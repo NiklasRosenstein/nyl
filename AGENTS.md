@@ -50,6 +50,13 @@ bug, and document a deliberate one where users choose it.
   its acceptance criteria are met, and distinguish proposals from implemented
   capabilities. Preserve milestone identifiers where practical for references
   from issues and pull requests.
+- Domain resource collections (M9) are tracked in the documentation instead:
+  their slices and deliverables live in
+  `nyl/book/src/lib/roadmaps/domain-resources.mjs`, rendered on the Domain
+  resources roadmap page, and ROADMAP.md keeps only the milestone row and a
+  pointer. Tick a deliverable in the same change that ships it, and keep the
+  module's prerequisite statuses equal to the ROADMAP.md milestone table,
+  which `npm test` checks.
 - Describe the current direction directly. Do not add "previously planned",
   superseded alternatives, or a chronological decision log to ROADMAP.md.
   Historical reasoning belongs in commit messages, pull requests, or dedicated
@@ -535,6 +542,7 @@ The site is split into header sections, each with its own sidebar
 | Rendering and applying manifests directly | `kubernetes/` |
 | The rendered manifest pattern | `rendered-gitops/` |
 | Environments, state, and orchestration | `orchestration/` |
+| Domain resources and their roadmap | `domain-resources/` |
 | One page per command or closely related pair | `reference/cli/` |
 | `nyl.toml` and editor schemas | `reference/` |
 | Usage guide for a resource | the owning section's `resource-guides/` |

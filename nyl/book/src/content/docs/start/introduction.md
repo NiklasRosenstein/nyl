@@ -2,7 +2,7 @@
 title: 'Introduction'
 ---
 
-**Nyl** turns configuration in Git into deployed systems. It works at three
+**Nyl** turns configuration in Git into deployed systems. It works at four
 levels, each building on the one before. Use only as much as you need.
 
 ## One declaration, one path
@@ -59,6 +59,18 @@ Orchestration is in development: [environments and their
 state](/nyl/orchestration/) exist today, and the
 [roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
 describes the milestones that follow.
+
+## Declare domain resources
+
+Nyl is planned to let teams declare what they need, such as cloud accounts,
+repositories, or access grants, as typed YAML in the folders they own.
+Schemas and policies decide what each folder may declare, and orchestration
+units owned by the platform implement the declarations with their native
+tools.
+
+Domain resources are planned for milestone M9. The [domain resources
+section](/nyl/domain-resources/) explains the case, and its
+[roadmap](/nyl/domain-resources/roadmap/) tracks progress.
 
 ## What Nyl provides
 

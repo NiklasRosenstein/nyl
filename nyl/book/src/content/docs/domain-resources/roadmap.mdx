@@ -1,0 +1,32 @@
+---
+title: 'Roadmap'
+description: 'Slices and progress of domain resource collections, milestone M9.'
+---
+
+import Roadmap from '../../../components/Roadmap.astro';
+import { domainResourcesRoadmap } from '../../../lib/roadmaps/domain-resources.mjs';
+
+Domain resources ship as milestone M9 of the
+[orchestration roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md),
+in slices that each deliver something usable. The first slice needs no
+orchestration at all. This page is where the milestone is tracked. The
+[design](https://github.com/NiklasRosenstein/nyl/blob/develop/design/domain-resources.md)
+holds the contract and its open decisions, and
+[issue #173](https://github.com/NiklasRosenstein/nyl/issues/173) holds the
+discussion.
+
+**Done when:** {domainResourcesRoadmap.exitCriterion}
+
+<Roadmap roadmap={domainResourcesRoadmap} part="progress" />
+
+## Prerequisites
+
+The slices build on these orchestration milestones.
+
+<Roadmap roadmap={domainResourcesRoadmap} part="prerequisites" />
+
+## Slices
+
+A slice's status follows from its deliverables.
+
+<Roadmap roadmap={domainResourcesRoadmap} part="slices" />

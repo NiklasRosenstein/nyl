@@ -155,6 +155,14 @@ export default defineConfig({
             ],
           },
           {
+            id: "domain-resources",
+            label: "Domain resources",
+            link: "/domain-resources/",
+            icon: "list-format",
+            badge: { text: "Planned", variant: "note" },
+            items: ["domain-resources", "domain-resources/example", "domain-resources/roadmap"],
+          },
+          {
             id: "reference",
             label: "Reference",
             link: "/reference/cli/",

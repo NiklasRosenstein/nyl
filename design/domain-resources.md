@@ -1,7 +1,10 @@
 # Domain resource collections
 
 **Status:** proposal for [#173](https://github.com/NiklasRosenstein/nyl/issues/173),
-milestone M9 in [ROADMAP.md](../ROADMAP.md). Nothing here exists yet. It
+milestone M9. Nothing here exists yet. Progress is tracked on the
+[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/)
+in the documentation, generated from
+[`nyl/book/src/lib/roadmaps/domain-resources.mjs`](../nyl/book/src/lib/roadmaps/domain-resources.mjs). It
 extends the [orchestration core contract](orchestration-core.md) and the
 [infrastructure units](infrastructure-units.md) and changes neither: a project
 that declares no ResourceDefinition never sees any of it.
@@ -643,8 +646,8 @@ consumer, and two owners rejected.
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, removal approval, exec with bundles | M4, M8's `exec` |
-| R5 | The worked guide, validated as a tier-2 reference scenario | R2–R4 |
-| R6 | `forEach` unit instances: the `resource` context, YAML-escaped values, instance names, leaving and teardown | R2 |
+| R5 | `forEach` unit instances: the `resource` context, YAML-escaped values, instance names, leaving and teardown | R2 |
+| R6 | The worked guide, validated as a tier-2 reference scenario | R2–R5 |
 
 ## Guide sketch: implementing a domain resource
 
@@ -710,5 +713,5 @@ teams/
 | Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
 | Generating HCL variable types from definitions (`nyl schema hcl`) | After R4 |
 | Whether per-member removal approval should be per member (`--approve aws-accounts:legacy-sandbox`) | R4 |
-| How YAML escaping of `resource` values is implemented: an escaping mode of the template engine, or values that are wrapped and render as quoted scalars | R6 |
-| Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R6 |
+| How YAML escaping of `resource` values is implemented: an escaping mode of the template engine, or values that are wrapped and render as quoted scalars | R5 |
+| Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R5 |

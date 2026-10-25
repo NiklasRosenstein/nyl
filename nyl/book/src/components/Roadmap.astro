@@ -1,0 +1,270 @@
+---
+// A feature roadmap's progress, prerequisites, and slices, rendered from its
+// data module so the page and the tracked state cannot disagree.
+import { roadmapProgress, sliceStatus, statusLabels } from '../lib/roadmaps/domain-resources.mjs';
+
+interface Deliverable {
+  text: string;
+  done: boolean;
+}
+interface Slice {
+  id: string;
+  title: string;
+  summary: string;
+  needs: string[];
+  deliverables: Deliverable[];
+}
+interface Prerequisite {
+  id: string;
+  title: string;
+  status: string;
+}
+interface Props {
+  roadmap: { milestone: string; prerequisites: Prerequisite[]; slices: Slice[] };
+  // The part to render, so the page can put its own headings, which reach the
+  // page outline, between them.
+  part: 'progress' | 'prerequisites' | 'slices';
+}
+
+const { roadmap, part } = Astro.props;
+const progress = roadmapProgress(roadmap);
+const percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+const sliceIds = new Set(roadmap.slices.map((slice) => slice.id));
+const milestones = 'https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md#milestones-and-acceptance-criteria';
+
+// Inline `code` spans are the only markup deliverables use.
+const parts = (text: string) => text.split('`').map((value, index) => ({ value, code: index % 2 === 1 }));
+const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : milestones);
+---
+
+<div class="roadmap not-content">
+  {part === 'progress' && (
+  <div class="overall">
+    <div class="overall-label">
+      <strong>{roadmap.milestone}</strong>
+      <span>{progress.done} of {progress.total} deliverables shipped</span>
+    </div>
+    <div
+      class="bar"
+      role="progressbar"
+      aria-label={`${roadmap.milestone} progress`}
+      aria-valuemin="0"
+      aria-valuemax={progress.total}
+      aria-valuenow={progress.done}
+    >
+      <div class="fill" style={`width: ${percent}%`}></div>
+    </div>
+  </div>
+  )}
+
+  {part === 'prerequisites' && (
+  <ul class="prerequisites">
+    {
+      roadmap.prerequisites.map((prerequisite) => (
+        <li>
+          <a href={milestones}>{prerequisite.id}</a>
+          <span class="prerequisite-title">{prerequisite.title}</span>
+          <span class={`status ${prerequisite.status}`}>{statusLabels[prerequisite.status as keyof typeof statusLabels]}</span>
+        </li>
+      ))
+    }
+  </ul>
+  )}
+
+  {part === 'slices' && (
+  <div class="slices">
+    {
+      roadmap.slices.map((slice) => {
+        const status = sliceStatus(slice);
+        const done = slice.deliverables.filter((deliverable) => deliverable.done).length;
+        return (
+          <section class="slice" id={slice.id.toLowerCase()} aria-labelledby={`${slice.id.toLowerCase()}-title`}>
+            <header>
+              <span class="slice-id">{slice.id}</span>
+              <h3 id={`${slice.id.toLowerCase()}-title`}>{slice.title}</h3>
+              <span class={`status ${status}`}>{statusLabels[status]}</span>
+            </header>
+            <p class="summary">
+              {parts(slice.summary).map((part) => (part.code ? <code>{part.value}</code> : part.value))}
+            </p>
+            <ul class="deliverables">
+              {slice.deliverables.map((deliverable) => (
+                <li class={deliverable.done ? 'done' : undefined}>
+                  <span class="check" aria-hidden="true">{deliverable.done ? '✓' : ''}</span>
+                  <span class="sr-only">{deliverable.done ? 'Shipped: ' : 'Not shipped: '}</span>
+                  <span>{parts(deliverable.text).map((part) => (part.code ? <code>{part.value}</code> : part.value))}</span>
+                </li>
+              ))}
+            </ul>
+            <footer>
+              <span>
+                {done} of {slice.deliverables.length} shipped
+              </span>
+              <span class="needs">
+                Needs
+                {slice.needs.map((need) => (
+                  <a href={needHref(need)}>{need}</a>
+                ))}
+              </span>
+            </footer>
+          </section>
+        );
+      })
+    }
+  </div>
+  )}
+</div>
+
+<style>
+  .roadmap {
+    margin-top: 1.5rem;
+  }
+  .overall {
+    display: grid;
+    gap: 0.5rem;
+  }
+  .overall-label {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    color: var(--sl-color-gray-2);
+  }
+  .overall-label strong {
+    color: var(--sl-color-white);
+    font-size: var(--sl-text-lg);
+  }
+  .bar {
+    height: 0.5rem;
+    border-radius: 999px;
+    background: var(--sl-color-gray-6);
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: var(--sl-color-accent);
+  }
+  .prerequisites {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 0.5rem;
+  }
+  .prerequisites li {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+  }
+  .prerequisites li + li {
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+  .prerequisites a {
+    font-weight: 600;
+    min-width: 2.25rem;
+  }
+  .prerequisite-title {
+    flex: 1;
+    color: var(--sl-color-gray-2);
+  }
+  .slices {
+    display: grid;
+    gap: 1rem;
+  }
+  .slice {
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    scroll-margin-top: calc(var(--sl-nav-height) + 1rem);
+  }
+  .slice header {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+  .slice h3 {
+    flex: 1;
+    margin: 0;
+    font-size: var(--sl-text-lg);
+    color: var(--sl-color-white);
+  }
+  .slice-id {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .summary {
+    margin: 0.5rem 0 0.75rem;
+    color: var(--sl-color-gray-2);
+  }
+  .deliverables {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.375rem;
+  }
+  .deliverables li {
+    display: flex;
+    gap: 0.625rem;
+    align-items: baseline;
+  }
+  .check {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    border: 1px solid var(--sl-color-gray-4);
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    line-height: 0.9rem;
+    text-align: center;
+    transform: translateY(0.15rem);
+  }
+  .deliverables li.done .check {
+    border-color: var(--sl-color-green);
+    background: var(--sl-color-green-low);
+    color: var(--sl-color-green-high);
+  }
+  .slice footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.875rem;
+    padding-top: 0.625rem;
+    border-top: 1px solid var(--sl-color-hairline);
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .needs {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .status {
+    flex: none;
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--sl-color-gray-5);
+    color: var(--sl-color-gray-2);
+  }
+  .status.done {
+    border-color: var(--sl-color-green);
+    background: var(--sl-color-green-low);
+    color: var(--sl-color-green-high);
+  }
+  .status.in-progress {
+    border-color: var(--sl-color-orange);
+    background: var(--sl-color-orange-low);
+    color: var(--sl-color-orange-high);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+</style>
