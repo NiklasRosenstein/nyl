@@ -558,6 +558,31 @@ tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfva
   what `prepare` would write now, so a later pipeline stage can confirm that
   an artifact passed from an earlier stage is still current.
 
+Instead of wiring the prepared files into the tool by hand, a pipeline can
+let Nyl run the tool. `nyl exec` without `-e` runs the unit's
+[`exec` capability](orchestration-core.md#operator-exec) directly:
+
+```sh
+nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan
+nyl exec --unit aws-accounts --base origin/main -- apply tfplan
+```
+
+- The driver prepares the tool exactly as it does under orchestration, from
+  the same `NativeInputs`: for OpenTofu, `init` with the backend file and
+  `-lockfile=readonly`, its own `TF_DATA_DIR`, and the variables file. The
+  arguments after `--` are passed to the tool unchanged.
+- There is no environment, so there is nothing to hold, no lease, no
+  ownership-scope check against state, and nothing recorded. Files come from
+  the worktree, as for `prepare`, and the tool runs in its own copy, so it
+  never writes into the checkout.
+- Admission, transition rules against `--base`, and guarded changes apply as
+  for `prepare`: a guarded change refuses with exit 125 unless
+  `--allow-change` names it, before the tool starts.
+- Credentials are the unit's admitted `env`, as always; the process
+  environment reaches the tool only through `env.passthrough`.
+- With `-e`, `nyl exec` keeps its orchestrated meaning: a held unit, the
+  lease, and a recorded repair.
+
 ## Planning and inspection
 
 `plan` gains a collections section per unit, from the same typed report:
@@ -768,7 +793,7 @@ consumer, and two owners rejected.
 | R1 | Definitions, discovery, schema and referential admission, `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
-| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` outside orchestration with `--check`, removal approval, exec with bundles | M4, M8's `exec` |
+| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, `prepare --check`, removal approval, exec with bundles | M4, M8's `exec` |
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `nyl validate --base`, the receipt baseline, Kyverno `oldObject`, and the `approve` effect for guarded changes | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |

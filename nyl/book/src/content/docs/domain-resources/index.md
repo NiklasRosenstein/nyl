@@ -100,9 +100,10 @@ for example one OpenTofu configuration per team, each with its own state.
 - **Sensitive changes are guarded.** A definition can forbid a change, such as
   moving a workload account back to the sandbox OU, or require approval for
   it, such as changing an account's email.
-- **Orchestration is optional.** Nyl can prepare the inputs for an existing
-  Terraform or OpenTofu pipeline, which then plans and applies as before.
-  The inputs are the same bytes an orchestrated run would pass.
+- **Orchestration is optional.** In an existing Terraform or OpenTofu
+  pipeline, `nyl exec` runs the tool with the collected inputs, or Nyl
+  writes the inputs for the pipeline's own commands. Either way they are the
+  same bytes an orchestrated run would pass, and nothing is recorded.
 - **Removing a declaration is an input change.** The implementing unit plans
   and applies the removal like any other change, and removals wait for
   approval by default. A hold on the unit protects the unit, not the native

@@ -222,6 +222,19 @@ pipeline, Nyl prepares its inputs, and the pipeline plans and applies as
 before:
 
 ```sh
+nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan
+nyl exec --unit aws-accounts --base origin/main -- apply tfplan
+```
+
+`nyl exec` without an environment prepares OpenTofu exactly as an
+orchestrated run would, with the backend, the variables, and its own working
+copy, and then runs `tofu` with the arguments after `--`. It records nothing,
+so the pipeline stays in charge of when to plan and who approves the apply.
+
+To hand the inputs to a tool invocation of your own instead, write them to a
+directory:
+
+```sh
 nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/
 tofu -chdir=platform/aws-accounts init -backend-config=../../out/native/backend.tfbackend.json
 tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfvars.json
@@ -229,7 +242,7 @@ tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfva
 
 The unit document stays the same, and no Environment selects it. Validation,
 policies, and transition rules still apply. An approval-guarded change, such
-as the email change above, stops `prepare` unless the pipeline passes
+as the email change above, stops `exec` and `prepare` unless the pipeline passes
 `--allow-change AwsAccount/payments-prod:email-change` after its own
 approval. Selecting the unit from an Environment later changes nothing about
 the inputs it receives.

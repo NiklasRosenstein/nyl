@@ -66,7 +66,7 @@ export const domainResourcesRoadmap = {
         { text: 'OpenTofu and Terraform adaptation, checked by the driver conformance suite', done: false },
         { text: 'Approval before collection members are removed', done: false },
         { text: '`nyl exec` with deployed and worktree bundles', done: false },
-        { text: '`nyl prepare --native` for a unit outside any Environment, and `prepare --check`', done: false },
+        { text: '`nyl prepare --native` and `nyl exec` for a unit outside any Environment, and `prepare --check`', done: false },
       ],
     },
     {
