@@ -210,8 +210,10 @@ whether what its current receipt describes still holds, without executing
 anything. It records the latest drift observation, a health observation when
 the driver reports one, and the attestations the driver reports, in one
 observed commit, and writes nothing when nothing changed. It never changes a
-receipt or a condition, and drift alone does not make a reconcile execute the
-unit again; <code dir="auto">verify</code> exits 3 on drift so that a pipeline can alert on it.</p>
+receipt or a condition. Drift does not yet make a reconcile execute the unit
+again; <code dir="auto">verify</code> exits 3 on drift so that a pipeline can alert on it.
+Automatic repair of idempotent units and <code dir="auto">nyl reconcile --reapply</code> are planned
+for the next part of M3.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="recovery-next-to-local-runs">Recovery next to local runs</h2><a class="sl-anchor-link" href="#recovery-next-to-local-runs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Recovery next to local runs”</span></a></div>
 <p>A <a href="/nyl/pr-preview/pr-177/orchestration/environments-and-state/#local-runs"><code dir="auto">--local</code> run</a>
 never takes over remote runs: while remote state holds dead runs, it exits 1
