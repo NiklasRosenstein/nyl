@@ -25,7 +25,9 @@ use nyl_core::orchestration::ports::{
     Checkpoint, Clock, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError,
     StateResult, StateStore, StateTips, Transition, TransitionChanges,
 };
-use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation};
+use nyl_core::orchestration::state::{
+    ArtifactDocument, DesiredUnit, Lease, Observation, ObservationType, ObservedUnit, Run, Signal, StateLocation,
+};
 use nyl_git::GitAuth;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -134,6 +136,43 @@ impl GitStateStore {
         }
     }
 
+    /// Rewrite a run ref with `run` as its record and `change` applied to
+    /// its files, by compare-and-swap against the tip it read.
+    fn update_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        change: impl FnOnce(&mut Files) -> StateResult<()>,
+    ) -> StateResult<()> {
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let name = run_ref(location, environment, &run.run);
+        let heads = refs.heads(std::slice::from_ref(&name))?;
+        refs.fetch(&heads, false)?;
+        let tip = heads.get(&name).and_then(|_| refs.local(&name));
+        let mut files = tree::read(&repository, tip)?;
+        files.insert(RUN_FILE.to_owned(), to_yaml(run)?);
+        change(&mut files)?;
+        let parents = tip.into_iter().collect::<Vec<_>>();
+        let message = format!("nyl: run {} of {environment}", run.run);
+        let Some(commit) = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)? else {
+            return Ok(());
+        };
+        match refs.update(&[Update {
+            name: name.clone(),
+            new: Some(commit),
+            expected: heads.get(&name).copied(),
+        }]) {
+            Ok(()) => Ok(()),
+            Err(UpdateError::Stale) => Err(StateError::Conflict {
+                reference: name,
+                actual: "another commit".to_owned(),
+            }),
+            Err(UpdateError::Other(error)) => Err(error),
+        }
+    }
+
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
     }
@@ -145,6 +184,19 @@ fn lease_ref(location: &StateLocation, environment: &EnvironmentName) -> String 
 
 fn run_ref(location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> String {
     format!("{}{environment}/runs/{run}", location.coordination_ref_prefix)
+}
+
+fn evidence_ref(location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> String {
+    format!("{}{environment}/evidence/{run}", location.coordination_ref_prefix)
+}
+
+/// The file name of an observation type, as `nyl verify` writes it.
+fn observation_name(observation_type: ObservationType) -> String {
+    match observation_type {
+        ObservationType::Drift => "drift",
+        ObservationType::Health => "health",
+    }
+    .to_owned()
 }
 
 fn signal_ref(location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> String {
@@ -187,24 +239,61 @@ fn units<T: DeserializeOwned>(files: &Files, directory: &str) -> StateResult<BTr
 }
 
 fn artifacts(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>> {
-    let mut artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>> = BTreeMap::new();
+    per_unit(files, "artifacts")
+}
+
+/// The documents in each unit's `observed/units/<unit>/<kind>/` directory,
+/// by unit and file name.
+fn per_unit<T: DeserializeOwned>(files: &Files, kind: &str) -> StateResult<BTreeMap<UnitName, BTreeMap<String, T>>> {
+    let marker = format!("/{kind}/");
+    let mut documents: BTreeMap<UnitName, BTreeMap<String, T>> = BTreeMap::new();
     for (path, bytes) in files {
         let Some(rest) = path.strip_prefix("observed/units/") else {
             continue;
         };
-        let Some((unit, file)) = rest.split_once("/artifacts/") else {
+        let Some((unit, file)) = rest.split_once(&marker) else {
             continue;
         };
-        let Some(name) = file.strip_suffix(".yaml") else {
+        let Some(name) = file.strip_suffix(".yaml").filter(|name| !name.contains('/')) else {
             continue;
         };
         let unit = UnitName::new(unit).map_err(|error| StateError::Corrupt(format!("{path}: {error}")))?;
-        artifacts
+        documents
             .entry(unit)
             .or_default()
             .insert(name.to_owned(), from_yaml(path, bytes)?);
     }
-    Ok(artifacts)
+    Ok(documents)
+}
+
+/// The latest observations by unit and type.
+fn observations(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>> {
+    Ok(per_unit::<Observation>(files, "observations")?
+        .into_iter()
+        .map(|(unit, documents)| {
+            let by_type = documents
+                .into_values()
+                .map(|observation| (observation.observation_type, observation))
+                .collect();
+            (unit, by_type)
+        })
+        .collect())
+}
+
+/// Replace a unit's directory of documents of one kind with `set`, or
+/// remove it for `None`.
+fn replace_set<T: Serialize>(
+    files: &mut Files,
+    unit: &UnitName,
+    kind: &str,
+    set: Option<impl Iterator<Item = (String, T)>>,
+) -> StateResult<()> {
+    let directory = format!("observed/units/{unit}/{kind}/");
+    files.retain(|path, _| !path.starts_with(&directory));
+    for (name, document) in set.into_iter().flatten() {
+        files.insert(format!("{directory}{name}.yaml"), to_yaml(&document)?);
+    }
+    Ok(())
 }
 
 /// Apply one side's changes to the files beneath a location's directory.
@@ -233,11 +322,23 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
             };
         }
         for (unit, set) in &changes.artifacts {
-            let directory = format!("observed/units/{unit}/artifacts/");
-            files.retain(|path, _| !path.starts_with(&directory));
-            for (name, document) in set.iter().flatten() {
-                files.insert(format!("{directory}{name}.yaml"), to_yaml(document)?);
-            }
+            let set = set
+                .as_ref()
+                .map(|set| set.iter().map(|(name, document)| (name.clone(), document)));
+            replace_set(files, unit, "artifacts", set)?;
+        }
+        for (unit, set) in &changes.observations {
+            let set = set.as_ref().map(|set| {
+                set.iter()
+                    .map(|(observation_type, document)| (observation_name(*observation_type), document))
+            });
+            replace_set(files, unit, "observations", set)?;
+        }
+        for (unit, set) in &changes.attestations {
+            let set = set
+                .as_ref()
+                .map(|set| set.iter().map(|(name, document)| (name.clone(), document)));
+            replace_set(files, unit, "attestations", set)?;
         }
     }
     Ok(())
@@ -274,9 +375,8 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         desired: units(desired, "desired/units/")?,
         observed: units(observed, "observed/units/")?,
         artifacts: artifacts(observed)?,
-        // Package `store` reads and writes observations and attestations.
-        observations: std::collections::BTreeMap::new(),
-        attestations: std::collections::BTreeMap::new(),
+        observations: observations(observed)?,
+        attestations: per_unit(observed, "attestations")?,
     })
 }
 
@@ -341,8 +441,14 @@ impl StateStore for GitStateStore {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
         let lease_name = lease_ref(location, environment);
-        let runs_pattern = format!("{}{environment}/runs/*", location.coordination_ref_prefix);
-        let heads = refs.heads(&[lease_name.clone(), runs_pattern])?;
+        let prefix = format!("{}{environment}/", location.coordination_ref_prefix);
+        let runs_prefix = format!("{prefix}runs/");
+        let evidence_prefix = format!("{prefix}evidence/");
+        let heads = refs.heads(&[
+            lease_name.clone(),
+            format!("{runs_prefix}*"),
+            format!("{evidence_prefix}*"),
+        ])?;
         refs.fetch(&heads, false)?;
         let lease = match heads.get(&lease_name) {
             Some(oid) => {
@@ -358,14 +464,19 @@ impl StateStore for GitStateStore {
             None => None,
         };
         let mut runs = Vec::new();
+        let mut evidence = Vec::new();
         for (name, oid) in &heads {
-            if name == &lease_name {
+            let target = if name.starts_with(&runs_prefix) {
+                &mut runs
+            } else if name.starts_with(&evidence_prefix) {
+                &mut evidence
+            } else {
                 continue;
-            }
+            };
             let files = tree::read(&repository, refs.local(name).or(Some(*oid)))?;
-            runs.push(read_run(name, &files, oid.to_string())?);
+            target.push(read_run(name, &files, oid.to_string())?);
         }
-        Ok(Coordination { lease, runs })
+        Ok(Coordination { lease, runs, evidence })
     }
 
     fn take_lease(
@@ -456,35 +567,100 @@ impl StateStore for GitStateStore {
         run: &Run,
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()> {
+        self.update_run(location, environment, run, |files| {
+            if let Some(checkpoint) = checkpoint {
+                let index = checkpoint_count(files);
+                insert_checkpoint(files, index, checkpoint)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn write_run_created(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        self.update_run(location, environment, run, |files| {
+            for desired in created {
+                files.insert(format!("created/{}.yaml", desired.unit.name), to_yaml(desired)?);
+            }
+            Ok(())
+        })
+    }
+
+    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
-        let name = run_ref(location, environment, &run.run);
-        let heads = refs.heads(std::slice::from_ref(&name))?;
+        let run_name = run_ref(location, environment, run);
+        let evidence_name = evidence_ref(location, environment, run);
+        let signal_name = signal_ref(location, environment, run);
+        let heads = refs.heads(&[run_name.clone(), evidence_name.clone(), signal_name.clone()])?;
         refs.fetch(&heads, false)?;
-        let tip = heads.get(&name).and_then(|_| refs.local(&name));
-        let mut files = tree::read(&repository, tip)?;
-        files.insert(RUN_FILE.to_owned(), to_yaml(run)?);
-        if let Some(checkpoint) = checkpoint {
-            let index = files
-                .keys()
-                .filter(|path| path.starts_with("checkpoints/") && path.ends_with("/desired.yaml"))
-                .count();
-            let directory = format!("checkpoints/{index:04}-{}", checkpoint.desired.unit.name);
-            files.insert(format!("{directory}/desired.yaml"), to_yaml(&checkpoint.desired)?);
-            files.insert(format!("{directory}/observed.yaml"), to_yaml(&checkpoint.observed)?);
-            for (artifact, document) in &checkpoint.artifacts {
-                files.insert(format!("{directory}/artifacts/{artifact}.yaml"), to_yaml(document)?);
-            }
+        let Some(run_oid) = heads.get(&run_name).copied() else {
+            return Ok(());
+        };
+        let run_files = tree::read(&repository, refs.local(&run_name).or(Some(run_oid)))?;
+        let evidence_tip = heads.get(&evidence_name).and_then(|_| refs.local(&evidence_name));
+        let mut files = tree::read(&repository, evidence_tip)?;
+        // The run ref's record and created units replace the evidence ref's;
+        // its checkpoints are appended after the ones retired before.
+        let retired = read_run(&run_name, &run_files, run_oid.to_string())?;
+        files.insert(RUN_FILE.to_owned(), to_yaml(&retired.run)?);
+        for desired in &retired.created {
+            files.insert(format!("created/{}.yaml", desired.unit.name), to_yaml(desired)?);
         }
-        let parents = tip.into_iter().collect::<Vec<_>>();
-        let message = format!("nyl: run {} of {environment}", run.run);
-        let Some(commit) = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)? else {
+        let first = checkpoint_count(&files);
+        for (index, checkpoint) in (first..).zip(&retired.checkpoints) {
+            insert_checkpoint(&mut files, index, checkpoint)?;
+        }
+        let parents = evidence_tip.into_iter().collect::<Vec<_>>();
+        let message = format!("nyl: evidence of run {run} of {environment}");
+        let commit = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)?
+            .expect("allow_empty commits");
+        let mut updates = vec![
+            Update {
+                name: evidence_name.clone(),
+                new: Some(commit),
+                expected: heads.get(&evidence_name).copied(),
+            },
+            Update {
+                name: run_name.clone(),
+                new: None,
+                expected: Some(run_oid),
+            },
+        ];
+        if let Some(signal) = heads.get(&signal_name) {
+            updates.push(Update {
+                name: signal_name,
+                new: None,
+                expected: Some(*signal),
+            });
+        }
+        match refs.update(&updates) {
+            Ok(()) => Ok(()),
+            Err(UpdateError::Stale) => Err(StateError::Conflict {
+                reference: run_name,
+                actual: "another commit".to_owned(),
+            }),
+            Err(UpdateError::Other(error)) => Err(error),
+        }
+    }
+
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let name = evidence_ref(location, environment, run);
+        let heads = refs.heads(std::slice::from_ref(&name))?;
+        let Some(current) = heads.get(&name).copied() else {
             return Ok(());
         };
         match refs.update(&[Update {
             name: name.clone(),
-            new: Some(commit),
-            expected: heads.get(&name).copied(),
+            new: None,
+            expected: Some(current),
         }]) {
             Ok(()) => Ok(()),
             Err(UpdateError::Stale) => Err(StateError::Conflict {
@@ -809,6 +985,25 @@ fn write_lease(
     }
 }
 
+/// How many checkpoints a run ref's files hold.
+fn checkpoint_count(files: &Files) -> usize {
+    files
+        .keys()
+        .filter(|path| path.starts_with("checkpoints/") && path.ends_with("/desired.yaml"))
+        .count()
+}
+
+/// Add a checkpoint as `checkpoints/<index>-<unit>/`.
+fn insert_checkpoint(files: &mut Files, index: usize, checkpoint: &Checkpoint) -> StateResult<()> {
+    let directory = format!("checkpoints/{index:04}-{}", checkpoint.desired.unit.name);
+    files.insert(format!("{directory}/desired.yaml"), to_yaml(&checkpoint.desired)?);
+    files.insert(format!("{directory}/observed.yaml"), to_yaml(&checkpoint.observed)?);
+    for (artifact, document) in &checkpoint.artifacts {
+        files.insert(format!("{directory}/artifacts/{artifact}.yaml"), to_yaml(document)?);
+    }
+    Ok(())
+}
+
 fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState> {
     let run: Run = from_yaml(
         name,
@@ -849,11 +1044,20 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
             artifacts,
         });
     }
+    let created = files
+        .iter()
+        .filter(|(path, _)| {
+            path.strip_prefix("created/")
+                .and_then(|file| file.strip_suffix(".yaml"))
+                .is_some_and(|unit| !unit.contains('/'))
+        })
+        .map(|(path, bytes)| from_yaml(&format!("{name}: {path}"), bytes))
+        .collect::<StateResult<Vec<DesiredUnit>>>()?;
     Ok(RunState {
         run,
         checkpoints,
-        // Package `store` records created units on the run ref.
-        created: Vec::new(),
+        created,
         version,
+        foreign: false,
     })
 }

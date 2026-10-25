@@ -298,7 +298,8 @@ fn units_table(
     snapshot: &EnvironmentSnapshot,
     output: GetOutput,
 ) -> Result<CommandOutcome> {
-    let report = nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default());
+    let report = // No run refs are read here, so `now` decides nothing.
+    nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default(), chrono::DateTime::UNIX_EPOCH);
     let documents = snapshot
         .desired
         .iter()

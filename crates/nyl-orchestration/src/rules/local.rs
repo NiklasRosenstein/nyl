@@ -18,6 +18,13 @@
 //!   commit's content and never restores `admission.yaml`
 //!   ([`restore_changes`]); it records the local transitions it rejects
 //!   ([`rejected`]).
+//! - A `--local` run refuses while the remote holds run refs of dead runs
+//!   that remote state has not taken over yet ([`check_leftovers`],
+//!   `NYL-LOCAL-RUN-LEFTOVERS`), because it never imports remote run refs;
+//!   the lease it takes at the remote lists no units, since remote runs do
+//!   not notice local effects.
+//! - `state restore --to` pairs the other state ref through the transition
+//!   trailers ([`restore_tips`]).
 //! - A local run warns about every unit it executes, naming the remote
 //!   command that records it again ([`unrecorded_warning`]), and runs units
 //!   whose recovery policy is not `converge` only when named with
@@ -27,9 +34,12 @@
 use std::collections::BTreeSet;
 
 use nyl_core::orchestration::codes::Finding;
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, LocalDivergence, LogEntry, StateSide, TransitionChanges};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ports::{
+    Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry, StateSide, StateTips, TransitionChanges,
+};
 use nyl_core::orchestration::state::StateLocation;
+use nyl_core::orchestration::time::Timestamp;
 
 /// The local view of a remote location: the same refs, path, and prefix in
 /// the clone itself. `--local-lease` takes the lease here too.
@@ -100,5 +110,38 @@ pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapsh
 /// `NYL-LOCAL-RUN-UNRECORDED` for a unit a `--local` run executed.
 pub fn unrecorded_warning(environment: &EnvironmentName, unit: &UnitName) -> Finding {
     let _ = (environment, unit);
+    todo!("local")
+}
+
+/// Refuse a `--local` run (`NYL-LOCAL-RUN-LEFTOVERS`) when `coordination`
+/// holds a foreign (remote) run ref of another run that is finished or past
+/// its deadline: remote state has not taken it over yet, and a local run
+/// never imports remote run refs. The fix names `nyl reconcile -e <env>`
+/// against remote state. Live foreign run refs block through the lease rule.
+pub fn check_leftovers(
+    environment: &EnvironmentName,
+    run: &RunId,
+    coordination: &Coordination,
+    now: Timestamp,
+) -> Result<(), Finding> {
+    let _ = (environment, run, coordination, now);
+    todo!("local")
+}
+
+/// The tips `nyl state restore --to <to>` restores: `to` is a commit of
+/// one side's log (newest first, as [`StateStore::log`](nyl_core::orchestration::ports::StateStore::log)
+/// reads it). The other side is the commit carrying the same `Nyl-Run-Id`
+/// trailer, else the one `to`'s `Nyl-Read-Desired`/`Nyl-Read-Observed`
+/// trailer names. `NYL-STATE-RESTORE-INVALID` when `to` is in neither log,
+/// when either chosen commit is a `Nyl-Local` commit, or when the other side
+/// cannot be paired. With one shared ref, both tips are `to`.
+pub fn restore_tips(
+    environment: &EnvironmentName,
+    to: &CommitId,
+    desired: &[LogEntry],
+    observed: &[LogEntry],
+    shared: bool,
+) -> Result<StateTips, Finding> {
+    let _ = (environment, to, desired, observed, shared);
     todo!("local")
 }

@@ -15,7 +15,8 @@ use nyl_core::orchestration::ports::{
     StateTips, Transition,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDocument, DesiredUnit, EnvironmentRecord, Lease, ObservedUnit, Run, Signal, StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, EnvironmentRecord, Lease, Observation, ObservationType, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 
 /// The state of one environment directory on one ref.
@@ -26,6 +27,8 @@ struct Directory {
     desired: BTreeMap<UnitName, DesiredUnit>,
     observed: BTreeMap<UnitName, ObservedUnit>,
     artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
 /// One ref: its tip and the directories it holds, by `state.path`.
@@ -62,6 +65,7 @@ struct Inner {
     refs: BTreeMap<(String, String), StateRef>,
     leases: BTreeMap<(String, String, EnvironmentName), HeldLease>,
     runs: BTreeMap<(String, String, EnvironmentName), BTreeMap<RunId, RunState>>,
+    evidence: BTreeMap<(String, String, EnvironmentName), BTreeMap<RunId, RunState>>,
     signals: BTreeMap<(String, String, EnvironmentName, RunId), Vec<Signal>>,
 }
 
@@ -176,6 +180,11 @@ impl StateStore for MemoryStateStore {
                 .get(&key)
                 .map(|runs| runs.values().cloned().collect())
                 .unwrap_or_default(),
+            evidence: inner
+                .evidence
+                .get(&key)
+                .map(|runs| runs.values().cloned().collect())
+                .unwrap_or_default(),
         })
     }
 
@@ -257,19 +266,27 @@ impl StateStore for MemoryStateStore {
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()> {
         let mut inner = self.lock();
-        let version = inner.next_version();
-        let runs = inner.runs.entry(coordination_key(location, environment)).or_default();
-        let state = runs.entry(run.run.clone()).or_insert_with(|| RunState {
-            run: run.clone(),
-            checkpoints: Vec::new(),
-            created: Vec::new(),
-            version: String::new(),
-        });
-        state.run = run.clone();
-        state.version = version;
+        let state = run_state(&mut inner, location, environment, run);
         if let Some(checkpoint) = checkpoint {
             state.checkpoints.push(checkpoint.clone());
         }
+        Ok(())
+    }
+
+    fn write_run_created(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        let mut inner = self.lock();
+        let state = run_state(&mut inner, location, environment, run);
+        for desired in created {
+            state.created.retain(|existing| existing.unit.name != desired.unit.name);
+            state.created.push(desired.clone());
+        }
+        state.created.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
         Ok(())
     }
 
@@ -280,6 +297,43 @@ impl StateStore for MemoryStateStore {
             runs.remove(run);
         }
         inner.signals.remove(&(key.0, key.1, key.2, run.clone()));
+        Ok(())
+    }
+
+    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let mut inner = self.lock();
+        let key = coordination_key(location, environment);
+        let Some(retired) = inner.runs.get_mut(&key).and_then(|runs| runs.remove(run)) else {
+            return Ok(());
+        };
+        inner
+            .signals
+            .remove(&(key.0.clone(), key.1.clone(), key.2.clone(), run.clone()));
+        let version = inner.next_version();
+        let evidence = inner.evidence.entry(key).or_default();
+        match evidence.get_mut(run) {
+            Some(existing) => {
+                existing.run = retired.run;
+                existing.checkpoints.extend(retired.checkpoints);
+                for desired in retired.created {
+                    existing.created.retain(|other| other.unit.name != desired.unit.name);
+                    existing.created.push(desired);
+                }
+                existing.created.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+                existing.version = version;
+            }
+            None => {
+                evidence.insert(run.clone(), RunState { version, ..retired });
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let mut inner = self.lock();
+        if let Some(evidence) = inner.evidence.get_mut(&coordination_key(location, environment)) {
+            evidence.remove(run);
+        }
         Ok(())
     }
 
@@ -367,6 +421,8 @@ impl StateStore for MemoryStateStore {
             if observed_side {
                 apply_map(&mut directory.observed, &changes.observed);
                 apply_map(&mut directory.artifacts, &changes.artifacts);
+                apply_map(&mut directory.observations, &changes.observations);
+                apply_map(&mut directory.attestations, &changes.attestations);
             }
             if directory == before {
                 return None;
@@ -447,10 +503,35 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
         artifacts: observed
             .map(|directory| directory.artifacts.clone())
             .unwrap_or_default(),
-        // Package `store` keeps observations and attestations.
-        observations: BTreeMap::new(),
-        attestations: BTreeMap::new(),
+        observations: observed
+            .map(|directory| directory.observations.clone())
+            .unwrap_or_default(),
+        attestations: observed
+            .map(|directory| directory.attestations.clone())
+            .unwrap_or_default(),
     }
+}
+
+/// The run ref of `run`, created when missing, with `run` as its record and
+/// a new version.
+fn run_state<'i>(
+    inner: &'i mut Inner,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    run: &Run,
+) -> &'i mut RunState {
+    let version = inner.next_version();
+    let runs = inner.runs.entry(coordination_key(location, environment)).or_default();
+    let state = runs.entry(run.run.clone()).or_insert_with(|| RunState {
+        run: run.clone(),
+        checkpoints: Vec::new(),
+        created: Vec::new(),
+        version: String::new(),
+        foreign: false,
+    });
+    state.run = run.clone();
+    state.version = version;
+    state
 }
 
 fn apply_map<V: Clone>(target: &mut BTreeMap<UnitName, V>, changes: &BTreeMap<UnitName, Option<V>>) {

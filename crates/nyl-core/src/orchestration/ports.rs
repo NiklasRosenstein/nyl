@@ -191,6 +191,12 @@ pub struct RunState {
     /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
     pub created: Vec<DesiredUnit>,
     pub version: String,
+    /// Set by a `--local` run's store on run refs it read from the remote
+    /// while the run works on the clone's local branches: such a run never
+    /// imports, retires, or deletes them; they only block it while live.
+    /// Stores themselves always return `false`. Contract:
+    /// [Local runs](../../../../design/orchestration-core.md#local-runs).
+    pub foreign: bool,
 }
 
 /// One finished unit of a run: the desired document it executed, with its
@@ -207,6 +213,12 @@ pub struct Checkpoint {
 pub struct Coordination {
     pub lease: Option<HeldLease>,
     pub runs: Vec<RunState>,
+    /// Retired run refs (`<prefix><env>/evidence/<run>`): checkpoints a
+    /// takeover already imported that are still evidence for an `uncertain`
+    /// unit, kept for `nyl recover` and never imported again or counted as a
+    /// lease. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
+    pub evidence: Vec<RunState>,
 }
 
 /// One of an environment's two state refs.
@@ -314,6 +326,17 @@ pub trait StateStore: Send + Sync {
 
     /// Delete a run ref and its signal ref.
     fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
+
+    /// Retire a run ref a takeover imported: move its record, checkpoints,
+    /// and created units to the run's evidence ref (`<prefix><env>/evidence/<run>`),
+    /// appending its checkpoints when that ref exists already, then delete
+    /// the run ref and its signal ref. Read back in
+    /// [`Coordination::evidence`]. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
+    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
+
+    /// Delete a run's evidence ref, once no unit's condition needs it.
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
 
     /// Read the signals sent to a run.
     fn signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId)

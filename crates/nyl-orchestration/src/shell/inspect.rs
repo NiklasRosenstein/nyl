@@ -35,7 +35,9 @@ pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &S
             Err(finding) => failed(finding),
             Ok(()) => match context.store.coordination(location, environment) {
                 Err(error) => failed(store_error(environment, &error)),
-                Ok(coordination) => crate::rules::unit_state::status(environment, &snapshot, &coordination),
+                Ok(coordination) => {
+                    crate::rules::unit_state::status(environment, &snapshot, &coordination, context.clock.now())
+                }
             },
         },
     };

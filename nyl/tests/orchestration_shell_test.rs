@@ -627,6 +627,12 @@ impl StateStore for FlakyLeaseStore {
     fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
         self.inner.delete_run(location, environment, run)
     }
+    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.retire_run(location, environment, run)
+    }
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.delete_evidence(location, environment, run)
+    }
     fn signals(
         &self,
         location: &StateLocation,

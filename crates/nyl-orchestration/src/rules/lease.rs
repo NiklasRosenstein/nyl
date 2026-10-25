@@ -129,6 +129,7 @@ mod tests {
             },
             checkpoints: Vec::new(),
             created: Vec::new(),
+            foreign: false,
             version: "r1".to_owned(),
         }
     }
@@ -138,6 +139,7 @@ mod tests {
         let coordination = Coordination {
             lease: Some(lease(RUN_A, 70)),
             runs: Vec::new(),
+            evidence: Vec::new(),
         };
         assert!(matches!(
             decide(&coordination, time(69)),
@@ -157,6 +159,7 @@ mod tests {
         let coordination = Coordination {
             lease: None,
             runs: vec![run(RUN_A, 70, false)],
+            evidence: Vec::new(),
         };
         assert!(matches!(
             decide(&coordination, time(10)),
@@ -166,6 +169,7 @@ mod tests {
         let coordination = Coordination {
             lease: None,
             runs: vec![run(RUN_A, 70, true)],
+            evidence: Vec::new(),
         };
         assert_eq!(
             decide(&coordination, time(10)),
@@ -187,6 +191,7 @@ mod tests {
         let coordination = Coordination {
             lease: Some(held),
             runs: vec![run(RUN_A, 70, false)],
+            evidence: Vec::new(),
         };
         let LeaseDecision::Take { broken, .. } = decide(&coordination, time(10)) else {
             panic!("a broken lease is taken over");

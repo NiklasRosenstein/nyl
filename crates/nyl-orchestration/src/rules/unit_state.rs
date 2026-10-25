@@ -24,6 +24,7 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
 use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
+use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::lease::Holder;
@@ -215,11 +216,15 @@ fn condition_warning(environment: &EnvironmentName, unit: &UnitName, condition: 
 /// The `status -e` report of one environment from one snapshot of both refs
 /// plus the lease and run refs: per-unit state, receipt, blockers, the
 /// running unit and holder, and suggested next actions as warnings with fixes.
+/// `now` decides which leases and run refs are past their deadline (the
+/// units a dead run was executing read `uncertain`).
 pub fn status(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     coordination: &Coordination,
+    now: Timestamp,
 ) -> EnvironmentRunReport {
+    let _ = now; // Package `takeover`: expired, unbroken leases and run refs.
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
     let running = running_units(coordination);
@@ -425,8 +430,14 @@ mod tests {
                 version: "1".to_owned(),
             }),
             runs: Vec::<RunState>::new(),
+            evidence: Vec::new(),
         };
-        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination);
+        let report = status(
+            &EnvironmentName::new("dev").unwrap(),
+            &snapshot,
+            &coordination,
+            Timestamp::UNIX_EPOCH,
+        );
 
         let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
         assert_eq!(unit("network").state, Some(UnitState::Running));
@@ -491,10 +502,17 @@ mod tests {
                 run,
                 checkpoints: Vec::new(),
                 created: Vec::new(),
+                foreign: false,
                 version: "r1".to_owned(),
             }],
+            evidence: Vec::new(),
         };
-        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination);
+        let report = status(
+            &EnvironmentName::new("dev").unwrap(),
+            &snapshot,
+            &coordination,
+            Timestamp::UNIX_EPOCH,
+        );
 
         let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
         assert_eq!(unit("web").state, Some(UnitState::Uncertain));
@@ -510,7 +528,12 @@ mod tests {
         // Once the broken run's ref says it finished, nothing was lost.
         let mut finished = coordination.clone();
         finished.runs[0].run.finished = true;
-        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &finished);
+        let report = status(
+            &EnvironmentName::new("dev").unwrap(),
+            &snapshot,
+            &finished,
+            Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(
             report.units[&UnitName::new("web").unwrap()].state,
             Some(UnitState::Current)

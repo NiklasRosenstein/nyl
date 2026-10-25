@@ -69,13 +69,20 @@ impl StateStore for LocalStore<'_> {
         todo!("local")
     }
 
-    /// The lease where [`LeaseScope`] says, and the run refs of both the
-    /// remote and the local view, so a live CI run ref still blocks.
+    /// [`LeaseScope::Remote`]: the remote lease and the run refs of both
+    /// the view and the remote, the remote ones marked
+    /// [`RunState::foreign`](nyl_core::orchestration::ports::RunState::foreign)
+    /// so a live CI run ref still blocks but is never imported.
+    /// [`LeaseScope::Local`]: the view's lease and only the view's run refs,
+    /// accepting that CI may run at the same time. Evidence refs: the view's.
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {
         let _ = (location, environment);
         todo!("local")
     }
 
+    /// Under [`LeaseScope::Remote`] the lease is written with its `units`
+    /// cleared (as is every update), so a remote run taking over from a dead
+    /// local run marks nothing uncertain in remote state.
     fn take_lease(
         &self,
         location: &StateLocation,
@@ -140,6 +147,17 @@ impl StateStore for LocalStore<'_> {
         todo!("local")
     }
 
+    /// Retires the view's run ref; never a remote one.
+    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let _ = (location, environment, run);
+        todo!("local")
+    }
+
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let _ = (location, environment, run);
+        todo!("local")
+    }
+
     fn signals(
         &self,
         location: &StateLocation,
@@ -186,8 +204,11 @@ impl StateStore for LocalStore<'_> {
 /// Refuse when a state ref of the remote `location` has a `Nyl-Local`
 /// commit at its tip (`NYL-STATE-LOCAL-TIP`), naming the last commit without
 /// the trailer. A [`StateLocation::LOCAL_REPOSITORY`] location, whose local
-/// branches are the state, passes. Every state-writing operation against
-/// remote state calls it after reading its snapshot.
+/// branches are the state, passes. So does a store whose
+/// [`StateStore::log`] returns `StateError::Unavailable`: a store without
+/// history cannot hold `Nyl-Local` commits (the Git and memory stores
+/// implement `log`). Every state-writing operation against remote state
+/// calls it after reading its snapshot, except `state restore`, the fix.
 pub fn check_remote_tips(store: &dyn StateStore, location: &StateLocation) -> Result<(), Finding> {
     // Package `local` implements the check; until then every tip passes.
     let _ = (store, location);

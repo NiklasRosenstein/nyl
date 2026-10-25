@@ -118,10 +118,13 @@ pub enum Code {
     LocalRunNotConverge,
     /// `--local` cannot run against this state, such as state refs with full `refs/…` names, which have no local branch.
     LocalRunUnsupported,
+    /// A `--local` run found remote run refs of dead runs that remote state
+    /// has not taken over yet.
+    LocalRunLeftovers,
 }
 
 impl Code {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 53] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -174,6 +177,7 @@ impl Code {
         Self::LocalRunUnrecorded,
         Self::LocalRunNotConverge,
         Self::LocalRunUnsupported,
+        Self::LocalRunLeftovers,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -230,6 +234,7 @@ impl Code {
             Self::LocalRunUnrecorded => "NYL-LOCAL-RUN-UNRECORDED",
             Self::LocalRunNotConverge => "NYL-LOCAL-RUN-NOT-CONVERGE",
             Self::LocalRunUnsupported => "NYL-LOCAL-RUN-UNSUPPORTED",
+            Self::LocalRunLeftovers => "NYL-LOCAL-RUN-LEFTOVERS",
         }
     }
 }

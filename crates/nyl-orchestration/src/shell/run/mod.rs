@@ -1053,9 +1053,16 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             .write_run(self.location(), self.environment(), &self.record, checkpoint)
     }
 
-    /// Update the lease and the run record for a phase.
+    /// Update the lease and the run record for a phase. The
+    /// `before-lease-update` fault point is consulted without a unit, then
+    /// with each unit the phase starts, so a fault can name the phase that
+    /// starts a unit's batch.
     fn phase(&mut self, units: Vec<UnitName>, deadline: Timestamp) -> Result<(), Ending> {
-        if self.fault(FaultPoint::BeforeLeaseUpdate, None) {
+        if self.fault(FaultPoint::BeforeLeaseUpdate, None)
+            || units
+                .iter()
+                .any(|unit| self.fault(FaultPoint::BeforeLeaseUpdate, Some(unit)))
+        {
             return Err(self.killed(FaultPoint::BeforeLeaseUpdate));
         }
         let mut lease = self.held.lease.clone();
@@ -1118,6 +1125,26 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
         if request.local.is_none() {
             if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location) {
+                self.report.errors.push(finding);
+                return Ending::Release;
+            }
+        } else {
+            // A `--local` run never imports remote run refs, so it waits
+            // until remote state took over dead ones.
+            let checked = context
+                .base
+                .store
+                .coordination(&request.location, &environment)
+                .map_err(|error| store_error(&environment, &error))
+                .and_then(|coordination| {
+                    crate::rules::local::check_leftovers(
+                        &environment,
+                        &self.run,
+                        &coordination,
+                        context.base.clock.now(),
+                    )
+                });
+            if let Err(finding) = checked {
                 self.report.errors.push(finding);
                 return Ending::Release;
             }

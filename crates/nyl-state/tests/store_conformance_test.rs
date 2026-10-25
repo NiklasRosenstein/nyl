@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Checkpoint, StateError, StateStore, StateTips, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, DesiredUnit, Lease, LeaseKind, ObservedUnit, Operation, Run, RunKind, Signal, SignalKind,
-    StateLocation, StateRecord, StateRecordKind, StateV1,
+    ApprovalIdentity, Attestation, DesiredUnit, Lease, LeaseKind, Observation, ObservationType, ObservedUnit,
+    Operation, Run, RunKind, Signal, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
 use nyl_state::git::{CommitAuthor, GitStateStore, LOCAL_REPOSITORY};
@@ -574,4 +574,146 @@ fn test_remote_state_fast_forwards_local_branches_and_refuses_rewrites() {
         local.refname_to_id("refs/heads/nyl/dev/desired").unwrap().to_string(),
         desired.as_str()
     );
+}
+
+#[test]
+fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let version = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
+        let committed = store
+            .commit(
+                &location,
+                &dev,
+                &StateTips::default(),
+                &init(&location, "dev"),
+                &version,
+            )
+            .unwrap();
+        let name = UnitName::new("seed").unwrap();
+        let identity = json!({"environment": "dev", "name": "seed", "uid": UID,
+                              "apiVersion": "units.gitops.nyl/v1", "kind": "Command"});
+        let observation: Observation = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Observation", "unit": identity, "type": "drift",
+            "executionKey": KEY, "at": "2026-09-24T10:00:00Z", "result": {"drift": "clean"}
+        }))
+        .unwrap();
+        let attestation: Attestation = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "smoke",
+            "unit": {"environment": "dev", "name": "seed", "uid": UID}, "executionKey": KEY, "result": "pass",
+            "at": "2026-09-24T10:00:00Z", "source": {"driver": "Command"}
+        }))
+        .unwrap();
+        let before = store.snapshot(&location).unwrap().tips;
+        let changes = TransitionChanges {
+            observations: BTreeMap::from([(
+                name.clone(),
+                Some(BTreeMap::from([(ObservationType::Drift, observation.clone())])),
+            )]),
+            attestations: BTreeMap::from([(
+                name.clone(),
+                Some(BTreeMap::from([("smoke".to_owned(), attestation.clone())])),
+            )]),
+            ..TransitionChanges::default()
+        };
+        let written = store
+            .commit(&location, &dev, &before, &transition(changes), &committed.lease_version)
+            .unwrap();
+        assert_eq!(written.desired, None, "{}: the desired ref is untouched", subject.name);
+        assert!(written.observed.is_some(), "{}", subject.name);
+        let snapshot = store.snapshot(&location).unwrap();
+        assert_eq!(snapshot.tips.desired, before.desired, "{}", subject.name);
+        assert_eq!(
+            snapshot.observations[&name][&ObservationType::Drift],
+            observation,
+            "{}",
+            subject.name
+        );
+        assert_eq!(snapshot.attestations[&name]["smoke"], attestation, "{}", subject.name);
+
+        let removal = TransitionChanges {
+            observations: BTreeMap::from([(name.clone(), None)]),
+            attestations: BTreeMap::from([(name.clone(), None)]),
+            ..TransitionChanges::default()
+        };
+        store
+            .commit(
+                &location,
+                &dev,
+                &snapshot.tips,
+                &transition(removal),
+                &written.lease_version,
+            )
+            .unwrap();
+        let snapshot = store.snapshot(&location).unwrap();
+        assert!(snapshot.observations.is_empty(), "{}", subject.name);
+        assert!(snapshot.attestations.is_empty(), "{}", subject.name);
+    }
+}
+
+#[test]
+fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let run = Run {
+            api_version: StateV1,
+            kind: RunKind,
+            run: RunId::new(RUN_A).unwrap(),
+            runner: "test".to_owned(),
+            operation: Operation::Reconcile,
+            source_commit: None,
+            read_desired: None,
+            read_observed: None,
+            deadline: at(),
+            units: vec![UnitName::new("seed").unwrap()],
+            finished: false,
+        };
+        let (desired, observed) = unit("seed");
+        store
+            .write_run_created(&location, &dev, &run, std::slice::from_ref(&desired))
+            .unwrap();
+        let checkpoint = Checkpoint {
+            desired: desired.clone(),
+            observed,
+            artifacts: BTreeMap::new(),
+        };
+        store.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
+        let coordination = store.coordination(&location, &dev).unwrap();
+        assert_eq!(coordination.runs[0].created, vec![desired.clone()], "{}", subject.name);
+        assert!(coordination.evidence.is_empty(), "{}", subject.name);
+
+        // Retiring moves the run ref to evidence, which no longer counts as a run.
+        store.retire_run(&location, &dev, &run.run).unwrap();
+        let coordination = store.coordination(&location, &dev).unwrap();
+        assert!(coordination.runs.is_empty(), "{}", subject.name);
+        assert_eq!(coordination.evidence.len(), 1, "{}", subject.name);
+        assert_eq!(
+            coordination.evidence[0].checkpoints,
+            vec![checkpoint.clone()],
+            "{}",
+            subject.name
+        );
+        assert_eq!(coordination.evidence[0].created, vec![desired], "{}", subject.name);
+
+        // A late checkpoint on a recreated run ref is appended when retired again.
+        let mut late = run.clone();
+        late.finished = true;
+        store.write_run(&location, &dev, &late, Some(&checkpoint)).unwrap();
+        store.retire_run(&location, &dev, &run.run).unwrap();
+        let coordination = store.coordination(&location, &dev).unwrap();
+        assert!(coordination.runs.is_empty(), "{}", subject.name);
+        assert_eq!(coordination.evidence[0].checkpoints.len(), 2, "{}", subject.name);
+        assert!(coordination.evidence[0].run.finished, "{}", subject.name);
+
+        store.delete_evidence(&location, &dev, &run.run).unwrap();
+        assert!(
+            store.coordination(&location, &dev).unwrap().evidence.is_empty(),
+            "{}",
+            subject.name
+        );
+    }
 }
