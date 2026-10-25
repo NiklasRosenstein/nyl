@@ -26,6 +26,11 @@
 //!   they are listed under `recovered`.
 //! - A checkpoint of a unit that is already `uncertain` is a late checkpoint:
 //!   evidence only (`NYL-RUN-LATE-CHECKPOINT`), never clearing the condition.
+//! - A run whose lease was broken may still be alive and write to its run
+//!   ref after the takeover read it. Consumption therefore acts only on refs
+//!   unchanged since that read ([`unchanged`]); a changed one is left for
+//!   the next run, which imports what arrived (as a late checkpoint where
+//!   the unit is `uncertain`).
 //! - Import is idempotent and never regresses state: a takeover condition
 //!   records the dead run's id, and a unit whose condition already names
 //!   that run is left alone; a checkpoint applies only when it is newer than
@@ -592,6 +597,46 @@ pub fn consumed(leftovers: &Leftovers<'_>, observed: &BTreeMap<UnitName, Observe
     consumption
 }
 
+/// Narrow `consumption` to the refs whose version in `current`, the
+/// coordination re-read right before consuming, is still the version
+/// `leftovers` read. A leftover run whose lease was broken may still be
+/// alive and checkpoint after the takeover read its ref; deleting or
+/// retiring the ref then would lose a result the takeover never saw (or
+/// bury a receipt that should be imported in an evidence ref). Such a ref,
+/// and one already gone, is left alone: the next run reads it again, and
+/// what was handled imports as a no-op. Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), items 4 and 8.
+pub fn unchanged(consumption: Consumption, leftovers: &Leftovers<'_>, current: &Coordination) -> Consumption {
+    let same = |read: &[&RunState], now: &[RunState], run: &RunId| {
+        let before = read
+            .iter()
+            .find(|state| &state.run.run == run)
+            .map(|state| &state.version);
+        let after = now
+            .iter()
+            .find(|state| &state.run.run == run)
+            .map(|state| &state.version);
+        before.is_some() && before == after
+    };
+    Consumption {
+        delete: consumption
+            .delete
+            .into_iter()
+            .filter(|run| same(&leftovers.runs, &current.runs, run))
+            .collect(),
+        retire: consumption
+            .retire
+            .into_iter()
+            .filter(|run| same(&leftovers.runs, &current.runs, run))
+            .collect(),
+        delete_evidence: consumption
+            .delete_evidence
+            .into_iter()
+            .filter(|run| same(&leftovers.evidence, &current.evidence, run))
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nyl_core::orchestration::ports::HeldLease;
@@ -868,6 +913,31 @@ mod tests {
         let cleared = BTreeMap::from([(name("database"), success("database", "v1", OWN, "13:00"))]);
         let consumption = consumed(&leftovers(&world.own, None, &retired), &cleared);
         assert_eq!(consumption.delete_evidence, [run(RUN_2)]);
+    }
+
+    /// Catches a takeover deleting the run ref of a run whose lease it broke
+    /// but that is still alive, after that run wrote a checkpoint the
+    /// takeover never read: the late result would be lost to import and to
+    /// `nyl recover --accept`.
+    #[test]
+    fn test_consumption_leaves_run_refs_that_changed_since_they_were_read() {
+        let world = World::new(vec![
+            run_state(RUN_1, "10:30", &["network"], Vec::new()),
+            run_state(RUN_2, "11:00", &["queue"], Vec::new()),
+        ]);
+        let leftovers = world.leftovers();
+        let consumption = consumed(&leftovers, &BTreeMap::new());
+        assert_eq!(consumption.delete, [run(RUN_1), run(RUN_2)]);
+
+        let mut current = world.coordination.clone();
+        // RUN_1 checkpointed after the read; RUN_2 is unchanged.
+        current.runs[0].checkpoints.push(checkpoint("network", "v1", RUN_1));
+        current.runs[0].version = "v2".to_owned();
+        let narrowed = unchanged(consumption.clone(), &leftovers, &current);
+        assert_eq!(narrowed.delete, [run(RUN_2)]);
+        // A ref already gone is not deleted again.
+        current.runs.clear();
+        assert!(unchanged(consumption, &leftovers, &current).delete.is_empty());
     }
 
     /// Catches a crashed run's created unit getting a new uid (so its

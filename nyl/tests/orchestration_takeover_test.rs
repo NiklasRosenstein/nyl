@@ -12,17 +12,18 @@ mod scenario;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{DriverOperation, DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry,
+    Checkpoint, Clock, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry,
     SourceRenderer, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
 };
 use nyl_core::orchestration::state::{
-    Condition, DesiredUnit, FailureCategory, Lease, ObservedUnit, Run, Signal, StateLocation,
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, FailureCategory, Lease, ObservedUnit, Run, Signal,
+    StateLocation,
 };
 use nyl_core::orchestration::time::Duration;
 use nyl_drivers::fake::{Script, Scripted};
@@ -30,6 +31,7 @@ use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
 use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 use nyl_orchestration::run_report::{EnvironmentRunReport, RunReport};
+use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
 use nyl_orchestration::shell::run::{self, Cancellation, RunContext, RunRequest};
 use nyl_orchestration::shell::state::{self as state_ops, Requested};
 use nyl_orchestration::shell::{Context, Settings};
@@ -347,11 +349,17 @@ fn test_takeover_after_a_crash_imports_recovers_and_deletes_the_run_ref() {
     assert!(coordination.evidence.is_empty());
 }
 
+/// Something another process does to the state repository.
+type Interleaved = Box<dyn FnOnce(&MemoryStateStore) + Send>;
+
 /// A memory store whose `delete_run` fails `failures` times, as a network
-/// error would; everything else is delegated.
+/// error would, and that runs `before_commit` once right before the next
+/// transition commit, as a concurrent process could; everything else is
+/// delegated.
 struct FailingDeleteStore {
     inner: MemoryStateStore,
     failures: Arc<AtomicUsize>,
+    before_commit: Arc<Mutex<Option<Interleaved>>>,
 }
 
 impl StateStore for FailingDeleteStore {
@@ -434,6 +442,10 @@ impl StateStore for FailingDeleteStore {
         transition: &Transition,
         lease_version: &str,
     ) -> StateResult<Committed> {
+        let interleaved = self.before_commit.lock().unwrap().take();
+        if let Some(interleaved) = interleaved {
+            interleaved(&self.inner);
+        }
         self.inner
             .commit(location, environment, base, transition, lease_version)
     }
@@ -482,6 +494,7 @@ fn test_takeover_is_idempotent_when_a_leftover_is_read_again() {
     harness.store = Box::new(FailingDeleteStore {
         inner: MemoryStateStore::new(),
         failures: failures.clone(),
+        before_commit: Arc::default(),
     });
     let dead = crashed_after_database(&mut harness);
     // The takeover's deletion of the leftover run ref fails once.
@@ -508,6 +521,72 @@ fn test_takeover_is_idempotent_when_a_leftover_is_read_again() {
     );
     assert_eq!(harness.snapshot().tips, tips);
     assert!(harness.coordination().runs.is_empty(), "the leftover is consumed now");
+}
+
+/// A run whose lease was broken may still be alive: here the dead run
+/// checkpoints the unit it was executing after the takeover read its run
+/// ref and before the takeover's transition commit. The takeover must not
+/// delete that run ref, so the late checkpoint survives; the next run
+/// reports it as a late checkpoint and retires the ref to an evidence ref
+/// that `nyl recover --accept` can adopt.
+#[test]
+fn test_takeover_keeps_a_run_ref_that_checkpointed_after_it_was_read() {
+    let mut harness = Harness::new(&shared_project(), false);
+    // database stays uncertain, so the late checkpoint is evidence.
+    harness.script.recover_by(RecoveryPolicy::Manual);
+    let before_commit: Arc<Mutex<Option<Interleaved>>> = Arc::default();
+    harness.store = Box::new(FailingDeleteStore {
+        inner: MemoryStateStore::new(),
+        failures: Arc::new(AtomicUsize::new(0)),
+        before_commit: before_commit.clone(),
+    });
+    let dead = crashed_after_database(&mut harness);
+    let leftover = harness.coordination().runs.remove(0);
+    assert_eq!(leftover.run.run, dead);
+    let database = leftover
+        .created
+        .iter()
+        .find(|desired| desired.unit.name == unit("database"))
+        .cloned()
+        .expect("database was recorded before it started");
+    // The dead run's result for database, finished after the takeover
+    // recorded its condition.
+    let mut late = leftover.checkpoints[0].clone();
+    late.desired = database.clone();
+    late.observed.unit = database.unit.clone();
+    let receipt = late.observed.receipt.as_mut().unwrap();
+    receipt.started_at = harness.clock.now();
+    receipt.finished_at = Duration::from_mins(5).after(harness.clock.now());
+    let (location, record) = (harness.location.clone(), leftover.run.clone());
+    *before_commit.lock().unwrap() = Some(Box::new(move |store: &MemoryStateStore| {
+        store.write_run(&location, &dev(), &record, Some(&late)).unwrap();
+    }));
+
+    let takeover = harness.reconcile(&[]);
+    assert_eq!(names(&takeover.recovered), set(&["database"]), "{takeover:#?}");
+    assert!(before_commit.lock().unwrap().is_none(), "the takeover committed");
+    let snapshot = harness.snapshot();
+    assert_eq!(
+        uncertain_run(snapshot.observed.get(&unit("database"))),
+        Some(dead.clone())
+    );
+    let kept = harness.coordination();
+    assert_eq!(
+        kept.runs.iter().map(|state| &state.run.run).collect::<Vec<_>>(),
+        [&dead],
+        "the run ref that changed after the takeover read it is kept"
+    );
+
+    harness.advance(10);
+    let next = harness.reconcile(&[]);
+    assert!(codes(&next.warnings).contains(&Code::RunLateCheckpoint), "{next:#?}");
+    let after = harness.coordination();
+    assert!(after.runs.is_empty(), "{after:#?}");
+    assert_eq!(
+        after.evidence.iter().map(|state| &state.run.run).collect::<Vec<_>>(),
+        [&dead],
+        "the late checkpoint is kept as evidence"
+    );
 }
 
 /// A crashed run created and started a unit that the next run no longer
@@ -742,4 +821,59 @@ fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_co
     assert_eq!(names(&next.imported), set(&["quick", "slow"]));
     assert_eq!(outcome(&next, "recovered"), set(&["slow"]));
     assert!(harness.coordination().runs.is_empty());
+}
+
+/// Decision 3: a `--local` run executes a unit whose recovery policy is not
+/// `converge` only when `--approve` names it; otherwise the unit awaits
+/// approval and the run exits 2. The executed unit's receipt and the
+/// local transition commit's summary record the `local` approval with the
+/// commit identity.
+#[test]
+#[ignore = "needs the `local` package (rules::local::check_leftovers, shell::local::finish_local_report); the integration step un-ignores it"]
+fn test_local_run_executes_a_unit_that_does_not_converge_only_when_approved() {
+    let files = [
+        ("nyl/nyl.toml", "[project]\n".to_owned()),
+        ("nyl/environment.yaml", ENVIRONMENT.to_owned()),
+        ("nyl/manual.yaml", command("manual", "true", "")),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(path, content)| (*path, content.as_str())).collect();
+    let project = project(&files);
+    let harness = Harness::new(project.path(), false);
+    harness.init();
+    let local = |approve: &[&str]| LocalRun {
+        lease: LeaseScope::Local,
+        approve: approve.iter().map(|name| unit(name)).collect(),
+    };
+
+    let mut job = harness.job(&[], Cancellation::default());
+    job.request.local = Some(local(&[]));
+    let waiting = harness.run(&job).environments.remove(0);
+    assert_eq!(waiting.exit.code(), 2, "{waiting:#?}");
+    assert_eq!(outcome(&waiting, "awaiting-approval"), set(&["manual"]));
+
+    let mut job = harness.job(&[], Cancellation::default());
+    job.request.local = Some(local(&["manual"]));
+    let approved = harness.run(&job).environments.remove(0);
+    assert_eq!(approved.exit.code(), 0, "{approved:#?}");
+    assert_eq!(outcome(&approved, "executed"), set(&["manual"]));
+    let expected = ApprovalRecord {
+        by: vec!["Scenario <scenario@example.invalid>".to_owned()],
+        identity: ApprovalIdentity::Local,
+        source: Some("local".to_owned()),
+        digest: None,
+        reviewed: false,
+    };
+    let snapshot = harness.snapshot();
+    let receipt = snapshot.observed[&unit("manual")].receipt.as_ref().unwrap();
+    assert_eq!(receipt.approval.as_ref(), Some(&expected));
+    let log = harness.store.log(&harness.location, StateSide::Observed, 1).unwrap();
+    let line = log[0]
+        .message
+        .lines()
+        .find(|line| line.trim_start().starts_with("manual:"))
+        .expect("the summary lists manual");
+    assert!(
+        line.contains("approval") && line.contains("Scenario <scenario@example.invalid>") && line.contains("local"),
+        "{line}"
+    );
 }

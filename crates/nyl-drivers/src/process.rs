@@ -202,14 +202,15 @@ impl ToolRunner for ProcessRunner {
 
         // The tool exited; its output ends when every process holding its
         // pipes, such as a background child, has exited too. That wait is
-        // bounded by the deadline like the tool itself.
-        let drained = match deadline {
-            Some(deadline) => drain(&finished, &mut open, deadline),
-            None => drain_unbounded(&finished, &mut open),
-        };
-        if !drained {
-            self.terminate(&mut child, true, &finished, &mut open)?;
-            return Ok(ToolExit::DeadlineExceeded);
+        // bounded by the deadline like the tool itself and, once the run is
+        // cancelled, by the kill grace after the forwarded signal.
+        match self.drain_after_exit(&child, &finished, &mut open, deadline, &mut forwarded) {
+            Drained::Finished => {}
+            Drained::DeadlineExceeded => {
+                self.terminate(&mut child, true, &finished, &mut open)?;
+                return Ok(ToolExit::DeadlineExceeded);
+            }
+            Drained::Cancelled => return Ok(ToolExit::Cancelled),
         }
         let captured = stdout
             .map(|reader| reader.join().unwrap_or_default())
@@ -235,6 +236,61 @@ impl ProcessRunner {
         if forwarded.is_some_and(|end| Instant::now() >= end) {
             kill_group(child, Signal::Kill);
         }
+    }
+}
+
+/// How waiting for a tool's output after the tool exited ended.
+enum Drained {
+    /// Every process holding the tool's pipes has closed them.
+    Finished,
+    /// The deadline passed first.
+    DeadlineExceeded,
+    /// The run was cancelled and the grace after the forwarded signal
+    /// passed; the group was killed and the readers detached.
+    Cancelled,
+}
+
+impl ProcessRunner {
+    /// Wait for the transcript of a tool whose leader exited while members
+    /// of its group, or processes that left it, may keep its pipes open.
+    /// The run's cancellation is still honored: the signal goes to the group
+    /// (once, unless it went out while the leader ran), and the group is
+    /// killed and the readers detached when the grace after it passes.
+    fn drain_after_exit(
+        &self,
+        child: &Child,
+        finished: &mpsc::Receiver<()>,
+        open: &mut usize,
+        deadline: Option<Instant>,
+        forwarded: &mut Option<Instant>,
+    ) -> Drained {
+        while *open > 0 {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Drained::DeadlineExceeded;
+            }
+            if forwarded.is_none() {
+                if let Some(signal) = self.cancelled() {
+                    kill_group(child, Signal::Forward(signal));
+                    *forwarded = Some(Instant::now() + self.kill_grace);
+                }
+            }
+            if forwarded.is_some_and(|end| Instant::now() >= end) {
+                kill_group(child, Signal::Kill);
+                drain(finished, open, Instant::now() + KILLED_DRAIN);
+                return Drained::Cancelled;
+            }
+            let mut wait = POLL_INTERVAL;
+            if let Some(until) = deadline.into_iter().chain(*forwarded).min() {
+                wait = wait.min(until.saturating_duration_since(Instant::now()));
+            }
+            match finished.recv_timeout(wait) {
+                Ok(()) => *open -= 1,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // Every reader dropped its sender, so every reader finished.
+                Err(mpsc::RecvTimeoutError::Disconnected) => *open = 0,
+            }
+        }
+        Drained::Finished
     }
 }
 
@@ -309,18 +365,6 @@ fn drain(finished: &mpsc::Receiver<()>, open: &mut usize, until: Instant) -> boo
             Err(mpsc::RecvTimeoutError::Timeout) => return false,
             // Every reader dropped its sender, so every reader finished.
             Err(mpsc::RecvTimeoutError::Disconnected) => *open = 0,
-        }
-    }
-    true
-}
-
-/// [`drain`] for a tool without a deadline: wait as long as its output lasts.
-fn drain_unbounded(finished: &mpsc::Receiver<()>, open: &mut usize) -> bool {
-    while *open > 0 {
-        if finished.recv().is_err() {
-            *open = 0;
-        } else {
-            *open -= 1;
         }
     }
     true
@@ -607,6 +651,44 @@ mod tests {
         assert!(transcript.contains("got-term"), "{transcript}");
         // Once cancelled, no further tool starts.
         assert!(matches!(runner.run(sh("true")).unwrap(), ToolExit::NotStarted { .. }));
+    }
+
+    /// Catches a cancelled run waiting on output until the unit's deadline
+    /// (up to an hour) after the tool's leader exited, while a member of its
+    /// group that ignores the signal keeps the pipes open: CI allows only
+    /// seconds between the signal and a forced kill. Covers the signal
+    /// arriving while the leader runs and after it exited.
+    #[test]
+    fn test_run_cancellation_kills_a_group_member_holding_the_pipes_after_the_tool_exits() {
+        let scripts = [
+            // The leader exits on the forwarded signal; the member ignores it.
+            "(trap '' TERM; sleep 30) & trap 'exit 7' TERM; while :; do sleep 0.05; done",
+            // The leader exits before the signal arrives.
+            "(trap '' TERM; sleep 30) & exit 0",
+        ];
+        for script in scripts {
+            let (runner, _) = quiet();
+            let cancel = Arc::new(AtomicI32::new(0));
+            let runner = ProcessRunner {
+                kill_grace: StdDuration::from_millis(300),
+                ..runner.cancelled_by(cancel.clone())
+            };
+            let mut invocation = sh(script);
+            invocation.timeout = Some(StdDuration::from_secs(25));
+            let signaller = thread::spawn(move || {
+                thread::sleep(StdDuration::from_millis(300));
+                cancel.store(libc::SIGTERM, Ordering::SeqCst);
+            });
+            let started = Instant::now();
+            let exit = runner.run(invocation).unwrap();
+            signaller.join().unwrap();
+            assert_eq!(exit, ToolExit::Cancelled, "{script}");
+            assert!(
+                started.elapsed() < StdDuration::from_secs(10),
+                "{script}: {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]

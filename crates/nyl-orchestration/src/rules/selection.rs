@@ -23,7 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::driver::{DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
-use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness};
+use nyl_core::orchestration::ports::CommitIdentity;
+use nyl_core::orchestration::state::{
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness,
+};
 
 use super::freshness::receipt_is_current;
 
@@ -122,6 +125,50 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         }
     }
     Ok(())
+}
+
+/// The units of `approve` (a `--local` run's `--approve`) that a
+/// reconcile may execute: an approval is recorded with the commit identity,
+/// so without one nothing is approved and the units await approval.
+pub fn local_approve<'a>(
+    approve: &'a BTreeSet<UnitName>,
+    identity: Option<&CommitIdentity>,
+) -> Option<&'a BTreeSet<UnitName>> {
+    static NONE: BTreeSet<UnitName> = BTreeSet::new();
+    Some(if identity.is_some() { approve } else { &NONE })
+}
+
+/// The approval a `--local` run records, in the receipt and in the local
+/// transition commit's summary, for each of `units` that `--approve` names
+/// and whose execution recovery policy is not `converge`:
+/// `{by: ["Name <email>"], identity: local, source: "local", digest: null,
+/// reviewed: false}`, with the commit identity. Nothing without an identity
+/// ([`local_approve`]). Contract:
+/// [Local runs](../../../../design/orchestration-core.md#local-runs).
+pub fn local_approvals<'u>(
+    approve: &BTreeSet<UnitName>,
+    identity: Option<&CommitIdentity>,
+    drivers: &DriverSet,
+    units: impl IntoIterator<Item = &'u DesiredUnit>,
+) -> BTreeMap<UnitName, ApprovalRecord> {
+    let Some(identity) = identity else {
+        return BTreeMap::new();
+    };
+    units
+        .into_iter()
+        .filter(|unit| approve.contains(&unit.unit.name))
+        .filter(|unit| execution_recovery(drivers, unit) != Some(RecoveryPolicy::Converge))
+        .map(|unit| {
+            let record = ApprovalRecord {
+                by: vec![format!("{} <{}>", identity.name, identity.email)],
+                identity: ApprovalIdentity::Local,
+                source: Some("local".to_owned()),
+                digest: None,
+                reviewed: false,
+            };
+            (unit.unit.name.clone(), record)
+        })
+        .collect()
 }
 
 fn execution_policy(candidates: &Candidates<'_>, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
@@ -374,6 +421,38 @@ mod tests {
         let (ready, skipped) = world.select(None);
         assert_eq!(ready, [name("approved"), name("converge")]);
         assert_eq!(skipped, BTreeMap::from([(name("unapproved"), Skipped::LocalApproval)]));
+    }
+
+    /// Catches a `--local` run's approved unit executing without the audit
+    /// record decision 3 requires (receipt and summary), or with an empty
+    /// `by` when the run has no commit identity.
+    #[test]
+    fn test_local_approvals_record_the_commit_identity_for_approved_units_that_do_not_converge() {
+        let mut world = World::new();
+        world.add("converge", json!({"idempotent": true}));
+        world.add("approved", json!({}));
+        world.add("unapproved", json!({}));
+        let approve = BTreeSet::from([name("approved"), name("converge")]);
+        let identity: CommitIdentity = "Jane Doe <jane@example.invalid>".parse().unwrap();
+
+        let approvals = local_approvals(&approve, Some(&identity), &world.drivers, world.desired.values());
+        let expected = ApprovalRecord {
+            by: vec!["Jane Doe <jane@example.invalid>".to_owned()],
+            identity: ApprovalIdentity::Local,
+            source: Some("local".to_owned()),
+            digest: None,
+            reviewed: false,
+        };
+        assert_eq!(approvals, BTreeMap::from([(name("approved"), expected)]));
+        assert_eq!(local_approve(&approve, Some(&identity)), Some(&approve));
+
+        // Without a commit identity nothing is approved: the unit awaits
+        // approval instead of executing without a record of who approved it.
+        assert!(local_approvals(&approve, None, &world.drivers, world.desired.values()).is_empty());
+        world.local = local_approve(&approve, None).cloned();
+        let (ready, skipped) = world.select(None);
+        assert_eq!(ready, [name("converge")]);
+        assert_eq!(skipped[&name("approved")], Skipped::LocalApproval);
     }
 
     #[test]

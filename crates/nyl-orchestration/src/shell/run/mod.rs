@@ -52,8 +52,7 @@ use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{
-    DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, RecoveryPolicy, ResolutionContext, Supported,
-    ToolRunner,
+    DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, ResolutionContext, Supported, ToolRunner,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
@@ -61,8 +60,8 @@ use nyl_core::orchestration::ports::{
     StateError, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit,
-    Lifecycle, ObservedUnit, Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
+    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
+    Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::Environment;
@@ -78,7 +77,7 @@ use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::graph::{extract, topological_order};
 use crate::rules::references::{resolve_unit, ReferenceView};
-use crate::rules::selection::{batches, execution_recovery, select, Candidates, Skipped};
+use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
 use crate::rules::sources::{
     effective_commit, pin_refs, pin_source_fields, root_local_paths, run_source_refs, source_request, source_revisions,
     unreachable, unsupported_source, SourceRequest,
@@ -1280,7 +1279,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 drivers: context.drivers,
                 named: request.units.as_ref(),
                 attempted: &attempted,
-                local: request.local.as_ref().map(|local| &local.approve),
+                local: request
+                    .local
+                    .as_ref()
+                    .and_then(|local| local_approve(&local.approve, context.commit_identity)),
             });
             if ready.is_empty() {
                 break (resolved, skipped);
@@ -1568,10 +1570,25 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     /// Delete the leftover run refs this run consumed and retire those whose
     /// checkpoints are evidence for a unit still uncertain; failures are
     /// warnings, since a re-read leftover imports as a no-op.
+    ///
+    /// The coordination refs are read again first, and only refs unchanged
+    /// since the takeover read them are consumed: a run whose lease was
+    /// broken may still be alive and have checkpointed in the meantime.
     fn consume(&mut self, leftovers: &Leftovers<'_>, observed: &BTreeMap<UnitName, ObservedUnit>) {
         let consumption = takeover::consumed(leftovers, observed);
+        if consumption == takeover::Consumption::default() {
+            return;
+        }
         let store = self.context().base.store;
         let (location, environment) = (self.location(), self.environment());
+        let consumption = match store.coordination(location, environment) {
+            Ok(current) => takeover::unchanged(consumption, leftovers, &current),
+            Err(error) => {
+                let finding = store_error(environment, &error);
+                self.report.warnings.push(finding);
+                return;
+            }
+        };
         let mut failures = Vec::new();
         for run in &consumption.delete {
             failures.extend(store.delete_run(location, environment, run).err());
@@ -1703,9 +1720,8 @@ fn imported_result(taking: &Takeover, unit: &DesiredUnit, observed: Option<&Obse
     })
 }
 
-/// The approval a `--local` run records for each unit of `batch` that
-/// `--approve` named because its recovery policy is not `converge`: the
-/// workstation's Git user, `identity: local`, without a digest.
+/// The approvals a `--local` run records for the units of `batch`
+/// (`rules::selection::local_approvals`).
 fn local_approvals(
     session: &Session<'_, '_>,
     resolved: &Resolved,
@@ -1714,29 +1730,12 @@ fn local_approvals(
     let Some(local) = &session.request.local else {
         return BTreeMap::new();
     };
-    let by = session
-        .context
-        .commit_identity
-        .map(|identity| format!("{} <{}>", identity.name, identity.email));
-    batch
-        .iter()
-        .filter(|name| local.approve.contains(*name))
-        .filter(|name| {
-            execution_recovery(session.context.drivers, &resolved.units[*name]) != Some(RecoveryPolicy::Converge)
-        })
-        .map(|name| {
-            (
-                name.clone(),
-                ApprovalRecord {
-                    by: by.iter().cloned().collect(),
-                    identity: ApprovalIdentity::Local,
-                    source: Some("local".to_owned()),
-                    digest: None,
-                    reviewed: false,
-                },
-            )
-        })
-        .collect()
+    crate::rules::selection::local_approvals(
+        &local.approve,
+        session.context.commit_identity,
+        session.context.drivers,
+        batch.iter().map(|name| &resolved.units[name]),
+    )
 }
 
 /// The result of a unit this run did not execute.
