@@ -910,7 +910,7 @@ fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_co
     let started = markers.path().join("started");
     // Forward slashes: `sh` on Windows reads backslashes as escapes.
     let marker = started.display().to_string().replace('\\', "/");
-    let slow = format!("[ -e \"{marker}\" ] && exit 0; touch \"{marker}\"; sleep 30");
+    let slow = format!("[ -e \"{marker}\" ] && exit 0; touch \"{marker}\"; sleep 120");
     let files = [
         ("nyl/nyl.toml", "[project]\n".to_owned()),
         ("nyl/environment.yaml", ENVIRONMENT.to_owned()),
@@ -939,9 +939,12 @@ fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_co
     let begun = std::time::Instant::now();
     let cancelled = harness.reconcile_with(&[], cancellation);
     watcher.join().unwrap();
+    // Unix forwards the signal to the tool's group; Windows kills the tool
+    // once the 30s grace passes.
+    let bound = if cfg!(unix) { 25 } else { 60 };
     assert!(
-        begun.elapsed() < std::time::Duration::from_secs(25),
-        "the tool was signalled"
+        begun.elapsed() < std::time::Duration::from_secs(bound),
+        "the tool was stopped"
     );
     assert_eq!(cancelled.exit.code(), 4, "{cancelled:#?}");
     assert_eq!(codes(&cancelled.errors), [Code::RunCancelled], "{cancelled:#?}");

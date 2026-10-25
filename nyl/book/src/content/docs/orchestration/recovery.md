@@ -164,7 +164,9 @@ uncertain unit needs them.
 
 On SIGINT or SIGTERM, `nyl reconcile` starts no further unit and forwards the
 signal to the running tools' process groups, so a tool can stop cleanly and
-release its own locks; a tool still running 30 seconds later is killed. The
+release its own locks; a tool still running 30 seconds later is killed. On
+Windows, which has no process groups to signal, the console delivers Ctrl+C
+to the tool directly, and Nyl kills it after the same 30 seconds. The
 run checkpoints the units that finish, gives the ones still running an
 `uncertain` condition, marks its run ref finished, releases the lease, and
 exits 4 with `NYL-RUN-CANCELLED`, without a transition commit. The next run

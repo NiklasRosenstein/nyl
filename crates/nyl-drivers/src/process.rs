@@ -10,7 +10,9 @@
 //! whether the tool is still running or has exited while other members of
 //! its group, or processes that left it, keep its output open: the runner
 //! waits for output no longer than the deadline plus the grace, then
-//! detaches its readers. Output goes to the
+//! detaches its readers. Windows has no process groups to signal: the
+//! console delivers Ctrl+C to the tool itself, and the runner kills the
+//! tool once the grace passes. Output goes to the
 //! transcript sink (stderr by default) with secret values masked, and is
 //! never stored; stdout is also returned for steps Nyl reads, such as a
 //! fingerprint.
@@ -190,7 +192,7 @@ impl ToolRunner for ProcessRunner {
             if let Some(status) = child.try_wait().map_err(wait_error)? {
                 break status;
             }
-            self.forward_cancellation(&child, &mut forwarded);
+            self.forward_cancellation(&mut child, &mut forwarded);
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 // Readers still blocked on a pipe that a process outside the
                 // group holds open are detached, never joined.
@@ -226,7 +228,7 @@ impl ProcessRunner {
     /// Forward the cancelling signal to the tool's group once, and SIGKILL
     /// the group when the grace after it has passed. `forwarded` holds the
     /// end of that grace once the signal went out.
-    fn forward_cancellation(&self, child: &Child, forwarded: &mut Option<Instant>) {
+    fn forward_cancellation(&self, child: &mut Child, forwarded: &mut Option<Instant>) {
         if forwarded.is_none() {
             if let Some(signal) = self.cancelled() {
                 kill_group(child, Signal::Forward(signal));
@@ -234,7 +236,7 @@ impl ProcessRunner {
             }
         }
         if forwarded.is_some_and(|end| Instant::now() >= end) {
-            kill_group(child, Signal::Kill);
+            kill_tool(child);
         }
     }
 }
@@ -419,6 +421,15 @@ fn kill_group(child: &Child, signal: Signal) {
     unsafe {
         libc::kill(-pgid, signal);
     }
+}
+
+/// Kill the tool once the cancellation grace has passed: its whole group on
+/// unix, the tool itself elsewhere.
+fn kill_tool(child: &mut Child) {
+    #[cfg(unix)]
+    kill_group(child, Signal::Kill);
+    #[cfg(not(unix))]
+    let _ = child.kill();
 }
 
 /// Without process groups, [`ProcessRunner::terminate`] stops the tool
