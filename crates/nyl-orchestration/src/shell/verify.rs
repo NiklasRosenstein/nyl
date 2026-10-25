@@ -16,21 +16,35 @@
 //!
 //! The lease it holds lists no units: verify has no effects, so a run
 //! taking over from a dead verify has nothing to mark uncertain. It writes
-//! no run ref for the same reason.
+//! no run ref for the same reason. Its deadline covers the units it
+//! verifies: before each batch, verify moves the lease's deadline to the
+//! batch's longest unit timeout from now (plus the grace period), as a
+//! reconcile does for each wave, and no unit's deadline passes the lease's
+//! less its grace period. A verify that passes its unit's deadline fails
+//! with a `timeout` error and records nothing for the unit.
+//!
+//! A driver sees the project directory reconcile gave it for the same
+//! commit: the project located at the unit's source revision S through the
+//! [`SourceRenderer`](nyl_core::orchestration::ports::SourceRenderer)
+//! (entry location, then `[project] previous_paths`), not the entry
+//! checkout's directory, so a project moved since the unit executed still
+//! verifies where it reconciled.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{DriverOperation, ExecutionContext, Supported};
-use nyl_core::orchestration::ids::{EnvironmentName, UnitAddress, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{Operation, StateLocation};
+use nyl_core::orchestration::time::{Duration, Timestamp};
 
 use super::lease::{self, HeldLease, LeaseError};
 use super::run::slots::Slots;
 use super::run::{admitted_env, project_path, unit_timeout, RunContext, RunRequest};
 use super::state::store_error;
+use super::Settings;
 use crate::rules::sources::effective_commit;
 use crate::rules::state_location::check_record;
 use crate::rules::unit_state::receipt_state;
@@ -145,7 +159,7 @@ fn holding(
     super::local::check_remote_tips(base.store, location)?;
     let snapshot = read(context, environment, location, request)?;
     let planned = targets(&snapshot, request.units.as_ref());
-    let results = verify_units(context, request, &snapshot, &planned);
+    let results = verify_units(context, request, held, &snapshot, &planned)?;
 
     let mut changes = TransitionChanges::default();
     for result in &results {
@@ -231,13 +245,16 @@ fn read(
 }
 
 /// Verify every `Verify` target, in batches of the concurrency limit, each
-/// unit of a batch on its own thread and slot.
+/// unit of a batch on its own thread and slot. Before each batch the
+/// lease's deadline moves to cover the batch's longest unit timeout; a lease
+/// lost meanwhile ends verify with `NYL-LEASE-LOST`.
 fn verify_units(
     context: &RunContext<'_>,
     request: &RunRequest,
+    held: &mut HeldLease,
     snapshot: &EnvironmentSnapshot,
     planned: &BTreeMap<UnitName, Target>,
-) -> Vec<Verified> {
+) -> Result<Vec<Verified>, Finding> {
     let directory = session_directory(context.workspace);
     let slots = Slots::new(&directory);
     let names: Vec<&UnitName> = planned
@@ -245,8 +262,20 @@ fn verify_units(
         .filter(|(_, target)| **target == Target::Verify)
         .map(|(name, _)| name)
         .collect();
+    let projects = project_dirs(context, request, snapshot, &names, &slots);
     let mut results = Vec::new();
+    let mut outcome = Ok(());
     for batch in names.chunks(request.concurrency.max(1)) {
+        let longest = batch
+            .iter()
+            .map(|name| unit_timeout(&snapshot.desired[*name]))
+            .max()
+            .unwrap_or_default();
+        if let Err(finding) = extend_lease(context, request, held, longest) {
+            outcome = Err(finding);
+            break;
+        }
+        let lease_deadline = held.lease.deadline;
         let batch_results: Vec<Verified> = std::thread::scope(|scope| {
             let handles: Vec<_> = batch
                 .iter()
@@ -254,7 +283,16 @@ fn verify_units(
                 .map(|(slot, name)| {
                     let slots = &slots;
                     let directory = &directory;
-                    scope.spawn(move || verify_unit(context, request, snapshot, name, slots, slot, directory))
+                    let project_dir = &projects[*name];
+                    scope.spawn(move || {
+                        let job = UnitJob {
+                            name,
+                            slot,
+                            project_dir,
+                            lease_deadline,
+                        };
+                        verify_unit(context, request, snapshot, &job, slots, directory)
+                    })
                 })
                 .collect();
             handles
@@ -268,7 +306,83 @@ fn verify_units(
         results.extend(batch_results);
     }
     let _ = std::fs::remove_dir_all(&directory);
-    results
+    outcome.map(|()| results)
+}
+
+/// Move the held lease's deadline to `phase` from now plus the grace
+/// period, so it covers the batch about to start.
+fn extend_lease(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    held: &mut HeldLease,
+    phase: Duration,
+) -> Result<(), Finding> {
+    let base = context.base;
+    let environment = &request.environment;
+    let mut lease = held.lease.clone();
+    lease.deadline = lease::deadline(base, base.clock.now(), phase);
+    match base
+        .store
+        .update_lease(&request.location, environment, &lease, &held.version)
+    {
+        Ok(version) => {
+            held.lease = lease;
+            held.version = version;
+            Ok(())
+        }
+        Err(StateError::LeaseLost) => Err(lease::lost(environment)),
+        Err(error) => Err(store_error(environment, &error)),
+    }
+}
+
+/// A unit's deadline: its timeout from `now`, but never past the lease's
+/// deadline less the grace period, so no verify runs once another runner
+/// may take the lease over.
+fn unit_deadline(settings: &Settings, now: Timestamp, timeout: Duration, lease: Timestamp) -> Timestamp {
+    let bound = lease
+        .checked_sub_signed(settings.lease_grace.to_chrono())
+        .unwrap_or(lease);
+    timeout.after(now).min(bound)
+}
+
+/// The worktree-rooted project directory at each target's source revision
+/// S, as reconcile located it: the source renderer finds the project at the
+/// entry location or a `[project] previous_paths` entry. A revision whose
+/// project cannot be located maps to the reason.
+fn project_dirs(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    snapshot: &EnvironmentSnapshot,
+    names: &[&UnitName],
+    slots: &Slots,
+) -> BTreeMap<UnitName, Result<String, String>> {
+    let mut located: BTreeMap<CommitId, Result<String, String>> = BTreeMap::new();
+    let mut projects = BTreeMap::new();
+    for name in names {
+        let revision = &snapshot.desired[*name].source_revision;
+        let project = located
+            .entry(revision.clone())
+            .or_insert_with(|| {
+                let worktree = slots.checkout(context.sources, 0, revision)?;
+                context
+                    .renderer
+                    .render(&worktree, &request.environment, revision)
+                    .map(|rendered| rendered.project_dir)
+                    .map_err(|error| format!("cannot locate the project at {revision}: {error}"))
+            })
+            .clone();
+        projects.insert((*name).clone(), project);
+    }
+    projects
+}
+
+/// One unit of a batch: its slot, its project directory, and the lease
+/// deadline its own deadline stays within.
+struct UnitJob<'a> {
+    name: &'a UnitName,
+    slot: usize,
+    project_dir: &'a Result<String, String>,
+    lease_deadline: Timestamp,
 }
 
 /// A directory of this verify's own beneath the workspace.
@@ -283,22 +397,10 @@ fn session_directory(workspace: &Path) -> PathBuf {
     }
 }
 
-fn verify_unit(
-    context: &RunContext<'_>,
-    request: &RunRequest,
-    snapshot: &EnvironmentSnapshot,
-    name: &UnitName,
-    slots: &Slots,
-    slot: usize,
-    directory: &Path,
-) -> Verified {
-    let environment = &request.environment;
-    let unit = &snapshot.desired[name];
-    let observed = snapshot.observed.get(name);
-    let receipt = observed
-        .and_then(|observed| observed.receipt.as_ref())
-        .expect("a verified unit has a current receipt");
-    let failed = |message: String| Verified {
+/// A unit whose verification could not run or did not finish: an error
+/// finding (`NYL-DRIVER-ERROR`) and nothing to record.
+fn driver_failure(name: &UnitName, message: String, fix: &str) -> Verified {
+    Verified {
         name: name.clone(),
         records: None,
         verification: UnitVerification {
@@ -307,12 +409,36 @@ fn verify_unit(
             },
             attestations: BTreeMap::new(),
         },
-        message: Some(message.clone()),
-        error: Some(Finding::new(
-            Code::DriverError,
-            format!("unit {name}: {message}"),
+        error: Some(Finding::new(Code::DriverError, format!("unit {name}: {message}"), fix)),
+        message: Some(message),
+    }
+}
+
+fn verify_unit(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    snapshot: &EnvironmentSnapshot,
+    job: &UnitJob<'_>,
+    slots: &Slots,
+    directory: &Path,
+) -> Verified {
+    let name = job.name;
+    let environment = &request.environment;
+    let unit = &snapshot.desired[name];
+    let observed = snapshot.observed.get(name);
+    let receipt = observed
+        .and_then(|observed| observed.receipt.as_ref())
+        .expect("a verified unit has a current receipt");
+    let failed = |message: String| {
+        driver_failure(
+            name,
+            message,
             "fix the cause, such as a missing tool or an unreadable worktree, then run nyl verify again",
-        )),
+        )
+    };
+    let project_dir = match job.project_dir {
+        Ok(project_dir) => project_dir,
+        Err(message) => return failed(message.clone()),
     };
     let Some(driver) = context.drivers.get(&unit.unit.api_version, &unit.unit.kind) else {
         return failed(format!("no driver serves kind {}", unit.unit.kind));
@@ -325,21 +451,23 @@ fn verify_unit(
     let temp_dir = directory.join(format!("tmp-{name}"));
     let worktree = match std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", temp_dir.display()))
-        .and_then(|()| slots.checkout(context.sources, slot, &commit))
+        .and_then(|()| slots.checkout(context.sources, job.slot, &commit))
     {
         Ok(worktree) => worktree,
         Err(message) => return failed(message),
     };
     let now = context.base.clock.now();
+    let timeout = unit_timeout(unit);
+    let deadline = unit_deadline(&context.base.settings, now, timeout, job.lease_deadline);
     let ctx = ExecutionContext {
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Verify,
-        project_dir: project_path(&worktree, &request.entry_project_dir),
+        project_dir: project_path(&worktree, project_dir),
         worktree,
         temp_dir: temp_dir.clone(),
         env: admitted_env(context.process_env, &unit.spec),
         approved_digest: None,
-        deadline: unit_timeout(unit).after(now),
+        deadline,
         now,
         observed,
         tools: context.tools,
@@ -349,6 +477,21 @@ fn verify_unit(
     let outcome = driver.verify(&ctx, unit, receipt);
     drop(ctx);
     let _ = std::fs::remove_dir_all(&temp_dir);
+    // A verify that passed its deadline failed with a `timeout`, whatever
+    // the driver made of it (the Command kind reports a terminated step as
+    // unknown drift): its result is not evidence of the unit's state.
+    if context.base.clock.now() >= deadline {
+        let limit = if deadline < timeout.after(now) {
+            "the lease's deadline".to_owned()
+        } else {
+            format!("its timeout of {timeout}")
+        };
+        return driver_failure(
+            name,
+            format!("timeout: verify passed {limit}"),
+            "raise the unit's `timeout` or speed up its verification, then run nyl verify again",
+        );
+    }
     match outcome {
         Ok(Supported::Supported(verification)) => {
             let records = records(environment, unit, receipt, &verification, now).settle(
@@ -463,5 +606,31 @@ fn summary(
         imported: Vec::new(),
         lease_broken: broken.cloned(),
         details: BTreeMap::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit verifies within its own timeout, and never past the lease's
+    /// deadline less the grace period, after which another runner may
+    /// take the lease over.
+    #[test]
+    fn test_unit_deadline_stays_within_the_lease() {
+        let settings = Settings::default();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-24T10:00:00Z")
+            .unwrap()
+            .to_utc();
+        let covering = now + chrono::Duration::minutes(70);
+        assert_eq!(
+            unit_deadline(&settings, now, Duration::from_mins(60), covering),
+            now + chrono::Duration::minutes(60)
+        );
+        let short = now + chrono::Duration::minutes(40);
+        assert_eq!(
+            unit_deadline(&settings, now, Duration::from_mins(60), short),
+            now + chrono::Duration::minutes(30)
+        );
     }
 }

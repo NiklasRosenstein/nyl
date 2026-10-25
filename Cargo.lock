@@ -1949,6 +1949,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustls",
+ "schemars",
  "serde",
  "serde-saphyr 2.0.0",
  "serde_json",

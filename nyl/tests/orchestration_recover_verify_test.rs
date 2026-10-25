@@ -6,28 +6,40 @@
 mod scenario;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser as _;
 use nyl::cli::Cli;
 use nyl::orchestration::run::{CommandOutcome, Wiring};
-use nyl_core::orchestration::driver::{DriverOperation, DriverSet};
-use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::driver::{
+    Capabilities, Driver, DriverOperation, DriverResult, DriverSet, ExecStatus, ExecutionContext, Inspection,
+    KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported,
+    Verification,
+};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Clock as _, CommitIdentity, StateStore, Transition, TransitionChanges,
+    Checkpoint, Clock as _, CommitIdentity, SourceRenderer as _, StateStore, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    Condition, FailureCategory, Lease, LeaseKind, ObservedUnit, Operation, Run, RunKind, StateLocation, StateV1,
+    ArtifactDocument, Condition, DesiredUnit, FailureCategory, Lease, LeaseKind, ObservedUnit, Operation, Receipt, Run,
+    RunKind, StateLocation, StateV1,
 };
-use nyl_core::orchestration::time::Duration;
-use nyl_drivers::fake::{Script, Scripted};
+use nyl_core::orchestration::time::{Duration, Timestamp};
+use nyl_drivers::fake::{FakeImage, FakeInfra, FakePublication, Script, Scripted};
 use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
 use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
+use nyl_orchestration::run_report::EnvironmentRunReport;
+use nyl_orchestration::shell::run::{RunContext, RunRequest};
+use nyl_orchestration::shell::verify;
+use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
+use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_state::git::{CommitAuthor, GitStateStore};
-use scenario::world::{git_output, World};
+use nyl_state::source::GitSourceResolver;
+use scenario::world::{git, git_output, World};
 use serde_json::Value;
 
 const AUTHOR: &str = "Scenario <scenario@example.invalid>";
@@ -91,7 +103,12 @@ impl Harness {
 
     /// `nyl <args>` in-process in a fresh clone of `main`, with `faults`.
     fn invoke_with(&self, args: &[&str], faults: &dyn FaultInjector) -> CommandOutcome {
-        let clone = self.world.fresh_clone("main");
+        self.invoke_in(args, "", faults)
+    }
+
+    /// `nyl <args>` in-process in `directory` of a fresh clone of `main`.
+    fn invoke_in(&self, args: &[&str], directory: &str, faults: &dyn FaultInjector) -> CommandOutcome {
+        let clone = self.world.fresh_clone("main").join(directory);
         let process_env = std::env::var("PATH")
             .map(|path| BTreeMap::from([("PATH".to_owned(), path)]))
             .unwrap_or_default();
@@ -520,4 +537,308 @@ fn test_verify_records_observations_once_and_reports_drift() {
     assert!(harness
         .show(OBSERVED, "observed/units/network/observations/drift.yaml")
         .contains("drift: drifted"));
+}
+
+/// What one `verify` call of a [`Recording`] driver saw.
+#[derive(Debug, Clone)]
+struct Seen {
+    unit: String,
+    now: Timestamp,
+    deadline: Timestamp,
+    project_dir: PathBuf,
+    /// Whether `project_dir` held a `nyl.toml` during the call.
+    project_found: bool,
+    /// The lease's deadline in the state repository during the call.
+    lease_deadline: Option<Timestamp>,
+}
+
+/// What every wrapped fake shares: the clock it advances during `verify`,
+/// how far per unit, and what each call saw.
+struct Recorder {
+    clock: Arc<FakeClock>,
+    bare: PathBuf,
+    advance: Mutex<BTreeMap<String, Duration>>,
+    seen: Mutex<Vec<Seen>>,
+}
+
+impl Recorder {
+    fn lease_deadline(&self) -> Option<Timestamp> {
+        let output = std::process::Command::new("git")
+            .current_dir(&self.bare)
+            .args(["show", "refs/nyl/dev/lease:lease.yaml"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        text.lines()
+            .find_map(|line| line.strip_prefix("deadline:"))
+            .map(|value| value.trim().trim_matches(['\'', '"']).parse().unwrap())
+    }
+}
+
+/// A fake kind that records what its `verify` calls see and lets time pass
+/// during them, delegating everything to the fake it wraps.
+struct Recording {
+    inner: Arc<dyn Driver>,
+    recorder: Arc<Recorder>,
+}
+
+impl Driver for Recording {
+    fn api_version(&self) -> &'static str {
+        self.inner.api_version()
+    }
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+    fn behavior_version(&self) -> u32 {
+        self.inner.behavior_version()
+    }
+    fn capabilities(&self, spec: &Value) -> Capabilities {
+        self.inner.capabilities(spec)
+    }
+    fn recovery(&self, spec: &Value) -> RecoveryPolicies {
+        self.inner.recovery(spec)
+    }
+    fn spec_schema(&self) -> schemars::Schema {
+        self.inner.spec_schema()
+    }
+    fn validate_spec(&self, spec: &Value) -> Result<(), String> {
+        self.inner.validate_spec(spec)
+    }
+    fn attestations(&self, spec: &Value) -> Vec<String> {
+        self.inner.attestations(spec)
+    }
+    fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
+        self.inner.ownership_scopes(environment, spec)
+    }
+    fn source_fields(&self, spec: &Value) -> Vec<String> {
+        self.inner.source_fields(spec)
+    }
+    fn local_path_fields(&self, spec: &Value) -> Vec<LocalPathField> {
+        self.inner.local_path_fields(spec)
+    }
+    fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
+        self.inner.execution_key_inputs(ctx, spec)
+    }
+    fn plan(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {
+        self.inner.plan(ctx, unit)
+    }
+    fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
+        self.inner.reconcile(ctx, unit)
+    }
+    fn verify(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        receipt: &Receipt,
+    ) -> DriverResult<Supported<Verification>> {
+        let name = unit.unit.name.to_string();
+        self.recorder.seen.lock().unwrap().push(Seen {
+            unit: name.clone(),
+            now: ctx.now,
+            deadline: ctx.deadline,
+            project_dir: ctx.project_dir.clone(),
+            project_found: ctx.project_dir.join("nyl.toml").is_file(),
+            lease_deadline: self.recorder.lease_deadline(),
+        });
+        let advance = self.recorder.advance.lock().unwrap().get(&name).copied();
+        if let Some(advance) = advance {
+            self.recorder.clock.advance(advance);
+        }
+        self.inner.verify(ctx, unit, receipt)
+    }
+    fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
+        self.inner.inspect(ctx, unit)
+    }
+    fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
+        self.inner.teardown(ctx, unit)
+    }
+    fn build(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        push: bool,
+    ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
+        self.inner.build(ctx, unit, push)
+    }
+    fn exec(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        args: &[OsString],
+    ) -> DriverResult<Supported<ExecStatus>> {
+        self.inner.exec(ctx, unit, args)
+    }
+}
+
+impl Harness {
+    /// A harness whose fake kinds record their `verify` calls.
+    fn recording() -> (Self, Arc<Recorder>) {
+        let mut harness = Self::new();
+        let recorder = Arc::new(Recorder {
+            clock: harness.clock.clone(),
+            bare: harness.world.bare(),
+            advance: Mutex::new(BTreeMap::new()),
+            seen: Mutex::new(Vec::new()),
+        });
+        let fakes: [(&str, Arc<dyn Driver>); 3] = [
+            ("OpenTofu", Arc::new(FakeInfra::new(harness.script.clone()))),
+            ("OciImage", Arc::new(FakeImage::new(harness.script.clone()))),
+            (
+                "KubernetesPublication",
+                Arc::new(FakePublication::new(harness.script.clone())),
+            ),
+        ];
+        for (kind, inner) in fakes {
+            let recording = Arc::new(Recording {
+                inner,
+                recorder: recorder.clone(),
+            });
+            harness
+                .drivers
+                .register_as(nyl_core::constants::API_VERSION_UNITS, kind, recording);
+        }
+        (harness, recorder)
+    }
+
+    /// `verify` through the shell's API on a fresh clone of `main`, with a
+    /// concurrency limit the command line does not offer.
+    fn verify_with_concurrency(&self, concurrency: usize) -> EnvironmentRunReport {
+        let clone = self.world.fresh_clone("main");
+        let (store, location) = self.store();
+        let entry_commit = CommitId::new(git_output(&clone, &["rev-parse", "HEAD"])).unwrap();
+        let sources = GitSourceResolver::new(clone.join(".git"), GitAuth::none());
+        let renderer = UnitSourceRenderer::new("/nyl");
+        let entry = renderer.render(&clone, &dev(), &entry_commit).unwrap().environment;
+        let request = RunRequest {
+            environment: dev(),
+            entry,
+            location,
+            entry_commit,
+            entry_project_dir: "/nyl".to_owned(),
+            units: None,
+            concurrency,
+            source_override: None,
+            wait: None,
+            local: None,
+        };
+        let base = Context {
+            store: &store,
+            clock: self.clock.as_ref(),
+            ids: &self.ids,
+            faults: &NoFaults,
+            runner: "test-runner".to_owned(),
+            requested_by: "test".to_owned(),
+            version: "0.0.0-test".to_owned(),
+            settings: Settings::default(),
+        };
+        let identity: CommitIdentity = AUTHOR.parse().unwrap();
+        let workspace = tempfile::TempDir::new().unwrap();
+        let process_env = BTreeMap::new();
+        let context = RunContext {
+            base: &base,
+            sources: &sources,
+            renderer: &renderer,
+            drivers: &self.drivers,
+            tools: &self.tools,
+            workspace: workspace.path(),
+            process_env: &process_env,
+            commit_identity: Some(&identity),
+        };
+        verify::verify(&context, &request).environments.remove(0)
+    }
+}
+
+/// With more units than the concurrency limit, verify's lease covers every
+/// unit's deadline: a runner may take over an expired lease, so a unit
+/// still verifying past it would end the whole verify with a lost lease.
+#[test]
+fn test_verify_lease_covers_every_unit_deadline_across_batches() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    // Each verify takes 9 minutes, less than the shortest unit timeout
+    // (10m) but enough that later batches end past a lease sized once.
+    for name in ["network", "database", "web-image", "kubernetes"] {
+        recorder
+            .advance
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), Duration::from_mins(9));
+    }
+
+    let report = harness.verify_with_concurrency(1);
+    assert_eq!(report.exit.code(), 0, "{report:#?}");
+    let seen = recorder.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 4, "{seen:#?}");
+    let grace = Settings::default().lease_grace;
+    for call in &seen {
+        let lease = call.lease_deadline.expect("verify holds the lease");
+        assert!(
+            grace.after(call.deadline) <= lease,
+            "{}: unit deadline {} plus grace passes the lease deadline {lease}",
+            call.unit,
+            call.deadline
+        );
+    }
+    // The last unit starts 27 minutes in and keeps its whole timeout.
+    let web = seen.iter().find(|call| call.unit == "web-image").unwrap();
+    assert_eq!(web.deadline, Duration::from_mins(60).after(web.now));
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+}
+
+/// A verify that passes its unit's timeout is a failed `timeout`, exit 1,
+/// not evidence of the unit's state: nothing is recorded for the unit.
+#[test]
+fn test_verify_past_its_timeout_fails_and_records_nothing() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let observed = harness.tip(OBSERVED);
+    recorder
+        .advance
+        .lock()
+        .unwrap()
+        .insert("network".to_owned(), Duration::from_mins(61));
+
+    let outcome = harness.invoke(&["verify", "-e", "dev", "--unit", "network", "-o", "json"]);
+    assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
+    let error = &outcome.report["environments"][0]["errors"][0];
+    assert_eq!(error["code"], "NYL-DRIVER-ERROR", "{}", outcome.stdout);
+    assert!(error["message"].as_str().unwrap().contains("timeout"), "{error}");
+    assert_eq!(harness.tip(OBSERVED), observed, "a timed-out verify records nothing");
+}
+
+/// A driver verifies in the project directory reconcile gave it for the
+/// unit's commit, found through `[project] previous_paths` after the
+/// project moved, not the entry checkout's directory applied to an older
+/// commit where it does not exist.
+#[test]
+fn test_verify_locates_a_moved_project_at_the_units_commit() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+
+    let clone = harness.world.fresh_clone("main");
+    git(&clone, &["mv", "nyl", "deploy"]);
+    std::fs::write(
+        clone.join("deploy/nyl.toml"),
+        "[project]\nprevious_paths = [\"/nyl\"]\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "--quiet", "-m", "Move the project to deploy/"]);
+    git(&clone, &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+
+    let outcome = harness.invoke_in(&["verify", "-e", "dev", "-o", "json"], "deploy", &NoFaults);
+    assert_eq!(outcome.exit, 0, "{}\n{}", outcome.stdout, outcome.stderr);
+    let seen = recorder.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 4, "{seen:#?}");
+    for call in &seen {
+        assert!(
+            call.project_dir.ends_with("nyl") && call.project_found,
+            "{}: {}",
+            call.unit,
+            call.project_dir.display()
+        );
+    }
 }

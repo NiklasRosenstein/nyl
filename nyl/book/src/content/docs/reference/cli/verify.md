@@ -21,13 +21,19 @@ nyl verify -e prod --wait-lease 10m -o json
 
 `verify` reads the environment's state, takes its lease, and calls the
 driver's verification for every unit with a current receipt, each in a
-checkout of the commit the unit executed. It never executes a unit and never
+checkout of the commit the unit executed, with the project directory located
+at the unit's source commit as `reconcile` located it (following
+`[project] previous_paths` after a move). It never executes a unit and never
 writes a receipt. It writes one commit to the observed state ref with the
 latest observation per type (`drift`, and `health` where the driver reports
 one) under `observed/units/<unit>/observations/`, and the driver's
 attestations of the receipt under `observed/units/<unit>/attestations/`.
-A verification that finds nothing new writes no commit. The lease's
-deadline follows the longest `timeout` of the units it verifies.
+A verification that finds nothing new writes no commit. Units verify in
+batches of four; before each batch, the lease's deadline moves to the
+batch's longest unit `timeout` from then, plus the grace period, and no
+unit's verification runs past the lease's deadline. A verification that
+passes its deadline fails with a timeout (`NYL-DRIVER-ERROR`, exit 1), and
+nothing is recorded for that unit.
 
 A unit without a current receipt is reported as `no-receipt`, and a unit
 whose kind cannot verify as `unsupported`; neither is skipped silently.
@@ -60,7 +66,7 @@ headline counts them, such as `nyl: verify dev (3 clean, 1 drifted)`.
 | `NYL-VERIFY-NO-RECEIPT` | The unit has no current receipt to verify. Run `nyl reconcile`. |
 | `NYL-VERIFY-UNKNOWN` | The driver could not tell whether the unit drifted, for example because its tool failed. Fix the cause and verify again. |
 | `NYL-VERIFY-UNSUPPORTED` | The unit's kind cannot verify, such as a Command unit without a `verify` step. |
-| `NYL-DRIVER-ERROR` | The verification could not run, for example because the unit's commit could not be checked out. |
+| `NYL-DRIVER-ERROR` | The verification could not run, for example because the unit's commit could not be checked out, or it passed its `timeout` (the message reads `timeout: verify passed …`). Fix the cause, or raise the unit's `timeout`, and verify again. |
 
 ## Exit codes
 
