@@ -476,7 +476,7 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
     }
 }
 
-fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<String, String>> {
+pub(super) fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<String, String>> {
     let mut labels = BTreeMap::new();
     let mut metadata_indent = None;
     let mut labels_indent = None;
@@ -553,6 +553,18 @@ fn scan_static_identity(document: &str) -> Result<Option<GitOpsResourceIdentity>
             return Ok(parse_gitops_resource_identity(&documents[0])?);
         }
     }
+    let (api_version, kind, name) = scan_static_envelope_fields(document);
+    Ok(parse_gitops_resource_identity(&serde_json::json!({
+        "apiVersion": api_version,
+        "kind": kind,
+        "metadata": {"name": name},
+    }))?)
+}
+
+/// The literal `apiVersion`, `kind`, and `metadata.name` of a block-style
+/// envelope, read line by line so text below it may be any template. A
+/// templated or missing field is `None`.
+pub(super) fn scan_static_envelope_fields(document: &str) -> (Option<String>, Option<String>, Option<String>) {
     let mut api_version = None;
     let mut kind = None;
     let mut name = None;
@@ -586,11 +598,7 @@ fn scan_static_identity(document: &str) -> Result<Option<GitOpsResourceIdentity>
             }
         }
     }
-    Ok(parse_gitops_resource_identity(&serde_json::json!({
-        "apiVersion": api_version,
-        "kind": kind,
-        "metadata": {"name": name},
-    }))?)
+    (api_version, kind, name)
 }
 
 fn static_mapping_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -602,7 +610,7 @@ fn static_mapping_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     (!value.is_empty() && !nyl_core::template_syntax::has_template_syntax(value)).then_some(value)
 }
 
-fn split_yaml_documents(contents: &str) -> Vec<&str> {
+pub(super) fn split_yaml_documents(contents: &str) -> Vec<&str> {
     let mut documents = Vec::new();
     let mut start = 0;
     let mut offset = 0;
@@ -648,7 +656,7 @@ fn advertises_release_kind(document: &str) -> bool {
 }
 
 /// The static scalar of a top-level key, if the document has one.
-fn top_level_value<'a>(document: &'a str, wanted: &str) -> Option<&'a str> {
+pub(super) fn top_level_value<'a>(document: &'a str, wanted: &str) -> Option<&'a str> {
     document.lines().find_map(|line| {
         if line.starts_with([' ', '\t']) {
             return None;
