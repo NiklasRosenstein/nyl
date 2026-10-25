@@ -258,6 +258,25 @@ fn replace_beneath(all: &Files, directory: &str, inner: &Files) -> Files {
     files
 }
 
+/// A snapshot from the files beneath a location's directory on each side.
+fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResult<EnvironmentSnapshot> {
+    let record = match desired.get(STATE_FILE).or_else(|| observed.get(STATE_FILE)) {
+        Some(bytes) => Some(from_yaml(STATE_FILE, bytes)?),
+        None => None,
+    };
+    Ok(EnvironmentSnapshot {
+        tips,
+        record,
+        environment: desired
+            .get(ENVIRONMENT_FILE)
+            .map(|bytes| from_yaml(ENVIRONMENT_FILE, bytes))
+            .transpose()?,
+        desired: units(desired, "desired/units/")?,
+        observed: units(observed, "observed/units/")?,
+        artifacts: artifacts(observed)?,
+    })
+}
+
 impl StateStore for GitStateStore {
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         let repository = self.open()?;
@@ -279,24 +298,40 @@ impl StateStore for GitStateStore {
             &tree::read(&repository, observed_tip.and_then(|_| refs.local(&observed_name)))?,
             &location.path,
         );
-        let record = match desired.get(STATE_FILE).or_else(|| observed.get(STATE_FILE)) {
-            Some(bytes) => Some(from_yaml(STATE_FILE, bytes)?),
-            None => None,
-        };
-        Ok(EnvironmentSnapshot {
-            tips: StateTips {
+        snapshot_of(
+            StateTips {
                 desired: desired_tip.map(commit_id),
                 observed: observed_tip.map(commit_id),
             },
-            record,
-            environment: desired
-                .get(ENVIRONMENT_FILE)
-                .map(|bytes| from_yaml(ENVIRONMENT_FILE, bytes))
-                .transpose()?,
-            desired: units(&desired, "desired/units/")?,
-            observed: units(&observed, "observed/units/")?,
-            artifacts: artifacts(&observed)?,
-        })
+            &desired,
+            &observed,
+        )
+    }
+
+    /// Read the state as of `tips`, for `nyl get --state-revision`: the
+    /// state refs' history is fetched, and each tip must be a commit of it.
+    fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let names = [full_name(&location.desired_ref), full_name(&location.observed_ref)];
+        let heads = refs.heads(&names)?;
+        refs.fetch(&heads, true)?;
+        let read = |tip: Option<&CommitId>| -> StateResult<Files> {
+            let Some(tip) = tip else {
+                return Ok(Files::new());
+            };
+            let commit = oid(tip)?;
+            if repository.find_commit(commit).is_err() {
+                return Err(StateError::Unavailable(format!(
+                    "state revision {tip} is not a commit of {} or {}",
+                    location.desired_ref, location.observed_ref
+                )));
+            }
+            Ok(tree::beneath(&tree::read(&repository, Some(commit))?, &location.path))
+        };
+        let desired = read(tips.desired.as_ref())?;
+        let observed = read(tips.observed.as_ref())?;
+        snapshot_of(tips.clone(), &desired, &observed)
     }
 
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {

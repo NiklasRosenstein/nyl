@@ -36,6 +36,10 @@ struct StateRef {
     directories: BTreeMap<String, Directory>,
     /// Every commit, oldest first, with the directory it changed.
     log: Vec<(CommitId, String)>,
+    /// The directories as of each commit, for `snapshot_at`.
+    history: BTreeMap<CommitId, BTreeMap<String, Directory>>,
+    /// Every commit's message, oldest first, for assertions on transition commits.
+    messages: Vec<String>,
 }
 
 impl StateRef {
@@ -108,6 +112,17 @@ impl MemoryStateStore {
             .map_or(0, |state_ref| state_ref.commits)
     }
 
+    /// The messages of the commits a state ref received, oldest first, such
+    /// as transition commits whose summaries a test reads back.
+    pub fn messages(&self, repository: &str, reference: &str) -> Vec<String> {
+        let inner = self.inner.lock().expect("store lock");
+        inner
+            .refs
+            .get(&(repository.to_owned(), reference.to_owned()))
+            .map(|state_ref| state_ref.messages.clone())
+            .unwrap_or_default()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("store lock")
     }
@@ -121,25 +136,34 @@ impl StateStore for MemoryStateStore {
         let observed = read(&location.observed_ref);
         let desired_directory = desired.and_then(|state_ref| state_ref.directories.get(&location.path));
         let observed_directory = observed.and_then(|state_ref| state_ref.directories.get(&location.path));
-        Ok(EnvironmentSnapshot {
-            tips: StateTips {
+        Ok(snapshot_of(
+            StateTips {
                 desired: desired.and_then(|state_ref| state_ref.tip.clone()),
                 observed: observed.and_then(|state_ref| state_ref.tip.clone()),
             },
-            record: desired_directory
-                .and_then(|directory| directory.record.clone())
-                .or_else(|| observed_directory.and_then(|directory| directory.record.clone())),
-            environment: desired_directory.and_then(|directory| directory.environment.clone()),
-            desired: desired_directory
-                .map(|directory| directory.desired.clone())
-                .unwrap_or_default(),
-            observed: observed_directory
-                .map(|directory| directory.observed.clone())
-                .unwrap_or_default(),
-            artifacts: observed_directory
-                .map(|directory| directory.artifacts.clone())
-                .unwrap_or_default(),
-        })
+            desired_directory,
+            observed_directory,
+        ))
+    }
+
+    fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
+        let inner = self.lock();
+        let read = |reference: &str, tip: Option<&CommitId>| -> StateResult<Option<Directory>> {
+            let Some(tip) = tip else {
+                return Ok(None);
+            };
+            let directories = inner
+                .refs
+                .get(&ref_key(location, reference))
+                .and_then(|state_ref| state_ref.history.get(tip))
+                .ok_or_else(|| {
+                    StateError::Unavailable(format!("state revision {tip} is not a commit of {reference}"))
+                })?;
+            Ok(directories.get(&location.path).cloned())
+        };
+        let desired = read(&location.desired_ref, tips.desired.as_ref())?;
+        let observed = read(&location.observed_ref, tips.observed.as_ref())?;
+        Ok(snapshot_of(tips.clone(), desired.as_ref(), observed.as_ref()))
     }
 
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {
@@ -352,6 +376,9 @@ impl StateStore for MemoryStateStore {
             state_ref.tip = Some(commit.clone());
             state_ref.commits += 1;
             state_ref.log.push((commit.clone(), location.path.clone()));
+            let directories = state_ref.directories.clone();
+            state_ref.history.insert(commit.clone(), directories);
+            state_ref.messages.push(transition.message.clone());
             Some(commit)
         };
         let mut committed = Committed::default();
@@ -403,6 +430,22 @@ impl StateStore for MemoryStateStore {
             }
         }
         Ok(())
+    }
+}
+
+/// A snapshot from one directory of each side.
+fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&Directory>) -> EnvironmentSnapshot {
+    EnvironmentSnapshot {
+        tips,
+        record: desired
+            .and_then(|directory| directory.record.clone())
+            .or_else(|| observed.and_then(|directory| directory.record.clone())),
+        environment: desired.and_then(|directory| directory.environment.clone()),
+        desired: desired.map(|directory| directory.desired.clone()).unwrap_or_default(),
+        observed: observed.map(|directory| directory.observed.clone()).unwrap_or_default(),
+        artifacts: observed
+            .map(|directory| directory.artifacts.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -477,6 +520,46 @@ mod tests {
 
     const RUN_A: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";
     const RUN_B: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
+
+    /// Catches `get --state-revision` reading the current state, or a
+    /// commit message not being kept for assertions on transition commits.
+    #[test]
+    fn test_snapshot_at_reads_an_earlier_commit_and_messages_are_kept() {
+        let store = MemoryStateStore::new();
+        let location = location(false);
+        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
+        let first = store
+            .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
+            .unwrap();
+        let mut moved = init(&location);
+        moved.message = "nyl: state-init dev (fresh)".to_owned();
+        moved.changes.record.as_mut().unwrap().template = Some("preview".to_owned());
+        let tips = StateTips {
+            desired: first.desired.clone(),
+            observed: first.observed.clone(),
+        };
+        store
+            .commit(&location, &dev(), &tips, &moved, &first.lease_version)
+            .unwrap();
+        let earlier = store.snapshot_at(&location, &tips).unwrap();
+        assert_eq!(earlier.record.unwrap().template, None);
+        assert_eq!(
+            store.snapshot(&location).unwrap().record.unwrap().template.as_deref(),
+            Some("preview")
+        );
+        assert_eq!(
+            store.messages(&location.repository, &location.desired_ref),
+            ["nyl: state-init dev", "nyl: state-init dev (fresh)"]
+        );
+        let unknown = StateTips {
+            desired: Some(CommitId::new("f".repeat(40)).unwrap()),
+            observed: None,
+        };
+        assert!(matches!(
+            store.snapshot_at(&location, &unknown),
+            Err(StateError::Unavailable(_))
+        ));
+    }
 
     #[test]
     fn test_lease_compare_and_swap_admits_one_holder() {
