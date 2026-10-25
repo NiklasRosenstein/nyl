@@ -142,39 +142,49 @@ pub fn open_store(
     })
 }
 
+/// The fix of a missing or invalid commit identity.
+const IDENTITY_FIX: &str =
+    "pass --author \"Name <email>\", or set git config user.name and git config user.email in the clone";
+
 /// Who writes state commits: `author` (`--author "Name <email>"`) when
-/// given, else the clone's Git `user.name` and `user.email`.
+/// given, else the clone's Git `user.name` and `user.email`, else a
+/// [`Code::CommitIdentityMissing`] finding that names both fixes.
 ///
 /// Contract: [Transition commits](../../../design/orchestration-core.md#transition-commits);
-/// decided for M3 part 3: the command line resolves the identity once and
-/// passes it, with the injected clock, to `nyl-state`.
-///
-/// TODO(cli-integration): this skeleton keeps the previous fallback to
-/// `Nyl <nyl@localhost>` so existing tests pass. The cli-integration package
-/// replaces it with a [`Code::CommitIdentityMissing`] finding whose fix names
-/// `--author` and `git config user.name/user.email`.
+/// decided for M3 part 3: the command line resolves the identity once, only
+/// for commands that write, and passes it with the injected clock to
+/// `nyl-state`, which never reads Git configuration itself.
 pub fn commit_identity(
     git_dir: &std::path::Path,
     author: Option<&str>,
 ) -> std::result::Result<CommitIdentity, Finding> {
     if let Some(author) = author {
-        return author.parse().map_err(|error: String| {
-            Finding::new(Code::CommitIdentityMissing, error, "pass --author \"Name <email>\"")
-        });
+        return author
+            .parse()
+            .map_err(|error: String| Finding::new(Code::CommitIdentityMissing, error, IDENTITY_FIX));
     }
     let configured = git2::Repository::open(git_dir)
         .ok()
         .and_then(|repository| repository.config().ok())
         .and_then(|config| {
-            Some(CommitIdentity {
-                name: config.get_string("user.name").ok()?,
-                email: config.get_string("user.email").ok()?,
-            })
+            let name = config
+                .get_string("user.name")
+                .ok()
+                .filter(|name| !name.trim().is_empty())?;
+            let email = config
+                .get_string("user.email")
+                .ok()
+                .filter(|email| !email.trim().is_empty())?;
+            Some(CommitIdentity { name, email })
         });
-    Ok(configured.unwrap_or_else(|| CommitIdentity {
-        name: "Nyl".to_owned(),
-        email: "nyl@localhost".to_owned(),
-    }))
+    configured.ok_or_else(|| {
+        Finding::new(
+            Code::CommitIdentityMissing,
+            "no identity to write state commits with: no --author was given and the clone's Git \
+             configuration names no user.name and user.email",
+            IDENTITY_FIX,
+        )
+    })
 }
 
 /// Who runs Nyl: the CI job's URL when a CI system says so, else `user@host`.
@@ -197,8 +207,8 @@ pub fn runner() -> String {
     format!("{user}@{host}")
 }
 
-/// Who requested an operator action: the Git user of the clone, else the runner.
-pub fn requested_by(git_dir: &std::path::Path) -> String {
+/// Who requested an operator action: the Git user of the clone, else `runner`.
+pub fn requested_by(git_dir: &std::path::Path, runner: &str) -> String {
     git2::Repository::open(git_dir)
         .ok()
         .and_then(|repository| repository.config().ok())
@@ -207,7 +217,76 @@ pub fn requested_by(git_dir: &std::path::Path) -> String {
             let email = config.get_string("user.email").ok();
             Some(email.map_or_else(|| name.clone(), |email| format!("{name} <{email}>")))
         })
-        .unwrap_or_else(runner)
+        .unwrap_or_else(|| runner.to_owned())
+}
+
+/// The state tips as of `revision`, a state commit (`--state-revision`):
+/// that commit on the state ref whose history holds it, and on the other
+/// ref its newest commit no later than that commit, so a transition that
+/// wrote both refs at once is read whole. `current` are the tips of a
+/// snapshot just read, which made the history available in the clone.
+pub fn state_tips_at(
+    git_dir: &std::path::Path,
+    current: &nyl_core::orchestration::ports::StateTips,
+    revision: &str,
+) -> std::result::Result<nyl_core::orchestration::ports::StateTips, Finding> {
+    use nyl_core::orchestration::ids::CommitId;
+    use nyl_core::orchestration::ports::StateTips;
+
+    let unavailable = |message: String| {
+        Finding::new(
+            Code::StateUnavailable,
+            message,
+            "name a commit of the environment's desired or observed state ref, as `git log` of the ref lists them",
+        )
+    };
+    let repository = git2::Repository::open(git_dir)
+        .map_err(|error| unavailable(format!("cannot open the project's clone: {}", error.message())))?;
+    let target = repository
+        .revparse_single(revision)
+        .and_then(|object| object.peel_to_commit())
+        .map_err(|error| {
+            unavailable(format!(
+                "--state-revision {revision:?} names no commit: {}",
+                error.message()
+            ))
+        })?;
+    let oid = |tip: &Option<CommitId>| tip.as_ref().and_then(|tip| git2::Oid::from_str(tip.as_str()).ok());
+    let holds = |tip: Option<git2::Oid>| {
+        tip.is_some_and(|tip| tip == target.id() || repository.graph_descendant_of(tip, target.id()).unwrap_or(false))
+    };
+    let at_or_before = |tip: Option<git2::Oid>| -> Option<CommitId> {
+        let mut walk = repository.revwalk().ok()?;
+        walk.set_sorting(git2::Sort::TIME).ok()?;
+        walk.push(tip?).ok()?;
+        walk.filter_map(std::result::Result::ok)
+            .find(|candidate| {
+                repository
+                    .find_commit(*candidate)
+                    .is_ok_and(|commit| commit.time().seconds() <= target.time().seconds())
+            })
+            .and_then(|found| CommitId::new(found.to_string()).ok())
+    };
+    let (desired, observed) = (oid(&current.desired), oid(&current.observed));
+    let (in_desired, in_observed) = (holds(desired), holds(observed));
+    if !in_desired && !in_observed {
+        return Err(unavailable(format!(
+            "--state-revision {revision:?} is not a commit of the environment's state refs"
+        )));
+    }
+    let named = CommitId::new(target.id().to_string()).map_err(|error| unavailable(error.to_string()))?;
+    Ok(StateTips {
+        desired: if in_desired {
+            Some(named.clone())
+        } else {
+            at_or_before(desired)
+        },
+        observed: if in_observed {
+            Some(named)
+        } else {
+            at_or_before(observed)
+        },
+    })
 }
 
 /// Map a finding to the CLI's error type, keeping its code and fix.

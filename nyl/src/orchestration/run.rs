@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::driver::{DriverSet, ToolRunner};
 use nyl_core::orchestration::ports::{Clock, CommitIdentity, IdGenerator};
 use nyl_orchestration::fault::FaultInjector;
@@ -59,8 +60,19 @@ pub struct ProcessWiring {
 }
 
 impl ProcessWiring {
+    /// The built-in drivers (plus the fake kinds with the `test-kinds`
+    /// feature, sharing an empty script), the process runner, and no faults.
     pub fn new() -> Self {
-        todo!("cli-integration")
+        #[cfg(feature = "test-kinds")]
+        let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
+        #[cfg(not(feature = "test-kinds"))]
+        let drivers = nyl_drivers::registry::builtin();
+        Self {
+            ids: crate::orchestration::ids::UuidV7,
+            drivers,
+            tools: nyl_drivers::process::ProcessRunner::new(),
+            faults: nyl_orchestration::fault::NoFaults,
+        }
     }
 }
 
@@ -72,8 +84,53 @@ impl Default for ProcessWiring {
 
 impl<'a> Wiring<'a> {
     /// The production wiring over `owned`.
+    ///
+    /// This is the only place orchestration commands read the process
+    /// environment: the clock (`NYL_TEST_NOW` with the `test-clock`
+    /// feature), the runner name from the CI variables, and the snapshot the
+    /// shell admits `PATH` and declared passthrough variables from.
     pub fn from_process(owned: &'a ProcessWiring) -> Result<Self> {
-        let _ = owned;
-        todo!("cli-integration")
+        let clock = crate::orchestration::clock::process_clock().map_err(crate::NylError::config)?;
+        Ok(Self {
+            clock,
+            ids: &owned.ids,
+            drivers: &owned.drivers,
+            tools: &owned.tools,
+            faults: &owned.faults,
+            runner: crate::orchestration::project::runner(),
+            author: None,
+            process_env: std::env::vars().collect(),
+        })
+    }
+
+    /// The commit identity of a writing command: `--author` when given,
+    /// else the wiring's author, else the clone's Git `user.name` and
+    /// `user.email`; a [`Code::CommitIdentityMissing`] finding when none
+    /// names one.
+    ///
+    /// [`Code::CommitIdentityMissing`]: nyl_core::orchestration::codes::Code::CommitIdentityMissing
+    pub fn commit_identity(
+        &self,
+        git_dir: &std::path::Path,
+        author: Option<&str>,
+    ) -> std::result::Result<CommitIdentity, Finding> {
+        match (author, &self.author) {
+            (None, Some(identity)) => Ok(identity.clone()),
+            (author, _) => crate::orchestration::project::commit_identity(git_dir, author),
+        }
+    }
+}
+
+impl CommandOutcome {
+    /// An outcome that failed before producing a typed report, such as an
+    /// unreadable project: exit 1 with the error on stderr.
+    pub fn error(message: impl std::fmt::Display) -> Self {
+        let message = message.to_string();
+        Self {
+            exit: 1,
+            report: serde_json::json!({ "error": message }),
+            stdout: String::new(),
+            stderr: format!("error: {message}\n"),
+        }
     }
 }
