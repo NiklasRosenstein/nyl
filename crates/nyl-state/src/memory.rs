@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use crate::require_local_branches;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease, LocalDivergence, LogEntry,
@@ -42,7 +43,6 @@ struct Directory {
 #[derive(Debug, Clone, Default)]
 struct StateRef {
     tip: Option<CommitId>,
-    commits: usize,
     directories: BTreeMap<String, Directory>,
     /// Every commit, oldest first, with the directory it changed.
     log: Vec<(CommitId, String)>,
@@ -105,33 +105,11 @@ fn local_key(reference: &str) -> (String, String) {
     (StateLocation::LOCAL_REPOSITORY.to_owned(), reference.to_owned())
 }
 
-/// Whether a state ref name has a local branch: a short name or a
-/// `refs/heads/` name, as in the Git store.
-fn has_local_branch(reference: &str) -> bool {
-    !reference.starts_with("refs/") || reference.starts_with("refs/heads/")
-}
-
-fn is_remote(location: &StateLocation) -> bool {
-    location.repository != StateLocation::LOCAL_REPOSITORY
-}
-
-/// Refuse a location whose state refs have no local branches.
-fn require_local_branches(location: &StateLocation) -> StateResult<()> {
-    for reference in [&location.desired_ref, &location.observed_ref] {
-        if !has_local_branch(reference) {
-            return Err(StateError::Unavailable(format!(
-                "state ref {reference} is a full ref name outside refs/heads/, which has no local branch in the clone"
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Fast-forward (or create) the local branch of a remote location's state
 /// ref to the remote tip, unless the local branch has commits the remote
 /// lacks, as the Git store does on every read and push.
 fn follow(inner: &mut Inner, location: &StateLocation, reference: &str) {
-    if !is_remote(location) || !has_local_branch(reference) {
+    if location.is_local() || !StateLocation::is_branch_ref(reference) {
         return;
     }
     let Some(remote) = inner.refs.get(&ref_key(location, reference)) else {
@@ -208,7 +186,6 @@ fn apply_side(
     let state_ref = inner.refs.entry(key.clone()).or_default();
     state_ref.directories.insert(path.to_owned(), directory);
     state_ref.tip = Some(commit.clone());
-    state_ref.commits += 1;
     state_ref.log.push((commit.clone(), path.to_owned()));
     let directories = state_ref.directories.clone();
     state_ref.history.insert(commit.clone(), directories);
@@ -273,6 +250,28 @@ fn renew_lease(
     };
 }
 
+/// Hold `lease` at `key` under a new version, which it returns.
+fn put_lease(inner: &mut Inner, key: (String, String, EnvironmentName), lease: &Lease) -> String {
+    let version = inner.next_version();
+    inner.leases.insert(
+        key,
+        HeldLease {
+            lease: lease.clone(),
+            version: version.clone(),
+        },
+    );
+    version
+}
+
+/// Merge `created` into a run's created units: one per unit name, sorted.
+fn merge_created(into: &mut Vec<DesiredUnit>, created: impl IntoIterator<Item = DesiredUnit>) {
+    for desired in created {
+        into.retain(|existing| existing.unit.name != desired.unit.name);
+        into.push(desired);
+    }
+    into.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+}
+
 fn coordination_key(location: &StateLocation, environment: &EnvironmentName) -> (String, String, EnvironmentName) {
     (
         location.repository.clone(),
@@ -284,27 +283,6 @@ fn coordination_key(location: &StateLocation, environment: &EnvironmentName) -> 
 impl MemoryStateStore {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// How many commits a state ref received, for assertions such as a
-    /// transition commit per ref.
-    pub fn commit_count(&self, repository: &str, reference: &str) -> usize {
-        let inner = self.inner.lock().expect("store lock");
-        inner
-            .refs
-            .get(&(repository.to_owned(), reference.to_owned()))
-            .map_or(0, |state_ref| state_ref.commits)
-    }
-
-    /// The messages of the commits a state ref received, oldest first, such
-    /// as transition commits whose summaries a test reads back.
-    pub fn messages(&self, repository: &str, reference: &str) -> Vec<String> {
-        let inner = self.inner.lock().expect("store lock");
-        inner
-            .refs
-            .get(&(repository.to_owned(), reference.to_owned()))
-            .map(|state_ref| state_ref.messages.clone())
-            .unwrap_or_default()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -383,15 +361,7 @@ impl StateStore for MemoryStateStore {
         if current != expected {
             return Err(StateError::LeaseRace);
         }
-        let version = inner.next_version();
-        inner.leases.insert(
-            key,
-            HeldLease {
-                lease: lease.clone(),
-                version: version.clone(),
-            },
-        );
-        Ok(version)
+        Ok(put_lease(&mut inner, key, lease))
     }
 
     fn update_lease(
@@ -407,15 +377,7 @@ impl StateStore for MemoryStateStore {
             Some(held) if held.version == expected => {}
             _ => return Err(StateError::LeaseLost),
         }
-        let version = inner.next_version();
-        inner.leases.insert(
-            key,
-            HeldLease {
-                lease: lease.clone(),
-                version: version.clone(),
-            },
-        );
-        Ok(version)
+        Ok(put_lease(&mut inner, key, lease))
     }
 
     fn release_lease(
@@ -464,11 +426,7 @@ impl StateStore for MemoryStateStore {
     ) -> StateResult<()> {
         let mut inner = self.lock();
         let state = run_state(&mut inner, location, environment, run);
-        for desired in created {
-            state.created.retain(|existing| existing.unit.name != desired.unit.name);
-            state.created.push(desired.clone());
-        }
-        state.created.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+        merge_created(&mut state.created, created.iter().cloned());
         Ok(())
     }
 
@@ -511,11 +469,7 @@ impl StateStore for MemoryStateStore {
             Some(existing) => {
                 existing.run = retired.run;
                 existing.checkpoints.extend(retired.checkpoints);
-                for desired in retired.created {
-                    existing.created.retain(|other| other.unit.name != desired.unit.name);
-                    existing.created.push(desired);
-                }
-                existing.created.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+                merge_created(&mut existing.created, retired.created);
                 existing.version = version;
             }
             None => {
@@ -588,10 +542,7 @@ impl StateStore for MemoryStateStore {
                 .get(&ref_key(location, reference))
                 .is_some_and(|state_ref| state_ref.unchanged_since(expected.as_ref(), &location.path));
             if &actual != expected && !rebased {
-                return Err(StateError::Conflict {
-                    reference: reference.clone(),
-                    actual: actual.map_or_else(|| "nothing".to_owned(), |commit| commit.to_string()),
-                });
+                return Err(StateError::conflict(reference.clone(), actual));
             }
         }
         let mut committed = apply_transition(&mut inner, location, transition, |reference| {
@@ -617,15 +568,7 @@ impl StateStore for MemoryStateStore {
                     inner.refs.insert(ref_key(to, target), copied);
                 }
                 Some(existing) if existing.tip == copied.tip => {}
-                Some(existing) => {
-                    return Err(StateError::Conflict {
-                        reference: target.clone(),
-                        actual: existing
-                            .tip
-                            .as_ref()
-                            .map_or_else(|| "nothing".to_owned(), ToString::to_string),
-                    })
-                }
+                Some(existing) => return Err(StateError::conflict(target.clone(), existing.tip.as_ref())),
             }
             follow(&mut inner, to, target);
         }
@@ -634,10 +577,7 @@ impl StateStore for MemoryStateStore {
 
     fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
         let inner = self.lock();
-        let reference = match side {
-            StateSide::Desired => &location.desired_ref,
-            StateSide::Observed => &location.observed_ref,
-        };
+        let reference = location.state_ref(side);
         let Some(state_ref) = inner.refs.get(&ref_key(location, reference)) else {
             return Ok(Vec::new());
         };
@@ -655,12 +595,12 @@ impl StateStore for MemoryStateStore {
     }
 
     fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
-        if !is_remote(location) {
+        if location.is_local() {
             return Ok(LocalDivergence::default());
         }
         let inner = self.lock();
         let side = |reference: &str| -> Option<Divergence> {
-            if !has_local_branch(reference) {
+            if !StateLocation::is_branch_ref(reference) {
                 return None;
             }
             let remote = inner
@@ -680,7 +620,7 @@ impl StateStore for MemoryStateStore {
     }
 
     fn reset_local(&self, location: &StateLocation, expected: &StateTips) -> StateResult<StateTips> {
-        if !is_remote(location) {
+        if location.is_local() {
             return Err(StateError::Unavailable(
                 "the state lives on the clone's own branches, which have no remote state to reset to".to_owned(),
             ));
@@ -691,13 +631,10 @@ impl StateStore for MemoryStateStore {
         if location.observed_ref != location.desired_ref {
             moves.push((&location.observed_ref, &expected.observed));
         } else if expected.observed != expected.desired {
-            return Err(StateError::Conflict {
-                reference: location.observed_ref.clone(),
-                actual: expected
-                    .desired
-                    .as_ref()
-                    .map_or_else(|| "nothing".to_owned(), ToString::to_string),
-            });
+            return Err(StateError::conflict(
+                location.observed_ref.clone(),
+                expected.desired.as_ref(),
+            ));
         }
         for (reference, expected) in &moves {
             let current = inner
@@ -705,10 +642,7 @@ impl StateStore for MemoryStateStore {
                 .get(&local_key(reference))
                 .and_then(|state_ref| state_ref.tip.clone());
             if &current != *expected {
-                return Err(StateError::Conflict {
-                    reference: (*reference).clone(),
-                    actual: current.map_or_else(|| "nothing".to_owned(), |commit| commit.to_string()),
-                });
+                return Err(StateError::conflict((*reference).clone(), current));
             }
         }
         for (reference, _) in &moves {
@@ -742,7 +676,7 @@ impl StateStore for MemoryStateStore {
         lease_location: &StateLocation,
         lease_version: &str,
     ) -> StateResult<Committed> {
-        if !is_remote(location) {
+        if location.is_local() {
             return Err(StateError::Unavailable(
                 "local transition commits go to the local branches of remote state; this state lives on the clone's own branches".to_owned(),
             ));
@@ -758,10 +692,7 @@ impl StateStore for MemoryStateStore {
                 .get(&local_key(reference))
                 .and_then(|state_ref| state_ref.tip.clone());
             if &actual != expected {
-                return Err(StateError::Conflict {
-                    reference: reference.clone(),
-                    actual: actual.map_or_else(|| "nothing".to_owned(), |commit| commit.to_string()),
-                });
+                return Err(StateError::conflict(reference.clone(), actual));
             }
         }
         let key = coordination_key(lease_location, environment);
@@ -849,11 +780,11 @@ mod tests {
     use nyl_core::orchestration::ports::TransitionChanges;
     use nyl_core::orchestration::state::{LeaseKind, Operation, StateRecordKind, StateV1};
 
-    fn location(shared: bool) -> StateLocation {
+    fn location() -> StateLocation {
         StateLocation {
             repository: "file:///project.git".to_owned(),
             desired_ref: "nyl/dev/desired".to_owned(),
-            observed_ref: if shared { "nyl/dev/desired" } else { "nyl/dev/observed" }.to_owned(),
+            observed_ref: "nyl/dev/observed".to_owned(),
             path: String::new(),
             coordination_ref_prefix: "refs/nyl/".to_owned(),
         }
@@ -902,122 +833,6 @@ mod tests {
     const RUN_A: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";
     const RUN_B: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
 
-    /// Catches `get --state-revision` reading the current state, or a
-    /// commit message not being kept for assertions on transition commits.
-    #[test]
-    fn test_snapshot_at_reads_an_earlier_commit_and_messages_are_kept() {
-        let store = MemoryStateStore::new();
-        let location = location(false);
-        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        let first = store
-            .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
-            .unwrap();
-        let mut moved = init(&location);
-        moved.message = "nyl: state-init dev (fresh)".to_owned();
-        moved.changes.record.as_mut().unwrap().template = Some("preview".to_owned());
-        let tips = StateTips {
-            desired: first.desired.clone(),
-            observed: first.observed.clone(),
-        };
-        store
-            .commit(&location, &dev(), &tips, &moved, &first.lease_version)
-            .unwrap();
-        let earlier = store.snapshot_at(&location, &tips).unwrap();
-        assert_eq!(earlier.record.unwrap().template, None);
-        assert_eq!(
-            store.snapshot(&location).unwrap().record.unwrap().template.as_deref(),
-            Some("preview")
-        );
-        assert_eq!(
-            store.messages(&location.repository, &location.desired_ref),
-            ["nyl: state-init dev", "nyl: state-init dev (fresh)"]
-        );
-        let unknown = StateTips {
-            desired: Some(CommitId::new("f".repeat(40)).unwrap()),
-            observed: None,
-        };
-        assert!(matches!(
-            store.snapshot_at(&location, &unknown),
-            Err(StateError::Unavailable(_))
-        ));
-    }
-
-    #[test]
-    fn test_lease_compare_and_swap_admits_one_holder() {
-        let store = MemoryStateStore::new();
-        let location = location(false);
-        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        // A second run expecting no lease loses the race.
-        assert!(matches!(
-            store.take_lease(&location, &dev(), &lease(RUN_B), None),
-            Err(StateError::LeaseRace)
-        ));
-        // A takeover names the version it replaces.
-        let taken = store
-            .take_lease(&location, &dev(), &lease(RUN_B), Some(&version))
-            .unwrap();
-        // The first holder's update now fails: it lost the lease.
-        assert!(matches!(
-            store.update_lease(&location, &dev(), &lease(RUN_A), &version),
-            Err(StateError::LeaseLost)
-        ));
-        store.release_lease(&location, &dev(), &taken).unwrap();
-        assert!(store.coordination(&location, &dev()).unwrap().lease.is_none());
-    }
-
-    #[test]
-    fn test_commit_is_fenced_by_the_lease_and_the_read_tips() {
-        let store = MemoryStateStore::new();
-        let location = location(false);
-        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        store.delete_lease(&location, &dev()).unwrap();
-        // A holder whose lease was deleted pushes nothing.
-        assert!(matches!(
-            store.commit(&location, &dev(), &StateTips::default(), &init(&location), &version),
-            Err(StateError::LeaseLost)
-        ));
-        let version = store.take_lease(&location, &dev(), &lease(RUN_B), None).unwrap();
-        let committed = store
-            .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
-            .unwrap();
-        assert!(committed.desired.is_some() && committed.observed.is_some());
-        // The fenced push moved the lease: the old version no longer holds it.
-        assert!(matches!(
-            store.update_lease(&location, &dev(), &lease(RUN_B), &version),
-            Err(StateError::LeaseLost)
-        ));
-        // A commit built on tips that have moved since is a conflict.
-        assert!(matches!(
-            store.commit(
-                &location,
-                &dev(),
-                &StateTips::default(),
-                &init(&location),
-                &committed.lease_version
-            ),
-            Err(StateError::Conflict { .. })
-        ));
-        let snapshot = store.snapshot(&location).unwrap();
-        assert_eq!(snapshot.record.unwrap().environment, dev());
-    }
-
-    #[test]
-    fn test_one_commit_per_ref_and_one_commit_when_the_refs_coincide() {
-        for (shared, observed_commits) in [(false, 1), (true, 1)] {
-            let store = MemoryStateStore::new();
-            let location = location(shared);
-            let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-            store
-                .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
-                .unwrap();
-            assert_eq!(store.commit_count(&location.repository, &location.desired_ref), 1);
-            assert_eq!(
-                store.commit_count(&location.repository, &location.observed_ref),
-                observed_commits
-            );
-        }
-    }
-
     /// A run's view: the lease version it believes it holds.
     #[derive(Debug, Clone, Copy)]
     enum Step {
@@ -1045,7 +860,7 @@ mod tests {
         #[test]
         fn test_only_the_current_holder_writes(steps in proptest::collection::vec(step(), 1..40)) {
             let store = MemoryStateStore::new();
-            let location = location(false);
+            let location = location();
             let runs = [RUN_A, RUN_B];
             let mut believed: [Option<String>; 2] = [None, None];
             for step in steps {

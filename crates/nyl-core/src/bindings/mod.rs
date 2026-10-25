@@ -300,6 +300,29 @@ struct Found<O> {
 /// Fields that make an object a reference.
 const REFERENCE_KINDS: [&str; 2] = ["fromUnit", "fromPromotion"];
 
+/// The reference fields of an object, in key order: none for data, one
+/// without any other field for a reference object; anything else mixes a
+/// reference with other fields.
+fn reference_kinds(fields: &serde_json::Map<String, Value>) -> Vec<String> {
+    fields
+        .keys()
+        .filter(|key| REFERENCE_KINDS.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Parse and validate the reference object at `field` whose only field is
+/// `kind`; `kind_label` names that field in the issue for a non-object.
+fn parse_reference(field: &str, kind_label: &str, kind: &str, reference: &Value) -> Result<InputBinding, String> {
+    if !reference[kind].is_object() {
+        return Err(format!("{kind_label} must be an object"));
+    }
+    let binding =
+        InputBinding::deserialize(reference).map_err(|error| format!("{field} is not a valid reference: {error}"))?;
+    binding.validate(field).map_err(|error| error.to_string())?;
+    Ok(binding)
+}
+
 fn walk<P: Providers>(
     field: &str,
     pointer: &str,
@@ -310,10 +333,7 @@ fn walk<P: Providers>(
 ) {
     match value {
         Value::Object(fields) => {
-            let references = fields
-                .keys()
-                .filter(|key| REFERENCE_KINDS.contains(&key.as_str()))
-                .collect::<Vec<_>>();
+            let references = reference_kinds(fields);
             match references.as_slice() {
                 [] => {
                     for (key, child) in fields.iter_mut() {
@@ -328,14 +348,14 @@ fn walk<P: Providers>(
                     }
                 }
                 [kind] if fields.len() == 1 => {
-                    let kind = (*kind).clone();
+                    let kind = kind.clone();
                     if let Some(input) = resolve_reference(field, pointer, &kind, value, providers, found, issues) {
                         *value = input;
                     }
                 }
                 _ => issues.push(format!(
                     "{field} mixes {} with other fields; a reference object holds only its reference, and replaces the whole value",
-                    references.iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(" and ")
+                    references.join(" and ")
                 )),
             }
         }
@@ -365,21 +385,13 @@ fn resolve_reference<P: Providers>(
     found: &mut Found<P::Origin>,
     issues: &mut Vec<String>,
 ) -> Option<Value> {
-    if !reference[kind].is_object() {
-        issues.push(format!("{field}.{kind} must be an object"));
-        return None;
-    }
-    let binding = match InputBinding::deserialize(reference) {
+    let binding = match parse_reference(field, &format!("{field}.{kind}"), kind, reference) {
         Ok(binding) => binding,
-        Err(error) => {
-            issues.push(format!("{field} is not a valid reference: {error}"));
+        Err(issue) => {
+            issues.push(issue);
             return None;
         }
     };
-    if let Err(error) = binding.validate(field) {
-        issues.push(error.to_string());
-        return None;
-    }
     match resolve_binding(field, &binding, providers) {
         Ok(Provision::Value(input)) => {
             found.provenance.insert(pointer.to_owned(), input.origin);

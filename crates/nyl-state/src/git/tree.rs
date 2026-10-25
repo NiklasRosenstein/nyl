@@ -12,6 +12,9 @@ use super::refs::unavailable;
 
 pub type Files = BTreeMap<String, Vec<u8>>;
 
+/// Why a store without a commit identity refuses to write.
+pub const READ_ONLY: &str = "the state store was opened read-only, without a commit identity";
+
 /// Every file of `commit`'s tree, or nothing for no commit.
 pub fn read(repository: &Repository, commit: Option<Oid>) -> StateResult<Files> {
     let mut files = Files::new();
@@ -108,7 +111,7 @@ pub fn commit(
 fn signature(author: Option<&super::CommitAuthor>) -> StateResult<Signature<'static>> {
     let Some(author) = author else {
         return Err(nyl_core::orchestration::ports::StateError::Unavailable(
-            "the state store was opened read-only, without a commit identity".to_owned(),
+            READ_ONLY.to_owned(),
         ));
     };
     let time = git2::Time::new(author.clock.now().timestamp(), 0);

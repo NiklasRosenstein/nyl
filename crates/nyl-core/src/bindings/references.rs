@@ -7,13 +7,9 @@
 //! rule of [`super::resolve_document`] (an object whose only field is
 //! `fromUnit` or `fromPromotion`, at any depth) but reads no provider.
 
-use serde::Deserialize;
 use serde_json::Value;
 
-use super::{BindingKind, InputBinding, UnitInputSource};
-
-/// Fields that make an object a reference, as in [`super::resolve_document`].
-const REFERENCE_KINDS: [&str; 2] = ["fromUnit", "fromPromotion"];
+use super::{parse_reference, reference_kinds, BindingKind, UnitInputSource};
 
 /// One `fromUnit` reference object of a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,11 +38,7 @@ pub fn unit_references(pointer: &str, document: &Value) -> Result<Vec<UnitRefere
 fn walk(pointer: &str, value: &Value, references: &mut Vec<UnitReference>, issues: &mut Vec<String>) {
     match value {
         Value::Object(fields) => {
-            let kinds = fields
-                .keys()
-                .filter(|key| REFERENCE_KINDS.contains(&key.as_str()))
-                .map(String::as_str)
-                .collect::<Vec<_>>();
+            let kinds = reference_kinds(fields);
             match kinds.as_slice() {
                 [] => {
                     for (key, child) in fields {
@@ -77,21 +69,13 @@ fn walk(pointer: &str, value: &Value, references: &mut Vec<UnitReference>, issue
 /// `fromPromotion` reference or a malformed one, which adds an issue.
 fn read_reference(pointer: &str, kind: &str, reference: &Value, issues: &mut Vec<String>) -> Option<UnitReference> {
     let field = format!("the reference at {pointer:?}");
-    if !reference[kind].is_object() {
-        issues.push(format!("{field}: {kind} must be an object"));
-        return None;
-    }
-    let binding = match InputBinding::deserialize(reference) {
+    let binding = match parse_reference(&field, &format!("{field}: {kind}"), kind, reference) {
         Ok(binding) => binding,
-        Err(error) => {
-            issues.push(format!("{field} is not a valid reference: {error}"));
+        Err(issue) => {
+            issues.push(issue);
             return None;
         }
     };
-    if let Err(error) = binding.validate(&field) {
-        issues.push(error.to_string());
-        return None;
-    }
     match binding.kind(&field) {
         Ok(BindingKind::FromUnit) => Some(UnitReference {
             pointer: pointer.to_owned(),

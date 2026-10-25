@@ -16,7 +16,7 @@ mod refs;
 mod tree;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use git2::{Oid, Repository};
@@ -27,13 +27,14 @@ use nyl_core::orchestration::ports::{
     TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDocument, DesiredUnit, Lease, Observation, ObservationType, ObservedUnit, Run, Signal, StateLocation,
+    DesiredUnit, Lease, Observation, ObservationType, ObservedUnit, Run, Signal, StateLocation,
 };
 use nyl_git::GitAuth;
+
+use crate::require_local_branches;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-pub use refs::{full_name, LOCAL_REPOSITORY};
 use refs::{unavailable, Refs, Update, UpdateError};
 use tree::Files;
 
@@ -85,7 +86,7 @@ pub struct Endpoint {
 impl GitStateStore {
     /// A store working through the repository at `git_dir`: the source
     /// checkout's clone, whose own branches are the state when a location
-    /// names [`LOCAL_REPOSITORY`], and which keeps the fetched objects and
+    /// names [`StateLocation::LOCAL_REPOSITORY`], and which keeps the fetched objects and
     /// the fast-forwarded local state branches otherwise.
     pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth, author: CommitAuthor) -> Self {
         Self {
@@ -120,7 +121,7 @@ impl GitStateStore {
     }
 
     fn refs<'a>(&'a self, repository: &'a Repository, location: &'a StateLocation) -> Refs<'a> {
-        if location.repository == LOCAL_REPOSITORY {
+        if location.is_local() {
             return Refs {
                 repository,
                 url: None,
@@ -151,7 +152,7 @@ impl GitStateStore {
         let name = run_ref(location, environment, &run.run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
         refs.fetch(&heads, false)?;
-        let tip = heads.get(&name).and_then(|_| refs.local(&name));
+        let tip = refs.fetched(&heads, &name);
         let mut files = tree::read(&repository, tip)?;
         files.insert(RUN_FILE.to_owned(), to_yaml(run)?);
         change(&mut files)?;
@@ -160,23 +161,18 @@ impl GitStateStore {
         let Some(commit) = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)? else {
             return Ok(());
         };
-        match refs.update(&[Update {
+        refs.update(&[Update {
             name: name.clone(),
             new: Some(commit),
             expected: heads.get(&name).copied(),
-        }]) {
-            Ok(()) => Ok(()),
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: name,
-                actual: "another commit".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        }])
+        .map_err(|error| error.or_stale(another_commit(name)))
     }
+}
 
-    pub fn git_dir(&self) -> &Path {
-        &self.git_dir
-    }
+/// The conflict of a compare-and-swap that lost to a commit Nyl did not read.
+fn another_commit(reference: String) -> StateError {
+    StateError::conflict(reference, Some("another commit"))
 }
 
 fn lease_ref(location: &StateLocation, environment: &EnvironmentName) -> String {
@@ -189,15 +185,6 @@ fn run_ref(location: &StateLocation, environment: &EnvironmentName, run: &RunId)
 
 fn evidence_ref(location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> String {
     format!("{}{environment}/evidence/{run}", location.coordination_ref_prefix)
-}
-
-/// The file name of an observation type, as `nyl verify` writes it.
-fn observation_name(observation_type: ObservationType) -> String {
-    match observation_type {
-        ObservationType::Drift => "drift",
-        ObservationType::Health => "health",
-    }
-    .to_owned()
 }
 
 fn signal_ref(location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> String {
@@ -237,10 +224,6 @@ fn units<T: DeserializeOwned>(files: &Files, directory: &str) -> StateResult<BTr
         units.insert(unit, from_yaml(path, bytes)?);
     }
     Ok(units)
-}
-
-fn artifacts(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>> {
-    per_unit(files, "artifacts")
 }
 
 /// The documents in each unit's `observed/units/<unit>/<kind>/` directory,
@@ -287,7 +270,7 @@ fn replace_set<T: Serialize>(
     files: &mut Files,
     unit: &UnitName,
     kind: &str,
-    set: Option<impl Iterator<Item = (String, T)>>,
+    set: Option<impl Iterator<Item = (impl std::fmt::Display, T)>>,
 ) -> StateResult<()> {
     let directory = format!("observed/units/{unit}/{kind}/");
     files.retain(|path, _| !path.starts_with(&directory));
@@ -306,41 +289,39 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         if let Some(environment) = &changes.environment {
             files.insert(ENVIRONMENT_FILE.to_owned(), to_yaml(environment)?);
         }
-        for (unit, document) in &changes.desired {
-            let path = format!("desired/units/{unit}.yaml");
-            match document {
-                Some(document) => files.insert(path, to_yaml(document)?),
-                None => files.remove(&path),
-            };
-        }
+        put_units(files, "desired", &changes.desired)?;
     }
     if observed {
-        for (unit, document) in &changes.observed {
-            let path = format!("observed/units/{unit}.yaml");
-            match document {
-                Some(document) => files.insert(path, to_yaml(document)?),
-                None => files.remove(&path),
-            };
-        }
+        put_units(files, "observed", &changes.observed)?;
         for (unit, set) in &changes.artifacts {
-            let set = set
-                .as_ref()
-                .map(|set| set.iter().map(|(name, document)| (name.clone(), document)));
-            replace_set(files, unit, "artifacts", set)?;
+            replace_set(files, unit, "artifacts", set.as_ref().map(|set| set.iter()))?;
         }
         for (unit, set) in &changes.observations {
             let set = set.as_ref().map(|set| {
                 set.iter()
-                    .map(|(observation_type, document)| (observation_name(*observation_type), document))
+                    .map(|(observation_type, document)| (observation_type.as_str(), document))
             });
             replace_set(files, unit, "observations", set)?;
         }
         for (unit, set) in &changes.attestations {
-            let set = set
-                .as_ref()
-                .map(|set| set.iter().map(|(name, document)| (name.clone(), document)));
-            replace_set(files, unit, "attestations", set)?;
+            replace_set(files, unit, "attestations", set.as_ref().map(|set| set.iter()))?;
         }
+    }
+    Ok(())
+}
+
+/// Put or remove each unit's document under `<side>/units/`.
+fn put_units<T: Serialize>(
+    files: &mut Files,
+    side: &str,
+    documents: &BTreeMap<UnitName, Option<T>>,
+) -> StateResult<()> {
+    for (unit, document) in documents {
+        let path = format!("{side}/units/{unit}.yaml");
+        match document {
+            Some(document) => files.insert(path, to_yaml(document)?),
+            None => files.remove(&path),
+        };
     }
     Ok(())
 }
@@ -375,7 +356,7 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
             .transpose()?,
         desired: units(desired, "desired/units/")?,
         observed: units(observed, "observed/units/")?,
-        artifacts: artifacts(observed)?,
+        artifacts: per_unit(observed, "artifacts")?,
         observations: observations(observed)?,
         attestations: per_unit(observed, "attestations")?,
     })
@@ -385,8 +366,8 @@ impl StateStore for GitStateStore {
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
-        let desired_name = full_name(&location.desired_ref);
-        let observed_name = full_name(&location.observed_ref);
+        let desired_name = StateLocation::full_name(&location.desired_ref);
+        let observed_name = StateLocation::full_name(&location.observed_ref);
         let heads = refs.heads(&[desired_name.clone(), observed_name.clone()])?;
         refs.fetch(&heads, true)?;
         for (name, oid) in &heads {
@@ -395,11 +376,11 @@ impl StateStore for GitStateStore {
         let desired_tip = heads.get(&desired_name).copied();
         let observed_tip = heads.get(&observed_name).copied();
         let desired = tree::beneath(
-            &tree::read(&repository, desired_tip.and_then(|_| refs.local(&desired_name)))?,
+            &tree::read(&repository, refs.fetched(&heads, &desired_name))?,
             &location.path,
         );
         let observed = tree::beneath(
-            &tree::read(&repository, observed_tip.and_then(|_| refs.local(&observed_name)))?,
+            &tree::read(&repository, refs.fetched(&heads, &observed_name))?,
             &location.path,
         );
         snapshot_of(
@@ -417,7 +398,10 @@ impl StateStore for GitStateStore {
     fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
-        let names = [full_name(&location.desired_ref), full_name(&location.observed_ref)];
+        let names = [
+            StateLocation::full_name(&location.desired_ref),
+            StateLocation::full_name(&location.observed_ref),
+        ];
         let heads = refs.heads(&names)?;
         refs.fetch(&heads, true)?;
         let read = |tip: Option<&CommitId>| -> StateResult<Files> {
@@ -533,15 +517,12 @@ impl StateStore for GitStateStore {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
         let expected = Oid::from_str(expected).map_err(unavailable)?;
-        match refs.update(&[Update {
+        refs.update(&[Update {
             name: lease_ref(location, environment),
             new: None,
             expected: Some(expected),
-        }]) {
-            Ok(()) => Ok(()),
-            Err(UpdateError::Stale) => Err(StateError::LeaseLost),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        }])
+        .map_err(|error| error.or_stale(StateError::LeaseLost))
     }
 
     fn delete_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()> {
@@ -584,12 +565,7 @@ impl StateStore for GitStateStore {
         run: &Run,
         created: &[DesiredUnit],
     ) -> StateResult<()> {
-        self.update_run(location, environment, run, |files| {
-            for desired in created {
-                files.insert(format!("created/{}.yaml", desired.unit.name), to_yaml(desired)?);
-            }
-            Ok(())
-        })
+        self.update_run(location, environment, run, |files| insert_created(files, created))
     }
 
     fn retire_run(
@@ -611,15 +587,13 @@ impl StateStore for GitStateStore {
         };
         stale_run(&run_name, run_oid, expected)?;
         let run_files = tree::read(&repository, refs.local(&run_name).or(Some(run_oid)))?;
-        let evidence_tip = heads.get(&evidence_name).and_then(|_| refs.local(&evidence_name));
+        let evidence_tip = refs.fetched(&heads, &evidence_name);
         let mut files = tree::read(&repository, evidence_tip)?;
         // The run ref's record and created units replace the evidence ref's;
         // its checkpoints are appended after the ones retired before.
         let retired = read_run(&run_name, &run_files, run_oid.to_string())?;
         files.insert(RUN_FILE.to_owned(), to_yaml(&retired.run)?);
-        for desired in &retired.created {
-            files.insert(format!("created/{}.yaml", desired.unit.name), to_yaml(desired)?);
-        }
+        insert_created(&mut files, &retired.created)?;
         let first = checkpoint_count(&files);
         for (index, checkpoint) in (first..).zip(&retired.checkpoints) {
             insert_checkpoint(&mut files, index, checkpoint)?;
@@ -647,14 +621,8 @@ impl StateStore for GitStateStore {
                 expected: Some(*signal),
             });
         }
-        match refs.update(&updates) {
-            Ok(()) => Ok(()),
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: run_name,
-                actual: "another commit".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        refs.update(&updates)
+            .map_err(|error| error.or_stale(another_commit(run_name)))
     }
 
     fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
@@ -665,18 +633,12 @@ impl StateStore for GitStateStore {
         let Some(current) = heads.get(&name).copied() else {
             return Ok(());
         };
-        match refs.update(&[Update {
+        refs.update(&[Update {
             name: name.clone(),
             new: None,
             expected: Some(current),
-        }]) {
-            Ok(()) => Ok(()),
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: name,
-                actual: "another commit".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        }])
+        .map_err(|error| error.or_stale(another_commit(name)))
     }
 
     fn delete_run(
@@ -707,14 +669,8 @@ impl StateStore for GitStateStore {
         if updates.is_empty() {
             return Ok(());
         }
-        match refs.update(&updates) {
-            Ok(()) => Ok(()),
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: names[0].clone(),
-                actual: "another commit".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        refs.update(&updates)
+            .map_err(|error| error.or_stale(another_commit(names[0].clone())))
     }
 
     fn signals(
@@ -728,7 +684,7 @@ impl StateStore for GitStateStore {
         let name = signal_ref(location, environment, run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
         refs.fetch(&heads, false)?;
-        let files = tree::read(&repository, heads.get(&name).and_then(|_| refs.local(&name)))?;
+        let files = tree::read(&repository, refs.fetched(&heads, &name))?;
         files
             .iter()
             .filter(|(path, _)| path.starts_with("signals/"))
@@ -742,25 +698,19 @@ impl StateStore for GitStateStore {
         let name = signal_ref(location, environment, &signal.run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
         refs.fetch(&heads, false)?;
-        let tip = heads.get(&name).and_then(|_| refs.local(&name));
+        let tip = refs.fetched(&heads, &name);
         let mut files = tree::read(&repository, tip)?;
         let index = files.len();
         files.insert(format!("signals/{index:04}.yaml"), to_yaml(signal)?);
         let parents = tip.into_iter().collect::<Vec<_>>();
         let commit = tree::commit(&repository, self.author.as_ref(), &files, "nyl: signal", &parents, true)?
             .expect("allow_empty commits");
-        match refs.update(&[Update {
+        refs.update(&[Update {
             name: name.clone(),
             new: Some(commit),
             expected: heads.get(&name).copied(),
-        }]) {
-            Ok(()) => Ok(()),
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: name,
-                actual: "another signal".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        }])
+        .map_err(|error| error.or_stale(StateError::conflict(name, Some("another signal"))))
     }
 
     fn commit(
@@ -774,62 +724,27 @@ impl StateStore for GitStateStore {
         let repository = self.open()?;
         let author = self.author.as_ref();
         let refs = self.refs(&repository, location);
-        let desired_name = full_name(&location.desired_ref);
-        let observed_name = full_name(&location.observed_ref);
+        let desired_name = StateLocation::full_name(&location.desired_ref);
+        let observed_name = StateLocation::full_name(&location.observed_ref);
         let lease_name = lease_ref(location, environment);
         let lease_oid = Oid::from_str(lease_version).map_err(unavailable)?;
         let base_desired = base.desired.as_ref().map(oid).transpose()?;
         let base_observed = base.observed.as_ref().map(oid).transpose()?;
-        let same_ref = desired_name == observed_name;
-        let side = |tip: Option<Oid>, desired: bool, observed: bool| {
-            transition_commit(&repository, author, location, transition, tip, (desired, observed))
-        };
-        // The lease moves to a new commit with the same document, so that
-        // the push checks it: git never compares an unchanged ref.
-        let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
-        let renewed = tree::commit(&repository, author, &lease_files, "nyl: lease", &[lease_oid], true)?
-            .expect("allow_empty commits");
+        let renewed = renew_lease(&repository, author, lease_oid)?;
 
         // Each attempt builds on the tips the last one lost to.
         let (mut tip_desired, mut tip_observed) = (base_desired, base_observed);
         for _ in 0..REBASE_ATTEMPTS {
-            let mut updates = Vec::new();
-            let mut committed = Committed::default();
-            if same_ref {
-                if let Some(commit) = side(tip_desired, true, true)? {
-                    updates.push(Update {
-                        name: desired_name.clone(),
-                        new: Some(commit),
-                        expected: tip_desired,
-                    });
-                    committed.desired = Some(commit_id(commit));
-                    committed.observed = Some(commit_id(commit));
-                }
-            } else {
-                if let Some(commit) = side(tip_desired, true, false)? {
-                    updates.push(Update {
-                        name: desired_name.clone(),
-                        new: Some(commit),
-                        expected: tip_desired,
-                    });
-                    committed.desired = Some(commit_id(commit));
-                }
-                if let Some(commit) = side(tip_observed, false, true)? {
-                    updates.push(Update {
-                        name: observed_name.clone(),
-                        new: Some(commit),
-                        expected: tip_observed,
-                    });
-                    committed.observed = Some(commit_id(commit));
-                }
-            }
+            let (mut updates, mut committed) = transition_updates(
+                &repository,
+                author,
+                location,
+                transition,
+                (&desired_name, tip_desired),
+                (&observed_name, tip_observed),
+            )?;
             if updates.is_empty() {
-                // Nothing to push, but a run that lost its lease still learns so.
-                if refs.heads(std::slice::from_ref(&lease_name))?.get(&lease_name) != Some(&lease_oid) {
-                    return Err(StateError::LeaseLost);
-                }
-                lease_version.clone_into(&mut committed.lease_version);
-                return Ok(committed);
+                return unchanged(&refs, &lease_name, lease_oid, lease_version, committed);
             }
             updates.push(Update {
                 name: lease_name.clone(),
@@ -871,8 +786,14 @@ impl StateStore for GitStateStore {
         let source = self.refs(&repository, from);
         let target = self.refs(&repository, to);
         let pairs = [
-            (full_name(&from.desired_ref), full_name(&to.desired_ref)),
-            (full_name(&from.observed_ref), full_name(&to.observed_ref)),
+            (
+                StateLocation::full_name(&from.desired_ref),
+                StateLocation::full_name(&to.desired_ref),
+            ),
+            (
+                StateLocation::full_name(&from.observed_ref),
+                StateLocation::full_name(&to.observed_ref),
+            ),
         ];
         let source_heads = source.heads(&pairs.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>())?;
         source.fetch(&source_heads, true)?;
@@ -910,11 +831,7 @@ impl StateStore for GitStateStore {
                 }
                 Ok(())
             }
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: updates[0].name.clone(),
-                actual: "another commit".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
+            Err(error) => Err(error.or_stale(another_commit(updates[0].name.clone()))),
         }
     }
 
@@ -924,10 +841,7 @@ impl StateStore for GitStateStore {
     fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
-        let name = full_name(match side {
-            StateSide::Desired => &location.desired_ref,
-            StateSide::Observed => &location.observed_ref,
-        });
+        let name = StateLocation::full_name(location.state_ref(side));
         let mut tip = refs.local(&name);
         if tip.is_none() && refs.url.is_some() {
             let heads = refs.heads(std::slice::from_ref(&name))?;
@@ -935,7 +849,7 @@ impl StateStore for GitStateStore {
             for (name, oid) in &heads {
                 refs.fast_forward_local_branch(name, *oid)?;
             }
-            tip = heads.get(&name).and_then(|_| refs.local(&name));
+            tip = refs.fetched(&heads, &name);
         }
         match tip {
             Some(tip) => first_parent_log(&repository, tip, limit),
@@ -944,20 +858,23 @@ impl StateStore for GitStateStore {
     }
 
     fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
-        if location.repository == LOCAL_REPOSITORY {
+        if location.is_local() {
             return Ok(LocalDivergence::default());
         }
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
-        let names = [full_name(&location.desired_ref), full_name(&location.observed_ref)];
+        let names = [
+            StateLocation::full_name(&location.desired_ref),
+            StateLocation::full_name(&location.observed_ref),
+        ];
         let heads = refs.heads(&names)?;
         refs.fetch(&heads, true)?;
         let side = |configured: &str| -> StateResult<Option<Divergence>> {
-            if !has_local_branch(configured) {
+            if !StateLocation::is_branch_ref(configured) {
                 return Ok(None);
             }
-            let name = full_name(configured);
-            let remote = heads.get(&name).and_then(|_| refs.local(&name));
+            let name = StateLocation::full_name(configured);
+            let remote = refs.fetched(&heads, &name);
             let (Some(remote), Ok(local)) = (remote, repository.refname_to_id(&name)) else {
                 return Ok(None);
             };
@@ -971,34 +888,29 @@ impl StateStore for GitStateStore {
     }
 
     fn reset_local(&self, location: &StateLocation, expected: &StateTips) -> StateResult<StateTips> {
-        if location.repository == LOCAL_REPOSITORY {
+        if location.is_local() {
             return Err(StateError::Unavailable(
                 "the state lives on the clone's own branches, which have no remote state to reset to".to_owned(),
             ));
         }
         require_local_branches(location)?;
         if self.author.is_none() {
-            return Err(StateError::Unavailable(
-                "the state store was opened read-only, without a commit identity".to_owned(),
-            ));
+            return Err(StateError::Unavailable(tree::READ_ONLY.to_owned()));
         }
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
-        let desired_name = full_name(&location.desired_ref);
-        let observed_name = full_name(&location.observed_ref);
+        let desired_name = StateLocation::full_name(&location.desired_ref);
+        let observed_name = StateLocation::full_name(&location.observed_ref);
         let heads = refs.heads(&[desired_name.clone(), observed_name.clone()])?;
         refs.fetch(&heads, true)?;
-        let remote = |name: &String| heads.get(name).and_then(|_| refs.local(name));
+        let remote = |name: &String| refs.fetched(&heads, name);
         let expected_desired = expected.desired.as_ref().map(oid).transpose()?;
         let expected_observed = expected.observed.as_ref().map(oid).transpose()?;
         let mut moves = vec![(desired_name.clone(), expected_desired, remote(&desired_name))];
         if observed_name != desired_name {
             moves.push((observed_name.clone(), expected_observed, remote(&observed_name)));
         } else if expected_observed != expected_desired {
-            return Err(StateError::Conflict {
-                reference: observed_name,
-                actual: expected_desired.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string()),
-            });
+            return Err(StateError::conflict(observed_name, expected_desired));
         }
         // A compare-and-swap of both local branches in one transaction.
         let mut transaction = repository.transaction().map_err(unavailable)?;
@@ -1008,10 +920,7 @@ impl StateStore for GitStateStore {
         for (name, expected, _) in &moves {
             let current = repository.refname_to_id(name).ok();
             if current != *expected {
-                return Err(StateError::Conflict {
-                    reference: name.clone(),
-                    actual: current.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string()),
-                });
+                return Err(StateError::conflict(name.clone(), current));
             }
         }
         for (name, current, new) in &moves {
@@ -1039,7 +948,7 @@ impl StateStore for GitStateStore {
         lease_location: &StateLocation,
         lease_version: &str,
     ) -> StateResult<Committed> {
-        if location.repository == LOCAL_REPOSITORY {
+        if location.is_local() {
             return Err(StateError::Unavailable(
                 "local transition commits go to the local branches of remote state; this state lives on the clone's own branches".to_owned(),
             ));
@@ -1053,53 +962,25 @@ impl StateStore for GitStateStore {
             push_url: None,
             auth: &self.auth,
         };
-        let desired_name = full_name(&location.desired_ref);
-        let observed_name = full_name(&location.observed_ref);
+        let desired_name = StateLocation::full_name(&location.desired_ref);
+        let observed_name = StateLocation::full_name(&location.observed_ref);
         let base_desired = base.desired.as_ref().map(oid).transpose()?;
         let base_observed = base.observed.as_ref().map(oid).transpose()?;
         // Checked before the lease moves, so a stale base costs nothing.
         for (name, base) in [(&desired_name, base_desired), (&observed_name, base_observed)] {
             let current = repository.refname_to_id(name).ok();
             if current != base {
-                return Err(StateError::Conflict {
-                    reference: name.clone(),
-                    actual: current.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string()),
-                });
+                return Err(StateError::conflict(name.clone(), current));
             }
         }
-        let side = |tip: Option<Oid>, desired: bool, observed: bool| {
-            transition_commit(&repository, author, location, transition, tip, (desired, observed))
-        };
-        let mut updates = Vec::new();
-        let mut committed = Committed::default();
-        if desired_name == observed_name {
-            if let Some(commit) = side(base_desired, true, true)? {
-                updates.push(Update {
-                    name: desired_name.clone(),
-                    new: Some(commit),
-                    expected: base_desired,
-                });
-                committed.desired = Some(commit_id(commit));
-                committed.observed = Some(commit_id(commit));
-            }
-        } else {
-            if let Some(commit) = side(base_desired, true, false)? {
-                updates.push(Update {
-                    name: desired_name.clone(),
-                    new: Some(commit),
-                    expected: base_desired,
-                });
-                committed.desired = Some(commit_id(commit));
-            }
-            if let Some(commit) = side(base_observed, false, true)? {
-                updates.push(Update {
-                    name: observed_name.clone(),
-                    new: Some(commit),
-                    expected: base_observed,
-                });
-                committed.observed = Some(commit_id(commit));
-            }
-        }
+        let (updates, mut committed) = transition_updates(
+            &repository,
+            author,
+            location,
+            transition,
+            (&desired_name, base_desired),
+            (&observed_name, base_observed),
+        )?;
 
         // The fence: renew the lease by compare-and-swap before any local
         // branch moves, as `commit` moves it in the same push.
@@ -1107,34 +988,91 @@ impl StateStore for GitStateStore {
         let lease_name = lease_ref(lease_location, environment);
         let lease_oid = Oid::from_str(lease_version).map_err(unavailable)?;
         if updates.is_empty() {
-            if lease_refs.heads(std::slice::from_ref(&lease_name))?.get(&lease_name) != Some(&lease_oid) {
-                return Err(StateError::LeaseLost);
-            }
-            lease_version.clone_into(&mut committed.lease_version);
-            return Ok(committed);
+            return unchanged(&lease_refs, &lease_name, lease_oid, lease_version, committed);
         }
-        let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
-        let renewed = tree::commit(&repository, author, &lease_files, "nyl: lease", &[lease_oid], true)?
-            .expect("allow_empty commits");
-        match lease_refs.update(&[Update {
-            name: lease_name,
-            new: Some(renewed),
-            expected: Some(lease_oid),
-        }]) {
-            Ok(()) => {}
-            Err(UpdateError::Stale) => return Err(StateError::LeaseLost),
-            Err(UpdateError::Other(error)) => return Err(error),
-        }
+        let renewed = renew_lease(&repository, author, lease_oid)?;
+        lease_refs
+            .update(&[Update {
+                name: lease_name,
+                new: Some(renewed),
+                expected: Some(lease_oid),
+            }])
+            .map_err(|error| error.or_stale(StateError::LeaseLost))?;
         committed.lease_version = renewed.to_string();
-        match local.update(&updates) {
-            Ok(()) => Ok(committed),
-            Err(UpdateError::Stale) => Err(StateError::Conflict {
-                reference: desired_name,
-                actual: "another commit".to_owned(),
-            }),
-            Err(UpdateError::Other(error)) => Err(error),
-        }
+        local
+            .update(&updates)
+            .map_err(|error| error.or_stale(another_commit(desired_name)))?;
+        Ok(committed)
     }
+}
+
+/// The updates of a transition on top of the tips of the desired and the
+/// observed ref: one commit per changed ref, or one when the refs coincide.
+fn transition_updates(
+    repository: &Repository,
+    author: Option<&CommitAuthor>,
+    location: &StateLocation,
+    transition: &Transition,
+    (desired_name, desired_tip): (&String, Option<Oid>),
+    (observed_name, observed_tip): (&String, Option<Oid>),
+) -> StateResult<(Vec<Update>, Committed)> {
+    let side = |tip: Option<Oid>, desired: bool, observed: bool| {
+        transition_commit(repository, author, location, transition, tip, (desired, observed))
+    };
+    let mut updates = Vec::new();
+    let mut committed = Committed::default();
+    if desired_name == observed_name {
+        if let Some(commit) = side(desired_tip, true, true)? {
+            updates.push(Update {
+                name: desired_name.clone(),
+                new: Some(commit),
+                expected: desired_tip,
+            });
+            committed.desired = Some(commit_id(commit));
+            committed.observed = Some(commit_id(commit));
+        }
+        return Ok((updates, committed));
+    }
+    if let Some(commit) = side(desired_tip, true, false)? {
+        updates.push(Update {
+            name: desired_name.clone(),
+            new: Some(commit),
+            expected: desired_tip,
+        });
+        committed.desired = Some(commit_id(commit));
+    }
+    if let Some(commit) = side(observed_tip, false, true)? {
+        updates.push(Update {
+            name: observed_name.clone(),
+            new: Some(commit),
+            expected: observed_tip,
+        });
+        committed.observed = Some(commit_id(commit));
+    }
+    Ok((updates, committed))
+}
+
+/// A new commit of the lease at `lease`, with the same document, so that
+/// a push checks it: git never compares an unchanged ref.
+fn renew_lease(repository: &Repository, author: Option<&CommitAuthor>, lease: Oid) -> StateResult<Oid> {
+    let files = tree::read(repository, Some(lease)).map_err(|_| StateError::LeaseLost)?;
+    Ok(tree::commit(repository, author, &files, "nyl: lease", &[lease], true)?.expect("allow_empty commits"))
+}
+
+/// A transition that changes nothing: nothing to push, but a run that lost
+/// its lease still learns so.
+fn unchanged(
+    refs: &Refs<'_>,
+    lease_name: &String,
+    lease_oid: Oid,
+    lease_version: &str,
+    mut committed: Committed,
+) -> StateResult<Committed> {
+    if refs.heads(std::slice::from_ref(lease_name))?.get(lease_name) != Some(&lease_oid) {
+        return Err(StateError::LeaseLost);
+    }
+    lease_version.clone_into(&mut committed.lease_version);
+    Ok(committed)
 }
 
 /// One side's transition commit on top of `tip`, or `None` when the
@@ -1153,24 +1091,6 @@ fn transition_commit(
     let files = replace_beneath(&all, &location.path, &inner);
     let parents = tip.into_iter().collect::<Vec<_>>();
     tree::commit(repository, author, &files, &transition.message, &parents, false)
-}
-
-/// Whether a configured state ref name has a local branch in the clone: a
-/// short name or a `refs/heads/` name. Other full `refs/…` names have none.
-fn has_local_branch(configured: &str) -> bool {
-    !configured.starts_with("refs/") || configured.starts_with("refs/heads/")
-}
-
-/// Refuse a location whose state refs have no local branches.
-fn require_local_branches(location: &StateLocation) -> StateResult<()> {
-    for configured in [&location.desired_ref, &location.observed_ref] {
-        if !has_local_branch(configured) {
-            return Err(StateError::Unavailable(format!(
-                "state ref {configured} is a full ref name outside refs/heads/, which has no local branch in the clone"
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// The newest `limit` commits of `tip`'s first-parent history, newest first.
@@ -1214,10 +1134,7 @@ fn rebase_tips(
     for (name, base) in bases {
         let head = heads.get(name).copied();
         if !directory_unchanged(repository, location, base, head)? {
-            return Err(StateError::Conflict {
-                reference: name.clone(),
-                actual: head.map_or_else(|| "nothing".to_owned(), |head| head.to_string()),
-            });
+            return Err(StateError::conflict(name.clone(), head));
         }
     }
     Ok((heads.get(bases[0].0).copied(), heads.get(bases[1].0).copied()))
@@ -1258,18 +1175,15 @@ fn write_lease(
         .into_iter()
         .collect::<Vec<_>>();
     let commit = tree::commit(repository, author, &files, &message, &parents, true)?.expect("allow_empty commits");
-    match refs.update(&[Update {
+    refs.update(&[Update {
         name: name.to_owned(),
         new: Some(commit),
         expected,
-    }]) {
-        Ok(()) => Ok(commit.to_string()),
-        Err(UpdateError::Stale) => Err(stale),
-        Err(UpdateError::Other(error)) => Err(error),
-    }
+    }])
+    .map_err(|error| error.or_stale(stale))?;
+    Ok(commit.to_string())
 }
 
-/// How many checkpoints a run ref's files hold.
 /// Refuse to consume a run ref that moved since the caller read it at `expected`.
 fn stale_run(name: &str, current: git2::Oid, expected: Option<&str>) -> StateResult<()> {
     match expected {
@@ -1281,11 +1195,20 @@ fn stale_run(name: &str, current: git2::Oid, expected: Option<&str>) -> StateRes
     }
 }
 
+/// How many checkpoints a run ref's files hold.
 fn checkpoint_count(files: &Files) -> usize {
     files
         .keys()
         .filter(|path| path.starts_with("checkpoints/") && path.ends_with("/desired.yaml"))
         .count()
+}
+
+/// Record created units' desired documents as `created/<unit>.yaml`.
+fn insert_created(files: &mut Files, created: &[DesiredUnit]) -> StateResult<()> {
+    for desired in created {
+        files.insert(format!("created/{}.yaml", desired.unit.name), to_yaml(desired)?);
+    }
+    Ok(())
 }
 
 /// Add a checkpoint as `checkpoints/<index>-<unit>/`.

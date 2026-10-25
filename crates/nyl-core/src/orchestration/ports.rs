@@ -94,6 +94,17 @@ pub enum StateError {
     Unavailable(String),
 }
 
+impl StateError {
+    /// A [`StateError::Conflict`] on `reference`, which is at `actual`, or
+    /// absent (`nothing`) for `None`.
+    pub fn conflict(reference: impl Into<String>, actual: Option<impl std::fmt::Display>) -> Self {
+        Self::Conflict {
+            reference: reference.into(),
+            actual: actual.map_or_else(|| "nothing".to_owned(), |actual| actual.to_string()),
+        }
+    }
+}
+
 pub type StateResult<T> = std::result::Result<T, StateError>;
 
 /// The commits a snapshot was read at; `None` for a ref that does not exist.
@@ -490,24 +501,14 @@ pub trait SourceResolver: Send + Sync {
     /// Make `path` exactly a fresh detached checkout of `commit`: create it
     /// when missing or empty, and otherwise reset a worktree this resolver
     /// made earlier, removing untracked and ignored files, so a run's
-    /// concurrency slot reuses one worktree across units. The default
-    /// removes the directory and checks out again. Contract:
+    /// concurrency slot reuses one worktree across units. Contract:
     /// [Execution](../../../../design/orchestration-core.md#execution).
     fn reset_worktree(
         &self,
         repository: &SourceRepository,
         commit: &CommitId,
         path: &std::path::Path,
-    ) -> SourceResult<()> {
-        match std::fs::remove_dir_all(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(SourceError(format!("cannot remove {}: {error}", path.display()))),
-        }
-        std::fs::create_dir_all(path)
-            .map_err(|error| SourceError(format!("cannot create {}: {error}", path.display())))?;
-        self.worktree(repository, commit, path)
-    }
+    ) -> SourceResult<()>;
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
 }

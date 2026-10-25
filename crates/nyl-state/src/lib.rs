@@ -23,3 +23,18 @@
 pub mod git;
 pub mod memory;
 pub mod source;
+
+use nyl_core::orchestration::ports::{StateError, StateResult};
+use nyl_core::orchestration::state::StateLocation;
+
+/// Refuse a location whose state refs have no local branches.
+fn require_local_branches(location: &StateLocation) -> StateResult<()> {
+    for configured in [&location.desired_ref, &location.observed_ref] {
+        if !StateLocation::is_branch_ref(configured) {
+            return Err(StateError::Unavailable(format!(
+                "state ref {configured} is a full ref name outside refs/heads/, which has no local branch in the clone"
+            )));
+        }
+    }
+    Ok(())
+}

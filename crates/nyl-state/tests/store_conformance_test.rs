@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Divergence, LocalDivergence, StateError, StateSide, StateStore, StateTips, Transition,
+    Checkpoint, Committed, Divergence, LocalDivergence, StateError, StateSide, StateStore, StateTips, Transition,
     TransitionChanges,
 };
 use nyl_core::orchestration::state::{
@@ -15,7 +15,7 @@ use nyl_core::orchestration::state::{
     Operation, Run, RunKind, Signal, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
-use nyl_state::git::{CommitAuthor, GitStateStore, LOCAL_REPOSITORY};
+use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::memory::MemoryStateStore;
 use serde_json::json;
 use tempfile::TempDir;
@@ -80,7 +80,7 @@ fn subjects() -> Vec<Subject> {
         Subject {
             name: "git local",
             store: Box::new(GitStateStore::new(clone.path().join(".git"), GitAuth::none(), author())),
-            repository: LOCAL_REPOSITORY.to_owned(),
+            repository: StateLocation::LOCAL_REPOSITORY.to_owned(),
             _directories: vec![clone],
         }
     };
@@ -157,6 +157,36 @@ fn unit(name: &str) -> (DesiredUnit, ObservedUnit) {
     }))
     .unwrap();
     (desired, observed)
+}
+
+/// Take the lease of `environment` for `RUN_A` and initialize its state.
+fn initialized(store: &dyn StateStore, location: &StateLocation, environment: &EnvironmentName) -> Committed {
+    let version = store.take_lease(location, environment, &lease(RUN_A), None).unwrap();
+    store
+        .commit(
+            location,
+            environment,
+            &StateTips::default(),
+            &init(location, environment.as_str()),
+            &version,
+        )
+        .unwrap()
+}
+
+fn run() -> Run {
+    Run {
+        api_version: StateV1,
+        kind: RunKind,
+        run: RunId::new(RUN_A).unwrap(),
+        runner: "test".to_owned(),
+        operation: Operation::Reconcile,
+        source_commit: None,
+        read_desired: None,
+        read_observed: None,
+        deadline: at(),
+        units: vec![UnitName::new("seed").unwrap()],
+        finished: false,
+    }
 }
 
 fn transition(changes: TransitionChanges) -> Transition {
@@ -305,24 +335,11 @@ fn test_snapshots_read_back_what_transitions_wrote_and_unchanged_state_writes_no
         let store = subject.store.as_ref();
         let location = separate(&subject);
         let dev = environment("dev");
-        let version = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
-        let committed = store
-            .commit(
-                &location,
-                &dev,
-                &StateTips::default(),
-                &init(&location, "dev"),
-                &version,
-            )
-            .unwrap();
+        let committed = initialized(store, &location, &dev);
         let (desired, observed) = unit("seed");
         let name = UnitName::new("seed").unwrap();
         let base = store.snapshot(&location).unwrap().tips;
-        let changes = TransitionChanges {
-            desired: BTreeMap::from([(name.clone(), Some(desired.clone()))]),
-            observed: BTreeMap::from([(name.clone(), Some(observed.clone()))]),
-            ..TransitionChanges::default()
-        };
+        let changes = seed_changes("seed");
         let committed = store
             .commit(
                 &location,
@@ -351,6 +368,44 @@ fn test_snapshots_read_back_what_transitions_wrote_and_unchanged_state_writes_no
         assert_eq!(
             store.snapshot(&location).unwrap().tips,
             snapshot.tips,
+            "{}",
+            subject.name
+        );
+    }
+}
+
+/// Catches `get --state-revision` reading the current state instead of
+/// the revision it names, or reading a commit the state refs never held.
+#[test]
+fn test_snapshot_at_reads_an_earlier_commit() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let first = initialized(store, &location, &dev);
+        let earlier = StateTips {
+            desired: first.desired.clone(),
+            observed: first.observed.clone(),
+        };
+        let mut moved = init(&location, "dev");
+        moved.changes.record.as_mut().unwrap().template = Some("preview".to_owned());
+        store
+            .commit(&location, &dev, &earlier, &moved, &first.lease_version)
+            .unwrap();
+        let snapshot = store.snapshot_at(&location, &earlier).unwrap();
+        assert_eq!(snapshot.record.unwrap().template, None, "{}", subject.name);
+        assert_eq!(
+            store.snapshot(&location).unwrap().record.unwrap().template.as_deref(),
+            Some("preview"),
+            "{}",
+            subject.name
+        );
+        let unknown = StateTips {
+            desired: Some(nyl_core::orchestration::ids::CommitId::new("f".repeat(40)).unwrap()),
+            observed: None,
+        };
+        assert!(
+            matches!(store.snapshot_at(&location, &unknown), Err(StateError::Unavailable(_))),
             "{}",
             subject.name
         );
@@ -424,19 +479,7 @@ fn test_run_refs_carry_checkpoints_and_signals_until_deleted() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
         let dev = environment("dev");
-        let run = Run {
-            api_version: StateV1,
-            kind: RunKind,
-            run: RunId::new(RUN_A).unwrap(),
-            runner: "test".to_owned(),
-            operation: Operation::Reconcile,
-            source_commit: None,
-            read_desired: None,
-            read_observed: None,
-            deadline: at(),
-            units: vec![UnitName::new("seed").unwrap()],
-            finished: false,
-        };
+        let run = run();
         store.write_run(&location, &dev, &run, None).unwrap();
         let (desired, observed) = unit("seed");
         let checkpoint = Checkpoint {
@@ -490,10 +533,7 @@ fn test_imported_history_completes_when_repeated_and_refuses_a_diverged_target()
         let from = separate(&subject);
         let to = location(&subject.repository, "state/dev/desired", "state/dev/observed", "");
         let dev = environment("dev");
-        let version = store.take_lease(&from, &dev, &lease(RUN_A), None).unwrap();
-        let committed = store
-            .commit(&from, &dev, &StateTips::default(), &init(&from, "dev"), &version)
-            .unwrap();
+        let committed = initialized(store, &from, &dev);
         store.import_history(&from, &to).unwrap();
         store.import_history(&from, &to).unwrap();
         let moved = store.snapshot(&to).unwrap();
@@ -585,16 +625,7 @@ fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
         let dev = environment("dev");
-        let version = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
-        let committed = store
-            .commit(
-                &location,
-                &dev,
-                &StateTips::default(),
-                &init(&location, "dev"),
-                &version,
-            )
-            .unwrap();
+        let committed = initialized(store, &location, &dev);
         let name = UnitName::new("seed").unwrap();
         let identity = json!({"environment": "dev", "name": "seed", "uid": UID,
                               "apiVersion": "units.gitops.nyl/v1", "kind": "Command"});
@@ -662,19 +693,7 @@ fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
         let dev = environment("dev");
-        let run = Run {
-            api_version: StateV1,
-            kind: RunKind,
-            run: RunId::new(RUN_A).unwrap(),
-            runner: "test".to_owned(),
-            operation: Operation::Reconcile,
-            source_commit: None,
-            read_desired: None,
-            read_observed: None,
-            deadline: at(),
-            units: vec![UnitName::new("seed").unwrap()],
-            finished: false,
-        };
+        let run = run();
         let (desired, observed) = unit("seed");
         store
             .write_run_created(&location, &dev, &run, std::slice::from_ref(&desired))
@@ -740,7 +759,7 @@ fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
 /// The clone's local branches of a remote location's state refs.
 fn view(location: &StateLocation) -> StateLocation {
     StateLocation {
-        repository: LOCAL_REPOSITORY.to_owned(),
+        repository: StateLocation::LOCAL_REPOSITORY.to_owned(),
         ..location.clone()
     }
 }
@@ -768,16 +787,7 @@ fn test_log_returns_first_parent_history_newest_first_with_raw_messages() {
             "{}: a missing ref has an empty log",
             subject.name
         );
-        let version = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
-        let first = store
-            .commit(
-                &location,
-                &dev,
-                &StateTips::default(),
-                &init(&location, "dev"),
-                &version,
-            )
-            .unwrap();
+        let first = initialized(store, &location, &dev);
         let mut second = transition(seed_changes("seed"));
         second.message = "nyl: second\n\nNyl-Operation: reconcile\nNyl-Local: true\n".to_owned();
         let tips = store.snapshot(&location).unwrap().tips;
@@ -812,21 +822,12 @@ fn test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
         let dev = environment("dev");
-        let version = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
-        let first = store
-            .commit(
-                &location,
-                &dev,
-                &StateTips::default(),
-                &init(&location, "dev"),
-                &version,
-            )
-            .unwrap();
+        let first = initialized(store, &location, &dev);
         let remote = store.snapshot(&location).unwrap().tips;
         let mut local_transition = transition(seed_changes("seed"));
         local_transition.message = "nyl: local\n\nNyl-Local: true\n".to_owned();
 
-        if subject.repository == LOCAL_REPOSITORY {
+        if subject.repository == StateLocation::LOCAL_REPOSITORY {
             // The clone's own branches are the state: nothing to diverge from.
             assert_eq!(
                 store.local_divergence(&location).unwrap(),
@@ -993,7 +994,7 @@ fn test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap() {
 #[test]
 fn test_local_writes_refuse_a_stale_base_and_full_refs_and_drop_branches_without_remote() {
     for subject in subjects() {
-        if subject.repository == LOCAL_REPOSITORY {
+        if subject.repository == StateLocation::LOCAL_REPOSITORY {
             // Local writes are refused outright for this subject (see
             // `test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap`).
             continue;
@@ -1004,16 +1005,7 @@ fn test_local_writes_refuse_a_stale_base_and_full_refs_and_drop_branches_without
         let dev_location = separate(&subject);
         let dev_local = view(&dev_location);
         let dev = environment("dev");
-        let version = store.take_lease(&dev_location, &dev, &lease(RUN_A), None).unwrap();
-        let first = store
-            .commit(
-                &dev_location,
-                &dev,
-                &StateTips::default(),
-                &init(&dev_location, "dev"),
-                &version,
-            )
-            .unwrap();
+        let first = initialized(store, &dev_location, &dev);
         store.snapshot(&dev_location).unwrap();
         let local_tips = store.snapshot(&dev_local).unwrap().tips;
         assert!(local_tips.desired.is_some(), "{}", subject.name);

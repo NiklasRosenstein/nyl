@@ -27,6 +27,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// `sha256:` and the lowercase hex SHA-256 of `bytes`.
+pub fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
 /// RFC 8785 canonical JSON bytes of `value`.
 pub fn canonical_json_bytes(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
     let mut bytes = Vec::new();

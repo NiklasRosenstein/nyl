@@ -121,14 +121,14 @@ string_id!(
 impl ExecutionKey {
     /// The key whose digest is the SHA-256 of `bytes`.
     pub fn from_digest_of(bytes: &[u8]) -> Self {
-        Self(format!("sha256:{}", crate::digest::sha256_hex(bytes)))
+        Self(crate::digest::sha256_prefixed(bytes))
     }
 }
 
 impl ChangeDigest {
     /// The digest whose value is the SHA-256 of `bytes`.
     pub fn from_digest_of(bytes: &[u8]) -> Self {
-        Self(format!("sha256:{}", crate::digest::sha256_hex(bytes)))
+        Self(crate::digest::sha256_prefixed(bytes))
     }
 }
 
@@ -164,29 +164,7 @@ impl FromStr for UnitAddress {
     }
 }
 
-impl Serialize for UnitAddress {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for UnitAddress {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl JsonSchema for UnitAddress {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "UnitAddress".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"type": "string", "description": "`<environment>/<unit>`"})
-    }
-}
+string_serde!(UnitAddress, {"type": "string", "description": "`<environment>/<unit>`"});
 
 fn validate_dns_label(what: &str, value: &str) -> Result<()> {
     let valid = !value.is_empty()

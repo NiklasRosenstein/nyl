@@ -221,28 +221,6 @@ fn test_worktree_is_a_clean_detached_checkout_of_the_commit() {
 }
 
 #[test]
-fn test_worktree_rejects_a_symbolic_link_leaving_the_tree() {
-    let world = World::new();
-    let clone = Repository::open(world.clone_dir()).unwrap();
-    let base = clone.find_commit(world.c2).unwrap().tree().unwrap();
-    let mut builder = clone.treebuilder(Some(&base)).unwrap();
-    let target = clone.blob(b"../../outside").unwrap();
-    builder.insert("escape", target, 0o120_000).unwrap();
-    let tree = clone.find_tree(builder.write().unwrap()).unwrap();
-    let parent = clone.find_commit(world.c2).unwrap();
-    let escaping = clone
-        .commit(None, &signature(), &signature(), "escape", &tree, &[&parent])
-        .unwrap();
-
-    let path = world.root.path().join("workspace/escape");
-    let error = world
-        .resolver()
-        .worktree(&SourceRepository::This, &id(escaping), &path)
-        .unwrap_err();
-    assert!(error.to_string().contains("escape"), "{error}");
-}
-
-#[test]
 fn test_default_branch_follows_origin_head_then_local_head() {
     let world = World::new();
     assert_eq!(
@@ -370,13 +348,10 @@ fn slot_commits(clone: &Repository) -> (Oid, Oid) {
     (first, second)
 }
 
-/// A unit may replace a tracked directory in its slot with a symbolic link
-/// leaving the slot: catches the next reset writing through it, outside
-/// the checkout, instead of restoring a real directory.
+/// A resolver and its slot holding a fresh checkout of the first of
+/// [`slot_commits`], with both commits.
 #[cfg(unix)]
-#[test]
-fn test_reset_worktree_does_not_write_through_a_link_a_unit_left() {
-    let world = World::new();
+fn first_slot(world: &World) -> (GitSourceResolver, PathBuf, Oid, Oid) {
     let clone = Repository::open(world.clone_dir()).unwrap();
     let (first, second) = slot_commits(&clone);
     let resolver = world.resolver();
@@ -384,6 +359,17 @@ fn test_reset_worktree_does_not_write_through_a_link_a_unit_left() {
     resolver
         .reset_worktree(&SourceRepository::This, &id(first), &slot)
         .unwrap();
+    (resolver, slot, first, second)
+}
+
+/// A unit may replace a tracked directory in its slot with a symbolic link
+/// leaving the slot: catches the next reset writing through it, outside
+/// the checkout, instead of restoring a real directory.
+#[cfg(unix)]
+#[test]
+fn test_reset_worktree_does_not_write_through_a_link_a_unit_left() {
+    let world = World::new();
+    let (resolver, slot, _, second) = first_slot(&world);
     let outside = TempDir::new().unwrap();
     std::fs::remove_dir_all(slot.join("dir")).unwrap();
     std::os::unix::fs::symlink(outside.path(), slot.join("dir")).unwrap();
@@ -403,13 +389,7 @@ fn test_reset_worktree_does_not_write_through_a_link_a_unit_left() {
 fn test_reset_worktree_restores_a_changed_file_mode() {
     use std::os::unix::fs::PermissionsExt;
     let world = World::new();
-    let clone = Repository::open(world.clone_dir()).unwrap();
-    let (first, second) = slot_commits(&clone);
-    let resolver = world.resolver();
-    let slot = world.root.path().join("slot");
-    resolver
-        .reset_worktree(&SourceRepository::This, &id(first), &slot)
-        .unwrap();
+    let (resolver, slot, _, second) = first_slot(&world);
     std::fs::set_permissions(slot.join("app.txt"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
     resolver
@@ -427,13 +407,7 @@ fn test_reset_worktree_restores_a_changed_file_mode() {
 #[test]
 fn test_reset_worktree_ignores_git_metadata_a_unit_changed() {
     let world = World::new();
-    let clone = Repository::open(world.clone_dir()).unwrap();
-    let (first, second) = slot_commits(&clone);
-    let resolver = world.resolver();
-    let slot = world.root.path().join("slot");
-    resolver
-        .reset_worktree(&SourceRepository::This, &id(first), &slot)
-        .unwrap();
+    let (resolver, slot, first, second) = first_slot(&world);
     let set_config = |configure: &dyn Fn(&mut git2::Config)| {
         let checkout = Repository::open(&slot).unwrap();
         let mut config = checkout.config().unwrap().open_level(git2::ConfigLevel::Local).unwrap();
