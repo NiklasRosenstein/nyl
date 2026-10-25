@@ -32,7 +32,8 @@ pub struct Requested {
     pub wait: Option<nyl_core::orchestration::time::Duration>,
 }
 
-fn store_error(environment: &EnvironmentName, error: &StateError) -> Finding {
+/// The finding for a state store failure of `environment`.
+pub(crate) fn store_error(environment: &EnvironmentName, error: &StateError) -> Finding {
     match error {
         StateError::LeaseLost => lease::lost(environment),
         StateError::NotFastForward { reference } => Finding::new(
