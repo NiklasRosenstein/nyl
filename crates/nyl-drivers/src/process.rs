@@ -3,7 +3,11 @@
 //! Contract: [Drivers](../../../design/orchestration-core.md#drivers). Each
 //! tool runs in its own process group with exactly the environment its
 //! invocation names. At the deadline, or when the run is cancelled, the
-//! group receives SIGTERM and, 30 seconds later, SIGKILL. Output goes to the
+//! group receives SIGTERM and, 30 seconds later, SIGKILL. This holds
+//! whether the tool is still running or has exited while other members of
+//! its group, or processes that left it, keep its output open: the runner
+//! waits for output no longer than the deadline plus the grace, then
+//! detaches its readers. Output goes to the
 //! transcript sink (stderr by default) with secret values masked, and is
 //! never stored; stdout is also returned for steps Nyl reads, such as a
 //! fingerprint.
@@ -144,27 +148,30 @@ impl ToolRunner for ProcessRunner {
             })
         });
         drop(done);
-        let readers = usize::from(stdout.is_some()) + usize::from(stderr.is_some());
+        let mut open = usize::from(stdout.is_some()) + usize::from(stderr.is_some());
 
         let status = loop {
             if let Some(status) = child.try_wait().map_err(wait_error)? {
                 break status;
             }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                self.terminate(&mut child)?;
-                join_readers(stdout, stderr);
+                // Readers still blocked on a pipe that a process outside the
+                // group holds open are detached, never joined.
+                self.terminate(&mut child, false, &finished, &mut open)?;
                 return Ok(ToolExit::DeadlineExceeded);
             }
             thread::sleep(POLL_INTERVAL);
         };
 
         // The tool exited; its output ends when every process holding its
-        // pipes, such as a background child, has exited too.
-        let expired = await_output(&finished, readers, deadline, &child);
-        if expired {
-            if cfg!(unix) {
-                join_readers(stdout, stderr);
-            }
+        // pipes, such as a background child, has exited too. That wait is
+        // bounded by the deadline like the tool itself.
+        let drained = match deadline {
+            Some(deadline) => drain(&finished, &mut open, deadline),
+            None => drain_unbounded(&finished, &mut open),
+        };
+        if !drained {
+            self.terminate(&mut child, true, &finished, &mut open)?;
             return Ok(ToolExit::DeadlineExceeded);
         }
         let captured = stdout
@@ -177,26 +184,54 @@ impl ToolRunner for ProcessRunner {
     }
 }
 
+/// How long the runner still waits for the transcript once the group was
+/// killed. A process that left the group can hold the tool's pipes open
+/// indefinitely; its readers are detached when this passes.
+const KILLED_DRAIN: StdDuration = StdDuration::from_millis(500);
+
 impl ProcessRunner {
-    /// SIGTERM to the group; SIGKILL once [`Self::kill_grace`] passes while
-    /// any member is alive. Returns once the tool itself is reaped.
+    /// Stop the tool at its deadline: SIGTERM to the group, SIGKILL once
+    /// [`Self::kill_grace`] passes while any member is alive. Returns once
+    /// the tool itself is reaped and its transcript drained, or once the
+    /// grace (plus [`KILLED_DRAIN`] after SIGKILL) has passed, whichever
+    /// comes first; it never waits on pipes without a bound.
     #[cfg(not(unix))]
-    fn terminate(&self, child: &mut Child) -> DriverResult<()> {
-        let _ = child.kill();
-        child.wait().map_err(wait_error)?;
+    fn terminate(
+        &self,
+        child: &mut Child,
+        leader_exited: bool,
+        finished: &mpsc::Receiver<()>,
+        open: &mut usize,
+    ) -> DriverResult<()> {
+        if !leader_exited {
+            let _ = child.kill();
+            child.wait().map_err(wait_error)?;
+        }
+        drain(finished, open, Instant::now() + KILLED_DRAIN.min(self.kill_grace));
         Ok(())
     }
 
     #[cfg(unix)]
-    fn terminate(&self, child: &mut Child) -> DriverResult<()> {
+    fn terminate(
+        &self,
+        child: &mut Child,
+        mut leader_exited: bool,
+        finished: &mpsc::Receiver<()>,
+        open: &mut usize,
+    ) -> DriverResult<()> {
         kill_group(child, Signal::Term);
         let grace_end = Instant::now() + self.kill_grace;
-        let mut leader_exited = false;
         while Instant::now() < grace_end {
             if !leader_exited {
                 leader_exited = child.try_wait().map_err(wait_error)?.is_some();
             }
+            while *open > 0 && finished.try_recv().is_ok() {
+                *open -= 1;
+            }
             if leader_exited && !group_alive(child) {
+                // The group is gone; what still holds the pipes, if anything,
+                // left the group. Wait for it only for the rest of the grace.
+                drain(finished, open, grace_end);
                 return Ok(());
             }
             thread::sleep(POLL_INTERVAL);
@@ -205,56 +240,41 @@ impl ProcessRunner {
         if !leader_exited {
             child.wait().map_err(wait_error)?;
         }
+        drain(finished, open, Instant::now() + KILLED_DRAIN);
         Ok(())
     }
 }
 
-/// Wait until `readers` transcript threads finish. Returns whether the
-/// deadline passed first, in which case the group was killed.
-fn await_output(finished: &mpsc::Receiver<()>, readers: usize, deadline: Option<Instant>, child: &Child) -> bool {
-    let mut open = readers;
-    let mut expired = false;
-    while open > 0 {
-        let received = match deadline {
-            Some(deadline) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match finished.recv_timeout(remaining) {
-                    Ok(()) => true,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        expired = true;
-                        if cfg!(unix) {
-                            kill_group(child, Signal::Kill);
-                            // The group is gone; the pipes close.
-                            finished.recv().is_ok()
-                        } else {
-                            false
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => false,
-                }
-            }
-            None => finished.recv().is_ok(),
-        };
-        if !received {
-            break;
+/// Count finished transcript readers until none is `open` or `until`
+/// passes. Returns whether every reader finished.
+fn drain(finished: &mpsc::Receiver<()>, open: &mut usize, until: Instant) -> bool {
+    while *open > 0 {
+        let remaining = until.saturating_duration_since(Instant::now());
+        match finished.recv_timeout(remaining) {
+            Ok(()) => *open -= 1,
+            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+            // Every reader dropped its sender, so every reader finished.
+            Err(mpsc::RecvTimeoutError::Disconnected) => *open = 0,
         }
-        open -= 1;
     }
-    expired
+    true
+}
+
+/// [`drain`] for a tool without a deadline: wait as long as its output lasts.
+fn drain_unbounded(finished: &mpsc::Receiver<()>, open: &mut usize) -> bool {
+    while *open > 0 {
+        if finished.recv().is_err() {
+            *open = 0;
+        } else {
+            *open -= 1;
+        }
+    }
+    true
 }
 
 #[allow(clippy::needless_pass_by_value)] // Used as `map_err(wait_error)`.
 fn wait_error(error: std::io::Error) -> DriverError {
     DriverError::after_effects(format!("failed to wait for a tool: {error}"))
-}
-
-fn join_readers(stdout: Option<thread::JoinHandle<Vec<u8>>>, stderr: Option<thread::JoinHandle<()>>) {
-    if let Some(reader) = stdout {
-        let _ = reader.join();
-    }
-    if let Some(reader) = stderr {
-        let _ = reader.join();
-    }
 }
 
 #[cfg(unix)]
@@ -460,6 +480,43 @@ mod tests {
         // The background `sleep` holds the stdout pipe, and the runner returns
         // only once that pipe closes: the whole group was terminated.
         assert!(started.elapsed() < StdDuration::from_secs(10));
+    }
+
+    #[test]
+    fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes_after_the_tool_exits() {
+        let (mut runner, _) = quiet();
+        runner.kill_grace = StdDuration::from_millis(200);
+        // `setsid` moves `sleep` out of the tool's process group, so no group
+        // signal reaches it, and it holds stdout and stderr open.
+        let mut invocation = sh("setsid sleep 30 & exit 0");
+        invocation.timeout = Some(StdDuration::from_millis(300));
+        let started = Instant::now();
+        assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
+        assert!(started.elapsed() < StdDuration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes_while_the_tool_runs() {
+        let (mut runner, _) = quiet();
+        runner.kill_grace = StdDuration::from_millis(200);
+        let mut invocation = sh("setsid sleep 30 & wait");
+        invocation.timeout = Some(StdDuration::from_millis(300));
+        let started = Instant::now();
+        assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
+        assert!(started.elapsed() < StdDuration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn test_run_terminates_a_lingering_group_with_sigterm_after_the_tool_exits() {
+        let (mut runner, transcript) = quiet();
+        runner.kill_grace = StdDuration::from_secs(5);
+        // A background member of the group outlives the tool and handles
+        // SIGTERM; SIGKILL would give it no chance to report.
+        let mut invocation = sh("(trap 'echo got-term >&2; exit 0' TERM; sleep 30 & wait) & exit 0");
+        invocation.timeout = Some(StdDuration::from_millis(300));
+        assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
+        let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+        assert!(transcript.contains("got-term"), "{transcript}");
     }
 
     #[test]
