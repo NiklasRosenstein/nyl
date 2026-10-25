@@ -102,8 +102,15 @@ jobs:
         with:
           install_args: helm kubeconform
 
+      # Tests create throwaway Git repositories and push to them hundreds of
+      # times; syncing each pack and ref to disk dominated the Linux runners'
+      # test time, so the test step turns Git's disk sync off.
       - name: Run tests
         working-directory: nyl
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.fsync
+          GIT_CONFIG_VALUE_0: none
         run: cargo test --workspace --all-features
 
   build-linux-musl:
