@@ -14,11 +14,13 @@ use std::path::PathBuf;
 use clap::Args;
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::run_report::ReportKind;
+use nyl_orchestration::shell::run::{RunContext, DEFAULT_CONCURRENCY};
+use nyl_state::git::CommitAuthor;
 
 use super::reconcile::RunOutput;
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::{stopped, Stop};
-use crate::Result;
+use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
+use crate::{NylError, Result};
 
 /// Verify an environment's current receipts.
 #[derive(Args, Debug)]
@@ -55,7 +57,36 @@ pub fn run(args: &VerifyArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 }
 
 fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
-    // Package `recover-verify` wires the shell's verify like reconcile.
-    let _ = (args, wiring);
-    todo!("recover-verify")
+    let session = Session::open(&args.path, &args.environment)?;
+    // Verify writes observations, so it needs a commit identity.
+    let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
+    let request = session.request(&RunOptions {
+        units: &args.units,
+        concurrency: DEFAULT_CONCURRENCY,
+        source: None,
+        wait: args.wait_lease,
+        local: None,
+    })?;
+    let store = session.store(Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    }))?;
+    let sources = session.sources()?;
+    let renderer = session.renderer();
+    let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
+    let base = session.context(&store, wiring, Some(identity.to_string()));
+    let context = RunContext {
+        base: &base,
+        sources: &sources,
+        renderer: &renderer,
+        drivers: wiring.drivers,
+        tools: wiring.tools,
+        workspace: workspace.path(),
+        process_env: &wiring.process_env,
+        commit_identity: Some(&identity),
+    };
+    let mut report = nyl_orchestration::shell::verify::verify(&context, &request);
+    session.add_warnings(&mut report);
+    let exit = report.exit().code();
+    Ok(outcome(&report, args.output, exit))
 }

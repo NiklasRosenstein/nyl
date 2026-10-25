@@ -8,9 +8,17 @@
 
 use clap::Args;
 
+use nyl_core::orchestration::codes::{Code, Finding};
+use nyl_core::orchestration::ids::{RunId, UnitName};
+use nyl_core::orchestration::state::Operation;
+use nyl_orchestration::report::StateOperationReport;
+use nyl_orchestration::rules::recovery::RecoverAction;
+use nyl_orchestration::shell::recover::recover;
+use nyl_orchestration::shell::state::Requested;
+
 use super::state::Common;
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::Result;
+use crate::{NylError, Result};
 
 /// Clear a unit's condition, or accept a checkpointed result.
 #[derive(Args, Debug)]
@@ -35,8 +43,33 @@ pub struct RecoverArgs {
 
 /// Run the command in-process with `wiring`.
 pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    // Package `recover-verify` runs shell::recover::recover through
-    // super::state::run, as the state commands do.
-    let _ = (args, wiring);
-    todo!("recover-verify")
+    let unit = UnitName::new(&args.unit).map_err(|error| NylError::config(error.to_string()))?;
+    let action = match &args.accept {
+        None => Ok(RecoverAction::Retry),
+        Some(run) => RunId::new(run)
+            .map(|run| RecoverAction::Accept { run })
+            .map_err(|error| {
+                Finding::new(
+                    Code::RecoverCheckpointMissing,
+                    format!("--accept {run:?} is not a run ID: {error}"),
+                    "pass a run ID as `nyl recover` lists the checkpoints under evidence",
+                )
+            }),
+    };
+    let requested = Requested {
+        reason: args.common.reason.clone(),
+        wait: args.common.wait_lease,
+    };
+    super::state::run(
+        &args.common,
+        wiring,
+        Operation::Recover.as_str(),
+        None,
+        |ctx| match &action {
+            Ok(action) => recover(ctx.context, &ctx.environment, ctx.location, &unit, action, &requested),
+            Err(finding) => {
+                StateOperationReport::new(ctx.environment.clone(), Operation::Recover.as_str()).refused(finding.clone())
+            }
+        },
+    )
 }
