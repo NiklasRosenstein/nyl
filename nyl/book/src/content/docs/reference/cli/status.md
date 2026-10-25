@@ -19,6 +19,12 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
 
 `status` only reads state and needs no commit identity.
 
+A run that ended without its transition commit, because it was cancelled or
+lost its lease, leaves its results on its run ref until the next reconcile
+imports them. Until then `status` reports it with `NYL-RUN-UNIMPORTED` and
+shows the units it left uncertain as `uncertain`; a run that recorded every
+unit only warns.
+
 When this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs)
 hold local transitions or are behind the remote, `status` warns with
 `NYL-STATE-LOCAL-DIVERGED`, such as "local state of dev has 2 local
@@ -43,4 +49,4 @@ branches hold it, including `nyl reconcile --local` runs.
 | 1 | An error, such as `NYL-STATE-MISSING`. |
 | 2 | Not everything is reconciled and nothing failed: a unit is blocked, held, or waiting. |
 | 3 | A unit has a `failed` condition. |
-| 4 | A unit is `uncertain`, or a run lost its lease. |
+| 4 | A unit is `uncertain`, a run lost its lease, or a cancelled run left units uncertain that no reconcile has imported yet (`NYL-RUN-UNIMPORTED`). |

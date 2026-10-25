@@ -265,6 +265,12 @@ impl Harness {
         self.run_with(&job, verify::verify).environments.remove(0)
     }
 
+    fn status(&self) -> EnvironmentRunReport {
+        nyl_orchestration::shell::inspect::status(&self.context(), &dev(), &self.location)
+            .environments
+            .remove(0)
+    }
+
     fn reconcile_with(&self, units: &[&str], cancellation: Cancellation) -> EnvironmentRunReport {
         let job = self.job(units, cancellation);
         self.run(&job).environments.into_iter().next().unwrap()
@@ -964,6 +970,14 @@ fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_co
     };
     assert!(checkpoint("quick").observed.receipt.is_some());
     assert_eq!(uncertain_run(Some(&checkpoint("slow").observed)), cancelled.run.clone());
+
+    // Until a reconcile imports the run ref, status reports what it left
+    // uncertain rather than the last transition's current receipts.
+    let status = harness.status();
+    assert_eq!(status.exit.code(), 4, "{status:#?}");
+    assert_eq!(codes(&status.errors), [Code::RunUnimported], "{status:#?}");
+    // slow is new, so no transition records it yet; the finding names it.
+    assert!(status.errors[0].message.contains("left slow uncertain"), "{status:#?}");
 
     // The next run imports both; slow converges.
     let next = harness.reconcile(&[]);

@@ -122,10 +122,13 @@ pub enum Code {
     /// A run stopped on SIGINT or SIGTERM: it checkpointed what finished,
     /// left the units still running `uncertain`, and wrote no transition commit.
     RunCancelled,
+    /// A run ended without its transition commit, cancelled or after losing
+    /// its lease, and its run ref waits for the next reconcile to import it.
+    RunUnimported,
 }
 
 impl Code {
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 54] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -179,6 +182,7 @@ impl Code {
         Self::LocalRunUnsupported,
         Self::LocalRunLeftovers,
         Self::RunCancelled,
+        Self::RunUnimported,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -236,6 +240,7 @@ impl Code {
             Self::LocalRunUnsupported => "NYL-LOCAL-RUN-UNSUPPORTED",
             Self::LocalRunLeftovers => "NYL-LOCAL-RUN-LEFTOVERS",
             Self::RunCancelled => "NYL-RUN-CANCELLED",
+            Self::RunUnimported => "NYL-RUN-UNIMPORTED",
         }
     }
 }

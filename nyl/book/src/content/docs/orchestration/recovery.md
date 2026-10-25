@@ -170,7 +170,8 @@ to the tool directly, and Nyl kills it after the same 30 seconds. The
 run checkpoints the units that finish, gives the ones still running an
 `uncertain` condition, marks its run ref finished, releases the lease, and
 exits 4 with `NYL-RUN-CANCELLED`, without a transition commit. The next run
-takes over at once, as after a crash.
+takes over at once, as after a crash. Until then, `nyl status` reports the
+cancelled run with `NYL-RUN-UNIMPORTED` and the units it left uncertain.
 
 CI systems allow only seconds between the signal and a forced kill, and a
 killed run leaves its lease until the deadline. Do not cancel pipelines that

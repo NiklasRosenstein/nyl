@@ -1669,7 +1669,11 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    releases, so the break stays in effect until a run takes the run ref over.
 
 `nyl status` reads the lease and run refs, so it shows a run in progress and
-the units it is executing.
+the units it is executing. A finished run ref that no reconcile has imported
+yet, left by a cancelled run or one that lost its lease, is reported with
+`NYL-RUN-UNIMPORTED`: the units it left uncertain, those its record still
+names and those it checkpointed uncertain, read `uncertain` and status exits
+4; a run that recorded every unit only warns.
 
 The lease coordinates runs; it does not authorize them. Forges such as GitHub
 cannot protect refs outside branches and tags, so anyone with push access can

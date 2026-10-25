@@ -171,6 +171,34 @@ fn dead_runs(coordination: &Coordination, now: Timestamp) -> Vec<DeadRun<'_>> {
     dead
 }
 
+/// Finished run refs no reconcile has imported yet, cancelled or stopped
+/// after losing their lease, with the units they left uncertain: those their
+/// record still names (executed without a recorded outcome) and those they
+/// checkpointed with an uncertain condition of their own.
+fn unimported_runs(coordination: &Coordination) -> Vec<(&RunId, BTreeSet<UnitName>)> {
+    coordination
+        .runs
+        .iter()
+        .filter(|state| state.run.finished)
+        .map(|state| {
+            let mut units: BTreeSet<UnitName> = state.run.units.iter().cloned().collect();
+            units.extend(
+                state
+                    .checkpoints
+                    .iter()
+                    .filter(|checkpoint| {
+                        matches!(
+                            &checkpoint.observed.condition,
+                            Some(Condition::Uncertain { run, .. }) if run == &state.run.run
+                        )
+                    })
+                    .map(|checkpoint| checkpoint.desired.unit.name.clone()),
+            );
+            (&state.run.run, units)
+        })
+        .collect()
+}
+
 /// Who holds the environment at `now`: a live lease, and live, unfinished
 /// runs it does not name.
 fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder> {
@@ -315,6 +343,28 @@ pub fn status(
             ),
         ));
         half_executed.extend(lost.units);
+    }
+    for (run, units) in unimported_runs(coordination) {
+        let fix = "run nyl reconcile: it imports the run's checkpoints; a unit left uncertain runs again when its \
+                   recovery policy converges";
+        if units.is_empty() {
+            report.warnings.push(Finding::new(
+                Code::RunUnimported,
+                format!("run {run} ended without a transition commit; its checkpoints wait for the next reconcile"),
+                fix,
+            ));
+        } else {
+            let names = units.iter().map(UnitName::as_str).collect::<Vec<_>>().join(", ");
+            report.errors.push(Finding::new(
+                Code::RunUnimported,
+                format!("run {run} ended without a transition commit and left {names} uncertain"),
+                format!(
+                    "{fix}, otherwise check it and run `nyl recover -e {environment} --unit <unit> --retry --reason \
+                     <text>` after that reconcile"
+                ),
+            ));
+            half_executed.extend(units);
+        }
     }
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
@@ -603,9 +653,11 @@ mod tests {
         assert_eq!(report.errors[0].code, Code::LeaseLost);
         assert_eq!(report.exit, ExitCategory::Uncertain);
 
-        // Once the broken run's ref says it finished, nothing was lost.
+        // Once the broken run's ref says it finished with every unit
+        // recorded, nothing was lost; it only waits to be imported.
         let mut finished = coordination.clone();
         finished.runs[0].run.finished = true;
+        finished.runs[0].run.units.clear();
         let report = status(
             &EnvironmentName::new("dev").unwrap(),
             &snapshot,
@@ -617,7 +669,72 @@ mod tests {
             Some(UnitState::Current)
         );
         assert!(report.errors.is_empty());
+        assert_eq!(codes(&report.warnings), [Code::RunUnimported]);
         assert_eq!(report.exit, ExitCategory::Ok);
+    }
+
+    /// Catches status reporting units as current while a cancelled run's
+    /// ref, not yet imported, holds them uncertain: the ones it was running
+    /// at the signal (checkpointed uncertain) and the ones it executed
+    /// without recording an outcome (still named by its finished record).
+    #[test]
+    fn test_status_reports_units_an_unimported_run_left_uncertain() {
+        let snapshot = EnvironmentSnapshot {
+            desired: BTreeMap::from([
+                (UnitName::new("network").unwrap(), desired(1, Some(key('a')))),
+                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
+                (UnitName::new("db").unwrap(), desired_named("db", 4, Some(key('a')))),
+            ]),
+            observed: BTreeMap::from([
+                (UnitName::new("network").unwrap(), observed(1, Some(key('a')))),
+                (UnitName::new("web").unwrap(), observed_named("web", 3, Some(key('a')))),
+                (UnitName::new("db").unwrap(), observed_named("db", 4, Some(key('a')))),
+            ]),
+            ..EnvironmentSnapshot::default()
+        };
+        let mut cancelled = observed_named("web", 3, Some(key('a')));
+        cancelled.condition = Some(condition(json!({
+            "state": "uncertain", "since": "2026-01-01T00:00:00Z", "run": RUN, "reason": "cancelled"
+        })));
+        let run = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": RUN, "runner": "ci",
+            "operation": "reconcile", "deadline": "2026-01-01T01:00:00Z", "units": ["db"],
+            "finished": true
+        }))
+        .unwrap();
+        let coordination = Coordination {
+            lease: None,
+            runs: vec![RunState {
+                run,
+                checkpoints: vec![nyl_core::orchestration::ports::Checkpoint {
+                    desired: desired_named("web", 3, Some(key('a'))),
+                    observed: cancelled,
+                    artifacts: BTreeMap::new(),
+                }],
+                created: Vec::new(),
+                foreign: false,
+                version: "r1".to_owned(),
+            }],
+            evidence: Vec::new(),
+        };
+        let report = status(
+            &EnvironmentName::new("dev").unwrap(),
+            &snapshot,
+            &coordination,
+            Timestamp::UNIX_EPOCH,
+        );
+
+        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
+        assert_eq!(unit("web").state, Some(UnitState::Uncertain));
+        assert_eq!(unit("db").state, Some(UnitState::Uncertain));
+        assert_eq!(unit("network").state, Some(UnitState::Current));
+        assert_eq!(codes(&report.errors), [Code::RunUnimported]);
+        assert!(
+            report.errors[0].message.contains("left db, web uncertain"),
+            "{:?}",
+            report.errors
+        );
+        assert_eq!(report.exit, ExitCategory::Uncertain);
     }
 
     /// Catches status reporting a crashed run, whose lease expired without

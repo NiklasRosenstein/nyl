@@ -118,7 +118,7 @@ impl ExitCategory {
     pub fn of_finding(finding: &Finding) -> Self {
         match finding.code {
             Code::LeaseHeld => Self::Incomplete,
-            Code::LeaseLost | Code::RunCancelled => Self::Uncertain,
+            Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,
         }
     }

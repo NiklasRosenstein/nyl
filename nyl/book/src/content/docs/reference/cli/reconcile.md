@@ -101,6 +101,7 @@ Besides the codes above, a reconcile reports:
 | `NYL-UNIT-UNCERTAIN` | A unit may have had effects without a recorded result. Check what it did; a converging unit runs again in the next reconcile, others need [`nyl recover`](/nyl/reference/cli/recover/). |
 | `NYL-RUN-SUPERSEDED` | A dead run checkpointed a unit with an execution key the new resolution no longer has. Its effects are real, so the unit becomes `uncertain` when the result recorded effects. |
 | `NYL-RUN-LATE-CHECKPOINT` | A run whose lease was broken checkpointed a unit after it was marked `uncertain`. The checkpoint stays as evidence; adopt it with `nyl recover --accept <run>` or run the unit again with `--retry`. |
+| `NYL-RUN-UNIMPORTED` | Reported by `nyl status`: a run ended without its transition commit, cancelled or after losing its lease, and the next reconcile imports its checkpoints. Units it left uncertain show as `uncertain` until then. |
 | `NYL-RUN-CANCELLED` | The run was cancelled by a signal. Run `nyl reconcile` again to take over its checkpoints. |
 | `NYL-LEASE-LOST` | Another invocation took over or deleted the lease. The run pushed nothing; the next run imports its checkpoints. |
 | `NYL-STATE-LOCAL-TIP` | A remote state ref's tip is a `Nyl-Local` commit pushed by hand. Repair it with [`nyl state restore`](/nyl/reference/cli/state/#nyl-state-restore). |
