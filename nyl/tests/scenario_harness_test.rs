@@ -12,18 +12,7 @@ use scenario::REACHED;
 /// Scenarios the harness has reached that cannot run yet, with what they
 /// wait for. A scenario leaves this list in the change that makes it run, so
 /// none is skipped silently: every reached scenario runs, or is pending.
-const PENDING: [(&str, &str); 7] = [
-    ("recovery/after-effect", "run takeover (M3 part 4)"),
-    ("recovery/before-checkpoint", "run takeover (M3 part 4)"),
-    ("recovery/before-lease-update", "run takeover (M3 part 4)"),
-    ("recovery/before-push", "run takeover (M3 part 4)"),
-    ("walkthroughs/competing-runners", "run takeover (M3 part 4)"),
-    ("walkthroughs/deletion", "deletion and teardown (M3)"),
-    (
-        "walkthroughs/effects-without-receipt",
-        "run takeover and recovery (M3 part 4)",
-    ),
-];
+const PENDING: [(&str, &str); 1] = [("walkthroughs/deletion", "deletion and teardown (M3)")];
 
 /// Every reached scenario that is not pending runs in tier 1 and passes its
 /// checks.

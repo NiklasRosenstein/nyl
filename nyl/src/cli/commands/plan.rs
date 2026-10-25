@@ -58,6 +58,7 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         source: args.source.as_deref(),
         wait: None,
         local: None,
+        cancellation: nyl_orchestration::shell::run::Cancellation::default(),
     })?;
     // A plan writes nothing, so it reads through a read-only store and needs
     // no commit identity.

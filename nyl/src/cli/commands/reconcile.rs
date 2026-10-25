@@ -3,8 +3,8 @@
 //!
 //! Contract: [Execution](../../../../design/orchestration-core.md#execution).
 //! Exit categories: 0 all selected units current; 2 blocked, held, awaiting
-//! approval, or the lease is held; 3 an execution failed; 4 uncertain or the
-//! lease was lost; 1 error; the most severe wins (4 > 3 > 1 > 2 > 0).
+//! approval, or the lease is held; 3 an execution failed; 4 uncertain, the
+//! lease was lost, or the run was cancelled by SIGINT or SIGTERM; 1 error; the most severe wins (4 > 3 > 1 > 2 > 0).
 
 use std::path::PathBuf;
 
@@ -105,6 +105,7 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
         source: args.source.as_deref(),
         wait: args.wait_lease,
         local: local.clone(),
+        cancellation: wiring.cancellation.clone(),
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),

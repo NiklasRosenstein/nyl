@@ -1021,6 +1021,7 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         Operation::Reconcile,
         base.settings.resolution_timeout,
         request.wait,
+        &request.cancellation,
     ) {
         Ok(held) => held,
         Err(LeaseError::Held(finding)) => {

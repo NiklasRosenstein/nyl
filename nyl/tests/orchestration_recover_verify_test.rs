@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser as _;
 use nyl::cli::Cli;
 use nyl::orchestration::run::{CommandOutcome, Wiring};
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
     Capabilities, Driver, DriverOperation, DriverResult, DriverSet, ExecStatus, ExecutionContext, Inspection,
     KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported,
@@ -32,7 +33,7 @@ use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
 use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 use nyl_orchestration::run_report::EnvironmentRunReport;
-use nyl_orchestration::shell::run::{RunContext, RunRequest};
+use nyl_orchestration::shell::run::{Cancellation, RunContext, RunRequest};
 use nyl_orchestration::shell::verify;
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
@@ -121,6 +122,7 @@ impl Harness {
             runner: "test-runner".to_owned(),
             author: Some(AUTHOR.parse().unwrap()),
             process_env,
+            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
         };
         let argv = std::iter::once("nyl".to_owned())
             .chain(args.iter().map(|arg| (*arg).to_owned()))
@@ -558,6 +560,8 @@ struct Recorder {
     bare: PathBuf,
     advance: Mutex<BTreeMap<String, Duration>>,
     seen: Mutex<Vec<Seen>>,
+    /// Cancelled by the first `verify` call, as a signal during it would.
+    cancel: Mutex<Option<Cancellation>>,
 }
 
 impl Recorder {
@@ -643,6 +647,9 @@ impl Driver for Recording {
         if let Some(advance) = advance {
             self.recorder.clock.advance(advance);
         }
+        if let Some(cancellation) = self.recorder.cancel.lock().unwrap().as_ref() {
+            cancellation.cancel(nyl_orchestration::shell::run::SIGTERM);
+        }
         self.inner.verify(ctx, unit, receipt)
     }
     fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
@@ -678,6 +685,7 @@ impl Harness {
             bare: harness.world.bare(),
             advance: Mutex::new(BTreeMap::new()),
             seen: Mutex::new(Vec::new()),
+            cancel: Mutex::new(None),
         });
         let fakes: [(&str, Arc<dyn Driver>); 3] = [
             ("OpenTofu", Arc::new(FakeInfra::new(harness.script.clone()))),
@@ -702,6 +710,11 @@ impl Harness {
     /// `verify` through the shell's API on a fresh clone of `main`, with a
     /// concurrency limit the command line does not offer.
     fn verify_with_concurrency(&self, concurrency: usize) -> EnvironmentRunReport {
+        self.verify_cancelled_by(concurrency, Cancellation::default())
+    }
+
+    /// [`Self::verify_with_concurrency`] with `cancellation`.
+    fn verify_cancelled_by(&self, concurrency: usize, cancellation: Cancellation) -> EnvironmentRunReport {
         let clone = self.world.fresh_clone("main");
         let (store, location) = self.store();
         let entry_commit = CommitId::new(git_output(&clone, &["rev-parse", "HEAD"])).unwrap();
@@ -719,7 +732,7 @@ impl Harness {
             source_override: None,
             wait: None,
             local: None,
-            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+            cancellation,
         };
         let base = Context {
             store: &store,
@@ -783,6 +796,28 @@ fn test_verify_lease_covers_every_unit_deadline_across_batches() {
     // The last unit starts 27 minutes in and keeps its whole timeout.
     let web = seen.iter().find(|call| call.unit == "web-image").unwrap();
     assert_eq!(web.deadline, Duration::from_mins(60).after(web.now));
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+}
+
+/// A verify cancelled during a batch ("Runs and leases" item 7) starts no
+/// further batch, writes no observed commit, releases the lease, and exits
+/// 4 with `NYL-RUN-CANCELLED`, instead of verifying every unit after the
+/// signal while CI waits to kill the job.
+#[test]
+fn test_cancelled_verify_starts_no_batch_and_records_nothing() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let observed = harness.tip(OBSERVED);
+    let cancellation = Cancellation::new();
+    *recorder.cancel.lock().unwrap() = Some(cancellation.clone());
+
+    let report = harness.verify_cancelled_by(1, cancellation);
+    assert_eq!(report.exit.code(), 4, "{report:#?}");
+    let codes: Vec<Code> = report.errors.iter().map(|finding| finding.code).collect();
+    assert_eq!(codes, [Code::RunCancelled], "{report:#?}");
+    assert_eq!(recorder.seen.lock().unwrap().len(), 1, "one batch ran");
+    assert_eq!(harness.tip(OBSERVED), observed, "a cancelled verify records nothing");
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
 }
 

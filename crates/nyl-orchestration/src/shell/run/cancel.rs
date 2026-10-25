@@ -70,6 +70,8 @@ impl PartialEq for Cancellation {
     }
 }
 
+impl Eq for Cancellation {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

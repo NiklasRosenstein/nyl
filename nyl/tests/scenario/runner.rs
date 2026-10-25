@@ -142,6 +142,7 @@ impl Shared {
             runner: "scenario".to_owned(),
             author: Some(self.author.clone()),
             process_env: self.process_env.clone(),
+            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
         }
     }
 }

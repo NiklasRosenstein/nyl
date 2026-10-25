@@ -290,6 +290,38 @@ fn test_a_held_lease_refuses_with_exit_two_or_waits() {
             "{refused:?}"
         );
 
+        // A signal stops the wait ("Runs and leases" item 7): the operation
+        // refuses with NYL-RUN-CANCELLED instead of waiting out --wait-lease.
+        let cancellation = nyl_orchestration::shell::run::Cancellation::new();
+        cancellation.cancel(nyl_orchestration::shell::run::SIGINT);
+        let cancelled = state::init(
+            &context,
+            &dev(),
+            &location,
+            false,
+            &Requested {
+                reason: None,
+                wait: Some(Duration::from_mins(30)),
+                cancellation,
+            },
+        );
+        assert_eq!(
+            cancelled.errors[0].code,
+            Code::RunCancelled,
+            "{}: {cancelled:?}",
+            world.name
+        );
+        assert_eq!(
+            world
+                .store
+                .coordination(&location, &dev())
+                .unwrap()
+                .lease
+                .unwrap()
+                .lease,
+            holder
+        );
+
         // Waiting long enough outlasts the holder's deadline: the test clock
         // advances by each poll instead of sleeping.
         let waited = state::init(
@@ -300,6 +332,7 @@ fn test_a_held_lease_refuses_with_exit_two_or_waits() {
             &Requested {
                 reason: None,
                 wait: Some(Duration::from_mins(30)),
+                ..Requested::default()
             },
         );
         assert_eq!(waited.outcome, Outcome::Done, "{}: {waited:?}", world.name);
