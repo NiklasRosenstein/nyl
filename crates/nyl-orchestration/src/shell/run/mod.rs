@@ -68,7 +68,6 @@ use crate::rules::sources::{
     effective_commit, pin_refs, pin_source_fields, root_local_paths, run_source_refs, source_request, source_revisions,
     unreachable, unsupported_source, SourceRequest,
 };
-use crate::rules::state_location::check_record;
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
 use crate::transition::{self, Trailers};
@@ -799,7 +798,12 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             return;
         }
     };
-    match check_record(snapshot.record.as_ref(), environment, &request.location) {
+    match super::local::check_record(
+        context.base.store,
+        snapshot.record.as_ref(),
+        environment,
+        &request.location,
+    ) {
         Ok(()) => {}
         // A plan of an environment without state shows what its first run does.
         Err(finding) if finding.code == Code::StateMissing => report.warnings.push(finding),
@@ -969,6 +973,23 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let mut report = EnvironmentRunReport::new(environment.clone());
     let run = base.ids.run_id();
     report.run = Some(run.clone());
+    // A `--local` run checks for remote run refs it would have to take over
+    // before it takes the lease, so a refusal leaves the remote lease (and
+    // the break it may record) as it was; it checks again once it holds it.
+    if request.local.is_some() {
+        let checked = base
+            .store
+            .coordination(&request.location, environment)
+            .map_err(|error| store_error(environment, &error))
+            .and_then(|coordination| {
+                crate::rules::local::check_leftovers(environment, &run, &coordination, base.clock.now())
+            });
+        if let Err(finding) = checked {
+            report.errors.push(finding);
+            report.finish(ReportKind::ReconcileReport);
+            return report;
+        }
+    }
     let held = match lease::acquire(
         base,
         &request.location,
@@ -1119,12 +1140,17 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
         };
-        if let Err(finding) = check_record(snapshot.record.as_ref(), &environment, &request.location) {
+        if let Err(finding) = super::local::check_record(
+            context.base.store,
+            snapshot.record.as_ref(),
+            &environment,
+            &request.location,
+        ) {
             self.report.errors.push(finding);
             return Ending::Release;
         }
         if request.local.is_none() {
-            if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location) {
+            if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location, &environment) {
                 self.report.errors.push(finding);
                 return Ending::Release;
             }

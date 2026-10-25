@@ -17,7 +17,6 @@ use serde_json::Value;
 use super::state::store_error;
 use super::Context;
 use crate::rules::references::{resolve_reference, ReferenceValue, ReferenceView};
-use crate::rules::state_location::check_record;
 use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport};
 
 /// `nyl status -e <env>`, with a `NYL-STATE-LOCAL-DIVERGED` warning when
@@ -33,15 +32,17 @@ pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &S
     };
     let environment_report = match context.store.snapshot(location) {
         Err(error) => failed(store_error(environment, &error)),
-        Ok(snapshot) => match check_record(snapshot.record.as_ref(), environment, location) {
-            Err(finding) => failed(finding),
-            Ok(()) => match context.store.coordination(location, environment) {
-                Err(error) => failed(store_error(environment, &error)),
-                Ok(coordination) => {
-                    crate::rules::unit_state::status(environment, &snapshot, &coordination, context.clock.now())
-                }
-            },
-        },
+        Ok(snapshot) => {
+            match super::local::check_record(context.store, snapshot.record.as_ref(), environment, location) {
+                Err(finding) => failed(finding),
+                Ok(()) => match context.store.coordination(location, environment) {
+                    Err(error) => failed(store_error(environment, &error)),
+                    Ok(coordination) => {
+                        crate::rules::unit_state::status(environment, &snapshot, &coordination, context.clock.now())
+                    }
+                },
+            }
+        }
     };
     let mut environment_report = environment_report;
     // Diverged local branches are reported, never an exit category.

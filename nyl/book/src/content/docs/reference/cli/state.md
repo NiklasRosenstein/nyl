@@ -116,14 +116,15 @@ command pairs it with the other ref's commit of the same transition, the one
 with the same `Nyl-Run-Id` trailer, else the one its `Nyl-Read-Desired` or
 `Nyl-Read-Observed` trailer names, so it never restores a desired and
 observed pair that did not exist together. A commit outside the state refs, a
-`Nyl-Local` commit, or one whose pair cannot be found exits 1 with
+`Nyl-Local` commit, a transition commit of another environment sharing the
+refs through `path`, or one whose pair cannot be found exits 1 with
 `NYL-STATE-RESTORE-INVALID`.
 
 It takes the lease and writes one desired and one observed commit on top of
 the current tips, so protected branches need no force push. The commits
 restore every unit document, artifact, observation, and attestation of that
 commit, carry `state.yaml` forward with a `state-restored` event, and list
-the rejected local commits. Admission is never restored. When the state
+the environment's rejected local commits. Admission is never restored. When the state
 already holds that content and its tips are not local, nothing changes.
 
 ## `nyl lease break`

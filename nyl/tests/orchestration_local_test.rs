@@ -458,6 +458,41 @@ fn test_local_run_refuses_while_a_dead_remote_run_awaits_takeover() {
     assert_eq!(harness.local_ref(DESIRED), harness.remote_ref(DESIRED));
 }
 
+/// After `nyl lease break`, the lease rule lets a run take over at once,
+/// even while the broken holder's run ref is within its deadline. A
+/// `--local` run, which never imports that run ref, refuses before taking
+/// the lease, so the break stays for the next remote run to take over.
+#[test]
+fn test_local_run_refuses_after_a_lease_break_and_keeps_the_break() {
+    let harness = Harness::new();
+    harness.init(&harness.remote);
+    let ci = harness.ci_store();
+    let run = harness.ids.run_id();
+    let deadline = start() + chrono::Duration::hours(1);
+    ci.take_lease(&harness.remote, &dev(), &harness.lease(&run, deadline), None)
+        .unwrap();
+    ci.write_run(&harness.remote, &dev(), &harness.run_record(&run, deadline), None)
+        .unwrap();
+    let context = harness.context(&harness.store, &NoFaults);
+    let broken = state_ops::break_lease(&context, &dev(), &harness.remote, Some("runner gone".to_owned()));
+    assert_eq!(broken.outcome, Outcome::Done, "{broken:?}");
+    let lease_ref = "refs/nyl/dev/lease";
+    let run_ref = format!("refs/nyl/dev/runs/{run}");
+    let before = (harness.remote_ref(lease_ref), harness.remote_ref(&run_ref));
+    assert!(before.0.is_some() && before.1.is_some());
+
+    let refused = harness.reconcile(local_run(LeaseScope::Remote));
+    assert_eq!(refused.exit.code(), 1, "{refused:#?}");
+    assert_eq!(codes(&refused.errors), vec![Code::LocalRunLeftovers]);
+    assert!(refused.errors[0].message.contains(run.as_str()));
+    assert!(executed(&refused).is_empty());
+    assert_eq!((harness.remote_ref(lease_ref), harness.remote_ref(&run_ref)), before);
+
+    // The break stands: an ordinary run takes over at once.
+    let takeover = harness.reconcile(None);
+    assert!(!codes(&takeover.errors).contains(&Code::LeaseHeld), "{takeover:#?}");
+}
+
 /// Local branches pushed by hand put `Nyl-Local` commits at the remote
 /// tips: the next ordinary run refuses, naming the commit to restore, and
 /// `state restore` writes forward commits restoring it, after which runs
@@ -555,7 +590,18 @@ fn test_state_without_a_remote_moves_to_one_with_its_history() {
 
     let missing = harness.reconcile(None);
     assert_eq!(codes(&missing.errors), vec![Code::StateMissing]);
-    assert!(missing.errors[0].fix.contains("nyl state move -e dev --from"));
+    assert_eq!(
+        missing.errors[0].fix,
+        "move the state and its history to the remote with `nyl state move -e dev --from local`"
+    );
+    // `status` explains it the same way.
+    let status = inspect::status(&harness.context(&harness.store, &NoFaults), &dev(), &harness.remote);
+    assert!(
+        status.environments[0].errors[0]
+            .fix
+            .contains("nyl state move -e dev --from local"),
+        "{status:#?}"
+    );
 
     let context = harness.context(&harness.store, &NoFaults);
     let moved = state_ops::relocate(&context, &dev(), &harness.remote, &local, &Requested::default());

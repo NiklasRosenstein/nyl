@@ -40,7 +40,8 @@ has no `origin`, those branches are the state. Runs are ordinary runs with the
 clone's own lease, and `nyl state init -e <env>` creates the state there.
 
 **Adding a remote.** Once the state repository resolves to a remote, a run
-finds no state there and exits 1 with `NYL-STATE-MISSING`. Move the state with
+finds no state there and exits 1 with `NYL-STATE-MISSING`, naming the move
+from the local branches. Move the state with
 [`nyl state move -e <env> --from local`](/nyl/reference/cli/state/#nyl-state-move):
 it pushes the branches' history to the remote, records the move there, and
 leaves the local branches following the remote.
@@ -63,9 +64,11 @@ pushing state:
   change is committed.
 - Units whose recovery policy is not `converge` run locally only when named
   with `--approve <unit>`; otherwise they wait as `awaiting-approval`.
-- It never imports remote run refs, so while remote state has dead runs to
-  take over it exits 1 with `NYL-LOCAL-RUN-LEFTOVERS`; an ordinary
-  `nyl reconcile -e <env>` takes them over first.
+- It never imports remote run refs, so while remote state has runs to take
+  over (finished, past their deadline, or the holder of a broken lease) it
+  exits 1 with `NYL-LOCAL-RUN-LEFTOVERS` before taking the lease, leaving the
+  lease and any break as they were; an ordinary `nyl reconcile -e <env>`
+  takes them over first.
 - `nyl status` and `nyl get` with `--local` show the local view.
 
 Once the remote moves, the local branches have diverged and Nyl stops
@@ -80,7 +83,10 @@ local receipts the remote does not reflect and proceeds only with `--discard
 
 Pushing local branches to the remote by hand puts `Nyl-Local` commits at its
 tips. Every run and state-writing command against that state then exits 1
-with `NYL-STATE-LOCAL-TIP`, naming the last commit without the trailer, and
+with `NYL-STATE-LOCAL-TIP`, naming the last commit without the trailer. When
+several environments share the state refs through `path`, each looks only at
+its own commits, those whose `Nyl-Environment` trailer names it, so one
+environment's pushed local commits refuse only that environment. Then
 [`nyl state restore -e <env> --to <commit>`](/nyl/reference/cli/state/#nyl-state-restore)
 writes forward commits restoring that commit's content, so protected branches
 need no force push.

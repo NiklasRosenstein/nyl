@@ -263,23 +263,54 @@ impl StateStore for LocalStore<'_> {
     }
 }
 
-/// How far back [`check_remote_tips`] looks for the last commit without the
-/// `Nyl-Local` trailer.
+/// How far back [`check_remote_tips`] first looks for the environment's
+/// last commit without the `Nyl-Local` trailer.
 pub const TIP_HISTORY: usize = 100;
 
-/// Refuse when a state ref of the remote `location` has a `Nyl-Local`
-/// commit at its tip (`NYL-STATE-LOCAL-TIP`), naming the last commit without
-/// the trailer. A [`StateLocation::LOCAL_REPOSITORY`] location, whose local
+/// How far back [`environment_log`] looks at most for an environment's
+/// commits on a ref that several environments share.
+const SHARED_HISTORY: usize = 10_000;
+
+/// The commits of `environment` on one state ref of `location`, newest
+/// first ([`rules::local::environment_log`]), read `limit` entries back. A
+/// ref that several environments share through `path` is read further back
+/// (up to [`SHARED_HISTORY`]) until it shows one of the environment's
+/// commits, so another environment's recent history cannot hide its tip.
+pub(crate) fn environment_log(
+    store: &dyn StateStore,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    side: StateSide,
+    limit: usize,
+) -> StateResult<Vec<LogEntry>> {
+    let mut limit = limit;
+    loop {
+        let log = store.log(location, side, limit)?;
+        let own = rules::local::environment_log(environment, &log);
+        if !own.is_empty() || log.len() < limit || limit >= SHARED_HISTORY {
+            return Ok(own);
+        }
+        limit = (limit * 10).min(SHARED_HISTORY);
+    }
+}
+
+/// Refuse when the newest commit of `environment` on a state ref of the
+/// remote `location` is a `Nyl-Local` commit (`NYL-STATE-LOCAL-TIP`), naming
+/// its last commit without the trailer. Several environments may share the
+/// refs through `path`, so only commits whose `Nyl-Environment` trailer names
+/// `environment` count: another environment's pushed local transitions never
+/// refuse this one, and a later commit of another environment never hides
+/// this one's. A [`StateLocation::LOCAL_REPOSITORY`] location, whose local
 /// branches are the state, passes. So does a store whose
 /// [`StateStore::log`] returns `StateError::Unavailable`: a store without
 /// history cannot hold `Nyl-Local` commits (the Git and memory stores
 /// implement `log`). Every state-writing operation against remote state
 /// calls it after reading its snapshot, except `state restore`, the fix.
-///
-/// The environment the refusal names is the tip's `Nyl-Environment`
-/// trailer, which every transition commit, and so every `Nyl-Local` one,
-/// carries.
-pub fn check_remote_tips(store: &dyn StateStore, location: &StateLocation) -> Result<(), Finding> {
+pub fn check_remote_tips(
+    store: &dyn StateStore,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+) -> Result<(), Finding> {
     if location.is_local() {
         return Ok(());
     }
@@ -289,7 +320,7 @@ pub fn check_remote_tips(store: &dyn StateStore, location: &StateLocation) -> Re
         &StateSide::ALL
     };
     for side in sides {
-        let log = match store.log(location, *side, TIP_HISTORY) {
+        let log = match environment_log(store, location, environment, *side, TIP_HISTORY) {
             Ok(log) => log,
             Err(StateError::Unavailable(_)) => return Ok(()),
             Err(error) => {
@@ -307,15 +338,33 @@ pub fn check_remote_tips(store: &dyn StateStore, location: &StateLocation) -> Re
                 ))
             }
         };
-        let environment = log
-            .first()
-            .and_then(|tip| crate::transition::trailer(&tip.message, "Nyl-Environment"))
-            .and_then(|name| EnvironmentName::new(name.trim()).ok());
-        if let Some(environment) = environment {
-            rules::local::check_tip(&environment, *side, &log)?;
-        }
+        rules::local::check_tip(environment, *side, &log)?;
     }
     Ok(())
+}
+
+/// [`rules::state_location::check_record`], explaining missing remote state
+/// whose clone holds it on local branches: the state started without a
+/// remote, and `nyl state move -e <env> --from local` takes it there
+/// ([`rules::local::missing_on_remote`]). Reading the local branches is best
+/// effort: when it fails, the plain finding stands.
+pub fn check_record(
+    store: &dyn StateStore,
+    record: Option<&nyl_core::orchestration::state::StateRecord>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+) -> Result<(), Finding> {
+    let Err(finding) = rules::state_location::check_record(record, environment, location) else {
+        return Ok(());
+    };
+    if finding.code != Code::StateMissing || location.is_local() {
+        return Err(finding);
+    }
+    let local = rules::local::view(location)
+        .ok()
+        .and_then(|view| store.snapshot(&view).ok())
+        .and_then(|snapshot| snapshot.record);
+    Err(rules::local::missing_on_remote(environment, location, local.as_ref()).unwrap_or(finding))
 }
 
 /// Add a `--local` run's warnings to its report: `NYL-LOCAL-RUN-UNRECORDED`
@@ -519,12 +568,12 @@ mod tests {
             self.record("import_history", from);
             Ok(())
         }
-        fn log(&self, location: &StateLocation, _: StateSide, _: usize) -> StateResult<Vec<LogEntry>> {
+        fn log(&self, location: &StateLocation, _: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
             self.record("log", location);
             if self.log_unavailable {
                 return Err(StateError::Unavailable("no history".to_owned()));
             }
-            Ok(self.log.clone())
+            Ok(self.log.iter().take(limit).cloned().collect())
         }
         fn commit_local(
             &self,
@@ -650,12 +699,17 @@ mod tests {
     }
 
     fn entry(digit: char, local: bool) -> LogEntry {
-        let mut message = format!("nyl: reconcile dev\n\nNyl-Run-Id: {RUN_A}\nNyl-Environment: dev\n");
+        entry_of("dev", &digit.to_string().repeat(40), local)
+    }
+
+    fn entry_of(environment: &str, commit: &str, local: bool) -> LogEntry {
+        let mut message =
+            format!("nyl: reconcile {environment}\n\nNyl-Run-Id: {RUN_A}\nNyl-Environment: {environment}\n");
         if local {
             message.push_str("Nyl-Local: true\n");
         }
         LogEntry {
-            commit: nyl_core::orchestration::ids::CommitId::new(digit.to_string().repeat(40)).unwrap(),
+            commit: nyl_core::orchestration::ids::CommitId::new(commit).unwrap(),
             message,
         }
     }
@@ -668,23 +722,62 @@ mod tests {
             log: vec![entry('2', true), entry('1', false)],
             ..Recording::default()
         };
-        let finding = check_remote_tips(&pushed, &remote()).unwrap_err();
+        let finding = check_remote_tips(&pushed, &remote(), &dev()).unwrap_err();
         assert_eq!(finding.code, Code::StateLocalTip);
         assert!(finding.fix.contains(&"1".repeat(40)), "{}", finding.fix);
         let clean = Recording {
             log: vec![entry('1', false)],
             ..Recording::default()
         };
-        assert!(check_remote_tips(&clean, &remote()).is_ok());
+        assert!(check_remote_tips(&clean, &remote(), &dev()).is_ok());
         let without_history = Recording {
             log_unavailable: true,
             ..Recording::default()
         };
-        assert!(check_remote_tips(&without_history, &remote()).is_ok());
+        assert!(check_remote_tips(&without_history, &remote(), &dev()).is_ok());
         // State on the clone's own branches has no remote to protect.
         let mut local = remote();
         local.repository = LOCAL.to_owned();
-        assert!(check_remote_tips(&pushed, &local).is_ok());
+        assert!(check_remote_tips(&pushed, &local, &dev()).is_ok());
         assert_eq!(pushed.calls().iter().filter(|(name, _)| name == "log").count(), 1);
+    }
+
+    /// Catches environments sharing refs through `path` refusing each other:
+    /// another environment's pushed local commit at the tip refusing this
+    /// one (and naming the wrong environment), or a later commit of another
+    /// environment, even beyond the first read, hiding this one's local tip.
+    #[test]
+    fn test_check_remote_tips_looks_at_the_environments_own_commits() {
+        let preview = EnvironmentName::new("preview").unwrap();
+        let shared = Recording {
+            log: vec![
+                entry_of("preview", &"b".repeat(40), true),
+                entry_of("dev", &"a".repeat(40), false),
+            ],
+            ..Recording::default()
+        };
+        assert!(check_remote_tips(&shared, &remote(), &dev()).is_ok());
+        let finding = check_remote_tips(&shared, &remote(), &preview).unwrap_err();
+        assert_eq!(finding.code, Code::StateLocalTip);
+        assert!(finding.message.contains("of preview"), "{}", finding.message);
+        assert!(
+            finding.fix.contains("nyl state restore -e preview --to <commit>"),
+            "{}",
+            finding.fix
+        );
+
+        let mut log = (0..TIP_HISTORY + 50)
+            .map(|index| entry_of("preview", &format!("{index:040x}"), false))
+            .collect::<Vec<_>>();
+        log.push(entry_of("dev", &"c".repeat(40), true));
+        log.push(entry_of("dev", &"d".repeat(40), false));
+        let hidden = Recording {
+            log,
+            ..Recording::default()
+        };
+        let finding = check_remote_tips(&hidden, &remote(), &dev()).unwrap_err();
+        assert_eq!(finding.code, Code::StateLocalTip);
+        assert!(finding.fix.contains(&"d".repeat(40)), "{}", finding.fix);
+        assert!(check_remote_tips(&hidden, &remote(), &preview).is_ok());
     }
 }

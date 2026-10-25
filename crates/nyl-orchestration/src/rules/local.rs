@@ -37,7 +37,7 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry, StateSide, StateTips, TransitionChanges,
 };
-use nyl_core::orchestration::state::{ObservedUnit, StateLocation};
+use nyl_core::orchestration::state::{ObservedUnit, StateLocation, StateRecord};
 use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::state_location::describe;
@@ -85,8 +85,9 @@ pub fn is_local_commit(message: &str) -> bool {
     trailer(message, "Nyl-Local").is_some_and(|value| value.trim() == "true")
 }
 
-/// Refuse when the newest entry of a remote state ref's `log` is a
-/// `Nyl-Local` commit, naming the last commit without the trailer.
+/// Refuse when the newest of an environment's commits on a remote state
+/// ref (its `log` filtered by [`environment_log`]) is a `Nyl-Local` commit,
+/// naming the last commit without the trailer.
 pub fn check_tip(environment: &EnvironmentName, side: StateSide, log: &[LogEntry]) -> Result<(), Finding> {
     let Some(tip) = log.first() else {
         return Ok(());
@@ -105,7 +106,7 @@ pub fn check_tip(environment: &EnvironmentName, side: StateSide, log: &[LogEntry
             last.commit
         ),
         None => format!(
-            "none of the last {} commits of the ref is without the trailer; name the commit to restore with `nyl state restore -e {environment} --to <commit>`",
+            "none of the last {} commits of {environment} on the ref is without the trailer; name the commit to restore with `nyl state restore -e {environment} --to <commit>`",
             log.len()
         ),
     };
@@ -279,21 +280,33 @@ pub fn unrecorded_warning(environment: &EnvironmentName, unit: &UnitName) -> Fin
 }
 
 /// Refuse a `--local` run (`NYL-LOCAL-RUN-LEFTOVERS`) when `coordination`
-/// holds a foreign (remote) run ref of another run that is finished or past
-/// its deadline: remote state has not taken it over yet, and a local run
-/// never imports remote run refs. The fix names `nyl reconcile -e <env>`
-/// against remote state. Live foreign run refs block through the lease rule.
+/// holds a foreign (remote) run ref of another run that remote state has to
+/// take over: one that is finished, past its deadline, or whose run held a
+/// broken lease (`nyl lease break` declares it gone, so the lease rule lets
+/// a run take the lease at once). A local run never imports remote run refs,
+/// so it would leave those units unmarked, and taking the broken lease would
+/// erase the break that lets the next remote run take over. The fix names
+/// `nyl reconcile -e <env>` against remote state. Other live foreign run
+/// refs block through the lease rule.
+///
+/// The run shell checks before it takes the lease, so a refused run leaves
+/// the remote lease and run refs as they were, and again once it holds it.
 pub fn check_leftovers(
     environment: &EnvironmentName,
     run: &RunId,
     coordination: &Coordination,
     now: Timestamp,
 ) -> Result<(), Finding> {
+    let broken = coordination
+        .lease
+        .as_ref()
+        .filter(|held| held.lease.broken.is_some())
+        .map(|held| &held.lease.run);
     let dead = coordination
         .runs
         .iter()
         .filter(|state| state.foreign && state.run.run != *run)
-        .filter(|state| state.run.finished || state.run.deadline <= now)
+        .filter(|state| state.run.finished || state.run.deadline <= now || Some(&state.run.run) == broken)
         .map(|state| state.run.run.to_string())
         .collect::<Vec<_>>();
     if dead.is_empty() {
@@ -312,13 +325,57 @@ pub fn check_leftovers(
     ))
 }
 
+/// The commit's `Nyl-Environment` trailer, which every transition commit
+/// carries.
+fn commit_environment(message: &str) -> Option<&str> {
+    trailer(message, "Nyl-Environment").map(str::trim)
+}
+
+/// The entries of a state ref's `log` that belong to `environment`, newest
+/// first: several environments may share one ref through `path`, so the tip
+/// check, the rejected transitions, and `state restore` look only at the
+/// environment's own commits, those whose `Nyl-Environment` trailer names it.
+pub fn environment_log(environment: &EnvironmentName, log: &[LogEntry]) -> Vec<LogEntry> {
+    log.iter()
+        .filter(|entry| commit_environment(&entry.message) == Some(environment.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// `NYL-STATE-MISSING` for remote state that is missing while the clone's
+/// local branches of the same refs hold the environment's state, recorded
+/// as local: a remote was added after the state started without one, and
+/// `nyl state move --from local` takes it there. `None` when the local
+/// branches hold no such state.
+pub fn missing_on_remote(
+    environment: &EnvironmentName,
+    configured: &StateLocation,
+    local_record: Option<&StateRecord>,
+) -> Option<Finding> {
+    let record = local_record?;
+    if configured.is_local() || !record.location.is_local() || &record.environment != environment {
+        return None;
+    }
+    Some(Finding::new(
+        Code::StateMissing,
+        format!(
+            "{environment} has no state at {}, but this clone's local branches hold its state from before the state repository had a remote",
+            describe(configured)
+        ),
+        format!(
+            "move the state and its history to the remote with `nyl state move -e {environment} --from local`"
+        ),
+    ))
+}
+
 /// The tips `nyl state restore --to <to>` restores: `to` is a commit of
 /// one side's log (newest first, as [`StateStore::log`](nyl_core::orchestration::ports::StateStore::log)
 /// reads it). The other side is the commit carrying the same `Nyl-Run-Id`
 /// trailer, else the one `to`'s `Nyl-Read-Desired`/`Nyl-Read-Observed`
 /// trailer names. `NYL-STATE-RESTORE-INVALID` when `to` is in neither log,
 /// when either chosen commit is a `Nyl-Local` commit, or when the other side
-/// cannot be paired. With one shared ref, both tips are `to`.
+/// cannot be paired, or when `to` is a transition commit of another
+/// environment sharing the refs. With one shared ref, both tips are `to`.
 ///
 /// Both sides of one transition carry the same message, so among several
 /// commits of one run on the other side (a move writes two), the one with
@@ -354,6 +411,11 @@ pub fn restore_tips(
             Ok(())
         }
     };
+    if let Some(other) = commit_environment(&entry.message).filter(|name| *name != environment.as_str()) {
+        return Err(invalid(format!(
+            "{to} is a transition commit of environment {other}, not of {environment}"
+        )));
+    }
     refuse_local(&entry, "--to")?;
     if shared {
         return Ok(StateTips {
@@ -794,5 +856,97 @@ mod tests {
         assert!(is_local_commit(&message(RUN_A, None, true)));
         assert!(!is_local_commit(&message(RUN_A, None, false)));
         assert!(!is_local_commit("nyl: reconcile dev\n\nNyl-Local: false\n"));
+    }
+
+    /// Catches a `--local` run taking a broken remote lease while the broken
+    /// holder's run ref is still within its deadline: it would never import
+    /// that run ref, and would erase the break the next remote run needs.
+    #[test]
+    fn test_check_leftovers_refuses_the_broken_holders_live_run() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-24T10:00:00Z")
+            .unwrap()
+            .to_utc();
+        let mut held = HeldLease {
+            lease: serde_json::from_value(json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": RUN_C, "runner": "ci",
+                "operation": "reconcile", "deadline": "2026-09-24T11:00:00Z",
+                "takenAt": "2026-09-24T09:00:00Z"
+            }))
+            .unwrap(),
+            version: "v1".to_owned(),
+        };
+        let live = Coordination {
+            lease: Some(held.clone()),
+            runs: vec![run_state(RUN_C, "2026-09-24T11:00:00Z", false, true)],
+            evidence: Vec::new(),
+        };
+        let own = RunId::new(RUN_A).unwrap();
+        // Not broken: the lease rule blocks; nothing is left over.
+        assert!(check_leftovers(&dev(), &own, &live, now).is_ok());
+        held.lease.broken = Some(serde_json::from_value(json!({"by": "ops", "at": "2026-09-24T09:30:00Z"})).unwrap());
+        let broken = Coordination {
+            lease: Some(held),
+            ..live
+        };
+        let finding = check_leftovers(&dev(), &own, &broken, now).unwrap_err();
+        assert_eq!(finding.code, Code::LocalRunLeftovers);
+        assert!(finding.message.contains(RUN_C), "{}", finding.message);
+    }
+
+    fn commit_of(environment: &str, digit: char, run: &str, local: bool) -> LogEntry {
+        let mut text = message(run, None, local);
+        text.push_str("Nyl-Environment: ");
+        text.push_str(environment);
+        text.push('\n');
+        entry(digit, text)
+    }
+
+    /// Catches environments sharing refs through `path` judging, rejecting,
+    /// or restoring each other's commits.
+    #[test]
+    fn test_environment_log_and_restore_keep_to_the_environments_commits() {
+        let log = vec![
+            commit_of("preview", '3', RUN_C, true),
+            commit_of("dev", '2', RUN_B, true),
+            commit_of("preview", '1', RUN_A, false),
+        ];
+        let own = environment_log(&dev(), &log);
+        assert_eq!(
+            own.iter().map(|entry| entry.commit.clone()).collect::<Vec<_>>(),
+            vec![commit('2')]
+        );
+        assert_eq!(rejected(&own), vec![commit('2')]);
+        assert!(check_tip(&dev(), StateSide::Desired, &own).is_err());
+        let preview = EnvironmentName::new("preview").unwrap();
+        assert_eq!(rejected(&environment_log(&preview, &log)), vec![commit('3')]);
+
+        let finding = restore_tips(&dev(), &commit('1'), &log, &log, true).unwrap_err();
+        assert_eq!(finding.code, Code::StateRestoreInvalid);
+        assert!(finding.message.contains("environment preview"), "{}", finding.message);
+        assert!(restore_tips(&preview, &commit('1'), &log, &log, true).is_ok());
+    }
+
+    /// Catches a run against a newly added remote pointing at an unknown
+    /// old location when the state is on the clone's local branches.
+    #[test]
+    fn test_missing_on_remote_names_the_move_from_local() {
+        let mut local = remote();
+        StateLocation::LOCAL_REPOSITORY.clone_into(&mut local.repository);
+        let record = |location: &StateLocation, environment: &str| -> StateRecord {
+            serde_json::from_value(json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "StateRecord", "environment": environment,
+                "location": serde_json::to_value(location).unwrap(), "events": []
+            }))
+            .unwrap()
+        };
+        let finding = missing_on_remote(&dev(), &remote(), Some(&record(&local, "dev"))).unwrap();
+        assert_eq!(finding.code, Code::StateMissing);
+        assert_eq!(
+            finding.fix,
+            "move the state and its history to the remote with `nyl state move -e dev --from local`"
+        );
+        assert!(missing_on_remote(&dev(), &remote(), None).is_none());
+        assert!(missing_on_remote(&dev(), &remote(), Some(&record(&remote(), "dev"))).is_none());
+        assert!(missing_on_remote(&dev(), &remote(), Some(&record(&local, "preview"))).is_none());
     }
 }

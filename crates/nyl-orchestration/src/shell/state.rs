@@ -213,7 +213,7 @@ pub fn init(
                             .insert("note".to_owned(), json!("state already exists at this location"));
                         return report;
                     }
-                    if let Err(finding) = check_remote_tips(context.store, location) {
+                    if let Err(finding) = check_remote_tips(context.store, location, environment) {
                         return report.refused(finding);
                     }
                     // A fresh start drops every unit's documents.
@@ -274,7 +274,7 @@ pub fn forget(
             if let Err(finding) = check_record(snapshot.record.as_ref(), environment, location) {
                 return report.refused(finding);
             }
-            if let Err(finding) = check_remote_tips(context.store, location) {
+            if let Err(finding) = check_remote_tips(context.store, location, environment) {
                 return report.refused(finding);
             }
             let Some(desired) = snapshot.desired.get(unit) else {
@@ -424,11 +424,11 @@ fn move_holding(
         Err(error) => return report.refused(store_error(environment, &error)),
     };
     // Neither location may carry pushed local transitions at its tip.
-    if let Err(finding) = check_remote_tips(context.store, from) {
+    if let Err(finding) = check_remote_tips(context.store, from, environment) {
         return report.refused(finding);
     }
     if target.record.is_some() {
-        if let Err(finding) = check_remote_tips(context.store, to) {
+        if let Err(finding) = check_remote_tips(context.store, to, environment) {
             return report.refused(finding);
         }
     }
@@ -814,8 +814,10 @@ pub fn restore(
                 Err(error) => return report.refused(store_error(environment, &error)),
             };
             let mut changes = local_rule::restore_changes(&snapshot, &target);
-            let mut rejected = local_rule::rejected(desired_log);
-            for commit in local_rule::rejected(observed_log) {
+            // Only the environment's own local transitions are rejected:
+            // others sharing the refs through `path` keep theirs.
+            let mut rejected = local_rule::rejected(&local_rule::environment_log(environment, desired_log));
+            for commit in local_rule::rejected(&local_rule::environment_log(environment, observed_log)) {
                 if !rejected.contains(&commit) {
                     rejected.push(commit);
                 }
