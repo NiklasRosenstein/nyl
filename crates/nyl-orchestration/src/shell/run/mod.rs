@@ -73,7 +73,7 @@ use super::{store_error, Context};
 use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{desire, DesireInputs, Desired};
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
-use crate::rules::freshness::receipt_is_current;
+use crate::rules::freshness::{receipt_is_current, same_incarnation};
 use crate::rules::graph::{extract, topological_order};
 use crate::rules::references::{resolve_unit, ReferenceView};
 use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
@@ -775,11 +775,6 @@ fn blocked_by(unit: &DesiredUnit) -> Vec<BlockedBy> {
             }
         })
         .collect()
-}
-
-/// The observed document of the unit's current incarnation.
-fn same_incarnation<'o>(unit: &DesiredUnit, observed: Option<&'o ObservedUnit>) -> Option<&'o ObservedUnit> {
-    observed.filter(|observed| observed.unit.uid == unit.unit.uid)
 }
 
 /// The failure or uncertainty message of the unit's current incarnation.

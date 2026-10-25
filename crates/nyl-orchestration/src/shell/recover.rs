@@ -65,8 +65,8 @@ pub fn recover(
                 .collect();
             let desired = snapshot.desired.get(unit);
             let observed = snapshot.observed.get(unit);
-            let condition = observed
-                .filter(|observed| desired.is_some_and(|desired| desired.unit.uid == observed.unit.uid))
+            let condition = desired
+                .and_then(|desired| crate::rules::freshness::same_incarnation(desired, observed))
                 .and_then(|observed| observed.condition.as_ref());
             report.details.insert(
                 "condition".to_owned(),
