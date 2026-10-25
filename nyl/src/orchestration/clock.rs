@@ -49,7 +49,8 @@ impl Clock for AdvancingClock {
     }
 
     fn wait(&self, duration: Duration) {
-        *self.now.lock().expect("clock lock") += duration.to_chrono();
+        let mut now = self.now.lock().expect("clock lock");
+        *now = duration.after(*now);
     }
 }
 

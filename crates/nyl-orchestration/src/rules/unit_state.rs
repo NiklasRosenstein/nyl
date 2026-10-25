@@ -176,7 +176,7 @@ fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
 }
 
 /// The suggested next action for a unit's condition.
-fn condition_warning(unit: &UnitName, condition: &Condition) -> Finding {
+fn condition_warning(environment: &EnvironmentName, unit: &UnitName, condition: &Condition) -> Finding {
     match condition {
         Condition::Failed {
             retryable: true,
@@ -194,12 +194,20 @@ fn condition_warning(unit: &UnitName, condition: &Condition) -> Finding {
         } => Finding::new(
             Code::DriverError,
             format!("unit {unit} failed and is not retried automatically: {message}"),
-            format!("fix the cause, then run nyl recover --unit {unit}"),
+            format!(
+                "fix the cause, then start over with `nyl state init -e {environment} --fresh`, which runs every unit \
+                 again; for a Command, set idempotent: true if re-running is safe so later failures are retried \
+                 (`nyl recover --unit {unit}` arrives in a later part of M3)"
+            ),
         ),
         Condition::Uncertain { reason, .. } => Finding::new(
             Code::DriverError,
             format!("unit {unit} is uncertain: {reason}"),
-            format!("check what the execution did, then run nyl recover --unit {unit}"),
+            format!(
+                "check what the execution did; for a Command, set idempotent: true if re-running is safe and the next \
+                 nyl reconcile runs it again, otherwise start over with `nyl state init -e {environment} --fresh` \
+                 (`nyl recover --unit {unit}` arrives in a later part of M3)"
+            ),
         ),
     }
 }
@@ -220,8 +228,12 @@ pub fn status(
         report.errors.push(Finding::new(
             Code::LeaseLost,
             format!("run {run} lost its lease to nyl lease break before it finished"),
-            "run nyl reconcile to take over the environment and import the run's checkpoints, \
-             then check and nyl recover any unit left uncertain",
+            format!(
+                "run nyl reconcile to take over the environment and import the run's checkpoints, then check any \
+                 unit left uncertain: it runs again only when its recovery policy converges (a Command with \
+                 idempotent: true), otherwise start over with `nyl state init -e {environment} --fresh` \
+                 (`nyl recover` arrives in a later part of M3)"
+            ),
         ));
     }
     for (name, desired) in &snapshot.desired {
@@ -254,7 +266,7 @@ pub fn status(
                 Condition::Uncertain { reason, .. } => reason.clone(),
             });
             if desired.lifecycle == Lifecycle::Active {
-                unit.warnings.push(condition_warning(name, condition));
+                unit.warnings.push(condition_warning(environment, name, condition));
             }
         }
         report.units.insert(name.clone(), unit);
@@ -430,7 +442,11 @@ mod tests {
         let web = unit("web");
         assert_eq!(web.state, Some(UnitState::Failed));
         assert_eq!(web.receipt, Some(ReceiptState::Current));
-        assert!(web.warnings[0].fix.contains("nyl recover"), "{:?}", web.warnings);
+        assert!(
+            web.warnings[0].fix.contains("nyl state init -e dev --fresh"),
+            "{:?}",
+            web.warnings
+        );
         assert!(web.last_run.is_some());
         assert!(report.warnings[0].message.contains("by ci"), "{:?}", report.warnings);
         assert_eq!(report.exit, ExitCategory::Failed);

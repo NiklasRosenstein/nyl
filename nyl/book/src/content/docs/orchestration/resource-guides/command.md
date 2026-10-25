@@ -121,6 +121,11 @@ steps, `workingDir`, `idempotent`, `outputs`, the resolved `values`, the names
 in `env`, the content of the files `files` matches, and the stdout of
 `fingerprint`.
 
+The unit's desired document records `workingDir`, explicitly when omitted, and
+each `files` glob in worktree-rooted form, such as `/scripts/seed`. Moving
+`nyl.toml` while the files stay where they are therefore keeps the key, and the
+command does not run again.
+
 - Files outside `files` may be read but never run the command again. `files`
   never follows a symbolic link, and a glob matching one is an error.
 - `fingerprint` runs during resolution with the same environment as the other
@@ -145,6 +150,14 @@ Failures are retried only with `idempotent: true`. An uncertain execution runs
 again only with `idempotent: true` (recovery policy `converge`); otherwise it
 waits for an operator to recover it (`manual`). Idempotency is your claim,
 which Nyl cannot check.
+
+`nyl recover`, which clears a failure or an uncertain execution after you have
+checked it, arrives in a later part of milestone M3. Until then, a failure
+recorded without `idempotent: true` is never retried, even after you fix the
+script, and `nyl status` says so. To run the unit again, start over with
+`nyl state init -e <env> --fresh`, which makes every unit a new incarnation that
+executes at the next reconcile. An uncertain execution also runs again once you
+set `idempotent: true`.
 
 `verify` records a drift observation, never a receipt. It receives the same
 inputs and environment as `command`, without `NYL_OUTPUTS`. `teardown`

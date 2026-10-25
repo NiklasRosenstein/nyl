@@ -76,6 +76,12 @@ part removes the walkthroughs it makes pass from the harness's pending list.
      kinds that build from one.
    - Unit `env.secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until
      the common credential admission of part 6; `env.passthrough` works.
+   - References and `dependsOn` entries requiring `evidence: attested` or
+     naming `attestations` are rejected with `NYL-ATTESTATIONS-UNSUPPORTED`
+     until receipts record attestation results (M5/M6), so a bare receipt
+     never satisfies a stronger requirement.
+   - `nyl recover` follows in part 4. Until then a non-retryable failure is
+     left only by `nyl state init --fresh`, and status findings say so.
    - Each unit has one effective commit, and a unit whose source fields pin
      different commits is rejected. Per-field worktrees wait for M4.
    - `nyl validate` checks a `fromUnit` artifact reference only for the

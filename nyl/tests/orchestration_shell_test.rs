@@ -12,9 +12,12 @@ use std::sync::Arc;
 use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{DriverOperation, DriverSet};
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{CommitIdentity, SourceRenderer, SourceRepository, SourceResolver, StateStore};
-use nyl_core::orchestration::state::{FailureCategory, StateLocation};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ports::{
+    Checkpoint, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, SourceRenderer, SourceRepository,
+    SourceResolver, StateError, StateResult, StateStore, StateTips, Transition,
+};
+use nyl_core::orchestration::state::{FailureCategory, Lease, Run, Signal, StateLocation};
 use nyl_drivers::fake::{Script, Scripted};
 use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
@@ -560,4 +563,125 @@ fn test_discovery_works_in_a_source_resolver_worktree() {
     let inventory = nyl::gitops::discover_gitops_inventory(&worktree.join("nyl"), None).unwrap();
     let units = nyl::gitops::units::discover_units(&inventory).unwrap();
     assert_eq!(units.len(), 4);
+}
+
+/// A memory store whose `update_lease` fails with an unavailable store
+/// from its `fail_from`-th call on, as a network error would.
+struct FlakyLeaseStore {
+    inner: MemoryStateStore,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    fail_from: usize,
+}
+
+impl StateStore for FlakyLeaseStore {
+    fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
+        self.inner.snapshot(location)
+    }
+    fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {
+        self.inner.coordination(location, environment)
+    }
+    fn take_lease(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        expected: Option<&str>,
+    ) -> StateResult<String> {
+        self.inner.take_lease(location, environment, lease, expected)
+    }
+    fn update_lease(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        expected: &str,
+    ) -> StateResult<String> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if call >= self.fail_from {
+            return Err(StateError::Unavailable("push failed: connection reset".to_owned()));
+        }
+        self.inner.update_lease(location, environment, lease, expected)
+    }
+    fn release_lease(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        expected: &str,
+    ) -> StateResult<()> {
+        self.inner.release_lease(location, environment, expected)
+    }
+    fn delete_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()> {
+        self.inner.delete_lease(location, environment)
+    }
+    fn write_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        checkpoint: Option<&Checkpoint>,
+    ) -> StateResult<()> {
+        self.inner.write_run(location, environment, run, checkpoint)
+    }
+    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.delete_run(location, environment, run)
+    }
+    fn signals(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+    ) -> StateResult<Vec<Signal>> {
+        self.inner.signals(location, environment, run)
+    }
+    fn send_signal(&self, location: &StateLocation, environment: &EnvironmentName, signal: &Signal) -> StateResult<()> {
+        self.inner.send_signal(location, environment, signal)
+    }
+    fn commit(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        base: &StateTips,
+        transition: &Transition,
+        lease_version: &str,
+    ) -> StateResult<Committed> {
+        self.inner
+            .commit(location, environment, base, transition, lease_version)
+    }
+    fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
+        self.inner.import_history(from, to)
+    }
+}
+
+/// A store failure while taking the lease for a later wave, after an
+/// earlier wave's units ran and were checkpointed, keeps the run ref with
+/// their checkpoints, so the next run imports them instead of executing
+/// them again; the lease is released.
+#[test]
+fn test_store_failure_after_a_checkpoint_keeps_the_run_ref() {
+    let mut harness = Harness::new(&shared_project(), false);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    harness.store = Box::new(FlakyLeaseStore {
+        inner: MemoryStateStore::new(),
+        calls: calls.clone(),
+        fail_from: 3,
+    });
+    harness.init();
+    // The renewals before the first resolution and the first wave succeed;
+    // the renewal before re-resolving for the second wave fails.
+    calls.store(0, std::sync::atomic::Ordering::SeqCst);
+    let report = harness.reconcile(&[]);
+    assert_eq!(report.exit.code(), 1, "{report:#?}");
+    assert_eq!(codes(&report.errors), vec![Code::StateUnavailable], "{report:#?}");
+    let coordination = harness.store.coordination(&harness.location, &dev()).unwrap();
+    assert!(coordination.lease.is_none(), "the lease is released");
+    let [kept] = coordination.runs.as_slice() else {
+        panic!("the run ref is kept: {coordination:#?}");
+    };
+    assert!(kept.run.finished);
+    let checkpointed: BTreeSet<String> = kept
+        .checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.desired.unit.name.to_string())
+        .collect();
+    assert_eq!(checkpointed, set(&["network", "web-image"]));
 }

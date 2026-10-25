@@ -24,8 +24,8 @@ use std::path::{Component, Path, PathBuf};
 
 use nyl_core::orchestration::driver::{
     AttestationOutcome, Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
-    ExecutionContext, Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
-    ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner, Verification,
+    ExecutionContext, Inspection, KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies,
+    RecoveryPolicy, ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner, Verification,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{
@@ -467,6 +467,22 @@ impl Driver for CommandDriver {
 
     fn attestations(&self, spec: &Value) -> Vec<String> {
         parse(spec).map(|spec| own_attestations(&spec)).unwrap_or_default()
+    }
+
+    /// `workingDir`, which defaults to the `nyl.toml` directory, and the
+    /// `files` globs; the driver reads either form, so it runs the rooted
+    /// forms resolution records.
+    fn local_path_fields(&self, _spec: &Value) -> Vec<LocalPathField> {
+        vec![
+            LocalPathField {
+                pointer: "/workingDir".to_owned(),
+                defaults_to_project_dir: true,
+            },
+            LocalPathField {
+                pointer: "/files".to_owned(),
+                defaults_to_project_dir: false,
+            },
+        ]
     }
 
     fn ownership_scopes(&self, _environment: &EnvironmentName, _spec: &Value) -> Vec<OwnershipScope> {

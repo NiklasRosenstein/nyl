@@ -10,7 +10,9 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
-use nyl_orchestration::run_report::{EnvironmentRunReport, ReportKind, RunReport, UnitReport};
+use nyl_orchestration::run_report::{
+    EnvironmentRunReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport, UnitReport,
+};
 use nyl_orchestration::shell::run::RunRequest;
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_state::git::{CommitSigner, GitStateStore};
@@ -90,22 +92,7 @@ impl Session {
     /// The worktree-rooted directory of `nyl.toml`, such as `/nyl`, or `/`
     /// at the worktree root.
     pub fn entry_project_dir(&self) -> String {
-        let root = self
-            .inventory
-            .project_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.inventory.project_root.clone());
-        let relative = root
-            .strip_prefix(&self.inventory.worktree_root)
-            .map(|relative| {
-                relative
-                    .components()
-                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join("/")
-            })
-            .unwrap_or_default();
-        format!("/{relative}")
+        project_dir(&self.inventory)
     }
 
     /// `[project] previous_paths` of the entry `nyl.toml`.
@@ -187,6 +174,26 @@ impl Session {
     }
 }
 
+/// The worktree-rooted directory of the inventory's `nyl.toml`, such as
+/// `/nyl`, or `/` at the worktree root.
+pub fn project_dir(inventory: &GitOpsInventory) -> String {
+    let root = inventory
+        .project_root
+        .canonicalize()
+        .unwrap_or_else(|_| inventory.project_root.clone());
+    let relative = root
+        .strip_prefix(&inventory.worktree_root)
+        .map(|relative| {
+            relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_default();
+    format!("/{relative}")
+}
+
 /// The options of a `plan` or `reconcile` request.
 pub struct RunOptions<'a> {
     pub units: &'a [String],
@@ -241,6 +248,41 @@ pub fn stopped(kind: ReportKind, environment: &str, output: RunOutput, stop: Sto
     }
 }
 
+/// The groups of the leaving section, one line per consequence as the
+/// contract's Planning section shows them: each unit with its reason, and a
+/// deselected unit with the selector labels it no longer matches.
+fn leaving_section(leaving: &[LeavingUnit]) -> String {
+    let headings = LeavingConsequence::ALL.map(|consequence| format!("{}:", consequence.heading()));
+    let width = headings.iter().map(String::len).max().unwrap_or(0);
+    let mut text = String::new();
+    for (consequence, heading) in LeavingConsequence::ALL.into_iter().zip(&headings) {
+        let units = leaving
+            .iter()
+            .filter(|unit| unit.consequence == consequence)
+            .map(|unit| {
+                let mut detail = unit.reason.clone();
+                if !unit.labels.is_empty() {
+                    let labels = unit
+                        .labels
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    detail = format!("{detail}, no longer matches {labels}");
+                }
+                format!("{} ({detail})", unit.unit)
+            })
+            .collect::<Vec<_>>();
+        let units = if units.is_empty() {
+            "(none)".to_owned()
+        } else {
+            units.join(", ")
+        };
+        let _ = writeln!(text, "  {heading:<width$} {units}");
+    }
+    text
+}
+
 /// The table form of a report: the leaving section first, then one row per unit.
 fn table(report: &RunReport) -> String {
     let mut text = String::new();
@@ -252,21 +294,7 @@ fn table(report: &RunReport) -> String {
                 environment.name,
                 environment.leaving.len()
             );
-            let rows = environment
-                .leaving
-                .iter()
-                .map(|leaving| {
-                    vec![
-                        Cell::plain(&leaving.unit),
-                        Cell::plain(&leaving.kind),
-                        Cell::plain(&leaving.reason),
-                        Cell::plain(leaving.consequences.join("; ")),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            for line in render_table(&["UNIT", "KIND", "REASON", "CONSEQUENCES"], &rows).lines() {
-                let _ = writeln!(text, "  {line}");
-            }
+            text.push_str(&leaving_section(&environment.leaving));
             text.push('\n');
         }
         let rows = environment
@@ -416,6 +444,34 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&json.stdout).unwrap(),
             json.report
+        );
+    }
+
+    /// Catches the leaving section losing its consequence groups, or a
+    /// deselected unit hiding the selector labels it no longer matches.
+    #[test]
+    fn test_leaving_section_groups_units_by_consequence() {
+        let leaving = [
+            LeavingUnit {
+                unit: UnitName::new("network").unwrap(),
+                kind: "OpenTofu".to_owned(),
+                reason: "removed".to_owned(),
+                consequence: LeavingConsequence::Teardown,
+                labels: std::collections::BTreeMap::new(),
+            },
+            LeavingUnit {
+                unit: UnitName::new("seed").unwrap(),
+                kind: "Command".to_owned(),
+                reason: "deselected".to_owned(),
+                consequence: LeavingConsequence::Dropped,
+                labels: std::collections::BTreeMap::from([("dve".to_owned(), "true".to_owned())]),
+            },
+        ];
+        assert_eq!(
+            leaving_section(&leaving),
+            "  teardown, needs --allow-teardown:   network (removed)\n  \
+             dropped from state, resources kept: seed (deselected, no longer matches dve=true)\n  \
+             retained as tombstones:             (none)\n"
         );
     }
 

@@ -82,7 +82,10 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
                 println!("  ⚠ {}: {} ({})", warning.code, warning.message, warning.fix);
             }
             let units = crate::gitops::units::discover_units(&inventory)?;
+            // Target bindings first: their findings name the DeploymentTarget
+            // field a publication unit's reference comes from.
             validate_targets(&inventory).await?;
+            validate_environment_units(&inventory)?;
             println!(
                 "✓ GitOps configuration is valid ({} resource(s), {} unit(s), {} YAML file(s))",
                 inventory.resources.len(),
@@ -108,6 +111,45 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
             println!("\n✓ Validation passed");
         }
         Ok(())
+    }
+}
+
+/// Render every Environment's units from the worktree and run the state-free
+/// unit checks `nyl plan` and `nyl reconcile` run
+/// ([`nyl_orchestration::rules::desired::check_units`]), with the drivers
+/// they use: specs, `env.secrets`, ownership scopes, unknown dependencies,
+/// cycles, and references to undeclared or sensitive outputs.
+fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Result<()> {
+    use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
+    use nyl_core::orchestration::ports::SourceRenderer;
+
+    let wiring = crate::orchestration::run::ProcessWiring::new();
+    let renderer = crate::gitops::units::UnitSourceRenderer::new(crate::orchestration::session::project_dir(inventory));
+    // The worktree is rendered as it is, committed or not; the commit only labels it.
+    let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
+    let (environments, _) = crate::orchestration::project::declared(inventory);
+    let mut issues = Vec::new();
+    for environment in &environments {
+        let name =
+            EnvironmentName::new(&environment.metadata.name).map_err(|error| NylError::config(error.to_string()))?;
+        let source = renderer
+            .render(&inventory.worktree_root, &name, &commit)
+            .map_err(|error| NylError::config(error.to_string()))?;
+        for finding in nyl_orchestration::rules::desired::check_units(&source, &wiring.drivers) {
+            issues.push(format!("{name}: {finding}"));
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(NylError::config(format!(
+            "units are invalid:\n{}",
+            issues
+                .iter()
+                .map(|issue| format!("  - {issue}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )))
     }
 }
 

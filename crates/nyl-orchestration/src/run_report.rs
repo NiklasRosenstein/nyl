@@ -268,8 +268,41 @@ pub struct LeavingUnit {
     pub kind: String,
     /// Why it leaves: `deselected`, `disabled`, or `removed`.
     pub reason: String,
-    /// Grouped consequences, such as the deletion policy that will apply.
-    pub consequences: Vec<String>,
+    /// What its deletion will do, by its effective deletion policy.
+    pub consequence: LeavingConsequence,
+    /// For a `deselected` unit, the `unitSelector` labels its literal labels
+    /// no longer match, so a selector typo reads as one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+/// What happens to a unit leaving the ownership set, the groups of the plan's
+/// leaving section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LeavingConsequence {
+    /// `deletionPolicy: Teardown`: its resources are torn down, which needs
+    /// `--allow-teardown`.
+    Teardown,
+    /// Its kind cannot tear down and it declares no policy: it is dropped
+    /// from state with its resources kept, and returns as a new incarnation.
+    Dropped,
+    /// `deletionPolicy: Retain` declared: it stays as a `retained` tombstone
+    /// with its resources kept.
+    Retained,
+}
+
+impl LeavingConsequence {
+    pub const ALL: [Self; 3] = [Self::Teardown, Self::Dropped, Self::Retained];
+
+    /// The heading of its group in the plan's leaving section.
+    pub fn heading(self) -> &'static str {
+        match self {
+            Self::Teardown => "teardown, needs --allow-teardown",
+            Self::Dropped => "dropped from state, resources kept",
+            Self::Retained => "retained as tombstones",
+        }
+    }
 }
 
 /// One unit of a report.

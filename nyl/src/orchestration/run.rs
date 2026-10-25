@@ -99,7 +99,7 @@ impl<'a> Wiring<'a> {
             faults: &owned.faults,
             runner: crate::orchestration::project::runner(),
             author: None,
-            process_env: std::env::vars().collect(),
+            process_env: unicode_env(std::env::vars_os()),
         })
     }
 
@@ -132,5 +132,41 @@ impl CommandOutcome {
             stdout: String::new(),
             stderr: format!("error: {message}\n"),
         }
+    }
+}
+
+/// The process environment's variables whose name and value are Unicode.
+/// Only `PATH` and declared passthrough variables are ever admitted, and
+/// those are named in Unicode, so dropping the rest changes nothing a unit
+/// can see; collecting with `std::env::vars` would panic on them instead.
+fn unicode_env(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::collections::BTreeMap<String, String> {
+    vars.into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    /// Catches a non-Unicode variable unrelated to any unit aborting every
+    /// orchestration command.
+    #[cfg(unix)]
+    #[test]
+    fn test_unicode_env_drops_non_unicode_variables() {
+        use std::os::unix::ffi::OsStringExt;
+        let env = unicode_env([
+            (OsString::from("PATH"), OsString::from("/bin")),
+            (OsString::from("BROKEN"), OsString::from_vec(vec![0xff, 0xfe])),
+            (OsString::from_vec(vec![0xff]), OsString::from("x")),
+        ]);
+        assert_eq!(
+            env,
+            std::collections::BTreeMap::from([("PATH".to_owned(), "/bin".to_owned())])
+        );
     }
 }

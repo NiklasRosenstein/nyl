@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs a program from the source commit with content-based execution keys,
   and source commits and pins are checked for reachability from the
   Environment's `protectedRefs`. Unit `env.secrets` is rejected with
-  `NYL-UNIT-SECRETS-UNSUPPORTED` for now.
+  `NYL-UNIT-SECRETS-UNSUPPORTED` for now, and references or `dependsOn`
+  entries requiring attestations with `NYL-ATTESTATIONS-UNSUPPORTED`.
+  `nyl validate` runs the unit checks `plan` runs before reading state. A
+  unit's `timeout` is at most `7d`.
 
 - State-writing commands (`nyl reconcile`, `nyl state …`, `nyl lease break`)
   take `--author "Name <email>"` for their state commits and otherwise use

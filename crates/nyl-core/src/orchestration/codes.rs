@@ -77,10 +77,13 @@ pub enum Code {
     /// A unit declares `env.secrets`, but no secrets provider is wired into
     /// orchestration yet (M3).
     UnitSecretsUnsupported,
+    /// A reference or `dependsOn` entry requires `evidence: attested` or
+    /// names attestations, which no kind records yet (M3).
+    AttestationsUnsupported,
 }
 
 impl Code {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -113,6 +116,7 @@ impl Code {
         Self::PlanUnitsLeaving,
         Self::TargetEnvironmentConflict,
         Self::UnitSecretsUnsupported,
+        Self::AttestationsUnsupported,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -149,6 +153,7 @@ impl Code {
             Self::PlanUnitsLeaving => "NYL-PLAN-UNITS-LEAVING",
             Self::TargetEnvironmentConflict => "NYL-TARGET-ENVIRONMENT-CONFLICT",
             Self::UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
+            Self::AttestationsUnsupported => "NYL-ATTESTATIONS-UNSUPPORTED",
         }
     }
 }
@@ -183,7 +188,7 @@ impl JsonSchema for Code {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "enum": Self::ALL.map(Code::as_str)
+            "enum": Self::ALL.map(Code::as_str).to_vec()
         })
     }
 }

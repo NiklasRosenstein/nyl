@@ -59,7 +59,7 @@ Common fields every kind shares:
 | `enabled` | `false` leaves the environment's ownership set. Default `true`. |
 | `outputs` | The outputs the unit declares, each with a `type` and optionally `sensitive: true`. |
 | `dependsOn` | Units that must have a current receipt first, for ordering without a data reference. |
-| `timeout` | The deadline of one execution. |
+| `timeout` | The deadline of one execution, at most `7d`. |
 | `env` | `passthrough`, the names of runner variables the unit may read. `secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until secret admission arrives. |
 
 ## References between units
@@ -79,7 +79,14 @@ executes in the same run, Nyl resolves again and the consumer runs in a later
 wave. A sensitive output can never be referenced.
 
 [`nyl validate`](/nyl/reference/cli/validate/) checks references without
-state: the producer must exist and declare the output as non-sensitive.
+state, as `plan` and `reconcile` do before reading it: the producer must exist
+and declare the output as non-sensitive. An artifact reference is checked only
+for the producer's existence.
+
+References and `dependsOn` entries require a current receipt, evidence
+`published`. Requiring `evidence: attested` or naming `attestations` is
+rejected with `NYL-ATTESTATIONS-UNSUPPORTED` until units record attestations
+in a later milestone, rather than accepting a receipt without them.
 
 ## Source commit
 
@@ -143,7 +150,12 @@ reconcile with no changes executes nothing and writes no commit.
 
 A failed execution records a condition and keeps the unit's previous receipt.
 An execution that may have had effects without completing, such as one that
-passed its timeout, is uncertain. `--unit` executes only the named units;
+passed its timeout, is uncertain. A retryable failure runs again at the next
+reconcile; a non-retryable failure, and an uncertain unit whose kind does not
+converge, wait for `nyl recover`, which arrives in a later part of M3. Until
+then, [`nyl state init --fresh`](/nyl/reference/cli/state/#nyl-state-init)
+starts the environment over, and the [Command guide](/nyl/orchestration/resource-guides/command/#failures-and-retries)
+describes how a Command converges. `--unit` executes only the named units;
 resolution still covers the whole environment, and a named unit whose
 dependency has no current receipt stays blocked.
 

@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::local_path::validate_local_path;
 use nyl_core::orchestration::codes::{Code, Finding};
+use nyl_core::orchestration::driver::LocalPathField;
 use nyl_core::orchestration::ids::CommitId;
 use nyl_core::orchestration::ports::SourceRepository;
 use nyl_core::orchestration::state::SourceChoice;
@@ -255,10 +256,60 @@ pub fn pin_source_fields(
     Ok(())
 }
 
+/// Rewrite each local path field of `resolved_spec` (a string, or an array
+/// of glob strings) into its worktree-rooted form by the same rule as Git
+/// source paths, and record an absent field that defaults to the `nyl.toml`
+/// directory as that directory. The desired document and the execution key
+/// then mean the same wherever `nyl.toml` lives.
+pub fn root_local_paths(resolved_spec: &mut Value, fields: &[LocalPathField], project_dir: &str) -> Result<(), String> {
+    for field in fields {
+        let name = format!("spec{}", field.pointer.replace('/', "."));
+        let rooted = match resolved_spec.pointer(&field.pointer) {
+            None | Some(Value::Null) if field.defaults_to_project_dir => Value::String(project_dir_path(project_dir)),
+            None | Some(Value::Null) => continue,
+            Some(Value::String(path)) => Value::String(worktree_path(&name, project_dir, path)?),
+            Some(Value::Array(paths)) => Value::Array(
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| {
+                        let path = path
+                            .as_str()
+                            .ok_or_else(|| format!("{name}[{index}] must be a string"))?;
+                        worktree_path(&format!("{name}[{index}]"), project_dir, path).map(Value::String)
+                    })
+                    .collect::<Result<_, String>>()?,
+            ),
+            Some(_) => return Err(format!("{name} must be a string or a list of strings")),
+        };
+        let (parent, key) = field
+            .pointer
+            .rsplit_once('/')
+            .ok_or_else(|| format!("{} is not a JSON Pointer", field.pointer))?;
+        let object = if parent.is_empty() {
+            resolved_spec.as_object_mut()
+        } else {
+            resolved_spec.pointer_mut(parent).and_then(Value::as_object_mut)
+        }
+        .ok_or_else(|| format!("{name}: its parent must be an object"))?;
+        object.insert(key.to_owned(), rooted);
+    }
+    Ok(())
+}
+
+/// The worktree-rooted `project_dir` in normalized form: `/` or `/a/b`.
+fn project_dir_path(project_dir: &str) -> String {
+    let segments: Vec<&str> = project_dir.split('/').filter(|segment| !segment.is_empty()).collect();
+    format!("/{}", segments.join("/"))
+}
+
 /// A local path in its worktree-rooted form: relative paths resolve against
 /// the worktree-rooted `project_dir`, `/` names the worktree root, and the
 /// result never leaves the worktree.
 fn worktree_path(field: &str, project_dir: &str, path: &str) -> Result<String, String> {
+    if path == "/" {
+        return Ok(path.to_owned());
+    }
     validate_local_path(field, path).map_err(|error| error.to_string())?;
     if path.starts_with('/') {
         return Ok(path.to_owned());
@@ -316,6 +367,66 @@ mod tests {
 
     fn commit(digit: char) -> CommitId {
         CommitId::new(digit.to_string().repeat(40)).unwrap()
+    }
+
+    fn command_paths() -> Vec<LocalPathField> {
+        vec![
+            LocalPathField {
+                pointer: "/workingDir".to_owned(),
+                defaults_to_project_dir: true,
+            },
+            LocalPathField {
+                pointer: "/files".to_owned(),
+                defaults_to_project_dir: false,
+            },
+        ]
+    }
+
+    /// Catches a Command's execution key changing, and the unit running
+    /// again, when only the `nyl.toml` location moves while its working
+    /// directory and files stay the same.
+    #[test]
+    fn test_root_local_paths_keep_the_key_when_nyl_toml_moves() {
+        let key = |spec: Value, project_dir: &str| {
+            let mut spec = spec;
+            root_local_paths(&mut spec, &command_paths(), project_dir).unwrap();
+            let key = crate::rules::execution_key::execution_key(&crate::rules::execution_key::KeyMaterial {
+                api_version: "units.gitops.nyl/v1",
+                kind: "Command",
+                behavior_version: 1,
+                resolved_spec: &spec,
+                source_fields: &[],
+                inputs: &nyl_core::orchestration::driver::KeyInputs::default(),
+            })
+            .unwrap();
+            (spec, key)
+        };
+        let (at_nyl, key_at_nyl) = key(
+            json!({"command": ["./run.sh"], "workingDir": "../scripts/seed", "files": ["../scripts/seed/**", "/tools/*.sh"]}),
+            "/nyl",
+        );
+        let (moved, key_moved) = key(
+            json!({"command": ["./run.sh"], "workingDir": "../../scripts/seed", "files": ["../../scripts/seed/**", "/tools/*.sh"]}),
+            "/deploy/nyl",
+        );
+        assert_eq!(at_nyl["workingDir"], "/scripts/seed");
+        assert_eq!(at_nyl["files"], json!(["/scripts/seed/**", "/tools/*.sh"]));
+        assert_eq!(at_nyl, moved);
+        assert_eq!(key_at_nyl, key_moved);
+    }
+
+    /// Catches an omitted working directory staying implicit, which would
+    /// make the desired document depend on where `nyl.toml` lives.
+    #[test]
+    fn test_root_local_paths_records_the_default_working_directory() {
+        let mut spec = json!({"command": ["./run.sh"]});
+        root_local_paths(&mut spec, &command_paths(), "/nyl").unwrap();
+        assert_eq!(spec, json!({"command": ["./run.sh"], "workingDir": "/nyl"}));
+        let mut at_root = json!({"command": ["./run.sh"], "workingDir": "/"});
+        root_local_paths(&mut at_root, &command_paths(), "/").unwrap();
+        assert_eq!(at_root["workingDir"], "/");
+        let mut escaping = json!({"files": ["../../x"]});
+        assert!(root_local_paths(&mut escaping, &command_paths(), "/nyl").is_err());
     }
 
     fn environment(spec: &Value) -> Environment {

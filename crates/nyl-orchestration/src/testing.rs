@@ -26,7 +26,7 @@ impl FakeClock {
 
     pub fn advance(&self, duration: Duration) {
         let mut now = self.now.lock().expect("clock lock");
-        *now += duration.to_chrono();
+        *now = duration.after(*now);
     }
 }
 

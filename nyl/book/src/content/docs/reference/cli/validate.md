@@ -24,6 +24,10 @@ nyl validate [path] [--strict]
 8. Which Environment places each DeploymentTarget, and the `fromUnit` bindings
    of every placed target
 9. A complete target compilation for every configured DeploymentTarget
+10. Each Environment's units, with the checks `nyl plan` and `nyl reconcile`
+    run before reading state: specs, `env.secrets`, overlapping resources,
+    `dependsOn` and references to unknown units, cycles, references to
+    undeclared or sensitive outputs, and evidence requirements
 
 ## Examples
 
@@ -40,7 +44,14 @@ rejects overlapping target prefixes on the same repository revision.
 ## Units and placed targets
 
 Validation renders every Environment's selected units with its effective
-values, the same render `nyl plan` and `nyl reconcile` use. A
+values from the worktree as it is, the same render `nyl plan` and
+`nyl reconcile` use at their source commit, and runs the unit checks they run
+before reading state, with the same codes: `NYL-UNIT-INVALID`,
+`NYL-UNIT-KIND-UNKNOWN`, `NYL-UNIT-SECRETS-UNSUPPORTED`,
+`NYL-UNIT-OWNERSHIP-OVERLAP`, `NYL-DEPENDENCY-UNKNOWN`, `NYL-DEPENDENCY-CYCLE`,
+`NYL-REFERENCE-INVALID` for a reference to an output its producer does not
+declare or marks `sensitive`, and `NYL-ATTESTATIONS-UNSUPPORTED`. An `artifact`
+reference between units is checked only for the producer's existence. A
 `KubernetesPublication` unit places the DeploymentTarget its `spec.target`
 names into that Environment. A target placed by publication units of two
 Environments fails with `NYL-TARGET-ENVIRONMENT-CONFLICT`.

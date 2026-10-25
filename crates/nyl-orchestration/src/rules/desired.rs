@@ -19,7 +19,9 @@
 //!   repository and revision are equal and one path prefix contains the other.
 //! - Units in the snapshot's desired state that leave the ownership set are
 //!   reported as leaving (`removed`, `deselected`, or `disabled`) with the
-//!   consequence of their effective deletion policy; their deletion is part 5.
+//!   consequence of their effective deletion policy (`teardown`, `dropped`,
+//!   or `retained`), and a deselected unit with the selector labels it no
+//!   longer matches; their deletion is part 5.
 //! - M3 restriction: a unit's `env.secrets` is rejected with
 //!   [`Code::UnitSecretsUnsupported`](nyl_core::orchestration::codes::Code::UnitSecretsUnsupported);
 //!   secrets providers for units arrive in a later milestone.
@@ -39,7 +41,7 @@ use nyl_core::resources::units::{
 };
 use serde_json::Value;
 
-use crate::run_report::LeavingUnit;
+use crate::run_report::{LeavingConsequence, LeavingUnit};
 
 /// What desiring one run's units reads.
 pub struct DesireInputs<'a> {
@@ -155,18 +157,7 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
     }
     errors.extend(overlaps(&scopes));
 
-    let leaving = inputs
-        .snapshot
-        .desired
-        .iter()
-        .filter(|(name, desired)| desired.lifecycle == Lifecycle::Active && !set.contains_key(name))
-        .map(|(name, desired)| LeavingUnit {
-            unit: name.clone(),
-            kind: desired.unit.kind.clone(),
-            reason: leaving_reason(source.units.get(name)).to_owned(),
-            consequences: leaving_consequences(inputs.drivers, desired),
-        })
-        .collect();
+    let leaving = leaving_units(inputs, &set);
 
     let ownership = units
         .iter()
@@ -187,6 +178,63 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
         leaving,
         errors,
     }
+}
+
+/// The state-free checks of one environment's rendered units, which
+/// `plan`, `reconcile`, and `nyl validate` share: every unit's kind has a
+/// driver and its spec passes the driver's and the common fields'
+/// validation, `env.secrets` is rejected, ownership scopes do not overlap,
+/// and the dependency graph ([`super::graph::extract`]) has no unknown unit,
+/// cycle, undeclared or sensitive output reference, or unsupported evidence
+/// requirement. `plan` and `reconcile` reach the same checks through
+/// [`desire`] and `extract`; this runs them without state.
+pub fn check_units(source: &RenderedSource, drivers: &DriverSet) -> Vec<Finding> {
+    let snapshot = EnvironmentSnapshot::default();
+    let mut next = 0u64;
+    let desired = desire(
+        &DesireInputs {
+            source,
+            environment_spec: &Value::Null,
+            source_choice: SourceChoice::Entry,
+            snapshot: &snapshot,
+            drivers,
+        },
+        &mut || {
+            next += 1;
+            Uid::new(format!("00000000-0000-7000-8000-{next:012x}")).expect("a UUID")
+        },
+    );
+    if !desired.errors.is_empty() {
+        return desired.errors;
+    }
+    match super::graph::extract(&desired.environment.environment, &source.source_commit, &desired.units) {
+        Ok(_) => Vec::new(),
+        Err(findings) => findings,
+    }
+}
+
+/// The units of the snapshot's desired state that leave the ownership set.
+fn leaving_units(inputs: &DesireInputs<'_>, set: &BTreeMap<&UnitName, &RenderedUnit>) -> Vec<LeavingUnit> {
+    let source = inputs.source;
+    inputs
+        .snapshot
+        .desired
+        .iter()
+        .filter(|(name, desired)| desired.lifecycle == Lifecycle::Active && !set.contains_key(name))
+        .map(|(name, desired)| {
+            let rendered = source.units.get(name);
+            LeavingUnit {
+                unit: name.clone(),
+                kind: desired.unit.kind.clone(),
+                reason: leaving_reason(rendered).to_owned(),
+                consequence: leaving_consequence(inputs.drivers, desired),
+                labels: rendered
+                    .filter(|rendered| !rendered.selected)
+                    .map(|rendered| unmatched_labels(&source.environment, rendered))
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 /// The source commit S every document of a run records.
@@ -340,8 +388,10 @@ fn leaving_reason(rendered: Option<&RenderedUnit>) -> &'static str {
 }
 
 /// What happens to a leaving unit, by its stored spec's effective deletion
+/// policy: `teardown`, `retained` for a declared `Retain`, which leaves a
+/// tombstone, or `dropped` for a kind that cannot tear down and declares no
 /// policy.
-fn leaving_consequences(drivers: &DriverSet, desired: &DesiredUnit) -> Vec<String> {
+fn leaving_consequence(drivers: &DriverSet, desired: &DesiredUnit) -> LeavingConsequence {
     let common = serde_json::from_value::<CommonUnitFields>(desired.spec.clone()).unwrap_or_default();
     let teardown = drivers
         .get(&desired.unit.api_version, &desired.unit.kind)
@@ -350,12 +400,27 @@ fn leaving_consequences(drivers: &DriverSet, desired: &DesiredUnit) -> Vec<Strin
         declared_outputs: true,
         teardown,
     });
-    vec![match policy {
-        DeletionPolicy::Teardown => {
-            "deletionPolicy Teardown: its resources are torn down after --allow-teardown".to_owned()
-        }
-        DeletionPolicy::Retain => "deletionPolicy Retain: its resources stay in place".to_owned(),
-    }]
+    match (policy, common.deletion_policy) {
+        (DeletionPolicy::Teardown, _) => LeavingConsequence::Teardown,
+        (DeletionPolicy::Retain, Some(DeletionPolicy::Retain)) => LeavingConsequence::Retained,
+        (DeletionPolicy::Retain, _) => LeavingConsequence::Dropped,
+    }
+}
+
+/// The Environment's `unitSelector` labels that a deselected unit's literal
+/// labels do not match.
+fn unmatched_labels(
+    environment: &nyl_core::resources::environment::Environment,
+    rendered: &RenderedUnit,
+) -> BTreeMap<String, String> {
+    environment
+        .spec
+        .unit_selector
+        .match_labels
+        .iter()
+        .filter(|(key, value)| rendered.envelope.metadata.labels.get(*key) != Some(*value))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -652,13 +717,25 @@ pub(crate) mod tests {
     /// wrong reason or deletion consequence.
     #[test]
     fn test_leaving_units_carry_their_reason_and_deletion_policy() {
-        let source = source(vec![
-            ("deselected", rendered(KIND_COMMAND, false, Some(command(json!({}))))),
+        let mut deselected = rendered(KIND_COMMAND, false, Some(command(json!({}))));
+        deselected
+            .envelope
+            .metadata
+            .labels
+            .insert("dev".to_owned(), "true".to_owned());
+        let mut source = source(vec![
+            ("deselected", deselected),
             (
                 "disabled",
                 rendered("Publication", true, Some(json!({"enabled": false, "prefix": "dev"}))),
             ),
         ]);
+        source
+            .environment
+            .spec
+            .unit_selector
+            .match_labels
+            .insert("dve".to_owned(), "true".to_owned());
         let mut held = stored("held", KIND_COMMAND, 4, command(json!({})));
         held.lifecycle = Lifecycle::Retained {
             tombstone: serde_json::from_value(json!({"since": "2026-01-01T00:00:00Z"})).unwrap(),
@@ -673,25 +750,39 @@ pub(crate) mod tests {
                     name("disabled"),
                     stored("disabled", "Publication", 2, json!({"prefix": "dev"})),
                 ),
-                (name("removed"), stored("removed", KIND_COMMAND, 3, command(json!({})))),
+                (
+                    name("removed"),
+                    stored("removed", KIND_COMMAND, 3, command(json!({"deletionPolicy": "Retain"}))),
+                ),
                 (name("held"), held),
             ]),
             ..EnvironmentSnapshot::default()
         };
         let desired = run_desire(&source, &snapshot);
-        let leaving: Vec<(&str, &str, &str)> = desired
+        let leaving: Vec<(&str, &str, LeavingConsequence)> = desired
             .leaving
             .iter()
-            .map(|unit| (unit.unit.as_str(), unit.reason.as_str(), unit.consequences[0].as_str()))
+            .map(|unit| (unit.unit.as_str(), unit.reason.as_str(), unit.consequence))
             .collect();
-        assert_eq!(leaving.len(), 3, "{leaving:?}");
-        assert_eq!(leaving[0].0, "deselected");
-        assert_eq!(leaving[0].1, "deselected");
-        assert!(leaving[0].2.starts_with("deletionPolicy Retain"));
-        assert_eq!((leaving[1].0, leaving[1].1), ("disabled", "disabled"));
-        assert!(leaving[1].2.starts_with("deletionPolicy Teardown"));
-        assert_eq!((leaving[2].0, leaving[2].1), ("removed", "removed"));
+        assert_eq!(
+            leaving,
+            [
+                ("deselected", "deselected", LeavingConsequence::Dropped),
+                ("disabled", "disabled", LeavingConsequence::Teardown),
+                ("removed", "removed", LeavingConsequence::Retained),
+            ]
+        );
+        // The unit's labels are {dev: "true"}; the selector asks for a typo.
+        assert_eq!(
+            desired.leaving[0].labels,
+            BTreeMap::from([("dve".to_owned(), "true".to_owned())])
+        );
+        assert!(desired.leaving[1].labels.is_empty());
         assert!(desired.units.is_empty());
+        assert_eq!(
+            serde_json::to_value(&desired.leaving[0]).unwrap(),
+            json!({"unit": "deselected", "kind": "Command", "reason": "deselected", "consequence": "dropped", "labels": {"dve": "true"}})
+        );
     }
 
     /// Catches a unit reading secrets the shell cannot provide yet, and

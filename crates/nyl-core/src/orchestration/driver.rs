@@ -380,6 +380,18 @@ pub struct ResolutionContext<'a> {
     pub cache_dir: PathBuf,
 }
 
+/// A spec field holding a local path, or an array of local path globs, by
+/// the local path rule: relative to the `nyl.toml` directory, or `/`-rooted
+/// at the Git worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPathField {
+    /// JSON Pointer of the field, such as `/workingDir` or `/files`.
+    pub pointer: String,
+    /// Whether an absent field means the `nyl.toml` directory, which
+    /// resolution then records explicitly.
+    pub defaults_to_project_dir: bool,
+}
+
 /// One unit kind. Built-in drivers implement it in Rust; methods for
 /// capabilities a kind lacks return [`Supported::Unsupported`].
 pub trait Driver: Send + Sync {
@@ -408,6 +420,17 @@ pub trait Driver: Send + Sync {
     /// Contract: [Units](../../../../design/orchestration-core.md#units),
     /// "Git source shape", and [Pinned commits](../../../../design/orchestration-core.md#pinned-commits).
     fn source_fields(&self, spec: &Value) -> Vec<String> {
+        let _ = spec;
+        Vec::new()
+    }
+    /// The spec's local path fields other than Git source fields, such as
+    /// a Command's `files` globs and `workingDir`. Resolution rewrites each
+    /// into its worktree-rooted form, so the desired document and the
+    /// execution key mean the same wherever `nyl.toml` lives.
+    ///
+    /// Contract: [Units](../../../../design/orchestration-core.md#units),
+    /// the local path rule.
+    fn local_path_fields(&self, spec: &Value) -> Vec<LocalPathField> {
         let _ = spec;
         Vec::new()
     }

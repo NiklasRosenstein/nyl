@@ -25,12 +25,13 @@
 //! the whole operation runs on a scoped thread of its own, and executions on
 //! further scoped threads.
 //!
-//! A run whose lease was lost, or whose transition commit failed after units
-//! executed, keeps its run ref, marked finished, so their results are not
+//! A run whose lease was lost, or that hit a store failure (a lease update,
+//! run record, or transition commit) after a unit's checkpoint was written,
+//! keeps its run ref, marked finished, so executed units' results are not
 //! lost; every other run deletes it and releases the lease, including runs
 //! that change nothing and runs whose units failed.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -63,8 +64,8 @@ use crate::rules::graph::{extract, topological_order};
 use crate::rules::references::{resolve_unit, ReferenceView};
 use crate::rules::selection::{batches, select, Candidates, Skipped};
 use crate::rules::sources::{
-    effective_commit, pin_refs, pin_source_fields, run_source_refs, source_request, source_revisions, unreachable,
-    unsupported_source, SourceRequest,
+    effective_commit, pin_refs, pin_source_fields, root_local_paths, run_source_refs, source_request, source_revisions,
+    unreachable, unsupported_source, SourceRequest,
 };
 use crate::rules::state_location::check_record;
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
@@ -177,6 +178,9 @@ struct Session<'r, 'a> {
     /// Key inputs per unit, by the resolved spec and commit they were read for.
     keys: RefCell<BTreeMap<UnitName, (Value, CommitId, KeyInputs)>>,
     executions: RefCell<usize>,
+    /// The deadline of the lease a reconcile holds, which bounds every
+    /// resolution deadline; `None` for a plan, which holds no lease.
+    lease_deadline: Cell<Option<Timestamp>>,
 }
 
 /// What preparing a run produced: S, its rendering, and the desired
@@ -227,6 +231,7 @@ impl<'r, 'a> Session<'r, 'a> {
             worktrees: RefCell::new(BTreeMap::new()),
             keys: RefCell::new(BTreeMap::new()),
             executions: RefCell::new(0),
+            lease_deadline: Cell::new(None),
         }
     }
 
@@ -490,8 +495,8 @@ impl<'r, 'a> Session<'r, 'a> {
         Resolved { units, commits, errors }
     }
 
-    /// Pin the unit's Git source fields in `spec`, check them out, and
-    /// compute its execution key.
+    /// Pin the unit's Git source fields in `spec`, root its other local path
+    /// fields at the worktree, check them out, and compute its execution key.
     fn key(
         &self,
         name: &UnitName,
@@ -530,6 +535,7 @@ impl<'r, 'a> Session<'r, 'a> {
             }
         }
         pin_source_fields(spec, &fields, project_dir, source_commit, &revisions).map_err(invalid)?;
+        root_local_paths(spec, &driver.local_path_fields(spec), project_dir).map_err(invalid)?;
         let commit = effective_commit(spec, &fields, source_commit).map_err(invalid)?;
 
         let cached = self
@@ -548,7 +554,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 project_dir: project_path(&worktree, project_dir),
                 worktree,
                 env: admitted_env(self.context.process_env, &unit.spec),
-                deadline: lease::deadline(self.base(), now, self.base().settings.resolution_timeout),
+                deadline: resolution_deadline(&self.base().settings, now, self.lease_deadline.get()),
                 now,
                 tools: self.context.tools,
                 cache_dir: self.cache_dir(),
@@ -580,6 +586,22 @@ impl<'r, 'a> Session<'r, 'a> {
             commit,
             attestations: driver.attestations(spec),
         })
+    }
+}
+
+/// The deadline of one resolution call: the resolution timeout from now,
+/// but never past the held lease's deadline less its grace period, so no
+/// fingerprint runs once another runner may break the lease.
+fn resolution_deadline(settings: &super::Settings, now: Timestamp, lease: Option<Timestamp>) -> Timestamp {
+    let own = settings.resolution_timeout.after(now);
+    match lease {
+        Some(lease) => {
+            let bound = lease
+                .checked_sub_signed(settings.lease_grace.to_chrono())
+                .unwrap_or(lease);
+            own.min(bound)
+        }
+        None => own,
     }
 }
 
@@ -863,7 +885,7 @@ fn plan_unit(
         temp_dir,
         env: admitted_env(context.process_env, &unit.spec),
         approved_digest: None,
-        deadline: now + unit_timeout(unit).to_chrono(),
+        deadline: unit_timeout(unit).after(now),
         now,
         observed,
         tools: context.tools,
@@ -912,6 +934,10 @@ struct Reconcile<'s, 'r, 'a> {
     held: HeldLease,
     record: Run,
     report: EnvironmentRunReport,
+    /// Whether a unit's checkpoint is on the run ref: from then on the run
+    /// ref is kept whenever the run cannot finish, so executed units'
+    /// results are not lost.
+    checkpointed: bool,
 }
 
 fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
@@ -962,7 +988,9 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         held,
         record,
         report,
+        checkpointed: false,
     };
+    session.lease_deadline.set(Some(state.held.lease.deadline));
     let ending = state.holding();
     state.end(&ending);
     let mut report = state.report;
@@ -1017,6 +1045,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             Ok(version) => {
                 self.held.lease = lease;
                 self.held.version = version;
+                self.session.lease_deadline.set(Some(deadline));
             }
             Err(StateError::LeaseLost) => {
                 self.report.errors.push(lease::lost(self.environment()));
@@ -1025,7 +1054,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             Err(error) => {
                 let finding = store_error(self.environment(), &error);
                 self.report.errors.push(finding);
-                return Err(Ending::Release);
+                return Err(self.failed());
             }
         }
         self.record.units = units;
@@ -1033,9 +1062,19 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if let Err(error) = self.write_run(None) {
             let finding = store_error(self.environment(), &error);
             self.report.errors.push(finding);
-            return Err(Ending::Release);
+            return Err(self.failed());
         }
         Ok(())
+    }
+
+    /// How a run that holds the lease ends on a store failure: it keeps its
+    /// run ref once a checkpoint is on it, else it deletes it.
+    fn failed(&self) -> Ending {
+        if self.checkpointed {
+            Ending::KeepRun { release: true }
+        } else {
+            Ending::Release
+        }
     }
 
     /// Everything a reconcile does while it holds the lease.
@@ -1083,9 +1122,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut produced = BTreeSet::new();
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
-        let mut checkpointed = false;
         let mut first = true;
         let (resolved, skipped) = loop {
+            // Resolution and its fingerprints run under a lease renewed for
+            // the resolution timeout, never one sized for an earlier phase.
+            let deadline = lease::deadline(
+                context.base,
+                context.base.clock.now(),
+                context.base.settings.resolution_timeout,
+            );
+            if let Err(ending) = self.phase(Vec::new(), deadline) {
+                return ending;
+            }
             let resolved = session.resolve(
                 &prepared,
                 &Evidence {
@@ -1145,7 +1193,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                             produced.insert(name.clone());
                         }
                         observed.insert(name.clone(), checkpoint.observed.clone());
-                        checkpointed = true;
+                        self.checkpointed = true;
                         if let Err(error) = self.write_run(Some(checkpoint)) {
                             let finding = store_error(&environment, &error);
                             self.report.errors.push(finding);
@@ -1257,11 +1305,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             Err(error) => {
                 self.report.errors.push(store_error(&environment, &error));
-                if checkpointed {
-                    Ending::KeepRun { release: true }
-                } else {
-                    Ending::Release
-                }
+                self.failed()
             }
         }
     }
@@ -1481,7 +1525,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         temp_dir,
         env: admitted_env(context.process_env, &unit.spec),
         approved_digest: None,
-        deadline: started + unit_timeout(unit).to_chrono(),
+        deadline: unit_timeout(unit).after(started),
         now: started,
         observed: job.observed,
         tools: context.tools,
@@ -1686,6 +1730,30 @@ mod tests {
                 ("PATH".to_owned(), "/bin".to_owned()),
                 ("REGION".to_owned(), "eu".to_owned()),
             ])
+        );
+    }
+
+    /// Catches a fingerprint running past the held lease, when another
+    /// runner may already have broken it.
+    #[test]
+    fn test_resolution_deadline_stays_within_the_lease() {
+        let settings = crate::shell::Settings::default();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-24T10:00:00Z")
+            .unwrap()
+            .to_utc();
+        assert_eq!(
+            resolution_deadline(&settings, now, None),
+            now + chrono::Duration::minutes(30)
+        );
+        let lease = now + chrono::Duration::minutes(15);
+        assert_eq!(
+            resolution_deadline(&settings, now, Some(lease)),
+            now + chrono::Duration::minutes(5)
+        );
+        let long = now + chrono::Duration::minutes(120);
+        assert_eq!(
+            resolution_deadline(&settings, now, Some(long)),
+            now + chrono::Duration::minutes(30)
         );
     }
 

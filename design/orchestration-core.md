@@ -308,7 +308,7 @@ spec:
   | `dependsOn` | list of unit names or `{environment?, unit, evidence?, attestations?}` | `[]` | Ordering without a data reference |
   | `approval` | `auto`, `manual`, or `{mode, bind, requireDigest}` | `auto` | See [Approval](#approval) |
   | `deletionPolicy` | `Teardown` \| `Retain` | `Teardown` where the kind supports teardown, else `Retain` | See [Deletion](#deletion) |
-  | `timeout` | duration | per kind (see [Defaults](#defaults)) | Deadline for one execution, teardown, or verification |
+  | `timeout` | duration | per kind (see [Defaults](#defaults)) | Deadline for one execution, teardown, or verification; at most `7d`, since a run holds its lease for it |
   | `env` | `{passthrough: [name], secrets: {name: key}}` | `{}` | See [Credentials](#credentials) |
   | `attestations` | list of `{name, from: external}` | `[]` | Attestations only external sources supply (see [Attestations](#attestations)); kinds that attest themselves add their own names |
 

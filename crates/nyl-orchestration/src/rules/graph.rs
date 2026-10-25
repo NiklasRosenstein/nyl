@@ -10,7 +10,13 @@
 //!
 //! Edges come from rendered specs, so they exist before any value does. A
 //! `dependsOn` or reference naming a unit outside the ownership set is an
-//! error, and so is a cycle, which names its units in order.
+//! error, and so is a cycle, which names its units in order. A reference
+//! must also pass the resolver's state-free checks
+//! ([`super::references::check_declaration`]): it reads an output its
+//! producer declares as non-sensitive. M3 restriction: a reference or
+//! `dependsOn` entry requiring `evidence: attested` or naming attestations is
+//! rejected with `NYL-ATTESTATIONS-UNSUPPORTED`, since no kind records
+//! attestation results yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,6 +27,8 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, UnitN
 use nyl_core::orchestration::state::DesiredUnit;
 use nyl_core::resources::units::{DependsOn, Evidence};
 use serde_json::Value;
+
+use super::references::{check_declaration, unsupported_depends_on, unsupported_evidence};
 
 /// The graph of a run's desired units. Errors use
 /// [`Code::DependencyUnknown`](nyl_core::orchestration::codes::Code::DependencyUnknown),
@@ -101,6 +109,13 @@ fn depends_on_edges(
         },
     };
     for (index, entry) in entries.iter().enumerate() {
+        if let Some(error) = unsupported_depends_on(entry) {
+            findings.push(attestations_unsupported(
+                consumer,
+                &format!("spec.dependsOn[{index}] {error}"),
+            ));
+            continue;
+        }
         if let Some(other) = entry.environment() {
             findings.push(Finding::new(
                 Code::DependencyUnknown,
@@ -160,6 +175,13 @@ fn reference_edges(
     };
     for reference in references {
         let source = reference.source;
+        if let Some(error) = unsupported_evidence(&source) {
+            findings.push(attestations_unsupported(
+                consumer,
+                &format!("the reference at {:?} {error}", reference.pointer),
+            ));
+            continue;
+        }
         if let Some(other) = &source.environment {
             findings.push(Finding::new(
                 Code::ReferenceInvalid,
@@ -185,6 +207,14 @@ fn reference_edges(
                 continue;
             }
         };
+        if let Err(error) = check_declaration(&producer, &units[&producer], &source) {
+            findings.push(Finding::new(
+                Code::ReferenceInvalid,
+                format!("unit {consumer}: the reference at {:?} {error}", reference.pointer),
+                "reference an output the producer declares and does not mark sensitive",
+            ));
+            continue;
+        }
         let pointer = match JsonPointer::new(reference.pointer.as_str()) {
             Ok(pointer) => pointer,
             Err(error) => {
@@ -206,6 +236,15 @@ fn reference_edges(
             },
         });
     }
+}
+
+/// `NYL-ATTESTATIONS-UNSUPPORTED` for one reference or `dependsOn` entry.
+fn attestations_unsupported(consumer: &UnitName, message: &str) -> Finding {
+    Finding::new(
+        Code::AttestationsUnsupported,
+        format!("unit {consumer}: {message}"),
+        "remove evidence: attested and attestations; requiring attestations arrives in a later milestone",
+    )
 }
 
 /// Direct producers of every node.
@@ -331,7 +370,10 @@ mod tests {
             (
                 "database",
                 "Command",
-                json!({"values": {"vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}}}}),
+                json!({
+                    "values": {"vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}}},
+                    "outputs": {"host": {"type": "string"}},
+                }),
             ),
             (
                 "kubernetes",
@@ -402,7 +444,11 @@ mod tests {
     fn test_extract_names_a_cycle_in_order() {
         let findings = graph(&[
             ("a", "Command", json!({"dependsOn": ["c"]})),
-            ("b", "Command", json!({"dependsOn": ["a"]})),
+            (
+                "b",
+                "Command",
+                json!({"dependsOn": ["a"], "outputs": {"y": {"type": "string"}}}),
+            ),
             ("c", "Command", json!({"x": {"fromUnit": {"unit": "b", "output": "y"}}})),
             ("d", "Command", json!({"dependsOn": ["a"]})),
         ])
@@ -444,5 +490,64 @@ mod tests {
         assert!(findings[0].message.contains("\"missing\""));
         assert!(findings[1].message.contains("cross-environment"));
         assert!(findings[2].message.contains("\"/y\""), "{}", findings[2].message);
+    }
+
+    /// Catches a reference to an output its producer does not declare, or
+    /// declares sensitive, passing the state-free checks `nyl validate`
+    /// shares with runs.
+    #[test]
+    fn test_extract_rejects_undeclared_and_sensitive_outputs() {
+        let findings = graph(&[
+            (
+                "db",
+                "Command",
+                json!({"outputs": {"host": {"type": "string"}, "password": {"type": "string", "sensitive": true}}}),
+            ),
+            (
+                "app",
+                "Command",
+                json!({
+                    "a": {"fromUnit": {"unit": "db", "output": "port"}},
+                    "b": {"fromUnit": {"unit": "db", "output": "password"}},
+                    "c": {"fromUnit": {"unit": "db", "output": "host"}},
+                    "d": {"fromUnit": {"unit": "db", "artifact": "anything"}},
+                }),
+            ),
+        ])
+        .unwrap_err();
+        let codes = findings.iter().map(|finding| finding.code).collect::<Vec<_>>();
+        assert_eq!(codes, [Code::ReferenceInvalid, Code::ReferenceInvalid], "{findings:?}");
+        assert!(
+            findings[0].message.contains("does not declare"),
+            "{}",
+            findings[0].message
+        );
+        assert!(findings[1].message.contains("sensitive"), "{}", findings[1].message);
+    }
+
+    /// Catches a consumer requiring attestations running on a bare receipt:
+    /// no kind records attestations yet, so the requirement is rejected.
+    #[test]
+    fn test_extract_rejects_evidence_requirements_until_attestations_exist() {
+        let findings = graph(&[
+            ("db", "Command", json!({"outputs": {"host": {"type": "string"}}})),
+            (
+                "app",
+                "Command",
+                json!({
+                    "dependsOn": [{"unit": "db", "attestations": ["healthy"]}, {"unit": "db", "evidence": "published"}],
+                    "x": {"fromUnit": {"unit": "db", "output": "host", "evidence": "attested"}},
+                }),
+            ),
+        ])
+        .unwrap_err();
+        let codes = findings.iter().map(|finding| finding.code).collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [Code::AttestationsUnsupported, Code::AttestationsUnsupported],
+            "{findings:?}"
+        );
+        assert!(findings[0].message.contains("healthy"), "{}", findings[0].message);
+        assert!(findings[1].message.contains("\"attested\""), "{}", findings[1].message);
     }
 }

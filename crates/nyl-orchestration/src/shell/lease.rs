@@ -85,7 +85,7 @@ pub fn acquire(
                 }
             }
             LeaseDecision::Held(holder) => {
-                let waited_out = wait.is_none_or(|wait| now >= started + wait.to_chrono());
+                let waited_out = wait.is_none_or(|wait| now >= wait.after(started));
                 if waited_out {
                     return Err(LeaseError::Held(Finding::new(
                         Code::LeaseHeld,
@@ -101,7 +101,7 @@ pub fn acquire(
 
 /// `now` plus a phase and the grace period: no phase runs without a deadline.
 pub fn deadline(context: &Context<'_>, now: Timestamp, phase: Duration) -> Timestamp {
-    now + phase.saturating_add(context.settings.lease_grace).to_chrono()
+    phase.saturating_add(context.settings.lease_grace).after(now)
 }
 
 /// Release a lease this run holds. A lease that was taken over meanwhile is

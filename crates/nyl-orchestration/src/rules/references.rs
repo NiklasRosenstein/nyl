@@ -41,7 +41,7 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId
 use nyl_core::orchestration::state::{
     ArtifactDocument, BlockedReason, DesiredUnit, ObservedUnit, Provenance, Readiness, Receipt, ReceiptProvenance,
 };
-use nyl_core::resources::units::{DependsOn, OutputDeclaration};
+use nyl_core::resources::units::{DependsOn, Evidence, OutputDeclaration};
 use serde_json::Value;
 
 use super::freshness::receipt_is_current;
@@ -111,33 +111,13 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
             source.unit
         ));
     }
+    if let Some(error) = unsupported_evidence(source) {
+        return Err(error);
+    }
     let (name, desired) = producer(view, &source.unit)?;
     // Static checks against the producer's declaration come first, so an
     // invalid reference fails even while its producer has no receipt.
-    let declaration = match (&source.output, &source.artifact) {
-        (Some(output), None) => {
-            if let Some(kind) = &source.kind {
-                return Err(format!(
-                    "asserts kind {kind:?} for output {output:?} of unit {name}; kind applies to artifact references only"
-                ));
-            }
-            let outputs = declared_outputs(desired)?;
-            let Some(declaration) = outputs.get(output) else {
-                return Err(format!(
-                    "reads output {output:?}, which unit {name} does not declare; declared outputs: {}",
-                    outputs.keys().cloned().collect::<Vec<_>>().join(", ")
-                ));
-            };
-            if declaration.sensitive {
-                return Err(format!(
-                    "reads output {output:?} of unit {name}, which is sensitive and never referenceable"
-                ));
-            }
-            Some(declaration.clone())
-        }
-        (None, Some(_)) => None,
-        _ => return Err("must set exactly one of output and artifact".to_owned()),
-    };
+    let declaration = check_declaration(name, desired, source)?;
     let observed = view.observed.get(name);
     if !receipt_is_current(desired, observed) {
         return Ok(ReferenceValue::Blocked {
@@ -185,6 +165,87 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
             },
             run: in_run.cloned(),
         },
+    })
+}
+
+/// The state-free checks of a reference against its producer's rendered
+/// spec: exactly one of `output` and `artifact`, `kind` only on artifact
+/// references, and an output that the producer declares as non-sensitive.
+/// Returns the output's declaration for an output reference. Resolution and
+/// graph extraction ([`super::graph::extract`], which `nyl validate` runs
+/// too) both check through it.
+pub(crate) fn check_declaration(
+    name: &UnitName,
+    producer: &DesiredUnit,
+    source: &UnitInputSource,
+) -> Result<Option<OutputDeclaration>, String> {
+    match (&source.output, &source.artifact) {
+        (Some(output), None) => {
+            if let Some(kind) = &source.kind {
+                return Err(format!(
+                    "asserts kind {kind:?} for output {output:?} of unit {name}; kind applies to artifact references only"
+                ));
+            }
+            let outputs = declared_outputs(producer)?;
+            let Some(declaration) = outputs.get(output) else {
+                return Err(format!(
+                    "reads output {output:?}, which unit {name} does not declare; declared outputs: {}",
+                    outputs.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            };
+            if declaration.sensitive {
+                return Err(format!(
+                    "reads output {output:?} of unit {name}, which is sensitive and never referenceable"
+                ));
+            }
+            Ok(Some(declaration.clone()))
+        }
+        // Artifact names are checked once kinds declare them (M5).
+        (None, Some(_)) => Ok(None),
+        _ => Err("must set exactly one of output and artifact".to_owned()),
+    }
+}
+
+/// Why a reference's evidence requirement cannot be met yet: no kind
+/// records attestation results in M3, so `evidence: attested` and named
+/// `attestations` are rejected rather than silently met by a bare receipt.
+pub(crate) fn unsupported_evidence(source: &UnitInputSource) -> Option<String> {
+    let evidence = source.evidence.as_deref().filter(|evidence| *evidence != "published");
+    if evidence.is_none() && source.attestations.is_empty() {
+        return None;
+    }
+    let mut required = Vec::new();
+    if let Some(evidence) = evidence {
+        required.push(format!("evidence {evidence:?}"));
+    }
+    if !source.attestations.is_empty() {
+        required.push(format!("attestations {}", source.attestations.join(", ")));
+    }
+    Some(format!(
+        "requires {} of unit {:?}; attestations are not recorded yet, so only evidence \"published\" (a current receipt) is supported",
+        required.join(" and "),
+        source.unit
+    ))
+}
+
+/// Why a `dependsOn` entry's evidence requirement cannot be met yet, as for
+/// [`unsupported_evidence`].
+pub(crate) fn unsupported_depends_on(entry: &DependsOn) -> Option<String> {
+    let DependsOn::Entry(entry) = entry else {
+        return None;
+    };
+    unsupported_evidence(&UnitInputSource {
+        environment: None,
+        unit: entry.unit.clone(),
+        output: None,
+        artifact: None,
+        kind: None,
+        pointer: None,
+        evidence: entry
+            .evidence
+            .filter(|evidence| *evidence != Evidence::Published)
+            .map(|_| "attested".to_owned()),
+        attestations: entry.attestations.clone(),
     })
 }
 
@@ -360,6 +421,10 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
     let mut reasons = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         let field = format!("spec.dependsOn[{index}]");
+        if let Some(error) = unsupported_depends_on(entry) {
+            errors.push(format!("{field} {error}"));
+            continue;
+        }
         if let Some(environment) = entry.environment() {
             errors.push(format!(
                 "{field} names unit {:?} of environment {environment:?}; cross-environment dependencies are not supported yet",
@@ -824,6 +889,34 @@ mod tests {
         assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
         assert!(resolution.errors[0].starts_with("spec.variables.bad reads output \"nope\""));
         assert_eq!(resolution.provenance.len(), 1);
+        assert_eq!(resolution.resolved_spec, None);
+    }
+
+    /// Catches a consumer that asked for attested evidence resolving, and
+    /// running, against a bare receipt: the one resolver rejects the
+    /// requirement instead of downgrading it to `published`.
+    #[test]
+    fn test_resolve_rejects_evidence_requirements_until_attestations_exist() {
+        let world = World::new();
+        let error = world
+            .resolve(json!({"unit": "network", "output": "vpcId", "evidence": "attested"}))
+            .unwrap_err();
+        assert!(error.contains("\"attested\""), "{error}");
+        assert!(world
+            .resolve(json!({"unit": "network", "output": "vpcId", "attestations": ["healthy"]}))
+            .is_err());
+        assert!(world
+            .resolve(json!({"unit": "network", "output": "vpcId", "evidence": "published"}))
+            .is_ok());
+        let unit = desired(
+            "database",
+            "Command",
+            json!({"dependsOn": [{"unit": "network", "evidence": "attested"}]}),
+            "database",
+        );
+        let resolution = resolve_unit(&world.view(), &unit);
+        assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
+        assert!(resolution.errors[0].starts_with("spec.dependsOn[0] requires evidence"));
         assert_eq!(resolution.resolved_spec, None);
     }
 }
