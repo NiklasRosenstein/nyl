@@ -52,14 +52,23 @@ pub const AUTHOR: &str = "Scenario <scenario@example.invalid>";
 /// the scenario fails instead of hanging the test.
 const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The outcome keys of `expect` that name sets of units.
-const OUTCOME_KEYS: [&str; 6] = [
+/// The outcome keys of `expect` that name sets of units: each a
+/// `UnitResult::name` or `UnitState::name`, as `UnitReport::outcome_name`
+/// gives them.
+pub const OUTCOME_KEYS: [&str; 13] = [
     "executed",
     "current",
     "blocked",
     "failed",
     "uncertain",
     "awaiting-approval",
+    "pending-teardown",
+    "tearing-down",
+    "retained",
+    "removed",
+    "released",
+    "held",
+    "drifted",
 ];
 
 /// A fault the next `nyl` step dies at, consumed when it fires. A `None`
@@ -162,8 +171,13 @@ pub fn run(loaded: &Loaded) -> Result<(), String> {
         .expect("start time")
         .to_utc();
     let script = Script::new();
+    let world = World::new(&loaded.directory.join(&loaded.scenario.project));
+    // Command units admit `SCENARIO_TMP` through `env.passthrough` to reach
+    // the files `file` steps change outside Nyl.
+    let mut process_env = super::shell::process_env();
+    process_env.insert("SCENARIO_TMP".to_owned(), world.scenario_tmp().display().to_string());
     let shared = Shared {
-        world: World::new(&loaded.directory.join(&loaded.scenario.project)),
+        world,
         clock: Arc::new(FakeClock::new(start)),
         ids: SequentialIds::new(),
         drivers: nyl_drivers::registry::with_test_kinds(&script),
@@ -171,7 +185,7 @@ pub fn run(loaded: &Loaded) -> Result<(), String> {
         tools: ProcessRunner::new(),
         faults: FaultSlot::default(),
         author: AUTHOR.parse().expect("identity"),
-        process_env: super::shell::process_env(),
+        process_env,
     };
     std::thread::scope(|scope| {
         let mut state = RunState {
@@ -243,6 +257,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             StepKind::SquashMerge => self.world.squash_merge(step.squash_merge.as_ref().expect("kind")),
             StepKind::DeleteBranch => self.world.delete_branch(step.delete_branch.as_ref().expect("kind")),
             StepKind::Ref => self.world.delete_ref(&step.reference.as_ref().expect("kind").delete),
+            StepKind::File => self.world.file(step.file.as_ref().expect("kind"))?,
             StepKind::Clock => {
                 let step = step.clock.as_ref().expect("kind");
                 if let Some(set) = &step.set {
@@ -271,6 +286,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                         outputs: step.outputs.clone(),
                     },
                     DriverOutcome::Uncertain => Scripted::Uncertain,
+                    DriverOutcome::Drifted => Scripted::Drifted,
                     DriverOutcome::Failed => Scripted::Failed {
                         category: serde_json::from_value::<FailureCategory>(Value::String(
                             step.category.clone().unwrap_or_default(),
@@ -457,7 +473,20 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         let Some(expect) = &checked.expect else {
             return Ok(());
         };
-        self.check_outcomes(expect, &outcome, args, environment, new_commits)
+        // A `--local` run's transition commits stay in its own clone.
+        let local = args.iter().any(|arg| arg == "--local");
+        let summaries = if reads_summary(expect) && (new_commits.0 > 0 || new_commits.1 > 0) {
+            let (side, count) = if new_commits.0 > 0 {
+                ("desired", new_commits.0)
+            } else {
+                ("observed", new_commits.1)
+            };
+            self.commit_summaries(environment, side, count)
+                .map_err(|error| format!("{error}; {}", describe()))?
+        } else {
+            Vec::new()
+        };
+        check_results(expect, &outcome.report, (!local).then_some(summaries.as_slice()))
             .map_err(|error| format!("{error}; {}", describe()))?;
         if let Some(commits) = &expect.commits {
             if new_commits != (commits.desired, commits.observed) {
@@ -484,8 +513,16 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             }
         }
         if let Some(units) = &expect.units {
+            let status = units
+                .values()
+                .any(|expectation| expectation.condition_state.is_some() || expectation.drift.is_some())
+                .then(|| self.status(environment, branch))
+                .transpose()?;
             for (unit, expectation) in units {
                 self.check_unit(unit, expectation, environment, branch)?;
+                if let Some(status) = &status {
+                    check_status_attributes(unit, expectation, status)?;
+                }
             }
         }
         if let Some(deploy) = &expect.deploy {
@@ -517,6 +554,17 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             }
         }
         Ok(())
+    }
+
+    /// The units of `nyl status -e <environment> -o json`, whatever its exit.
+    fn status(&self, environment: &str, branch: &str) -> Result<Value, String> {
+        let args = ["status", "-e", environment, "-o", "json"].map(str::to_owned);
+        let outcome = self.invoke(&args, branch)?;
+        outcome
+            .report
+            .pointer("/environments/0/units")
+            .cloned()
+            .ok_or_else(|| format!("status of {environment} has no units: {}", outcome.stderr))
     }
 
     /// One sequential in-process invocation, without faults beyond the slot.
@@ -560,110 +608,29 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             .collect()
     }
 
-    fn check_outcomes(
-        &self,
-        expect: &Expect,
-        outcome: &CommandOutcome,
-        args: &[String],
-        environment: &str,
-        new_commits: Counts,
-    ) -> Result<(), String> {
-        let expected = [
-            &expect.executed,
-            &expect.current,
-            &expect.blocked,
-            &expect.failed,
-            &expect.uncertain,
-            &expect.awaiting_approval,
-        ];
-        let lists = [("recovered", &expect.recovered), ("imported", &expect.imported)];
-        if expected.iter().all(|set| set.is_none()) && lists.iter().all(|(_, list)| list.is_none()) {
-            return Ok(());
-        }
-        let reconcile = args.first().is_some_and(|command| command == "reconcile");
-        let summary = if reconcile && (new_commits.0 > 0 || new_commits.1 > 0) {
-            let side = if new_commits.0 > 0 { "desired" } else { "observed" };
-            Some(self.commit_summary(environment, side)?)
-        } else {
-            None
-        };
-        if expected.iter().any(|set| set.is_some()) {
-            let units = outcome
-                .report
-                .pointer("/environments/0/units")
-                .and_then(Value::as_object)
-                .ok_or("the report has no units")?;
-            let outcome_of = |unit: &Value| {
-                unit.get("result")
-                    .or_else(|| unit.get("state"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            };
-            let summary_units = summary.as_ref().map(summary_units);
-            for (key, expected) in OUTCOME_KEYS.iter().zip(expected) {
-                let Some(expected) = expected else { continue };
-                let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
-                let reported = units
-                    .iter()
-                    .filter(|(_, unit)| outcome_of(unit).as_deref() == Some(*key))
-                    .map(|(name, _)| name.clone())
-                    .collect::<BTreeSet<_>>();
-                if reported != expected {
-                    return Err(format!("{key}: the report has {reported:?} instead of {expected:?}"));
-                }
-                if let Some(summary_units) = &summary_units {
-                    let listed = summary_units
-                        .iter()
-                        .filter(|(_, result)| result.as_str() == *key)
-                        .map(|(name, _)| name.clone())
-                        .collect::<BTreeSet<_>>();
-                    if listed != expected {
-                        return Err(format!(
-                            "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
-                        ));
-                    }
-                }
-            }
-        }
-        // `recovered` and `imported` are the summary's lists, and the
-        // report's lists of the same name, which are omitted when empty.
-        for (key, expected) in lists {
-            let Some(expected) = expected else { continue };
-            let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
-            let summary = summary
-                .as_ref()
-                .ok_or_else(|| format!("{key}: the step wrote no transition commit whose summary lists it"))?;
-            let listed = names(summary.get(key));
-            if listed != expected {
-                return Err(format!(
-                    "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
-                ));
-            }
-            let reported = names(outcome.report.pointer(&format!("/environments/0/{key}")));
-            if reported != expected {
-                return Err(format!("{key}: the report lists {reported:?} instead of {expected:?}"));
-            }
-        }
-        Ok(())
-    }
-
-    /// The YAML summary of the latest transition commit on the
-    /// environment's `side` ref.
-    fn commit_summary(&self, environment: &str, side: &str) -> Result<Value, String> {
-        let message = git_output(
+    /// The YAML summaries of the step's `count` newest transition commits
+    /// on the environment's `side` ref, newest first.
+    fn commit_summaries(&self, environment: &str, side: &str, count: usize) -> Result<Vec<Value>, String> {
+        let log = git_output(
             &self.world.bare(),
             &[
                 "log",
-                "-1",
-                "--format=%B",
+                &format!("-{count}"),
+                "--format=%B%x00",
                 &format!("refs/heads/nyl/{environment}/{side}"),
             ],
         );
-        let body = message
-            .split("\n\n")
-            .nth(1)
-            .ok_or_else(|| format!("the transition commit has no summary:\n{message}"))?;
-        serde_saphyr::from_str(body).map_err(|error| format!("summary {body:?}: {error}"))
+        log.split('\0')
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(|message| {
+                let body = message
+                    .split("\n\n")
+                    .nth(1)
+                    .ok_or_else(|| format!("the transition commit has no summary:\n{message}"))?;
+                serde_saphyr::from_str(body).map_err(|error| format!("summary {body:?}: {error}"))
+            })
+            .collect()
     }
 
     fn check_unit(
@@ -739,6 +706,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 UidExpectation::New if same || uid.is_none() => {
                     return Err(format!("{unit}: uid {uid:?} is not new"));
                 }
+                UidExpectation::None if uid.is_some() => {
+                    return Err(format!("{unit}: has uid {uid:?} instead of none"));
+                }
                 _ => {}
             }
         }
@@ -770,6 +740,195 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         }
         Ok(())
     }
+}
+
+/// Whether `expect` names a key checked against the transition summary.
+fn reads_summary(expect: &Expect) -> bool {
+    outcome_sets(expect).iter().any(|(_, set)| set.is_some())
+        || list_keys(expect).iter().any(|(_, list)| list.is_some())
+        || expect.lease_broken.is_some()
+}
+
+/// The outcome keys of `expect` with the sets they name, in [`OUTCOME_KEYS`] order.
+fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 13] {
+    let sets = [
+        &expect.executed,
+        &expect.current,
+        &expect.blocked,
+        &expect.failed,
+        &expect.uncertain,
+        &expect.awaiting_approval,
+        &expect.pending_teardown,
+        &expect.tearing_down,
+        &expect.retained,
+        &expect.removed,
+        &expect.released,
+        &expect.held,
+        &expect.drifted,
+    ];
+    std::array::from_fn(|index| (OUTCOME_KEYS[index], sets[index]))
+}
+
+/// The keys of `expect` that name a list of units in both the report and
+/// the transition summary: the expect key, the summary's and the report's
+/// key, and the expected list.
+fn list_keys(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 4] {
+    [
+        ("recovered", &expect.recovered),
+        ("imported", &expect.imported),
+        ("driftRepaired", &expect.drift_repaired),
+        ("reapplied", &expect.reapplied),
+    ]
+}
+
+/// The run report of one environment inside a step's report: a run
+/// report's first environment, or the teardown run a `state delete
+/// --teardown` report carries under `details.teardown`.
+fn run_environment(report: &Value) -> Option<&Value> {
+    report
+        .pointer("/environments/0")
+        .or_else(|| report.pointer("/details/teardown/environments/0"))
+}
+
+/// A unit's outcome name in a report or a summary entry: its `result`
+/// (reconcile, teardown), `state` (plan, status), or `verification` (verify),
+/// as `UnitReport::outcome_name` orders them.
+fn outcome_of(unit: &Value) -> Option<&str> {
+    ["result", "state", "verification"]
+        .iter()
+        .find_map(|key| unit.get(*key).and_then(Value::as_str))
+}
+
+/// Check the outcome sets, the unit lists, the lease break, and the state
+/// operation outcome `expect` names against a step's JSON report and the
+/// summaries of the transition commits the step wrote, newest first, or
+/// `None` for a `--local` run, whose commits never reach `project.git`, so
+/// only its report is checked.
+///
+/// - Outcome keys compare against the report's units and, when the step
+///   wrote a transition commit whose `units:` block carries outcomes, the
+///   newest such block; a state operation's actions (`hold`, `resume`)
+///   carry none, so only its report is read.
+/// - `recovered`, `imported`, `driftRepaired`, and `reapplied` compare
+///   against the newest summary's list (`reapplied`'s `units`) and the
+///   report's list of that name, missing meaning empty, in the run report
+///   or a state operation's `details`.
+/// - `lease-broken` checks whether the newest summary records `leaseBroken`.
+pub fn check_results(expect: &Expect, report: &Value, summaries: Option<&[Value]>) -> Result<(), String> {
+    if let Some(expected) = expect.outcome {
+        let reported = report.get("outcome").and_then(Value::as_str);
+        if reported != Some(expected.name()) {
+            return Err(format!(
+                "outcome: the report has {reported:?} instead of {}",
+                expected.name()
+            ));
+        }
+    }
+    let sets = outcome_sets(expect);
+    if sets.iter().any(|(_, set)| set.is_some()) {
+        let units = run_environment(report)
+            .and_then(|environment| environment.get("units"))
+            .and_then(Value::as_object)
+            .ok_or("the report has no units")?;
+        let summary_units = summaries
+            .into_iter()
+            .flatten()
+            .map(summary_units)
+            .find(|units| !units.is_empty());
+        for (key, expected) in sets {
+            let Some(expected) = expected else { continue };
+            let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
+            let reported = units
+                .iter()
+                .filter(|(_, unit)| outcome_of(unit) == Some(key))
+                .map(|(name, _)| name.clone())
+                .collect::<BTreeSet<_>>();
+            if reported != expected {
+                return Err(format!("{key}: the report has {reported:?} instead of {expected:?}"));
+            }
+            if let Some(summary_units) = &summary_units {
+                let listed = summary_units
+                    .iter()
+                    .filter(|(_, outcome)| outcome.as_str() == key)
+                    .map(|(name, _)| name.clone())
+                    .collect::<BTreeSet<_>>();
+                if listed != expected {
+                    return Err(format!(
+                        "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
+                    ));
+                }
+            }
+        }
+    }
+    let newest = summaries.map(|summaries| summaries.first());
+    for (key, expected) in list_keys(expect) {
+        let Some(expected) = expected else { continue };
+        let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
+        if let Some(newest) = newest {
+            let summary =
+                newest.ok_or_else(|| format!("{key}: the step wrote no transition commit whose summary lists it"))?;
+            let listed = match key {
+                "reapplied" => names(summary.pointer("/reapplied/units")),
+                _ => names(summary.get(key)),
+            };
+            if listed != expected {
+                return Err(format!(
+                    "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
+                ));
+            }
+        }
+        let reported = run_environment(report)
+            .and_then(|environment| environment.get(key))
+            .or_else(|| report.pointer(&format!("/details/{key}")));
+        let reported = names(reported);
+        if reported != expected {
+            return Err(format!("{key}: the report lists {reported:?} instead of {expected:?}"));
+        }
+    }
+    if let Some(expected) = expect.lease_broken {
+        let newest = newest.ok_or("lease-broken: a --local run's transition commit is not in project.git")?;
+        let recorded = newest.is_some_and(|summary| summary.get("leaseBroken").is_some());
+        if recorded != expected {
+            return Err(format!(
+                "lease-broken: the transition commit summary {} a lease break",
+                if recorded { "records" } else { "does not record" }
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check the attributes `nyl status` shows for `unit` (`status` holds its
+/// units): the condition next to its state, and its drift observation.
+fn check_status_attributes(unit: &str, expectation: &UnitExpectation, status: &Value) -> Result<(), String> {
+    let shown = status.get(unit);
+    if let Some(expected) = &expectation.condition_state {
+        let condition = shown
+            .and_then(|unit| unit.get("condition"))
+            .filter(|value| !value.is_null());
+        let matches = match (expected, condition) {
+            (Value::Null, None) => true,
+            (expected, Some(condition)) => expected == condition,
+            _ => false,
+        };
+        if !matches {
+            return Err(format!(
+                "{unit}: status shows condition {condition:?} instead of {expected}"
+            ));
+        }
+    }
+    if let Some(drift) = &expectation.drift {
+        let result = shown
+            .and_then(|unit| unit.pointer("/drift/result"))
+            .and_then(Value::as_str);
+        if result != Some(drift.result.name()) {
+            return Err(format!(
+                "{unit}: status shows drift {result:?} instead of {}",
+                drift.result.name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The environment of a step's `-e`, or `dev`.
@@ -859,14 +1018,15 @@ pub fn invoke_in(
         .map_err(|error| format!("nyl {}: {error}", args.join(" ")))
 }
 
-/// Each unit's result in a transition summary's `units:` block.
+/// Each unit's outcome in a transition summary's `units:` block: its
+/// `result`, or a verify's `verification`; an operator action has none.
 fn summary_units(summary: &Value) -> BTreeMap<String, String> {
     summary
         .get("units")
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
-        .filter_map(|(name, value)| Some((name.clone(), value.get("result")?.as_str()?.to_owned())))
+        .filter_map(|(name, value)| Some((name.clone(), outcome_of(value)?.to_owned())))
         .collect()
 }
 

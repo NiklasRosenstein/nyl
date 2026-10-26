@@ -1,0 +1,16 @@
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: worker
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  values:
+    cache: {fromUnit: {unit: cache, output: endpoint}}
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  command: ['./resource.sh', 'create']
+  teardown: ['./resource.sh', 'remove']
+  idempotent: true
+  deletionPolicy: Retain

@@ -1,0 +1,13 @@
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: scratch
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+  command: ['./resource.sh', 'create']
+  teardown: ['./resource.sh', 'remove']

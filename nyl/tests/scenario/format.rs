@@ -80,6 +80,7 @@ pub struct Step {
     pub ci_worker: Option<CiWorkerStep>,
     #[serde(rename = "ci-export")]
     pub ci_export: Option<CiExportStep>,
+    pub file: Option<FileStep>,
 
     // Modifiers.
     pub exit: Option<i32>,
@@ -107,6 +108,7 @@ pub enum StepKind {
     CiAdmit,
     CiWorker,
     CiExport,
+    File,
 }
 
 impl StepKind {
@@ -134,6 +136,19 @@ pub struct CommitStep {
     /// Paths removed from the working clone.
     #[serde(default)]
     pub delete: Vec<String>,
+}
+
+/// A change made outside Nyl to a file in the scenario's temporary
+/// directory, `%SCENARIO_TMP%`, such as the resources a Command unit's
+/// `verify` inspects: `content` writes the file, `delete: true` removes it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileStep {
+    /// Relative to `%SCENARIO_TMP%`, and never leaving it.
+    pub path: String,
+    pub content: Option<String>,
+    #[serde(default)]
+    pub delete: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +199,8 @@ pub enum DriverOutcome {
     Succeeded,
     Failed,
     Uncertain,
+    /// `verify` only: the fake reports drift.
+    Drifted,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -283,8 +300,21 @@ pub struct Expect {
     pub tearing_down: Option<Vec<String>>,
     pub retained: Option<Vec<String>>,
     pub removed: Option<Vec<String>>,
+    pub released: Option<Vec<String>>,
+    pub held: Option<Vec<String>>,
+    pub drifted: Option<Vec<String>>,
     pub recovered: Option<Vec<String>>,
     pub imported: Option<Vec<String>>,
+    /// The summary's `driftRepaired`, and the report's list of that name.
+    #[serde(rename = "driftRepaired")]
+    pub drift_repaired: Option<Vec<String>>,
+    /// The units of the summary's `reapplied`, and the report's list.
+    pub reapplied: Option<Vec<String>>,
+    /// Whether the transition commit records a lease break (`leaseBroken`).
+    #[serde(rename = "lease-broken")]
+    pub lease_broken: Option<bool>,
+    /// How a state operation, such as `hold` or `resume`, ended.
+    pub outcome: Option<OperationOutcome>,
     pub commits: Option<CommitCounts>,
     pub units: Option<BTreeMap<String, UnitExpectation>>,
     pub codes: Option<Vec<String>>,
@@ -292,6 +322,25 @@ pub struct Expect {
     pub deploy: Option<DeployExpectation>,
     pub promotion: Option<PromotionExpectation>,
     pub ci: Option<CiExpectation>,
+}
+
+/// A StateOperationReport's `outcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationOutcome {
+    Done,
+    Unchanged,
+    Refused,
+}
+
+impl OperationOutcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Unchanged => "unchanged",
+            Self::Refused => "refused",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -311,6 +360,37 @@ pub struct UnitExpectation {
     pub condition: Option<Value>,
     pub receipt: Option<ReceiptExpectation>,
     pub uid: Option<UidExpectation>,
+    /// The condition `nyl status` shows next to the unit's state, such as a
+    /// held unit that is still `uncertain`; `null` checks that it shows none.
+    #[serde(rename = "condition-state", default, deserialize_with = "present")]
+    pub condition_state: Option<Value>,
+    /// The latest drift observation `nyl status` shows for the unit.
+    pub drift: Option<DriftExpectation>,
+}
+
+/// A unit's drift attribute in `nyl status`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriftExpectation {
+    pub result: DriftResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DriftResult {
+    Clean,
+    Drifted,
+    Unknown,
+}
+
+impl DriftResult {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Drifted => "drifted",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Distinguishes `condition: null` (checked to be absent) from a missing key.
@@ -331,6 +411,8 @@ pub enum ReceiptExpectation {
 pub enum UidExpectation {
     Same,
     New,
+    /// No uid: a held marker, or a unit held without an incarnation.
+    None,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,6 +475,7 @@ impl Step {
             (self.ci_admit.is_some(), StepKind::CiAdmit),
             (self.ci_worker.is_some(), StepKind::CiWorker),
             (self.ci_export.is_some(), StepKind::CiExport),
+            (self.file.is_some(), StepKind::File),
         ];
         let set = kinds
             .iter()
@@ -443,6 +526,21 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
         return Err(format!("{id} is paused and never resumed"));
     }
     Ok(())
+}
+
+/// Whether a `nyl` step's arguments parse with the real command line, as
+/// the runner invokes it (with the clone's path appended), so a misspelt or
+/// misused option, such as `--reapply` given a unit instead of `--unit`,
+/// fails before the scenario runs. Only scenarios that run can be checked:
+/// a pending one may use options its milestone has not added yet.
+pub fn validate_arguments(args: &[String]) -> Result<(), String> {
+    use clap::Parser;
+    let argv = std::iter::once("nyl")
+        .chain(args.iter().map(String::as_str))
+        .chain(std::iter::once("."));
+    nyl::cli::Cli::try_parse_from(argv)
+        .map(drop)
+        .map_err(|error| format!("nyl {}: {error}", args.join(" ")))
 }
 
 fn validate_contract(contract: &str, repository_root: &Path) -> Result<(), String> {
@@ -550,6 +648,9 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
             if driver.times == Some(0) {
                 return Err("times must be at least 1".to_owned());
             }
+            if (driver.outcome == DriverOutcome::Drifted) && driver.operation != DriverOperation::Verify {
+                return Err("only a verify outcome can be drifted".to_owned());
+            }
         }
         StepKind::Fault => {
             let fault = step.fault.as_ref().expect("kind");
@@ -567,6 +668,23 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
                     return Err("fault before-push concerns the whole run; it takes no unit".to_owned());
                 }
                 _ => {}
+            }
+        }
+        StepKind::File => {
+            let file = step.file.as_ref().expect("kind");
+            if file.content.is_some() == file.delete {
+                return Err("file takes exactly one of content and delete: true".to_owned());
+            }
+            let path = Path::new(&file.path);
+            let inside = !file.path.is_empty()
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)));
+            if !inside {
+                return Err(format!(
+                    "file path {:?} must be relative to %SCENARIO_TMP% and stay inside it",
+                    file.path
+                ));
             }
         }
         StepKind::CiWorker => {

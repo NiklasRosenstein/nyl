@@ -1,0 +1,25 @@
+# dev and qa share dev's state refs, each beneath a path of its own, so
+# deleting dev's state leaves qa's untouched.
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  state:
+    path: dev
+  allowUnprotectedSource: true
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: qa
+spec:
+  unitSelector:
+    matchLabels: {qa: 'true'}
+  state:
+    desiredRef: nyl/dev/desired
+    observedRef: nyl/dev/observed
+    path: qa
+  allowUnprotectedSource: true

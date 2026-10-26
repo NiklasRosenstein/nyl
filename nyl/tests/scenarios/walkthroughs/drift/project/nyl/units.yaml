@@ -1,0 +1,29 @@
+# Two Command units managing a resource outside Nyl, which `verify` checks.
+# Re-running `idempotent` is safe (recovery policy converge); re-running
+# `other` is not (manual), so its repair needs an approval.
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: idempotent
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  command: ['./resource.sh', 'apply']
+  verify: ['./resource.sh', 'verify']
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: other
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  command: ['./resource.sh', 'apply']
+  verify: ['./resource.sh', 'verify']
+  env:
+    passthrough: [SCENARIO_TMP]

@@ -1,0 +1,10 @@
+# scratch becomes an image: a kind change, which tears the old incarnation
+# down before the new kind runs.
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: scratch
+  labels: {dev: 'true'}
+spec:
+  context: {path: ../scripts}
+  repository: '%REGISTRY%/scratch'
