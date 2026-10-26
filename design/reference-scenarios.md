@@ -558,7 +558,10 @@ Tier 1 variants:
   signal during `--wait-lease` refuses with `NYL-RUN-CANCELLED` having
   written nothing.
 - **Broken lease.** After a forced kill, `nyl lease break -e dev --reason
-  "runner lost"` lets the next run take over before the deadline.
+  "runner lost"` lets the next run take over before the deadline. Until a
+  run imports the dead one, `nyl verify -e dev` exits 2 with
+  `NYL-LEASE-BROKEN` and names `nyl recover -e dev`, which imports the dead
+  run without executing and records the break once, in its own commit.
 - **Busy instance.** While a pull request job holds `pr-124`'s lease, the
   fleet job skips it as `busy` and exits by the other instances' results.
 - **Close job waiting.** `state delete -e pr-123 --teardown --wait-lease 10m`

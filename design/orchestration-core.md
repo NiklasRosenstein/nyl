@@ -1320,9 +1320,9 @@ Nyl-Version: 0.7.0
   `recover`, `verify`, `attest`, `exec`, `ci-admit`, `state-init`,
   `state-move`, `state-delete`,
   `state-forget`, and `state-restore`. `state reset` rewrites only the clone's
-  local branches, and `lease break` writes only the lease ref; the next
-  transition commit lists the break under `leaseBroken` with who broke it and
-  why.
+  local branches, and `lease break` writes only the lease ref; the
+  transition commit that imports the broken run lists the break under
+  `leaseBroken` with who broke it and why.
 - Replaying operations in order, from the read commits and evaluation times
   they name, reproduces every state decision.
 
@@ -1556,7 +1556,14 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    `state move`, `state delete`, `state forget`, `state restore`), so only one
    runs per environment at a time. `promote` takes the target environment's
    lease only. `lease break` is the one command that changes a lease it does
-   not hold.
+   not hold. A broken lease whose run no run has imported yet is taken over
+   only by an operation that imports that run: `reconcile`, `teardown`, or
+   `recover` (see item 8). Every other state-writing operation, `state forget`
+   and `state delete` included, exits 2 with `NYL-LEASE-BROKEN`, or waits
+   under `--wait-lease`, and names `nyl recover -e <env>` as the fix, so the
+   dead run's effects and created units are recorded before anything else
+   writes state. Read-only commands (`plan`, `status`, `get`, `state log`)
+   never take the lease and work whatever its state.
 2. **Deadline.** Every phase sets the deadline before it starts, plus a grace
    period that also absorbs clock skew, and no phase runs without one:
    resolution, including target renders and `fingerprint` scripts, by
@@ -1622,7 +1629,8 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
      unchanged since the takeover read them, because the holder of a broken
      lease may still be alive and checkpoint in between; a changed ref is
      left for the next run, which imports what arrived.
-   - `nyl recover` never touches run refs. A `--local` run never imports,
+   - `nyl recover` touches run refs only when it imports the run of a broken
+     lease (see [Recovery](#recovery)). A `--local` run never imports,
      retires, or deletes remote run refs (see [Local runs](#local-runs)).
 5. **Fenced commit.** The final transition commit is pushed with
    `git push --atomic`, together with a compare-and-swap of the lease ref that
@@ -1668,12 +1676,13 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    run takes over at once, as after expiry, and
    units the holder was executing become `uncertain`. The command warns that
    a holder that is in fact alive may still be causing effects; the fenced
-   final push keeps it from overwriting state either way. The break is
-   recorded in the next transition commit with who broke it and why. An
-   operation that takes over a broken lease without consuming the broken
-   run's ref, such as `verify`, `recover`, a state operation, or a reconcile
-   that ends before its final push, puts the broken lease back when it
-   releases, so the break stays in effect until a run takes the run ref over.
+   final push keeps it from overwriting state either way. Only an operation
+   that imports the broken run takes the broken lease over (item 1), and its
+   transition commit records the break once, under `leaseBroken` with who
+   broke it and why, next to the import it caused. A run that took a broken
+   lease over and ends before its transition commit lands, such as a
+   reconcile that fails during resolution, restores the broken lease when it
+   releases, so the break stays in effect until an import is committed.
 
 `nyl status` reads the lease and run refs, so it shows a run in progress and
 the units it is executing. A finished run ref that no reconcile has imported
@@ -1725,16 +1734,34 @@ the run up on run refs and evidence refs, and `nyl recover` lists the
 evidence, every checkpoint of the unit there, newest run first, with whether
 `--accept` would adopt it.
 
-`recover` takes the lease and writes one observed commit with the operation
-`recover`, the unit under `recovered`, the action under `units`, such as
+`recover` takes the lease and writes one observed commit, with a desired
+commit beside it when an import adopts units a dead run created, with the
+operation `recover`, the unit under `recovered`, the action under `units`, such as
 `database: {action: accept, run: 0b8f…}` or `{action: retry}`, a headline such
 as `nyl: recover dev (database: accept 0b8f…)`, and the `Nyl-Requested-By` and
 `Nyl-Reason` trailers. Every receipt and condition change, of a run, a
 takeover, or `recover`, follows one transition table: a success or an
 accepted checkpoint replaces the receipt and clears the condition; a failure
 or an uncertain outcome keeps the receipt; an import onto an `uncertain` unit
-is evidence only. `recover` never touches run refs; after its commit it
-deletes the evidence refs that no `uncertain` unit needs any longer.
+is evidence only. Apart from importing a broken run, below, `recover` never
+touches run refs; after its commit it deletes the evidence refs that no
+`uncertain` unit needs any longer.
+
+**Importing a broken run.** When the lease is broken and its run has not been
+imported, `nyl recover -e <env>` takes the lease over and imports that run the
+way a `reconcile` takeover does, through the same run path with execution
+switched off: it resolves the desired units, adopts the uids of units the
+dead run created, turns checkpoints whose execution key matches into
+`imported` receipts, and gives units the run left without a checkpoint an
+`uncertain` condition. Nothing executes, so a converging unit made
+`uncertain` runs again in the next `reconcile` under its recovery policy. The
+transition commit, operation `recover`, lists the import under `imported`
+and the break under `leaseBroken`, and consumes the run ref as a takeover
+does (see [Runs and leases](#runs-and-leases), item 4). With `--unit`, the
+`--retry` or `--accept` action applies after the import, in the same commit,
+so an operator can break a lease, import, and decide a unit in one command.
+Without `--unit` and without a broken run to import, `recover` refuses with
+`NYL-RECOVER-NOTHING`.
 
 **Holds on uncertain units.** A hold on a unit with an `uncertain` condition
 keeps the desired document and uid of the unit's last receipt as its desired
@@ -2139,8 +2166,8 @@ experiments from a workstation:
   `NYL-LOCAL-RUN-LEFTOVERS` while the remote holds run refs of dead runs that
   no remote run has taken over yet: finished, past their deadline, or the
   holder of a broken lease. It checks before taking the lease, leaving the
-  lease and any break as they were; an ordinary `reconcile` takes them over
-  first. It never retires or deletes remote run refs or evidence refs.
+  lease and any break as they were; a remote `reconcile` or `recover` takes
+  them over first. It never retires or deletes remote run refs or evidence refs.
 - `--local-lease` explicitly opts into a local lease instead, for working
   without that access, and accepts that CI may run at the same time. It
   reads only the clone's own lease and run refs.
@@ -2496,7 +2523,7 @@ spec:
 | `state reset` | With `--local`, drop local transitions and follow the remote state again (see [Local runs](#local-runs)) | The clone's local state branches only |
 | `state restore` | Restore remote state to an earlier commit's content after local transitions were pushed by hand | One desired and one observed commit |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
-| `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the next transition commit |
+| `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the transition commit that imports the broken run |
 | `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only with `--push` where the kind allows it |
 | `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or a pull request under `changeGate: pullRequest` |
 

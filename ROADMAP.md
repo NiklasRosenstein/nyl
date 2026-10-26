@@ -132,6 +132,13 @@ part removes the walkthroughs it makes pass from the harness's pending list.
    repairs any current unit explicitly, recorded with requester and reason.
    Walkthrough step: `verify` finds drift, `reconcile` repairs the idempotent
    unit, and the other waits for `--reapply`.
+   Lease breaks: only an operation that imports the broken run (`reconcile`,
+   `teardown`, `recover`) takes a broken lease over, and its commit records
+   the break once; `nyl recover -e <env>` imports a broken run without
+   executing, other state-writing operations exit 2 with
+   `NYL-LEASE-BROKEN`, and the put-back by non-importing operations goes
+   away. Walkthrough step: a break, `verify` refusing, and `recover`
+   importing.
 6. Multi-environment runs, including `verify` over several environments,
    approvals (`verified`, `asserted`, and `local` sources, `--approve` for
    remote runs, the GitHub lookup, the `[approval] lookup` hook, and
