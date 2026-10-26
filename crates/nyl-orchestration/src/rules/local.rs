@@ -20,7 +20,8 @@
 //!   ([`rejected`]).
 //! - A `--local` run refuses while the remote holds run refs of dead runs
 //!   that remote state has not taken over yet ([`check_leftovers`],
-//!   `NYL-LOCAL-RUN-LEFTOVERS`), because it never imports remote run refs;
+//!   `NYL-LOCAL-RUN-LEFTOVERS`, naming a remote `nyl reconcile` or `nyl
+//!   recover -e <env>`), because it never imports remote run refs;
 //!   the lease it takes at the remote lists no units, since remote runs do
 //!   not notice local effects.
 //! - `state restore --to` pairs the other state ref through the transition
@@ -282,8 +283,10 @@ pub fn unrecorded_warning(environment: &EnvironmentName, unit: &UnitName) -> Fin
 /// a run take the lease at once). A local run never imports remote run refs,
 /// so it would leave those units unmarked, and taking the broken lease would
 /// erase the break that lets the next remote run take over. The fix names
-/// `nyl reconcile -e <env>` against remote state. Other live foreign run
-/// refs block through the lease rule.
+/// a remote `nyl reconcile -e <env>` or `nyl recover -e <env>`, which
+/// import them. Other live foreign run refs block through the lease rule,
+/// and a broken remote lease without leftovers refuses through it too
+/// (`NYL-LEASE-BROKEN`, `shell::lease::run_takeover`).
 ///
 /// The run shell checks before it takes the lease, so a refused run leaves
 /// the remote lease and run refs as they were, and again once it holds it.
@@ -310,7 +313,7 @@ pub fn check_leftovers(
             "the remote state of {environment} has run refs of dead {noun} {list}, which no run took over yet; a --local run never imports remote run refs"
         ),
         format!(
-            "run `nyl reconcile -e {environment}` against remote state first, so it takes over {noun} {list}; then run with --local again"
+            "run a remote `nyl reconcile -e {environment}` or `nyl recover -e {environment}` first, so it takes over {noun} {list}; then run with --local again"
         ),
     ))
 }
@@ -807,6 +810,7 @@ mod tests {
             assert_eq!(finding.code, Code::LocalRunLeftovers);
             assert!(finding.message.contains(RUN_C), "{}", finding.message);
             assert!(finding.fix.contains("nyl reconcile -e dev"), "{}", finding.fix);
+            assert!(finding.fix.contains("nyl recover -e dev"), "{}", finding.fix);
         }
     }
 

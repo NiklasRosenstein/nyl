@@ -41,7 +41,10 @@ lease update and pushes nothing to the state refs.
 ## Taking over
 
 A run that finds the lease expired, or [broken](#breaking-a-lease), replaces
-it and takes over from every run ref left behind:
+it and takes over from every run ref left behind. A broken lease is taken
+over only by an operation that imports the broken run: `nyl reconcile`,
+`nyl teardown`, or `nyl recover -e <env>`, which imports without
+executing.
 
 - It reuses the uid of every unit a dead run created and started, so a
   resource that run created always has state, even when the unit is no longer
@@ -148,6 +151,12 @@ execution as applied needs its outputs, so a checkpoint is the only evidence
 of the unit Nyl still holds, newest run first, and whether `--accept` would
 adopt it.
 
+A unit held with `nyl hold` keeps the desired document of its last receipt,
+so its consumers keep resolving from that receipt while it is investigated.
+Its condition stays, and `nyl resume` does not clear it. `--retry` on a held
+unit clears only the condition; the unit stays held. `--accept` refuses a
+held unit, which runs nothing a checkpoint could match: resume it first.
+
 ## Late checkpoints and evidence refs
 
 A runner whose lease was broken may still be alive and finish its unit after
@@ -188,15 +197,57 @@ gone:
 ```console
 $ nyl lease break -e dev --reason "runner was killed"
 lease-break dev: done
-  broken: run 01a1732a-11d1-7ed6-a3cc-174dc69c7856
-warning NYL-LEASE-HELD: the lease of run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 by unknown@localhost was broken; if that run is still alive it may still cause effects, but it can no longer write state
+  broken: run 01a17a9c-0455-77cd-a40d-42e3b92482da
+warning NYL-LEASE-HELD: the lease of run 01a17a9c-0455-77cd-a40d-42e3b92482da by unknown@localhost was broken; if that run is still alive it may still cause effects, but it can no longer write state
   fix: make sure the runner is gone; units it was executing become uncertain at the next run
 ```
 
-The next run takes over at once, and its transition commit records who broke
-the lease and why under `leaseBroken`. A holder that is in fact alive can no
-longer write state, because every transition commit is pushed together with a
-check of the holder's own lease.
+A holder that is in fact alive can no longer write state, because every
+transition commit is pushed together with a check of the holder's own lease.
+
+The dead run's effects must be recorded before anything else writes state.
+So only an operation that imports the broken run takes the broken lease
+over: `nyl reconcile`, `nyl teardown`, or `nyl recover -e <env>`. Every other
+command that writes state, `nyl verify`, `nyl hold`, and the `nyl state`
+commands included, exits 2 with `NYL-LEASE-BROKEN`, or waits under
+`--wait-lease`:
+
+```console
+$ nyl state forget -e dev --unit migrate
+state-forget dev: refused
+error NYL-LEASE-BROKEN: the lease of dev was broken and its run 01a17a9c-0455-77cd-a40d-42e3b92482da has not been imported yet
+  fix: run `nyl recover -e dev` to import it (a `nyl reconcile` or `nyl teardown` of dev imports it too), then run this command again
+```
+
+`nyl recover -e <env>` imports the run as a reconcile takeover would, with
+execution switched off: units the run was executing become `uncertain`, and
+the next reconcile runs them under their recovery policy. It writes one
+transition commit and no run record of its own, and exits 0 once the import
+is recorded:
+
+```console
+$ nyl recover -e dev --reason "import the killed run"
+recover dev: done
+  desired: f99b8341625ba6f6fccae39f32651c71b9cd518c
+  observed: 1547cfcc32bd21a1c3905e940a421d32b318e463
+  imported: []
+  leaseBroken: {"at":"2026-10-26T23:46:51.527951350Z","by":"Alice Example <alice@example.com>","reason":"runner was killed"}
+  recovered: ["migrate"]
+```
+
+Whichever operation imports the run records the break once, under
+`leaseBroken` with who broke the lease and why, next to the import, and
+consumes the broken run's refs. It records the break even when the run left
+nothing to import, such as a broken `nyl hold`. An importer that ends before
+its transition commit lands, such as a reconcile that fails during
+resolution or is cancelled, puts the broken lease back when it releases, so
+the break stays in effect until an import is committed.
+
+When the state cannot be imported into, because `state.yaml` is missing
+after a broken `nyl state init`, the state moved away, or a remote tip is a
+`Nyl-Local` commit, `nyl recover -e <env>` still takes the broken lease over
+and releases it, so `nyl state init`, `nyl state move`, or `nyl state
+restore` can repair the state. See [`nyl recover`](/nyl/reference/cli/recover/#importing-a-broken-run).
 
 ## Verifying receipts
 
@@ -214,8 +265,10 @@ for the next part of M3.
 
 A [`--local` run](/nyl/orchestration/environments-and-state/#local-runs)
 never takes over remote runs: while remote state holds dead runs, it exits 1
-with `NYL-LOCAL-RUN-LEFTOVERS`, and an ordinary `nyl reconcile` takes them over
-first. A `--local` run executes a unit whose recovery policy is not
+with `NYL-LOCAL-RUN-LEFTOVERS`, and a remote `nyl reconcile` or `nyl recover
+-e <env>` takes them over first. Under the remote lease, a `--local` run also
+refuses a broken remote lease with `NYL-LEASE-BROKEN` (exit 2), even when the
+broken holder left no run ref, because only an import records the break. A `--local` run executes a unit whose recovery policy is not
 `converge` only when named with `--approve <unit>`.
 
 ## See also

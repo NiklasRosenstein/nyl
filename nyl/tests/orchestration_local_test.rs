@@ -372,6 +372,40 @@ fn test_local_run_refuses_after_a_lease_break_and_keeps_the_break() {
     assert!(!codes(&takeover.errors).contains(&Code::LeaseHeld), "{takeover:#?}");
 }
 
+/// Q41: a broken remote lease whose holder left no run ref refuses a
+/// `--local` run under the remote lease with `NYL-LEASE-BROKEN` (exit 2):
+/// it never imports remote runs, so taking the lease would erase a break
+/// nothing recorded. The lease ref is untouched; `nyl recover -e dev` is
+/// the way forward.
+#[test]
+fn test_local_run_refuses_a_broken_remote_lease_without_leftovers() {
+    let harness = Harness::new();
+    harness.init();
+    let ci = harness.ci_store();
+    let run = harness.ids.run_id();
+    ci.take_lease(
+        &harness.location,
+        &dev(),
+        &harness.lease(&run, start() + chrono::Duration::hours(1)),
+        None,
+    )
+    .unwrap();
+    let context = harness.context();
+    let broken = state_ops::break_lease(&context, &dev(), &harness.location, Some("runner gone".to_owned()));
+    assert_eq!(broken.outcome, Outcome::Done, "{broken:?}");
+    let lease_ref = "refs/nyl/dev/lease";
+    let before = harness.remote_ref(lease_ref);
+    assert!(before.is_some());
+
+    let refused = harness.reconcile(local_run(LeaseScope::Remote));
+    assert_eq!(refused.exit.code(), 2, "{refused:#?}");
+    assert_eq!(codes(&refused.errors), vec![Code::LeaseBroken]);
+    assert!(refused.errors[0].fix.contains("nyl recover -e dev"), "{refused:#?}");
+    assert!(executed(&refused).is_empty());
+    assert_eq!(harness.remote_ref(lease_ref), before);
+    assert_eq!(harness.local_ref(DESIRED), harness.remote_ref(DESIRED));
+}
+
 /// Local branches pushed by hand put `Nyl-Local` commits at the remote
 /// tips: the next ordinary run refuses, naming the commit to restore, and
 /// `state restore` writes forward commits restoring it, after which runs

@@ -25,7 +25,7 @@ use nyl_core::orchestration::state::{
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_drivers::fake::{FakeImage, FakeInfra, FakePublication, Scripted};
 use nyl_drivers::process::ProcessRunner;
-use nyl_orchestration::fault::{FaultInjector, FaultPoint, NoFaults};
+use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 use nyl_orchestration::run_report::EnvironmentRunReport;
 use nyl_orchestration::shell::run::Cancellation;
 use nyl_orchestration::shell::verify;
@@ -389,6 +389,10 @@ fn test_accept_adopts_a_late_checkpoint_and_deletes_its_evidence_ref() {
         observed.contains(late.as_str()) && !observed.contains("uncertain"),
         "{observed}"
     );
+    // The accepted receipt carries the desired document it was produced
+    // for, which a later hold reverts to (Q16).
+    let accepted: ObservedUnit = serde_saphyr::from_str(&observed).unwrap();
+    assert_eq!(accepted.desired.as_deref(), Some(&snapshot.desired[&network]));
     assert!(harness
         .message(OBSERVED)
         .contains(&format!("\"action\":\"accept\",\"run\":\"{late}\"")));
@@ -754,4 +758,476 @@ fn test_verify_locates_a_moved_project_at_the_units_commit() {
             call.project_dir.display()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Importing a broken run ("Recovery", "Importing a broken run"; "Runs and
+// leases" items 1 and 8)
+
+impl Harness {
+    /// Write `changes` as one transition under a lease of its own, as a run
+    /// would, with `message` (trailers included).
+    fn stage(&self, changes: TransitionChanges, message: &str) {
+        let (store, location) = (self.store.as_ref(), &self.location);
+        let now = self.clock.now();
+        let holder = Lease {
+            api_version: StateV1,
+            kind: LeaseKind,
+            run: RunId::new("00000000-0000-7000-9000-0000000000fe").unwrap(),
+            runner: "staging".to_owned(),
+            operation: Operation::Reconcile,
+            units: Vec::new(),
+            deadline: Duration::from_mins(30).after(now),
+            taken_at: now,
+            broken: None,
+        };
+        let version = store.take_lease(location, &dev(), &holder, None).unwrap();
+        let tips = store.snapshot(location).unwrap().tips;
+        let committed = store
+            .commit(
+                location,
+                &dev(),
+                &tips,
+                &Transition {
+                    message: message.to_owned(),
+                    changes,
+                },
+                &version,
+            )
+            .unwrap();
+        store.release_lease(location, &dev(), &committed.lease_version).unwrap();
+    }
+
+    /// Take the lease for a holder that then dies without a run ref, and
+    /// break it with `nyl lease break`.
+    fn break_dead_holder(&self, operation: Operation) {
+        let now = self.clock.now();
+        let holder = Lease {
+            api_version: StateV1,
+            kind: LeaseKind,
+            run: RunId::new("00000000-0000-7000-9000-0000000000fd").unwrap(),
+            runner: "lost runner".to_owned(),
+            operation,
+            units: Vec::new(),
+            deadline: Duration::from_mins(60).after(now),
+            taken_at: now,
+            broken: None,
+        };
+        self.store.take_lease(&self.location, &dev(), &holder, None).unwrap();
+        self.break_lease();
+    }
+
+    fn break_lease(&self) {
+        let broken = self.invoke(&["lease", "break", "-e", "dev", "--reason", "runner lost"]);
+        assert_eq!(broken.exit, 0, "{}", broken.stderr);
+    }
+
+    /// The first run dies after `database`'s effect, before its checkpoint,
+    /// with network and web-image checkpointed (the walkthrough "Effects
+    /// without a receipt"), and its lease is broken. Returns the dead run and
+    /// the uid it created for `database`.
+    fn break_after_database(&self) -> (RunId, nyl_core::orchestration::ids::Uid) {
+        self.init();
+        let killed = self.invoke_with(
+            &["reconcile", "-e", "dev"],
+            &FaultSlot::kill_once(FaultPoint::AfterEffect, Some("database")),
+        );
+        assert_ne!(killed.exit, 0);
+        let coordination = self.coordination();
+        let [dead] = coordination.runs.as_slice() else {
+            panic!("the dead run keeps its run ref: {coordination:#?}");
+        };
+        let database = dead
+            .created
+            .iter()
+            .find(|created| created.unit.name == unit("database"))
+            .and_then(|created| created.unit.uid.clone())
+            .expect("the dead run recorded database's uid before starting it");
+        let run = dead.run.run.clone();
+        self.break_lease();
+        (run, database)
+    }
+}
+
+fn names(value: &Value) -> Vec<&str> {
+    value
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// `nyl recover -e dev` after a break and a crash after an effect imports
+/// without executing (Q45): it adopts the uid the dead run created, turns
+/// matching checkpoints into imported receipts, marks the unit without a
+/// checkpoint uncertain, records the break once with the requester and
+/// reason, consumes the run ref, writes no run ref of its own, and exits 0
+/// although a unit is left uncertain (Q43).
+#[test]
+fn test_recover_imports_a_broken_run_without_executing() {
+    let harness = Harness::new();
+    let (dead, database_uid) = harness.break_after_database();
+
+    let outcome = harness.invoke(&["recover", "-e", "dev", "--reason", "runner gone", "-o", "json"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    let details = &outcome.report["details"];
+    assert_eq!(outcome.report["outcome"], "done");
+    assert_eq!(names(&details["imported"]), ["network", "web-image"], "{details}");
+    assert_eq!(names(&details["recovered"]), ["database"], "{details}");
+    assert_eq!(details["leaseBroken"]["reason"], "runner lost");
+
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot.desired[&unit("database")].unit.uid, Some(database_uid));
+    let database = &snapshot.observed[&unit("database")];
+    assert!(
+        matches!(&database.condition, Some(Condition::Uncertain { run, .. }) if *run == dead),
+        "{database:#?}"
+    );
+    assert!(database.receipt.is_none(), "nothing executed");
+    assert!(
+        !snapshot.observed.contains_key(&unit("kubernetes")),
+        "kubernetes never ran"
+    );
+    let message = harness.message(OBSERVED);
+    for expected in [
+        "nyl: recover dev",
+        "\nimported: [network, web-image]",
+        "\nrecovered: [database]",
+        "\nleaseBroken: {",
+        "runner lost",
+        "Nyl-Operation: recover",
+        &format!("Nyl-Requested-By: {AUTHOR}"),
+        "Nyl-Reason: runner gone",
+    ] {
+        assert!(message.contains(expected), "{expected:?} missing in\n{message}");
+    }
+    assert_eq!(message.matches("leaseBroken").count(), 1, "{message}");
+    assert!(
+        harness.coordination_refs("").is_empty(),
+        "every coordination ref is gone"
+    );
+
+    // The next reconcile runs database again under its recovery policy.
+    let next = harness.reconcile(&[]);
+    assert_eq!(next.exit, 0, "{}", next.stderr);
+}
+
+/// Q44: the recover commit's headline gives the import's counts, then the
+/// unit action.
+#[test]
+#[ignore = "needs lifecycle: run/mod.rs completes a Recover-mode summary with shell::recover::summarize"]
+fn test_recover_import_headline_counts_then_the_unit_action() {
+    let harness = Harness::new();
+    harness.break_after_database();
+    let outcome = harness.invoke(&["recover", "-e", "dev", "--unit", "database", "--retry"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    let message = harness.message(OBSERVED);
+    assert!(
+        message.starts_with("nyl: recover dev (2 imported, 1 recovered; database: retry)"),
+        "{message}"
+    );
+}
+
+/// A recover that dies before its commit lands leaves the broken run's refs
+/// for the next import, and never had a run ref of its own (Q45).
+#[test]
+fn test_a_recover_crashing_mid_import_leaves_the_broken_runs_refs() {
+    let harness = Harness::new();
+    let (dead, _) = harness.break_after_database();
+    let observed = harness.tip(OBSERVED);
+    let killed = harness.invoke_with(
+        &["recover", "-e", "dev"],
+        &FaultSlot::kill_once(FaultPoint::BeforePush, None),
+    );
+    assert_ne!(killed.exit, 0, "{}", killed.stdout);
+    assert_eq!(harness.tip(OBSERVED), observed, "nothing was committed");
+    assert_eq!(
+        harness.coordination_refs("runs"),
+        format!("refs/nyl/dev/runs/{dead}"),
+        "only the broken run's ref"
+    );
+}
+
+/// `recover -e dev --unit database --retry` imports and decides the unit in
+/// one commit per ref: the import's uncertain condition is cleared there.
+#[test]
+fn test_recover_import_with_a_unit_action_writes_one_commit() {
+    let harness = Harness::new();
+    harness.break_after_database();
+    let observed = harness.tip(OBSERVED);
+    let outcome = harness.invoke(&[
+        "recover", "-e", "dev", "--unit", "database", "--retry", "--reason", "checked", "-o", "json",
+    ]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.report["details"]["database"]["action"], "retry");
+    assert_eq!(
+        git_output(
+            &harness.world.bare(),
+            &["rev-list", "--count", &format!("{observed}..{OBSERVED}")]
+        ),
+        "1"
+    );
+    let message = harness.message(OBSERVED);
+    assert!(
+        message.contains("database: {\"action\":\"retry\"}") && message.contains("\nleaseBroken: {"),
+        "{message}"
+    );
+    let database = &harness.snapshot().observed[&unit("database")];
+    assert_eq!(database.condition, None, "{database:#?}");
+    assert!(harness.coordination_refs("").is_empty());
+}
+
+/// Q40: a broken `state init` leaves no `state.yaml`, so nothing can be
+/// imported and every other command refuses the broken lease; `recover -e
+/// dev` takes it over and releases it, after which `state init` proceeds.
+/// With `--unit` it refuses, as for any missing state.
+#[test]
+fn test_recover_clears_the_break_of_a_broken_state_init() {
+    let harness = Harness::new();
+    harness.break_dead_holder(Operation::StateInit);
+    let refused = harness.invoke(&["state", "init", "-e", "dev", "-o", "json"]);
+    assert_eq!(refused.exit, 2, "{}", refused.stderr);
+    assert_eq!(refused.report["errors"][0]["code"], "NYL-LEASE-BROKEN");
+
+    let unit_action = harness.invoke(&["recover", "-e", "dev", "--unit", "network", "--retry", "-o", "json"]);
+    assert_eq!(unit_action.exit, 1, "{}", unit_action.stderr);
+    assert_eq!(unit_action.report["errors"][0]["code"], "NYL-STATE-MISSING");
+
+    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.report["outcome"], "done");
+    assert_eq!(outcome.report["warnings"][0]["code"], "NYL-STATE-MISSING");
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+    harness.init();
+}
+
+/// Q40: on state that moved away, `recover -e dev` records the break with
+/// an unchanged commit at the old location and releases the lease.
+#[test]
+fn test_recover_clears_the_break_on_moved_state() {
+    let harness = Harness::new();
+    harness.init();
+    let mut record = harness.snapshot().record.unwrap();
+    let mut to = harness.location.clone();
+    "nyl/next/desired".clone_into(&mut to.desired_ref);
+    record
+        .events
+        .push(nyl_core::orchestration::state::StateEvent::StateMoved {
+            at: harness.clock.now(),
+            by: "alice".to_owned(),
+            reason: None,
+            from: Box::new(harness.location.clone()),
+            to: Box::new(to),
+        });
+    harness.stage(
+        TransitionChanges {
+            record: Some(record),
+            ..TransitionChanges::default()
+        },
+        "nyl: state-move dev\n\nunits: {}\n\nNyl-Operation: state-move\nNyl-Environment: dev\n",
+    );
+    harness.break_dead_holder(Operation::StateMove);
+
+    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.report["warnings"][0]["code"], "NYL-STATE-MOVED");
+    let message = harness.message(OBSERVED);
+    assert!(
+        message.starts_with("nyl: recover dev") && message.contains("\nleaseBroken: {"),
+        "{message}"
+    );
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+}
+
+/// Q40: with a `Nyl-Local` commit at the remote tip, `recover -e dev`
+/// releases the broken lease without committing on that tip (Nyl commits
+/// only on tips that pass the local-tip check), so `state restore` can run.
+#[test]
+fn test_recover_clears_the_break_under_a_local_tip_without_committing() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let network = harness.snapshot().observed[&unit("network")].clone();
+    harness.stage(
+        TransitionChanges {
+            observed: BTreeMap::from([(unit("network"), Some(network))]),
+            commit_unchanged: true,
+            ..TransitionChanges::default()
+        },
+        "nyl: reconcile dev\n\nunits: {}\n\nNyl-Operation: reconcile\nNyl-Environment: dev\nNyl-Local: true\n",
+    );
+    harness.break_dead_holder(Operation::Reconcile);
+    let observed = harness.tip(OBSERVED);
+
+    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.report["warnings"][0]["code"], "NYL-STATE-LOCAL-TIP");
+    assert_eq!(harness.tip(OBSERVED), observed, "nothing is committed on a local tip");
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+}
+
+/// Q56: a recover import records the units as they are: a unit that left
+/// the ownership set stays active until the next reconcile decides it.
+#[test]
+fn test_a_recover_import_writes_no_lifecycle_changes() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    harness.world.commit_files(
+        "main",
+        "Change the web page",
+        &[("services/web/index.html", "<h1>Changed</h1>\n")],
+    );
+    let killed = harness.invoke_with(
+        &["reconcile", "-e", "dev"],
+        &FaultSlot::kill_once(FaultPoint::AfterEffect, Some("web-image")),
+    );
+    assert_ne!(killed.exit, 0);
+    harness.break_lease();
+    // kubernetes leaves the ownership set.
+    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml")).unwrap();
+    let leaving = units.replace(
+        "name: kubernetes\n  labels: {dev: 'true'}",
+        "name: kubernetes\n  labels: {dev: 'false'}",
+    );
+    assert_ne!(leaving, units);
+    harness
+        .world
+        .commit_files("main", "Drop kubernetes from dev", &[("nyl/units.yaml", &leaving)]);
+    let before = harness.snapshot().desired[&unit("kubernetes")].clone();
+
+    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome.report["details"]["recovered"]), ["web-image"]);
+    assert_eq!(harness.snapshot().desired[&unit("kubernetes")], before);
+}
+
+/// Without a broken lease, `recover -e dev` without `--unit` has nothing to
+/// do: `NYL-RECOVER-NOTHING`, exit 1.
+#[test]
+fn test_recover_without_a_break_or_a_unit_refuses() {
+    let harness = Harness::new();
+    harness.init();
+    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
+    assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.report["errors"][0]["code"], "NYL-RECOVER-NOTHING");
+    assert!(harness.coordination_refs("").is_empty());
+}
+
+/// Runs `nyl recover -e dev` the first time an operation waits for the lease.
+struct RecoverWhileWaiting<'h> {
+    harness: &'h Harness,
+    recovered: Mutex<Option<CommandOutcome>>,
+}
+
+impl FaultInjector for RecoverWhileWaiting<'_> {
+    fn at(&self, point: FaultPoint, _unit: Option<&nyl_core::orchestration::ids::UnitName>) -> FaultAction {
+        if point == FaultPoint::WaitingLease {
+            let mut recovered = self.recovered.lock().unwrap();
+            if recovered.is_none() {
+                *recovered = Some(self.harness.invoke(&["recover", "-e", "dev"]));
+            }
+        }
+        FaultAction::Continue
+    }
+}
+
+/// `verify` never imports, so a broken lease refuses it (exit 2,
+/// `NYL-LEASE-BROKEN`, naming `nyl recover -e dev`); with `--wait-lease` it
+/// waits like for a held lease and proceeds once a recover imported the run.
+#[test]
+fn test_verify_refuses_a_broken_lease_and_waits_for_its_import() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    harness.break_dead_holder(Operation::Reconcile);
+    let observed = harness.tip(OBSERVED);
+
+    let refused = harness.invoke(&["verify", "-e", "dev", "-o", "json"]);
+    assert_eq!(refused.exit, 2, "{}", refused.stderr);
+    assert_eq!(
+        refused.report["environments"][0]["errors"][0]["code"],
+        "NYL-LEASE-BROKEN"
+    );
+    assert!(refused.stderr.contains("nyl recover -e dev"), "{}", refused.stderr);
+    assert_eq!(harness.tip(OBSERVED), observed);
+
+    let injector = RecoverWhileWaiting {
+        harness: &harness,
+        recovered: Mutex::new(None),
+    };
+    let waited = harness.invoke_with(&["verify", "-e", "dev", "--wait-lease", "10m", "-o", "json"], &injector);
+    let recovered = injector.recovered.lock().unwrap().take().expect("verify waited");
+    assert_eq!(recovered.exit, 0, "{}", recovered.stderr);
+    assert_eq!(waited.exit, 0, "{}", waited.stderr);
+    assert!(harness.coordination_refs("").is_empty());
+}
+
+/// "Holds on uncertain units" (Q21): `--retry` on a held uncertain unit
+/// clears only its condition and the unit stays held; `--accept` on a held
+/// unit is refused, naming `nyl resume` first.
+#[test]
+fn test_recover_on_a_held_uncertain_unit() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let snapshot = harness.snapshot();
+    let network = unit("network");
+    let mut held = snapshot.desired[&network].clone();
+    held.lifecycle = nyl_core::orchestration::state::Lifecycle::Held {
+        hold: serde_json::from_value(serde_json::json!({"since": harness.clock.now(), "by": "alice"})).unwrap(),
+        deletion: None,
+    };
+    let uncertain = ObservedUnit {
+        condition: Some(Condition::Uncertain {
+            since: harness.clock.now(),
+            run: RunId::new("00000000-0000-7000-9000-0000000000fb").unwrap(),
+            reason: "run lost its lease".to_owned(),
+        }),
+        ..snapshot.observed[&network].clone()
+    };
+    let stage = || {
+        harness.stage(
+            TransitionChanges {
+                desired: BTreeMap::from([(network.clone(), Some(held.clone()))]),
+                observed: BTreeMap::from([(network.clone(), Some(uncertain.clone()))]),
+                ..TransitionChanges::default()
+            },
+            "nyl: hold dev\n\nunits: {}\n\nNyl-Operation: hold\nNyl-Environment: dev\n",
+        );
+    };
+    stage();
+
+    let retried = harness.invoke(&[
+        "recover", "-e", "dev", "--unit", "network", "--retry", "--reason", "checked",
+    ]);
+    assert_eq!(retried.exit, 0, "{}", retried.stderr);
+    let after = harness.snapshot();
+    assert_eq!(after.observed[&network].condition, None);
+    assert_eq!(after.observed[&network].receipt, uncertain.receipt);
+    assert_eq!(after.desired[&network], held, "the unit stays held");
+
+    stage();
+    let accepted = harness.invoke(&[
+        "recover",
+        "-e",
+        "dev",
+        "--unit",
+        "network",
+        "--accept",
+        "00000000-0000-7000-9000-0000000000fb",
+        "--reason",
+        "it finished",
+        "-o",
+        "json",
+    ]);
+    assert_eq!(accepted.exit, 1, "{}", accepted.stderr);
+    assert_eq!(accepted.report["errors"][0]["code"], "NYL-RECOVER-KEY-MISMATCH");
+    assert!(
+        accepted.report["errors"][0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("nyl resume -e dev --unit network"),
+        "{}",
+        accepted.stderr
+    );
 }

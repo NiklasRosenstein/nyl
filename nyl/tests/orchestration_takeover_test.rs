@@ -16,12 +16,17 @@ use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{DriverOperation, RecoveryPolicy};
 use nyl_core::orchestration::ids::RunId;
 use nyl_core::orchestration::ports::{Clock, StateSide, StateStore};
-use nyl_core::orchestration::state::{ApprovalIdentity, ApprovalRecord, FailureCategory};
+use nyl_core::orchestration::state::{
+    ApprovalIdentity, ApprovalRecord, FailureCategory, Lease, LeaseKind, Operation, StateV1,
+};
 use nyl_core::orchestration::time::Duration;
 use nyl_drivers::fake::Scripted;
-use nyl_orchestration::fault::FaultPoint;
+use nyl_drivers::process::ProcessRunner;
+use nyl_orchestration::fault::{FaultPoint, NoFaults};
+use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
-use nyl_orchestration::shell::run::{self, Cancellation};
+use nyl_orchestration::shell::recover::{recover_environment, RecoverUnit};
+use nyl_orchestration::shell::run::{self, Cancellation, RunContext};
 use nyl_orchestration::shell::state as state_ops;
 use nyl_state::memory::MemoryStateStore;
 use scenario::format::CommitStep;
@@ -194,12 +199,35 @@ fn test_a_failed_checkpoint_write_leaves_the_unit_uncertain_for_the_next_run() {
     assert!(harness.coordination().runs.is_empty());
 }
 
-/// "Runs and leases" item 8: an operation that takes over a broken lease
-/// without consuming the broken run's ref (here `verify`) puts the break
-/// back when it releases, so the next reconcile still takes the run over at
-/// once, before its deadline, and records the break in its commit.
+/// `nyl recover -e dev` through the shell, on the shared run path, with
+/// the `--unit` action `unit`.
+fn recover(harness: &Harness, unit: Option<RecoverUnit>) -> StateOperationReport {
+    let mut job = harness.job(&[], Cancellation::default());
+    job.request.mode = run::RunMode::Recover { unit };
+    job.request.reason = Some("runner gone".to_owned());
+    let base = harness.context();
+    let tools = ProcessRunner::new();
+    let context = RunContext {
+        base: &base,
+        sources: &job.sources,
+        renderer: &job.renderer,
+        drivers: &harness.drivers,
+        tools: &tools,
+        workspace: job.workspace.path(),
+        process_env: &harness.process_env,
+        commit_identity: Some(&harness.identity),
+        observer: None,
+        prompt: None,
+    };
+    recover_environment(&context, &job.request)
+}
+
+/// "Runs and leases" items 1 and 8: an operation that does not import the
+/// broken run (here `verify`) refuses with `NYL-LEASE-BROKEN` and writes
+/// nothing, leaving the break in place; `nyl recover -e dev` imports the
+/// run, records the break once, and consumes the run ref.
 #[test]
-fn test_a_lease_break_survives_an_operation_that_does_not_take_the_run_over() {
+fn test_a_lease_break_refuses_verify_until_recover_imports_the_run() {
     let mut harness = Harness::new(&shared_project(), true);
     harness.init();
     let first = harness.reconcile(&[]);
@@ -212,6 +240,7 @@ fn test_a_lease_break_survives_an_operation_that_does_not_take_the_run_over() {
     // The run dies while executing web-image, its run ref live for an hour.
     harness.faults = Box::new(FaultSlot::kill_once(FaultPoint::AfterEffect, Some("web-image")));
     let dead = harness.reconcile(&[]).run.unwrap();
+    harness.faults = Box::new(NoFaults);
     let broken = state_ops::break_lease(
         &harness.context(),
         &dev(),
@@ -219,32 +248,111 @@ fn test_a_lease_break_survives_an_operation_that_does_not_take_the_run_over() {
         Some("runner lost".to_owned()),
     );
     assert_eq!(broken.exit, 0, "{broken:?}");
+    let lease = harness.coordination().lease;
+    let tips = harness.tips();
 
     let verified = harness.verify();
-    assert!(verified.run.is_some(), "verify took the lease: {verified:#?}");
-    assert!(!codes(&verified.errors).contains(&Code::LeaseHeld), "{verified:#?}");
-    let lease = harness
-        .coordination()
-        .lease
-        .expect("the broken lease is put back")
-        .lease;
-    assert_eq!(lease.run, dead);
-    assert_eq!(
-        lease.broken.map(|request| request.reason),
-        Some(Some("runner lost".to_owned()))
-    );
+    assert_eq!(verified.exit.code(), 2, "{verified:#?}");
+    assert_eq!(codes(&verified.errors), [Code::LeaseBroken], "{verified:#?}");
+    assert!(verified.errors[0].fix.contains("nyl recover -e dev"), "{verified:#?}");
+    assert_eq!(harness.tips(), tips, "verify wrote nothing");
+    assert_eq!(harness.coordination().lease, lease, "the break stays");
 
-    let takeover = harness.reconcile(&[]);
-    assert_eq!(takeover.exit.code(), 0, "{takeover:#?}");
-    assert_eq!(names(&takeover.recovered), set(&["web-image"]), "{takeover:#?}");
+    let recovered = recover(&harness, None);
+    assert_eq!(recovered.exit, 0, "{recovered:#?}");
+    assert_eq!(recovered.outcome, Outcome::Done, "{recovered:#?}");
+    assert_eq!(recovered.details["recovered"], json!(["web-image"]), "{recovered:#?}");
+    assert_eq!(recovered.details["leaseBroken"]["reason"], "runner lost");
     let message = git_output(
         &harness.world.bare(),
         &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
     );
+    for expected in [
+        "nyl: recover dev",
+        "\nrecovered: [web-image]",
+        "\nleaseBroken: {",
+        "runner lost",
+        "Nyl-Operation: recover",
+        "Nyl-Reason: runner gone",
+    ] {
+        assert!(message.contains(expected), "{expected:?} missing in\n{message}");
+    }
+    assert_eq!(message.matches("leaseBroken").count(), 1, "{message}");
+    let coordination = harness.coordination();
+    assert!(coordination.lease.is_none(), "{coordination:#?}");
     assert!(
-        message.contains("\nleaseBroken: {") && message.contains("runner lost"),
-        "{message}"
+        coordination.runs.iter().all(|state| state.run.run != dead),
+        "the broken run's ref is consumed: {coordination:#?}"
     );
+    assert!(
+        coordination.runs.is_empty(),
+        "recover wrote no run ref: {coordination:#?}"
+    );
+    assert_eq!(
+        uncertain_run(harness.snapshot().observed.get(&unit("web-image"))),
+        Some(dead),
+        "nothing executed: web-image waits for the next reconcile"
+    );
+
+    // The next reconcile converges web-image.
+    let next = harness.reconcile(&[]);
+    assert_eq!(next.exit.code(), 0, "{next:#?}");
+    assert_eq!(outcome(&next, "recovered"), set(&["web-image"]), "{next:#?}");
+}
+
+/// A lease a dead holder kept, broken: its holder left no run ref.
+fn break_a_dead_holder(harness: &Harness) -> Lease {
+    let now = harness.clock.now();
+    let holder = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: RunId::new("00000000-0000-7000-9000-0000000000fd").unwrap(),
+        runner: "lost runner".to_owned(),
+        operation: Operation::Reconcile,
+        units: Vec::new(),
+        deadline: Duration::from_mins(60).after(now),
+        taken_at: now,
+        broken: None,
+    };
+    harness
+        .store
+        .take_lease(&harness.location, &dev(), &holder, None)
+        .unwrap();
+    let broken = state_ops::break_lease(
+        &harness.context(),
+        &dev(),
+        &harness.location,
+        Some("runner lost".to_owned()),
+    );
+    assert_eq!(broken.exit, 0, "{broken:?}");
+    harness.coordination().lease.unwrap().lease
+}
+
+/// "Runs and leases" item 8: an importer that takes a broken lease over and
+/// ends before its commit lands (a resolution error, a cancellation) puts
+/// the broken lease back, so the break stays in effect; one whose commit
+/// landed releases it.
+#[test]
+fn test_an_importer_ending_before_its_commit_puts_the_broken_lease_back() {
+    let harness = Harness::new(&shared_project(), false);
+    harness.init();
+    let broken = break_a_dead_holder(&harness);
+    assert!(broken.broken.is_some());
+
+    let failed = harness.reconcile(&["no-such-unit"]);
+    assert_eq!(codes(&failed.errors), [Code::UnitUnknown], "{failed:#?}");
+    let coordination = harness.coordination();
+    assert_eq!(coordination.lease.as_ref().map(|held| &held.lease), Some(&broken));
+    assert!(coordination.runs.is_empty(), "{coordination:#?}");
+
+    let cancellation = Cancellation::new();
+    cancellation.cancel(run::SIGTERM);
+    let cancelled = harness.reconcile_with(&[], cancellation);
+    assert_eq!(codes(&cancelled.errors), [Code::RunCancelled], "{cancelled:#?}");
+    assert_eq!(harness.coordination().lease.map(|held| held.lease), Some(broken));
+
+    let landed = harness.reconcile(&[]);
+    assert!(!landed.commits.is_empty(), "{landed:#?}");
     assert!(harness.coordination().lease.is_none());
 }
 
