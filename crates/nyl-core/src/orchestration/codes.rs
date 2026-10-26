@@ -194,6 +194,10 @@ codes! {
     /// signal ref: the run starts no held unit and writes the hold in its
     /// own transition commit. Exit 0.
     HoldDelivered => "NYL-HOLD-DELIVERED",
+    /// `--fail-fast` stopped the run after a unit failed, became uncertain,
+    /// or waited for an approval: it started no further unit, and the units
+    /// it did not start report what their state gives. A warning.
+    RunStopped => "NYL-RUN-STOPPED",
 }
 
 impl fmt::Display for Code {
