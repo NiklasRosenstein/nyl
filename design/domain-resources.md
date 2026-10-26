@@ -14,7 +14,10 @@ Platform teams define domain types, such as `AwsAccount`, `AwsAccessGrant`,
 paths they own. Units that the platform registers explicitly pick up those
 declarations as typed input collections. Nyl collects, validates, admits, and
 bundles the declarations. Terraform, OpenTofu, or a command implements them,
-and the native tool keeps its own state.
+and the native tool keeps its own state. Kubernetes Releases can read
+collections too, as template data; the
+[Release catalog](release-catalog.md) describes that consumer, and this
+document the rules both share.
 
 ```text
  definition ─► discovery ─► admission ─► collection ─► resolution ─► bundle ─► driver adaptation ─► execution
@@ -237,7 +240,8 @@ schema:
   rule runs:
   - **When a unit runs**, the previous version is the resource as the
     bundle of the unit's current receipt holds it: what its native tool last
-    received. This is the authoritative check. It catches a change spread
+    received. This is the authoritative check, and it runs for units that
+    own the resource (see [Ownership](#ownership)). It catches a change spread
     over several commits, and it applies per consuming unit, because two
     units may have last run different versions.
   - **Against a revision**, `--base <rev>` on `validate`, `plan`,
@@ -395,7 +399,7 @@ spec:
 | `paths` | all | Globs over the resource's trusted, worktree-rooted path, under the local path rule |
 | `access` | `own` | `own` claims the members (see [Ownership](#ownership)); `read` only reads them |
 | `allowEmpty` | `false` | An empty collection fails resolution (`NYL-RESOURCE-COLLECTION-EMPTY`) unless `true` |
-| `removal` | `approve` | Whether dropping members needs `--approve` (see [Removal](#removal-and-retention)) |
+| `removal` | `approve` | Whether dropping members needs `--approve` (see [Removal](#removal-and-retention)); only with `access: own` |
 
 - The unit's spec, `collections` included, is templated per environment as
   today, so a selector can follow `values` or `environment`. The domain
@@ -425,6 +429,14 @@ describe:
   [ownership scopes](orchestration-core.md#identity).
 - `access: read` collections, such as a GitHub team list that an access-grant
   unit reads to map names to IDs, claim nothing.
+- **Guards follow ownership.** The owner creates and deletes what a member
+  describes, so the owner's runs carry the guards: dropped members under
+  `removal: approve`, and transition rules evaluated against the receipt
+  baseline, including guarded changes. A `read` collection gets neither. Its
+  unit re-runs with the new data but never waits for an approval that the
+  owner already needs. Setting `removal` on a `read` collection is an error
+  (`NYL-RESOURCE-REMOVAL-READ`). Rules checked against `--base` judge the
+  resource itself, not a consumer, so they apply whoever consumes it.
 - Like a Command's effects, a claim is a declaration Nyl cannot verify.
   Preventing two configurations from fighting over one account is the point
   of making it explicit.
@@ -479,6 +491,12 @@ collections:
       search-prod:
         labels: {team: search, stage: production}
         spec: {email: aws+search-prod@acme.example, ou: workloads, owner: search, budgetUsd: 400}
+referenced:
+  domain.acme.example/v1/GitHubTeam:
+    payments: {labels: {team: payments}, spec: {org: acme, maintainers: [alice]}}
+    search: {labels: {team: search}, spec: {org: acme, maintainers: [bob]}}
+  domain.acme.example/v1/GitHubOrganization:
+    acme: {labels: {}, spec: {login: acme-corp}}
 ```
 
 - Items hold `labels` and the admitted, defaulted, resolved `spec`.
@@ -503,8 +521,8 @@ collections:
   history.
 - **Execution key.** The canonical digest of the bundle enters the key through
   `resolvedSpec`. Provenance does not. So:
-  - editing a member, adding or removing one, or a schema default changing an
-    effective value re-runs the unit;
+  - editing a member or a resource it references, adding or removing a
+    member, or a schema default changing an effective value re-runs the unit;
   - moving a file to a place that the collection's `paths` and the admission
     policies treat the same, editing an annotation, rewording a definition's
     `description`, or changing an unrelated team's declarations does not;
@@ -516,6 +534,35 @@ collections:
     the key.
 - Domain resources live in Git, so they never contain secrets. Credentials
   reach the implementation only through the unit's `env`.
+
+### Referenced resources
+
+A member often names another resource through an `x-nyl-reference` field,
+such as a `GitHubTeam` whose `org` names a `GitHubOrganization`. The consumer
+needs that resource's data, but does not manage it and should not have to
+collect it. The bundle's `referenced` map therefore carries it:
+
+- **Closure.** `referenced` holds every resource reachable from the members
+  through `x-nyl-reference` fields, transitively, including through other
+  referenced resources. It is keyed by `<apiVersion>/<kind>` and name, so a
+  cycle adds each resource once. A resource that is also a member appears in
+  both places.
+- **Static.** The closure is computed from the admitted catalog at S, like
+  membership, so it is known before resolution. Admission already guarantees
+  that every reference names an existing resource. A referenced resource that
+  fails admission fails resolution of the consumer, as a member does.
+- **Read-only.** Referenced resources are never owned, whatever the
+  collection's `access`, and the collection's `selector` and `paths` do not
+  apply to them. They were admitted under their own path, and the consumer
+  only reads them. Removal and transition-rule guards follow their owners'
+  collections.
+- **References inside.** Reference objects in `x-nyl-accepts-references`
+  fields of referenced resources resolve like those of members, in the
+  consumer's environment, and add the same dependency edges.
+- **Digest and provenance.** `referenced` is part of the bundle and its
+  digest. `ResourceBundleProvenance` records each referenced resource's
+  source path, document index, and digest, and the reference pointers that
+  reached it.
 
 ## Stage 6: Driver adaptation
 
@@ -851,16 +898,18 @@ spec:                                 # rendered once per (environment, resource
   a resource that instantiates units.
 - **Escaping across the trust boundary.** Structural templating renders text
   and then parses YAML. Until now that text was platform-authored; `resource`
-  is not. A string from `resource` printed with `{{ … }}` must therefore
-  consist only of letters, digits, spaces, and `. _ - / @ + =`, which cannot
-  change YAML structure whether the template places it in a plain or a quoted
-  scalar, so `'teams/{{ resource.metadata.name }}'` renders as
-  `'teams/payments'`. Any other string fails rendering with
-  `NYL-UNIT-RESOURCE-UNSAFE-VALUE`, naming the field, so `"x\napproval: auto"`
-  never becomes structure. A template inserts such a value as a whole YAML
-  value with `{{ resource.spec.description | tojson }}`, which renders a
-  quoted JSON string, or a list or object. Names already follow the DNS label
-  rule, and schemas should constrain the other fields that templates use.
+  is not. In a unit with `forEach`, every `{{ … }}` that emits a string must
+  therefore emit only letters, digits, spaces, and `. _ - / @ + =`, which
+  cannot change YAML structure in a plain or a quoted scalar, or a value that
+  `tojson` produced. Otherwise rendering fails with
+  `NYL-UNIT-RESOURCE-UNSAFE-VALUE`, naming the field. The check runs in the
+  template engine's output formatter, so it holds whatever filters or
+  concatenation built the string: `'teams/{{ resource.metadata.name }}'`
+  renders as `'teams/payments'`, and `"x\napproval: auto"` never becomes
+  structure. A template inserts any other value whole with
+  `{{ resource.spec.description | tojson }}`, which renders a quoted JSON
+  string, or a list or object. Names already follow the DNS label rule, and
+  schemas should constrain the other fields that templates use.
 - `nyl get units` lists the instances under their base unit. `nyl get unit
   team-aws` shows the `forEach` match for each instance.
 
@@ -903,10 +952,11 @@ instantiating it differently in some environments.
 | Rule or type | Home |
 | --- | --- |
 | `ResourceDefinition`, the domain envelope, `collections`, `fromCollection`, `ResourceBundle`, its provenance, golden files | `nyl-core` (`resources::domain`, `bindings`) |
-| Identity, duplicates, ordering, membership, ownership claims, removal detection | `nyl-core` pure rules, one module each, used by orchestration as `rules::collection` and `rules::resource_ownership` |
-| Schema validation and defaulting (JSON Schema 2020-12, a new dependency to evaluate) | `nyl-core`, pure |
+| Identity, duplicates, ordering, membership, ownership claims, the reference closure, removal detection, transition-rule decisions | `nyl-collections`, pure rules, one module each; CEL evaluation behind a `RuleEvaluator` port in `nyl-core` |
+| Schema validation and defaulting (JSON Schema 2020-12, a new dependency to evaluate) | `nyl-collections`, pure |
+| Bundle assembly and its canonical digest | `nyl-collections`, shared by units and [Releases](release-catalog.md) |
 | Discovery of definitions and resources, the catalog, Kyverno admission | `nyl-render` (`gitops::discovery`, `validation`), returned through `SourceRenderer` as part of `RenderedSource` |
-| Bundle assembly and the bundle digest in the execution key | `nyl-orchestration` resolution, `rules::execution_key` |
+| Resolving references inside a bundle, and the bundle digest in the execution key | `nyl-orchestration` resolution, `rules::execution_key` |
 | `prepare` and `NativeInputs` per kind | `nyl-drivers` |
 | `nyl prepare`, `get resources`, `schema resources` | `nyl-cli`, wiring only |
 
@@ -927,6 +977,7 @@ consumer, and two owners rejected.
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
+| R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3 |
 
 ## Guide sketch: implementing a domain resource
 
