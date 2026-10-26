@@ -797,8 +797,67 @@ fn test_run_ref_writes_follow_a_ref_another_clone_moved() {
     running.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
     let coordination = taking.coordination(&location, &dev).unwrap();
     assert_eq!(coordination.runs.len(), 1);
-    assert_eq!(coordination.runs[0].checkpoints, vec![checkpoint]);
+    assert_eq!(coordination.runs[0].checkpoints, vec![checkpoint.clone()]);
     assert_eq!(coordination.evidence.len(), 1);
+
+    // A phase update that moves the lease too follows the moved run ref.
+    let mut version = running.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
+    taking.write_run(&location, &dev, &run, None).unwrap();
+    running
+        .update_lease_and_run(
+            &location,
+            &dev,
+            &lease(RUN_A),
+            &mut version,
+            &run,
+            std::slice::from_ref(&checkpoint.desired),
+        )
+        .unwrap();
+    let coordination = taking.coordination(&location, &dev).unwrap();
+    assert_eq!(coordination.lease.unwrap().version, version);
+    assert_eq!(coordination.runs[0].checkpoints, vec![checkpoint.clone()]);
+    assert_eq!(coordination.runs[0].created, vec![checkpoint.desired]);
+}
+
+/// The phase update moves the lease and writes the run record with the
+/// units the run created, or changes neither when the lease moved.
+#[test]
+fn test_lease_and_run_record_move_together_or_not_at_all() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let taken = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
+        let mut moved = lease(RUN_A);
+        moved.units = vec![UnitName::new("seed").unwrap()];
+        let (desired, _) = unit("seed");
+        let mut version = taken.clone();
+        store
+            .update_lease_and_run(
+                &location,
+                &dev,
+                &moved,
+                &mut version,
+                &run(),
+                std::slice::from_ref(&desired),
+            )
+            .unwrap();
+        let coordination = store.coordination(&location, &dev).unwrap();
+        let held = coordination.lease.unwrap();
+        assert_eq!((held.lease, held.version), (moved, version.clone()), "{}", subject.name);
+        assert_eq!(coordination.runs[0].run, run(), "{}", subject.name);
+        assert_eq!(coordination.runs[0].created, vec![desired.clone()], "{}", subject.name);
+
+        // From a lease version that is no longer current, nothing moves.
+        let mut stale = taken;
+        let mut finished = run();
+        finished.finished = true;
+        let refused = store.update_lease_and_run(&location, &dev, &lease(RUN_A), &mut stale, &finished, &[]);
+        assert!(matches!(refused, Err(StateError::LeaseLost)), "{}", subject.name);
+        let coordination = store.coordination(&location, &dev).unwrap();
+        assert_eq!(coordination.lease.unwrap().version, version, "{}", subject.name);
+        assert!(!coordination.runs[0].run.finished, "{}", subject.name);
+    }
 }
 
 /// The clone's local branches of a remote location's state refs.

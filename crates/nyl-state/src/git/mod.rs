@@ -139,22 +139,36 @@ impl GitStateStore {
     }
 
     /// Rewrite a run ref with `run` as its record and `change` applied to
-    /// its files, by compare-and-swap against the tip it read.
+    /// its files, by compare-and-swap against the tip it read; with `lease`,
+    /// in the same atomic update as the lease ref's move from its expected
+    /// version to a new commit of the lease, returned.
     ///
     /// Only its run writes a run ref, so the tip this clone last pushed is
     /// almost always current: the write builds on it without listing the
     /// remote, and reads the remote only when the compare-and-swap shows
-    /// that the ref moved.
+    /// that a ref moved. A moved lease is [`StateError::LeaseLost`].
     fn update_run(
         &self,
         location: &StateLocation,
         environment: &EnvironmentName,
         run: &Run,
         change: impl Fn(&mut Files) -> StateResult<()>,
-    ) -> StateResult<()> {
+        lease: Option<(&Lease, Oid)>,
+    ) -> StateResult<Option<Oid>> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
         let name = run_ref(location, environment, &run.run);
+        let lease_name = lease_ref(location, environment);
+        let lease = lease
+            .map(|(lease, expected)| {
+                let commit = lease_commit(&repository, self.author.as_ref(), lease, Some(expected))?;
+                Ok::<_, StateError>(Update {
+                    name: lease_name.clone(),
+                    new: Some(commit),
+                    expected: Some(expected),
+                })
+            })
+            .transpose()?;
         let write = |tip: Option<Oid>, expected: Option<Oid>| -> Result<(), UpdateError> {
             let mut files = tree::read(&repository, tip).map_err(UpdateError::Other)?;
             files.insert(RUN_FILE.to_owned(), to_yaml(run).map_err(UpdateError::Other)?);
@@ -164,21 +178,43 @@ impl GitStateStore {
             let commit = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)
                 .map_err(UpdateError::Other)?
                 .expect("allow_empty commits");
-            refs.update(&[Update {
+            let mut updates = vec![Update {
                 name: name.clone(),
                 new: Some(commit),
                 expected,
-            }])
+            }];
+            updates.extend(lease.clone());
+            refs.update(&updates)
+        };
+        // A refused update names no ref: list both, and a moved lease ends it.
+        let moved = || -> StateResult<BTreeMap<String, Oid>> {
+            let mut names = vec![name.clone()];
+            names.extend(lease.as_ref().map(|lease| lease.name.clone()));
+            let heads = refs.heads(&names)?;
+            match &lease {
+                Some(lease) if heads.get(&lease.name) != lease.expected.as_ref() => Err(StateError::LeaseLost),
+                _ => Ok(heads),
+            }
         };
         let tracked = refs.local(&name);
         match write(tracked, tracked) {
             Err(UpdateError::Stale) => {}
-            result => return result.map_err(|error| error.or_stale(another_commit(name.clone()))),
+            result => {
+                result.map_err(|error| error.or_stale(another_commit(name.clone())))?;
+                return Ok(lease.and_then(|lease| lease.new));
+            }
         }
-        let heads = refs.heads(std::slice::from_ref(&name))?;
-        refs.fetch(&heads, false)?;
-        write(refs.fetched(&heads, &name), heads.get(&name).copied())
-            .map_err(|error| error.or_stale(another_commit(name.clone())))
+        let heads = moved()?;
+        let run_heads = heads.into_iter().filter(|(head, _)| *head == name).collect();
+        refs.fetch(&run_heads, false)?;
+        match write(refs.fetched(&run_heads, &name), run_heads.get(&name).copied()) {
+            Ok(()) => Ok(lease.and_then(|lease| lease.new)),
+            Err(UpdateError::Stale) => {
+                moved()?;
+                Err(another_commit(name.clone()))
+            }
+            Err(UpdateError::Other(error)) => Err(error),
+        }
     }
 }
 
@@ -520,6 +556,28 @@ impl StateStore for GitStateStore {
         )
     }
 
+    /// One atomic update of the lease ref and the run ref.
+    fn update_lease_and_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        version: &mut String,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        let expected = Oid::from_str(version).map_err(unavailable)?;
+        let renewed = self.update_run(
+            location,
+            environment,
+            run,
+            |files| insert_created(files, created),
+            Some((lease, expected)),
+        )?;
+        *version = renewed.expect("a lease update").to_string();
+        Ok(())
+    }
+
     fn release_lease(
         &self,
         location: &StateLocation,
@@ -561,13 +619,20 @@ impl StateStore for GitStateStore {
         run: &Run,
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()> {
-        self.update_run(location, environment, run, |files| {
-            if let Some(checkpoint) = checkpoint {
-                let index = checkpoint_count(files);
-                insert_checkpoint(files, index, checkpoint)?;
-            }
-            Ok(())
-        })
+        self.update_run(
+            location,
+            environment,
+            run,
+            |files| {
+                if let Some(checkpoint) = checkpoint {
+                    let index = checkpoint_count(files);
+                    insert_checkpoint(files, index, checkpoint)?;
+                }
+                Ok(())
+            },
+            None,
+        )
+        .map(drop)
     }
 
     fn write_run_created(
@@ -577,7 +642,8 @@ impl StateStore for GitStateStore {
         run: &Run,
         created: &[DesiredUnit],
     ) -> StateResult<()> {
-        self.update_run(location, environment, run, |files| insert_created(files, created))
+        self.update_run(location, environment, run, |files| insert_created(files, created), None)
+            .map(drop)
     }
 
     fn retire_run(
@@ -1180,13 +1246,7 @@ fn write_lease(
     expected: Option<Oid>,
     stale: StateError,
 ) -> StateResult<String> {
-    let files = Files::from([(LEASE_FILE.to_owned(), to_yaml(lease)?)]);
-    let message = format!("nyl: lease for run {}", lease.run);
-    let parents = expected
-        .filter(|oid| repository.find_commit(*oid).is_ok())
-        .into_iter()
-        .collect::<Vec<_>>();
-    let commit = tree::commit(repository, author, &files, &message, &parents, true)?.expect("allow_empty commits");
+    let commit = lease_commit(repository, author, lease, expected)?;
     refs.update(&[Update {
         name: name.to_owned(),
         new: Some(commit),
@@ -1194,6 +1254,23 @@ fn write_lease(
     }])
     .map_err(|error| error.or_stale(stale))?;
     Ok(commit.to_string())
+}
+
+/// A commit of `lease`, on top of the lease commit it replaces when this
+/// clone has it.
+fn lease_commit(
+    repository: &Repository,
+    author: Option<&CommitAuthor>,
+    lease: &Lease,
+    replaces: Option<Oid>,
+) -> StateResult<Oid> {
+    let files = Files::from([(LEASE_FILE.to_owned(), to_yaml(lease)?)]);
+    let message = format!("nyl: lease for run {}", lease.run);
+    let parents = replaces
+        .filter(|oid| repository.find_commit(*oid).is_ok())
+        .into_iter()
+        .collect::<Vec<_>>();
+    Ok(tree::commit(repository, author, &files, &message, &parents, true)?.expect("allow_empty commits"))
 }
 
 /// Refuse to consume a run ref that moved since the caller read it at `expected`.

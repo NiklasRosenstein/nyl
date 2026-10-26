@@ -20,8 +20,8 @@
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry, StateError, StateResult,
-    StateSide, StateStore, StateTips, Transition,
+    update_lease_then_run, Checkpoint, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry,
+    StateError, StateResult, StateSide, StateStore, StateTips, Transition,
 };
 use nyl_core::orchestration::state::{DesiredUnit, Lease, Run, Signal, StateLocation};
 
@@ -163,6 +163,27 @@ impl StateStore for LocalStore<'_> {
             &self.lease_written(lease),
             expected,
         )
+    }
+
+    /// One write in the view under [`LeaseScope::Local`]; under
+    /// [`LeaseScope::Remote`] the lease and the run ref live in different
+    /// repositories, and are written one after the other.
+    fn update_lease_and_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        version: &mut String,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        match self.run.lease {
+            LeaseScope::Local => {
+                self.inner
+                    .update_lease_and_run(&Self::view(location)?, environment, lease, version, run, created)
+            }
+            LeaseScope::Remote => update_lease_then_run(self, location, environment, lease, version, run, created),
+        }
     }
 
     fn release_lease(
@@ -648,6 +669,11 @@ mod tests {
         store
             .update_lease(&location, &dev(), &lease(&["network"]), "v1")
             .unwrap();
+        let mut version = "v2".to_owned();
+        let run = run_state(RUN_A).run;
+        store
+            .update_lease_and_run(&location, &dev(), &lease(&["network"]), &mut version, &run, &[])
+            .unwrap();
         assert!(inner.leases.lock().unwrap().iter().all(|lease| lease.units.is_empty()));
         store
             .commit(
@@ -679,7 +705,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(reached("take_lease"), vec![REMOTE]);
-        assert_eq!(reached("update_lease"), vec![REMOTE]);
+        assert_eq!(reached("update_lease"), vec![REMOTE, REMOTE]);
+        assert_eq!(reached("write_run"), vec![LOCAL]);
         assert_eq!(reached("release_lease"), vec![REMOTE]);
         assert_eq!(reached("commit"), Vec::<&str>::new());
         assert_eq!(reached("commit_local"), vec![REMOTE]);
