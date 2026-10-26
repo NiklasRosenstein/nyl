@@ -345,6 +345,54 @@
     "StateV1": {
       "const": "gitops.nyl/v1"
     },
+    "TeardownWaiting": {
+      "additionalProperties": false,
+      "description": "A teardown waiting after its first phase, as the observed unit records it.",
+      "properties": {
+        "phase": {
+          "description": "The driver's phase name, such as `applications-removed`.",
+          "type": "string"
+        },
+        "phase1Commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The phase 1 commit, the teardown's published evidence; a\nconfirmation is bound to it."
+        },
+        "reason": {
+          "type": "string"
+        },
+        "run": {
+          "$ref": "#/$defs/RunId",
+          "description": "The run that published phase 1."
+        },
+        "since": {
+          "description": "When the phase was published: the start of a `delay` wait.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "until": {
+          "description": "When the wait ends by itself, such as a `delay`'s end; `None` for a\n`manual` wait, which never keeps a run waiting.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "phase",
+        "reason",
+        "since",
+        "run"
+      ],
+      "type": "object"
+    },
     "Uid": {
       "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
       "type": "string"
@@ -423,6 +471,17 @@
     },
     "unit": {
       "$ref": "#/$defs/UnitIdentity"
+    },
+    "waiting": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TeardownWaiting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A two-phase teardown that published phase 1 and waits under its\n`teardownWait`: what `Outcome::Waiting` reported, kept between runs.\nContract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),\nTeardown, and [Drivers](../../../../design/orchestration-core.md#drivers)."
     }
   },
   "required": [

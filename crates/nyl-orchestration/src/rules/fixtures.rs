@@ -115,6 +115,7 @@ pub fn observed(unit: &str, kind: &str, receipt: Option<Receipt>) -> ObservedUni
         unit: identity(unit, kind),
         receipt,
         condition: None,
+        waiting: None,
     }
 }
 

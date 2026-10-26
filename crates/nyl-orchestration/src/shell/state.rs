@@ -62,6 +62,9 @@ fn acquire(
         environment,
         &context.ids.run_id(),
         operation,
+        // State operations and `recover` without an import never take a
+        // broken lease over ("Runs and leases" item 1).
+        lease_rule::BrokenLease::Refuse,
         context.settings.resolution_timeout,
         requested.wait,
         &requested.cancellation,
@@ -84,7 +87,7 @@ pub(crate) fn with_lease(
         Err(finding) => return report.refused(finding),
     };
     let mut report = refusing(report, |report| body(&mut held, report));
-    if let Err(error) = lease::release(context, &held) {
+    if let Err(error) = lease::release(context, &held, true) {
         report.warnings.push(store_error(environment, &error));
     }
     report
@@ -160,6 +163,8 @@ pub(crate) fn summary(operation: Operation, environment: &EnvironmentName, headl
         recovered: Vec::new(),
         imported: Vec::new(),
         lease_broken: None,
+        drift_repaired: Vec::new(),
+        reapplied: None,
         details: BTreeMap::new(),
     }
 }
@@ -337,7 +342,7 @@ pub fn relocate(
                 report,
             );
             if let Some(old) = &old_lease {
-                let _ = lease::release(context, old);
+                let _ = lease::release(context, old, true);
             }
             moved
         },
@@ -453,6 +458,7 @@ fn move_holding(
                 artifacts: written(&source.artifacts),
                 observations: written(&source.observations),
                 attestations: written(&source.attestations),
+                ..TransitionChanges::default()
             };
             // The copy's commits are not the move's: step 3 writes its tip.
             commit(
@@ -532,11 +538,19 @@ pub fn break_lease(
             let now = context.clock.now();
             // Break whatever holds the environment: its lease, or a live run whose
             // lease ref is already gone.
-            let mut lease = match lease_rule::decide(&coordination, now) {
+            let mut lease = match lease_rule::decide(&coordination, now, lease_rule::BrokenLease::TakeOver) {
                 LeaseDecision::Take { .. } => {
                     report.details.insert(
                         "note".to_owned(),
                         json!(format!("nothing holds the lease of {environment}")),
+                    );
+                    return Ok(());
+                }
+                // Not returned when taking over; kept for an exhaustive match.
+                LeaseDecision::Broken(_) => {
+                    report.details.insert(
+                        "note".to_owned(),
+                        json!(format!("the lease of {environment} is already broken")),
                     );
                     return Ok(());
                 }

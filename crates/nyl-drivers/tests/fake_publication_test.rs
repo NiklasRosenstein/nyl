@@ -173,6 +173,7 @@ fn context<'a>(
         tools: &NoTools,
         commit_identity: identity,
         cache_dir: world.root.path().join("cache"),
+        teardown_wait: None,
     }
 }
 

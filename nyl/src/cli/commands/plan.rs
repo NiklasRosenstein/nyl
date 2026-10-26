@@ -35,6 +35,15 @@ pub struct PlanArgs {
     #[arg(long)]
     pub fail_on_leaving: bool,
 
+    /// Preview a teardown that has not been requested: the destroy plans of
+    /// what `nyl teardown` would remove, for the --unit units or with --all.
+    #[arg(long)]
+    pub teardown: bool,
+
+    /// With --teardown, preview tearing down every unit.
+    #[arg(long, requires = "teardown", conflicts_with = "units")]
+    pub all: bool,
+
     /// Output format.
     #[arg(short = 'o', long = "output", value_enum, default_value_t)]
     pub output: RunOutput,
@@ -42,6 +51,16 @@ pub struct PlanArgs {
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
+}
+
+/// The run mode of `plan --teardown`: a teardown preview of the `--unit`
+/// units or, with `--all`, of every unit.
+fn teardown_mode(args: &PlanArgs) -> std::result::Result<nyl_orchestration::shell::run::RunMode, Stop> {
+    use nyl_orchestration::shell::run::RunMode;
+    if !args.teardown {
+        return Ok(RunMode::Reconcile);
+    }
+    todo!("operator: plan --teardown needs --unit or --all, and maps them to TeardownTarget")
 }
 
 /// Run the command in-process with `wiring`.
@@ -58,6 +77,10 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         wait: None,
         local: None,
         cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+        mode: teardown_mode(args)?,
+        lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
+        reapply: &[],
+        reason: None,
     })?;
     // A plan writes nothing, so it reads through a read-only store and needs
     // no commit identity.

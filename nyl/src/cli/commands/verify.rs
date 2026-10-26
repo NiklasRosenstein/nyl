@@ -68,6 +68,10 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         wait: args.wait_lease,
         local: None,
         cancellation: wiring.cancellation.clone(),
+        mode: nyl_orchestration::shell::run::RunMode::default(),
+        lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
+        reapply: &[],
+        reason: None,
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),

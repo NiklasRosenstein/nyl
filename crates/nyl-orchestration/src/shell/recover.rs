@@ -19,16 +19,59 @@
 
 use std::collections::BTreeMap;
 
+use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{RunState, TransitionChanges};
-use nyl_core::orchestration::state::{Condition, Operation, StateLocation};
+use nyl_core::orchestration::state::{
+    ArtifactDocument, Condition, DesiredUnit, ObservedUnit, Operation, StateLocation,
+};
 use serde_json::json;
 
 use super::local::{check_record, check_remote_tips};
+use super::run::{RunContext, RunRequest};
 use super::state::{commit, read, summary, with_lease, Requested};
 use super::{store_error, Context};
 use crate::report::{Outcome, StateOperationReport};
 use crate::rules::recovery::{decide, evidence, RecoverAction};
+
+/// `--unit <u> --retry` or `--accept <run>` of `nyl recover`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverUnit {
+    pub unit: UnitName,
+    pub action: RecoverAction,
+}
+
+/// `nyl recover -e <env> [--unit <u> (--retry | --accept <run>)]`.
+///
+/// When the lease is broken and its run not imported, it takes the lease
+/// over and imports that run through the shared run path with execution
+/// switched off (`request.mode` is [`RunMode::Recover`](super::run::RunMode::Recover)),
+/// applying the unit's action after the import in the same commit
+/// ([`after_import`]). Otherwise it applies the action as [`recover`] does,
+/// and without `--unit` refuses with `NYL-RECOVER-NOTHING`. Contract:
+/// [Recovery](../../../../design/orchestration-core.md#recovery), "Importing a broken run".
+pub fn recover_environment(context: &RunContext<'_>, request: &RunRequest) -> StateOperationReport {
+    let _ = (context, request);
+    todo!("lease-break")
+}
+
+/// The `--unit` action of a `recover` that imported a broken run, applied
+/// to the observed state after the import, in the same transition commit:
+/// updates `observed` and `artifacts` and returns the unit's entry for the
+/// summary's `units` block, such as `{"action": "retry"}`. `runs` are the
+/// leftover and evidence run refs the import read, so `--accept` finds the
+/// checkpoint.
+pub(crate) fn after_import(
+    environment: &EnvironmentName,
+    recover: &RecoverUnit,
+    desired: Option<&DesiredUnit>,
+    observed: &mut BTreeMap<UnitName, ObservedUnit>,
+    artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    runs: &[RunState],
+) -> Result<serde_json::Value, Finding> {
+    let _ = (environment, recover, desired, observed, artifacts, runs);
+    todo!("lease-break")
+}
 
 /// `nyl recover`.
 pub fn recover(

@@ -84,6 +84,7 @@ impl World {
             tools,
             commit_identity: None,
             cache_dir: self.root.path().join("cache"),
+            teardown_wait: None,
         }
     }
 

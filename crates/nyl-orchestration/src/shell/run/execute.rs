@@ -204,6 +204,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         tools: context.tools,
         commit_identity: context.commit_identity,
         cache_dir: shared.cache_dir.clone(),
+        teardown_wait: None,
     };
 
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);

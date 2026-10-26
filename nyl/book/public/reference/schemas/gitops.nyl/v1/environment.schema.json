@@ -8,6 +8,21 @@
       ],
       "type": "string"
     },
+    "DriftRepair": {
+      "description": "Whether reconcile repairs drift on its own.\n\nContract: [Drift](../../../../design/orchestration-core.md#drift).",
+      "oneOf": [
+        {
+          "const": "converge",
+          "description": "Execute drifted units whose recovery policy is `converge` again.",
+          "type": "string"
+        },
+        {
+          "const": "manual",
+          "description": "Leave every drifted unit to `nyl reconcile --reapply`.",
+          "type": "string"
+        }
+      ]
+    },
     "EnvironmentSource": {
       "additionalProperties": false,
       "description": "The source commit of an environment's runs: a ref whose tip each run uses,\noptionally pinned to a commit that `nyl update source-locks` moves, or the\ncommit the newest promotion recorded.",
@@ -89,6 +104,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "driftRepair": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DriftRepair"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether `reconcile` executes `converge` units again whose latest drift observation is `drifted`. Omitted, the group's, else `converge`."
         },
         "protectedRefs": {
           "description": "Refs that pinned commits and run source commits must be reachable from. Omitted, the group's, else each repository's default branch.",

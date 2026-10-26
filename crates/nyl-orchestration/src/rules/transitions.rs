@@ -29,6 +29,7 @@ use nyl_core::orchestration::time::Timestamp;
 
 /// What happened to a unit.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Short-lived values, built and applied at once.
 pub enum Event {
     /// An execution succeeded, or `inspect` found its effects applied: the
     /// receipt replaces the last one and clears any condition.
@@ -88,6 +89,9 @@ pub fn apply(unit: &UnitIdentity, current: Option<&ObservedUnit>, event: Event) 
             unit: unit.clone(),
             receipt,
             condition,
+            // Teardown waits are recorded by the lifecycle shell, not by
+            // these events (package `lifecycle` adds teardown events).
+            waiting: None,
         }))
     };
     if matches!(event, Event::RecoverRetry | Event::RecoverAccept { .. }) && condition.is_none() {
@@ -201,6 +205,7 @@ mod tests {
                     reason: "interrupted".to_owned(),
                 }),
             },
+            waiting: None,
         }
     }
 

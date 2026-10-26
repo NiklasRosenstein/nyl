@@ -151,11 +151,24 @@ pub struct TransitionChanges {
     /// The complete set of a unit's driver attestations by name; `None`
     /// removes all. Written by `nyl verify`.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
+    /// Remove every file of the environment's state on both refs before
+    /// applying the other changes: `state.yaml`, `desired/`, and `observed/`
+    /// beneath the location's `path`, leaving other environments' files of a
+    /// shared ref alone. `nyl state delete` writes it, so the refs and their
+    /// history stay. Contract: [Instances](../../../../design/orchestration-core.md#instances).
+    pub clear: bool,
+    /// Write the observed side's commit even when no document changes, so
+    /// the transition itself is recorded, such as the takeover of a broken
+    /// lease whose import changed nothing. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 8.
+    pub commit_unchanged: bool,
 }
 
 impl TransitionChanges {
     pub fn is_empty(&self) -> bool {
-        self.record.is_none()
+        !self.clear
+            && !self.commit_unchanged
+            && self.record.is_none()
             && self.environment.is_none()
             && self.desired.is_empty()
             && self.observed.is_empty()
@@ -392,6 +405,17 @@ pub trait StateStore: Send + Sync {
     /// Send a signal to a run.
     fn send_signal(&self, location: &StateLocation, environment: &EnvironmentName, signal: &Signal) -> StateResult<()>;
 
+    /// Delete a run's signal ref, such as a confirmation sent to a run that
+    /// finished before it read it. Contract: [Kubernetes publication
+    /// unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+    /// the signal path.
+    fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let _ = (location, environment, run);
+        Err(StateError::Unavailable(
+            "this state store cannot delete signal refs".to_owned(),
+        ))
+    }
+
     /// Write one transition commit per changed state ref on top of `base`,
     /// atomically with a compare-and-swap of the lease at `lease_version`.
     /// The lease moves to a new version in the same push, because a lease
@@ -600,6 +624,16 @@ pub enum ApplicationsObservation {
 /// Reads Argo CD for teardown waits and health evidence.
 pub trait ArgoObserver: Send + Sync {
     fn workload_applications(&self, target: &str) -> ApplicationsObservation;
+}
+
+/// The terminal of a run that waits on a teardown: when its stdin is a
+/// terminal, it shows the remaining time and accepts Enter as a
+/// confirmation from the person running it. Contract: [Kubernetes
+/// publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// the signal path. Absent when stdin is not a terminal.
+pub trait OperatorPrompt: Send + Sync {
+    /// Show `message` and wait up to `timeout` for Enter; whether it came.
+    fn confirm(&self, message: &str, timeout: Duration) -> bool;
 }
 
 #[cfg(test)]

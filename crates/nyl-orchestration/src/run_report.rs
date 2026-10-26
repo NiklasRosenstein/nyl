@@ -30,6 +30,8 @@ pub enum ReportKind {
     StatusReport,
     /// `nyl verify`: per unit its [`UnitVerification`].
     VerifyReport,
+    /// `nyl teardown`: per unit its [`UnitResult`], exit categories as for reconcile.
+    TeardownReport,
 }
 
 /// The report of one invocation.
@@ -115,7 +117,7 @@ impl ExitCategory {
     /// anything else an error (1).
     pub fn of_finding(finding: &Finding) -> Self {
         match finding.code {
-            Code::LeaseHeld => Self::Incomplete,
+            Code::LeaseHeld | Code::LeaseBroken => Self::Incomplete,
             Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,
         }
@@ -153,6 +155,14 @@ pub struct EnvironmentRunReport {
     /// the transition summary's `recovered`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recovered: Vec<UnitName>,
+    /// Units executed again because their latest drift observation was
+    /// `drifted`: the transition summary's `driftRepaired`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub drift_repaired: Vec<UnitName>,
+    /// Units `--reapply` executed again: the transition summary's
+    /// `reapplied`, with the requester and reason.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reapplied: Vec<UnitName>,
     /// The transition commits written, by state ref side (`desired`, `observed`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
@@ -173,6 +183,8 @@ impl EnvironmentRunReport {
             units: BTreeMap::new(),
             imported: Vec::new(),
             recovered: Vec::new(),
+            drift_repaired: Vec::new(),
+            reapplied: Vec::new(),
             commits: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -225,18 +237,26 @@ impl EnvironmentRunReport {
             recovered: self.recovered.clone(),
             imported: self.imported.clone(),
             lease_broken: None,
+            drift_repaired: self.drift_repaired.clone(),
+            reapplied: None,
             details: BTreeMap::new(),
         }
     }
 }
 
 /// The results a transition commit's headline counts, in order.
-const HEADLINE_RESULTS: [&str; 7] = [
+const HEADLINE_RESULTS: [&str; 13] = [
     "executed",
     "recovered",
     "imported",
+    "removed",
+    "retained",
+    "released",
     "failed",
     "uncertain",
+    "held",
+    "pending-teardown",
+    "tearing-down",
     "blocked",
     "awaiting-approval",
 ];
@@ -269,25 +289,38 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 ExitCategory::Ok
             }
         }
-        ReportKind::ReconcileReport => match unit.result {
+        ReportKind::ReconcileReport | ReportKind::TeardownReport => match unit.result {
             Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
             Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
-            Some(UnitResult::Blocked { .. } | UnitResult::AwaitingApproval) => ExitCategory::Incomplete,
+            Some(
+                UnitResult::Blocked { .. }
+                | UnitResult::AwaitingApproval
+                | UnitResult::Held { .. }
+                | UnitResult::PendingTeardown { .. }
+                | UnitResult::TearingDown { .. },
+            ) => ExitCategory::Incomplete,
             Some(
                 UnitResult::Current
                 | UnitResult::Executed { .. }
                 | UnitResult::Imported { .. }
-                | UnitResult::Recovered { .. },
+                | UnitResult::Recovered { .. }
+                | UnitResult::Removed
+                | UnitResult::Retained
+                | UnitResult::Released { .. },
             )
             | None => ExitCategory::Ok,
         },
         ReportKind::VerifyReport => crate::rules::verification::unit_exit(unit),
-        ReportKind::StatusReport => match unit.state {
-            Some(UnitState::Uncertain) => ExitCategory::Uncertain,
-            Some(UnitState::Failed) => ExitCategory::Failed,
-            // A retained unit's deletion completed: its resources stay by policy.
-            Some(UnitState::Current | UnitState::Retained) | None => ExitCategory::Ok,
-            Some(_) => ExitCategory::Incomplete,
+        ReportKind::StatusReport => match (unit.state, unit.condition) {
+            // A held or deleting unit with a condition exits by its
+            // condition, which still needs a run or `nyl recover`.
+            (_, Some(ConditionState::Uncertain)) | (Some(UnitState::Uncertain), _) => ExitCategory::Uncertain,
+            (_, Some(ConditionState::Failed)) | (Some(UnitState::Failed), _) => ExitCategory::Failed,
+            (state, None) => match state {
+                // A retained unit's deletion completed: its resources stay by policy.
+                Some(UnitState::Current | UnitState::Retained) | None => ExitCategory::Ok,
+                Some(_) => ExitCategory::Incomplete,
+            },
         },
     }
 }
@@ -372,8 +405,51 @@ pub struct UnitReport {
     /// The run of the unit's latest receipt or condition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run: Option<RunId>,
+    /// The condition of a unit whose state is its lifecycle, such as a held
+    /// and uncertain unit, or a deleting unit whose teardown failed
+    /// (status and `get units -e`). Contract:
+    /// [Recovery](../../../../design/orchestration-core.md#recovery), holds on uncertain units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<ConditionState>,
+    /// The latest drift observation of a unit with a current receipt
+    /// (status and `get units -e`). Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<DriftAttribute>,
+    /// A held unit's pending changes: the source commit its hold keeps from applying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<CommitId>,
+    /// A publication's teardown readiness: `ready`, or the unmet requirements.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teardown_readiness: Option<TeardownReadiness>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Finding>,
+}
+
+/// The condition shown next to a lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConditionState {
+    Uncertain,
+    Failed,
+}
+
+/// A unit's latest drift observation, as status shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftAttribute {
+    /// `clean`, `drifted`, or `unknown`.
+    pub result: String,
+    /// A drifted unit no reconcile repairs on its own: it waits for `--reapply`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waits: bool,
+}
+
+/// A publication unit's teardown readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "readiness", rename_all = "kebab-case")]
+pub enum TeardownReadiness {
+    Ready,
+    Incomplete { reasons: Vec<String> },
 }
 
 impl UnitReport {
@@ -391,6 +467,10 @@ impl UnitReport {
             verification: None,
             message: None,
             last_run: None,
+            condition: None,
+            drift: None,
+            pending: None,
+            teardown_readiness: None,
             warnings: Vec::new(),
         }
     }
@@ -445,6 +525,34 @@ pub enum UnitResult {
         reason: String,
     },
     AwaitingApproval,
+    /// Held: reconcile changed nothing about it. `pending` names the source
+    /// commit whose changes the hold keeps from applying.
+    Held {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pending: Option<CommitId>,
+    },
+    /// Deleting, and its teardown has not started: it awaits
+    /// `--allow-teardown`, `--allow-dependents`, a dependent's teardown, an
+    /// approval, or a readiness override.
+    PendingTeardown {
+        reason: String,
+    },
+    /// Its teardown started and waits, such as a publication under its `teardownWait`.
+    TearingDown {
+        reason: String,
+    },
+    /// Left the ownership set with `deletionPolicy: Retain`: its files became
+    /// a `retained` tombstone; its resources stay.
+    Retained,
+    /// Its teardown completed, or its tombstone was torn down: its files were removed.
+    Removed,
+    /// Its kind cannot tear down: its resources were left in place, as
+    /// `left` describes, and its files removed (or kept, held, without an
+    /// incarnation).
+    Released {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        left: Option<String>,
+    },
 }
 
 impl UnitResult {
@@ -459,6 +567,12 @@ impl UnitResult {
             Self::Uncertain { .. } => "uncertain",
             Self::Blocked { .. } => "blocked",
             Self::AwaitingApproval => "awaiting-approval",
+            Self::Held { .. } => "held",
+            Self::PendingTeardown { .. } => "pending-teardown",
+            Self::TearingDown { .. } => "tearing-down",
+            Self::Retained => "retained",
+            Self::Removed => "removed",
+            Self::Released { .. } => "released",
         }
     }
 }

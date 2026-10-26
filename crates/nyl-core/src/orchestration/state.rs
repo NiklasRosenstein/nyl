@@ -472,6 +472,33 @@ pub struct ObservedUnit {
     pub receipt: Option<Receipt>,
     #[serde(default)]
     pub condition: Option<Condition>,
+    /// A two-phase teardown that published phase 1 and waits under its
+    /// `teardownWait`: what `Outcome::Waiting` reported, kept between runs.
+    /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+    /// Teardown, and [Drivers](../../../../design/orchestration-core.md#drivers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<TeardownWaiting>,
+}
+
+/// A teardown waiting after its first phase, as the observed unit records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TeardownWaiting {
+    /// The driver's phase name, such as `applications-removed`.
+    pub phase: String,
+    pub reason: String,
+    /// When the phase was published: the start of a `delay` wait.
+    pub since: Timestamp,
+    /// When the wait ends by itself, such as a `delay`'s end; `None` for a
+    /// `manual` wait, which never keeps a run waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<Timestamp>,
+    /// The phase 1 commit, the teardown's published evidence; a
+    /// confirmation is bound to it.
+    #[serde(rename = "phase1Commit", default, skip_serializing_if = "Option::is_none")]
+    pub phase1_commit: Option<CommitId>,
+    /// The run that published phase 1.
+    pub run: RunId,
 }
 
 impl ObservedUnit {

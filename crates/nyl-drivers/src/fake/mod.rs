@@ -17,6 +17,7 @@
 
 mod image;
 mod infra;
+mod observer;
 mod publication;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -32,6 +33,7 @@ use crate::command::resolved_spec;
 
 pub use image::FakeImage;
 pub use infra::FakeInfra;
+pub use observer::FakeObserver;
 pub use publication::FakePublication;
 
 /// API version of the fake kinds.
@@ -234,6 +236,7 @@ mod tests {
             tools,
             commit_identity: None,
             cache_dir: directory.path().join("cache"),
+            teardown_wait: None,
         }
     }
 

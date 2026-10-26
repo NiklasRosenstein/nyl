@@ -262,6 +262,10 @@ impl StateStore for LocalStore<'_> {
         self.inner.send_signal(&Self::view(location)?, environment, signal)
     }
 
+    fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.delete_signals(&Self::view(location)?, environment, run)
+    }
+
     /// Commits to the local branches through [`StateStore::commit_local`],
     /// fenced by the lease where the run holds it.
     fn commit(

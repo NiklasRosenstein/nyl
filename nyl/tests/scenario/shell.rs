@@ -239,6 +239,10 @@ impl Harness {
                 wait: None,
                 local: None,
                 cancellation,
+                mode: run::RunMode::default(),
+                lifecycle: run::LifecycleOptions::default(),
+                reapply: std::collections::BTreeSet::new(),
+                reason: None,
             },
             workspace: TempDir::new().unwrap(),
         }
@@ -265,6 +269,8 @@ impl Harness {
             workspace: job.workspace.path(),
             process_env: &self.process_env,
             commit_identity: identity.then_some(&self.identity),
+            observer: None,
+            prompt: None,
         };
         operation(&context, &job.request)
     }
@@ -445,6 +451,9 @@ impl StateStore for FaultyStore {
     }
     fn send_signal(&self, location: &StateLocation, environment: &EnvironmentName, signal: &Signal) -> StateResult<()> {
         self.inner.send_signal(location, environment, signal)
+    }
+    fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.delete_signals(location, environment, run)
     }
     fn commit(
         &self,

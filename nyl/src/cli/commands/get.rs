@@ -306,7 +306,7 @@ fn units_table(
     output: GetOutput,
 ) -> Result<CommandOutcome> {
     let report = // No run refs are read here, so `now` decides nothing.
-    nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default(), chrono::DateTime::UNIX_EPOCH);
+    nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default(), chrono::DateTime::UNIX_EPOCH, None);
     let documents = snapshot
         .desired
         .iter()

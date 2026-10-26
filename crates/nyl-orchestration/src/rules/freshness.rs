@@ -20,6 +20,24 @@ pub fn receipt_is_current(desired: &DesiredUnit, observed: Option<&ObservedUnit>
     desired.unit.uid.is_some() && desired.unit.uid == observed.unit.uid && receipt.execution_key == *key
 }
 
+/// [`receipt_is_current`] within an environment's desired documents:
+/// additionally, every producer of the same environment that the receipt's
+/// provenance cites still has the cited uid in `units`, so a consumer whose
+/// producer became a new incarnation (replaced, or returned after its
+/// teardown) runs again with the new outputs (open question Q3, option B).
+/// Selection and status ask this one function.
+///
+/// Skeleton note: until package `lifecycle` implements the provenance part,
+/// it equals [`receipt_is_current`].
+pub fn receipt_is_current_in(
+    units: &std::collections::BTreeMap<nyl_core::orchestration::ids::UnitName, DesiredUnit>,
+    desired: &DesiredUnit,
+    observed: Option<&ObservedUnit>,
+) -> bool {
+    let _ = units;
+    receipt_is_current(desired, observed)
+}
+
 /// `observed` when it is of `desired`'s incarnation: a receipt or condition
 /// applies only to the incarnation it was recorded for.
 pub(crate) fn same_incarnation<'o>(

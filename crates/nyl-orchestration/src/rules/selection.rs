@@ -25,8 +25,10 @@ use nyl_core::orchestration::driver::{DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness,
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, Observation, ObservationType, ObservedUnit,
+    Provenance, Readiness,
 };
+use nyl_core::resources::environment::DriftRepair;
 
 use super::freshness::{receipt_is_current, same_incarnation};
 
@@ -45,6 +47,15 @@ pub struct Candidates<'a> {
     /// approval ([`Skipped::LocalApproval`]). `None` for an ordinary run.
     /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
     pub local: Option<&'a BTreeSet<UnitName>>,
+    /// The latest observations per unit and type (`nyl verify`'s drift
+    /// observations select drifted units again). Contract:
+    /// [Drift](../../../../design/orchestration-core.md#drift).
+    pub observations: &'a BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    /// The environment's `driftRepair`, as rendered at S.
+    pub drift_repair: DriftRepair,
+    /// `nyl reconcile --reapply`: units to execute again although their
+    /// receipt is current.
+    pub reapply: &'a BTreeSet<UnitName>,
 }
 
 /// Why a unit is not selected.
@@ -248,6 +259,9 @@ mod tests {
                 named,
                 attempted: &self.attempted,
                 local: self.local.as_ref(),
+                observations: &BTreeMap::new(),
+                drift_repair: DriftRepair::default(),
+                reapply: &BTreeSet::new(),
             })
         }
     }

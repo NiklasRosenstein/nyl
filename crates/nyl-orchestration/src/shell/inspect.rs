@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::{Code, Finding};
+use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateStore, StateTips};
 use nyl_core::orchestration::state::{DesiredUnit, ObservedUnit, StateLocation};
@@ -22,6 +23,17 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport};
 /// the clone's local state branches diverged from the remote. Through a
 /// [`super::local::LocalStore`] (`--local`) it reports the local view.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
+    status_with(context, environment, location, None)
+}
+
+/// [`status`], with the drivers whose recovery policies decide whether a
+/// drifted unit waits for `--reapply` (`nyl status` passes them).
+pub fn status_with(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    drivers: Option<&DriverSet>,
+) -> RunReport {
     let read = || {
         let snapshot = context
             .store
@@ -37,6 +49,7 @@ pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &S
             &snapshot,
             &coordination,
             context.clock.now(),
+            drivers,
         ))
     };
     let mut environment_report = read().unwrap_or_else(|finding: Finding| {

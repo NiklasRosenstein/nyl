@@ -40,6 +40,19 @@ impl Holder {
     }
 }
 
+/// Whether an operation imports the run of a broken lease and so may take
+/// such a lease over: `reconcile`, `teardown`, and `recover` do; every other
+/// state-writing operation refuses with `NYL-LEASE-BROKEN`. Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), items 1 and 8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokenLease {
+    /// The operation imports the broken run: it takes the lease over.
+    TakeOver,
+    /// The operation does not import: a broken lease whose run is not
+    /// imported yet stops it like a held lease.
+    Refuse,
+}
+
 /// What a run may do about the lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseDecision {
@@ -51,6 +64,9 @@ pub enum LeaseDecision {
     },
     /// Another run holds the environment.
     Held(Holder),
+    /// The lease is broken and its run not imported, and the caller does not
+    /// import: `NYL-LEASE-BROKEN`, naming `nyl recover -e <env>`.
+    Broken(Lease),
 }
 
 /// Whether a lease is still held at `now`: unbroken and before its deadline.
@@ -87,8 +103,13 @@ pub(crate) fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder
     holders
 }
 
-/// Decide from one read of the coordination refs at `now`.
-pub fn decide(coordination: &Coordination, now: Timestamp) -> LeaseDecision {
+/// Decide from one read of the coordination refs at `now`, for an
+/// operation that does or does not import a broken lease's run.
+///
+/// Skeleton note: `broken` is not consulted until package `lease-break`
+/// implements item 1; until then every caller takes a broken lease over.
+pub fn decide(coordination: &Coordination, now: Timestamp, broken: BrokenLease) -> LeaseDecision {
+    let _ = broken;
     match holders(coordination, now).into_iter().next() {
         Some(holder) => LeaseDecision::Held(holder),
         None => LeaseDecision::Take {
@@ -134,11 +155,11 @@ mod tests {
             evidence: Vec::new(),
         };
         assert!(matches!(
-            decide(&coordination, time(69)),
+            decide(&coordination, time(69), BrokenLease::TakeOver),
             LeaseDecision::Held(Holder::Lease(_))
         ));
         assert_eq!(
-            decide(&coordination, time(70)),
+            decide(&coordination, time(70), BrokenLease::TakeOver),
             LeaseDecision::Take {
                 expected: Some("v1".to_owned()),
                 broken: None
@@ -154,7 +175,7 @@ mod tests {
             evidence: Vec::new(),
         };
         assert!(matches!(
-            decide(&coordination, time(10)),
+            decide(&coordination, time(10), BrokenLease::TakeOver),
             LeaseDecision::Held(Holder::Run(_))
         ));
         // A finished run ref no longer counts, whatever its deadline.
@@ -164,7 +185,7 @@ mod tests {
             evidence: Vec::new(),
         };
         assert_eq!(
-            decide(&coordination, time(10)),
+            decide(&coordination, time(10), BrokenLease::TakeOver),
             LeaseDecision::Take {
                 expected: None,
                 broken: None
@@ -185,7 +206,7 @@ mod tests {
             runs: vec![run(RUN_A, 70, false)],
             evidence: Vec::new(),
         };
-        let LeaseDecision::Take { broken, .. } = decide(&coordination, time(10)) else {
+        let LeaseDecision::Take { broken, .. } = decide(&coordination, time(10), BrokenLease::TakeOver) else {
             panic!("a broken lease is taken over");
         };
         assert_eq!(broken.unwrap().by, "alice");
@@ -193,7 +214,7 @@ mod tests {
         let mut coordination = coordination;
         coordination.runs.push(run(RUN_B, 70, false));
         assert!(matches!(
-            decide(&coordination, time(10)),
+            decide(&coordination, time(10), BrokenLease::TakeOver),
             LeaseDecision::Held(Holder::Run(_))
         ));
     }

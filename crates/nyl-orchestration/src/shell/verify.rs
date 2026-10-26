@@ -120,6 +120,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
         environment,
         &run,
         Operation::Verify,
+        crate::rules::lease::BrokenLease::Refuse,
         longest,
         request.wait,
         &request.cancellation,
@@ -134,7 +135,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
     if let Err(finding) = holding(context, request, &mut held, &mut report) {
         report.errors.push(finding);
     }
-    if let Err(error) = lease::release(base, &held) {
+    if let Err(error) = lease::release(base, &held, true) {
         report.warnings.push(store_error(environment, &error));
     }
     finish(report)
@@ -420,6 +421,7 @@ fn verify_unit(
         tools: context.tools,
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
+        teardown_wait: None,
     };
     let outcome = driver.verify(&ctx, unit, receipt);
     drop(ctx);

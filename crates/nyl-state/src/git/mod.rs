@@ -791,6 +791,22 @@ impl StateStore for GitStateStore {
         .map_err(|error| error.or_stale(StateError::conflict(name, Some("another signal"))))
     }
 
+    fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let name = signal_ref(location, environment, run);
+        let heads = refs.heads(std::slice::from_ref(&name))?;
+        let Some(expected) = heads.get(&name).copied() else {
+            return Ok(());
+        };
+        refs.update(&[Update {
+            name: name.clone(),
+            new: None,
+            expected: Some(expected),
+        }])
+        .map_err(|error| error.or_stale(StateError::conflict(name, Some("another signal"))))
+    }
+
     fn commit(
         &self,
         location: &StateLocation,
@@ -1165,10 +1181,14 @@ fn transition_commit(
 ) -> StateResult<Option<Oid>> {
     let all = tree::read(repository, tip)?;
     let mut inner = tree::beneath(&all, &location.path);
+    if transition.changes.clear {
+        inner.clear();
+    }
     apply_changes(&mut inner, &transition.changes, desired, observed)?;
     let files = replace_beneath(&all, &location.path, &inner);
     let parents = tip.into_iter().collect::<Vec<_>>();
-    tree::commit(repository, author, &files, &transition.message, &parents, false)
+    let allow_empty = transition.changes.commit_unchanged && observed;
+    tree::commit(repository, author, &files, &transition.message, &parents, allow_empty)
 }
 
 /// The newest `limit` commits of `tip`'s first-parent history, newest first.

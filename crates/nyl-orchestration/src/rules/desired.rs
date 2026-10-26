@@ -33,8 +33,8 @@ use nyl_core::orchestration::driver::{Driver, DriverSet, OwnershipScope};
 use nyl_core::orchestration::ids::{Uid, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, RenderedSource, RenderedUnit};
 use nyl_core::orchestration::state::{
-    DesiredUnit, DesiredUnitKind, EnvironmentRecord, EnvironmentRecordKind, Lifecycle, Readiness, SourceChoice,
-    StateV1, UnitIdentity,
+    DesiredUnit, DesiredUnitKind, EnvironmentRecord, EnvironmentRecordKind, HoldPending, Lifecycle, Readiness,
+    SourceChoice, StateV1, Tombstone, UnitIdentity,
 };
 use nyl_core::resources::units::{
     is_builtin_unit_api_version, CommandSpec, CommonUnitFields, DeletionPolicy, KindSupport, KIND_COMMAND,
@@ -70,6 +70,88 @@ pub struct Desired {
     pub leaving: Vec<LeavingUnit>,
     /// Errors that stop the run before anything executes (exit 1).
     pub errors: Vec<Finding>,
+    /// Lifecycle changes this run writes, decided through
+    /// [`super::lifecycle::transition`]: units leaving the ownership set
+    /// (deleting, retained, released), units returning to it, and kind
+    /// changes. Contract: [Deletion](../../../../design/orchestration-core.md#deletion).
+    pub lifecycle: BTreeMap<UnitName, LifecycleWrite>,
+    /// Held units, as stored: a hold freezes the document, so they are not
+    /// rendered into [`Desired::units`], but consumers resolve against them.
+    pub held: BTreeMap<UnitName, HeldUnit>,
+    /// Returning units adopting a `retained` tombstone of the same name and
+    /// kind: the tombstone, whose receipt the run restores when
+    /// [`adopt_tombstone`] finds it still current after resolution.
+    pub tombstones: BTreeMap<UnitName, Tombstone>,
+    /// Units of the ownership set that wait for a deleting incarnation of
+    /// the same name (another kind) to be removed before they start.
+    pub fenced: BTreeSet<UnitName>,
+}
+
+/// One lifecycle change of a run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LifecycleWrite {
+    /// The desired document to write; `None` removes the desired file.
+    pub desired: Option<DesiredUnit>,
+    /// Whether the observed file goes: a retained tombstone embeds the
+    /// receipt, and a released unit leaves no state.
+    pub remove_observed: bool,
+    /// What happened, for the report and the transition summary.
+    pub outcome: LifecycleOutcome,
+}
+
+/// What a lifecycle change did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleOutcome {
+    /// Deleting, its teardown pending.
+    PendingTeardown,
+    /// Replaced by a `retained` tombstone.
+    Retained,
+    /// A kind that cannot tear down left its resources in place, as `left` says.
+    Released { left: Option<String> },
+    /// Back in the ownership set: active again with its uid and receipt, or
+    /// adopting its tombstone.
+    Returned,
+    /// Its kind changed: the old incarnation is deleting.
+    KindChange,
+}
+
+/// A held unit as a run sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldUnit {
+    /// The stored desired document, which the run keeps.
+    pub stored: DesiredUnit,
+    /// The unit as source renders it at S, before resolution, so the run
+    /// can record what it would change under `hold.pending`; `None` when the
+    /// unit left the ownership set.
+    pub rendered: Option<DesiredUnit>,
+}
+
+/// The `hold.pending` a run records for a held unit: S, the execution key of
+/// the unit as S would resolve it (`None` while that resolution is
+/// blocked), and whether it left the ownership set. `None` when source
+/// would change nothing.
+pub fn hold_pending(
+    held: &HeldUnit,
+    source_commit: &nyl_core::orchestration::ids::CommitId,
+    resolved: Option<&DesiredUnit>,
+) -> Option<HoldPending> {
+    let _ = (held, source_commit, resolved);
+    todo!("lifecycle")
+}
+
+/// The receipt a returning unit adopts from its tombstone: the tombstone's
+/// receipt when `resolved` has the same execution key and every producer
+/// the receipt cites is still at the cited incarnation and receipt in
+/// `desired`; `None` otherwise, so the unit runs as an ordinary change of
+/// the same incarnation. Contract: [Deletion](../../../../design/orchestration-core.md#deletion), "Retain, declared".
+pub fn adopt_tombstone(
+    resolved: &DesiredUnit,
+    tombstone: &Tombstone,
+    desired: &BTreeMap<UnitName, DesiredUnit>,
+    observed: &BTreeMap<UnitName, nyl_core::orchestration::state::ObservedUnit>,
+) -> Option<nyl_core::orchestration::state::Receipt> {
+    let _ = (resolved, tombstone, desired, observed);
+    todo!("lifecycle")
 }
 
 /// The selected, enabled units: those rendered to a spec whose `enabled`
@@ -177,6 +259,10 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
         units,
         leaving,
         errors,
+        lifecycle: BTreeMap::new(),
+        held: BTreeMap::new(),
+        tombstones: BTreeMap::new(),
+        fenced: BTreeSet::new(),
     }
 }
 

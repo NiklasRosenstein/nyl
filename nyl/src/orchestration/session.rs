@@ -162,6 +162,8 @@ impl Session {
             workspace: workspace.path(),
             process_env: &wiring.process_env,
             commit_identity: identity,
+            observer: None,
+            prompt: None,
         };
         let mut report = operation(&context, request);
         self.add_warnings(&mut report);
@@ -216,6 +218,10 @@ impl Session {
             wait: options.wait,
             local: options.local.clone(),
             cancellation: options.cancellation.clone(),
+            mode: options.mode.clone(),
+            lifecycle: options.lifecycle,
+            reapply: unit_names("--reapply", options.reapply)?,
+            reason: options.reason.map(str::to_owned),
         })
     }
 }
@@ -266,6 +272,15 @@ pub struct RunOptions<'a> {
     pub local: Option<nyl_orchestration::shell::local::LocalRun>,
     /// The wiring's cancellation for `reconcile` and `verify`; never set for `plan`.
     pub cancellation: nyl_orchestration::shell::run::Cancellation,
+    /// The operation on the run path: reconcile, a recover import, or a teardown.
+    pub mode: nyl_orchestration::shell::run::RunMode,
+    /// `--allow-teardown`, `--allow-dependents`, `--allow-incomplete`,
+    /// `--leaving`, `--confirm-removed`, and `--hold`.
+    pub lifecycle: nyl_orchestration::shell::run::LifecycleOptions,
+    /// `reconcile --reapply`.
+    pub reapply: &'a [String],
+    /// `--reason` of an operator action.
+    pub reason: Option<&'a str>,
 }
 
 /// `environment` as a name for a report of a command that stopped before
@@ -379,7 +394,7 @@ fn table(report: &RunReport) -> String {
             .collect::<Vec<_>>();
         let headers: &[&str] = match report.kind {
             ReportKind::PlanReport => &["UNIT", "KIND", "STATE", "RECEIPT", "CHANGES", "DETAIL"],
-            ReportKind::ReconcileReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
+            ReportKind::ReconcileReport | ReportKind::TeardownReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
             ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
         };
@@ -420,7 +435,7 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
             let changes = cell_label(unit.changes);
             vec![name.to_string(), unit.kind.clone(), outcome, receipt, changes, detail]
         }
-        ReportKind::ReconcileReport | ReportKind::VerifyReport => {
+        ReportKind::ReconcileReport | ReportKind::TeardownReport | ReportKind::VerifyReport => {
             vec![name.to_string(), unit.kind.clone(), outcome, detail]
         }
         ReportKind::StatusReport => {

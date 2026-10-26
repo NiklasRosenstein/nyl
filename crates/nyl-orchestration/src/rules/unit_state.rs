@@ -25,10 +25,12 @@
 use std::collections::BTreeSet;
 
 use nyl_core::orchestration::codes::{Code, Finding};
+use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
 use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
 use nyl_core::orchestration::time::Timestamp;
+use nyl_core::resources::environment::DriftRepair;
 
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::lease::{holders, lease_live, run_live};
@@ -277,13 +279,23 @@ fn condition_warning(
 /// plus the lease and run refs: per-unit state, receipt, blockers, the
 /// running unit and holder, and suggested next actions as warnings with fixes.
 /// `now` decides which leases and run refs are past their deadline (the
-/// units a dead run was executing read `uncertain`).
+/// units a dead run was executing read `uncertain`). With `drivers`, units
+/// with a current receipt show their drift observation
+/// ([`crate::rules::drift::status_drift`]), which needs each unit's
+/// recovery policy.
 pub fn status(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     coordination: &Coordination,
     now: Timestamp,
+    drivers: Option<&DriverSet>,
 ) -> EnvironmentRunReport {
+    let drift_repair = snapshot
+        .environment
+        .as_ref()
+        .and_then(|record| record.spec.get("driftRepair"))
+        .and_then(|value| serde_json::from_value::<DriftRepair>(value.clone()).ok())
+        .unwrap_or_default();
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
     let running = running_units(coordination, now);
@@ -337,6 +349,19 @@ pub fn status(
             unit_state(desired, observed, running.contains(name))
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
+        if let Some(drivers) = drivers {
+            unit.drift = crate::rules::drift::status_drift(
+                desired,
+                observed,
+                snapshot.observations.get(name),
+                drivers,
+                drift_repair,
+            );
+            if unit.drift.as_ref().is_some_and(|drift| drift.waits) {
+                unit.warnings
+                    .push(crate::rules::drift::waiting_warning(environment, name));
+            }
+        }
         let condition = observed.and_then(|observed| observed.condition.as_ref());
         unit.last_run = observed.and_then(ObservedUnit::last_run).cloned();
         if let Readiness::Blocked { reasons } = &desired.readiness {
@@ -531,7 +556,7 @@ mod tests {
     }
 
     fn status_at(snapshot: &EnvironmentSnapshot, coordination: &Coordination, now: Timestamp) -> EnvironmentRunReport {
-        status(&EnvironmentName::new("dev").unwrap(), snapshot, coordination, now)
+        status(&EnvironmentName::new("dev").unwrap(), snapshot, coordination, now, None)
     }
 
     /// Catches status losing what the operator needs next: the blocker's

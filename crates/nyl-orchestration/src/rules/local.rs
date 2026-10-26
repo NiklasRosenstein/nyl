@@ -258,6 +258,7 @@ pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapsh
         artifacts: replace(&current.artifacts, &target.artifacts),
         observations: replace(&current.observations, &target.observations),
         attestations: replace(&current.attestations, &target.attestations),
+        ..TransitionChanges::default()
     }
 }
 

@@ -79,6 +79,22 @@ pub struct EnvironmentSpec {
     /// CI deployment admission: `required` makes state-writing runs use the source of the current admission. Omitted, the group's, else `off`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<Admission>,
+    /// Whether `reconcile` executes `converge` units again whose latest drift observation is `drifted`. Omitted, the group's, else `converge`.
+    #[serde(rename = "driftRepair", default, skip_serializing_if = "Option::is_none")]
+    pub drift_repair: Option<DriftRepair>,
+}
+
+/// Whether reconcile repairs drift on its own.
+///
+/// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DriftRepair {
+    /// Execute drifted units whose recovery policy is `converge` again.
+    #[default]
+    Converge,
+    /// Leave every drifted unit to `nyl reconcile --reapply`.
+    Manual,
 }
 
 /// Whether state-writing runs require a CI deployment admission.

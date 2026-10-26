@@ -32,6 +32,7 @@ pub enum RunOutput {
 
 /// Execute an environment's ready units.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent command-line switches.
 pub struct ReconcileArgs {
     /// The environment to reconcile.
     #[arg(short = 'e', long = "environment")]
@@ -70,6 +71,34 @@ pub struct ReconcileArgs {
     #[arg(long = "approve", value_name = "UNIT", requires = "local", value_delimiter = ',')]
     pub approve: Vec<String>,
 
+    /// Tear down units that left the ownership set (omission) or whose kind
+    /// changed, instead of leaving them pending teardown.
+    #[arg(long)]
+    pub allow_teardown: bool,
+
+    /// Tear down units that retained tombstones still cite.
+    #[arg(long)]
+    pub allow_dependents: bool,
+
+    /// Proceed with teardowns whose readiness requirements are unmet, or
+    /// whose removal is not confirmed, recording what may remain.
+    #[arg(long)]
+    pub allow_incomplete: bool,
+
+    /// Act only on units outside the ownership set: newly leaving, deleting,
+    /// pending teardown, or tearing down.
+    #[arg(long, conflicts_with = "units")]
+    pub leaving: bool,
+
+    /// Execute this unit again although its receipt is current, such as to
+    /// repair drift (repeatable, or comma-separated); needs --reason.
+    #[arg(long, value_name = "UNIT", value_delimiter = ',', requires = "reason")]
+    pub reapply: Vec<String>,
+
+    /// Why, recorded as the transition commit's Nyl-Reason for --reapply.
+    #[arg(long)]
+    pub reason: Option<String>,
+
     /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
     pub author: Option<String>,
@@ -105,6 +134,16 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
         wait: args.wait_lease,
         local: local.clone(),
         cancellation: wiring.cancellation.clone(),
+        mode: nyl_orchestration::shell::run::RunMode::Reconcile,
+        lifecycle: nyl_orchestration::shell::run::LifecycleOptions {
+            allow_teardown: args.allow_teardown,
+            allow_dependents: args.allow_dependents,
+            allow_incomplete: args.allow_incomplete,
+            leaving: args.leaving,
+            ..nyl_orchestration::shell::run::LifecycleOptions::default()
+        },
+        reapply: &args.reapply,
+        reason: args.reason.as_deref(),
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),

@@ -120,6 +120,26 @@ pub enum StateCommand {
         #[arg(long)]
         discard_all: bool,
     },
+    /// Remove the environment's state once no unit has an incarnation left;
+    /// with --teardown, tear every unit down first.
+    Delete {
+        #[command(flatten)]
+        common: Common,
+        /// Run `nyl teardown --all` first and continue to the deletion in the same command.
+        #[arg(long)]
+        teardown: bool,
+        /// With --teardown, tear down units that retained tombstones still cite.
+        #[arg(long, requires = "teardown")]
+        allow_dependents: bool,
+        /// With --teardown, proceed despite unmet readiness requirements or
+        /// unconfirmed removals, recording what may remain.
+        #[arg(long, requires = "teardown")]
+        allow_incomplete: bool,
+        /// With --teardown, take the units' source files from this revision
+        /// when the recorded source commit cannot be fetched.
+        #[arg(long, requires = "teardown")]
+        source: Option<String>,
+    },
     /// Restore remote state to an earlier commit's content with forward commits,
     /// after local transitions were pushed by hand.
     Restore {
@@ -174,6 +194,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 state::reset(ctx.context, &ctx.environment, ctx.location, discard.as_ref())
             })
         }
+        StateCommand::Delete { .. } => todo!("operator: state delete through shell::teardown::state_delete"),
         StateCommand::Restore { common, to } => {
             let to = CommitId::new(to.trim().to_ascii_lowercase()).map_err(|error| {
                 NylError::config(format!(

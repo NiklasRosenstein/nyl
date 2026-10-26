@@ -56,8 +56,8 @@ use nyl_core::orchestration::driver::{
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, CommitIdentity, EnvironmentSnapshot, RenderedSource, SourceRenderer, SourceRepository, SourceResolver,
-    StateError, TransitionChanges,
+    ArgoObserver, Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer,
+    SourceRepository, SourceResolver, StateError, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
@@ -72,6 +72,7 @@ use super::lease::{self, HeldLease};
 use super::{store_error, Context};
 use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{desire, DesireInputs, Desired};
+use crate::rules::drift;
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
 use crate::rules::freshness::{receipt_is_current, same_incarnation};
 use crate::rules::graph::{extract, topological_order};
@@ -92,6 +93,7 @@ use slots::Slots;
 mod cancel;
 mod execute;
 pub(crate) mod slots;
+pub(crate) mod wait;
 
 /// Default number of units a wave runs at once.
 pub const DEFAULT_CONCURRENCY: usize = 4;
@@ -117,6 +119,88 @@ pub struct RunContext<'a> {
     /// clock's time: the identity the command line resolved for state
     /// commits. `None` for `plan`, which writes nothing.
     pub commit_identity: Option<&'a CommitIdentity>,
+    /// Reads Argo CD for a publication's `observe` teardown wait; `None`
+    /// when no observer is configured, which makes such a wait uncertain
+    /// with `observation-failed`.
+    pub observer: Option<&'a dyn ArgoObserver>,
+    /// The terminal of a run waiting on a teardown, when stdin is one: Enter
+    /// confirms the removal.
+    pub prompt: Option<&'a dyn OperatorPrompt>,
+}
+
+/// Which operation runs on the shared run path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RunMode {
+    /// `nyl reconcile` (and `nyl plan`).
+    #[default]
+    Reconcile,
+    /// `nyl recover -e <env>` importing a broken lease's run: operation
+    /// `recover`, nothing executes, then the optional `--unit` action
+    /// applies in the same commit. Contract:
+    /// [Recovery](../../../../../design/orchestration-core.md#recovery), "Importing a broken run".
+    Recover { unit: Option<super::recover::RecoverUnit> },
+    /// `nyl teardown` (and `nyl plan --teardown`): operation `teardown`,
+    /// acting on the stored desired documents. Contract:
+    /// [Deletion](../../../../../design/orchestration-core.md#deletion), "Explicit teardown".
+    Teardown { target: TeardownTarget },
+}
+
+impl RunMode {
+    /// The operation the run records in its lease, run ref, and commit.
+    pub fn operation(&self) -> Operation {
+        match self {
+            Self::Reconcile => Operation::Reconcile,
+            Self::Recover { .. } => Operation::Recover,
+            Self::Teardown { .. } => Operation::Teardown,
+        }
+    }
+
+    /// Whether the run executes or tears down units; a recover import does not.
+    pub fn executes(&self) -> bool {
+        !matches!(self, Self::Recover { .. })
+    }
+
+    /// The report kind of a run in this mode.
+    pub fn report_kind(&self) -> ReportKind {
+        match self {
+            Self::Teardown { .. } => ReportKind::TeardownReport,
+            Self::Reconcile | Self::Recover { .. } => ReportKind::ReconcileReport,
+        }
+    }
+}
+
+/// What `nyl teardown` tears down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeardownTarget {
+    /// `--unit <u>…`.
+    Units(BTreeSet<UnitName>),
+    /// `--all`: every unit, dependents first; units still in the ownership
+    /// set are held afterwards, and kinds that cannot tear down are released.
+    All,
+}
+
+/// The lifecycle options of a run. Contract:
+/// [Deletion](../../../../../design/orchestration-core.md#deletion),
+/// [Execution](../../../../../design/orchestration-core.md#execution)
+/// (`--leaving`), and [Kubernetes publication
+/// unit](../../../../../design/orchestration-core.md#kubernetes-publication-unit)
+/// (`--confirm-removed`, `--allow-incomplete`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Independent command-line switches.
+pub struct LifecycleOptions {
+    /// `--allow-teardown`: omission and kind-change teardowns proceed.
+    pub allow_teardown: bool,
+    /// `--allow-dependents`: tear down units retained tombstones cite.
+    pub allow_dependents: bool,
+    /// `--allow-incomplete`: proceed despite unmet readiness requirements
+    /// or an unfinished teardown wait, recorded with a condition.
+    pub allow_incomplete: bool,
+    /// `reconcile --leaving`: act only on units outside the ownership set.
+    pub leaving: bool,
+    /// `teardown --confirm-removed`: the operator confirms a publication's removal.
+    pub confirm_removed: bool,
+    /// `teardown --hold`: hold the units after their teardown, in the same operation.
+    pub hold: bool,
 }
 
 /// One `plan` or `reconcile` of one environment.
@@ -148,6 +232,23 @@ pub struct RunRequest {
     /// Set by the command line's SIGINT/SIGTERM handler; never set by
     /// default. Contract: [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases), item 7.
     pub cancellation: Cancellation,
+    /// The operation on the run path.
+    pub mode: RunMode,
+    pub lifecycle: LifecycleOptions,
+    /// `reconcile --reapply`: units with a current receipt to execute again.
+    /// Contract: [Drift](../../../../../design/orchestration-core.md#drift).
+    pub reapply: BTreeSet<UnitName>,
+    /// `--reason` of an operator action (`--reapply`, `teardown`, `recover`),
+    /// recorded as `Nyl-Reason` next to `Nyl-Requested-By`.
+    pub reason: Option<String>,
+}
+
+impl RunRequest {
+    /// Whether the run is an operator action that records `Nyl-Requested-By`
+    /// and `Nyl-Reason`: a teardown, a recover import, or a reapply.
+    pub fn requested(&self) -> bool {
+        !matches!(self.mode, RunMode::Reconcile) || !self.reapply.is_empty()
+    }
 }
 
 /// `nyl plan -e <env>`.
@@ -176,7 +277,7 @@ pub fn reconcile(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
         }
         report
     });
-    let mut report = RunReport::new(ReportKind::ReconcileReport);
+    let mut report = RunReport::new(request.mode.report_kind());
     report.environments.push(environment);
     report
 }
@@ -861,6 +962,9 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         named: None,
         attempted: &attempted,
         local: request.local.as_ref().map(|local| &local.approve),
+        observations: &snapshot.observations,
+        drift_repair: drift::drift_repair(&prepared.rendered.environment),
+        reapply: &request.reapply,
     });
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
@@ -932,6 +1036,7 @@ fn plan_unit(
         tools: context.tools,
         commit_identity: context.commit_identity,
         cache_dir: session.context.cache_dir(),
+        teardown_wait: None,
     };
     match driver.plan(&execution, unit) {
         Ok(Supported::Supported(plan)) => {
@@ -985,6 +1090,10 @@ struct Reconcile<'s, 'r, 'a> {
     /// ref is kept whenever the run cannot finish, so executed units'
     /// results are not lost.
     checkpointed: bool,
+    /// Whether the run's transition commit landed, or it ended without
+    /// changes after its import: a run that took a broken lease over and
+    /// ends otherwise restores the break when it releases.
+    landed: bool,
 }
 
 /// A `--local` run never imports remote run refs: it refuses while the
@@ -1021,7 +1130,8 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
             &request.location,
             environment,
             &run,
-            Operation::Reconcile,
+            request.mode.operation(),
+            lease::run_takeover(request.local.as_ref()),
             base.settings.resolution_timeout,
             request.wait,
             &request.cancellation,
@@ -1031,7 +1141,7 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         Ok(held) => held,
         Err(finding) => {
             report.errors.push(finding);
-            report.finish(ReportKind::ReconcileReport);
+            report.finish(request.mode.report_kind());
             return report;
         }
     };
@@ -1040,7 +1150,7 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         kind: RunKind,
         run: run.clone(),
         runner: base.runner.clone(),
-        operation: Operation::Reconcile,
+        operation: request.mode.operation(),
         source_commit: None,
         read_desired: None,
         read_observed: None,
@@ -1055,12 +1165,13 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         record,
         report,
         checkpointed: false,
+        landed: false,
     };
     session.lease_deadline.set(Some(state.held.lease.deadline));
     let ending = state.holding();
     state.end(&ending);
     let mut report = state.report;
-    report.finish(ReportKind::ReconcileReport);
+    report.finish(request.mode.report_kind());
     report
 }
 
@@ -1283,6 +1394,21 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 self.report.errors.extend(resolved.errors.values().flatten().cloned());
                 return Ending::Release;
             }
+            if first && !request.reapply.is_empty() {
+                // `--reapply` is checked before anything executes.
+                if let Err(finding) = drift::check_reapply(
+                    &environment,
+                    &request.reapply,
+                    request.units.as_ref(),
+                    &resolved.units,
+                    &observed,
+                    context.drivers,
+                    request.local.is_some(),
+                ) {
+                    self.report.errors.push(finding);
+                    return Ending::Release;
+                }
+            }
             first = false;
             if taking.active {
                 let import = takeover::import(&ImportInputs {
@@ -1300,7 +1426,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     continue;
                 }
             }
-            let (ready, skipped) = select(&Candidates {
+            if !request.mode.executes() {
+                // A recover import resolves and imports; nothing executes.
+                break (resolved, BTreeMap::new());
+            }
+            let candidates = Candidates {
                 desired: &resolved.units,
                 observed: &observed,
                 drivers: context.drivers,
@@ -1310,7 +1440,20 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .local
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
-            });
+                observations: &snapshot.observations,
+                drift_repair: drift::drift_repair(&prepared.rendered.environment),
+                reapply: &request.reapply,
+            };
+            let (ready, skipped) = select(&candidates);
+            for (name, repair) in drift::repairs(&candidates, &ready) {
+                let list = match repair {
+                    drift::Repair::Drift => &mut self.report.drift_repaired,
+                    drift::Repair::Reapply => &mut self.report.reapplied,
+                };
+                if !list.contains(&name) {
+                    list.push(name);
+                }
+            }
             if ready.is_empty() {
                 break (resolved, skipped);
             }
@@ -1421,6 +1564,28 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
         self.report.imported = taking.imported.iter().cloned().collect();
         self.report.recovered = taking.recovered.iter().cloned().collect();
+        // `nyl recover --unit` after importing a broken run: the action
+        // applies to the imported state, in the same commit.
+        let mut recover_entry = None;
+        if let RunMode::Recover { unit: Some(recover) } = &request.mode {
+            let runs: Vec<_> = leftovers
+                .runs
+                .iter()
+                .chain(leftovers.evidence.iter())
+                .map(|state| (*state).clone())
+                .collect();
+            let desired = resolved
+                .units
+                .get(&recover.unit)
+                .or_else(|| taking.unresolved.get(&recover.unit));
+            match super::recover::after_import(&environment, recover, desired, &mut observed, &mut artifacts, &runs) {
+                Ok(entry) => recover_entry = Some((recover.unit.clone(), entry)),
+                Err(finding) => {
+                    self.report.errors.push(finding);
+                    return Ending::Release;
+                }
+            }
+        }
 
         // The report: one result per unit, only the named ones with --unit.
         for (name, unit) in &resolved.units {
@@ -1480,17 +1645,40 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.artifacts.insert(name.clone(), after.cloned());
             }
         }
+        // A new receipt replaces the one a drift observation was about.
+        changes
+            .observations
+            .extend(drift::observation_changes(&snapshot, &observed));
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
+        if changes.is_empty() && lease::records_break(&self.held) {
+            // The takeover of a broken lease is recorded once, even when
+            // its import changed nothing ("Runs and leases" item 8).
+            changes.commit_unchanged = true;
+        }
         if changes.is_empty() {
             self.consume(&leftovers, &observed);
+            self.landed = true;
             return Ending::Release;
         }
         if self.fault(FaultPoint::BeforePush, None) {
             return self.killed(FaultPoint::BeforePush);
         }
-        let mut summary = self.report.transition_summary(Operation::Reconcile);
+        let mut summary = self.report.transition_summary(request.mode.operation());
+        if let Some((unit, entry)) = recover_entry {
+            summary.units.insert(unit, entry);
+        }
+        if !self.report.reapplied.is_empty() {
+            summary.reapplied = Some(crate::transition::Reapplied {
+                request: nyl_core::orchestration::state::Request {
+                    by: context.base.requested_by.clone(),
+                    at: self.held.lease.taken_at,
+                    reason: request.reason.clone(),
+                },
+                units: self.report.reapplied.clone(),
+            });
+        }
         for (name, execution) in &executions {
             let approval = execution
                 .checkpoint
@@ -1508,6 +1696,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let trailers = Trailers {
             source_commit: Some(source_commit),
             local: request.local.is_some(),
+            requested_by: request.requested().then(|| context.base.requested_by.clone()),
+            reason: request.requested().then(|| request.reason.clone()).flatten(),
             ..super::trailers(context.base, &self.held, &snapshot.tips)
         };
         let committed = super::commit_transition(
@@ -1522,6 +1712,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         match committed {
             Ok(commits) => {
                 self.report.commits.extend(commits);
+                self.landed = true;
                 self.consume(&leftovers, &observed);
                 Ending::Release
             }
@@ -1648,7 +1839,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         }
         if release {
-            if let Err(error) = lease::release(base, &self.held) {
+            if let Err(error) = lease::release(base, &self.held, self.landed) {
                 let finding = store_error(self.environment(), &error);
                 self.report.warnings.push(finding);
             }
