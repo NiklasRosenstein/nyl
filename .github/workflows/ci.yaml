@@ -108,16 +108,28 @@ jobs:
         if: runner.os == 'Linux'
         run: echo "TMPDIR=/dev/shm" >> "$GITHUB_ENV"
 
+      # nextest runs the tests of every binary in one pool, so the long
+      # render-tree tests no longer hold back the other test binaries.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9
+
       # Tests create throwaway Git repositories and push to them hundreds of
       # times; syncing each pack and ref to disk dominated the Linux runners'
-      # test time, so the test step turns Git's disk sync off.
+      # test time, so the test steps turn Git's disk sync off.
       - name: Run tests
         working-directory: nyl
         env:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: core.fsync
           GIT_CONFIG_VALUE_0: none
-        run: cargo test --workspace --all-features
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      # nextest does not run documentation tests.
+      - name: Run documentation tests
+        working-directory: nyl
+        run: cargo test --workspace --all-features --doc
 
   build-linux-musl:
     name: Build Linux musl binaries
