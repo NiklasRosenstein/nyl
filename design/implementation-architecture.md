@@ -13,14 +13,16 @@ so each rule has one home, one test, and no way to drift from the others.
 
 Nyl is a Cargo workspace whose crates' dependency direction the compiler
 enforces. `nyl-core` and `nyl-render` live under `crates/`; the orchestration
-crates join them from M3:
+crates join them from M3, and `nyl-collections` with domain resources (M9):
 
 ```text
-nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
+nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
+         │                      └► nyl-collections ─► nyl-core
          ├─► nyl-state ─────────┬► nyl-core
          │                      └► nyl-git
          ├─► nyl-drivers ─┬──────► nyl-core
          │                └──────► nyl-render ─┬► nyl-core
+         │                                     ├► nyl-collections
          │                                     └► nyl-git
          └─► nyl-render
 ```
@@ -28,11 +30,12 @@ nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
 | `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-collections` | Domain resource rules shared by rendering and orchestration: schema validation and defaulting, identity, membership, ownership claims, the reference closure, bundle assembly, transition rules ([domain resources](domain-resources.md#code-homes)) | Git, processes, network, clock, environment, and every Nyl crate except `nyl-core` |
 | `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
 | `nyl-render` | Today's Kubernetes rendering and rendered GitOps, unchanged in behavior | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
 | `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
-| `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` |
+| `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` and `nyl-collections` |
 | `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
@@ -49,8 +52,9 @@ nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
 - The `KubernetesPublication` driver is a thin adapter over a narrow rendering
   API, such as `render_target(target, input_snapshot) -> Tree`. Rendering never
   learns about environments, receipts, or state refs.
-- `nyl-orchestration` depends only on `nyl-core`, so the compiler rejects any
-  direct Git, process, or cluster call from orchestration; `nyl-cli` passes in
+- `nyl-orchestration` depends only on the pure crates `nyl-core` and
+  `nyl-collections`, so the compiler rejects any direct Git, process, or
+  cluster call from orchestration; `nyl-cli` passes in
   the implementations from `nyl-state` and `nyl-drivers`.
 - Plugin drivers, when added, implement the same driver trait through a
   process adapter in `nyl-drivers`.

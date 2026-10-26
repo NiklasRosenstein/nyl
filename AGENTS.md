@@ -71,7 +71,9 @@ These rules keep it maintainable:
 
 - Respect the crate dependency direction: `nyl-core` depends on nothing Nyl
   and owns the orchestration traits; `nyl-render` never depends on
-  orchestration crates; `nyl-orchestration` depends only on `nyl-core`;
+  orchestration crates; `nyl-orchestration` depends only on `nyl-core` and,
+  from M9, the equally pure `nyl-collections`, which both it and
+  `nyl-render` use for domain resource rules;
   `nyl-state` and `nyl-drivers` implement the traits; `nyl-cli` wires them
   together and holds no business rules.
 - Decisions are pure functions over snapshots. Only the orchestration shell

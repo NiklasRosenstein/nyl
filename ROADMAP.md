@@ -43,7 +43,7 @@ stable for references from issues and pull requests:
 | M6 | Promotion paths |
 | M7 | Continuous operation and scope decision |
 | M8 | Provider-neutral CI execution and first GitLab adapter |
-| M9 | Domain resource collections as unit inputs |
+| M9 | Domain resource collections for units and Releases |
 
 ## Product direction
 
@@ -409,6 +409,22 @@ the [domain resources design](design/domain-resources.md), and its slices and
 progress are on the
 [Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
 
+Kubernetes Releases consume collections too, without orchestration, as
+described in the [Release catalog design](design/release-catalog.md). The
+Release becomes an inventoried resource: it can point at its manifests with
+`spec.manifests` instead of holding them, with its own file remaining the
+default, and an ApplicationGroup can select Releases by literal labels as
+well as by path. Both modes stay, because path membership lets CODEOWNERS
+decide who may join a group. Label membership is guarded instead by Kyverno
+policies that admit Releases with their trusted source path, since a
+generated AppProject admits its members' namespaces. A Release reads
+collections, never owns them, and can be instantiated once per domain
+resource with `forEach`. A bundle carries the resources its members
+reference, so a Release that reads GitHub teams also sees their
+organization. The rules units and Releases share live in a pure
+`nyl-collections` crate that both `nyl-render` and `nyl-orchestration` use,
+so the two consumers cannot diverge.
+
 ### Promotion paths (M6)
 
 A PromotionPath is the explicit link between source selectors and target
@@ -688,6 +704,8 @@ reasons to delay independent work.
   criterion as executable scenarios
 - [Domain resource collections](design/domain-resources.md): the M9 proposal
   for team-owned declarations as unit inputs
+- [Release catalog](design/release-catalog.md): Releases as inventoried
+  resources, label membership, and collections in rendering, part of M9
 
 - [Nyl rendering session and bundle](crates/nyl-render/src/render/session.rs)
 - [Nyl components](crates/nyl-render/src/components/mod.rs)

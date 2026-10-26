@@ -86,6 +86,13 @@ input.
 A unit can also declare `forEach` and be instantiated once per declaration,
 for example one OpenTofu configuration per team, each with its own state.
 
+Kubernetes Releases are planned to read collections too, without
+orchestration: a Release declares the collections it reads, and its templates
+render from the same bundle, for example one RoleBinding per team. A Release
+can also be instantiated once per declaration, such as one per tenant. The
+[Release catalog design](https://github.com/NiklasRosenstein/nyl/blob/develop/design/release-catalog.md)
+describes it.
+
 ## What to expect
 
 - **Declarations are data, not units.** Editing a declaration changes the inputs
