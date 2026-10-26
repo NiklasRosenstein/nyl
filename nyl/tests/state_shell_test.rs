@@ -1,7 +1,10 @@
 //! The state operations of the orchestration shell, against the in-memory
 //! store and the Git store: `state init`, `state forget`, `state move`,
 //! `state reset`, `state restore`, and `lease break`, with the lease rules
-//! they share.
+//! they share; a broken lease refuses them until `nyl recover -e <env>`
+//! imports it, which the tests run in the scenario world.
+
+mod scenario;
 
 use std::collections::BTreeMap;
 
@@ -10,14 +13,19 @@ use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Clock as _, IdGenerator as _, StateStore, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Run, RunKind, StateEvent, StateLocation, StateV1};
 use nyl_core::orchestration::time::Duration;
+use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
 use nyl_orchestration::fault::NoFaults;
-use nyl_orchestration::report::Outcome;
+use nyl_orchestration::report::{Outcome, StateOperationReport};
+use nyl_orchestration::shell::recover::recover_environment;
+use nyl_orchestration::shell::run::{Cancellation, RunContext, RunMode};
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::memory::MemoryStateStore;
+use scenario::shell;
+use scenario::world::git_output;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -322,91 +330,171 @@ fn test_a_held_lease_refuses_with_exit_two_or_waits() {
     }
 }
 
+/// `nyl recover -e dev` through the shell, on the shared run path.
+fn recover(harness: &shell::Harness) -> StateOperationReport {
+    let mut job = harness.job(&[], Cancellation::default());
+    job.request.mode = RunMode::Recover { unit: None };
+    let base = harness.context();
+    let tools = ProcessRunner::new();
+    let context = RunContext {
+        base: &base,
+        sources: &job.sources,
+        renderer: &job.renderer,
+        drivers: &harness.drivers,
+        tools: &tools,
+        workspace: job.workspace.path(),
+        process_env: &harness.process_env,
+        commit_identity: Some(&harness.identity),
+        observer: None,
+        prompt: None,
+    };
+    recover_environment(&context, &job.request)
+}
+
+/// Break the lease of a holder that died without a run ref, as `nyl lease
+/// break` does for a dead `operation`.
+fn break_dead_holder(harness: &shell::Harness, operation: Operation) {
+    let holder = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: RunId::new("00000000-0000-7000-9000-0000000000fd").unwrap(),
+        runner: "lost runner".to_owned(),
+        operation,
+        units: Vec::new(),
+        deadline: harness.clock.now() + chrono::Duration::hours(1),
+        taken_at: harness.clock.now(),
+        broken: None,
+    };
+    harness
+        .store
+        .take_lease(&harness.location, &dev(), &holder, None)
+        .unwrap();
+    let broken = state::break_lease(
+        &harness.context(),
+        &dev(),
+        &harness.location,
+        Some("runner lost".to_owned()),
+    );
+    assert_eq!(broken.outcome, Outcome::Done, "{broken:?}");
+    assert!(!broken.warnings.is_empty(), "breaking warns about a live holder");
+}
+
+/// "Runs and leases" items 1 and 8 (Q23): no state operation takes a
+/// broken lease over. `state init`, `forget`, `move`, and `restore` each
+/// exit 2 with `NYL-LEASE-BROKEN`, naming `nyl recover -e dev`, and write
+/// nothing; `nyl recover -e dev` imports the run of the broken holder (a
+/// `hold`, which leaves no run ref and no units), records
+/// the break once in an observed commit although nothing else changed
+/// (Q39), and the operations proceed.
 #[test]
-fn test_lease_break_lets_the_next_operation_take_over_and_record_the_break() {
-    for world in worlds() {
-        let context = world.context();
-        let location = world.dev();
-        state::init(&context, &dev(), &location, false, &requested());
-        seed_unit(
-            &world,
-            &location,
-            "cache",
-            json!({"state": "retained", "tombstone": {"since": "2026-09-24T10:00:00Z"}}),
-        );
-        let holder = Lease {
-            api_version: StateV1,
-            kind: LeaseKind,
-            run: world.ids.run_id(),
-            runner: "lost runner".to_owned(),
-            operation: Operation::Reconcile,
-            units: Vec::new(),
-            deadline: world.clock.now() + chrono::Duration::hours(1),
-            taken_at: world.clock.now(),
-            broken: None,
-        };
-        world.store.take_lease(&location, &dev(), &holder, None).unwrap();
-        let held = state::forget(
-            &context,
-            &dev(),
-            &location,
-            &UnitName::new("cache").unwrap(),
-            &requested(),
-        );
-        assert_eq!(held.exit, 2, "{}: the lease is held for another hour", world.name);
+fn test_a_broken_lease_refuses_state_operations_until_recover_imports_it() {
+    for git_store in [false, true] {
+        let harness = shell::Harness::new(&shell::shared_project(), git_store);
+        harness.init();
+        assert_eq!(harness.reconcile(&[]).exit.code(), 0);
+        break_dead_holder(&harness, Operation::Hold);
+        let context = harness.context();
+        let location = harness.location.clone();
+        let snapshot = harness.snapshot();
+        let restorable = snapshot.tips.desired.clone().unwrap();
+        let mut old = location.clone();
+        "nyl/old/desired".clone_into(&mut old.desired_ref);
+        "nyl/old/observed".clone_into(&mut old.observed_ref);
+        let database = UnitName::new("database").unwrap();
 
-        let broken = state::break_lease(&context, &dev(), &location, Some("runner lost".to_owned()));
-        assert_eq!(broken.outcome, Outcome::Done, "{}: {broken:?}", world.name);
-        assert!(!broken.warnings.is_empty(), "breaking warns about a live holder");
+        let refusals = [
+            state::init(&context, &dev(), &location, true, &requested()),
+            state::forget(&context, &dev(), &location, &database, &requested()),
+            state::relocate(&context, &dev(), &location, &old, &requested()),
+            state::restore(&context, &dev(), &location, &restorable, &requested()),
+        ];
+        for refused in &refusals {
+            assert_eq!(refused.exit, 2, "{git_store}: {refused:?}");
+            assert_eq!(refused.errors[0].code, Code::LeaseBroken, "{refused:?}");
+            assert!(refused.errors[0].fix.contains("nyl recover -e dev"), "{refused:?}");
+        }
+        assert_eq!(harness.tips(), snapshot.tips, "{git_store}: nothing was written");
 
-        let forgotten = state::forget(
-            &context,
-            &dev(),
-            &location,
-            &UnitName::new("cache").unwrap(),
-            &requested(),
+        let recovered = recover(&harness);
+        assert_eq!(recovered.exit, 0, "{git_store}: {recovered:?}");
+        assert_eq!(recovered.outcome, Outcome::Done);
+        assert_eq!(
+            recovered.commits.keys().copied().collect::<Vec<_>>(),
+            vec!["observed"],
+            "{git_store}: one observed commit records the break: {recovered:?}"
         );
-        assert_eq!(forgotten.outcome, Outcome::Done, "{}: {forgotten:?}", world.name);
-        if world.bare.is_some() {
-            let message = world.tip_message("refs/heads/nyl/dev/desired").unwrap();
-            assert!(message.starts_with("nyl: state-forget dev"), "{message}");
+        assert_eq!(recovered.details["leaseBroken"]["reason"], "runner lost");
+        assert_eq!(harness.snapshot().desired, snapshot.desired, "{git_store}");
+        assert_eq!(harness.snapshot().observed, snapshot.observed, "{git_store}");
+        if git_store {
+            let message = git_output(
+                &harness.world.bare(),
+                &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+            );
+            assert!(message.starts_with("nyl: recover dev"), "{message}");
             assert!(
                 message.contains("\nleaseBroken: {") && message.contains("runner lost"),
                 "{message}"
             );
         }
+        assert!(harness.coordination().lease.is_none());
+
+        let forget = state::forget(&context, &dev(), &location, &database, &requested());
+        assert_eq!(
+            forget.errors[0].code,
+            Code::StateForgetRefused,
+            "{git_store}: {forget:?}"
+        );
+        let fresh = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(fresh.outcome, Outcome::Done, "{git_store}: {fresh:?}");
     }
 }
 
+/// `nyl lease break` also breaks a live run whose lease ref is gone; a
+/// state operation then refuses until `nyl recover -e dev` imports and
+/// consumes that run's ref.
 #[test]
 fn test_lease_break_also_breaks_a_live_run_without_a_lease() {
-    for world in worlds() {
-        let context = world.context();
-        let location = world.dev();
-        state::init(&context, &dev(), &location, false, &requested());
-        // The runner died after its lease ref was deleted; its run ref lives on.
-        let run = Run {
-            api_version: StateV1,
-            kind: RunKind,
-            run: world.ids.run_id(),
-            runner: "lost runner".to_owned(),
-            operation: Operation::Reconcile,
-            source_commit: None,
-            read_desired: None,
-            read_observed: None,
-            deadline: world.clock.now() + chrono::Duration::hours(3),
-            units: Vec::new(),
-            finished: false,
-        };
-        world.store.write_run(&location, &dev(), &run, None).unwrap();
-        let held = state::init(&context, &dev(), &location, true, &requested());
-        assert_eq!(held.exit, 2, "{}: the live run holds the environment", world.name);
+    let harness = shell::Harness::new(&shell::shared_project(), false);
+    harness.init();
+    let context = harness.context();
+    let location = harness.location.clone();
+    // The runner died after its lease ref was deleted; its run ref lives on.
+    let run = Run {
+        api_version: StateV1,
+        kind: RunKind,
+        run: RunId::new("00000000-0000-7000-9000-0000000000fc").unwrap(),
+        runner: "lost runner".to_owned(),
+        operation: Operation::Reconcile,
+        source_commit: None,
+        read_desired: None,
+        read_observed: None,
+        deadline: harness.clock.now() + chrono::Duration::hours(3),
+        units: Vec::new(),
+        finished: false,
+    };
+    harness.store.write_run(&location, &dev(), &run, None).unwrap();
+    let held = state::init(&context, &dev(), &location, true, &requested());
+    assert_eq!(
+        held.errors[0].code,
+        Code::LeaseHeld,
+        "the live run holds the environment"
+    );
 
-        let broken = state::break_lease(&context, &dev(), &location, Some("runner lost".to_owned()));
-        assert_eq!(broken.outcome, Outcome::Done, "{}: {broken:?}", world.name);
-        let fresh = state::init(&context, &dev(), &location, true, &requested());
-        assert_eq!(fresh.outcome, Outcome::Done, "{}: {fresh:?}", world.name);
-    }
+    let broken = state::break_lease(&context, &dev(), &location, Some("runner lost".to_owned()));
+    assert_eq!(broken.outcome, Outcome::Done, "{broken:?}");
+    let refused = state::init(&context, &dev(), &location, true, &requested());
+    assert_eq!(refused.errors[0].code, Code::LeaseBroken, "{refused:?}");
+
+    let recovered = recover(&harness);
+    assert_eq!(recovered.exit, 0, "{recovered:?}");
+    let coordination = harness.coordination();
+    assert!(
+        coordination.lease.is_none() && coordination.runs.is_empty(),
+        "the run ref is consumed: {coordination:?}"
+    );
+    let fresh = state::init(&context, &dev(), &location, true, &requested());
+    assert_eq!(fresh.outcome, Outcome::Done, "{fresh:?}");
 }
 
 #[test]

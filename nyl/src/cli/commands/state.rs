@@ -463,7 +463,7 @@ fn run_delete(
 }
 
 /// Render a state operation's report as the command's outcome.
-fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
+pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
     let json = serde_json::to_value(report).expect("reports serialize");
     let mut stdout = String::new();
     let mut stderr = String::new();

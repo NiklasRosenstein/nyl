@@ -1,10 +1,14 @@
-//! `nyl recover -e <env> --unit <u> (--retry | --accept <run>)`: clear a
-//! unit's uncertain condition or non-retryable failure for re-execution, or
-//! adopt a result a run checkpointed, recording the operator's reason.
+//! `nyl recover -e <env> [--unit <u> (--retry | --accept <run>)]`: import
+//! the run of a broken lease without executing, and clear a unit's
+//! uncertain condition or non-retryable failure for re-execution, or adopt
+//! a result a run checkpointed, recording the operator's reason.
 //!
 //! Contract: [Recovery](../../../../design/orchestration-core.md#recovery).
-//! It never executes: the unit becomes ready for the next `reconcile`.
-//! Exit: 0 done, 1 error or refusal (including `NYL-RUN-CANCELLED` when a
+//! It never executes: imported units and the recovered unit run in the next
+//! `reconcile`. It runs on the shared run path
+//! ([`recover_environment`]), which writes one transition commit and no run
+//! record. Exit: 0 done (also once an import is recorded with units left
+//! uncertain), 1 error or refusal (including `NYL-RUN-CANCELLED` when a
 //! signal stops `--wait-lease`), 2 the lease is held. Once it holds the
 //! lease, recover finishes its one commit despite a first signal.
 
@@ -15,59 +19,136 @@ use nyl_core::orchestration::ids::{RunId, UnitName};
 use nyl_core::orchestration::state::Operation;
 use nyl_orchestration::report::StateOperationReport;
 use nyl_orchestration::rules::recovery::RecoverAction;
-use nyl_orchestration::shell::recover::recover;
+use nyl_orchestration::shell::recover::{recover_environment, RecoverUnit};
+use nyl_orchestration::shell::run::{LifecycleOptions, RunMode, DEFAULT_CONCURRENCY};
+use nyl_state::git::CommitAuthor;
 
-use super::state::Common;
+use super::state::{render, Common};
 use crate::orchestration::run::{CommandOutcome, Wiring};
+use crate::orchestration::session::{placeholder_environment, RunOptions, Session, Stop};
 use crate::{NylError, Result};
 
-/// Clear a unit's condition, or accept a checkpointed result.
+/// Import a broken lease's run, clear a unit's condition, or accept a checkpointed result.
 #[derive(Args, Debug)]
-#[command(group(clap::ArgGroup::new("action").required(true).args(["retry", "accept"])))]
+#[command(group(clap::ArgGroup::new("action").args(["retry", "accept"])))]
 pub struct RecoverArgs {
     #[command(flatten)]
     pub common: Common,
 
-    /// The unit to recover.
-    #[arg(long)]
-    pub unit: String,
+    /// The unit to recover; needs --retry or --accept. Without it, recover
+    /// imports the run of a broken lease.
+    #[arg(long, requires = "action")]
+    pub unit: Option<String>,
 
     /// Clear the condition so the next reconcile executes the unit again.
-    #[arg(long)]
+    #[arg(long, requires = "unit")]
     pub retry: bool,
 
     /// Adopt the receipt, outputs, and artifacts this run checkpointed for
-    /// the unit; needs --reason.
-    #[arg(long, value_name = "RUN", requires = "reason")]
+    /// the unit; needs --unit and --reason.
+    #[arg(long, value_name = "RUN", requires_all = ["unit", "reason"])]
     pub accept: Option<String>,
 }
 
 /// Run the command in-process with `wiring`.
 pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    let unit = UnitName::new(&args.unit).map_err(|error| NylError::config(error.to_string()))?;
-    let action = match &args.accept {
-        None => Ok(RecoverAction::Retry),
-        Some(run) => RunId::new(run)
-            .map(|run| RecoverAction::Accept { run })
-            .map_err(|error| {
-                Finding::new(
-                    Code::RecoverCheckpointMissing,
-                    format!("--accept {run:?} is not a run ID: {error}"),
-                    "pass a run ID as `nyl recover` lists the checkpoints under evidence",
-                )
-            }),
+    let common = &args.common;
+    let refused = |finding: Finding| {
+        let environment = placeholder_environment(&common.environment);
+        render(
+            &StateOperationReport::new(environment, Operation::Recover.as_str()).refused(finding),
+            common.output,
+        )
     };
-    let requested = super::state::requested(&args.common, wiring);
-    super::state::run(
-        &args.common,
-        wiring,
-        Operation::Recover.as_str(),
-        None,
-        |ctx| match &action {
-            Ok(action) => recover(ctx.context, &ctx.environment, ctx.location, &unit, action, &requested),
-            Err(finding) => {
-                StateOperationReport::new(ctx.environment.clone(), Operation::Recover.as_str()).refused(finding.clone())
-            }
-        },
-    )
+    let unit = match &args.unit {
+        None => None,
+        Some(unit) => {
+            let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
+            let action = match &args.accept {
+                None => RecoverAction::Retry,
+                Some(run) => match RunId::new(run) {
+                    Ok(run) => RecoverAction::Accept { run },
+                    Err(error) => {
+                        return Ok(refused(Finding::new(
+                            Code::RecoverCheckpointMissing,
+                            format!("--accept {run:?} is not a run ID: {error}"),
+                            "pass a run ID as `nyl recover` lists the checkpoints under evidence",
+                        )))
+                    }
+                },
+            };
+            Some(RecoverUnit { unit, action })
+        }
+    };
+    let session = match Session::open(&common.path, &common.environment) {
+        Ok(session) => session,
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
+        Err(Stop::Error(error)) => return Err(error),
+    };
+    let identity = match wiring.commit_identity(&session.resolved.git_dir, common.author.as_deref()) {
+        Ok(identity) => identity,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let request = match session.request(&RunOptions {
+        units: &[],
+        concurrency: DEFAULT_CONCURRENCY,
+        source: None,
+        wait: common.wait_lease,
+        local: None,
+        cancellation: wiring.cancellation.clone(),
+        mode: RunMode::Recover { unit },
+        lifecycle: LifecycleOptions::default(),
+        reapply: false,
+        fail_fast: false,
+        reason: common.reason.as_deref(),
+    }) {
+        Ok(request) => request,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let store = session.store(Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    }))?;
+    let mut report = match session.run_with(wiring, &store, Some(&identity), &request, recover_environment) {
+        Ok(report) => report,
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
+        Err(Stop::Error(error)) => return Err(error),
+    };
+    let mut warnings = session.resolved.warnings.clone();
+    warnings.append(&mut report.warnings);
+    report.warnings = warnings;
+    Ok(render(&report, common.output))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        recover: RecoverArgs,
+    }
+
+    /// Catches the import form (`nyl recover -e dev`, no unit) rejected by
+    /// the parser, or a unit action accepted without its unit or action.
+    #[test]
+    fn test_recover_parses_the_import_form_and_ties_actions_to_a_unit() {
+        let parsed = Cli::try_parse_from(["recover", "-e", "dev"]).unwrap();
+        assert!(parsed.recover.unit.is_none() && !parsed.recover.retry);
+        let parsed = Cli::try_parse_from(["recover", "-e", "dev", "--unit", "database", "--retry"]).unwrap();
+        assert_eq!(parsed.recover.unit.as_deref(), Some("database"));
+        for invalid in [
+            &["recover", "-e", "dev", "--retry"][..],
+            &["recover", "-e", "dev", "--unit", "database"],
+            &["recover", "-e", "dev", "--unit", "database", "--accept", "run"],
+            &[
+                "recover", "-e", "dev", "--unit", "database", "--retry", "--accept", "run", "--reason", "x",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(invalid).is_err(), "{invalid:?} parses");
+        }
+    }
 }

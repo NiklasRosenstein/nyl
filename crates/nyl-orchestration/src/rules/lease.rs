@@ -8,8 +8,15 @@
 //! - A run ref whose `Run` record is not finished and whose deadline has not
 //!   passed counts as a held lease too, so a deleted lease ref alone never
 //!   lets a second run execute units the first is still executing.
-//! - A broken lease (`nyl lease break`) is taken over at once, and the break
-//!   is recorded in the taking run's transition commit.
+//! - A broken lease (`nyl lease break`) whose run no operation has imported
+//!   yet ([`unimported_break`]) is taken over at once, but only by an
+//!   operation that imports that run: `reconcile`, `teardown`, and `recover`
+//!   ([`BrokenLease::TakeOver`]). Every other state-writing operation gets
+//!   [`LeaseDecision::Broken`] (`NYL-LEASE-BROKEN`, naming `nyl recover -e
+//!   <env>`), so the dead run's effects are recorded before anything else
+//!   writes state (item 1). The importer records the break once, in its
+//!   transition commit (item 8).
+//! - An expired, unbroken lease is taken over by every operation.
 //! - Otherwise the run takes the lease by compare-and-swap against the
 //!   version it read, and the expired runs are left for import.
 
@@ -120,18 +127,21 @@ pub(crate) fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder
 }
 
 /// Decide from one read of the coordination refs at `now`, for an
-/// operation that does or does not import a broken lease's run.
-///
-/// Skeleton note: `broken` is not consulted until package `lease-break`
-/// implements item 1; until then every caller takes a broken lease over.
+/// operation that does or does not import a broken lease's run: a live
+/// holder holds first; then a broken lease whose run is not imported is
+/// [`LeaseDecision::Broken`] for a non-importer and taken over by an
+/// importer, which reports the break; anything else is taken. Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), items 1 and 8.
 pub fn decide(coordination: &Coordination, now: Timestamp, broken: BrokenLease) -> LeaseDecision {
-    let _ = broken;
-    match holders(coordination, now).into_iter().next() {
-        Some(holder) => LeaseDecision::Held(holder),
-        None => LeaseDecision::Take {
-            expected: coordination.lease.as_ref().map(|held| held.version.clone()),
-            broken: coordination.lease.as_ref().and_then(|held| held.lease.broken.clone()),
-        },
+    if let Some(holder) = holders(coordination, now).into_iter().next() {
+        return LeaseDecision::Held(holder);
+    }
+    if let (Some(lease), BrokenLease::Refuse) = (unimported_break(coordination), broken) {
+        return LeaseDecision::Broken(lease.clone());
+    }
+    LeaseDecision::Take {
+        expected: coordination.lease.as_ref().map(|held| held.version.clone()),
+        broken: unimported_break(coordination).and_then(|lease| lease.broken.clone()),
     }
 }
 
@@ -209,29 +219,117 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_a_broken_lease_is_taken_over_at_once_and_reported() {
-        let mut held = lease(RUN_A, 70);
+    fn broken(run: &str, deadline: i64) -> HeldLease {
+        let mut held = lease(run, deadline);
         held.lease.broken = Some(Request {
             by: "alice".to_owned(),
             at: time(5),
             reason: Some("runner lost".to_owned()),
         });
+        held
+    }
+
+    /// Catches an importer (`reconcile`, `teardown`, `recover`) refused by a
+    /// break it exists to resolve, or one that loses the break it must record.
+    #[test]
+    fn test_an_importer_takes_a_broken_lease_over_at_once_and_reports_it() {
         let coordination = Coordination {
-            lease: Some(held),
+            lease: Some(broken(RUN_A, 70)),
             runs: vec![run(RUN_A, 70, false)],
             evidence: Vec::new(),
         };
-        let LeaseDecision::Take { broken, .. } = decide(&coordination, time(10), BrokenLease::TakeOver) else {
-            panic!("a broken lease is taken over");
+        let LeaseDecision::Take { expected, broken } = decide(&coordination, time(10), BrokenLease::TakeOver) else {
+            panic!("an importer takes a broken lease over");
         };
+        assert_eq!(expected.as_deref(), Some("v1"));
         assert_eq!(broken.unwrap().by, "alice");
-        // Another run's live run ref still holds the environment.
-        let mut coordination = coordination;
-        coordination.runs.push(run(RUN_B, 70, false));
+    }
+
+    /// Catches a state operation (or `hold`, `verify`) writing state before
+    /// the broken run's effects are imported.
+    #[test]
+    fn test_a_non_importer_is_refused_by_a_broken_lease() {
+        let coordination = Coordination {
+            lease: Some(broken(RUN_A, 70)),
+            runs: vec![run(RUN_A, 70, false)],
+            evidence: Vec::new(),
+        };
+        let LeaseDecision::Broken(lease) = decide(&coordination, time(10), BrokenLease::Refuse) else {
+            panic!("a non-importer is refused");
+        };
+        assert_eq!(lease.run.as_str(), RUN_A);
+        // Also after the broken lease's deadline: a break is resolved only by an import.
         assert!(matches!(
-            decide(&coordination, time(10), BrokenLease::TakeOver),
-            LeaseDecision::Held(Holder::Run(_))
+            decide(&coordination, time(200), BrokenLease::Refuse),
+            LeaseDecision::Broken(_)
         ));
+    }
+
+    /// Catches a break overriding another run that is still live: its run
+    /// ref holds the environment for importers and non-importers alike.
+    #[test]
+    fn test_another_live_run_ref_still_holds_a_broken_environment() {
+        let coordination = Coordination {
+            lease: Some(broken(RUN_A, 70)),
+            runs: vec![run(RUN_A, 70, false), run(RUN_B, 70, false)],
+            evidence: Vec::new(),
+        };
+        for broken in [BrokenLease::TakeOver, BrokenLease::Refuse] {
+            assert!(matches!(
+                decide(&coordination, time(10), broken),
+                LeaseDecision::Held(Holder::Run(ref run)) if run.run.as_str() == RUN_B
+            ));
+        }
+    }
+
+    /// Catches a non-importer refused by an ordinary expired lease, which
+    /// any operation takes over.
+    #[test]
+    fn test_an_expired_unbroken_lease_is_taken_by_a_non_importer() {
+        let coordination = Coordination {
+            lease: Some(lease(RUN_A, 70)),
+            runs: vec![run(RUN_A, 70, false)],
+            evidence: Vec::new(),
+        };
+        assert_eq!(
+            decide(&coordination, time(70), BrokenLease::Refuse),
+            LeaseDecision::Take {
+                expected: Some("v1".to_owned()),
+                broken: None
+            }
+        );
+    }
+
+    proptest::proptest! {
+        /// Catches the lease rule and `nyl recover -e` disagreeing about
+        /// whether a break awaits its import: with no live holder, a
+        /// non-importer is refused exactly when `unimported_break` is set,
+        /// and an importer is never refused by a break.
+        #[test]
+        fn prop_a_non_importer_is_refused_exactly_when_a_break_awaits_import(
+            has_lease in proptest::bool::ANY,
+            is_broken in proptest::bool::ANY,
+            lease_deadline in 0i64..100,
+            runs in proptest::collection::vec((0i64..100, proptest::bool::ANY, proptest::bool::ANY), 0..3),
+            now in 0i64..100,
+        ) {
+            let lease = has_lease.then(|| if is_broken { broken(RUN_A, lease_deadline) } else { lease(RUN_A, lease_deadline) });
+            let runs = runs
+                .into_iter()
+                .map(|(deadline, finished, other)| run(if other { RUN_B } else { RUN_A }, deadline, finished))
+                .collect();
+            let coordination = Coordination { lease, runs, evidence: Vec::new() };
+            let held = !holders(&coordination, time(now)).is_empty();
+            let refused = decide(&coordination, time(now), BrokenLease::Refuse);
+            proptest::prop_assert_eq!(
+                matches!(refused, LeaseDecision::Broken(_)),
+                !held && unimported_break(&coordination).is_some()
+            );
+            let importer = decide(&coordination, time(now), BrokenLease::TakeOver);
+            proptest::prop_assert!(!matches!(importer, LeaseDecision::Broken(_)));
+            if let LeaseDecision::Take { broken, .. } = importer {
+                proptest::prop_assert_eq!(broken.is_some(), unimported_break(&coordination).is_some());
+            }
+        }
     }
 }
