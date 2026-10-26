@@ -1,0 +1,29 @@
+---
+title: 'Roadmap'
+description: 'Milestones, progress, and the next step of Nyl orchestration.'
+---
+
+import Roadmap from '../../../components/Roadmap.astro';
+import { orchestrationRoadmap } from '../../../lib/roadmaps/orchestration.mjs';
+
+Orchestration grows in milestones, each with an exit criterion that says when
+it is done. This page tracks them. The
+[direction](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
+explains where orchestration is going and why, and the
+[design contracts](https://github.com/NiklasRosenstein/nyl/tree/develop/design)
+specify each part. Everything not marked done is planned and does not exist in
+Nyl yet.
+
+<Roadmap roadmap={orchestrationRoadmap} part="progress" />
+
+## Next step
+
+<Roadmap roadmap={orchestrationRoadmap} part="next" />
+
+## Milestones
+
+A milestone is in progress once one of its items is done, and done only when
+its exit criterion is met. The line between milestones fills as the milestone
+above it progresses.
+
+<Roadmap roadmap={orchestrationRoadmap} part="stages" />
