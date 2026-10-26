@@ -49,6 +49,29 @@ commit of the worktree you run from; with `revision`, that ref's tip; with
 commit. An EnvironmentGroup supplies these fields when the Environment omits
 them. See [Runs](/nyl/orchestration/runs/#source-commit).
 
+## Drift repair
+
+[`nyl verify`](/nyl/reference/cli/verify/) records whether each unit's
+resources still match its receipt. A unit whose latest verification found
+drift is `drifted` in `nyl status` (exit 2) and is work for the next
+`nyl reconcile`, like a unit whose inputs changed. `spec.driftRepair` decides
+what that reconcile does with it:
+
+| `driftRepair` | The next `nyl reconcile` |
+| --- | --- |
+| `converge` (default) | Executes drifted units whose recovery policy is `converge`, such as OpenTofu and idempotent Command units, and lists them under `driftRepaired` in its transition commit. A drifted unit that is not safe to re-run is reported `awaiting-approval` (exit 2) while the rest of the run continues; a local run executes it with `--local --approve <unit>`. |
+| `manual` | Executes no drifted unit by itself. The units stay `drifted` until `nyl reconcile -e <env> --unit <unit> --reapply --reason <text>` forces them. |
+
+```yaml
+spec:
+  driftRepair: manual
+```
+
+The new receipt of a repaired unit replaces the one the drift was observed
+on, so the drift observation is dropped in the same commit and the unit is
+current again. An EnvironmentGroup supplies `driftRepair` when the
+Environment omits it.
+
 ## See also
 
 - [EnvironmentGroup](/nyl/reference/resources/gitops.nyl/v1/environment-group/)

@@ -38,6 +38,22 @@ nothing is recorded for that unit.
 A unit without a current receipt is reported as `no-receipt`, and a unit
 whose kind cannot verify as `unsupported`; neither is skipped silently.
 
+A drifted unit is `drifted` in [`nyl status`](/nyl/reference/cli/status/)
+and work for the next [`nyl reconcile`](/nyl/reference/cli/reconcile/). What
+that reconcile does depends on the environment's `driftRepair` and the
+unit's recovery policy, and the `NYL-VERIFY-DRIFT` fix names it per unit:
+
+| `driftRepair` | Recovery policy | Fix |
+| --- | --- | --- |
+| `converge` (default) | `converge` | the next `nyl reconcile -e <env>` repairs it by executing the unit again |
+| `converge` | `inspect` or `manual` | it awaits approval: run `nyl reconcile -e <env> --local --approve <unit>`, or wait for remote approvals |
+| `manual` | `converge` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text>` |
+| `manual` | `inspect` or `manual` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text> --local --approve <unit>` |
+
+A repair writes a new receipt and drops the unit's drift observation in the
+same commit; verify again to observe the new receipt. See
+[drift repair](/nyl/orchestration/resource-guides/environment/#drift-repair).
+
 SIGINT or SIGTERM cancels the verification: it starts no further batch,
 forwards the signal to running tools, writes no observed commit, releases
 the lease, and exits 4 with `NYL-RUN-CANCELLED`. A signal while
@@ -67,7 +83,7 @@ headline counts them, such as `nyl: verify dev (3 clean, 1 drifted)`.
 
 | Code | Meaning and fix |
 | --- | --- |
-| `NYL-VERIFY-DRIFT` | The unit's resources differ from what its receipt applied. Investigate the change made outside Nyl; `nyl plan --unit <u>` shows what the unit would apply. `nyl reconcile` does not yet execute a unit with a current receipt again: automatic repair of idempotent units and `nyl reconcile --reapply` are planned for the next part of M3. |
+| `NYL-VERIFY-DRIFT` | The unit's resources differ from what its receipt applied. The fix says what the next reconcile does with the unit: repairs it, waits for its approval, or, under `driftRepair: manual`, waits for `--reapply` (see the table above). |
 | `NYL-ATTESTATION-FAILED` | A check the driver attests failed. References that require the attestation stay unsatisfied until a newer one passes. |
 | `NYL-VERIFY-NO-RECEIPT` | The unit has no current receipt to verify. Run `nyl reconcile`. |
 | `NYL-VERIFY-UNKNOWN` | The driver could not tell whether the unit drifted, for example because its tool failed. Fix the cause and verify again. |

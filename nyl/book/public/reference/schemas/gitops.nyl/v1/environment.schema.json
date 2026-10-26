@@ -13,12 +13,12 @@
       "oneOf": [
         {
           "const": "converge",
-          "description": "Execute drifted units whose recovery policy is `converge` again.",
+          "description": "The next reconcile executes drifted units whose recovery policy is\n`converge` again; a drifted unit that is not safe to re-run awaits\napproval.",
           "type": "string"
         },
         {
           "const": "manual",
-          "description": "Leave every drifted unit to `nyl reconcile --reapply`.",
+          "description": "Reconcile repairs no drift by itself: drifted units stay `drifted`\nuntil `nyl reconcile --unit <unit> --reapply --reason <text>`.",
           "type": "string"
         }
       ]
@@ -114,7 +114,7 @@
               "type": "null"
             }
           ],
-          "description": "Whether `reconcile` executes `converge` units again whose latest drift observation is `drifted`. Omitted, the group's, else `converge`."
+          "description": "Whether `reconcile` repairs drift by itself: `converge` executes units whose latest drift observation is `drifted` again (units not safe to re-run await approval); `manual` leaves them `drifted` until `--reapply`. Omitted, the group's, else `converge`."
         },
         "protectedRefs": {
           "description": "Refs that pinned commits and run source commits must be reachable from. Omitted, the group's, else each repository's default branch.",

@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{DriverOperation, ExecutionContext, Supported};
+use nyl_core::orchestration::driver::{DriverOperation, DriverSet, ExecutionContext, Supported};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, TransitionChanges};
 use nyl_core::orchestration::state::{Operation, StateLocation};
@@ -52,6 +52,8 @@ use super::run::{
     RunRequest,
 };
 use super::{store_error, Settings};
+use crate::rules::drift::stored_drift_repair;
+use crate::rules::selection::execution_recovery;
 use crate::rules::sources::effective_commit;
 use crate::rules::unit_state::receipt_state;
 use crate::rules::verification::{records, targets, warnings, Records, Target};
@@ -107,7 +109,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
         .collect();
     if verified.is_empty() {
         // Nothing to verify writes nothing, so it needs no lease.
-        report_units(&mut report, &snapshot, &planned, Vec::new());
+        report_units(&mut report, &snapshot, &planned, Vec::new(), context.drivers);
         return finish(report);
     }
 
@@ -172,7 +174,7 @@ fn holding(
             changes.attestations.insert(result.name.clone(), attestations);
         }
     }
-    report_units(report, &snapshot, &planned, results);
+    report_units(report, &snapshot, &planned, results, context.drivers);
     if changes.is_empty() {
         return Ok(());
     }
@@ -487,7 +489,9 @@ fn report_units(
     snapshot: &EnvironmentSnapshot,
     planned: &BTreeMap<UnitName, Target>,
     results: Vec<Verified>,
+    drivers: &DriverSet,
 ) {
+    let drift_repair = stored_drift_repair(snapshot.environment.as_ref());
     let mut results: BTreeMap<UnitName, Verified> = results
         .into_iter()
         .map(|result| (result.name.clone(), result))
@@ -508,7 +512,8 @@ fn report_units(
             }
             None => VerifyResult::NoReceipt.into(),
         };
-        entry.warnings = warnings(&report.name, name, &verification);
+        let policy = execution_recovery(drivers, desired);
+        entry.warnings = warnings(&report.name, name, &verification, policy, drift_repair);
         entry.verification = Some(verification);
         report.units.insert(name.clone(), entry);
     }
