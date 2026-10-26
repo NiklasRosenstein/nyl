@@ -140,33 +140,45 @@ impl GitStateStore {
 
     /// Rewrite a run ref with `run` as its record and `change` applied to
     /// its files, by compare-and-swap against the tip it read.
+    ///
+    /// Only its run writes a run ref, so the tip this clone last pushed is
+    /// almost always current: the write builds on it without listing the
+    /// remote, and reads the remote only when the compare-and-swap shows
+    /// that the ref moved.
     fn update_run(
         &self,
         location: &StateLocation,
         environment: &EnvironmentName,
         run: &Run,
-        change: impl FnOnce(&mut Files) -> StateResult<()>,
+        change: impl Fn(&mut Files) -> StateResult<()>,
     ) -> StateResult<()> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
         let name = run_ref(location, environment, &run.run);
+        let write = |tip: Option<Oid>, expected: Option<Oid>| -> Result<(), UpdateError> {
+            let mut files = tree::read(&repository, tip).map_err(UpdateError::Other)?;
+            files.insert(RUN_FILE.to_owned(), to_yaml(run).map_err(UpdateError::Other)?);
+            change(&mut files).map_err(UpdateError::Other)?;
+            let parents = tip.into_iter().collect::<Vec<_>>();
+            let message = format!("nyl: run {} of {environment}", run.run);
+            let commit = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)
+                .map_err(UpdateError::Other)?
+                .expect("allow_empty commits");
+            refs.update(&[Update {
+                name: name.clone(),
+                new: Some(commit),
+                expected,
+            }])
+        };
+        let tracked = refs.local(&name);
+        match write(tracked, tracked) {
+            Err(UpdateError::Stale) => {}
+            result => return result.map_err(|error| error.or_stale(another_commit(name.clone()))),
+        }
         let heads = refs.heads(std::slice::from_ref(&name))?;
         refs.fetch(&heads, false)?;
-        let tip = refs.fetched(&heads, &name);
-        let mut files = tree::read(&repository, tip)?;
-        files.insert(RUN_FILE.to_owned(), to_yaml(run)?);
-        change(&mut files)?;
-        let parents = tip.into_iter().collect::<Vec<_>>();
-        let message = format!("nyl: run {} of {environment}", run.run);
-        let Some(commit) = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)? else {
-            return Ok(());
-        };
-        refs.update(&[Update {
-            name: name.clone(),
-            new: Some(commit),
-            expected: heads.get(&name).copied(),
-        }])
-        .map_err(|error| error.or_stale(another_commit(name)))
+        write(refs.fetched(&heads, &name), heads.get(&name).copied())
+            .map_err(|error| error.or_stale(another_commit(name.clone())))
     }
 }
 

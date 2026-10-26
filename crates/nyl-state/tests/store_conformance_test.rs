@@ -756,6 +756,51 @@ fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
     }
 }
 
+/// A run writes its run ref on top of the tip it last pushed. Another
+/// clone moving the ref (a takeover retiring it) makes that write fall
+/// back to the remote's tip, as every write did before.
+#[test]
+fn test_run_ref_writes_follow_a_ref_another_clone_moved() {
+    let bare = TempDir::new().unwrap();
+    git2::Repository::init_bare(bare.path()).unwrap();
+    let clones = [TempDir::new().unwrap(), TempDir::new().unwrap()];
+    let [running, taking] = clones.each_ref().map(|clone| {
+        git2::Repository::init(clone.path()).unwrap();
+        GitStateStore::new(clone.path().join(".git"), GitAuth::none(), author())
+    });
+    let location = location(
+        &format!("file://{}", bare.path().display()),
+        "nyl/dev/desired",
+        "nyl/dev/observed",
+        "",
+    );
+    let dev = environment("dev");
+    let run = run();
+    let (desired, observed) = unit("seed");
+    let checkpoint = Checkpoint {
+        desired,
+        observed,
+        artifacts: BTreeMap::new(),
+    };
+    running.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
+
+    // Another clone writes the run ref it never wrote, then retires it.
+    taking.write_run(&location, &dev, &run, None).unwrap();
+    let read = taking.coordination(&location, &dev).unwrap().runs[0].version.clone();
+    assert_eq!(
+        taking.coordination(&location, &dev).unwrap().runs[0].checkpoints,
+        vec![checkpoint.clone()]
+    );
+    taking.retire_run(&location, &dev, &run.run, Some(&read)).unwrap();
+
+    // The run's late checkpoint recreates the run ref it last saw elsewhere.
+    running.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
+    let coordination = taking.coordination(&location, &dev).unwrap();
+    assert_eq!(coordination.runs.len(), 1);
+    assert_eq!(coordination.runs[0].checkpoints, vec![checkpoint]);
+    assert_eq!(coordination.evidence.len(), 1);
+}
+
 /// The clone's local branches of a remote location's state refs.
 fn view(location: &StateLocation) -> StateLocation {
     StateLocation {
