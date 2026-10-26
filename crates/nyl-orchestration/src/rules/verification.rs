@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::Verification;
+use nyl_core::orchestration::driver::{RecoveryPolicy, Verification};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
@@ -29,6 +29,7 @@ use nyl_core::orchestration::state::{
     ObservationType, Receipt, StateV1,
 };
 use nyl_core::orchestration::time::Timestamp;
+use nyl_core::resources::environment::DriftRepair;
 use serde_json::{json, Value};
 
 use crate::rules::freshness::receipt_is_current;
@@ -247,7 +248,21 @@ pub fn unit_exit(unit: &UnitReport) -> ExitCategory {
 }
 
 /// The warnings a unit's verification adds to its report, each with its fix.
-pub fn warnings(environment: &EnvironmentName, unit: &UnitName, verification: &UnitVerification) -> Vec<Finding> {
+///
+/// The fix of `NYL-VERIFY-DRIFT` says what the next reconcile does with the
+/// drifted unit ([Drift](../../../../design/orchestration-core.md#drift)),
+/// from its execution recovery `policy` (`None` when no driver serves its
+/// kind) and the environment's stored `driftRepair`: under `converge`, a
+/// `converge` unit is repaired by the next `nyl reconcile`, and any other
+/// awaits approval (`--local --approve`); under `manual`, only `--reapply`
+/// repairs it.
+pub fn warnings(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    verification: &UnitVerification,
+    policy: Option<RecoveryPolicy>,
+    drift_repair: DriftRepair,
+) -> Vec<Finding> {
     let mut warnings = Vec::new();
     match &verification.result {
         VerifyResult::Clean => {}
@@ -269,9 +284,7 @@ pub fn warnings(environment: &EnvironmentName, unit: &UnitName, verification: &U
         VerifyResult::Drifted { summary } => warnings.push(Finding::new(
             Code::VerifyDrift,
             format!("{unit} in {environment} drifted from its receipt: {summary}"),
-            format!(
-                "investigate the change made outside Nyl; `nyl plan -e {environment} --unit {unit}` shows what the unit would apply (nyl reconcile does not execute a unit with a current receipt again yet)"
-            ),
+            drift_fix(environment, unit, policy, drift_repair),
         )),
     }
     for (name, result) in &verification.attestations {
@@ -284,6 +297,31 @@ pub fn warnings(environment: &EnvironmentName, unit: &UnitName, verification: &U
         }
     }
     warnings
+}
+
+/// What the next reconcile does with a drifted unit, as the fix of
+/// `NYL-VERIFY-DRIFT`.
+fn drift_fix(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    policy: Option<RecoveryPolicy>,
+    drift_repair: DriftRepair,
+) -> String {
+    let converges = policy == Some(RecoveryPolicy::Converge);
+    match drift_repair {
+        DriftRepair::Converge if converges => {
+            format!("the next `nyl reconcile -e {environment}` repairs it by executing {unit} again")
+        }
+        DriftRepair::Converge => format!(
+            "it awaits approval, since {unit} is not safe to re-run: run `nyl reconcile -e {environment} --local --approve {unit}`, or wait for remote approvals"
+        ),
+        DriftRepair::Manual if converges => format!(
+            "repair it with `nyl reconcile -e {environment} --unit {unit} --reapply --reason <text>` (driftRepair: manual)"
+        ),
+        DriftRepair::Manual => format!(
+            "repair it with `nyl reconcile -e {environment} --unit {unit} --reapply --reason <text> --local --approve {unit}` (driftRepair: manual; {unit} is not safe to re-run without an approval)"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -474,10 +512,16 @@ mod tests {
         for (result, attestation, expected) in cases {
             let unit = report(result.clone(), attestation);
             assert_eq!(unit_exit(&unit), expected, "{result:?} {attestation:?}");
-            let codes: Vec<Code> = warnings(&env(), &name("network"), unit.verification.as_ref().unwrap())
-                .iter()
-                .map(|finding| finding.code)
-                .collect();
+            let codes: Vec<Code> = warnings(
+                &env(),
+                &name("network"),
+                unit.verification.as_ref().unwrap(),
+                Some(RecoveryPolicy::Converge),
+                DriftRepair::Converge,
+            )
+            .iter()
+            .map(|finding| finding.code)
+            .collect();
             let expected_codes: Vec<Code> = match result {
                 VerifyResult::Clean => vec![],
                 VerifyResult::NoReceipt => vec![Code::VerifyNoReceipt],
@@ -490,5 +534,47 @@ mod tests {
             .collect();
             assert_eq!(codes, expected_codes, "{result:?} {attestation:?}");
         }
+    }
+
+    /// Catches the drift fix sending an operator to the wrong command: a
+    /// plain reconcile for a unit that awaits approval or under `manual`
+    /// (it would do nothing), or `--approve` for a unit the next reconcile
+    /// repairs anyway.
+    #[test]
+    fn test_drift_fix_names_what_the_next_reconcile_does() {
+        let drifted = UnitVerification {
+            result: VerifyResult::Drifted {
+                summary: "1 change".to_owned(),
+            },
+            attestations: BTreeMap::new(),
+        };
+        let fix = |policy, repair| {
+            let findings = warnings(&env(), &name("network"), &drifted, policy, repair);
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].code, Code::VerifyDrift);
+            findings[0].fix.clone()
+        };
+        let environment = env();
+        assert_eq!(
+            fix(Some(RecoveryPolicy::Converge), DriftRepair::Converge),
+            format!("the next `nyl reconcile -e {environment}` repairs it by executing network again")
+        );
+        for policy in [Some(RecoveryPolicy::Manual), Some(RecoveryPolicy::Inspect), None] {
+            assert_eq!(
+                fix(policy, DriftRepair::Converge),
+                format!(
+                    "it awaits approval, since network is not safe to re-run: run `nyl reconcile -e {environment} --local --approve network`, or wait for remote approvals"
+                )
+            );
+        }
+        assert_eq!(
+            fix(Some(RecoveryPolicy::Converge), DriftRepair::Manual),
+            format!(
+                "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text>` (driftRepair: manual)"
+            )
+        );
+        assert!(fix(Some(RecoveryPolicy::Manual), DriftRepair::Manual).starts_with(&format!(
+            "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text> --local --approve network`"
+        )));
     }
 }

@@ -260,7 +260,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
             json!({"unitSelector": {"matchLabels": {"stage": "production"}}, "values": {"target": "production"}, "state": {"repositoryRef": {"name": "deploy"}}, "protectedRefs": ["main"]})
         }
         ResourceKind::EnvironmentGroup => {
-            json!({"environmentSelector": {"matchLabels": {"stage": "production"}}, "values": {"cluster": "prod-1"}})
+            json!({"environmentSelector": {"matchLabels": {"stage": "production"}}, "values": {"cluster": "prod-1"}, "driftRepair": "manual"})
         }
         ResourceKind::Cluster => {
             json!({"destination": {"server": "https://kubernetes.default.svc"}, "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1", "apps/v1"]}})

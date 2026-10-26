@@ -8,6 +8,21 @@
       ],
       "type": "string"
     },
+    "DriftRepair": {
+      "description": "Whether reconcile repairs drift on its own.\n\nContract: [Drift](../../../../design/orchestration-core.md#drift).",
+      "oneOf": [
+        {
+          "const": "converge",
+          "description": "The next reconcile executes drifted units whose recovery policy is\n`converge` again; a drifted unit that is not safe to re-run awaits\napproval.",
+          "type": "string"
+        },
+        {
+          "const": "manual",
+          "description": "Reconcile repairs no drift by itself: drifted units stay `drifted`\nuntil `nyl reconcile --unit <unit> --reapply --reason <text>`.",
+          "type": "string"
+        }
+      ]
+    },
     "EnvironmentGroupSpec": {
       "additionalProperties": false,
       "properties": {
@@ -28,6 +43,17 @@
             "boolean",
             "null"
           ]
+        },
+        "driftRepair": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DriftRepair"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default `driftRepair` of the members."
         },
         "environmentSelector": {
           "$ref": "#/$defs/LabelSelector",
@@ -167,6 +193,7 @@
         "name": "production"
       },
       "spec": {
+        "driftRepair": "manual",
         "environmentSelector": {
           "matchLabels": {
             "stage": "production"

@@ -9,6 +9,11 @@
 //! verify, or unknown drift) or the lease is held; 3 drift or a failing
 //! attestation; 4 cancelled by SIGINT or SIGTERM (`NYL-RUN-CANCELLED`,
 //! nothing recorded); 1 error; the most severe wins.
+//!
+//! A drifted unit's `NYL-VERIFY-DRIFT` fix says what the next reconcile does
+//! with it under the environment's stored `driftRepair` and the unit's
+//! recovery policy ([Drift](../../../../design/orchestration-core.md#drift);
+//! `nyl_orchestration::rules::verification::warnings`).
 
 use std::path::PathBuf;
 
