@@ -60,7 +60,7 @@ export const domainResourcesRoadmap = {
       id: 'R4',
       title: 'Native adaptation',
       summary: 'OpenTofu and Terraform consume bundles, with or without orchestration, and removals wait for approval.',
-      needs: ['M4', 'M8', 'R2'],
+      needs: ['M4', 'R2'],
       items: [
         { text: 'The driver `prepare` capability and `nyl prepare --native`', done: false },
         { text: 'OpenTofu and Terraform adaptation, checked by the driver conformance suite', done: false },

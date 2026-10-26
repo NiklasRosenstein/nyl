@@ -923,7 +923,7 @@ consumer, and two owners rejected.
 | R1 | Definitions, discovery, schema and referential admission, `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
-| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4, M8's `exec` |
+| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4 |
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
