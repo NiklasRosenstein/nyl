@@ -62,6 +62,13 @@ Inside the refs, `state.yaml` records the location and its history,
 `observed/` each unit's receipt, condition, artifacts, observations, and
 attestations. Each operation writes at most one commit per state ref.
 
+[`nyl state delete`](/nyl/reference/cli/state/#nyl-state-delete) keeps the
+refs: its commit removes the environment's `desired/` and `observed/` files
+and leaves `state.yaml`, whose last event `state-deleted` marks the location
+deleted. History keeps the removed state, and every later command for the
+environment fails with `NYL-STATE-DELETED` until the Environment is removed
+from source or `nyl state init --fresh` starts it over.
+
 ### The clone's local branches
 
 Every command that reads remote state keeps the clone's own branches of the
@@ -89,8 +96,8 @@ history:
 | --- | --- | --- | --- |
 | `<prefix><env>/lease` | One `Lease` (`lease.yaml`): run, runner, operation, units executing, deadline | Every state-writing operation, with compare-and-swap | The holder when it ends; replaced by a run that takes over an expired lease or by `nyl lease break` |
 | `<prefix><env>/runs/<run>` | `run.yaml`, the `Run` record with the same deadline and units; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before it starts; `checkpoints/<n>-<unit>/`, added in one commit per finished unit, with the desired document it executed, its receipt or condition, and its artifacts | `reconcile` | The run after its transition commit lands; otherwise the run that takes it over, which retires it to an evidence ref when an uncertain unit still needs it |
-| `<prefix><env>/signals/<run>` | `Signal` records other invocations send to a running run, such as teardown confirmations (planned, with teardown waits) | The sending command | Together with the run ref |
-| `<prefix><env>/evidence/<run>` | A retired run ref, kept because its checkpoints are evidence for an `uncertain` unit | A run that takes over | A later takeover or `nyl recover`, once no uncertain unit needs it |
+| `<prefix><env>/signals/<run>` | `Signal` records other invocations send to a running run: a teardown confirmation (`nyl teardown --confirm-removed`) or a hold (`nyl hold`) | The sending command | Together with the run ref; by the sender when the run finished before reading it; by `nyl state delete` |
+| `<prefix><env>/evidence/<run>` | A retired run ref, kept because its checkpoints are evidence for an `uncertain` unit | A run that takes over | A later takeover or `nyl recover`, once no uncertain unit needs it; `nyl state delete` |
 | `<prefix><env>/keep` (M5, planned) | Keeps a preview instance's latest source commit fetchable, in the source repository | Every reconcile of a template instance | `nyl state delete` |
 
 While a run executes, its lease and run ref look like this:
@@ -141,5 +148,5 @@ stay credential-free.
 | --- | --- |
 | Everything in the source repository | You start out, or one team owns source and deployments. It is the simplest setup: state defaults to the checkout's `origin`. |
 | A separate state repository | State needs other permissions or branch protection than source, such as pushes only by the CI identity and operators, or you want state commits out of the source history. Name it with `state.repositoryRef`. |
-| One shared state ref with `path` | Many short-lived environments, such as previews, would otherwise create a pair of branches each. Removing one removes a directory instead of a ref. |
+| One shared state ref with `path` | Many short-lived environments, such as previews, would otherwise create a pair of branches each. Deleting one empties its directory, keeping only its `state.yaml` marker, instead of leaving a pair of branches behind. |
 | Separate publication repositories per target | Targets need access boundaries, such as a production repository that only the production Argo CD reads and only release pipelines write. |

@@ -206,7 +206,13 @@ pub fn init(
                     events: vec![event],
                 },
                 Some(existing) => {
-                    check_record(context.store, Some(existing), environment, location)?;
+                    if fresh {
+                        // `--fresh` starts a deleted location over (Q15).
+                        crate::rules::state_location::check_location(Some(existing), environment, location)?;
+                    } else {
+                        // A plain init refuses a deleted location (`NYL-STATE-DELETED`).
+                        check_record(context.store, Some(existing), environment, location)?;
+                    }
                     if !fresh {
                         report
                             .details
@@ -519,8 +525,11 @@ fn move_holding(
 }
 
 /// `nyl lease break -e <env> --reason <text>`: declare the lease holder gone.
-/// The lease is replaced by a broken one, so the next run takes over at once
-/// and records who broke it and why. A holder that is in fact alive may still
+/// The lease is replaced by a broken one, so the next importer (`reconcile`,
+/// `teardown`, or `recover -e`) takes over at once, imports its run, and
+/// records who broke it and why; every other state writer refuses with
+/// `NYL-LEASE-BROKEN` until then. A lease that is already broken is
+/// reported as such. A holder that is in fact alive may still
 /// cause effects; the fenced final push keeps it from writing state.
 pub fn break_lease(
     context: &Context<'_>,
@@ -538,7 +547,9 @@ pub fn break_lease(
             let now = context.clock.now();
             // Break whatever holds the environment: its lease, or a live run whose
             // lease ref is already gone.
-            let mut lease = match lease_rule::decide(&coordination, now, lease_rule::BrokenLease::TakeOver) {
+            // As every non-importer: a lease that is already broken, its run
+            // not imported yet, is reported as such ("Runs and leases" item 1).
+            let mut lease = match lease_rule::decide(&coordination, now, lease_rule::BrokenLease::Refuse) {
                 LeaseDecision::Take { .. } => {
                     report.details.insert(
                         "note".to_owned(),
@@ -546,11 +557,13 @@ pub fn break_lease(
                     );
                     return Ok(());
                 }
-                // Not returned when taking over; kept for an exhaustive match.
-                LeaseDecision::Broken(_) => {
+                LeaseDecision::Broken(broken) => {
                     report.details.insert(
                         "note".to_owned(),
-                        json!(format!("the lease of {environment} is already broken")),
+                        json!(format!(
+                            "the lease of {environment} is already broken (run {} by {}); only an importer takes it over: `nyl reconcile`, `nyl teardown`, or `nyl recover -e {environment}`",
+                            broken.run, broken.runner
+                        )),
                     );
                     return Ok(());
                 }
@@ -584,7 +597,9 @@ pub fn break_lease(
                         "the lease of run {} by {} was broken; if that run is still alive it may still cause effects, but it can no longer write state",
                         lease.run, lease.runner
                     ),
-                    "make sure the runner is gone; units it was executing become uncertain at the next run",
+                    format!(
+                        "make sure the runner is gone; only an importer takes the break over (`nyl reconcile`, `nyl teardown`, or `nyl recover -e {environment}`), which imports its run and makes units it was executing uncertain; every other state writer refuses with NYL-LEASE-BROKEN until then"
+                    ),
                 ));
                     report.outcome = Outcome::Done;
                     Ok(())

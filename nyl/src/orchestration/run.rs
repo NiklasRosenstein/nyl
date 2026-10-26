@@ -73,6 +73,9 @@ pub struct ProcessWiring {
     pub faults: nyl_orchestration::fault::NoFaults,
     /// The flag the signal handler sets; `tools` forwards it to running tools.
     pub cancellation: Cancellation,
+    /// The terminal Enter confirmation of a waiting teardown; `Some` only
+    /// when stdin is a terminal.
+    pub prompt: Option<TerminalPrompt>,
 }
 
 impl ProcessWiring {
@@ -96,7 +99,45 @@ impl ProcessWiring {
             tools: nyl_drivers::process::ProcessRunner::new().cancelled_by(cancellation.shared()),
             faults: nyl_orchestration::fault::NoFaults,
             cancellation,
+            prompt: {
+                use std::io::IsTerminal as _;
+                std::io::stdin().is_terminal().then(TerminalPrompt::default)
+            },
         }
+    }
+}
+
+/// The terminal of a run waiting on a teardown: shows the message on stderr
+/// and takes Enter on stdin as the operator's confirmation. One reader
+/// thread, started at the first prompt, feeds the lines it reads to every
+/// later prompt; lines typed before a prompt do not confirm it.
+#[derive(Default)]
+pub struct TerminalPrompt {
+    lines: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl OperatorPrompt for TerminalPrompt {
+    fn confirm(&self, message: &str, timeout: nyl_core::orchestration::time::Duration) -> bool {
+        use std::io::{BufRead as _, Write as _};
+        let mut lines = self.lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let receiver = lines.get_or_insert_with(|| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for line in std::io::stdin().lock().lines() {
+                    if line.is_err() || sender.send(()).is_err() {
+                        break;
+                    }
+                }
+            });
+            receiver
+        });
+        while receiver.try_recv().is_ok() {}
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "{message} (press Enter to confirm, {timeout} left)");
+        let _ = stderr.flush();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(timeout.as_secs()))
+            .is_ok()
     }
 }
 
@@ -125,9 +166,7 @@ impl<'a> Wiring<'a> {
             author: None,
             process_env: unicode_env(std::env::vars_os()),
             cancellation: owned.cancellation.clone(),
-            // Skeleton note: package `operator` wires the terminal prompt
-            // here (stdin `IsTerminal`) through a `ProcessWiring` field.
-            prompt: None,
+            prompt: owned.prompt.as_ref().map(|prompt| prompt as &dyn OperatorPrompt),
             observer: None,
         })
     }

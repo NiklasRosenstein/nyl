@@ -13,8 +13,10 @@
 //!   forges: `NYL-STATE-UNPROTECTED`.
 //! - `state.yaml` must exist (`NYL-STATE-MISSING`), name this environment
 //!   (`NYL-STATE-ENVIRONMENT-MISMATCH`), not have moved away
-//!   (`NYL-STATE-MOVED`), and record the configured location
-//!   (`NYL-STATE-LOCATION-MISMATCH`).
+//!   (`NYL-STATE-MOVED`), record the configured location
+//!   (`NYL-STATE-LOCATION-MISMATCH`), and not carry the deleted marker of
+//!   `nyl state delete` (`NYL-STATE-DELETED`, read from the record's last
+//!   event, never from history; [Instances](../../../../design/orchestration-core.md#instances)).
 //! - Refs of all environments in one repository must be names Git can hold
 //!   together: no ref may be a directory of another (`NYL-STATE-REF-CONFLICT`).
 
@@ -107,8 +109,38 @@ pub fn resolve(inputs: &LocationInputs<'_>) -> Result<ResolvedLocation, String> 
     })
 }
 
-/// Check the state record at the configured location before using it.
+/// Check the state record at the configured location before using it:
+/// [`check_location`], and the deleted marker ([`deleted`]).
 pub fn check_record(
+    record: Option<&StateRecord>,
+    environment: &EnvironmentName,
+    configured: &StateLocation,
+) -> Result<(), Finding> {
+    check_location(record, environment, configured)?;
+    match record.and_then(StateRecord::deleted) {
+        Some(_) => Err(deleted(environment)),
+        None => Ok(()),
+    }
+}
+
+/// `NYL-STATE-DELETED`: the location's `state.yaml` carries the deleted
+/// marker of `nyl state delete`. Every command for the environment fails
+/// with it, naming both ways forward, so a pipeline that still runs it
+/// fails visibly instead of re-creating anything.
+pub fn deleted(environment: &EnvironmentName) -> Finding {
+    Finding::new(
+        Code::StateDeleted,
+        format!("the state of {environment} was deleted with `nyl state delete`"),
+        format!(
+            "remove the Environment {environment} from source to decommission it, or start it over with `nyl state init -e {environment} --fresh`"
+        ),
+    )
+}
+
+/// Check that the state record exists, belongs to `environment`, and
+/// records the configured location; a deleted location passes (`state init
+/// --fresh` starts it over).
+pub fn check_location(
     record: Option<&StateRecord>,
     environment: &EnvironmentName,
     configured: &StateLocation,
@@ -327,6 +359,45 @@ mod tests {
             check_record(Some(&record), &dev(), &elsewhere).unwrap_err().code,
             Code::StateLocationMismatch
         );
+    }
+
+    /// Q15: a deleted location refuses every command, naming both ways
+    /// forward; a later fresh initialization ends the marker.
+    #[test]
+    fn test_a_deleted_location_refuses_until_initialized_fresh() {
+        let location = StateLocation {
+            repository: "local".to_owned(),
+            desired_ref: "nyl/dev/desired".to_owned(),
+            observed_ref: "nyl/dev/observed".to_owned(),
+            path: String::new(),
+            coordination_ref_prefix: "refs/nyl/".to_owned(),
+        };
+        let at = "2026-09-24T10:00:00Z".parse().unwrap();
+        let mut record = StateRecord {
+            api_version: StateV1,
+            kind: StateRecordKind,
+            environment: dev(),
+            template: None,
+            params: BTreeMap::new(),
+            expires_at: None,
+            location: location.clone(),
+            events: vec![StateEvent::StateDeleted {
+                at,
+                by: "alice".to_owned(),
+                reason: None,
+            }],
+        };
+        let finding = check_record(Some(&record), &dev(), &location).unwrap_err();
+        assert_eq!(finding.code, Code::StateDeleted);
+        assert!(finding.fix.contains("remove the Environment") && finding.fix.contains("--fresh"));
+        check_location(Some(&record), &dev(), &location).unwrap();
+        record.events.push(StateEvent::StateInitialized {
+            at,
+            by: "alice".to_owned(),
+            reason: None,
+            fresh: true,
+        });
+        check_record(Some(&record), &dev(), &location).unwrap();
     }
 
     #[test]
