@@ -1,0 +1,10 @@
+apiVersion: gitops.nyl/v1
+kind: Signal
+run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
+action: hold
+unit: database
+by: alice
+identity: local
+reason: incident 4711
+at: "2026-09-24T12:30:00Z"
+from: alice@workstation

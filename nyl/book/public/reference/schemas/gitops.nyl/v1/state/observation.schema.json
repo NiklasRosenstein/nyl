@@ -82,6 +82,7 @@
       "description": "A unit's identity in state documents.",
       "properties": {
         "apiVersion": {
+          "description": "The unit's kind; empty only in a held marker, which `nyl hold` writes\nfor a unit it never rendered ([`DesiredUnit::held_marker`]).",
           "type": "string"
         },
         "environment": {
@@ -107,9 +108,7 @@
       },
       "required": [
         "environment",
-        "name",
-        "apiVersion",
-        "kind"
+        "name"
       ],
       "type": "object"
     },

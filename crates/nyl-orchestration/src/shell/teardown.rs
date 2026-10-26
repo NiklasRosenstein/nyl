@@ -11,11 +11,21 @@
 //! [`RunMode::Teardown`](super::run::RunMode::Teardown): it takes the lease
 //! (and takes a broken lease over, importing its run), acts on the stored
 //! desired documents, writes one transition commit per state ref with
-//! operation `teardown`, and reports a `TeardownReport`. `state delete`
-//! refuses while a unit has an incarnation (`NYL-STATE-DELETE-INCARNATIONS`)
-//! and otherwise writes one commit per state ref removing the environment's
-//! state ([`TransitionChanges::clear`](nyl_core::orchestration::ports::TransitionChanges::clear));
-//! with `--teardown` it runs `teardown --all` first, in the same command.
+//! operation `teardown`, and reports a `TeardownReport`. A held unit is not
+//! torn down: the run records the request on its held file and reports it
+//! held with a pending teardown (exit 0); after `nyl resume` the next
+//! teardown-capable run carries it out. `--all` and `state delete
+//! --teardown` honour `deletionPolicy: Retain`: Retain units and retained
+//! tombstones are released and listed in the commit.
+//!
+//! `state delete` refuses while a unit has an incarnation
+//! (`NYL-STATE-DELETE-INCARNATIONS`) and otherwise writes one commit per
+//! state ref removing the environment's other state files
+//! ([`TransitionChanges::clear`](nyl_core::orchestration::ports::TransitionChanges::clear))
+//! and leaving `state.yaml` with a `state-deleted` event as the deleted
+//! marker; with `--teardown` it runs `teardown --all` first, in the same
+//! command. A plain `nyl state init` on a deleted location refuses with
+//! `NYL-STATE-DELETED`, read from the marker.
 
 use super::run::{RunContext, RunRequest};
 use crate::report::StateOperationReport;

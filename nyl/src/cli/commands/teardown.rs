@@ -1,13 +1,15 @@
 //! `nyl teardown -e <env> (--unit <u>… | --all) [--hold] [--confirm-removed]`:
 //! tear units down, replacing a unit still in the ownership set, holding
-//! them with `--hold` or `--all`, and ending a publication's teardown wait
-//! on the operator's word with `--confirm-removed`.
+//! them afterwards with `--hold` (and `--all`, for units still in the
+//! ownership set), and ending a publication's teardown wait on the
+//! operator's word with `--confirm-removed`. A held unit is not torn down:
+//! the request is recorded on it and carried out after `nyl resume`.
 //!
 //! Contract: [Deletion](../../../../design/orchestration-core.md#deletion),
 //! "Explicit teardown", [Instances](../../../../design/orchestration-core.md#instances),
 //! and [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit).
 //! Exit categories as for `reconcile`: 0 every named unit's deletion
-//! completed; 2 a teardown waits (`--allow-dependents`, a dependent, a
+//! completed, or its request was recorded on a held unit; 2 a teardown waits (`--allow-dependents`, a dependent, a
 //! teardown wait, readiness, an approval) or the lease is held; 3 a teardown
 //! failed; 4 uncertain, the lease was lost, or cancelled; 1 error.
 
@@ -34,13 +36,19 @@ pub struct TeardownArgs {
     pub units: Vec<String>,
 
     /// Tear down every unit, dependents first, and hold the units still in
-    /// the ownership set; kinds that cannot tear down are released.
+    /// the ownership set afterwards; kinds that cannot tear down and
+    /// deletionPolicy Retain units are released.
     #[arg(long)]
     pub all: bool,
 
     /// Hold the units after their teardown, in the same operation.
     #[arg(long)]
     pub hold: bool,
+
+    /// Start no further teardown after the first failure, uncertain outcome,
+    /// or approval wait; what finished is still recorded.
+    #[arg(long)]
+    pub fail_fast: bool,
 
     /// Confirm that a publication's workloads are gone, ending its teardown
     /// wait: directly, or by signalling the run waiting on it.

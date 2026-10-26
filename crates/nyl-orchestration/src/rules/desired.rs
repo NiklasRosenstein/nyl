@@ -75,8 +75,9 @@ pub struct Desired {
     /// (deleting, retained, released), units returning to it, and kind
     /// changes. Contract: [Deletion](../../../../design/orchestration-core.md#deletion).
     pub lifecycle: BTreeMap<UnitName, LifecycleWrite>,
-    /// Held units, as stored: a hold freezes the document, so they are not
-    /// rendered into [`Desired::units`], but consumers resolve against them.
+    /// Held units, as stored (held markers included): a hold freezes the
+    /// document, so they are not rendered into [`Desired::units`], but
+    /// consumers resolve against them.
     pub held: BTreeMap<UnitName, HeldUnit>,
     /// Returning units adopting a `retained` tombstone of the same name and
     /// kind: the tombstone, whose receipt the run restores when
@@ -122,7 +123,8 @@ pub struct HeldUnit {
     pub stored: DesiredUnit,
     /// The unit as source renders it at S, before resolution, so the run
     /// can record what it would change under `hold.pending`; `None` when the
-    /// unit left the ownership set.
+    /// unit is outside the ownership set. A held marker's `stored` has no
+    /// rendering ([`DesiredUnit::is_held_marker`]).
     pub rendered: Option<DesiredUnit>,
 }
 
@@ -140,17 +142,16 @@ pub fn hold_pending(
 }
 
 /// The receipt a returning unit adopts from its tombstone: the tombstone's
-/// receipt when `resolved` has the same execution key and every producer
-/// the receipt cites is still at the cited incarnation and receipt in
-/// `desired`; `None` otherwise, so the unit runs as an ordinary change of
-/// the same incarnation. Contract: [Deletion](../../../../design/orchestration-core.md#deletion), "Retain, declared".
+/// receipt when `resolved` has the same execution key (the execution key
+/// alone decides freshness; producer identity never does); `None`
+/// otherwise, so the unit runs as an ordinary change of the same
+/// incarnation. Contract: [Deletion](../../../../design/orchestration-core.md#deletion),
+/// "Retain, declared", as amended by part 5 decision Q3.
 pub fn adopt_tombstone(
     resolved: &DesiredUnit,
     tombstone: &Tombstone,
-    desired: &BTreeMap<UnitName, DesiredUnit>,
-    observed: &BTreeMap<UnitName, nyl_core::orchestration::state::ObservedUnit>,
 ) -> Option<nyl_core::orchestration::state::Receipt> {
-    let _ = (resolved, tombstone, desired, observed);
+    let _ = (resolved, tombstone);
     todo!("lifecycle")
 }
 
@@ -225,8 +226,8 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
                     kind: kind.clone(),
                 },
                 lifecycle: Lifecycle::Active,
-                source_commit: source.source_commit.clone(),
-                source_revision: source.source_commit.clone(),
+                source_commit: Some(source.source_commit.clone()),
+                source_revision: Some(source.source_commit.clone()),
                 spec: spec.clone(),
                 resolved_spec: None,
                 provenance: BTreeMap::new(),
@@ -572,8 +573,8 @@ mod tests {
                 kind: kind.to_owned(),
             },
             lifecycle: Lifecycle::Active,
-            source_commit: commit('b'),
-            source_revision: commit('b'),
+            source_commit: Some(commit('b')),
+            source_revision: Some(commit('b')),
             spec,
             resolved_spec: None,
             provenance: BTreeMap::new(),
@@ -655,7 +656,7 @@ mod tests {
         assert_eq!(uid_of("new"), uid(102));
         assert_eq!(desired.environment.ownership[&name("same")], Some(uid(1)));
         let unit = &desired.units[&name("same")];
-        assert_eq!(unit.source_revision, commit('a'));
+        assert_eq!(unit.source_revision, Some(commit('a')));
         assert_eq!(unit.readiness, Readiness::Ready);
         assert!(unit.resolved_spec.is_none() && unit.execution_key.is_none());
     }

@@ -24,9 +24,13 @@
 //! - active, left with intent retain: deleting with intent retain (the
 //!   caller retains it in the same run).
 //! - active or deleting with intent retain, retain: retained tombstone.
-//! - active or deleting, released (a kind that cannot tear down): files removed.
-//! - retained, released (`teardown --unit` or `--all` of a tombstone whose
-//!   kind cannot tear down): files removed, resources left in place.
+//! - active or deleting, released (a kind that cannot tear down, or a
+//!   `Retain` unit under `teardown --all`): files removed; with a hold to
+//!   apply afterwards, held without an incarnation.
+//! - retained, released (`teardown --unit` of a tombstone whose kind cannot
+//!   tear down, or `teardown --all` of any tombstone, which honours
+//!   `Retain`): files removed, resources left in place; with a hold, held
+//!   without an incarnation.
 //! - deleting with teardown pending and reason omission or kind-change,
 //!   returned: active (the caller keeps uid and receipt). Any other deleting
 //!   unit, returned: unchanged (an explicit request is not undone by source,
@@ -34,10 +38,12 @@
 //! - retained, returned (same name and kind): active, adopting the tombstone.
 //! - retained, left with reason kind-change: files removed (the tombstone of
 //!   another kind is dropped, resources left in place).
-//! - deleting or held-deleting, teardown started: teardown in progress.
-//! - deleting, torn down: files removed.
-//! - held, torn down: held without an incarnation (the file survives
-//!   without a uid until `resume`).
+//! - deleting, teardown started: teardown in progress.
+//! - deleting, torn down: files removed; with a hold to apply afterwards
+//!   (`teardown --hold`, or `--all` for a unit in the ownership set), held
+//!   without an incarnation (the file survives without a uid until `resume`).
+//! - active or deleting without an incarnation, outside the ownership set
+//!   (a uid-less file after `resume`): files removed.
 //! - active or deleting, teardown requested (explicit): deleting with the
 //!   request's reason, teardown pending; a deleting unit keeps its progress.
 //! - retained, teardown requested (explicit): deleting with the request's
@@ -45,18 +51,25 @@
 //!   observed file ([`Next::RestoreReceipt`]), so the teardown reads the
 //!   receipt's outputs and a teardown that does not finish in this run keeps
 //!   them.
-//! - held, teardown requested: held, with the deletion block next to the hold.
+//! - held, teardown requested: held, with the deletion block (teardown
+//!   pending, the request) next to the hold. That is all a teardown of a
+//!   held unit does: a held unit never progresses, so there is no row for
+//!   a held unit's teardown starting, finishing, or its release. After
+//!   `resume` the unit is deleting, and the next teardown-capable run
+//!   carries the request out as an explicit teardown.
 //! - held, left: unchanged (a held unit leaving the ownership set is not
 //!   deleted; `hold.pending.deletion` reports it).
-//! - held, released: held without an incarnation.
 //! - active, hold: held. Deleting, hold: held, keeping the deletion block.
 //!   Held, hold: unchanged. Retained, hold: refused.
+//! - no desired document, hold ([`transition_absent`]): a held marker
+//!   ([`nyl_core::orchestration::state::DesiredUnit::held_marker`]).
 //! - held, resume: active, or deleting where it stopped. Not held, resume: unchanged.
 //!
-//! Order of events in one run: `teardown --hold` and `teardown --all` apply
-//! `Hold` right after `TeardownRequested`, before `TeardownStarted` or
-//! `Released`, so the teardown ends with [`Next::EndIncarnation`] (held
-//! without an incarnation) instead of [`Next::Remove`].
+//! `teardown --hold` is "tear down, then hold": the hold rides on the
+//! teardown's last event (`TornDown { hold }` or `Released { hold }`), so
+//! the teardown ends with [`Next::EndIncarnation`] (held without an
+//! incarnation) instead of [`Next::Remove`]. `teardown --all` does the same
+//! for units still in the ownership set.
 
 use nyl_core::orchestration::state::{
     Deletion, DeletionIntent, DeletionReason, Hold, Lifecycle, Request, TeardownProgress, Tombstone,
@@ -79,12 +92,17 @@ pub enum Event {
     TeardownRequested { reason: DeletionReason, requested: Request },
     /// The driver's teardown started.
     TeardownStarted,
-    /// The teardown completed.
-    TornDown,
+    /// The teardown completed; `hold` is applied afterwards (`teardown
+    /// --hold`, or `--all` for a unit in the ownership set).
+    TornDown { hold: Option<Hold> },
     /// A declared `Retain` unit leaves its files for a tombstone.
     Retain { tombstone: Tombstone },
-    /// A kind that cannot tear down leaves its resources in place.
-    Released,
+    /// A kind that cannot tear down, or a `Retain` unit under `teardown
+    /// --all`, leaves its resources in place; `hold` as for `TornDown`.
+    Released { hold: Option<Hold> },
+    /// A unit without an incarnation (no uid) is outside the ownership set,
+    /// such as a uid-less held file after `resume`: nothing to delete.
+    LeftWithoutIncarnation,
     /// `nyl hold`.
     Hold { hold: Hold },
     /// `nyl resume`.
@@ -98,9 +116,10 @@ impl Event {
             Self::Returned => "returned",
             Self::TeardownRequested { .. } => "teardown-requested",
             Self::TeardownStarted => "teardown-started",
-            Self::TornDown => "torn-down",
+            Self::TornDown { .. } => "torn-down",
             Self::Retain { .. } => "retain",
-            Self::Released => "released",
+            Self::Released { .. } => "released",
+            Self::LeftWithoutIncarnation => "left-without-incarnation",
             Self::Hold { .. } => "hold",
             Self::Resume => "resume",
         }
@@ -143,6 +162,28 @@ pub fn state_name(lifecycle: &Lifecycle) -> &'static str {
         Lifecycle::Deleting { .. } => "deleting",
         Lifecycle::Held { .. } => "held",
         Lifecycle::Retained { .. } => "retained",
+    }
+}
+
+/// The end of a teardown or release: the files go, or, with a hold to apply
+/// afterwards, the file stays held without an incarnation.
+fn then_hold(hold: Option<Hold>) -> Next {
+    match hold {
+        None => Next::Remove,
+        Some(hold) => Next::EndIncarnation(Lifecycle::Held { hold, deletion: None }),
+    }
+}
+
+/// Apply `event` to a unit with no desired document in state: only `nyl
+/// hold` applies, and the caller writes a held marker
+/// ([`nyl_core::orchestration::state::DesiredUnit::held_marker`]).
+pub fn transition_absent(event: Event) -> Result<Next, Refusal> {
+    match event {
+        Event::Hold { hold } => Ok(Next::Lifecycle(Lifecycle::Held { hold, deletion: None })),
+        event => Err(Refusal::NotApplicable {
+            state: "absent",
+            event: event.name(),
+        }),
     }
 }
 
@@ -195,12 +236,10 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         {
             Next::Lifecycle(Lifecycle::Retained { tombstone })
         }
-        (Lifecycle::Active | Lifecycle::Deleting { .. }, Event::Released) => Next::Remove,
-        (Lifecycle::Retained { .. }, Event::Released) => Next::Remove,
-        (Lifecycle::Held { hold, .. }, Event::Released) => Next::EndIncarnation(Lifecycle::Held {
-            hold: hold.clone(),
-            deletion: None,
-        }),
+        (Lifecycle::Active | Lifecycle::Deleting { .. }, Event::Released { hold }) => then_hold(hold),
+        (Lifecycle::Retained { .. }, Event::Released { hold }) => then_hold(hold),
+        (Lifecycle::Active | Lifecycle::Deleting { .. }, Event::LeftWithoutIncarnation) => Next::Remove,
+        (Lifecycle::Held { .. }, Event::LeftWithoutIncarnation) => Next::Unchanged,
 
         // Explicit teardown.
         (Lifecycle::Active, Event::TeardownRequested { reason, requested }) => Next::Lifecycle(Lifecycle::Deleting {
@@ -257,32 +296,9 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
                 },
             })
         }
-        (
-            Lifecycle::Held {
-                hold,
-                deletion: Some(deletion),
-            },
-            Event::TeardownStarted,
-        ) if deletion.intent == DeletionIntent::Teardown => Next::Lifecycle(Lifecycle::Held {
-            hold: hold.clone(),
-            deletion: Some(Deletion {
-                teardown: Some(TeardownProgress::InProgress),
-                ..deletion.clone()
-            }),
-        }),
-        (Lifecycle::Deleting { deletion }, Event::TornDown) if deletion.intent == DeletionIntent::Teardown => {
-            Next::Remove
+        (Lifecycle::Deleting { deletion }, Event::TornDown { hold }) if deletion.intent == DeletionIntent::Teardown => {
+            then_hold(hold)
         }
-        (
-            Lifecycle::Held {
-                hold,
-                deletion: Some(deletion),
-            },
-            Event::TornDown,
-        ) if deletion.intent == DeletionIntent::Teardown => Next::EndIncarnation(Lifecycle::Held {
-            hold: hold.clone(),
-            deletion: None,
-        }),
 
         // Holds.
         (Lifecycle::Active, Event::Hold { hold }) => Next::Lifecycle(Lifecycle::Held { hold, deletion: None }),
@@ -344,6 +360,6 @@ mod tests {
     #[test]
     fn test_a_released_tombstone_is_removed() {
         let retained = Lifecycle::Retained { tombstone: tombstone() };
-        assert_eq!(transition(&retained, Event::Released), Ok(Next::Remove));
+        assert_eq!(transition(&retained, Event::Released { hold: None }), Ok(Next::Remove));
     }
 }

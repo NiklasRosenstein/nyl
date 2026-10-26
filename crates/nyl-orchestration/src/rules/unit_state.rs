@@ -283,6 +283,7 @@ fn condition_warning(
 /// with a current receipt show their drift observation
 /// ([`crate::rules::drift::status_drift`]), which needs each unit's
 /// recovery policy.
+#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, blockers.
 pub fn status(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
@@ -357,9 +358,12 @@ pub fn status(
                 drivers,
                 drift_repair,
             );
-            if unit.drift.as_ref().is_some_and(|drift| drift.waits) {
-                unit.warnings
-                    .push(crate::rules::drift::waiting_warning(environment, name));
+            // A current unit whose latest drift observation is `drifted` is
+            // work for the next reconcile: state `drifted`, exit 2.
+            if unit.state == Some(UnitState::Current)
+                && unit.drift.as_ref().is_some_and(|drift| drift.result == "drifted")
+            {
+                unit.state = Some(UnitState::Drifted);
             }
         }
         let condition = observed.and_then(|observed| observed.condition.as_ref());

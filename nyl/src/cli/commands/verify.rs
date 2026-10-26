@@ -70,7 +70,8 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         cancellation: wiring.cancellation.clone(),
         mode: nyl_orchestration::shell::run::RunMode::default(),
         lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
-        reapply: &[],
+        reapply: false,
+        fail_fast: false,
         reason: None,
     })?;
     let store = session.store(Some(CommitAuthor {

@@ -245,7 +245,7 @@ impl EnvironmentRunReport {
 }
 
 /// The results a transition commit's headline counts, in order.
-const HEADLINE_RESULTS: [&str; 13] = [
+const HEADLINE_RESULTS: [&str; 14] = [
     "executed",
     "recovered",
     "imported",
@@ -255,6 +255,7 @@ const HEADLINE_RESULTS: [&str; 13] = [
     "failed",
     "uncertain",
     "held",
+    "drifted",
     "pending-teardown",
     "tearing-down",
     "blocked",
@@ -293,14 +294,10 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
             Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
             Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
             Some(
-                UnitResult::Blocked { .. }
-                | UnitResult::AwaitingApproval
-                | UnitResult::Held { .. }
-                | UnitResult::PendingTeardown { .. }
-                | UnitResult::TearingDown { .. },
-            ) => ExitCategory::Incomplete,
-            Some(
                 UnitResult::Current
+                // Recording a teardown request on a held unit is all a
+                // teardown of it does, so it succeeds.
+                | UnitResult::Held { recorded: true, .. }
                 | UnitResult::Executed { .. }
                 | UnitResult::Imported { .. }
                 | UnitResult::Recovered { .. }
@@ -309,6 +306,14 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 | UnitResult::Released { .. },
             )
             | None => ExitCategory::Ok,
+            Some(
+                UnitResult::Blocked { .. }
+                | UnitResult::AwaitingApproval
+                | UnitResult::Held { .. }
+                | UnitResult::Drifted
+                | UnitResult::PendingTeardown { .. }
+                | UnitResult::TearingDown { .. },
+            ) => ExitCategory::Incomplete,
         },
         ReportKind::VerifyReport => crate::rules::verification::unit_exit(unit),
         ReportKind::StatusReport => match (unit.state, unit.condition) {
@@ -439,9 +444,6 @@ pub enum ConditionState {
 pub struct DriftAttribute {
     /// `clean`, `drifted`, or `unknown`.
     pub result: String,
-    /// A drifted unit no reconcile repairs on its own: it waits for `--reapply`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub waits: bool,
 }
 
 /// A publication unit's teardown readiness.
@@ -525,12 +527,25 @@ pub enum UnitResult {
         reason: String,
     },
     AwaitingApproval,
-    /// Held: reconcile changed nothing about it. `pending` names the source
-    /// commit whose changes the hold keeps from applying.
+    /// Held: the run changed nothing about it. `pending` names the source
+    /// commit whose changes the hold keeps from applying. `teardown` is set
+    /// when the unit has a pending teardown request (a `nyl teardown --unit`
+    /// of the held unit, recorded and carried out after `nyl resume`);
+    /// `recorded` when this run recorded that request, which is the whole
+    /// of a teardown of a held unit and exits 0. Contract:
+    /// [Deletion](../../../../design/orchestration-core.md#deletion), holds.
     Held {
         #[serde(skip_serializing_if = "Option::is_none")]
         pending: Option<CommitId>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        teardown: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        recorded: bool,
     },
+    /// Current, but its latest drift observation is `drifted` and this run
+    /// did not repair it (`driftRepair: manual`, or excluded by `--unit`).
+    /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    Drifted,
     /// Deleting, and its teardown has not started: it awaits
     /// `--allow-teardown`, `--allow-dependents`, a dependent's teardown, an
     /// approval, or a readiness override.
@@ -568,6 +583,7 @@ impl UnitResult {
             Self::Blocked { .. } => "blocked",
             Self::AwaitingApproval => "awaiting-approval",
             Self::Held { .. } => "held",
+            Self::Drifted => "drifted",
             Self::PendingTeardown { .. } => "pending-teardown",
             Self::TearingDown { .. } => "tearing-down",
             Self::Retained => "retained",
@@ -642,6 +658,10 @@ pub enum UnitState {
     PendingTeardown,
     TearingDown,
     Retained,
+    /// A current unit whose latest drift observation is `drifted`: work for
+    /// the next reconcile (status exits 2, plan lists it as executing).
+    /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    Drifted,
 }
 
 impl UnitState {
@@ -659,6 +679,7 @@ impl UnitState {
             Self::PendingTeardown => "pending-teardown",
             Self::TearingDown => "tearing-down",
             Self::Retained => "retained",
+            Self::Drifted => "drifted",
         }
     }
 }

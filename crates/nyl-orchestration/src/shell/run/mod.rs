@@ -136,7 +136,9 @@ pub enum RunMode {
     Reconcile,
     /// `nyl recover -e <env>` importing a broken lease's run: operation
     /// `recover`, nothing executes, then the optional `--unit` action
-    /// applies in the same commit. Contract:
+    /// applies in the same commit. It writes no run record: its one
+    /// transition commit is all it writes, and if it crashes the broken
+    /// run's refs stay for the next import. Contract:
     /// [Recovery](../../../../../design/orchestration-core.md#recovery), "Importing a broken run".
     Recover { unit: Option<super::recover::RecoverUnit> },
     /// `nyl teardown` (and `nyl plan --teardown`): operation `teardown`,
@@ -158,6 +160,12 @@ impl RunMode {
     /// Whether the run executes or tears down units; a recover import does not.
     pub fn executes(&self) -> bool {
         !matches!(self, Self::Recover { .. })
+    }
+
+    /// Whether the run writes a run record (run ref and checkpoints): every
+    /// mode that executes; a recover import writes only its transition commit.
+    pub fn writes_run_record(&self) -> bool {
+        self.executes()
     }
 
     /// Whether the run writes lifecycle changes (omission, return,
@@ -182,9 +190,11 @@ impl RunMode {
 pub enum TeardownTarget {
     /// `--unit <u>…`.
     Units(BTreeSet<UnitName>),
-    /// `--all`: every unit, dependents first; units still in the ownership
-    /// set are held (the hold applies right after the request, before the
-    /// teardown starts), and kinds that cannot tear down are released.
+    /// `--all`: every unit, dependents first; kinds that cannot tear down,
+    /// `deletionPolicy: Retain` units, and retained tombstones are released
+    /// (resources kept), and units still in the ownership set are held
+    /// afterwards, without an incarnation. Held units only record the
+    /// request.
     All,
 }
 
@@ -208,7 +218,8 @@ pub struct LifecycleOptions {
     pub leaving: bool,
     /// `teardown --confirm-removed`: the operator confirms a publication's removal.
     pub confirm_removed: bool,
-    /// `teardown --hold`: hold the units after their teardown, in the same operation.
+    /// `teardown --hold`: hold the units after their teardown, in the same
+    /// operation ("tear down, then hold").
     pub hold: bool,
 }
 
@@ -244,9 +255,17 @@ pub struct RunRequest {
     /// The operation on the run path.
     pub mode: RunMode,
     pub lifecycle: LifecycleOptions,
-    /// `reconcile --reapply`: units with a current receipt to execute again.
+    /// `reconcile --unit <u>… --reapply`: the named units execute again
+    /// although their receipts are current; requires `units` and `reason`.
     /// Contract: [Drift](../../../../../design/orchestration-core.md#drift).
-    pub reapply: BTreeSet<UnitName>,
+    pub reapply: bool,
+    /// `--fail-fast` (`reconcile`, `teardown`): after the first failure,
+    /// uncertain outcome, or approval wait, start no further unit; the run
+    /// still checkpoints what finished and writes its transition commit.
+    /// By default the run continues with every unit that does not depend
+    /// on one that stopped. Contract:
+    /// [Execution](../../../../../design/orchestration-core.md#execution).
+    pub fail_fast: bool,
     /// `--reason` of an operator action (`--reapply`, `teardown`, `recover`),
     /// recorded as `Nyl-Reason` next to `Nyl-Requested-By`.
     pub reason: Option<String>,
@@ -256,7 +275,15 @@ impl RunRequest {
     /// Whether the run is an operator action that records `Nyl-Requested-By`
     /// and `Nyl-Reason`: a teardown, a recover import, or a reapply.
     pub fn requested(&self) -> bool {
-        !matches!(self.mode, RunMode::Reconcile) || !self.reapply.is_empty()
+        !matches!(self.mode, RunMode::Reconcile) || self.reapply
+    }
+
+    /// The units `--reapply` forces: the `--unit` names, or none.
+    pub fn reapply_units(&self) -> BTreeSet<UnitName> {
+        match (&self.units, self.reapply) {
+            (Some(units), true) => units.clone(),
+            _ => BTreeSet::new(),
+        }
     }
 }
 
@@ -966,7 +993,6 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
     let attempted = BTreeSet::new();
     let (ready, _) = select(&Candidates {
         desired: &resolved.units,
-        view: &resolved.units,
         observed: &snapshot.observed,
         drivers: context.drivers,
         named: None,
@@ -974,7 +1000,8 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         local: request.local.as_ref().map(|local| &local.approve),
         observations: &snapshot.observations,
         drift_repair: drift::drift_repair(&prepared.rendered.environment),
-        reapply: &request.reapply,
+        // `nyl plan` has no `--reapply`.
+        reapply: &BTreeSet::new(),
     });
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
@@ -1213,6 +1240,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
 
     /// Write the run record; a store failure is reported and ends the run.
     fn write_run(&mut self, checkpoint: Option<&Checkpoint>) -> Result<(), StateError> {
+        if !self.session.request.mode.writes_run_record() {
+            return Ok(());
+        }
         self.context()
             .base
             .store
@@ -1239,14 +1269,22 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         record.units = units;
         record.deadline = deadline;
         let mut version = self.held.version.clone();
-        let written = self.context().base.store.update_lease_and_run(
-            self.location(),
-            self.environment(),
-            &lease,
-            &mut version,
-            &record,
-            created,
-        );
+        let store = self.context().base.store;
+        let written = if self.session.request.mode.writes_run_record() {
+            store.update_lease_and_run(
+                self.location(),
+                self.environment(),
+                &lease,
+                &mut version,
+                &record,
+                created,
+            )
+        } else {
+            // A recover import renews only its lease.
+            store
+                .update_lease(self.location(), self.environment(), &lease, &version)
+                .map(|new| version = new)
+        };
         if version != self.held.version {
             self.held.version = version;
             self.held.lease = lease;
@@ -1373,6 +1411,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
         let mut created: BTreeSet<UnitName> = BTreeSet::new();
         let mut taking = Takeover::new(&leftovers, &overlay, &prepared);
+        let reapply = request.reapply_units();
         let mut first = true;
         let (resolved, skipped) = loop {
             if request.cancellation.is_cancelled() {
@@ -1404,21 +1443,6 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 self.report.errors.extend(resolved.errors.values().flatten().cloned());
                 return Ending::Release;
             }
-            if first && !request.reapply.is_empty() {
-                // `--reapply` is checked before anything executes.
-                if let Err(finding) = drift::check_reapply(
-                    &environment,
-                    &request.reapply,
-                    request.units.as_ref(),
-                    &resolved.units,
-                    &observed,
-                    context.drivers,
-                    request.local.is_some(),
-                ) {
-                    self.report.errors.push(finding);
-                    return Ending::Release;
-                }
-            }
             first = false;
             if taking.active {
                 let import = takeover::import(&ImportInputs {
@@ -1442,7 +1466,6 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             let candidates = Candidates {
                 desired: &resolved.units,
-                view: &resolved.units,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),
@@ -1453,7 +1476,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
                 observations: &snapshot.observations,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
-                reapply: &request.reapply,
+                reapply: &reapply,
             };
             let (ready, skipped) = select(&candidates);
             for (name, repair) in drift::repairs(&candidates, &ready) {
@@ -1840,7 +1863,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 (release, false)
             }
         };
-        if delete {
+        if delete && self.session.request.mode.writes_run_record() {
             if let Err(error) = base
                 .store
                 .delete_run(self.location(), self.environment(), &self.run, None)
@@ -1957,6 +1980,13 @@ fn unexecuted_result(
         return UnitResult::Blocked {
             reason: error.message.clone(),
         };
+    }
+    // A current unit that drift repair or `--reapply` would re-run but
+    // this run does not ("Drift").
+    match skipped {
+        Some(Skipped::Drifted) => return UnitResult::Drifted,
+        Some(Skipped::RepairApproval) => return UnitResult::AwaitingApproval,
+        _ => {}
     }
     if receipt_is_current(unit, observed) {
         return UnitResult::Current;

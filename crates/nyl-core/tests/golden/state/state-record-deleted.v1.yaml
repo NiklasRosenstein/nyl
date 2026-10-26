@@ -1,0 +1,16 @@
+apiVersion: gitops.nyl/v1
+kind: StateRecord
+environment: dev
+location:
+  repository: https://example.invalid/platform.git
+  desiredRef: nyl/dev/desired
+  observedRef: nyl/dev/observed
+  coordinationRefPrefix: refs/nyl/
+events:
+- type: state-initialized
+  at: "2026-09-24T09:00:00Z"
+  by: alice
+- type: state-deleted
+  at: "2026-10-01T09:00:00Z"
+  by: alice
+  reason: decommissioned

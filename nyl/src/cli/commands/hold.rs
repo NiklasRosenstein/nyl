@@ -2,8 +2,12 @@
 //! freeze a unit so `reconcile` changes nothing about it, and lift the hold.
 //!
 //! Contract: [Deletion](../../../../design/orchestration-core.md#deletion),
-//! "Holds freeze a unit". Each writes one desired commit. Exit: 0 done or
-//! unchanged, 1 error or refusal, 2 the lease is held or broken.
+//! "Holds freeze a unit". Each writes one desired commit. `hold` works for
+//! a unit never reconciled in the environment (a held marker) and never
+//! renders source; while a run holds the lease, `hold` delivers the hold to
+//! it through its signal ref (`NYL-HOLD-DELIVERED`, exit 0). `resume` only
+//! lifts the hold. Exit: 0 done, delivered, or unchanged; 1 error or
+//! refusal; 2 the lease is broken, or held (`resume`).
 
 use clap::Args;
 

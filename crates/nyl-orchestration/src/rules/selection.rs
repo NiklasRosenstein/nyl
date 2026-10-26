@@ -36,12 +36,6 @@ use super::freshness::{receipt_is_current, same_incarnation};
 pub struct Candidates<'a> {
     /// The units selection may select.
     pub desired: &'a BTreeMap<UnitName, DesiredUnit>,
-    /// The resolution view for freshness
-    /// ([`super::freshness::receipt_is_current_in`]): every desired document
-    /// of the environment, held, deleting, and retained included, so a
-    /// consumer of a held producer stays current. Skeleton note: the run
-    /// path passes `desired` until package `lifecycle` builds the view.
-    pub view: &'a BTreeMap<UnitName, DesiredUnit>,
     /// The snapshot's observed documents overlaid with this run's checkpoints.
     pub observed: &'a BTreeMap<UnitName, ObservedUnit>,
     pub drivers: &'a DriverSet,
@@ -60,8 +54,10 @@ pub struct Candidates<'a> {
     pub observations: &'a BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
     /// The environment's `driftRepair`, as rendered at S.
     pub drift_repair: DriftRepair,
-    /// `nyl reconcile --reapply`: units to execute again although their
-    /// receipt is current.
+    /// `nyl reconcile --unit <u>… --reapply`: the named units, to execute
+    /// again although their receipt is current; empty without `--reapply`.
+    /// A named unit whose recovery policy is not `converge` awaits approval
+    /// instead (`--approve` in a `--local` run).
     pub reapply: &'a BTreeSet<UnitName>,
 }
 
@@ -79,6 +75,16 @@ pub enum Skipped {
     /// execution recovery policy is not `converge`. Reported as
     /// `awaiting-approval`.
     LocalApproval,
+    /// Current, its latest drift observation is `drifted`, and this run
+    /// does not repair it (`driftRepair: manual`). Reported as `drifted`.
+    /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    Drifted,
+    /// Current and drifted (or named by `--reapply`), but its execution
+    /// recovery policy is not `converge`, so re-running it needs an
+    /// approval this run does not have (a remote run, or a `--local` run
+    /// without `--approve`). Reported as `awaiting-approval`; the rest of
+    /// the run continues.
+    RepairApproval,
 }
 
 /// The ready units, by name, and why each other unit is skipped.
@@ -261,7 +267,6 @@ mod tests {
         fn select(&self, named: Option<&BTreeSet<UnitName>>) -> (Vec<UnitName>, BTreeMap<UnitName, Skipped>) {
             select(&Candidates {
                 desired: &self.desired,
-                view: &self.desired,
                 observed: &self.observed,
                 drivers: &self.drivers,
                 named,

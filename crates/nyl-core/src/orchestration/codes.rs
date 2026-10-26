@@ -179,17 +179,8 @@ codes! {
     UnitKindChange => "NYL-UNIT-KIND-CHANGE",
     /// A unit is held: reconcile changes nothing about it until `nyl resume`.
     UnitHeld => "NYL-UNIT-HELD",
-    /// `nyl hold` cannot hold this unit, such as a `retained` tombstone.
+    /// `nyl hold` cannot hold this unit: a `retained` tombstone.
     HoldRefused => "NYL-HOLD-REFUSED",
-    /// A unit's latest drift observation is `drifted` and it waits for
-    /// `nyl reconcile --reapply`.
-    UnitDrifted => "NYL-UNIT-DRIFTED",
-    /// `--reapply` names a unit whose recovery policy is not `converge`,
-    /// which needs an approval the invocation cannot give.
-    ReapplyApprovalRequired => "NYL-REAPPLY-APPROVAL-REQUIRED",
-    /// `--reapply` names a unit it cannot apply to: unknown, excluded by
-    /// `--unit`, or with a condition that `nyl recover` must clear first.
-    ReapplyInvalid => "NYL-REAPPLY-INVALID",
     /// `--confirm-removed` was rejected: no teardown of that unit waits for
     /// a confirmation, or the waiting run is not waiting on it.
     ConfirmationRejected => "NYL-CONFIRMATION-REJECTED",
@@ -199,6 +190,10 @@ codes! {
     StateDeleted => "NYL-STATE-DELETED",
     /// `nyl state delete` refuses while units still have an incarnation.
     StateDeleteIncarnations => "NYL-STATE-DELETE-INCARNATIONS",
+    /// `nyl hold` was delivered to the run holding the lease, through its
+    /// signal ref: the run starts no held unit and writes the hold in its
+    /// own transition commit. Exit 0.
+    HoldDelivered => "NYL-HOLD-DELIVERED",
 }
 
 impl fmt::Display for Code {

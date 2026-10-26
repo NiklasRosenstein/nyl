@@ -47,7 +47,10 @@ pub struct RecoverUnit {
 /// over and imports that run through the shared run path with execution
 /// switched off (`request.mode` is [`RunMode::Recover`](super::run::RunMode::Recover)),
 /// applying the unit's action after the import in the same commit
-/// ([`after_import`]). Otherwise it applies the action as [`recover`] does,
+/// ([`after_import`]). It writes no run record: its one transition commit
+/// (import, `leaseBroken`, the optional action) is all it writes, and it
+/// consumes the broken run's refs as a takeover does; if it crashes, those
+/// refs stay for the next import. Otherwise it applies the action as [`recover`] does,
 /// and without `--unit` refuses with `NYL-RECOVER-NOTHING`. Contract:
 /// [Recovery](../../../../design/orchestration-core.md#recovery), "Importing a broken run".
 pub fn recover_environment(context: &RunContext<'_>, request: &RunRequest) -> StateOperationReport {

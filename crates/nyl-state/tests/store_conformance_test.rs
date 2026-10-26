@@ -12,7 +12,7 @@ use nyl_core::orchestration::ports::{
 };
 use nyl_core::orchestration::state::{
     ApprovalIdentity, Attestation, DesiredUnit, Lease, LeaseKind, Observation, ObservationType, ObservedUnit,
-    Operation, Run, RunKind, Signal, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
+    Operation, Run, RunKind, Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
 use nyl_state::git::{CommitAuthor, GitStateStore};
@@ -501,8 +501,9 @@ fn test_run_refs_carry_checkpoints_and_signals_until_deleted() {
             api_version: StateV1,
             kind: SignalKind,
             run: run.run.clone(),
+            action: SignalAction::ConfirmRemoved,
             unit: UnitName::new("kubernetes").unwrap(),
-            phase1_commit: nyl_core::orchestration::ids::CommitId::new(COMMIT).unwrap(),
+            phase1_commit: Some(nyl_core::orchestration::ids::CommitId::new(COMMIT).unwrap()),
             by: "alice".to_owned(),
             identity: ApprovalIdentity::Local,
             reason: None,

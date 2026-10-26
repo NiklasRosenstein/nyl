@@ -235,7 +235,8 @@ impl Session {
             cancellation: options.cancellation.clone(),
             mode: options.mode.clone(),
             lifecycle: options.lifecycle,
-            reapply: unit_names("--reapply", options.reapply)?,
+            reapply: options.reapply,
+            fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
         })
     }
@@ -292,8 +293,10 @@ pub struct RunOptions<'a> {
     /// `--allow-teardown`, `--allow-dependents`, `--allow-incomplete`,
     /// `--leaving`, `--confirm-removed`, and `--hold`.
     pub lifecycle: nyl_orchestration::shell::run::LifecycleOptions,
-    /// `reconcile --reapply`.
-    pub reapply: &'a [String],
+    /// `reconcile --reapply` (with `--unit`).
+    pub reapply: bool,
+    /// `--fail-fast` of `reconcile` and `teardown`.
+    pub fail_fast: bool,
     /// `--reason` of an operator action.
     pub reason: Option<&'a str>,
 }

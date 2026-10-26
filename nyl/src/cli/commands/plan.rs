@@ -79,7 +79,8 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         cancellation: nyl_orchestration::shell::run::Cancellation::default(),
         mode: teardown_mode(args)?,
         lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
-        reapply: &[],
+        reapply: false,
+        fail_fast: false,
         reason: None,
     })?;
     // A plan writes nothing, so it reads through a read-only store and needs

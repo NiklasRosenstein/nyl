@@ -7,13 +7,19 @@
 //! the units it depends on, transitively; units without a path to a waiting
 //! unit proceed in the same run; omission and kind-change teardown need
 //! `--allow-teardown`), "Retained dependents" (`NYL-TEARDOWN-HAS-DEPENDENTS`
-//! unless `--allow-dependents`), "Explicit teardown" and "Holds" (an
-//! explicit teardown of a held unit proceeds; a held deleting unit pauses
-//! otherwise), [Recovery](../../../../design/orchestration-core.md#recovery)
+//! unless `--allow-dependents`), "Explicit teardown" and "Holds" (a held
+//! unit never progresses: an explicit teardown of it only records the
+//! request, see [`super::lifecycle`]), [Recovery](../../../../design/orchestration-core.md#recovery)
 //! (the driver's teardown recovery policy), and
 //! [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 //! teardown readiness (an unmet blocking requirement keeps the unit pending
 //! unless `--allow-incomplete`).
+//!
+//! One uniform reverse-dependency rule (part 5 decision Q6): every drop
+//! (a release, or a kind change's removal of a tombstone) and every declared
+//! retention waits for its deleting dependents exactly as a teardown does,
+//! so this plan covers every unit leaving with any intent, and the run
+//! writes a drop or retention only once it is in [`TeardownPlan::ready`].
 //!
 //! Dependencies between deleting units come from their stored specs
 //! ([`dependencies`]), not from a resolution of source, so a teardown never
@@ -39,8 +45,9 @@ pub struct TeardownOptions<'a> {
     /// `nyl teardown --unit`: only these units are torn down; `None` acts on
     /// every deleting unit the invocation may tear down.
     pub named: Option<&'a BTreeSet<UnitName>>,
-    /// Explicitly requested teardowns (`nyl teardown`, `state delete
-    /// --teardown`) proceed for held units; a reconcile pauses them.
+    /// An explicitly requested teardown (`nyl teardown`, `state delete
+    /// --teardown`), which needs no `--allow-teardown`. Held units are
+    /// pending either way.
     pub explicit: bool,
 }
 
@@ -75,7 +82,8 @@ pub enum Pending {
     Dependents { units: Vec<UnitName> },
     /// A publication it is a dependency of, directly or transitively, waits under its `teardownWait`.
     Waiting { units: Vec<UnitName> },
-    /// Held, and the invocation is not an explicit teardown.
+    /// Held: a held unit never progresses; a teardown request on it is
+    /// recorded and carried out after `nyl resume`.
     Held,
     /// Unmet blocking readiness requirements, without `--allow-incomplete`.
     Readiness { findings: Vec<Finding> },

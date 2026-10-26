@@ -89,6 +89,10 @@ pub fn apply(unit: &UnitIdentity, current: Option<&ObservedUnit>, event: Event) 
             unit: unit.clone(),
             receipt,
             condition,
+            // Skeleton note: package `lifecycle` writes the copy of the
+            // desired document next to every new receipt (the hold reverts
+            // to it), and keeps the existing copy otherwise.
+            desired: current.and_then(|observed| observed.desired.clone()),
             // Teardown waits are recorded by the lifecycle shell, not by
             // these events (package `lifecycle` adds teardown events).
             waiting: None,
@@ -205,6 +209,8 @@ mod tests {
                     reason: "interrupted".to_owned(),
                 }),
             },
+            desired: None,
+
             waiting: None,
         }
     }

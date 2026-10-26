@@ -90,14 +90,19 @@ pub struct ReconcileArgs {
     #[arg(long, conflicts_with = "units")]
     pub leaving: bool,
 
-    /// Execute this unit again although its receipt is current, such as to
-    /// repair drift (repeatable, or comma-separated); needs --reason.
-    #[arg(long, value_name = "UNIT", value_delimiter = ',', requires = "reason")]
-    pub reapply: Vec<String>,
+    /// Execute the --unit units again although their receipts are current,
+    /// such as to repair drift; needs --unit and --reason.
+    #[arg(long, requires_all = ["units", "reason"])]
+    pub reapply: bool,
 
     /// Why, recorded as the transition commit's Nyl-Reason for --reapply.
     #[arg(long)]
     pub reason: Option<String>,
+
+    /// Start no further unit after the first failure, uncertain outcome, or
+    /// approval wait; what finished is still recorded.
+    #[arg(long)]
+    pub fail_fast: bool,
 
     /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
@@ -142,7 +147,8 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
             leaving: args.leaving,
             ..nyl_orchestration::shell::run::LifecycleOptions::default()
         },
-        reapply: &args.reapply,
+        reapply: args.reapply,
+        fail_fast: args.fail_fast,
         reason: args.reason.as_deref(),
     })?;
     let store = session.store(Some(CommitAuthor {

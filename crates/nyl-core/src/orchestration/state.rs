@@ -202,6 +202,27 @@ pub enum StateEvent {
         /// The commit whose content was restored.
         to: CommitId,
     },
+    /// `nyl state delete`: the environment's other state files were removed
+    /// in the same commit, and `state.yaml` stays as the deleted marker. A
+    /// plain `nyl state init` refuses on it (`NYL-STATE-DELETED`); `--fresh`
+    /// appends a new initialization. Contract:
+    /// [Instances](../../../../design/orchestration-core.md#instances).
+    StateDeleted {
+        at: Timestamp,
+        by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+impl StateRecord {
+    /// The `state-deleted` event that marks the location deleted: the last
+    /// event, when it is one. A later initialization (`--fresh`) ends it.
+    pub fn deleted(&self) -> Option<&StateEvent> {
+        self.events
+            .last()
+            .filter(|event| matches!(event, StateEvent::StateDeleted { .. }))
+    }
 }
 
 /// `desired/environment.yaml`: the resolved Environment, its source commit,
@@ -259,8 +280,11 @@ pub struct UnitIdentity {
     /// The incarnation; absent for a held unit without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<Uid>,
-    #[serde(rename = "apiVersion")]
+    /// The unit's kind; empty only in a held marker, which `nyl hold` writes
+    /// for a unit it never rendered ([`DesiredUnit::held_marker`]).
+    #[serde(rename = "apiVersion", default, skip_serializing_if = "String::is_empty")]
     pub api_version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
 }
 
@@ -273,12 +297,17 @@ pub struct DesiredUnit {
     pub kind: DesiredUnitKind,
     pub unit: UnitIdentity,
     pub lifecycle: Lifecycle,
-    #[serde(rename = "sourceCommit")]
-    pub source_commit: CommitId,
-    /// The effective revision for repository content, S.
-    #[serde(rename = "sourceRevision")]
-    pub source_revision: CommitId,
-    /// The rendered spec, references still as expressions.
+    /// The source commit S the document was rendered from; absent only in a
+    /// held marker.
+    #[serde(rename = "sourceCommit", default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<CommitId>,
+    /// The effective revision for repository content, S; absent only in a
+    /// held marker.
+    #[serde(rename = "sourceRevision", default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<CommitId>,
+    /// The rendered spec, references still as expressions; null only in a
+    /// held marker.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub spec: Value,
     /// The spec with references replaced by values; absent while blocked.
     #[serde(rename = "resolvedSpec", default, skip_serializing_if = "Option::is_none")]
@@ -296,6 +325,46 @@ pub struct DesiredUnit {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
     pub readiness: Readiness,
+}
+
+impl DesiredUnit {
+    /// A held marker: the desired file `nyl hold` writes for a unit with no
+    /// desired document in state (never reconciled in the environment). It
+    /// has no uid and no rendering (no kind, source commit, or spec); `nyl
+    /// hold` never renders source. Reconcile excludes it until `nyl resume`;
+    /// the first reconcile after the resume renders the unit as a new
+    /// incarnation, or removes the file when the unit is outside the
+    /// ownership set. Contract: [Deletion](../../../../design/orchestration-core.md#deletion),
+    /// "Holds freeze a unit".
+    pub fn held_marker(environment: EnvironmentName, name: UnitName, hold: Hold) -> Self {
+        Self {
+            api_version: StateV1,
+            kind: DesiredUnitKind,
+            unit: UnitIdentity {
+                environment,
+                name,
+                uid: None,
+                api_version: String::new(),
+                kind: String::new(),
+            },
+            lifecycle: Lifecycle::Held { hold, deletion: None },
+            source_commit: None,
+            source_revision: None,
+            spec: Value::Null,
+            resolved_spec: None,
+            provenance: BTreeMap::new(),
+            execution_key: None,
+            fingerprint: None,
+            attestations: Vec::new(),
+            readiness: Readiness::Ready,
+        }
+    }
+
+    /// Whether this is a held marker, a document never rendered
+    /// ([`Self::held_marker`]): it names no kind.
+    pub fn is_held_marker(&self) -> bool {
+        self.unit.kind.is_empty()
+    }
 }
 
 /// Where a unit is in its life: running, being deleted, frozen, or retained.
@@ -472,6 +541,14 @@ pub struct ObservedUnit {
     pub receipt: Option<Receipt>,
     #[serde(default)]
     pub condition: Option<Condition>,
+    /// The desired document the receipt was produced for: a copy written by
+    /// the same transition that writes the receipt, absent when there is no
+    /// receipt. A hold reverts an active unit to it directly, never through
+    /// commit history. Contract: [Recovery](../../../../design/orchestration-core.md#recovery),
+    /// "Holds on uncertain units", and [Deletion](../../../../design/orchestration-core.md#deletion),
+    /// "Holds freeze a unit".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<Box<DesiredUnit>>,
     /// A two-phase teardown that published phase 1 and waits under its
     /// `teardownWait`: what `Outcome::Waiting` reported, kept between runs.
     /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
@@ -872,7 +949,19 @@ pub struct Run {
     pub finished: bool,
 }
 
-/// A message to a running run, such as a teardown confirmation.
+/// What a signal asks the running run to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignalAction {
+    /// `nyl teardown --confirm-removed`: the publication's removal is
+    /// confirmed; bound to the phase 1 commit.
+    ConfirmRemoved,
+    /// `nyl hold`: the run starts no further work on the unit and writes
+    /// the hold in its own transition commit.
+    Hold,
+}
+
+/// A message to a running run: a teardown confirmation or a hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Signal {
@@ -880,15 +969,17 @@ pub struct Signal {
     pub api_version: StateV1,
     pub kind: SignalKind,
     pub run: RunId,
+    pub action: SignalAction,
     pub unit: UnitName,
-    #[serde(rename = "phase1Commit")]
-    pub phase1_commit: CommitId,
+    /// The phase 1 commit a `confirm-removed` signal confirms; absent for a hold.
+    #[serde(rename = "phase1Commit", default, skip_serializing_if = "Option::is_none")]
+    pub phase1_commit: Option<CommitId>,
     pub by: String,
     pub identity: ApprovalIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub at: Timestamp,
-    /// Where the confirmation came from, such as a CI run URL.
+    /// Where the signal came from, such as a CI run URL.
     pub from: String,
 }
 

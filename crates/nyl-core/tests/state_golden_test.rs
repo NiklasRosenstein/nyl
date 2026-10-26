@@ -4,6 +4,9 @@
 //! one kind. The test fails when serialization changes or when a golden file
 //! no longer parses, so a format change is always deliberate: it adds a
 //! version, a migration, and a new golden file, and keeps the old one.
+//! (The v1 formats are unreleased while M3 is in progress; until the first
+//! release that writes them, v1 is amended in place and its golden files
+//! regenerated.)
 //!
 //! After an intended change, regenerate with
 //! `cargo test -p nyl-core --test state_golden_test -- --ignored`.
@@ -63,6 +66,17 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "state-record-deleted.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "StateRecord", "environment": "dev",
+                "location": location(),
+                "events": [
+                    {"type": "state-initialized", "at": "2026-09-24T09:00:00Z", "by": "alice"},
+                    {"type": "state-deleted", "at": "2026-10-01T09:00:00Z", "by": "alice", "reason": "decommissioned"}
+                ]
+            }),
+        ),
+        (
             "environment-record.v1.yaml",
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "EnvironmentRecord", "environment": "dev",
@@ -98,6 +112,15 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "desired-unit-held-marker.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit",
+                "unit": {"environment": "dev", "name": "cache"},
+                "lifecycle": {"state": "held", "hold": {"since": "2026-09-24T12:05:00Z", "by": "alice", "reason": "incident 4711"}},
+                "readiness": {"state": "ready"}
+            }),
+        ),
+        (
             "desired-unit-retained.v1.yaml",
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("worker", "Command"),
@@ -111,6 +134,13 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": identity("database", "OpenTofu"),
                 "receipt": receipt(),
+                "desired": {
+                    "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("database", "OpenTofu"),
+                    "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
+                    "spec": {"source": {"path": "infra/database"}},
+                    "resolvedSpec": {"source": {"path": "/infra/database", "commit": COMMIT}},
+                    "executionKey": KEY, "readiness": {"state": "ready"}
+                },
                 "condition": {"state": "failed", "since": "2026-09-24T11:12:00Z", "run": RUN, "category": "tool-error",
                               "retryable": false, "message": "tofu apply exited 1"}
             }),
@@ -170,8 +200,16 @@ fn samples() -> Vec<(&'static str, Value)> {
         (
             "signal.v1.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "Signal", "run": RUN, "unit": "kubernetes",
-                "phase1Commit": COMMIT, "by": "alice", "identity": "local", "reason": "checked in Argo CD",
+                "apiVersion": "gitops.nyl/v1", "kind": "Signal", "run": RUN, "action": "confirm-removed",
+                "unit": "kubernetes", "phase1Commit": COMMIT, "by": "alice", "identity": "local", "reason": "checked in Argo CD",
+                "at": "2026-09-24T12:30:00Z", "from": "alice@workstation"
+            }),
+        ),
+        (
+            "signal-hold.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "Signal", "run": RUN, "action": "hold", "unit": "database",
+                "by": "alice", "identity": "local", "reason": "incident 4711",
                 "at": "2026-09-24T12:30:00Z", "from": "alice@workstation"
             }),
         ),

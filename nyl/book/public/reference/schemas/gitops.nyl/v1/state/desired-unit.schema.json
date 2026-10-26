@@ -614,6 +614,7 @@
       "description": "A unit's identity in state documents.",
       "properties": {
         "apiVersion": {
+          "description": "The unit's kind; empty only in a held marker, which `nyl hold` writes\nfor a unit it never rendered ([`DesiredUnit::held_marker`]).",
           "type": "string"
         },
         "environment": {
@@ -639,9 +640,7 @@
       },
       "required": [
         "environment",
-        "name",
-        "apiVersion",
-        "kind"
+        "name"
       ],
       "type": "object"
     },
@@ -702,14 +701,29 @@
       "description": "The spec with references replaced by values; absent while blocked."
     },
     "sourceCommit": {
-      "$ref": "#/$defs/CommitId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The source commit S the document was rendered from; absent only in a\nheld marker."
     },
     "sourceRevision": {
-      "$ref": "#/$defs/CommitId",
-      "description": "The effective revision for repository content, S."
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The effective revision for repository content, S; absent only in a\nheld marker."
     },
     "spec": {
-      "description": "The rendered spec, references still as expressions."
+      "description": "The rendered spec, references still as expressions; null only in a\nheld marker."
     },
     "unit": {
       "$ref": "#/$defs/UnitIdentity"
@@ -720,9 +734,6 @@
     "kind",
     "unit",
     "lifecycle",
-    "sourceCommit",
-    "sourceRevision",
-    "spec",
     "readiness"
   ],
   "title": "DesiredUnit",

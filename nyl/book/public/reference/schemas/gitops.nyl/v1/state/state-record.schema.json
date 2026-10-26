@@ -113,6 +113,35 @@
             "to"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`nyl state delete`: the environment's other state files were removed\nin the same commit, and `state.yaml` stays as the deleted marker. A\nplain `nyl state init` refuses on it (`NYL-STATE-DELETED`); `--fresh`\nappends a new initialization. Contract:\n[Instances](../../../../design/orchestration-core.md#instances).",
+          "properties": {
+            "at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "state-deleted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "at",
+            "by"
+          ],
+          "type": "object"
         }
       ]
     },

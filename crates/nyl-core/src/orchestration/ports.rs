@@ -154,8 +154,10 @@ pub struct TransitionChanges {
     /// Remove every file of the environment's state on both refs before
     /// applying the other changes: `state.yaml`, `desired/`, and `observed/`
     /// beneath the location's `path`, leaving other environments' files of a
-    /// shared ref alone. `nyl state delete` writes it, so the refs and their
-    /// history stay. Contract: [Instances](../../../../design/orchestration-core.md#instances).
+    /// shared ref alone. `nyl state delete` writes it together with
+    /// `record`, whose last event is `state-deleted`, so `state.yaml` stays
+    /// as the deleted marker and the refs and their history stay. Contract:
+    /// [Instances](../../../../design/orchestration-core.md#instances).
     pub clear: bool,
     /// Write the observed side's commit even when no document changes, so
     /// the transition itself is recorded, such as the takeover of a broken

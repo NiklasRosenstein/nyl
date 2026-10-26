@@ -3,7 +3,13 @@
 //! Contract: [Observed unit](../../../../design/orchestration-core.md#observed-unit):
 //! a receipt is current exactly when its unit's uid and its execution key
 //! equal the current desired document's. Readiness, reference resolution,
-//! status, and `nyl get` all ask this one function.
+//! status, and `nyl get` all ask this one function. Producer identity
+//! (the uids in provenance) never makes a receipt stale and is not part of
+//! the execution key: a consumer of a recreated producer runs again only
+//! when its own execution key changes, such as when it consumes an output
+//! that changed with the producer. A returning tombstone with an unchanged
+//! key is current at once, and the dependents of a replaced unit with an
+//! unchanged key stay current.
 
 use nyl_core::orchestration::state::{DesiredUnit, ObservedUnit};
 
@@ -18,30 +24,6 @@ pub fn receipt_is_current(desired: &DesiredUnit, observed: Option<&ObservedUnit>
         return false;
     };
     desired.unit.uid.is_some() && desired.unit.uid == observed.unit.uid && receipt.execution_key == *key
-}
-
-/// [`receipt_is_current`] within an environment's desired documents:
-/// additionally, every producer of the same environment that the receipt's
-/// provenance cites still has the cited uid in `units`, so a consumer whose
-/// producer became a new incarnation (replaced, or returned after its
-/// teardown) runs again with the new outputs (open question Q3, option B).
-/// Selection, status, `nyl get output`, and the run path ask this one
-/// function.
-///
-/// `units` is the resolution view: every desired document of the
-/// environment's state, active, held, deleting, and retained alike. A held
-/// or deleting producer keeps its uid, so its consumers stay current; only
-/// a new incarnation or a removed producer makes them stale.
-///
-/// Skeleton note: until package `lifecycle` implements the provenance part,
-/// it equals [`receipt_is_current`].
-pub fn receipt_is_current_in(
-    units: &std::collections::BTreeMap<nyl_core::orchestration::ids::UnitName, DesiredUnit>,
-    desired: &DesiredUnit,
-    observed: Option<&ObservedUnit>,
-) -> bool {
-    let _ = units;
-    receipt_is_current(desired, observed)
 }
 
 /// `observed` when it is of `desired`'s incarnation: a receipt or condition

@@ -8,6 +8,7 @@ pub mod execution_key;
 mod fixtures;
 pub mod freshness;
 pub mod graph;
+pub mod hold;
 pub mod lease;
 pub mod lifecycle;
 pub mod local;

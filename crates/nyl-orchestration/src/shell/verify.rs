@@ -321,7 +321,11 @@ fn project_dirs(
     let mut located: BTreeMap<CommitId, Result<String, String>> = BTreeMap::new();
     let mut projects = BTreeMap::new();
     for name in names {
-        let revision = &snapshot.desired[*name].source_revision;
+        // Only rendered documents have receipts to verify; a held marker has none.
+        let Some(revision) = &snapshot.desired[*name].source_revision else {
+            projects.insert((*name).clone(), Err(format!("{name} has never been rendered")));
+            continue;
+        };
         let project = located
             .entry(revision.clone())
             .or_insert_with(|| {
@@ -362,6 +366,7 @@ fn driver_failure(name: &UnitName, message: String, fix: &str) -> Verified {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One unit's verification in order: locate, check out, verify, record.
 fn verify_unit(
     context: &RunContext<'_>,
     request: &RunRequest,
@@ -392,7 +397,10 @@ fn verify_unit(
         return failed(format!("no driver serves kind {}", unit.unit.kind));
     };
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-    let commit = match effective_commit(spec, &driver.source_fields(spec), &unit.source_revision) {
+    let Some(revision) = &unit.source_revision else {
+        return failed(format!("{name} has never been rendered"));
+    };
+    let commit = match effective_commit(spec, &driver.source_fields(spec), revision) {
         Ok(commit) => commit,
         Err(message) => return failed(message),
     };
