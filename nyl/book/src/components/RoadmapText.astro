@@ -1,0 +1,34 @@
+---
+// Roadmap text with `code` spans and [links](url). Docs links are written as
+// `/nyl/...`, like Markdown links, and follow the deployment base here too.
+import { inlineParts } from '../lib/roadmaps/index.mjs';
+
+interface Part {
+  kind: 'text' | 'code' | 'link';
+  value: string;
+  href?: string;
+  children?: Part[];
+}
+interface Props {
+  text?: string;
+  parts?: Part[];
+}
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const href = (url: string) => (url === '/nyl' || url.startsWith('/nyl/') ? `${base}${url.slice(4)}` : url);
+const parts: Part[] = Astro.props.parts ?? inlineParts(Astro.props.text ?? '');
+---
+
+{
+  parts.map((part) =>
+    part.kind === 'code' ? (
+      <code>{part.value}</code>
+    ) : part.kind === 'link' ? (
+      <a href={href(part.href ?? '')}>
+        <Astro.self parts={part.children} />
+      </a>
+    ) : (
+      part.value
+    ),
+  )
+}

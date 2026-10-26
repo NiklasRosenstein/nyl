@@ -152,7 +152,16 @@ export default defineConfig({
               "orchestration/runs",
               "orchestration/recovery",
               { label: "Resources", items: [{ autogenerate: { directory: "orchestration/resource-guides" } }] },
+              "orchestration/roadmap",
             ],
+          },
+          {
+            id: "domain-resources",
+            label: "Domain resources",
+            link: "/domain-resources/",
+            icon: "list-format",
+            badge: { text: "Planned", variant: "note" },
+            items: ["domain-resources", "domain-resources/example", "domain-resources/roadmap"],
           },
           {
             id: "reference",

@@ -20,128 +20,30 @@ and its rationale here; keep superseded plans and decision history in commits,
 pull requests, or dedicated decision notes. [AGENTS.md](AGENTS.md) defines the
 working instructions.
 
+This file records direction. Progress, the next step, and each milestone's
+items and exit criterion are tracked in the documentation, on the
+[Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/) and the
+[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/), generated from
+[`nyl/book/src/lib/roadmaps/`](nyl/book/src/lib/roadmaps/).
+
 ## Progress and next step
 
 Orchestration and the interfaces below are planned capabilities, not claims
-about Nyl's current CLI.
+about Nyl's current CLI. Status, progress, and the next step are on the
+[Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/). Milestone identifiers stay
+stable for references from issues and pull requests:
 
-| ID | Milestone | Status | Depends on |
-| --- | --- | --- | --- |
-| M1 | Unit, input, state, and promotion contract | Done | — |
-| M2 | Release inputs without orchestration | Done | M1 |
-| M3 | Orchestration core with a constrained command unit | In progress | M1 |
-| M4 | Container image and Terraform units | Planned | M3 |
-| M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
-| M6 | Promotion paths | Planned | M5 |
-| M7 | Continuous operation and scope decision | Planned | M6 |
-| M8 | Provider-neutral CI execution and first GitLab adapter | Planned | M3, M4 |
-
-**Next step:** continue M3, delivered in six parts against the
-[orchestration core contract](design/orchestration-core.md) and its
-executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/). Each
-part removes the walkthroughs it makes pass from the harness's pending list.
-
-1. Foundations, done: the business rules moved out of the `nyl` package, one
-   `GitSource`, the `nyl-state`, `nyl-orchestration`, and `nyl-drivers`
-   crates, the orchestration types and traits in `nyl-core` with golden
-   files, the scenario format and Git test world, fault points, the
-   `FakeImage` and `FakeInfra` kinds, and the `test-clock` feature. The
-   harness validates every scenario and lists the reached ones as pending
-   until the commands they use exist.
-2. Done: the Git state store in `nyl-state` over the shared `nyl-git`
-   transport, `nyl state init`/`move`/`forget`, `nyl lease break`, leases and
-   run refs with compare-and-swap, the fenced transition commit, optional
-   dedicated credentials, and the Environment and EnvironmentGroup resources.
-   Custom refs and atomic leased pushes are verified on GitHub, GitLab,
-   Forgejo, and plain Git with both coordination prefixes
-   ([Git host compatibility](nyl/book/src/content/docs/orchestration/environments-and-state.md#git-host-compatibility)).
-3. Done: one environment's run: the Command unit and its driver, unit selection
-   and templating, desired documents, `fromUnit` references through
-   `nyl_core::bindings`, the versioned dependency graph and waves,
-   content-based execution keys, pinned source worktrees with reachability
-   checks, `FakePublication`, `plan`, `reconcile` (with `--unit`), `status`,
-   `get -e`, `nyl validate` of targets whose bindings orchestration resolves,
-   and state commits whose author and time the command line passes in.
-   Walkthroughs `dependency-wave`, `unit-jobs`, and
-   `unavailable-upstream-output` run in the tier-1 harness. Part 3
-   deliberately leaves out:
-   - A KubernetesPublication unit's `releases` holds only the bindings
-     orchestration resolves, `fromUnit` and `fromPromotion`; the other inputs
-     enter its key through the render's input record until the real driver
-     (M5) and PromotionPath selectors (M6) add them.
-   - Orchestrated publications keep ownership index version 2; version 3,
-     which records the owning environment and unit, arrives with the
-     KubernetesPublication driver in M5.
-   - Unit source fields that name another repository wait for M4, the first
-     kinds that build from one.
-   - Unit `env.secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until
-     the common credential admission of part 6; `env.passthrough` works.
-   - References and `dependsOn` entries requiring `evidence: attested` or
-     naming `attestations` are rejected with `NYL-ATTESTATIONS-UNSUPPORTED`
-     until receipts record attestation results (M5/M6), so a bare receipt
-     never satisfies a stronger requirement.
-   - Each unit has one effective commit, and a unit whose source fields pin
-     different commits is rejected. Per-field worktrees wait for M4.
-   - `nyl validate` checks a `fromUnit` artifact reference only for the
-     producer's existence and declared non-sensitive outputs; artifact names
-     are checked once kinds declare them, in M5.
-4. Done: recovery and concurrency. `verify` records drift and health
-   observations and driver attestations against current receipts; `recover
-   --retry` and `--accept <run>` clear a condition or adopt a checkpointed
-   result. A run takes over from runs that died, lost their lease, or were
-   cancelled: it adopts the uids of units they created, imports their
-   checkpoints idempotently as `imported` receipts, gives units they left
-   without a checkpoint an `uncertain` condition, recovers converging units
-   in the same run, and retires run refs that are still evidence for an
-   uncertain unit to evidence refs. SIGINT and SIGTERM cancel a run: it
-   forwards the signal to running tools, checkpoints what finished, marks
-   running units uncertain, keeps its run ref, releases the lease, and exits
-   4 with `NYL-RUN-CANCELLED`. Also done: competing runners with
-   `--wait-lease`, `--local` runs (with `--local-lease` and `--approve` for
-   non-converging units, recorded with the `local` approval identity), state
-   without a remote, `state move --from local`, `state reset --local` and
-   `state restore --to`, crash injection at every killable fault point,
-   property tests of the transition table and of import, and one reusable
-   worktree per concurrency slot, reset between units to the unit's commit
-   with untracked and ignored files removed, with the symbolic-link check run
-   once per tree. Walkthroughs `effects-without-receipt` and
-   `competing-runners` and the `recovery/` crash scenarios run in the tier-1
-   harness. Part 4 deliberately leaves out:
-   - `--approve` outside `--local`, and approvals of remote runs, wait for
-     part 6; until then a non-converging unit with an `uncertain` condition
-     in a remote run waits for `nyl recover`.
-   - `verify` takes one environment; `-l` and `-g` selections arrive with
-     multi-environment runs in part 6.
-   - No built-in kind declares the `inspect` recovery policy yet; the policy
-     is implemented and tested with the fake kinds, and drivers adopt it from
-     M4 where they can observe their effects.
-   - Drivers report attestations to `verify`, but `nyl attest` and references
-     requiring `evidence: attested` wait for M5 and M6.
-5. Lifecycle: `teardown` (including `--hold`, `--all`, and
-   `--confirm-removed`), `hold`, `resume`, `state delete` with
-   decommissioning, teardown order, and `--allow-teardown` /
-   `--allow-dependents`. A hold on an `uncertain` unit keeps its last
-   receipt's desired document and uid as desired state, with the condition
-   left in place, so consumers keep resolving from that receipt. Walkthrough:
-   `deletion`, plus a walkthrough step that holds an uncertain producer and
-   reconciles a consumer against its previous outputs. Drift repair:
-   `reconcile` executes units whose recovery policy is `converge` again when
-   their latest drift observation is `drifted`, by default
-   (`Environment.spec.driftRepair: converge`, `manual` to opt out), `status`
-   shows drifted units that wait, and `nyl reconcile --reapply <unit>`
-   repairs any current unit explicitly, recorded with requester and reason.
-   Walkthrough step: `verify` finds drift, `reconcile` repairs the idempotent
-   unit, and the other waits for `--reapply`.
-6. Multi-environment runs, including `verify` over several environments,
-   approvals (`verified`, `asserted`, and `local` sources, `--approve` for
-   remote runs, the GitHub lookup, the `[approval] lookup` hook, and
-   `bind: plan` with destroy digests), the tier-2 harness, and the M3 part of
-   reference scenario 1.
-
-M3 uses `FakePublication` for Kubernetes publication; the real
-`KubernetesPublication` driver arrives in M5. `nyl exec` belongs to M4 with
-the first drivers that wrap a native tool, `nyl build` to M4, attestations to
-M5 and M6, and `nyl promote` to M6.
+| ID | Milestone |
+| --- | --- |
+| M1 | Unit, input, state, and promotion contract |
+| M2 | Release inputs without orchestration |
+| M3 | Orchestration core with a constrained command unit |
+| M4 | Container image and Terraform units |
+| M5 | Images and Terraform outputs into Kubernetes releases |
+| M6 | Promotion paths |
+| M7 | Continuous operation and scope decision |
+| M8 | Provider-neutral CI execution and first GitLab adapter |
+| M9 | Domain resource collections as unit inputs |
 
 ## Product direction
 
@@ -498,6 +400,15 @@ must be reachable from a protected ref or its lock's own branch; run source
 commits must be reachable too, unless an environment opts into unprotected
 sources.
 
+### Domain resource collections (M9, proposed)
+
+Teams declare typed domain resources, such as AWS accounts or GitHub teams, in
+paths they own, and explicitly registered units consume them as a tool-neutral
+bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
+the [domain resources design](design/domain-resources.md), and its slices and
+progress are on the
+[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+
 ### Promotion paths (M6)
 
 A PromotionPath is the explicit link between source selectors and target
@@ -740,282 +651,9 @@ structured results.
 
 ## Milestones and acceptance criteria
 
-### M1 — Unit, input, state, and promotion contract
-
-- [x] Define Release input declarations, DeploymentTarget bindings, types, and
-  lock semantics for `fromGit` ([contract](design/release-inputs.md)).
-- [x] Define Unit, Environment, and PromotionPath schemas; typed references;
-  output admission; and artifact descriptors
-  ([core](design/orchestration-core.md), [promotion](design/promotion.md)).
-- [x] Define desired/observed ref layout, receipt freshness, identity fences,
-  leases, deletion, and recovery invariants.
-- [x] Define the driver trait, capabilities, and the command unit's process
-  contract ([core](design/orchestration-core.md#drivers),
-  [infrastructure units](design/infrastructure-units.md)).
-- [x] Specify CLI effects, revision selection, partial plans, and exit
-  categories.
-- [x] Write the exit-criterion walkthroughs as
-  [scenario files](nyl/tests/scenarios/walkthroughs/) for the M3 harness.
-
-**Exit criterion:** the contract explains a successful dependency wave, an
-unavailable upstream output, effects without a receipt, competing runners, a
-promotion with stale source evidence, and deletion, without hidden state or
-ambiguous command semantics. Met by the
-[walkthroughs](design/orchestration-core.md#walkthroughs) and their scenarios.
-
-### M2 — Release inputs without orchestration
-
-- [x] Implement Release inputs and DeploymentTarget bindings for `value`,
-  `fromFile`, `fromGit`, and `fromPublication`, with type validation and
-  defaults.
-- [x] Support `carryFileFromWorktree` for `fromPublication`, excluding carried files from the
-  dirty check.
-- [x] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
-  `--target` filter.
-- [x] Apply target bindings in direct commands and add `--input`/`--inputs`;
-  a target that selects no group containing the Release fails unless
-  `--application-group` or `--defaults-only` is given.
-- [x] Require unique generated Argo CD names across every pair of targets whose
-  instances resolve to the same cluster and namespace, including implicit
-  per-target instances.
-- [x] Record resolved inputs in the dependency recorder, render-cache key, and
-  the existing ownership-index `inputs` map as digests under reserved
-  `@`-prefixed keys, keeping index format version 2.
-- [x] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
-  an actionable message.
-- [x] Move binding declarations, validation, and resolution into one generic
-  resolver in `nyl_core::bindings`: typed declarations, exactly one source
-  per binding, JSON Pointer selection, effective-value precedence, digests
-  and provenance, and aggregated issues, with each binding kind served by a
-  provider trait. Release input sources become providers in `nyl-render`, so
-  M3's unit `values` and `variables`, PromotionPath selectors, and `nyl get`
-  reuse the same resolver instead of growing their own: it resolves declared
-  slots and references at any depth of a document, records provenance per JSON
-  Pointer, and lists blocked references by location.
-- [x] Document the feature and regenerate resource schemas.
-- [x] Expand template values (`${ … }`) in fields rendered later than the
-  structural pass, starting with `applicationNameTemplate`, which requires at
-  least one expression and no longer expands the `{% raw %}` form.
-- [x] Extract `nyl-core` and `nyl-render` from the current crate without
-  behavior change, per the implementation architecture. The `nyl` package
-  keeps the CLI role, and no crate is published to crates.io.
-
-**Exit criterion:** a target renders Releases from static, locked external, and
-same-branch publication state inputs, committed or carried, through
-`render-tree` and `publish-tree`;
-a concurrent state push makes publication fail rather than interleave; projects
-without inputs that the previous release rendered produce byte-identical
-output, except where the two listed validation changes now reject them: a
-`{% raw %}` `applicationNameTemplate`, and duplicate generated names across
-implicit per-target Argo CD instances.
-
-### M3 — Orchestration core with a constrained command unit
-
-- [ ] Implement environments, YAML state files with published schemas,
-  `nyl state init`/`move`/`forget`/`delete` (including decommissioning declared
-  environments and moves between branches and custom refs), leases and run
-  checkpoints under a configurable coordination ref prefix, validated against
-  GitHub, GitLab, and Forgejo for custom refs and mixed atomic pushes, and one
-  transition commit per operation with a machine-readable summary, pushed
-  atomically with the lease check.
-- [x] Support optional dedicated SSH keys and HTTPS tokens, configured only
-  when needed, for state pushes and `publish-tree`. Remote Git operations run
-  the `git` command line through `nyl-git`, so by default they authenticate
-  as the user's `git` does (SSH config and keys, agent, credential helpers);
-  `[[git.credentials]]` in `nyl.toml` names a key file, or a key or token in
-  an environment variable, per repository URL prefix, for runners without
-  those. State pushes use the same transport, including atomic multi-ref
-  pushes with per-ref leases; libgit2 handles only local repository access.
-- [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
-  (including `--hold`), `hold`, and `resume` for a dependency graph of command
-  units with `fromUnit` references, including `--local` runs next to remote
-  state on the clone's own state branches, state without a remote, and
-  `state move --from local` when a remote is added.
-- [ ] Implement cross-environment references and multi-environment runs by
-  repeated `-e`, a label selector, or an EnvironmentGroup with shared
-  defaults, ordered by those references, each environment with its own lease
-  and transition commit.
-- [ ] Implement approvals bound to the desired document, with recorded approval
-  sources and identity (`verified`, `asserted`, `local`), the GitHub approver
-  lookup and the `[approval] lookup` hook, and the common `env` credential
-  admission.
-- [ ] Implement pinned source worktrees, reachability checks against protected
-  refs, and content-based execution keys.
-- [x] Prove stale-evidence blocking, competing runners, and recovery after an
-  effect succeeds but receipt publication fails.
-- [x] Move the business rules the `nyl` package still holds into the crates
-  that own them before orchestration builds on them: ownership-index input
-  hashing (`hash_inputs`), the worktree source state with its carry exclusion
-  (`source_state`), and publication-base verification
-  (`verify_publication_base`). The command line then only parses arguments,
-  wires crates, and renders reports.
-- [x] Replace the remote fields of `ApplicationGroupSource` and `fromGit`'s
-  `GitInputSource` with the one `GitSource` type of the implementation
-  architecture, which command-unit sources then use too. Both already share
-  one commit-lock rule.
-- [x] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
-  crates with the scenario harness, property tests, and crash injection.
-- [ ] Expose a pure, versioned graph of literal unit addresses and dependency
-  edges before upstream values exist, shared by local execution and future CI
-  exporters. Prove separate unit-scoped invocations through the
-  [unit-jobs walkthrough](nyl/tests/scenarios/walkthroughs/unit-jobs/scenario.yaml)
-  without changing environment-wide lease or ownership semantics.
-- [ ] Add the `test-clock` Cargo feature, the test-only fake kinds, and the
-  two-tier harness for the reference scenarios: in-process with fakes, and
-  through the real binary under the `tier2` Cargo feature.
-
-**Exit criterion:** two dependent command units reconcile locally and in CI with
-identical results; repeat execution is a no-op; interruption has a demonstrated
-recovery path; the M3 part of the
-[reference scenarios](design/reference-scenarios.md) and every
-[walkthrough scenario](nyl/tests/scenarios/walkthroughs/) marked M3 pass.
-
-### M4 — Container image and Terraform units
-
-- [ ] Add the `OciImage` kind over `docker buildx`, recording digest references
-  and a `ContainerImage` artifact, with the `registryAuth` helper and named
-  build contexts.
-- [ ] Add `nyl build` for kinds with the `build` capability, starting with
-  `OciImage`: builds from the current worktree, `--load` or `--push`, no state.
-- [ ] Add the `Terraform` and `OpenTofu` kinds over one implementation, with
-  native state and locking, declared output admission, change digests, plan
-  approval (`bind: plan`), verification, and teardown.
-- [ ] Support a local-module Terraform configuration pinned to a source commit
-  and path.
-- [ ] Demonstrate Terraform-to-Terraform output references.
-- [ ] Check out only what a unit reads when its kind declares its inputs:
-  `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their
-  source paths and the `nyl.toml` directory, so their cost in a large
-  monorepo follows the unit, not the repository. A Command unit can read
-  anything in the repository, so it keeps a full worktree unless it declares
-  the paths it reads.
-
-**Exit criterion:** a network configuration's outputs feed a dependent
-configuration; an image build records a digest; unchanged inputs plan no change;
-the M4 part of the reference scenarios passes with the real tools in the
-required `tier2` CI job.
-
-### M5 — Images and Terraform outputs into Kubernetes releases
-
-- [ ] Add the Kubernetes publication unit over `render-tree`/`publish-tree`.
-- [ ] Resolve `fromUnit` Release input bindings into an explicit pinned input
-  snapshot for rendering.
-- [ ] Distinguish `published` from `attested` evidence and named attestations
-  for dependents.
-- [ ] Add the publication unit's observe mode: read generated Argo CD
-  Applications' last successful sync and health, match them to publication
-  commits by Application directory tree, record the observations, and attest
-  `accepted` and `healthy`.
-- [ ] Document an end-to-end local/CI example.
-- [ ] Declare the `build` capability for `KubernetesPublication`: `nyl build`
-  renders the tree, `--diff` compares it with the published tree, and `--push`
-  publishes only targets no environment owns.
-- [ ] Support inline DeploymentTargets on `KubernetesPublication`, its
-  two-phase teardown with the `teardownWait` strategies, ownership-index
-  owner fencing, and the teardown readiness check with its warnings.
-- [ ] Add EnvironmentTemplates for preview environments: instances through
-  `nyl state init --template`, `teardown --all`, `state delete`, shared state
-  refs through `state.path`, cross-environment references to declared
-  environments, sliding expiry, and `maxInstances`.
-
-**Exit criterion:** one reconcile builds an image, applies Terraform, and
-publishes Kubernetes manifests consuming both; the same Releases still render
-with static inputs in a target that does not use orchestration; all three
-reference scenarios, including preview closure and expiry, pass in both tiers.
-
-### M6 — Promotion paths
-
-- [ ] Implement PromotionPath, PromotionRecord, and `nyl promote`
-  with evidence checks and an optional pull-request change gate.
-- [ ] Promote dev's source commit and image digest to prod from one recorded
-  dev state, with `record: state` and `record: source`, the whole-source
-  evidence rule, recorded evidence for older states, artifact verification,
-  and rollback through `--revision`.
-- [ ] Support several paths into one environment: `source.fromPromotion.paths`,
-  path-less bindings, the per-value supersede check with `--supersede`, and
-  the hotfix pattern with a fifth reference scenario.
-- [ ] Add `nyl get states`, `nyl get promotion-candidates`, and
-  `nyl promote --dry-run`.
-- [ ] Promote values only, such as an image digest and a Terraform source
-  commit, across differently named units and inputs, each from the state its
-  consumer runs.
-- [ ] Promote from a non-orchestrated target's published inputs, including a
-  carried state file, with values verified against the recorded digests.
-- [ ] Promote into a target outside every environment: `to: {target}`, the
-  record in the target's `spec.promotions`, `fromPromotion` resolution in tree
-  and direct commands, and the ownership index's applied sequence.
-- [ ] Implement attestations: driver-declared names, `spec.attestations` on
-  units and environments, `nyl attest` for environments and targets, the
-  `published | attested` evidence levels with a path's per-unit
-  `attestations`, blocking on failures with `--ignore-attestation`, and
-  `maxAttestationAge`.
-- [ ] Gate promotion on fresh recorded attestations for both PromotionPath
-  sources, sourcing each value from the publication its Application runs.
-- [ ] Show promotion lineage in `status`.
-
-**Exit criterion:** prod runs exactly the source commit and image digest dev
-proved, with auditable lineage; stale, missing, or mixed source evidence blocks
-promotion; a hotfix reaches prod through its own path, and a dev promotion
-without the fix is refused until the fix is merged or superseded; a
-value-only path promotes each value from what its consuming Application runs.
-
-### M7 — Continuous operation and scope decision
-
-- [ ] Evaluate a scheduled or long-running runner and its observation cadence
-  using M3–M6 evidence. The drift-repair policy is settled in M3 part 5:
-  converging units repair recorded drift automatically by default.
-- [ ] Decide which command-unit uses warrant typed drivers, and whether to add
-  the plugin driver protocol.
-- [ ] Support minimum healthy durations and flapping guards over recorded
-  observations.
-- [ ] Evaluate application-level checks as promotion evidence.
-- [ ] Record the selected direction and constraints in this roadmap.
-
-### M8 — Provider-neutral CI execution and first GitLab adapter
-
-- [ ] Implement `nyl ci export gitlab` for one environment, with reconcile and
-  read-only plan operations, consuming M3's graph and typed reports. Keep CI
-  runner configuration separate from unit semantics.
-- [ ] Specify provider-neutral graph/manifest types, capability negotiation,
-  normalized diagnostics, and a conformance suite shared by GitLab and an
-  in-memory test adapter. Provider IDs and scheduler syntax never enter unit
-  identity, receipt formats, or the execution key. Unsupported capabilities
-  fail explicitly or use a documented safe fallback.
-- [ ] Generate stable, collision-checked job IDs and `needs` edges, a pinned
-  public graph manifest, per-unit reports, and an always-run read-only summary.
-  Include current producers and unresolved consumers, and a lifecycle node:
-  `reconcile --leaving` after the unit jobs for reconciliation, and a read-only
-  lifecycle report for planning, including empty selections, preserving the
-  caller's `--fail-on-leaving` policy without state writes.
-- [ ] Bind jobs to the admitted source, project, environment, operation, and
-  adapter configuration. Implement opt-in deployment admission: a versioned
-  record on `state.admissionRef` with forward-only generations chosen by the
-  environment's source rules, idempotent re-dispatch, authorized rollback, and
-  normalized authorization evidence. Under the environment lease, superseded
-  worker attempts skip before intent writes, imports, or effects; `state
-  restore` carries the record forward. Provider pipeline serialization is an
-  optional optimization, not the fence.
-- [ ] Add the `exec` driver capability and `nyl exec` for held units, with the
-  deployed or `--worktree` spec and source snapshot, ownership-scope checks,
-  recorded spec differences, approval of the first execution afterwards, and
-  refusal exit 125; implement it for OpenTofu and Terraform,
-  with their missing-state guard.
-- [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
-  revalidate approvals and never pass authoritative outputs through CI artifacts.
-- [ ] Cover the [CI acceptance scenarios](design/ci-execution.md#acceptance-scenarios)
-  with fake drivers and local Git repositories, plus a GitLab configuration and
-  integration check. Demonstrate the generated jobs with M4's real drivers.
-
-**Exit criterion:** a GitLab child pipeline displays separate producer and
-consumer jobs, executes at a pinned source, explains no-ops and blockers, and
-preserves the local core's freshness, lease, approval, and recovery rules across
-retries and cancellation. Independent unit jobs are observably serialized within
-one environment; no distributed-run guarantee is made. Retrying an old worker
-after a newer admission has no deployment effects, and a newly authorized
-rollback remains possible. Removing a unit shows a lifecycle job that destroys
-nothing without `--allow-teardown`, and removing all units still produces a
-read-only MR lifecycle report. The in-memory adapter proves the same semantic graph and
-admission behavior without GitLab types or services.
+Each milestone's items and exit criterion are on the
+[Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/#milestones), with M9's slices
+on the [Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
 
 ## Open decisions
 
@@ -1048,6 +686,8 @@ reasons to delay independent work.
   PromotionRecord, state selection, attestations, and observation for M5–M6
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
+- [Domain resource collections](design/domain-resources.md): the M9 proposal
+  for team-owned declarations as unit inputs
 
 - [Nyl rendering session and bundle](crates/nyl-render/src/render/session.rs)
 - [Nyl components](crates/nyl-render/src/components/mod.rs)

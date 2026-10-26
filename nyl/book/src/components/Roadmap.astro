@@ -1,0 +1,483 @@
+---
+// A roadmap rendered from its data module, so the page and the tracked state
+// cannot disagree. The page renders one part at a time and writes its own
+// headings between them, so they reach the page outline.
+//
+// The stages hang on a vertical rail: each stage's node shows its status, and
+// the rail below it fills with the share of the stage's items that are done.
+import RoadmapText from './RoadmapText.astro';
+import {
+  delegateRoadmap,
+  findStage,
+  issueUrl,
+  prerequisites,
+  roadmapProgress,
+  stageNeeds,
+  stageProgress,
+  stageStatus,
+  stageTitle,
+  statusLabels,
+} from '../lib/roadmaps/index.mjs';
+
+interface Props {
+  // The data modules are plain JavaScript; their shape is checked by tests.
+  roadmap: any;
+  part: 'exit' | 'progress' | 'next' | 'prerequisites' | 'stages';
+}
+
+const { roadmap, part } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const anchor = (id: string) => id.toLowerCase();
+const stageHref = (id: string) => {
+  const found = findStage(id);
+  if (!found) return undefined;
+  return found.roadmap.id === roadmap.id ? `#${anchor(id)}` : `${base}/${found.roadmap.page}#${anchor(id)}`;
+};
+const percent = ({ done, total }: { done: number; total: number }) => (total ? Math.round((done / total) * 100) : 0);
+const overall = roadmapProgress(roadmap);
+const stages = roadmap.stages.map((stage: any) => {
+  const status = stageStatus(stage);
+  const progress = stageProgress(stage);
+  const delegate = stage.delegate ? delegateRoadmap(stage) : undefined;
+  // A done stage fills its rail even when items were dropped from scope.
+  const fill = status === 'done' ? 100 : percent(progress);
+  return { stage, title: stageTitle(stage), needs: stageNeeds(stage), status, progress, delegate, fill };
+});
+const required = prerequisites(roadmap).map((id: string) => {
+  const found = findStage(id);
+  return { id, title: found ? stageTitle(found.stage) : id, status: found ? stageStatus(found.stage) : 'planned' };
+});
+---
+
+<div class="roadmap not-content">
+  {
+    part === 'exit' && roadmap.exitCriterion && (
+      <p class="roadmap-exit">
+        <strong>Done when:</strong> <RoadmapText text={roadmap.exitCriterion} />
+      </p>
+    )
+  }
+
+  {
+    part === 'progress' && (
+      <div class="overall">
+        <div class="overall-label">
+          <strong>{roadmap.milestone ?? roadmap.title}</strong>
+          <span>
+            {overall.done} of {overall.total} {roadmap.itemNoun} done
+          </span>
+          {(roadmap.issues ?? []).map((number: number) => (
+            <a href={issueUrl(number)}>#{number}</a>
+          ))}
+        </div>
+        <div
+          class="bar"
+          role="progressbar"
+          aria-label={`${roadmap.milestone ?? roadmap.title} progress`}
+          aria-valuemin="0"
+          aria-valuemax={overall.total}
+          aria-valuenow={overall.done}
+        >
+          <div class="bar-fill" style={`width: ${percent(overall)}%`} />
+        </div>
+      </div>
+    )
+  }
+
+  {
+    part === 'next' && roadmap.nextStep && (
+      <div class="next">
+        <p>
+          <RoadmapText text={roadmap.nextStep.intro} />
+        </p>
+        <ol class="checklist">
+          {roadmap.nextStep.steps.map((step: any, index: number) => (
+            <li class={step.done ? 'done' : undefined}>
+              <span class="check" aria-hidden="true">
+                {step.done ? '✓' : ''}
+              </span>
+              <span class="step-number">{index + 1}.</span>
+              <span class="sr-only">{step.done ? 'Done: ' : 'Not done: '}</span>
+              <div class="step-text">
+                <RoadmapText text={step.text} />
+                {step.notes?.length > 0 && (
+                  <ul class="step-notes">
+                    {step.notes.map((note: string) => (
+                      <li>
+                        <RoadmapText text={note} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+        {roadmap.nextStep.outro && (
+          <p class="next-outro">
+            <RoadmapText text={roadmap.nextStep.outro} />
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  {
+    part === 'prerequisites' && (
+      <ul class="prerequisites">
+        {required.map((prerequisite: any) => (
+          <li>
+            <a href={stageHref(prerequisite.id)}>{prerequisite.id}</a>
+            <span class="prerequisite-title">{prerequisite.title}</span>
+            <span class={`status ${prerequisite.status}`}>{statusLabels[prerequisite.status as keyof typeof statusLabels]}</span>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
+  {
+    part === 'stages' && (
+      <ol class="timeline">
+        {stages.map(({ stage, title, needs, status, progress, delegate, fill }: any) => (
+          <li class={`stage ${status}`} id={anchor(stage.id)} style={`--fill: ${fill}%`}>
+            <div class="rail" aria-hidden="true">
+              <span class="node">{status === 'done' ? '✓' : ''}</span>
+              <span class="line">
+                <span class="line-fill" />
+              </span>
+            </div>
+            <section class="card" aria-labelledby={`${anchor(stage.id)}-title`}>
+              <header>
+                <span class="stage-id">{stage.id}</span>
+                <h3 id={`${anchor(stage.id)}-title`}>{title}</h3>
+                <span class={`status ${status}`}>{statusLabels[status as keyof typeof statusLabels]}</span>
+              </header>
+              <p class="summary">
+                <RoadmapText text={stage.summary} />
+              </p>
+              {delegate ? (
+                <p class="delegate">
+                  <a href={`${base}/${delegate.page}`}>Open the {delegate.milestone} roadmap</a>, which tracks its{' '}
+                  {delegate.stages.length} slices.
+                </p>
+              ) : (
+                <details open={status === 'in-progress'}>
+                  <summary>
+                    {stage.items.length} {roadmap.itemNoun}
+                  </summary>
+                  <ul class="checklist">
+                    {stage.items.map((item: any) => (
+                      <li class={item.done ? 'done' : undefined}>
+                        <span class="check" aria-hidden="true">
+                          {item.done ? '✓' : ''}
+                        </span>
+                        <span class="sr-only">{item.done ? 'Done: ' : 'Not done: '}</span>
+                        <span>
+                          <RoadmapText text={item.text} />
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {stage.exitCriterion && (
+                <p class="exit">
+                  <strong>Done when:</strong> <RoadmapText text={stage.exitCriterion} />
+                </p>
+              )}
+              <footer>
+                <span>
+                  {progress.done} of {progress.total} done
+                  {(stage.issues ?? []).map((number: number) => (
+                    <>
+                      {' · '}
+                      <a href={issueUrl(number)}>#{number}</a>
+                    </>
+                  ))}
+                </span>
+                {needs.length > 0 && (
+                  <span class="needs">
+                    Needs
+                    {needs.map((need: string) => (
+                      <a href={stageHref(need)}>{need}</a>
+                    ))}
+                  </span>
+                )}
+              </footer>
+            </section>
+          </li>
+        ))}
+      </ol>
+    )
+  }
+</div>
+
+<style>
+  .roadmap {
+    --node: 1.5rem;
+    --node-top: 1.125rem;
+    --gap: 1rem;
+    --rail-off: var(--sl-color-gray-5);
+    margin-top: 1rem;
+  }
+  .overall {
+    display: grid;
+    gap: 0.5rem;
+  }
+  .overall-label {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    color: var(--sl-color-gray-2);
+  }
+  .overall-label strong {
+    color: var(--sl-color-white);
+    font-size: var(--sl-text-lg);
+  }
+  .bar {
+    height: 0.5rem;
+    border-radius: 999px;
+    background: var(--rail-off);
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--sl-color-accent);
+  }
+  .roadmap a {
+    color: var(--sl-color-text-accent);
+  }
+  .roadmap-exit {
+    margin: 0;
+  }
+  .step-number {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+    color: var(--sl-color-gray-3);
+  }
+  .step-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .step-notes {
+    margin: 0.375rem 0 0;
+    padding-left: 1.125rem;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+  .step-notes li + li {
+    margin-top: 0.25rem;
+  }
+  .next .next-outro {
+    margin: 0.75rem 0 0;
+  }
+  .next p {
+    margin: 0 0 0.75rem;
+  }
+  .prerequisites {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 0.5rem;
+  }
+  .prerequisites li {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+  }
+  .prerequisites li + li {
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+  .prerequisites a {
+    font-weight: 600;
+    min-width: 2.25rem;
+  }
+  .prerequisite-title {
+    flex: 1;
+    color: var(--sl-color-gray-2);
+  }
+
+  /* The rail: a node per stage, joined by a line that fills with progress. */
+  .timeline {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: var(--gap);
+  }
+  .stage {
+    display: grid;
+    grid-template-columns: var(--node) minmax(0, 1fr);
+    column-gap: 1rem;
+    scroll-margin-top: calc(var(--sl-nav-height) + 1rem);
+  }
+  .rail {
+    position: relative;
+  }
+  .node {
+    position: absolute;
+    top: var(--node-top);
+    left: 0;
+    z-index: 1;
+    box-sizing: border-box;
+    width: var(--node);
+    height: var(--node);
+    border-radius: 50%;
+    border: 2px solid var(--rail-off);
+    background: var(--sl-color-bg);
+    display: grid;
+    place-items: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--sl-color-black);
+  }
+  .stage.done .node {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-accent);
+  }
+  .stage.in-progress .node {
+    border-color: var(--sl-color-accent);
+    background: conic-gradient(var(--sl-color-accent) var(--fill), var(--sl-color-bg) 0);
+  }
+  .line {
+    position: absolute;
+    left: calc(var(--node) / 2 - 1.5px);
+    width: 3px;
+    top: calc(var(--node-top) + var(--node) / 2);
+    bottom: calc(-1 * (var(--gap) + var(--node-top) + var(--node) / 2));
+    background: var(--rail-off);
+  }
+  .stage:last-child .line {
+    display: none;
+  }
+  .line-fill {
+    display: block;
+    width: 100%;
+    height: var(--fill);
+    background: var(--sl-color-accent);
+  }
+
+  .card {
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    min-width: 0;
+  }
+  .stage.in-progress .card {
+    border-color: var(--sl-color-accent);
+  }
+  .card header {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+  .card h3 {
+    flex: 1;
+    margin: 0;
+    font-size: var(--sl-text-lg);
+    color: var(--sl-color-white);
+  }
+  .stage-id {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .summary {
+    margin: 0.5rem 0 0.75rem;
+    color: var(--sl-color-gray-2);
+  }
+  .delegate {
+    margin: 0;
+  }
+  details summary {
+    cursor: pointer;
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+  }
+  details[open] summary {
+    margin-bottom: 0.5rem;
+  }
+  .exit {
+    margin: 0.75rem 0 0;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+  .exit strong {
+    color: var(--sl-color-white);
+  }
+  .checklist {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.375rem;
+  }
+  .checklist > li {
+    display: flex;
+    gap: 0.625rem;
+    align-items: baseline;
+  }
+  .check {
+    flex: none;
+    box-sizing: border-box;
+    width: 1rem;
+    height: 1rem;
+    border: 1px solid var(--sl-color-gray-4);
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    line-height: 0.9rem;
+    text-align: center;
+    transform: translateY(0.15rem);
+  }
+  .checklist > li.done > .check {
+    border-color: var(--sl-color-green);
+    background: var(--sl-color-green-low);
+    color: var(--sl-color-green-high);
+  }
+  .card footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.875rem;
+    padding-top: 0.625rem;
+    border-top: 1px solid var(--sl-color-hairline);
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .needs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .status {
+    flex: none;
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--sl-color-gray-5);
+    color: var(--sl-color-gray-2);
+  }
+  .status.done {
+    border-color: var(--sl-color-green);
+    background: var(--sl-color-green-low);
+    color: var(--sl-color-green-high);
+  }
+  .status.in-progress {
+    border-color: var(--sl-color-orange);
+    background: var(--sl-color-orange-low);
+    color: var(--sl-color-orange-high);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+</style>

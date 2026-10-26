@@ -46,10 +46,19 @@ bug, and document a deliberate one where users choose it.
   documented as the intended plan. Ask the user only when a material product
   choice or authorization remains unresolved; divergence alone does not require
   permission.
-- Keep the roadmap's progress and next step accurate. Mark completion only when
-  its acceptance criteria are met, and distinguish proposals from implemented
-  capabilities. Preserve milestone identifiers where practical for references
-  from issues and pull requests.
+- Progress is tracked in the documentation, not in ROADMAP.md: the data
+  modules in `nyl/book/src/lib/roadmaps/` render the Orchestration and Domain
+  resources roadmap pages. Tick an item in the change that ships it, keep the
+  next step accurate, and set a stage's `done` only when its exit criterion is
+  met; a test rejects `done` while an item is unticked. Distinguish proposals
+  from implemented capabilities, and preserve milestone identifiers for
+  references from issues and pull requests. ROADMAP.md keeps the direction and
+  the list of milestone identifiers.
+- A roadmap or stage lists the GitHub issues it delivers in `issues`. The
+  change that sets its `done` closes them: its pull request says
+  `Closes #<number>` for each, or they are closed with a comment linking the
+  roadmap page once it merges. A pull request that only advances a stage says
+  `Refs #<number>` instead, so the issue stays open until the stage is done.
 - Describe the current direction directly. Do not add "previously planned",
   superseded alternatives, or a chronological decision log to ROADMAP.md.
   Historical reasoning belongs in commit messages, pull requests, or dedicated
@@ -534,7 +543,8 @@ The site is split into header sections, each with its own sidebar
 | First steps and the core principle | `start/`, `index.md` |
 | Rendering and applying manifests directly | `kubernetes/` |
 | The rendered manifest pattern | `rendered-gitops/` |
-| Environments, state, and orchestration | `orchestration/` |
+| Environments, state, orchestration, and its roadmap | `orchestration/` |
+| Domain resources and their roadmap | `domain-resources/` |
 | One page per command or closely related pair | `reference/cli/` |
 | `nyl.toml` and editor schemas | `reference/` |
 | Usage guide for a resource | the owning section's `resource-guides/` |
