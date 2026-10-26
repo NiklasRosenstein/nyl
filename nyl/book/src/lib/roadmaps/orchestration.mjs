@@ -9,13 +9,37 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'Continue M3, delivered in four parts against the [orchestration core contract](https://github.com/NiklasRosenstein/nyl/blob/develop/design/orchestration-core.md) and its executable [walkthrough scenarios](https://github.com/NiklasRosenstein/nyl/blob/develop/nyl/tests/scenarios/walkthroughs/):',
+    intro: 'Continue M3, delivered in six parts against the [orchestration core contract](https://github.com/NiklasRosenstein/nyl/blob/develop/design/orchestration-core.md) and its executable [walkthrough scenarios](https://github.com/NiklasRosenstein/nyl/blob/develop/nyl/tests/scenarios/walkthroughs/). Each part removes the walkthroughs it makes pass from the harness\'s pending list.',
     steps: [
       { text: 'Foundations: the business rules moved out of the `nyl` package, one `GitSource`, the `nyl-state`, `nyl-orchestration`, and `nyl-drivers` crates, the orchestration types and traits in `nyl-core` with golden files, the scenario format and Git test world, fault points, the `FakeImage` and `FakeInfra` kinds, and the `test-clock` feature. The harness validates every scenario and lists the reached ones as pending until the commands they use exist.', done: true },
       { text: 'The Git state store in `nyl-state` over the shared `nyl-git` transport, `nyl state init`/`move`/`forget`, `nyl lease break`, leases and run refs with compare-and-swap, the fenced transition commit, optional dedicated credentials, and the Environment and EnvironmentGroup resources. Custom refs and atomic leased pushes are verified on GitHub, GitLab, Forgejo, and plain Git with both coordination prefixes ([Git host compatibility](/nyl/orchestration/environments-and-state/#git-host-compatibility)).', done: true },
-      { text: 'Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`, `recover`, and `get -e`, with `FakePublication`, pinned source worktrees, execution keys, `--local` runs, and `nyl validate` of targets whose bindings orchestration resolves. Unit `values` and `variables` resolve through `nyl_core::bindings`.', done: false },
-      { text: '`teardown`, `hold`, `resume`, `state delete`, multi-environment runs, approvals, the tier-2 harness, and the M3 part of reference scenario 1.', done: false },
+      {
+        text: 'One environment\'s run: the Command unit and its driver, unit selection and templating, desired documents, `fromUnit` references through `nyl_core::bindings`, the versioned dependency graph and waves, content-based execution keys, pinned source worktrees with reachability checks, `FakePublication`, `plan`, `reconcile` (with `--unit`), `status`, `get -e`, `nyl validate` of targets whose bindings orchestration resolves, and state commits whose author and time the command line passes in. Walkthroughs `dependency-wave`, `unit-jobs`, and `unavailable-upstream-output` run in the tier-1 harness. Part 3 deliberately leaves out:',
+        done: true,
+        notes: [
+          'A KubernetesPublication unit\'s `releases` holds only the bindings orchestration resolves, `fromUnit` and `fromPromotion`; the other inputs enter its key through the render\'s input record until the real driver (M5) and PromotionPath selectors (M6) add them.',
+          'Orchestrated publications keep ownership index version 2; version 3, which records the owning environment and unit, arrives with the KubernetesPublication driver in M5.',
+          'Unit source fields that name another repository wait for M4, the first kinds that build from one.',
+          'Unit `env.secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until the common credential admission of part 6; `env.passthrough` works.',
+          'References and `dependsOn` entries requiring `evidence: attested` or naming `attestations` are rejected with `NYL-ATTESTATIONS-UNSUPPORTED` until receipts record attestation results (M5/M6), so a bare receipt never satisfies a stronger requirement.',
+          'Each unit has one effective commit, and a unit whose source fields pin different commits is rejected. Per-field worktrees wait for M4.',
+          '`nyl validate` checks a `fromUnit` artifact reference only for the producer\'s existence and declared non-sensitive outputs; artifact names are checked once kinds declare them, in M5.',
+        ],
+      },
+      {
+        text: 'Recovery and concurrency. `verify` records drift and health observations and driver attestations against current receipts; `recover --retry` and `--accept <run>` clear a condition or adopt a checkpointed result. A run takes over from runs that died, lost their lease, or were cancelled: it adopts the uids of units they created, imports their checkpoints idempotently as `imported` receipts, gives units they left without a checkpoint an `uncertain` condition, recovers converging units in the same run, and retires run refs that are still evidence for an uncertain unit to evidence refs. SIGINT and SIGTERM cancel a run: it forwards the signal to running tools, checkpoints what finished, marks running units uncertain, keeps its run ref, releases the lease, and exits 4 with `NYL-RUN-CANCELLED`. Also done: competing runners with `--wait-lease`, `--local` runs (with `--local-lease` and `--approve` for non-converging units, recorded with the `local` approval identity), state without a remote, `state move --from local`, `state reset --local` and `state restore --to`, crash injection at every killable fault point, property tests of the transition table and of import, and one reusable worktree per concurrency slot, reset between units to the unit\'s commit with untracked and ignored files removed, with the symbolic-link check run once per tree. Walkthroughs `effects-without-receipt` and `competing-runners` and the `recovery/` crash scenarios run in the tier-1 harness. Part 4 deliberately leaves out:',
+        done: true,
+        notes: [
+          '`--approve` outside `--local`, and approvals of remote runs, wait for part 6; until then a non-converging unit with an `uncertain` condition in a remote run waits for `nyl recover`.',
+          '`verify` takes one environment; `-l` and `-g` selections arrive with multi-environment runs in part 6.',
+          'No built-in kind declares the `inspect` recovery policy yet; the policy is implemented and tested with the fake kinds, and drivers adopt it from M4 where they can observe their effects.',
+          'Drivers report attestations to `verify`, but `nyl attest` and references requiring `evidence: attested` wait for M5 and M6.',
+        ],
+      },
+      { text: 'Lifecycle: `teardown` (including `--hold`, `--all`, and `--confirm-removed`), `hold`, `resume`, `state delete` with decommissioning, teardown order, and `--allow-teardown` / `--allow-dependents`. A hold on an `uncertain` unit keeps its last receipt\'s desired document and uid as desired state, with the condition left in place, so consumers keep resolving from that receipt. Walkthrough: `deletion`, plus a walkthrough step that holds an uncertain producer and reconciles a consumer against its previous outputs. Drift repair: `reconcile` executes units whose recovery policy is `converge` again when their latest drift observation is `drifted`, by default (`Environment.spec.driftRepair: converge`, `manual` to opt out), `status` shows drifted units that wait, and `nyl reconcile --reapply <unit>` repairs any current unit explicitly, recorded with requester and reason. Walkthrough step: `verify` finds drift, `reconcile` repairs the idempotent unit, and the other waits for `--reapply`.', done: false },
+      { text: 'Multi-environment runs, including `verify` over several environments, approvals (`verified`, `asserted`, and `local` sources, `--approve` for remote runs, the GitHub lookup, the `[approval] lookup` hook, and `bind: plan` with destroy digests), the tier-2 harness, and the M3 part of reference scenario 1.', done: false },
     ],
+    outro: 'M3 uses `FakePublication` for Kubernetes publication; the real `KubernetesPublication` driver arrives in M5. `nyl exec` belongs to M4 with the first drivers that wrap a native tool, `nyl build` to M4, attestations to M5 and M6, and `nyl promote` to M6.',
   },
   stages: [
     {
@@ -69,7 +93,7 @@ export const orchestrationRoadmap = {
         { text: 'Implement cross-environment references and multi-environment runs by repeated `-e`, a label selector, or an EnvironmentGroup with shared defaults, ordered by those references, each environment with its own lease and transition commit.', done: false },
         { text: 'Implement approvals bound to the desired document, with recorded approval sources and identity (`verified`, `asserted`, `local`), the GitHub approver lookup and the `[approval] lookup` hook, and the common `env` credential admission.', done: false },
         { text: 'Implement pinned source worktrees, reachability checks against protected refs, and content-based execution keys.', done: false },
-        { text: 'Prove stale-evidence blocking, competing runners, and recovery after an effect succeeds but receipt publication fails.', done: false },
+        { text: 'Prove stale-evidence blocking, competing runners, and recovery after an effect succeeds but receipt publication fails.', done: true },
         { text: 'Move the business rules the `nyl` package still holds into the crates that own them before orchestration builds on them: ownership-index input hashing (`hash_inputs`), the worktree source state with its carry exclusion (`source_state`), and publication-base verification (`verify_publication_base`). The command line then only parses arguments, wires crates, and renders reports.', done: true },
         { text: 'Replace the remote fields of `ApplicationGroupSource` and `fromGit`\'s `GitInputSource` with the one `GitSource` type of the implementation architecture, which command-unit sources then use too. Both already share one commit-lock rule.', done: true },
         { text: 'Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate crates with the scenario harness, property tests, and crash injection.', done: true },
@@ -90,6 +114,7 @@ export const orchestrationRoadmap = {
         { text: 'Add the `Terraform` and `OpenTofu` kinds over one implementation, with native state and locking, declared output admission, change digests, plan approval (`bind: plan`), verification, and teardown.', done: false },
         { text: 'Support a local-module Terraform configuration pinned to a source commit and path.', done: false },
         { text: 'Demonstrate Terraform-to-Terraform output references.', done: false },
+        { text: 'Check out only what a unit reads when its kind declares its inputs: `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their source paths and the `nyl.toml` directory, so their cost in a large monorepo follows the unit, not the repository. A Command unit can read anything in the repository, so it keeps a full worktree unless it declares the paths it reads.', done: false },
       ],
     },
     {
@@ -134,7 +159,7 @@ export const orchestrationRoadmap = {
       summary: 'Evaluate continuous operation and decide what comes after the initial scope.',
       needs: ['M6'],
       items: [
-        { text: 'Evaluate a scheduled or long-running runner, observation cadence, and drift-repair policy using M3–M6 evidence.', done: false },
+        { text: 'Evaluate a scheduled or long-running runner and its observation cadence using M3–M6 evidence. The drift-repair policy is settled in M3 part 5: converging units repair recorded drift automatically by default.', done: false },
         { text: 'Decide which command-unit uses warrant typed drivers, and whether to add the plugin driver protocol.', done: false },
         { text: 'Support minimum healthy durations and flapping guards over recorded observations.', done: false },
         { text: 'Evaluate application-level checks as promotion evidence.', done: false },

@@ -16,7 +16,12 @@ const allStages = roadmaps.flatMap((roadmap) => roadmap.stages.map((stage) => ({
 
 // Every piece of roadmap text the pages render, with where it comes from.
 const renderedTexts = roadmaps.flatMap((roadmap) => [
-  ...[roadmap.exitCriterion, roadmap.nextStep?.intro, ...(roadmap.nextStep?.steps ?? []).map((step) => step.text)]
+  ...[
+    roadmap.exitCriterion,
+    roadmap.nextStep?.intro,
+    roadmap.nextStep?.outro,
+    ...(roadmap.nextStep?.steps ?? []).flatMap((step) => [step.text, ...(step.notes ?? [])]),
+  ]
     .filter(Boolean)
     .map((text) => ({ where: roadmap.id, text })),
   ...roadmap.stages.flatMap((stage) =>

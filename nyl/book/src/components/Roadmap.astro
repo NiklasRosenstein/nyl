@@ -98,12 +98,26 @@ const required = prerequisites(roadmap).map((id: string) => {
               </span>
               <span class="step-number">{index + 1}.</span>
               <span class="sr-only">{step.done ? 'Done: ' : 'Not done: '}</span>
-              <span>
+              <div class="step-text">
                 <RoadmapText text={step.text} />
-              </span>
+                {step.notes?.length > 0 && (
+                  <ul class="step-notes">
+                    {step.notes.map((note: string) => (
+                      <li>
+                        <RoadmapText text={note} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </li>
           ))}
         </ol>
+        {roadmap.nextStep.outro && (
+          <p class="next-outro">
+            <RoadmapText text={roadmap.nextStep.outro} />
+          </p>
+        )}
       </div>
     )
   }
@@ -241,6 +255,22 @@ const required = prerequisites(roadmap).map((id: string) => {
     flex: none;
     font-variant-numeric: tabular-nums;
     color: var(--sl-color-gray-3);
+  }
+  .step-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .step-notes {
+    margin: 0.375rem 0 0;
+    padding-left: 1.125rem;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+  .step-notes li + li {
+    margin-top: 0.25rem;
+  }
+  .next .next-outro {
+    margin: 0.75rem 0 0;
   }
   .next p {
     margin: 0 0 0.75rem;
@@ -385,7 +415,7 @@ const required = prerequisites(roadmap).map((id: string) => {
     display: grid;
     gap: 0.375rem;
   }
-  .checklist li {
+  .checklist > li {
     display: flex;
     gap: 0.625rem;
     align-items: baseline;
@@ -402,7 +432,7 @@ const required = prerequisites(roadmap).map((id: string) => {
     text-align: center;
     transform: translateY(0.15rem);
   }
-  .checklist li.done .check {
+  .checklist > li.done > .check {
     border-color: var(--sl-color-green);
     background: var(--sl-color-green-low);
     color: var(--sl-color-green-high);
