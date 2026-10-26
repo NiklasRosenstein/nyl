@@ -110,6 +110,11 @@ panic = "abort"
 opt-level = 0
 debug = true
 
+# Nyl fingerprints its own executable with SHA-256 for the render cache;
+# unoptimized, that takes seconds per invocation of a debug build.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

@@ -317,6 +317,26 @@ pub trait StateStore: Send + Sync {
         expected: &str,
     ) -> StateResult<String>;
 
+    /// Move the held lease at `version` to `lease` and write the run's
+    /// record with it, recording `created` as [`Self::write_run_created`]
+    /// does: the update at each phase start. A store that can writes both
+    /// in one compare-and-swap, so both land or neither does; the default
+    /// writes the lease and then the run ref. [`StateError::LeaseLost`] when
+    /// the lease changed. On return `version` is the lease's current
+    /// version, also when the run ref write failed after the lease moved.
+    /// Contract: [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 2.
+    fn update_lease_and_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        version: &mut String,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        update_lease_then_run(self, location, environment, lease, version, run, created)
+    }
+
     /// Delete the held lease by compare-and-swap.
     fn release_lease(&self, location: &StateLocation, environment: &EnvironmentName, expected: &str)
         -> StateResult<()>;
@@ -483,6 +503,25 @@ pub enum SourceRepository {
 pub struct SourceError(pub String);
 
 pub type SourceResult<T> = std::result::Result<T, SourceError>;
+
+/// [`StateStore::update_lease_and_run`] as two writes: the lease, then the
+/// run ref, for stores or locations that cannot write both at once.
+pub fn update_lease_then_run<S: StateStore + ?Sized>(
+    store: &S,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    lease: &Lease,
+    version: &mut String,
+    run: &Run,
+    created: &[DesiredUnit],
+) -> StateResult<()> {
+    *version = store.update_lease(location, environment, lease, version)?;
+    if created.is_empty() {
+        store.write_run(location, environment, run, None)
+    } else {
+        store.write_run_created(location, environment, run, created)
+    }
+}
 
 /// Every Git operation on sources that decisions depend on.
 pub trait SourceResolver: Send + Sync {

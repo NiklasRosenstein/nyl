@@ -380,6 +380,28 @@ impl StateStore for MemoryStateStore {
         Ok(put_lease(&mut inner, key, lease))
     }
 
+    /// Both under one lock: the lease and the run ref move together.
+    fn update_lease_and_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        version: &mut String,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        let mut inner = self.lock();
+        let key = coordination_key(location, environment);
+        match inner.leases.get(&key) {
+            Some(held) if held.version == *version => {}
+            _ => return Err(StateError::LeaseLost),
+        }
+        *version = put_lease(&mut inner, key, lease);
+        let state = run_state(&mut inner, location, environment, run);
+        merge_created(&mut state.created, created.iter().cloned());
+        Ok(())
+    }
+
     fn release_lease(
         &self,
         location: &StateLocation,

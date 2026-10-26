@@ -1098,11 +1098,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             .write_run(self.location(), self.environment(), &self.record, checkpoint)
     }
 
-    /// Update the lease and the run record for a phase. The
-    /// `before-lease-update` fault point is consulted without a unit, then
-    /// with each unit the phase starts, so a fault can name the phase that
-    /// starts a unit's batch.
-    fn phase(&mut self, units: Vec<UnitName>, deadline: Timestamp) -> Result<(), Ending> {
+    /// Update the lease and the run record for a phase, recording on the
+    /// run ref the units of `created` before they start, in one store
+    /// write. The `before-lease-update` fault point is consulted without a
+    /// unit, then with each unit the phase starts, so a fault can name the
+    /// phase that starts a unit's batch.
+    fn phase(&mut self, units: Vec<UnitName>, deadline: Timestamp, created: &[DesiredUnit]) -> Result<(), Ending> {
         if self.fault(FaultPoint::BeforeLeaseUpdate, None)
             || units
                 .iter()
@@ -1110,23 +1111,36 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         {
             return Err(self.killed(FaultPoint::BeforeLeaseUpdate));
         }
-        match lease::update(self.context().base, &mut self.held, units.clone(), deadline) {
-            Ok(()) => self.session.lease_deadline.set(Some(deadline)),
-            Err(StateError::LeaseLost) => return Err(self.lost()),
+        let mut lease = self.held.lease.clone();
+        lease.units.clone_from(&units);
+        lease.deadline = deadline;
+        let mut record = self.record.clone();
+        record.units = units;
+        record.deadline = deadline;
+        let mut version = self.held.version.clone();
+        let written = self.context().base.store.update_lease_and_run(
+            self.location(),
+            self.environment(),
+            &lease,
+            &mut version,
+            &record,
+            created,
+        );
+        if version != self.held.version {
+            self.held.version = version;
+            self.held.lease = lease;
+            self.session.lease_deadline.set(Some(deadline));
+            self.record = record;
+        }
+        match written {
+            Ok(()) => Ok(()),
+            Err(StateError::LeaseLost) => Err(self.lost()),
             Err(error) => {
                 let finding = store_error(self.environment(), &error);
                 self.report.errors.push(finding);
-                return Err(self.failed());
+                Err(self.failed())
             }
         }
-        self.record.units = units;
-        self.record.deadline = deadline;
-        if let Err(error) = self.write_run(None) {
-            let finding = store_error(self.environment(), &error);
-            self.report.errors.push(finding);
-            return Err(self.failed());
-        }
-        Ok(())
     }
 
     /// How a run ends that lost its lease: `NYL-LEASE-LOST`, and it keeps
@@ -1250,7 +1264,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 context.base.clock.now(),
                 context.base.settings.resolution_timeout,
             );
-            if let Err(ending) = self.phase(Vec::new(), deadline) {
+            if let Err(ending) = self.phase(Vec::new(), deadline, &[]) {
                 return ending;
             }
             let resolved = session.resolve(
@@ -1306,9 +1320,6 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
                 let now = context.base.clock.now();
                 let longest = longest_timeout(batch.iter().map(|unit| &resolved.units[unit]));
-                if let Err(ending) = self.phase(batch.clone(), lease::deadline(context.base, now, longest)) {
-                    return ending;
-                }
                 // Units whose uid this run generated go on the run ref before
                 // they start, so a run taking over adopts them.
                 let new: Vec<DesiredUnit> = batch
@@ -1322,18 +1333,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     })
                     .cloned()
                     .collect();
-                if !new.is_empty() {
-                    let written =
-                        context
-                            .base
-                            .store
-                            .write_run_created(&request.location, &environment, &self.record, &new);
-                    if let Err(error) = written {
-                        self.report.errors.push(store_error(&environment, &error));
-                        return self.failed();
-                    }
-                    created.extend(new.into_iter().map(|unit| unit.unit.name));
+                if let Err(ending) = self.phase(batch.clone(), lease::deadline(context.base, now, longest), &new) {
+                    return ending;
                 }
+                created.extend(new.into_iter().map(|unit| unit.unit.name));
                 let approvals = local_approvals(session, &resolved, &batch);
                 let results = execute_batch(
                     session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot, &approvals,

@@ -1564,7 +1564,9 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    latest finish time of the units executing, by their `timeout`; `verify` by
    the timeouts of the units it verifies; a teardown wait by the wait's end.
    The runner updates the lease and the `Run` record together at each phase
-   and unit start; there are no heartbeats.
+   and unit start, with the batch's `created/` documents, in one atomic push
+   that lands both or neither; a `--local` run whose lease is at the remote
+   writes the two one after the other. There are no heartbeats.
 3. **Checkpoints.** Each finished unit is checkpointed on the run ref before
    the next wave, together with the desired document it executed and its uid,
    including documents the run created. Before a unit the run created starts,
