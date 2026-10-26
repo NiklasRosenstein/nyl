@@ -13,14 +13,7 @@ use predicates::prelude::*;
 use scenario::world::World;
 
 fn project() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/walkthroughs/_project")
-}
-
-/// A fresh clone of the shared project, whose Cluster records the kind
-/// scopes `nyl capture cluster` would, so the target's generated AppProject
-/// can be derived.
-fn checkout(world: &World) -> std::path::PathBuf {
-    world.fresh_clone("main")
+    scenario::shell::shared_project()
 }
 
 fn nyl_validate(world: &World, checkout: &Path) -> Command {
@@ -37,7 +30,7 @@ fn nyl_validate(world: &World, checkout: &Path) -> Command {
 #[test]
 fn test_validate_accepts_a_target_placed_by_a_publication_unit() {
     let world = World::new(&project());
-    let checkout = checkout(&world);
+    let checkout = world.fresh_clone("main");
     nyl_validate(&world, &checkout)
         .assert()
         .success()
@@ -47,7 +40,7 @@ fn test_validate_accepts_a_target_placed_by_a_publication_unit() {
 #[test]
 fn test_validate_rejects_from_unit_on_a_target_without_a_publication_unit() {
     let world = World::new(&project());
-    let checkout = checkout(&world);
+    let checkout = world.fresh_clone("main");
     let units = checkout.join("nyl/units.yaml");
     // Windows checkouts may convert line endings.
     let contents = std::fs::read_to_string(&units).unwrap().replace("\r\n", "\n");
@@ -67,7 +60,7 @@ fn test_validate_rejects_from_unit_on_a_target_without_a_publication_unit() {
 #[test]
 fn test_validate_rejects_a_placed_target_whose_unit_reference_is_undeclared() {
     let world = World::new(&project());
-    let checkout = checkout(&world);
+    let checkout = world.fresh_clone("main");
     let platform = checkout.join("nyl/platform.yaml");
     let contents = std::fs::read_to_string(&platform).unwrap();
     std::fs::write(&platform, contents.replace("output: host", "output: port")).unwrap();
@@ -107,7 +100,7 @@ fn test_validate_runs_the_unit_checks_plan_runs() {
         ),
     ];
     for (unit, code) in cases {
-        let checkout = checkout(&world);
+        let checkout = world.fresh_clone("main");
         let units = checkout.join("nyl/units.yaml");
         let mut contents = std::fs::read_to_string(&units).unwrap();
         contents.push_str("---\napiVersion: units.gitops.nyl/v1\n");

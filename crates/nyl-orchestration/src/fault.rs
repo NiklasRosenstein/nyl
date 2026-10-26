@@ -5,7 +5,9 @@
 //! point as a forced kill would, so recovery after an effect without a
 //! checkpoint, a lost lease, or a missing final push is exercised for real.
 //! The points and their names are those of the scenario format's `fault`
-//! and `pause` steps (`design/reference-scenarios.md`).
+//! and `pause` steps (`design/reference-scenarios.md`). An injector may
+//! also block inside [`FaultInjector::at`], which is how the scenario harness
+//! pauses an invocation at a point and resumes it later.
 
 use std::fmt;
 use std::str::FromStr;
@@ -23,14 +25,23 @@ pub enum FaultPoint {
     BeforeLeaseUpdate,
     /// The final transition commit is about to be pushed.
     BeforePush,
+    /// A unit is about to start: its worktree is ready and its driver is
+    /// about to be called. A pause point; the shell ignores
+    /// [`FaultAction::Kill`] here.
+    Executing,
+    /// A run passed `--wait-lease` found the lease held and is about to wait
+    /// for it. A pause point; the shell ignores [`FaultAction::Kill`] here.
+    WaitingLease,
 }
 
 impl FaultPoint {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::AfterEffect,
         Self::BeforeCheckpoint,
         Self::BeforeLeaseUpdate,
         Self::BeforePush,
+        Self::Executing,
+        Self::WaitingLease,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -39,6 +50,8 @@ impl FaultPoint {
             Self::BeforeCheckpoint => "before-checkpoint",
             Self::BeforeLeaseUpdate => "before-lease-update",
             Self::BeforePush => "before-push",
+            Self::Executing => "executing",
+            Self::WaitingLease => "waiting-lease",
         }
     }
 }

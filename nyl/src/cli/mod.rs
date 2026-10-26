@@ -4,6 +4,7 @@ pub mod filter;
 pub mod git_auth;
 pub(crate) mod namespace_resolution;
 pub(crate) mod resource_file;
+mod signals;
 pub(crate) mod table;
 pub(crate) mod tree_progress;
 
@@ -107,6 +108,12 @@ enum Commands {
 
     /// Show an environment's units, lease, and runs
     Status(commands::status::StatusArgs),
+
+    /// Verify an environment's current receipts with their drivers
+    Verify(commands::verify::VerifyArgs),
+
+    /// Clear a unit's uncertain or failed condition, or accept a checkpointed result
+    Recover(commands::recover::RecoverArgs),
 }
 
 impl Cli {
@@ -134,19 +141,38 @@ impl Cli {
             | Commands::Lease(_)
             | Commands::Plan(_)
             | Commands::Reconcile(_)
-            | Commands::Status(_) => {
+            | Commands::Status(_)
+            | Commands::Verify(_)
+            | Commands::Recover(_) => {
+                let cancellation = nyl_orchestration::shell::run::Cancellation::new();
+                // reconcile, verify, and recover end cleanly on SIGINT or
+                // SIGTERM instead of dying with the lease held.
+                let handler = self
+                    .cancels_on_signal()
+                    .then(|| tokio::spawn(signals::cancel_on_signal(cancellation.clone())));
                 // Drivers may block on runtimes of their own, so orchestration
-                // runs on a thread outside this command line's async runtime.
-                let outcome = std::thread::scope(|scope| {
-                    scope
-                        .spawn(move || -> Result<crate::orchestration::run::CommandOutcome> {
-                            let owned = crate::orchestration::run::ProcessWiring::new();
-                            let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
-                            self.execute_in_process(&wiring)
-                        })
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                })?;
+                // runs on a thread outside this command line's async runtime,
+                // which keeps handling signals meanwhile.
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let worker = std::thread::spawn(move || {
+                    let outcome = (|| -> Result<crate::orchestration::run::CommandOutcome> {
+                        let owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
+                        self.execute_in_process(&wiring)
+                    })();
+                    let _ = sender.send(outcome);
+                });
+                let Ok(outcome) = receiver.await else {
+                    // The worker dropped the sender without sending: it panicked.
+                    match worker.join() {
+                        Err(panic) => std::panic::resume_unwind(panic),
+                        Ok(()) => unreachable!("the worker sends its outcome before it returns"),
+                    }
+                };
+                if let Some(handler) = handler {
+                    handler.abort();
+                }
+                let outcome = outcome?;
                 print!("{}", outcome.stdout);
                 eprint!("{}", outcome.stderr);
                 if outcome.exit != 0 {
@@ -157,8 +183,20 @@ impl Cli {
         }
     }
 
-    /// Run an orchestration command (`plan`, `reconcile`, `status`, `get`,
-    /// `state`, `lease`) with injected dependencies, returning its outcome
+    /// Whether the command cancels on SIGINT and SIGTERM ("Runs and leases"
+    /// item 7): the commands that take the lease to execute, verify, or
+    /// recover units, and the state operations, whose `--wait-lease` a
+    /// signal stops. `lease break` waits for nothing; other commands keep the
+    /// default disposition.
+    fn cancels_on_signal(&self) -> bool {
+        matches!(
+            self.command,
+            Commands::Reconcile(_) | Commands::Verify(_) | Commands::Recover(_) | Commands::State(_)
+        )
+    }
+
+    /// Run an orchestration command (`plan`, `reconcile`, `status`,
+    /// `verify`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
     /// instead of printing and exiting. The tier-1 scenario harness calls
     /// this. An orchestration command that fails before producing its report,
     /// such as on a project that cannot be discovered, is an outcome with
@@ -174,9 +212,11 @@ impl Cli {
             Commands::Get(args) => commands::get::run(&args, wiring),
             Commands::State(args) => commands::state::run_state(&args, wiring),
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
+            Commands::Verify(args) => commands::verify::run(&args, wiring),
+            Commands::Recover(args) => commands::recover::run(&args, wiring),
             _ => {
                 return Err(crate::NylError::config(
-                    "only plan, reconcile, status, get, state, and lease run in-process",
+                    "only plan, reconcile, status, verify, recover, get, state, and lease run in-process",
                 ))
             }
         };

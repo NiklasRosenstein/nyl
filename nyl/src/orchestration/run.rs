@@ -15,6 +15,7 @@ use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::driver::{DriverSet, ToolRunner};
 use nyl_core::orchestration::ports::{Clock, CommitIdentity, IdGenerator};
 use nyl_orchestration::fault::FaultInjector;
+use nyl_orchestration::shell::run::Cancellation;
 
 use crate::Result;
 
@@ -35,6 +36,11 @@ pub struct Wiring<'a> {
     /// A snapshot of the whole process environment, read once here; the
     /// shell admits only `PATH` and each unit's declared passthrough from it.
     pub process_env: BTreeMap<String, String>,
+    /// Set by the command line's SIGINT/SIGTERM handler for `reconcile`,
+    /// `verify`, `recover`, and the state operations ("Runs and leases"
+    /// item 7); `tools` forwards
+    /// it to running tools. Never set elsewhere.
+    pub cancellation: Cancellation,
 }
 
 /// How one orchestration command ended, without printing or exiting.
@@ -57,12 +63,21 @@ pub struct ProcessWiring {
     pub drivers: DriverSet,
     pub tools: nyl_drivers::process::ProcessRunner,
     pub faults: nyl_orchestration::fault::NoFaults,
+    /// The flag the signal handler sets; `tools` forwards it to running tools.
+    pub cancellation: Cancellation,
 }
 
 impl ProcessWiring {
     /// The built-in drivers (plus the fake kinds with the `test-kinds`
-    /// feature, sharing an empty script), the process runner, and no faults.
+    /// feature, sharing an empty script), the process runner, and no faults,
+    /// never cancelled.
     pub fn new() -> Self {
+        Self::cancelled_by(Cancellation::new())
+    }
+
+    /// [`Self::new`], cancelled when `cancellation` is set: the process
+    /// runner forwards its signal to every running tool's process group.
+    pub fn cancelled_by(cancellation: Cancellation) -> Self {
         #[cfg(feature = "test-kinds")]
         let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
         #[cfg(not(feature = "test-kinds"))]
@@ -70,8 +85,9 @@ impl ProcessWiring {
         Self {
             ids: crate::orchestration::ids::UuidV7,
             drivers,
-            tools: nyl_drivers::process::ProcessRunner::new(),
+            tools: nyl_drivers::process::ProcessRunner::new().cancelled_by(cancellation.shared()),
             faults: nyl_orchestration::fault::NoFaults,
+            cancellation,
         }
     }
 }
@@ -100,6 +116,7 @@ impl<'a> Wiring<'a> {
             runner: crate::orchestration::project::runner(),
             author: None,
             process_env: unicode_env(std::env::vars_os()),
+            cancellation: owned.cancellation.clone(),
         })
     }
 

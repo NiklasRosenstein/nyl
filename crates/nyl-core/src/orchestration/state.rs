@@ -24,36 +24,31 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use super::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, JsonPointer, RunId, Uid, UnitName};
+use super::ports::StateSide;
 use super::time::Timestamp;
 use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS};
 
-macro_rules! document_kind {
-    ($(#[$meta:meta])* $name:ident, $api_version:expr, $kind:literal) => {
+/// A unit struct that serializes as the constant string `$value` and
+/// refuses every other string on deserialization with `$message`.
+macro_rules! constant_marker {
+    ($(#[$meta:meta])* $name:ident, $value:expr, |$got:ident| $message:expr) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
         pub struct $name;
 
-        impl $name {
-            pub const API_VERSION: &'static str = $api_version;
-            pub const KIND: &'static str = $kind;
-        }
-
         impl Serialize for $name {
             fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-                serializer.serialize_str(Self::KIND)
+                serializer.serialize_str($value)
             }
         }
 
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-                let kind = String::deserialize(deserializer)?;
-                if kind == Self::KIND {
+                let $got = String::deserialize(deserializer)?;
+                if $got == $value {
                     Ok(Self)
                 } else {
-                    Err(serde::de::Error::custom(format_args!(
-                        "expected kind {}, got {kind:?}",
-                        Self::KIND
-                    )))
+                    Err(serde::de::Error::custom($message))
                 }
             }
         }
@@ -64,55 +59,40 @@ macro_rules! document_kind {
             }
 
             fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-                schemars::json_schema!({"const": $kind})
+                schemars::json_schema!({"const": $value})
             }
         }
     };
 }
 
-/// The format version of the `gitops.nyl/v1` state kinds. Deserializing any
-/// other `apiVersion` fails, so a reader never misreads a newer format.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct StateV1;
-
-impl Serialize for StateV1 {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str(API_VERSION_GITOPS)
-    }
+macro_rules! document_kind {
+    ($name:ident, $kind:literal) => {
+        constant_marker!($name, $kind, |kind| format_args!(
+            "expected kind {}, got {kind:?}",
+            $kind
+        ));
+    };
 }
 
-impl<'de> Deserialize<'de> for StateV1 {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let version = String::deserialize(deserializer)?;
-        if version == API_VERSION_GITOPS {
-            Ok(Self)
-        } else {
-            Err(serde::de::Error::custom(format_args!(
-                "unsupported state format {version:?}; this Nyl reads {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
-            )))
-        }
-    }
-}
+constant_marker!(
+    /// The format version of the `gitops.nyl/v1` state kinds. Deserializing any
+    /// other `apiVersion` fails, so a reader never misreads a newer format.
+    StateV1,
+    API_VERSION_GITOPS,
+    |version| format_args!(
+        "unsupported state format {version:?}; this Nyl reads {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
+    )
+);
 
-impl JsonSchema for StateV1 {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "StateV1".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"const": API_VERSION_GITOPS})
-    }
-}
-
-document_kind!(StateRecordKind, API_VERSION_GITOPS, "StateRecord");
-document_kind!(EnvironmentRecordKind, API_VERSION_GITOPS, "EnvironmentRecord");
-document_kind!(DesiredUnitKind, API_VERSION_GITOPS, "DesiredUnit");
-document_kind!(ObservedUnitKind, API_VERSION_GITOPS, "ObservedUnit");
-document_kind!(ObservationKind, API_VERSION_GITOPS, "Observation");
-document_kind!(AttestationKind, API_VERSION_GITOPS, "Attestation");
-document_kind!(LeaseKind, API_VERSION_GITOPS, "Lease");
-document_kind!(RunKind, API_VERSION_GITOPS, "Run");
-document_kind!(SignalKind, API_VERSION_GITOPS, "Signal");
+document_kind!(StateRecordKind, "StateRecord");
+document_kind!(EnvironmentRecordKind, "EnvironmentRecord");
+document_kind!(DesiredUnitKind, "DesiredUnit");
+document_kind!(ObservedUnitKind, "ObservedUnit");
+document_kind!(ObservationKind, "Observation");
+document_kind!(AttestationKind, "Attestation");
+document_kind!(LeaseKind, "Lease");
+document_kind!(RunKind, "Run");
+document_kind!(SignalKind, "Signal");
 
 /// Where an environment's state lives, as `state.yaml` records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -138,6 +118,34 @@ impl StateLocation {
 
     pub fn is_local(&self) -> bool {
         self.repository == Self::LOCAL_REPOSITORY
+    }
+
+    /// Whether a configured state ref name has a branch in the clone: a
+    /// short name or a `refs/heads/…` name. Other full `refs/…` names have none.
+    pub fn is_branch_ref(configured: &str) -> bool {
+        !configured.starts_with("refs/") || configured.starts_with("refs/heads/")
+    }
+
+    /// Whether both state refs have a branch in the clone, by [`Self::is_branch_ref`].
+    pub fn has_local_branches(&self) -> bool {
+        Self::is_branch_ref(&self.desired_ref) && Self::is_branch_ref(&self.observed_ref)
+    }
+
+    /// The full name of a configured state ref: a short name is a branch.
+    pub fn full_name(configured: &str) -> String {
+        if configured.starts_with("refs/") {
+            configured.to_owned()
+        } else {
+            format!("refs/heads/{configured}")
+        }
+    }
+
+    /// The configured name of one of the two state refs.
+    pub fn state_ref(&self, side: StateSide) -> &str {
+        match side {
+            StateSide::Desired => &self.desired_ref,
+            StateSide::Observed => &self.observed_ref,
+        }
     }
 }
 
@@ -466,6 +474,26 @@ pub struct ObservedUnit {
     pub condition: Option<Condition>,
 }
 
+impl ObservedUnit {
+    /// The run of the document's latest change: its condition's run, else
+    /// its receipt's.
+    pub fn last_run(&self) -> Option<&RunId> {
+        match &self.condition {
+            Some(condition) => Some(condition.run()),
+            None => self.receipt.as_ref().map(|receipt| &receipt.run),
+        }
+    }
+
+    /// When the document last changed: its condition's `since`, else its
+    /// receipt's `finishedAt`.
+    pub fn changed_at(&self) -> Option<Timestamp> {
+        match &self.condition {
+            Some(condition) => Some(condition.since()),
+            None => self.receipt.as_ref().map(|receipt| receipt.finished_at),
+        }
+    }
+}
+
 /// What one successful execution recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -561,6 +589,38 @@ pub enum Condition {
     },
 }
 
+impl Condition {
+    /// The run that set the condition.
+    pub fn run(&self) -> &RunId {
+        match self {
+            Self::Uncertain { run, .. } | Self::Failed { run, .. } => run,
+        }
+    }
+
+    /// When the condition was set.
+    pub fn since(&self) -> Timestamp {
+        match self {
+            Self::Uncertain { since, .. } | Self::Failed { since, .. } => *since,
+        }
+    }
+
+    /// The uncertainty's reason or the failure's message.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Uncertain { reason, .. } => reason,
+            Self::Failed { message, .. } => message,
+        }
+    }
+
+    /// `uncertain` or `failed`, as the document's `state` field names it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Uncertain { .. } => "uncertain",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
 /// The closed set of failure categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -596,7 +656,12 @@ impl ArtifactDocument {
     /// Contract: [Artifacts](../../../../design/orchestration-core.md#artifacts).
     pub fn digest(&self) -> String {
         let bytes = crate::digest::canonical_json_bytes(self).expect("artifact documents serialize to JSON");
-        format!("sha256:{}", crate::digest::sha256_hex(&bytes))
+        crate::digest::sha256_prefixed(&bytes)
+    }
+
+    /// Whether the document is a built-in artifact kind.
+    pub fn is_builtin(&self) -> bool {
+        self.api_version == API_VERSION_ARTIFACTS
     }
 }
 
@@ -613,13 +678,6 @@ pub struct ArtifactUnit {
     pub environment: EnvironmentName,
     pub name: UnitName,
     pub uid: Uid,
-}
-
-impl ArtifactDocument {
-    /// Whether the document is a built-in artifact kind.
-    pub fn is_builtin(&self) -> bool {
-        self.api_version == API_VERSION_ARTIFACTS
-    }
 }
 
 /// `observed/units/<unit>/observations/<type>.yaml`.
@@ -640,11 +698,21 @@ pub struct Observation {
     pub details: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ObservationType {
     Drift,
     Health,
+}
+
+impl ObservationType {
+    /// `drift` or `health`, as the document's `type` field names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Drift => "drift",
+            Self::Health => "health",
+        }
+    }
 }
 
 /// The result of a drift verification.

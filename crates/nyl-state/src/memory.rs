@@ -5,17 +5,26 @@
 //! environment directories that `state.path` places in it, so environments
 //! sharing a ref share its commit history as they would in Git. Commit IDs
 //! are deterministic digests of a counter, never real Git objects.
+//!
+//! Like the Git store's clone, the store keeps local branches of remote
+//! state refs under [`StateLocation::LOCAL_REPOSITORY`]: reading a remote
+//! location fast-forwards (or creates) them unless they diverged, a
+//! successful transition moves them along, and `--local` runs commit to
+//! them alone ([`StateStore::commit_local`]). Contract:
+//! [Local runs](../../../design/orchestration-core.md#local-runs).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use crate::require_local_branches;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError, StateResult, StateStore,
-    StateTips, Transition,
+    Checkpoint, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease, LocalDivergence, LogEntry,
+    RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDocument, DesiredUnit, EnvironmentRecord, Lease, ObservedUnit, Run, Signal, StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, EnvironmentRecord, Lease, Observation, ObservationType, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 
 /// The state of one environment directory on one ref.
@@ -26,13 +35,14 @@ struct Directory {
     desired: BTreeMap<UnitName, DesiredUnit>,
     observed: BTreeMap<UnitName, ObservedUnit>,
     artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
 /// One ref: its tip and the directories it holds, by `state.path`.
 #[derive(Debug, Clone, Default)]
 struct StateRef {
     tip: Option<CommitId>,
-    commits: usize,
     directories: BTreeMap<String, Directory>,
     /// Every commit, oldest first, with the directory it changed.
     log: Vec<(CommitId, String)>,
@@ -62,6 +72,7 @@ struct Inner {
     refs: BTreeMap<(String, String), StateRef>,
     leases: BTreeMap<(String, String, EnvironmentName), HeldLease>,
     runs: BTreeMap<(String, String, EnvironmentName), BTreeMap<RunId, RunState>>,
+    evidence: BTreeMap<(String, String, EnvironmentName), BTreeMap<RunId, RunState>>,
     signals: BTreeMap<(String, String, EnvironmentName, RunId), Vec<Signal>>,
 }
 
@@ -89,6 +100,178 @@ fn ref_key(location: &StateLocation, reference: &str) -> (String, String) {
     (location.repository.clone(), reference.to_owned())
 }
 
+/// The clone's local branch of a remote state ref.
+fn local_key(reference: &str) -> (String, String) {
+    (StateLocation::LOCAL_REPOSITORY.to_owned(), reference.to_owned())
+}
+
+/// Fast-forward (or create) the local branch of a remote location's state
+/// ref to the remote tip, unless the local branch has commits the remote
+/// lacks, as the Git store does on every read and push.
+fn follow(inner: &mut Inner, location: &StateLocation, reference: &str) {
+    if location.is_local() || !StateLocation::is_branch_ref(reference) {
+        return;
+    }
+    let Some(remote) = inner.refs.get(&ref_key(location, reference)) else {
+        return;
+    };
+    if remote.tip.is_none() {
+        return;
+    }
+    let forward = match inner
+        .refs
+        .get(&local_key(reference))
+        .and_then(|local| local.tip.as_ref())
+    {
+        None => true,
+        Some(tip) => remote.log.iter().any(|(commit, _)| commit == tip),
+    };
+    if forward {
+        let copy = remote.clone();
+        inner.refs.insert(local_key(reference), copy);
+    }
+}
+
+/// Commits only `local` has, and commits only `remote` has, over their
+/// linear histories.
+fn divergence(local: &StateRef, remote: &StateRef) -> Divergence {
+    let common = local
+        .log
+        .iter()
+        .zip(&remote.log)
+        .take_while(|((a, _), (b, _))| a == b)
+        .count();
+    Divergence {
+        ahead: local.log.len() - common,
+        behind: remote.log.len() - common,
+    }
+}
+
+/// Apply one side's changes to the ref at `key`; commit only when the
+/// directory changed, so an operation that changes nothing writes nothing.
+fn apply_side(
+    inner: &mut Inner,
+    key: &(String, String),
+    path: &str,
+    transition: &Transition,
+    (desired_side, observed_side): (bool, bool),
+) -> Option<CommitId> {
+    let changes: &TransitionChanges = &transition.changes;
+    let before = inner
+        .refs
+        .get(key)
+        .and_then(|state_ref| state_ref.directories.get(path))
+        .cloned()
+        .unwrap_or_default();
+    let mut directory = before.clone();
+    if let Some(record) = &changes.record {
+        directory.record = Some(record.clone());
+    }
+    if desired_side {
+        if let Some(environment) = &changes.environment {
+            directory.environment = Some(environment.clone());
+        }
+        apply_map(&mut directory.desired, &changes.desired);
+    }
+    if observed_side {
+        apply_map(&mut directory.observed, &changes.observed);
+        apply_map(&mut directory.artifacts, &changes.artifacts);
+        apply_map(&mut directory.observations, &changes.observations);
+        apply_map(&mut directory.attestations, &changes.attestations);
+    }
+    if directory == before {
+        return None;
+    }
+    let commit = inner.next_commit();
+    let state_ref = inner.refs.entry(key.clone()).or_default();
+    state_ref.directories.insert(path.to_owned(), directory);
+    state_ref.tip = Some(commit.clone());
+    state_ref.log.push((commit.clone(), path.to_owned()));
+    let directories = state_ref.directories.clone();
+    state_ref.history.insert(commit.clone(), directories);
+    state_ref.messages.push(transition.message.clone());
+    Some(commit)
+}
+
+/// Apply a transition to the refs `key` maps each state ref name to.
+fn apply_transition(
+    inner: &mut Inner,
+    location: &StateLocation,
+    transition: &Transition,
+    key: impl Fn(&str) -> (String, String),
+) -> Committed {
+    let mut committed = Committed::default();
+    if location.desired_ref == location.observed_ref {
+        if let Some(commit) = apply_side(
+            inner,
+            &key(&location.desired_ref),
+            &location.path,
+            transition,
+            (true, true),
+        ) {
+            committed.desired = Some(commit.clone());
+            committed.observed = Some(commit);
+        }
+    } else {
+        committed.desired = apply_side(
+            inner,
+            &key(&location.desired_ref),
+            &location.path,
+            transition,
+            (true, false),
+        );
+        committed.observed = apply_side(
+            inner,
+            &key(&location.observed_ref),
+            &location.path,
+            transition,
+            (false, true),
+        );
+    }
+    committed
+}
+
+/// Move the held lease to a new version after a transition that wrote
+/// something, as the Git store's fenced push does.
+fn renew_lease(
+    inner: &mut Inner,
+    key: &(String, String, EnvironmentName),
+    committed: &mut Committed,
+    lease_version: &str,
+) {
+    committed.lease_version = if committed.desired.is_some() || committed.observed.is_some() {
+        let version = inner.next_version();
+        if let Some(held) = inner.leases.get_mut(key) {
+            held.version.clone_from(&version);
+        }
+        version
+    } else {
+        lease_version.to_owned()
+    };
+}
+
+/// Hold `lease` at `key` under a new version, which it returns.
+fn put_lease(inner: &mut Inner, key: (String, String, EnvironmentName), lease: &Lease) -> String {
+    let version = inner.next_version();
+    inner.leases.insert(
+        key,
+        HeldLease {
+            lease: lease.clone(),
+            version: version.clone(),
+        },
+    );
+    version
+}
+
+/// Merge `created` into a run's created units: one per unit name, sorted.
+fn merge_created(into: &mut Vec<DesiredUnit>, created: impl IntoIterator<Item = DesiredUnit>) {
+    for desired in created {
+        into.retain(|existing| existing.unit.name != desired.unit.name);
+        into.push(desired);
+    }
+    into.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+}
+
 fn coordination_key(location: &StateLocation, environment: &EnvironmentName) -> (String, String, EnvironmentName) {
     (
         location.repository.clone(),
@@ -102,27 +285,6 @@ impl MemoryStateStore {
         Self::default()
     }
 
-    /// How many commits a state ref received, for assertions such as a
-    /// transition commit per ref.
-    pub fn commit_count(&self, repository: &str, reference: &str) -> usize {
-        let inner = self.inner.lock().expect("store lock");
-        inner
-            .refs
-            .get(&(repository.to_owned(), reference.to_owned()))
-            .map_or(0, |state_ref| state_ref.commits)
-    }
-
-    /// The messages of the commits a state ref received, oldest first, such
-    /// as transition commits whose summaries a test reads back.
-    pub fn messages(&self, repository: &str, reference: &str) -> Vec<String> {
-        let inner = self.inner.lock().expect("store lock");
-        inner
-            .refs
-            .get(&(repository.to_owned(), reference.to_owned()))
-            .map(|state_ref| state_ref.messages.clone())
-            .unwrap_or_default()
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("store lock")
     }
@@ -130,7 +292,9 @@ impl MemoryStateStore {
 
 impl StateStore for MemoryStateStore {
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        follow(&mut inner, location, &location.desired_ref);
+        follow(&mut inner, location, &location.observed_ref);
         let read = |reference: &str| inner.refs.get(&ref_key(location, reference));
         let desired = read(&location.desired_ref);
         let observed = read(&location.observed_ref);
@@ -176,6 +340,11 @@ impl StateStore for MemoryStateStore {
                 .get(&key)
                 .map(|runs| runs.values().cloned().collect())
                 .unwrap_or_default(),
+            evidence: inner
+                .evidence
+                .get(&key)
+                .map(|runs| runs.values().cloned().collect())
+                .unwrap_or_default(),
         })
     }
 
@@ -192,15 +361,7 @@ impl StateStore for MemoryStateStore {
         if current != expected {
             return Err(StateError::LeaseRace);
         }
-        let version = inner.next_version();
-        inner.leases.insert(
-            key,
-            HeldLease {
-                lease: lease.clone(),
-                version: version.clone(),
-            },
-        );
-        Ok(version)
+        Ok(put_lease(&mut inner, key, lease))
     }
 
     fn update_lease(
@@ -216,15 +377,7 @@ impl StateStore for MemoryStateStore {
             Some(held) if held.version == expected => {}
             _ => return Err(StateError::LeaseLost),
         }
-        let version = inner.next_version();
-        inner.leases.insert(
-            key,
-            HeldLease {
-                lease: lease.clone(),
-                version: version.clone(),
-            },
-        );
-        Ok(version)
+        Ok(put_lease(&mut inner, key, lease))
     }
 
     fn release_lease(
@@ -257,28 +410,80 @@ impl StateStore for MemoryStateStore {
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()> {
         let mut inner = self.lock();
-        let version = inner.next_version();
-        let runs = inner.runs.entry(coordination_key(location, environment)).or_default();
-        let state = runs.entry(run.run.clone()).or_insert_with(|| RunState {
-            run: run.clone(),
-            checkpoints: Vec::new(),
-            version: String::new(),
-        });
-        state.run = run.clone();
-        state.version = version;
+        let state = run_state(&mut inner, location, environment, run);
         if let Some(checkpoint) = checkpoint {
             state.checkpoints.push(checkpoint.clone());
         }
         Ok(())
     }
 
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+    fn write_run_created(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        let mut inner = self.lock();
+        let state = run_state(&mut inner, location, environment, run);
+        merge_created(&mut state.created, created.iter().cloned());
+        Ok(())
+    }
+
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
         let mut inner = self.lock();
         let key = coordination_key(location, environment);
         if let Some(runs) = inner.runs.get_mut(&key) {
+            stale_run(runs.get(run), run, expected)?;
             runs.remove(run);
         }
         inner.signals.remove(&(key.0, key.1, key.2, run.clone()));
+        Ok(())
+    }
+
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
+        let mut inner = self.lock();
+        let key = coordination_key(location, environment);
+        stale_run(inner.runs.get(&key).and_then(|runs| runs.get(run)), run, expected)?;
+        let Some(retired) = inner.runs.get_mut(&key).and_then(|runs| runs.remove(run)) else {
+            return Ok(());
+        };
+        inner
+            .signals
+            .remove(&(key.0.clone(), key.1.clone(), key.2.clone(), run.clone()));
+        let version = inner.next_version();
+        let evidence = inner.evidence.entry(key).or_default();
+        match evidence.get_mut(run) {
+            Some(existing) => {
+                existing.run = retired.run;
+                existing.checkpoints.extend(retired.checkpoints);
+                merge_created(&mut existing.created, retired.created);
+                existing.version = version;
+            }
+            None => {
+                evidence.insert(run.clone(), RunState { version, ..retired });
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let mut inner = self.lock();
+        if let Some(evidence) = inner.evidence.get_mut(&coordination_key(location, environment)) {
+            evidence.remove(run);
+        }
         Ok(())
     }
 
@@ -337,70 +542,15 @@ impl StateStore for MemoryStateStore {
                 .get(&ref_key(location, reference))
                 .is_some_and(|state_ref| state_ref.unchanged_since(expected.as_ref(), &location.path));
             if &actual != expected && !rebased {
-                return Err(StateError::Conflict {
-                    reference: reference.clone(),
-                    actual: actual.map_or_else(|| "nothing".to_owned(), |commit| commit.to_string()),
-                });
+                return Err(StateError::conflict(reference.clone(), actual));
             }
         }
-        let changes = &transition.changes;
-        // Apply one side's changes; commit only when the directory changed,
-        // so an operation that changes nothing writes nothing.
-        let apply = |inner: &mut Inner, reference: &str, desired_side: bool, observed_side: bool| -> Option<CommitId> {
-            let before = inner
-                .refs
-                .get(&ref_key(location, reference))
-                .and_then(|state_ref| state_ref.directories.get(&location.path))
-                .cloned()
-                .unwrap_or_default();
-            let mut directory = before.clone();
-            if let Some(record) = &changes.record {
-                directory.record = Some(record.clone());
-            }
-            if desired_side {
-                if let Some(environment) = &changes.environment {
-                    directory.environment = Some(environment.clone());
-                }
-                apply_map(&mut directory.desired, &changes.desired);
-            }
-            if observed_side {
-                apply_map(&mut directory.observed, &changes.observed);
-                apply_map(&mut directory.artifacts, &changes.artifacts);
-            }
-            if directory == before {
-                return None;
-            }
-            let commit = inner.next_commit();
-            let state_ref = inner.refs.entry(ref_key(location, reference)).or_default();
-            state_ref.directories.insert(location.path.clone(), directory);
-            state_ref.tip = Some(commit.clone());
-            state_ref.commits += 1;
-            state_ref.log.push((commit.clone(), location.path.clone()));
-            let directories = state_ref.directories.clone();
-            state_ref.history.insert(commit.clone(), directories);
-            state_ref.messages.push(transition.message.clone());
-            Some(commit)
-        };
-        let mut committed = Committed::default();
-        if location.desired_ref == location.observed_ref {
-            if let Some(commit) = apply(&mut inner, &location.desired_ref, true, true) {
-                committed.desired = Some(commit.clone());
-                committed.observed = Some(commit);
-            }
-        } else {
-            committed.desired = apply(&mut inner, &location.desired_ref, true, false);
-            committed.observed = apply(&mut inner, &location.observed_ref, false, true);
-        }
-        // The fenced push moves the lease, as the Git store's does.
-        committed.lease_version = if committed.desired.is_some() || committed.observed.is_some() {
-            let version = inner.next_version();
-            if let Some(held) = inner.leases.get_mut(&key) {
-                held.version.clone_from(&version);
-            }
-            version
-        } else {
-            lease_version.to_owned()
-        };
+        let mut committed = apply_transition(&mut inner, location, transition, |reference| {
+            ref_key(location, reference)
+        });
+        renew_lease(&mut inner, &key, &mut committed, lease_version);
+        follow(&mut inner, location, &location.desired_ref);
+        follow(&mut inner, location, &location.observed_ref);
         Ok(committed)
     }
 
@@ -418,18 +568,141 @@ impl StateStore for MemoryStateStore {
                     inner.refs.insert(ref_key(to, target), copied);
                 }
                 Some(existing) if existing.tip == copied.tip => {}
-                Some(existing) => {
-                    return Err(StateError::Conflict {
-                        reference: target.clone(),
-                        actual: existing
-                            .tip
-                            .as_ref()
-                            .map_or_else(|| "nothing".to_owned(), ToString::to_string),
-                    })
+                Some(existing) => return Err(StateError::conflict(target.clone(), existing.tip.as_ref())),
+            }
+            follow(&mut inner, to, target);
+        }
+        Ok(())
+    }
+
+    fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
+        let inner = self.lock();
+        let reference = location.state_ref(side);
+        let Some(state_ref) = inner.refs.get(&ref_key(location, reference)) else {
+            return Ok(Vec::new());
+        };
+        Ok(state_ref
+            .log
+            .iter()
+            .zip(&state_ref.messages)
+            .rev()
+            .take(limit)
+            .map(|((commit, _), message)| LogEntry {
+                commit: commit.clone(),
+                message: message.clone(),
+            })
+            .collect())
+    }
+
+    fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
+        if location.is_local() {
+            return Ok(LocalDivergence::default());
+        }
+        let inner = self.lock();
+        let side = |reference: &str| -> Option<Divergence> {
+            if !StateLocation::is_branch_ref(reference) {
+                return None;
+            }
+            let remote = inner
+                .refs
+                .get(&ref_key(location, reference))
+                .filter(|state_ref| state_ref.tip.is_some())?;
+            let local = inner
+                .refs
+                .get(&local_key(reference))
+                .filter(|state_ref| state_ref.tip.is_some())?;
+            Some(divergence(local, remote))
+        };
+        Ok(LocalDivergence {
+            desired: side(&location.desired_ref),
+            observed: side(&location.observed_ref),
+        })
+    }
+
+    fn reset_local(&self, location: &StateLocation, expected: &StateTips) -> StateResult<StateTips> {
+        if location.is_local() {
+            return Err(StateError::Unavailable(
+                "the state lives on the clone's own branches, which have no remote state to reset to".to_owned(),
+            ));
+        }
+        require_local_branches(location)?;
+        let mut inner = self.lock();
+        let mut moves = vec![(&location.desired_ref, &expected.desired)];
+        if location.observed_ref != location.desired_ref {
+            moves.push((&location.observed_ref, &expected.observed));
+        } else if expected.observed != expected.desired {
+            return Err(StateError::conflict(
+                location.observed_ref.clone(),
+                expected.desired.as_ref(),
+            ));
+        }
+        for (reference, expected) in &moves {
+            let current = inner
+                .refs
+                .get(&local_key(reference))
+                .and_then(|state_ref| state_ref.tip.clone());
+            if &current != *expected {
+                return Err(StateError::conflict((*reference).clone(), current));
+            }
+        }
+        for (reference, _) in &moves {
+            match inner.refs.get(&ref_key(location, reference)).cloned() {
+                Some(remote) if remote.tip.is_some() => {
+                    inner.refs.insert(local_key(reference), remote);
+                }
+                _ => {
+                    inner.refs.remove(&local_key(reference));
                 }
             }
         }
-        Ok(())
+        let tip = |reference: &str| {
+            inner
+                .refs
+                .get(&local_key(reference))
+                .and_then(|state_ref| state_ref.tip.clone())
+        };
+        Ok(StateTips {
+            desired: tip(&location.desired_ref),
+            observed: tip(&location.observed_ref),
+        })
+    }
+
+    fn commit_local(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        base: &StateTips,
+        transition: &Transition,
+        lease_location: &StateLocation,
+        lease_version: &str,
+    ) -> StateResult<Committed> {
+        if location.is_local() {
+            return Err(StateError::Unavailable(
+                "local transition commits go to the local branches of remote state; this state lives on the clone's own branches".to_owned(),
+            ));
+        }
+        require_local_branches(location)?;
+        let mut inner = self.lock();
+        for (reference, expected) in [
+            (&location.desired_ref, &base.desired),
+            (&location.observed_ref, &base.observed),
+        ] {
+            let actual = inner
+                .refs
+                .get(&local_key(reference))
+                .and_then(|state_ref| state_ref.tip.clone());
+            if &actual != expected {
+                return Err(StateError::conflict(reference.clone(), actual));
+            }
+        }
+        let key = coordination_key(lease_location, environment);
+        match inner.leases.get(&key) {
+            Some(held) if held.version == lease_version => {}
+            _ => return Err(StateError::LeaseLost),
+        }
+        let mut committed = apply_transition(&mut inner, location, transition, local_key);
+        renew_lease(&mut inner, &key, &mut committed, lease_version);
+        Ok(committed)
     }
 }
 
@@ -446,7 +719,35 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
         artifacts: observed
             .map(|directory| directory.artifacts.clone())
             .unwrap_or_default(),
+        observations: observed
+            .map(|directory| directory.observations.clone())
+            .unwrap_or_default(),
+        attestations: observed
+            .map(|directory| directory.attestations.clone())
+            .unwrap_or_default(),
     }
+}
+
+/// The run ref of `run`, created when missing, with `run` as its record and
+/// a new version.
+fn run_state<'i>(
+    inner: &'i mut Inner,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    run: &Run,
+) -> &'i mut RunState {
+    let version = inner.next_version();
+    let runs = inner.runs.entry(coordination_key(location, environment)).or_default();
+    let state = runs.entry(run.run.clone()).or_insert_with(|| RunState {
+        run: run.clone(),
+        checkpoints: Vec::new(),
+        created: Vec::new(),
+        version: String::new(),
+        foreign: false,
+    });
+    state.run = run.clone();
+    state.version = version;
+    state
 }
 
 fn apply_map<V: Clone>(target: &mut BTreeMap<UnitName, V>, changes: &BTreeMap<UnitName, Option<V>>) {
@@ -462,17 +763,28 @@ fn apply_map<V: Clone>(target: &mut BTreeMap<UnitName, V>, changes: &BTreeMap<Un
     }
 }
 
+/// Refuse to consume a run ref that moved since the caller read it at `expected`.
+fn stale_run(current: Option<&RunState>, run: &RunId, expected: Option<&str>) -> StateResult<()> {
+    match (current, expected) {
+        (Some(current), Some(expected)) if current.version != expected => Err(StateError::Conflict {
+            reference: format!("runs/{run}"),
+            actual: current.version.clone(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nyl_core::orchestration::ports::TransitionChanges;
     use nyl_core::orchestration::state::{LeaseKind, Operation, StateRecordKind, StateV1};
 
-    fn location(shared: bool) -> StateLocation {
+    fn location() -> StateLocation {
         StateLocation {
             repository: "file:///project.git".to_owned(),
             desired_ref: "nyl/dev/desired".to_owned(),
-            observed_ref: if shared { "nyl/dev/desired" } else { "nyl/dev/observed" }.to_owned(),
+            observed_ref: "nyl/dev/observed".to_owned(),
             path: String::new(),
             coordination_ref_prefix: "refs/nyl/".to_owned(),
         }
@@ -521,122 +833,6 @@ mod tests {
     const RUN_A: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";
     const RUN_B: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
 
-    /// Catches `get --state-revision` reading the current state, or a
-    /// commit message not being kept for assertions on transition commits.
-    #[test]
-    fn test_snapshot_at_reads_an_earlier_commit_and_messages_are_kept() {
-        let store = MemoryStateStore::new();
-        let location = location(false);
-        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        let first = store
-            .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
-            .unwrap();
-        let mut moved = init(&location);
-        moved.message = "nyl: state-init dev (fresh)".to_owned();
-        moved.changes.record.as_mut().unwrap().template = Some("preview".to_owned());
-        let tips = StateTips {
-            desired: first.desired.clone(),
-            observed: first.observed.clone(),
-        };
-        store
-            .commit(&location, &dev(), &tips, &moved, &first.lease_version)
-            .unwrap();
-        let earlier = store.snapshot_at(&location, &tips).unwrap();
-        assert_eq!(earlier.record.unwrap().template, None);
-        assert_eq!(
-            store.snapshot(&location).unwrap().record.unwrap().template.as_deref(),
-            Some("preview")
-        );
-        assert_eq!(
-            store.messages(&location.repository, &location.desired_ref),
-            ["nyl: state-init dev", "nyl: state-init dev (fresh)"]
-        );
-        let unknown = StateTips {
-            desired: Some(CommitId::new("f".repeat(40)).unwrap()),
-            observed: None,
-        };
-        assert!(matches!(
-            store.snapshot_at(&location, &unknown),
-            Err(StateError::Unavailable(_))
-        ));
-    }
-
-    #[test]
-    fn test_lease_compare_and_swap_admits_one_holder() {
-        let store = MemoryStateStore::new();
-        let location = location(false);
-        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        // A second run expecting no lease loses the race.
-        assert!(matches!(
-            store.take_lease(&location, &dev(), &lease(RUN_B), None),
-            Err(StateError::LeaseRace)
-        ));
-        // A takeover names the version it replaces.
-        let taken = store
-            .take_lease(&location, &dev(), &lease(RUN_B), Some(&version))
-            .unwrap();
-        // The first holder's update now fails: it lost the lease.
-        assert!(matches!(
-            store.update_lease(&location, &dev(), &lease(RUN_A), &version),
-            Err(StateError::LeaseLost)
-        ));
-        store.release_lease(&location, &dev(), &taken).unwrap();
-        assert!(store.coordination(&location, &dev()).unwrap().lease.is_none());
-    }
-
-    #[test]
-    fn test_commit_is_fenced_by_the_lease_and_the_read_tips() {
-        let store = MemoryStateStore::new();
-        let location = location(false);
-        let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        store.delete_lease(&location, &dev()).unwrap();
-        // A holder whose lease was deleted pushes nothing.
-        assert!(matches!(
-            store.commit(&location, &dev(), &StateTips::default(), &init(&location), &version),
-            Err(StateError::LeaseLost)
-        ));
-        let version = store.take_lease(&location, &dev(), &lease(RUN_B), None).unwrap();
-        let committed = store
-            .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
-            .unwrap();
-        assert!(committed.desired.is_some() && committed.observed.is_some());
-        // The fenced push moved the lease: the old version no longer holds it.
-        assert!(matches!(
-            store.update_lease(&location, &dev(), &lease(RUN_B), &version),
-            Err(StateError::LeaseLost)
-        ));
-        // A commit built on tips that have moved since is a conflict.
-        assert!(matches!(
-            store.commit(
-                &location,
-                &dev(),
-                &StateTips::default(),
-                &init(&location),
-                &committed.lease_version
-            ),
-            Err(StateError::Conflict { .. })
-        ));
-        let snapshot = store.snapshot(&location).unwrap();
-        assert_eq!(snapshot.record.unwrap().environment, dev());
-    }
-
-    #[test]
-    fn test_one_commit_per_ref_and_one_commit_when_the_refs_coincide() {
-        for (shared, observed_commits) in [(false, 1), (true, 1)] {
-            let store = MemoryStateStore::new();
-            let location = location(shared);
-            let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-            store
-                .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
-                .unwrap();
-            assert_eq!(store.commit_count(&location.repository, &location.desired_ref), 1);
-            assert_eq!(
-                store.commit_count(&location.repository, &location.observed_ref),
-                observed_commits
-            );
-        }
-    }
-
     /// A run's view: the lease version it believes it holds.
     #[derive(Debug, Clone, Copy)]
     enum Step {
@@ -664,7 +860,7 @@ mod tests {
         #[test]
         fn test_only_the_current_holder_writes(steps in proptest::collection::vec(step(), 1..40)) {
             let store = MemoryStateStore::new();
-            let location = location(false);
+            let location = location();
             let runs = [RUN_A, RUN_B];
             let mut believed: [Option<String>; 2] = [None, None];
             for step in steps {

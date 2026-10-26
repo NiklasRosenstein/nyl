@@ -125,9 +125,25 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Property tests (proptest) cover invariants: no unit executes with non-current
   provenance; a held unit's desired document never changes; replaying
   transition commits reproduces the state; a transition commit touches only its
-  operation's paths.
-- Crash injection at defined fault points in the shell (after an effect, before
-  a checkpoint, before the final push) exercises recovery.
+  operation's paths; every receipt and condition change follows the
+  transition table (`rules::transitions`); importing leftover run refs is
+  idempotent and never regresses state (`rules::takeover`).
+- Crash injection at defined fault points in the shell (`FaultPoint`) exercises
+  recovery: four killable points, after an effect, before a checkpoint,
+  before a lease update (once per phase, then once per unit the phase
+  starts), and before the final push, plus two pause points, before a unit's
+  driver call (`executing`) and before each `--wait-lease` poll
+  (`waiting-lease`), where an injector blocks so a scenario can run another
+  invocation meanwhile. The [crash-injection
+  scenarios](reference-scenarios.md#crash-injection) cover every killable
+  point.
+- Cancellation is an injected, cloneable flag (`shell::run::Cancellation`)
+  that the command line's signal handler sets and tests set directly; the
+  process runner shares it and forwards the signal to running tools. Only
+  `reconcile`, `verify`, and `recover` install the handler; the command line
+  runs their orchestration on its own thread so the signal task stays free,
+  and a second signal exits at once. Tier-1 tests cancel through the flag,
+  and `orchestration_signal_test` sends SIGTERM to the real binary.
 - Golden files cover every state-file kind and schema version, so format
   changes are deliberate.
 - A driver conformance suite runs against every driver and, later, every plugin

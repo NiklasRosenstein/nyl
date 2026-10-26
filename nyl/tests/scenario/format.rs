@@ -189,35 +189,48 @@ pub enum DriverOutcome {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaultStep {
-    pub point: FaultPointName,
-    pub unit: String,
+    pub point: PointName,
+    /// The unit the point concerns: required for `after-effect` and
+    /// `before-checkpoint`; for `before-lease-update`, the unit whose phase
+    /// the fault precedes, or none for the first phase; none for
+    /// `before-push`.
+    pub unit: Option<String>,
 }
 
+/// The points a `fault` step or a `pause` names. A `fault` step's
+/// `executing` and `waiting-lease` parse so that validation can say they
+/// only pause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum FaultPointName {
+pub enum PointName {
     AfterEffect,
     BeforeCheckpoint,
     BeforeLeaseUpdate,
     BeforePush,
+    Executing,
+    WaitingLease,
+}
+
+impl PointName {
+    /// The shell's fault point of this name.
+    pub fn fault_point(self) -> nyl_orchestration::fault::FaultPoint {
+        use nyl_orchestration::fault::FaultPoint;
+        match self {
+            Self::AfterEffect => FaultPoint::AfterEffect,
+            Self::BeforeCheckpoint => FaultPoint::BeforeCheckpoint,
+            Self::BeforeLeaseUpdate => FaultPoint::BeforeLeaseUpdate,
+            Self::BeforePush => FaultPoint::BeforePush,
+            Self::Executing => FaultPoint::Executing,
+            Self::WaitingLease => FaultPoint::WaitingLease,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PauseAt {
-    pub point: PausePoint,
+    pub point: PointName,
     pub unit: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PausePoint {
-    Executing,
-    WaitingLease,
-    AfterEffect,
-    BeforeCheckpoint,
-    BeforeLeaseUpdate,
-    BeforePush,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -425,6 +438,10 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
         }
         scripted |= kind.tier_one_only() || step.pause.is_some();
     }
+    // `ids` maps each id to whether its paused invocation still awaits a resume.
+    if let Some((id, _)) = ids.iter().find(|(_, awaiting)| **awaiting) {
+        return Err(format!("{id} is paused and never resumed"));
+    }
     Ok(())
 }
 
@@ -519,9 +536,9 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
         }
         StepKind::Resume => {
             let id = step.resume.as_ref().expect("kind");
-            match ids.get(id) {
-                Some(true) => {}
-                Some(false) => return Err(format!("resume {id}: that step was not paused")),
+            match ids.get_mut(id) {
+                Some(awaiting @ true) => *awaiting = false,
+                Some(false) => return Err(format!("resume {id}: that step was not paused or is already resumed")),
                 None => return Err(format!("resume {id}: no earlier nyl step has that id")),
             }
         }
@@ -532,6 +549,24 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
             }
             if driver.times == Some(0) {
                 return Err("times must be at least 1".to_owned());
+            }
+        }
+        StepKind::Fault => {
+            let fault = step.fault.as_ref().expect("kind");
+            match (fault.point, &fault.unit) {
+                (PointName::Executing | PointName::WaitingLease, _) => {
+                    return Err(format!(
+                        "fault {:?}: executing and waiting-lease only pause; use a nyl step's pause",
+                        fault.point
+                    ));
+                }
+                (PointName::AfterEffect | PointName::BeforeCheckpoint, None) => {
+                    return Err(format!("fault {:?} needs the unit it concerns", fault.point));
+                }
+                (PointName::BeforePush, Some(_)) => {
+                    return Err("fault before-push concerns the whole run; it takes no unit".to_owned());
+                }
+                _ => {}
             }
         }
         StepKind::CiWorker => {

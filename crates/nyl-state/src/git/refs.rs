@@ -13,9 +13,6 @@ use git2::{Oid, Repository};
 use nyl_core::orchestration::ports::{StateError, StateResult};
 use nyl_git::{Expect, GitAuth, RefUpdate};
 
-/// The `repository` of a state location that is the clone itself.
-pub const LOCAL_REPOSITORY: &str = nyl_core::orchestration::state::StateLocation::LOCAL_REPOSITORY;
-
 /// One ref update, a compare-and-swap: the ref must be at `expected`, or
 /// absent for `None`; `new` of `None` deletes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +30,23 @@ pub enum UpdateError {
     Other(StateError),
 }
 
+impl UpdateError {
+    /// The state error for this failure, `stale` for a ref that was not at
+    /// its expected value.
+    pub fn or_stale(self, stale: StateError) -> StateError {
+        match self {
+            Self::Stale => stale,
+            Self::Other(error) => error,
+        }
+    }
+}
+
+impl From<git2::Error> for UpdateError {
+    fn from(error: git2::Error) -> Self {
+        Self::Other(unavailable(error))
+    }
+}
+
 /// The refs of one state repository.
 pub struct Refs<'a> {
     pub repository: &'a Repository,
@@ -45,15 +59,6 @@ pub struct Refs<'a> {
 
 pub fn unavailable(error: impl std::fmt::Display) -> StateError {
     StateError::Unavailable(error.to_string())
-}
-
-/// The full name of a ref as configured: a short name is a branch.
-pub fn full_name(name: &str) -> String {
-    if name.starts_with("refs/") {
-        name.to_owned()
-    } else {
-        format!("refs/heads/{name}")
-    }
 }
 
 impl Refs<'_> {
@@ -198,25 +203,14 @@ impl Refs<'_> {
     }
 
     fn update_local(&self, updates: &[Update]) -> Result<(), UpdateError> {
-        let mut transaction = self
-            .repository
-            .transaction()
-            .map_err(|error| UpdateError::Other(unavailable(error)))?;
+        let mut transaction = self.repository.transaction()?;
         for update in updates {
-            transaction
-                .lock_ref(&update.name)
-                .map_err(|error| UpdateError::Other(unavailable(error)))?;
+            transaction.lock_ref(&update.name)?;
         }
         for update in updates {
             let current = self.repository.refname_to_id(&update.name).ok();
             let fast_forward = match (current, update.new) {
-                (Some(current), Some(new)) => {
-                    current == new
-                        || self
-                            .repository
-                            .graph_descendant_of(new, current)
-                            .map_err(|error| UpdateError::Other(unavailable(error)))?
-                }
+                (Some(current), Some(new)) => current == new || self.repository.graph_descendant_of(new, current)?,
                 _ => true,
             };
             let stale = update.expected != current || !fast_forward;
@@ -232,16 +226,19 @@ impl Refs<'_> {
             } else {
                 transaction.remove(&update.name)
             };
-            result.map_err(|error| UpdateError::Other(unavailable(error)))?;
+            result?;
         }
-        transaction
-            .commit()
-            .map_err(|error| UpdateError::Other(unavailable(error)))
+        Ok(transaction.commit()?)
     }
 
     /// The local object a listed head names, after [`Self::fetch`].
     pub fn local(&self, name: &str) -> Option<Oid> {
         self.repository.refname_to_id(&self.tracking(name)).ok()
+    }
+
+    /// The local object of `name` when `heads` lists it, after [`Self::fetch`].
+    pub fn fetched(&self, heads: &BTreeMap<String, Oid>, name: &str) -> Option<Oid> {
+        heads.get(name).and_then(|_| self.local(name))
     }
 
     /// Fast-forward the clone's branch of a state ref to `oid`, creating it

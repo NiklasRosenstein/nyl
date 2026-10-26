@@ -26,9 +26,8 @@ use nyl_core::orchestration::graph::{EdgeSource, ExecutionGraph, GraphEdge, Grap
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, UnitName};
 use nyl_core::orchestration::state::DesiredUnit;
 use nyl_core::resources::units::{DependsOn, Evidence};
-use serde_json::Value;
 
-use super::references::{check_declaration, unsupported_depends_on, unsupported_evidence};
+use super::references::{check_declaration, depends_on, unsupported_depends_on, unsupported_evidence};
 
 /// The graph of a run's desired units. Errors use
 /// [`Code::DependencyUnknown`](nyl_core::orchestration::codes::Code::DependencyUnknown),
@@ -94,19 +93,16 @@ fn depends_on_edges(
     edges: &mut Vec<GraphEdge>,
     findings: &mut Vec<Finding>,
 ) {
-    let entries: Vec<DependsOn> = match unit.spec.get("dependsOn") {
-        None | Some(Value::Null) => return,
-        Some(entries) => match serde_json::from_value(entries.clone()) {
-            Ok(entries) => entries,
-            Err(error) => {
-                findings.push(Finding::new(
-                    Code::UnitInvalid,
-                    format!("unit {consumer}: spec.dependsOn is invalid: {error}"),
-                    "write each dependsOn entry as a unit name or {unit, evidence, attestations}",
-                ));
-                return;
-            }
-        },
+    let entries = match depends_on(&unit.spec) {
+        Ok(entries) => entries,
+        Err(error) => {
+            findings.push(Finding::new(
+                Code::UnitInvalid,
+                format!("unit {consumer}: spec.dependsOn is invalid: {error}"),
+                "write each dependsOn entry as a unit name or {unit, evidence, attestations}",
+            ));
+            return;
+        }
     };
     for (index, entry) in entries.iter().enumerate() {
         if let Some(error) = unsupported_depends_on(entry) {
@@ -333,22 +329,12 @@ pub fn topological_order(graph: &ExecutionGraph) -> Vec<UnitName> {
     order
 }
 
-/// The producers `unit` depends on directly.
-pub fn producers<'a>(graph: &'a ExecutionGraph, unit: &UnitName) -> BTreeSet<&'a UnitName> {
-    graph
-        .edges
-        .iter()
-        .filter(|edge| &edge.consumer == unit)
-        .map(|edge| &edge.producer)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
-    use super::super::references::fixtures::*;
     use super::*;
+    use crate::rules::fixtures::*;
 
     fn units(specs: &[(&str, &str, Value)]) -> BTreeMap<UnitName, DesiredUnit> {
         specs
@@ -398,10 +384,6 @@ mod tests {
         assert_eq!(
             topological_order(&graph),
             [name("network"), name("web-image"), name("database"), name("kubernetes")]
-        );
-        assert_eq!(
-            producers(&graph, &name("kubernetes")),
-            BTreeSet::from([&name("database"), &name("web-image")])
         );
         let publication = graph
             .edges

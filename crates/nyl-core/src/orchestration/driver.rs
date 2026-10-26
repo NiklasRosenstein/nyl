@@ -26,19 +26,17 @@ use super::time::Timestamp;
 /// gives the unit an `uncertain` condition when an effect may have started,
 /// and otherwise fails the invocation with exit 1.
 #[derive(Debug, thiserror::Error)]
-pub enum DriverError {
-    #[error("{message}")]
-    Failed {
-        message: String,
-        /// Whether an effect may have started.
-        effects_possible: bool,
-    },
+#[error("{message}")]
+pub struct DriverError {
+    message: String,
+    /// Whether an effect may have started.
+    effects_possible: bool,
 }
 
 impl DriverError {
     /// A failure before any effect could start.
     pub fn before_effects(message: impl Into<String>) -> Self {
-        Self::Failed {
+        Self {
             message: message.into(),
             effects_possible: false,
         }
@@ -46,16 +44,14 @@ impl DriverError {
 
     /// A failure after an effect may have started.
     pub fn after_effects(message: impl Into<String>) -> Self {
-        Self::Failed {
+        Self {
             message: message.into(),
             effects_possible: true,
         }
     }
 
     pub fn effects_possible(&self) -> bool {
-        match self {
-            Self::Failed { effects_possible, .. } => *effects_possible,
-        }
+        self.effects_possible
     }
 }
 
@@ -408,8 +404,11 @@ pub trait Driver: Send + Sync {
     fn spec_schema(&self) -> schemars::Schema;
     /// Parse and validate a rendered spec, references still as expressions.
     fn validate_spec(&self, spec: &Value) -> std::result::Result<(), String>;
-    /// Attestation names the kind can produce for a spec.
-    fn attestations(&self, spec: &Value) -> Vec<String>;
+    /// Attestation names the kind can produce for a spec; none by default.
+    fn attestations(&self, spec: &Value) -> Vec<String> {
+        let _ = spec;
+        Vec::new()
+    }
     /// The native resources a spec claims in an environment; an image tag prefix names the environment.
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope>;
     /// JSON Pointers of the spec's Git source fields (the `GitSource` shape:
@@ -445,20 +444,36 @@ pub trait Driver: Send + Sync {
         unit: &DesiredUnit,
         receipt: &Receipt,
     ) -> DriverResult<Supported<Verification>>;
-    fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>>;
-    fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>>;
+    /// The `inspect` recovery policy's check; unsupported by default.
+    fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
+        let _ = (ctx, unit);
+        Ok(Supported::Unsupported)
+    }
+    /// Tear the unit down; unsupported by default.
+    fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
+        let _ = (ctx, unit);
+        Ok(Supported::Unsupported)
+    }
+    /// `nyl build`; unsupported by default.
     fn build(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         push: bool,
-    ) -> DriverResult<Supported<Vec<ArtifactDocument>>>;
+    ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
+        let _ = (ctx, unit, push);
+        Ok(Supported::Unsupported)
+    }
+    /// `nyl exec`; unsupported by default.
     fn exec(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         args: &[OsString],
-    ) -> DriverResult<Supported<ExecStatus>>;
+    ) -> DriverResult<Supported<ExecStatus>> {
+        let _ = (ctx, unit, args);
+        Ok(Supported::Unsupported)
+    }
 }
 
 /// The drivers of one invocation, by the `apiVersion` and `kind` a unit's
@@ -491,13 +506,6 @@ impl DriverSet {
         self.drivers
             .get(&(api_version.to_owned(), kind.to_owned()))
             .map(std::convert::AsRef::as_ref)
-    }
-
-    /// Every registered `(apiVersion, kind)`.
-    pub fn kinds(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.drivers
-            .keys()
-            .map(|(api_version, kind)| (api_version.as_str(), kind.as_str()))
     }
 }
 

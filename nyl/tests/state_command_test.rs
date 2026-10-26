@@ -5,43 +5,30 @@
 mod scenario;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use assert_cmd::Command;
+use nyl_core::orchestration::ids::RunId;
+use nyl_core::orchestration::ports::StateStore as _;
+use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, StateV1};
+use nyl_orchestration::testing::FakeClock;
 use predicates::prelude::*;
+use scenario::runner::AUTHOR;
+use scenario::shell;
 use scenario::world::{git_output, World};
 
 fn project() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/walkthroughs/_project")
+    scenario::shell::shared_project()
 }
 
-/// The author state commits are written with: fresh clones have no Git
-/// identity, and the host's must not matter.
-const AUTHOR: &str = "Scenario <scenario@example.invalid>";
-
-/// `nyl <args>` in `checkout`, with a home that holds no Git configuration,
-/// so only `--author` or the clone's own configuration can name an identity.
+/// `nyl <args>` in `checkout`, with a home that holds no Git configuration.
 fn bare_nyl(checkout: &Path, home: &Path, args: &[&str]) -> Command {
-    let mut command = Command::cargo_bin("nyl").unwrap();
-    command
-        .current_dir(checkout)
-        .args(args)
-        .env_remove("GITHUB_RUN_ID")
-        .env_remove("CI_JOB_URL")
-        .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        // CI forces colour; the assertions read plain text.
-        .env("NO_COLOR", "1");
-    command
+    Command::from_std(scenario::nyl_binary(checkout, home, args))
 }
 
 /// `nyl <args> --author <AUTHOR>` in `checkout`.
 fn nyl(checkout: &Path, args: &[&str]) -> Command {
-    let home = checkout.with_extension("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let mut command = bare_nyl(checkout, &home, args);
-    command.args(["--author", AUTHOR]);
-    command
+    Command::from_std(scenario::nyl_as_author(checkout, args))
 }
 
 #[test]
@@ -143,46 +130,21 @@ fn test_state_commands_refuse_with_stable_codes_and_exit_categories() {
         .stderr(predicate::str::contains("NYL-UNIT-UNKNOWN"));
 
     // A lease another runner holds makes every state command wait: exit 2.
-    let lease = "apiVersion: gitops.nyl/v1\nkind: Lease\nrun: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90\nrunner: https://ci.example.com/runs/1\noperation: reconcile\ndeadline: '2999-01-01T00:00:00Z'\ntakenAt: '2026-09-24T10:00:00Z'\n";
-    let blob = {
-        let path = world.scenario_tmp().join("lease.yaml");
-        std::fs::write(&path, lease).unwrap();
-        git_output(&world.bare(), &["hash-object", "-w", path.to_str().unwrap()])
+    let lease = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: RunId::new("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90").unwrap(),
+        runner: "https://ci.example.com/runs/1".to_owned(),
+        operation: Operation::Reconcile,
+        units: Vec::new(),
+        deadline: "2999-01-01T00:00:00Z".parse().unwrap(),
+        taken_at: shell::start(),
+        broken: None,
     };
-    let tree = {
-        let mut command = std::process::Command::new("git");
-        command
-            .current_dir(world.bare())
-            .args(["mktree"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
-        let mut child = command.spawn().unwrap();
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(format!("100644 blob {blob}\tlease.yaml\n").as_bytes())
-            .unwrap();
-        String::from_utf8(child.wait_with_output().unwrap().stdout)
-            .unwrap()
-            .trim()
-            .to_owned()
-    };
-    let commit = git_output(
-        &world.bare(),
-        &[
-            "-c",
-            "user.name=CI",
-            "-c",
-            "user.email=ci@example.invalid",
-            "commit-tree",
-            &tree,
-            "-m",
-            "lease",
-        ],
-    );
-    git_output(&world.bare(), &["update-ref", "refs/nyl/dev/lease", &commit]);
+    let clock = Arc::new(FakeClock::new(shell::start()));
+    shell::git_store(&world.fresh_clone("main"), &clock)
+        .take_lease(&shell::location(&world), &shell::dev(), &lease, None)
+        .unwrap();
     nyl(&checkout, &["state", "init", "-e", "dev", "--fresh"])
         .assert()
         .code(2)
@@ -224,9 +186,10 @@ fn test_validate_rejects_state_refs_git_cannot_hold_together() {
         .stderr(predicate::str::contains("NYL-STATE-REF-CONFLICT").and(predicate::str::contains("refs/heads/nyl/dev")));
 }
 
-/// The tier-1 harness runs state commands in-process: the wiring's author
+/// Commands run in-process over the production wiring: the wiring's author
 /// writes the commit, and the outcome carries the typed report and exit
-/// instead of printing and exiting.
+/// instead of printing and exiting. Refusals and the other in-process
+/// commands are covered through the binary and by the tier-1 scenarios.
 #[test]
 fn test_state_commands_run_in_process_with_the_wiring_author() {
     use clap::Parser as _;
@@ -249,17 +212,6 @@ fn test_state_commands_run_in_process_with_the_wiring_author() {
         &["log", "-1", "--format=%an <%ae>", "refs/heads/nyl/dev/desired"],
     );
     assert_eq!(signature, AUTHOR);
-
-    let cli = Cli::try_parse_from(["nyl", "state", "init", "-e", "prod", path]).unwrap();
-    let outcome = cli.execute_in_process(&wiring).unwrap();
-    assert_eq!(outcome.exit, 1);
-    assert_eq!(outcome.report["errors"][0]["code"], "NYL-ENVIRONMENT-UNKNOWN");
-
-    // get reads declarations in-process too, never needing an identity.
-    let cli = Cli::try_parse_from(["nyl", "get", "environments", "dev", path]).unwrap();
-    let outcome = cli.execute_in_process(&wiring).unwrap();
-    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
-    assert!(outcome.stdout.contains("dev"), "{}", outcome.stdout);
 }
 
 /// Only writing commands need a commit identity: reconcile refuses without
@@ -293,4 +245,52 @@ fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
         .stderr(predicate::str::contains("NYL-COMMIT-IDENTITY-MISSING").not())
         .code(predicate::ne(1));
     assert_eq!(tips(), before, "plan or status wrote state");
+}
+
+/// The local-state options through the binary, in one workstation clone:
+/// `--approve` needs `--local`, `reconcile --local` leaves remote state
+/// alone, `status` and `get` take `--local`, `state reset --local
+/// --discard-all` and `state restore` reach their operations. What those
+/// operations do is `orchestration_local_test`'s.
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_local_state_commands_through_the_binary() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();
+    let remote = || git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/", "refs/nyl/"]);
+    let before = remote();
+    // Reading commands take no --author.
+    let home = world.scenario_tmp().join("reader-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let read = |args: &[&str]| bare_nyl(&checkout, &home, args);
+
+    nyl(&checkout, &["reconcile", "-e", "dev", "--approve", "network"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--local"));
+    nyl(&checkout, &["reconcile", "-e", "dev", "--local"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("NYL-LOCAL-RUN-UNRECORDED"));
+    assert_eq!(remote(), before, "a --local run wrote remote state");
+
+    read(&["status", "-e", "dev", "--local"]).assert().success();
+    read(&["get", "units", "-e", "dev", "--local", "-o", "name"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("network"));
+    read(&["status", "-e", "dev"])
+        .assert()
+        .stderr(predicate::str::contains("NYL-STATE-LOCAL-DIVERGED"));
+
+    nyl(&checkout, &["state", "reset", "-e", "dev", "--local", "--discard-all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state-reset dev: done"));
+
+    nyl(&checkout, &["state", "restore", "-e", "dev", "--to", &"0".repeat(40)])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("NYL-STATE-RESTORE-INVALID"));
 }

@@ -37,3 +37,21 @@ pub fn redact_url_credentials(text: &str, url: &str) -> String {
         None => redacted,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redact_url_credentials_hides_userinfo_in_embedded_urls() {
+        let url = "https://user:token@git.example.com/state.git";
+        assert_eq!(
+            redact_url_credentials(&format!("Failed to clone {url}: timeout"), url),
+            "Failed to clone https://***@git.example.com/state.git: timeout"
+        );
+        assert_eq!(
+            redact_url_credentials("fatal: '//user:token@git.example.com/state' not found", url),
+            "fatal: '//***@git.example.com/state' not found"
+        );
+    }
+}

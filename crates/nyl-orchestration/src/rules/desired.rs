@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{Driver, DriverSet, OwnershipScope};
-use nyl_core::orchestration::ids::{CommitId, Uid, UnitName};
+use nyl_core::orchestration::ids::{Uid, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, RenderedSource, RenderedUnit};
 use nyl_core::orchestration::state::{
     DesiredUnit, DesiredUnitKind, EnvironmentRecord, EnvironmentRecordKind, Lifecycle, Readiness, SourceChoice,
@@ -237,11 +237,6 @@ fn leaving_units(inputs: &DesireInputs<'_>, set: &BTreeMap<&UnitName, &RenderedU
         .collect()
 }
 
-/// The source commit S every document of a run records.
-pub fn source_commit(desired: &Desired) -> &CommitId {
-    &desired.environment.source_commit
-}
-
 /// Why a unit's spec is not accepted.
 enum UnitError {
     Invalid(String),
@@ -424,131 +419,26 @@ fn unmatched_labels(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::ffi::OsString;
+mod tests {
     use std::sync::Arc;
 
     use nyl_core::constants::API_VERSION_UNITS;
-    use nyl_core::orchestration::driver::{
-        Capabilities, DriverResult, ExecStatus, ExecutionContext, Inspection, KeyInputs, Outcome, PlanReport,
-        RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, Verification,
-    };
-    use nyl_core::orchestration::ids::EnvironmentName;
-    use nyl_core::orchestration::state::{ArtifactDocument, Receipt};
+    use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
     use nyl_core::resources::units::{UnitEnvelope, UnitMetadata};
     use serde_json::json;
 
     use super::*;
+    use crate::rules::fixtures::{name, uid_numbered as uid, TestDriver};
 
-    /// A driver whose `Publication` kind claims `spec.prefix` in one
-    /// repository, and whose `Command` kind defers to the built-in rules.
-    pub(crate) struct TestDriver {
-        pub kind: &'static str,
-    }
-
-    impl Driver for TestDriver {
-        fn api_version(&self) -> &'static str {
-            API_VERSION_UNITS
-        }
-        fn kind(&self) -> &'static str {
-            self.kind
-        }
-        fn behavior_version(&self) -> u32 {
-            1
-        }
-        fn capabilities(&self, _: &Value) -> Capabilities {
-            Capabilities {
-                teardown: self.kind == "Publication",
-                ..Capabilities::default()
-            }
-        }
-        fn recovery(&self, _: &Value) -> RecoveryPolicies {
-            RecoveryPolicies {
-                execution: RecoveryPolicy::Manual,
-                teardown: RecoveryPolicy::Manual,
-            }
-        }
-        fn spec_schema(&self) -> schemars::Schema {
-            schemars::json_schema!({})
-        }
-        fn validate_spec(&self, spec: &Value) -> Result<(), String> {
-            if spec.get("broken").is_some() {
-                return Err("spec.broken is not a field".to_owned());
-            }
-            Ok(())
-        }
-        fn attestations(&self, _: &Value) -> Vec<String> {
-            Vec::new()
-        }
-        fn ownership_scopes(&self, _: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
-            spec.get("prefix")
-                .and_then(Value::as_str)
-                .map(|prefix| OwnershipScope::Publication {
-                    repository: "https://example.com/deploy.git".to_owned(),
-                    revision: "main".to_owned(),
-                    path_prefix: prefix.to_owned(),
-                })
-                .into_iter()
-                .collect()
-        }
-        fn execution_key_inputs(&self, _: &ResolutionContext<'_>, _: &Value) -> DriverResult<KeyInputs> {
-            Ok(KeyInputs::default())
-        }
-        fn plan(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {
-            Ok(Supported::Unsupported)
-        }
-        fn reconcile(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-            Ok(Supported::Unsupported)
-        }
-        fn verify(
-            &self,
-            _: &ExecutionContext<'_>,
-            _: &DesiredUnit,
-            _: &Receipt,
-        ) -> DriverResult<Supported<Verification>> {
-            Ok(Supported::Unsupported)
-        }
-        fn inspect(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
-            Ok(Supported::Unsupported)
-        }
-        fn teardown(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-            Ok(Supported::Unsupported)
-        }
-        fn build(
-            &self,
-            _: &ExecutionContext<'_>,
-            _: &DesiredUnit,
-            _: bool,
-        ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-            Ok(Supported::Unsupported)
-        }
-        fn exec(
-            &self,
-            _: &ExecutionContext<'_>,
-            _: &DesiredUnit,
-            _: &[OsString],
-        ) -> DriverResult<Supported<ExecStatus>> {
-            Ok(Supported::Unsupported)
-        }
-    }
-
-    pub(crate) fn drivers() -> DriverSet {
+    fn drivers() -> DriverSet {
         let mut drivers = DriverSet::new();
         drivers.register(Arc::new(TestDriver { kind: KIND_COMMAND }));
         drivers.register(Arc::new(TestDriver { kind: "Publication" }));
         drivers
     }
 
-    pub(crate) fn commit(digit: char) -> CommitId {
+    fn commit(digit: char) -> CommitId {
         CommitId::new(digit.to_string().repeat(40)).unwrap()
-    }
-
-    fn name(value: &str) -> UnitName {
-        UnitName::new(value).unwrap()
-    }
-
-    fn uid(number: u64) -> Uid {
-        Uid::new(format!("00000000-0000-7000-8000-{number:012x}")).unwrap()
     }
 
     fn rendered(kind: &str, selected: bool, spec: Option<Value>) -> RenderedUnit {

@@ -172,11 +172,6 @@ impl GitAuth {
         Ok(Self { entries })
     }
 
-    /// Whether any credential applies to `url`.
-    pub fn applies_to(&self, url: &str) -> bool {
-        self.secret_for(url).is_some()
-    }
-
     fn secret_for(&self, url: &str) -> Option<&Secret> {
         self.entries
             .iter()
@@ -257,8 +252,7 @@ mod tests {
     use super::*;
 
     fn settings(entries: &str) -> GitSettings {
-        let value: serde_json::Value = serde_json::from_str(entries).unwrap();
-        serde_json::from_value(value).unwrap()
+        serde_json::from_str(entries).unwrap()
     }
 
     #[test]
@@ -277,7 +271,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert!(!auth.applies_to("https://other.example.com/state.git"));
+        assert!(auth.secret_for("https://other.example.com/state.git").is_none());
     }
 
     #[test]

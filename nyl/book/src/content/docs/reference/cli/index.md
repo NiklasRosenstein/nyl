@@ -30,7 +30,9 @@ closely related pair.
   - [`plan`](/nyl/reference/cli/plan/) - Show what a reconcile would do, without writing anything
   - [`reconcile`](/nyl/reference/cli/reconcile/) - Execute an environment's ready units and record the results
   - [`status`](/nyl/reference/cli/status/) - Report each unit's state from one snapshot of an environment's state
-  - [`state and lease`](/nyl/reference/cli/state/) - Create, move, and forget an environment's state; break a lost lease
+  - [`verify`](/nyl/reference/cli/verify/) - Check current receipts for drift and record the observations
+  - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result
+  - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, and restore an environment's state; break a lost lease
 
 ## Global Options
 

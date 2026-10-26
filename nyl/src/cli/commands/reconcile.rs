@@ -3,21 +3,22 @@
 //!
 //! Contract: [Execution](../../../../design/orchestration-core.md#execution).
 //! Exit categories: 0 all selected units current; 2 blocked, held, awaiting
-//! approval, or the lease is held; 3 an execution failed; 4 uncertain or the
-//! lease was lost; 1 error; the most severe wins (4 > 3 > 1 > 2 > 0).
+//! approval, or the lease is held; 3 an execution failed; 4 uncertain, the
+//! lease was lost, or the run was cancelled by SIGINT or SIGTERM; 1 error; the most severe wins (4 > 3 > 1 > 2 > 0).
 
 use std::path::PathBuf;
 
 use clap::Args;
 use nyl_core::orchestration::time::Duration;
 
+use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
-use nyl_orchestration::shell::run::RunContext;
+use nyl_orchestration::shell::local::LocalStore;
 use nyl_state::git::CommitAuthor;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use crate::Result;
 
 /// Output format of orchestration commands.
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
@@ -53,6 +54,22 @@ pub struct ReconcileArgs {
     #[arg(long)]
     pub wait_lease: Option<Duration>,
 
+    /// Run next to remote state without publishing it: continue from this
+    /// clone's local state branches and commit there, marked Nyl-Local.
+    #[arg(long)]
+    pub local: bool,
+
+    /// With --local, take this clone's own lease instead of the remote one,
+    /// accepting that CI may run at the same time.
+    #[arg(long, requires = "local")]
+    pub local_lease: bool,
+
+    /// With --local, execute this unit although its recovery policy is not
+    /// converge, recorded with the local approval identity (repeatable, or
+    /// comma-separated). Other such units wait for approval.
+    #[arg(long = "approve", value_name = "UNIT", requires = "local", value_delimiter = ',')]
+    pub approve: Vec<String>,
+
     /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
     pub author: Option<String>,
@@ -76,33 +93,33 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
     let session = Session::open(&args.path, &args.environment)?;
     // Reconcile writes state, so it alone of the run commands needs an identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
+    let local = if args.local {
+        Some(session.local_run(args.local_lease, &args.approve)?)
+    } else {
+        None
+    };
     let request = session.request(&RunOptions {
         units: &args.units,
         concurrency: args.concurrency,
         source: args.source.as_deref(),
         wait: args.wait_lease,
+        local: local.clone(),
+        cancellation: wiring.cancellation.clone(),
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
     }))?;
-    let sources = session.sources()?;
-    let renderer = session.renderer();
-    let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
-    let base = session.context(&store, wiring, Some(identity.to_string()));
-    let context = RunContext {
-        base: &base,
-        sources: &sources,
-        renderer: &renderer,
-        drivers: wiring.drivers,
-        tools: wiring.tools,
-        faults: wiring.faults,
-        workspace: workspace.path(),
-        process_env: &wiring.process_env,
-        commit_identity: Some(&identity),
-    };
-    let mut report = nyl_orchestration::shell::run::reconcile(&context, &request);
-    session.add_warnings(&mut report);
+    // A `--local` run works on the clone's local branches through the same shell.
+    let local_store = local.map(|local| LocalStore::new(&store, local));
+    let state = local_store.as_ref().map_or(&store as &dyn StateStore, |local| local);
+    let report = session.run(
+        wiring,
+        state,
+        Some(&identity),
+        &request,
+        nyl_orchestration::shell::run::reconcile,
+    )?;
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }

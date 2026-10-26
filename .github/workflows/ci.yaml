@@ -102,8 +102,21 @@ jobs:
         with:
           install_args: helm kubeconform
 
+      # Linux runners keep /tmp on a network disk; the tests' throwaway
+      # repositories, clones, and worktrees go to the RAM disk instead.
+      - name: Keep temporary files in memory
+        if: runner.os == 'Linux'
+        run: echo "TMPDIR=/dev/shm" >> "$GITHUB_ENV"
+
+      # Tests create throwaway Git repositories and push to them hundreds of
+      # times; syncing each pack and ref to disk dominated the Linux runners'
+      # test time, so the test step turns Git's disk sync off.
       - name: Run tests
         working-directory: nyl
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.fsync
+          GIT_CONFIG_VALUE_0: none
         run: cargo test --workspace --all-features
 
   build-linux-musl:

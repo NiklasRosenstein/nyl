@@ -25,7 +25,7 @@ use crate::gitops::units::discover_units;
 use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::{write_finding, Session, Stop};
+use crate::orchestration::session::{cell_label, pretty_json, write_finding, Session, Stop};
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
@@ -100,8 +100,12 @@ struct StateOptions {
     environment: Option<String>,
 
     /// Read state as of this earlier state commit.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "local")]
     state_revision: Option<String>,
+
+    /// Read this clone's local state branches, including --local runs.
+    #[arg(long)]
+    local: bool,
 
     /// Output format.
     #[arg(short = 'o', long = "output", value_enum, default_value_t)]
@@ -173,8 +177,7 @@ struct GetValueArgs {
 /// Run `get` in-process with `wiring`. Declarations and state documents
 /// exit 0 when they can be read; value forms exit 1 when the reference
 /// would not resolve.
-pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    let _ = wiring;
+pub fn run(args: &GetArgs, _wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
         GetCommand::Repositories(selection) => declarations(GitOpsResourceKind::GitRepository, selection),
         GetCommand::Clusters(selection) => declarations(GitOpsResourceKind::Cluster, selection),
@@ -260,7 +263,19 @@ fn state_form(
     };
     let store = session.store(None)?;
     let location = &session.resolved.location;
-    let snapshot = match inspect::snapshot(&store, location, None) {
+    // `--local`: the clone's local view, through the store a `--local` run uses.
+    let local_store = if options.local {
+        match session.local_run(false, &[]) {
+            Ok(local) => Some(nyl_orchestration::shell::local::LocalStore::new(&store, local)),
+            Err(finding) => return Ok(refused(&finding)),
+        }
+    } else {
+        None
+    };
+    let state = local_store
+        .as_ref()
+        .map_or(&store as &dyn nyl_core::orchestration::ports::StateStore, |local| local);
+    let snapshot = match inspect::snapshot(state, location, None) {
         Ok(snapshot) => snapshot,
         Err(finding) => return Ok(refused(&finding)),
     };
@@ -290,7 +305,8 @@ fn units_table(
     snapshot: &EnvironmentSnapshot,
     output: GetOutput,
 ) -> Result<CommandOutcome> {
-    let report = nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default());
+    let report = // No run refs are read here, so `now` decides nothing.
+    nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default(), chrono::DateTime::UNIX_EPOCH);
     let documents = snapshot
         .desired
         .iter()
@@ -323,11 +339,7 @@ fn units_table(
 }
 
 fn unit_state_row(name: &UnitName, unit: &UnitReport, wide: bool) -> Vec<Cell> {
-    let receipt = unit
-        .receipt
-        .and_then(|receipt| serde_json::to_value(receipt).ok())
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "-".to_owned());
+    let receipt = cell_label(unit.receipt);
     let mut cells = vec![
         name.to_string(),
         unit.kind.clone(),
@@ -519,10 +531,6 @@ fn lines(items: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
         let _ = writeln!(text, "{item}");
         text
     })
-}
-
-fn pretty_json(value: &Value) -> String {
-    format!("{}\n", serde_json::to_string_pretty(value).expect("JSON prints"))
 }
 
 fn yaml(value: &Value) -> Result<String> {

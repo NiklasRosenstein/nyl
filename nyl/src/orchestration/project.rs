@@ -7,8 +7,7 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::StateLocation;
-use nyl_core::resources::environment::{Environment, EnvironmentGroup};
-use nyl_orchestration::rules::environment_groups::sharing_group;
+use nyl_core::resources::environment::{sharing_group, Environment, EnvironmentGroup};
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
 use nyl_state::git::{CommitAuthor, Endpoint, GitStateStore};
 
@@ -163,20 +162,17 @@ pub fn commit_identity(
             .parse()
             .map_err(|error: String| Finding::new(Code::CommitIdentityMissing, error, IDENTITY_FIX));
     }
-    let configured = git2::Repository::open(git_dir)
-        .ok()
-        .and_then(|repository| repository.config().ok())
-        .and_then(|config| {
-            let name = config
-                .get_string("user.name")
-                .ok()
-                .filter(|name| !name.trim().is_empty())?;
-            let email = config
-                .get_string("user.email")
-                .ok()
-                .filter(|email| !email.trim().is_empty())?;
-            Some(CommitIdentity { name, email })
-        });
+    let configured = clone_config(git_dir).and_then(|config| {
+        let name = config
+            .get_string("user.name")
+            .ok()
+            .filter(|name| !name.trim().is_empty())?;
+        let email = config
+            .get_string("user.email")
+            .ok()
+            .filter(|email| !email.trim().is_empty())?;
+        Some(CommitIdentity { name, email })
+    });
     configured.ok_or_else(|| {
         Finding::new(
             Code::CommitIdentityMissing,
@@ -185,6 +181,11 @@ pub fn commit_identity(
             IDENTITY_FIX,
         )
     })
+}
+
+/// The Git configuration the clone at `git_dir` sees.
+fn clone_config(git_dir: &std::path::Path) -> Option<git2::Config> {
+    git2::Repository::open(git_dir).ok()?.config().ok()
 }
 
 /// Who runs Nyl: the CI job's URL when a CI system says so, else `user@host`.
@@ -209,9 +210,7 @@ pub fn runner() -> String {
 
 /// Who requested an operator action: the Git user of the clone, else `runner`.
 pub fn requested_by(git_dir: &std::path::Path, runner: &str) -> String {
-    git2::Repository::open(git_dir)
-        .ok()
-        .and_then(|repository| repository.config().ok())
+    clone_config(git_dir)
         .and_then(|config| {
             let name = config.get_string("user.name").ok()?;
             let email = config.get_string("user.email").ok();
@@ -290,7 +289,7 @@ pub fn state_tips_at(
 }
 
 /// Map a finding to the CLI's error type, keeping its code and fix.
-pub fn finding_error(finding: &Finding) -> NylError {
+fn finding_error(finding: &Finding) -> NylError {
     NylError::config(format!("{}: {}\nHint: {}", finding.code, finding.message, finding.fix))
 }
 

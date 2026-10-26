@@ -17,11 +17,11 @@ use nyl_core::orchestration::driver::{
     Verification,
 };
 use nyl_core::orchestration::ids::{ChangeDigest, EnvironmentName};
-use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Lifecycle, Receipt};
+use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
 use nyl_core::resources::units::OutputDeclaration;
 use serde_json::{json, Map, Value};
 
-use super::{directory_digests, local_directory, required_str, resolved_spec, Script, ScriptedOutcome};
+use super::{required_str, resolved_spec, source_files, Script, Scripted, ScriptedOutcome};
 
 pub(super) const KIND: &str = "FakeInfra";
 
@@ -68,10 +68,7 @@ impl FakeInfra {
     fn plan_change(unit: &DesiredUnit, spec: &Value) -> DriverResult<Planned> {
         let state = Self::read_state(spec)?;
         let before = state.as_ref().and_then(|state| state.get("inputs").cloned());
-        let teardown = matches!(
-            unit.lifecycle,
-            Lifecycle::Deleting { .. } | Lifecycle::Held { deletion: Some(_), .. }
-        );
+        let teardown = crate::command::is_deleting(unit);
         let (changes, after) = if teardown {
             (
                 if before.is_some() {
@@ -163,7 +160,7 @@ impl Driver for FakeInfra {
 
     fn recovery(&self, _spec: &Value) -> RecoveryPolicies {
         RecoveryPolicies {
-            execution: RecoveryPolicy::Converge,
+            execution: self.script.execution_policy(RecoveryPolicy::Converge),
             teardown: RecoveryPolicy::Converge,
         }
     }
@@ -213,14 +210,8 @@ impl Driver for FakeInfra {
     }
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
-        let path = required_str(spec, "/source/path")?;
-        let directory = local_directory(&ctx.worktree, &ctx.project_dir, "spec.source.path", path)?;
-        let worktree = ctx
-            .worktree
-            .canonicalize()
-            .map_err(|error| DriverError::before_effects(error.to_string()))?;
         Ok(KeyInputs {
-            files: directory_digests(&worktree, &directory)?,
+            files: source_files(ctx, spec, "/source/path", "spec.source.path")?,
             excluded_fields: Vec::new(),
             fingerprint: None,
         })
@@ -286,8 +277,24 @@ impl Driver for FakeInfra {
         }))
     }
 
-    fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
-        Ok(Supported::Unsupported)
+    /// Only scripted: a scripted success is applied (with its outputs, or
+    /// the derived ones), a failure not applied, and uncertain unknown.
+    fn inspect(&self, _ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
+        let inspection = match self.script.take(&unit.unit.name, DriverOperation::Inspect) {
+            None => return Ok(Supported::Unsupported),
+            Some(Scripted::Succeeded { outputs }) => Inspection::Applied {
+                outputs: match outputs {
+                    Some(outputs) => outputs,
+                    None => Self::outputs(unit, resolved_spec(unit)?)?,
+                },
+                artifacts: Vec::new(),
+            },
+            Some(Scripted::Failed { .. }) => Inspection::NotApplied,
+            Some(Scripted::Uncertain) => Inspection::Unknown {
+                reason: "scripted unknown inspect".to_owned(),
+            },
+        };
+        Ok(Supported::Supported(inspection))
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {

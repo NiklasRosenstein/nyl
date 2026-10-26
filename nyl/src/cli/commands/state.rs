@@ -1,24 +1,25 @@
-//! `nyl state` and `nyl lease`: create, move, and forget environment state,
-//! and declare a lease holder gone.
+//! `nyl state` and `nyl lease`: create, move, forget, reset, and restore
+//! environment state, and declare a lease holder gone.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use std::fmt::Write as _;
 
 use clap::{Args, Subcommand, ValueEnum};
 use nyl_core::orchestration::codes::Finding;
-use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
+use nyl_orchestration::rules::local::Discard;
 use nyl_orchestration::shell::state::{self, Requested};
-use nyl_orchestration::shell::{Context, Settings};
+use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
 use crate::gitops::discover_gitops_inventory;
-use crate::orchestration::project::{open_store, resolve_environment};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::write_finding;
+use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, Session, Stop};
 use crate::{NylError, Result};
 
 /// Output format of state commands.
@@ -105,6 +106,29 @@ pub enum StateCommand {
         #[arg(long)]
         unit: String,
     },
+    /// Drop this clone's local transitions and follow the remote state again.
+    Reset {
+        #[command(flatten)]
+        common: Common,
+        /// Reset the clone's local state branches (required: reset never changes remote state).
+        #[arg(long, required = true)]
+        local: bool,
+        /// Forget the local receipts of these units, which the remote does not reflect (repeatable, or comma-separated).
+        #[arg(long, value_delimiter = ',', conflicts_with = "discard_all")]
+        discard: Vec<String>,
+        /// Forget every local receipt the remote does not reflect.
+        #[arg(long)]
+        discard_all: bool,
+    },
+    /// Restore remote state to an earlier commit's content with forward commits,
+    /// after local transitions were pushed by hand.
+    Restore {
+        #[command(flatten)]
+        common: Common,
+        /// The state commit whose content to restore.
+        #[arg(long)]
+        to: String,
+    },
 }
 
 /// Manage an environment's run lease.
@@ -126,13 +150,39 @@ pub enum LeaseCommand {
 /// Run a `nyl state` command in-process with `wiring`.
 pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
-        StateCommand::Init { common, fresh } => run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
-            state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested(common))
-        }),
+        StateCommand::Init { common, fresh } => {
+            let requested = requested(common, wiring);
+            run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
+                state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested)
+            })
+        }
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
+            let requested = requested(common, wiring);
             run(common, wiring, Operation::StateForget.as_str(), None, |ctx| {
-                state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested(common))
+                state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
+            })
+        }
+        StateCommand::Reset {
+            common,
+            local: _,
+            discard,
+            discard_all,
+        } => {
+            let discard = discard_option(discard, *discard_all)?;
+            run(common, wiring, "state-reset", None, |ctx| {
+                state::reset(ctx.context, &ctx.environment, ctx.location, discard.as_ref())
+            })
+        }
+        StateCommand::Restore { common, to } => {
+            let to = CommitId::new(to.trim().to_ascii_lowercase()).map_err(|error| {
+                NylError::config(format!(
+                    "--to {to:?} is not a full commit ID, as `git log` of the state ref prints it: {error}"
+                ))
+            })?;
+            let requested = requested(common, wiring);
+            run(common, wiring, Operation::StateRestore.as_str(), None, |ctx| {
+                state::restore(ctx.context, &ctx.environment, ctx.location, &to, &requested)
             })
         }
         StateCommand::Move {
@@ -176,6 +226,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             let extra = from
                 .as_ref()
                 .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
+            let requested = requested(common, wiring);
             run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
                 let location = ctx.location;
                 let mut old = location.clone();
@@ -194,7 +245,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 if let Some(prefix) = coordination_refs {
                     old.coordination_ref_prefix.clone_from(prefix);
                 }
-                state::relocate(ctx.context, &ctx.environment, location, &old, &requested(common))
+                state::relocate(ctx.context, &ctx.environment, location, &old, &requested)
             })
         }
     }
@@ -209,25 +260,44 @@ pub fn run_lease(args: &LeaseArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
     }
 }
 
-fn requested(common: &Common) -> Requested {
+/// `--discard <unit>…` or `--discard-all` of `state reset`; `None` for neither.
+fn discard_option(units: &[String], all: bool) -> Result<Option<Discard>> {
+    if all {
+        return Ok(Some(Discard::All));
+    }
+    if units.is_empty() {
+        return Ok(None);
+    }
+    let units = units
+        .iter()
+        .map(|unit| UnitName::new(unit).map_err(|error| NylError::config(error.to_string())))
+        .collect::<Result<BTreeSet<_>>>()?;
+    Ok(Some(Discard::Units(units)))
+}
+
+/// The request of a state operation: SIGINT or SIGTERM stops its
+/// `--wait-lease` ("Runs and leases" item 7); once it holds the lease it
+/// finishes its single commit.
+pub(crate) fn requested(common: &Common, wiring: &Wiring<'_>) -> Requested {
     Requested {
         reason: common.reason.clone(),
         wait: common.wait_lease,
+        cancellation: wiring.cancellation.clone(),
     }
 }
 
 /// What one state operation runs against.
-struct OperationContext<'a> {
-    context: &'a Context<'a>,
-    environment: EnvironmentName,
-    location: &'a StateLocation,
+pub(crate) struct OperationContext<'a> {
+    pub(crate) context: &'a Context<'a>,
+    pub(crate) environment: EnvironmentName,
+    pub(crate) location: &'a StateLocation,
 }
 
 /// Resolve the environment and the commit identity, run one state
 /// operation, and render its report. Findings before the operation, such as
 /// an unknown environment or a missing identity, are refusals in the same
-/// report.
-fn run(
+/// report. `nyl recover` shares it.
+pub(crate) fn run(
     common: &Common,
     wiring: &Wiring<'_>,
     operation_name: &'static str,
@@ -235,46 +305,33 @@ fn run(
     operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
 ) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
-        let environment = EnvironmentName::new(&common.environment)
-            .or_else(|_| EnvironmentName::new("unknown"))
-            .expect("a valid placeholder name");
+        let environment = placeholder_environment(&common.environment);
         render(
             &StateOperationReport::new(environment, operation_name).refused(finding),
             common.output,
         )
     };
-    let inventory = discover_gitops_inventory(&common.path, None)?;
-    let resolved = match resolve_environment(&inventory, &common.environment) {
-        Ok(resolved) => resolved,
-        Err(finding) => return Ok(refused(finding)),
+    let session = match Session::open(&common.path, &common.environment) {
+        Ok(session) => session,
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
+        Err(Stop::Error(error)) => return Err(error),
     };
+    let resolved = &session.resolved;
     let identity = match wiring.commit_identity(&resolved.git_dir, common.author.as_deref()) {
         Ok(identity) => identity,
         Err(finding) => return Ok(refused(finding)),
     };
-    let mut store = open_store(
-        &inventory,
-        &resolved,
-        Some(CommitAuthor {
-            identity: identity.clone(),
-            clock: wiring.clock.clone(),
-        }),
-    )?;
+    let mut store = session.store(Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    }))?;
     if let Some((repository, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.
         if repository != resolved.location.repository {
             store = store.with_endpoint(repository, endpoint);
         }
     }
-    let context = Context {
-        store: &store,
-        clock: wiring.clock.as_ref(),
-        ids: wiring.ids,
-        runner: wiring.runner.clone(),
-        requested_by: identity.to_string(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        settings: Settings::default(),
-    };
+    let context = session.context(&store, wiring, Some(identity.to_string()));
     let mut report = operation(&OperationContext {
         context: &context,
         environment: resolved.name.clone(),
@@ -293,7 +350,7 @@ fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
     let mut stderr = String::new();
     match output {
         Output::Json => {
-            stdout = format!("{}\n", serde_json::to_string_pretty(&json).expect("JSON prints"));
+            stdout = pretty_json(&json);
         }
         Output::Text => {
             let status = match report.outcome {

@@ -8,14 +8,21 @@
 //! the same path as the binary. Fresh clones carry no Git identity, so a run
 //! that read the host's would not be reproducible; the identity comes from
 //! the wiring instead.
+//!
+//! A `nyl` step with `pause` runs on a thread of its own whose fault
+//! injector blocks the first time the invocation reaches the pause point,
+//! so later steps run while it waits; its `resume` step lets it continue,
+//! joins it, and checks it like any `nyl` step.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread::{Scope, ScopedJoinHandle};
 
 use clap::Parser;
 use nyl::cli::Cli;
 use nyl::orchestration::run::{CommandOutcome, Wiring};
-use nyl_core::orchestration::driver::DriverOperation;
+use nyl_core::orchestration::driver::{DriverOperation, DriverSet};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{DesiredUnit, FailureCategory, ObservedUnit};
@@ -29,8 +36,8 @@ use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use serde_json::Value;
 
 use super::format::{
-    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, FaultPointName, ReceiptExpectation,
-    Step, StepKind, UidExpectation, UnitExpectation,
+    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, PointName, ReceiptExpectation, Step,
+    StepKind, UidExpectation, UnitExpectation,
 };
 use super::world::{git_output, World};
 use super::Loaded;
@@ -40,6 +47,10 @@ pub const START: &str = "2026-09-24T10:00:00Z";
 
 /// The commit identity of every state and publication commit.
 pub const AUTHOR: &str = "Scenario <scenario@example.invalid>";
+
+/// How long a paused invocation may take to reach its pause point before
+/// the scenario fails instead of hanging the test.
+const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The outcome keys of `expect` that name sets of units.
 const OUTCOME_KEYS: [&str; 6] = [
@@ -51,17 +62,31 @@ const OUTCOME_KEYS: [&str; 6] = [
     "awaiting-approval",
 ];
 
-/// A fault the next `nyl` step dies at, consumed when it fires.
+/// A fault the next `nyl` step dies at, consumed when it fires. A `None`
+/// unit matches only a point the shell consults without a unit.
 #[derive(Default)]
-struct FaultSlot {
-    armed: Mutex<Option<(FaultPoint, UnitName)>>,
+pub struct FaultSlot {
+    armed: Mutex<Option<(FaultPoint, Option<UnitName>)>>,
+}
+
+impl FaultSlot {
+    /// A slot that kills once at `point` for `unit`, or for the unit-less call.
+    pub fn kill_once(point: FaultPoint, unit: Option<&str>) -> Self {
+        Self {
+            armed: Mutex::new(Some((point, unit.map(|unit| UnitName::new(unit).unwrap())))),
+        }
+    }
+
+    fn is_armed(&self) -> bool {
+        self.armed.lock().expect("fault lock").is_some()
+    }
 }
 
 impl FaultInjector for FaultSlot {
     fn at(&self, point: FaultPoint, unit: Option<&UnitName>) -> FaultAction {
         let mut armed = self.armed.lock().expect("fault lock");
         match armed.as_ref() {
-            Some((armed_point, armed_unit)) if *armed_point == point && Some(armed_unit) == unit => {
+            Some((armed_point, armed_unit)) if *armed_point == point && armed_unit.as_ref() == unit => {
                 *armed = None;
                 FaultAction::Kill
             }
@@ -70,62 +95,169 @@ impl FaultInjector for FaultSlot {
     }
 }
 
+/// The injector of a paused invocation: the first time the invocation
+/// reaches the pause point (for the given unit, when one is given), it
+/// signals `reached` and blocks until resumed; every point then consults
+/// the shared fault slot, so a pause point that is a fault point can also
+/// kill. Dropping the resume sender lets a blocked invocation continue.
+struct Pausing<'s> {
+    shared: &'s FaultSlot,
+    point: FaultPoint,
+    unit: Option<UnitName>,
+    reached: Mutex<Option<mpsc::Sender<()>>>,
+    resume: Mutex<mpsc::Receiver<()>>,
+}
+
+impl FaultInjector for Pausing<'_> {
+    fn at(&self, point: FaultPoint, unit: Option<&UnitName>) -> FaultAction {
+        let matches = point == self.point && self.unit.as_ref().is_none_or(|paused| Some(paused) == unit);
+        if matches {
+            let reached = self.reached.lock().expect("pause lock").take();
+            if let Some(reached) = reached {
+                // The scenario thread may have given up waiting; continue then.
+                let _ = reached.send(());
+                drop(reached);
+                let _ = self.resume.lock().expect("pause lock").recv();
+            }
+        }
+        self.shared.at(point, unit)
+    }
+}
+
+/// What every invocation of one scenario shares.
+struct Shared {
+    world: World,
+    clock: Arc<FakeClock>,
+    ids: SequentialIds,
+    script: Script,
+    drivers: DriverSet,
+    tools: ProcessRunner,
+    faults: FaultSlot,
+    author: CommitIdentity,
+    process_env: BTreeMap<String, String>,
+}
+
+impl Shared {
+    /// The wiring of one invocation with `faults` as its injector.
+    fn wiring<'a>(&'a self, faults: &'a dyn FaultInjector) -> Wiring<'a> {
+        Wiring {
+            clock: self.clock.clone(),
+            ids: &self.ids,
+            drivers: &self.drivers,
+            tools: &self.tools,
+            faults,
+            runner: "scenario".to_owned(),
+            author: Some(self.author.clone()),
+            process_env: self.process_env.clone(),
+            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+        }
+    }
+}
+
 /// Run every step of `loaded`, returning the first failed check.
 pub fn run(loaded: &Loaded) -> Result<(), String> {
-    let world = World::new(&loaded.directory.join(&loaded.scenario.project));
     let start = chrono::DateTime::parse_from_rfc3339(START)
         .expect("start time")
         .to_utc();
-    let clock = Arc::new(FakeClock::new(start));
-    let ids = SequentialIds::new();
     let script = Script::new();
-    let drivers = nyl_drivers::registry::with_test_kinds(&script);
-    let tools = ProcessRunner::new();
-    let faults = FaultSlot::default();
-    let author: CommitIdentity = AUTHOR.parse().expect("identity");
-    let process_env = std::env::var("PATH")
-        .map(|path| BTreeMap::from([("PATH".to_owned(), path)]))
-        .unwrap_or_default();
-    let wiring = Wiring {
-        clock: clock.clone(),
-        ids: &ids,
-        drivers: &drivers,
-        tools: &tools,
-        faults: &faults,
-        runner: "scenario".to_owned(),
-        author: Some(author),
-        process_env,
+    let shared = Shared {
+        world: World::new(&loaded.directory.join(&loaded.scenario.project)),
+        clock: Arc::new(FakeClock::new(start)),
+        ids: SequentialIds::new(),
+        drivers: nyl_drivers::registry::with_test_kinds(&script),
+        script,
+        tools: ProcessRunner::new(),
+        faults: FaultSlot::default(),
+        author: AUTHOR.parse().expect("identity"),
+        process_env: super::shell::process_env(),
     };
-    let mut state = RunState {
-        world: &world,
-        wiring: &wiring,
-        uids: BTreeMap::new(),
-    };
-    for (index, step) in loaded.scenario.steps.iter().enumerate() {
-        let context = |error: String| format!("{}: step {}: {error}", loaded.name, index + 1);
-        match step.kind().map_err(context)? {
-            StepKind::Commit => world.commit(step.commit.as_ref().expect("kind"), &loaded.directory),
-            StepKind::Branch => world.branch(step.branch.as_ref().expect("kind")),
-            StepKind::SquashMerge => world.squash_merge(step.squash_merge.as_ref().expect("kind")),
-            StepKind::DeleteBranch => world.delete_branch(step.delete_branch.as_ref().expect("kind")),
-            StepKind::Ref => world.delete_ref(&step.reference.as_ref().expect("kind").delete),
+    std::thread::scope(|scope| {
+        let mut state = RunState {
+            world: &shared.world,
+            shared: &shared,
+            uids: BTreeMap::new(),
+            written: BTreeMap::new(),
+            paused: BTreeMap::new(),
+        };
+        let mut result = loaded.scenario.steps.iter().enumerate().try_for_each(|(index, step)| {
+            state
+                .step(scope, loaded, step)
+                .map_err(|error| format!("{}: step {}: {error}", loaded.name, index + 1))
+        });
+        // Let every invocation still paused finish, so none outlives the
+        // scenario blocked and a panic in one is reported, not rethrown.
+        let unresumed = std::mem::take(&mut state.paused);
+        for (id, paused) in unresumed {
+            drop(paused.resume);
+            let _ = paused.handle.join();
+            if result.is_ok() {
+                result = Err(format!("{}: {id} was paused and never resumed", loaded.name));
+            }
+        }
+        result
+    })
+}
+
+/// Commit counts on an environment's desired and observed refs.
+type Counts = (usize, usize);
+
+/// What a step's checks compare against, taken before its invocation.
+struct Before {
+    environment: String,
+    counts: Counts,
+    /// The commits other steps had written to the environment's refs.
+    written: Counts,
+    deploy: Option<BTreeMap<String, String>>,
+}
+
+/// A paused invocation awaiting its `resume` step.
+struct Paused<'scope, 'l> {
+    step: &'l Step,
+    handle: ScopedJoinHandle<'scope, Result<CommandOutcome, String>>,
+    resume: mpsc::Sender<()>,
+    before: Before,
+}
+
+struct RunState<'s, 'scope, 'l> {
+    world: &'s World,
+    shared: &'s Shared,
+    /// Each unit's uid as the last `units` check saw it.
+    uids: BTreeMap<String, Option<String>>,
+    /// Per environment, the state commits checked steps have written, so a
+    /// resumed invocation's new commits exclude those of steps that ran
+    /// while it was paused.
+    written: BTreeMap<String, Counts>,
+    paused: BTreeMap<String, Paused<'scope, 'l>>,
+}
+
+impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
+    fn step(&mut self, scope: &'scope Scope<'scope, '_>, loaded: &'l Loaded, step: &'l Step) -> Result<(), String> {
+        let shared = self.shared;
+        match step.kind()? {
+            StepKind::Commit => self
+                .world
+                .commit(step.commit.as_ref().expect("kind"), &loaded.directory),
+            StepKind::Branch => self.world.branch(step.branch.as_ref().expect("kind")),
+            StepKind::SquashMerge => self.world.squash_merge(step.squash_merge.as_ref().expect("kind")),
+            StepKind::DeleteBranch => self.world.delete_branch(step.delete_branch.as_ref().expect("kind")),
+            StepKind::Ref => self.world.delete_ref(&step.reference.as_ref().expect("kind").delete),
             StepKind::Clock => {
                 let step = step.clock.as_ref().expect("kind");
                 if let Some(set) = &step.set {
                     let time = chrono::DateTime::parse_from_rfc3339(set)
-                        .map_err(|error| context(format!("clock set {set}: {error}")))?;
-                    clock.set(time.to_utc());
+                        .map_err(|error| format!("clock set {set}: {error}"))?;
+                    shared.clock.set(time.to_utc());
                 }
                 if let Some(advance) = &step.advance {
                     let duration = advance
                         .parse::<Duration>()
-                        .map_err(|error| context(format!("clock advance {advance}: {error}")))?;
-                    clock.advance(duration);
+                        .map_err(|error| format!("clock advance {advance}: {error}"))?;
+                    shared.clock.advance(duration);
                 }
             }
             StepKind::Driver => {
                 let step = step.driver.as_ref().expect("kind");
-                let unit = UnitName::new(&step.unit).map_err(|error| context(error.to_string()))?;
+                let unit = UnitName::new(&step.unit).map_err(|error| error.to_string())?;
                 let operation = match step.operation {
                     StepOperation::Plan => DriverOperation::Plan,
                     StepOperation::Reconcile => DriverOperation::Reconcile,
@@ -141,56 +273,166 @@ pub fn run(loaded: &Loaded) -> Result<(), String> {
                         category: serde_json::from_value::<FailureCategory>(Value::String(
                             step.category.clone().unwrap_or_default(),
                         ))
-                        .map_err(|error| context(format!("category: {error}")))?,
+                        .map_err(|error| format!("category: {error}"))?,
                         retryable: step.retryable.unwrap_or(false),
                     },
                 };
-                script.push(unit, operation, &result, step.times.unwrap_or(1));
+                shared.script.push(unit, operation, &result, step.times.unwrap_or(1));
             }
             StepKind::Fault => {
                 let step = step.fault.as_ref().expect("kind");
                 let point = match step.point {
-                    FaultPointName::AfterEffect => FaultPoint::AfterEffect,
-                    FaultPointName::BeforeCheckpoint => FaultPoint::BeforeCheckpoint,
-                    FaultPointName::BeforeLeaseUpdate => FaultPoint::BeforeLeaseUpdate,
-                    FaultPointName::BeforePush => FaultPoint::BeforePush,
+                    PointName::Executing | PointName::WaitingLease => {
+                        return Err(format!("fault {:?} only pauses", step.point));
+                    }
+                    point => point.fault_point(),
                 };
-                let unit = UnitName::new(&step.unit).map_err(|error| context(error.to_string()))?;
-                *faults.armed.lock().expect("fault lock") = Some((point, unit));
+                let unit = step
+                    .unit
+                    .as_deref()
+                    .map(UnitName::new)
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                *shared.faults.armed.lock().expect("fault lock") = Some((point, unit));
             }
+            StepKind::Nyl if step.pause.is_some() => self.pause(scope, loaded, step)?,
             StepKind::Nyl => {
-                if step.pause.is_some() {
-                    return Err(context("tier 1 does not pause invocations yet".to_owned()));
-                }
-                state.nyl(step).map_err(context)?;
+                let args = step.nyl.as_ref().expect("kind");
+                let branch = step.at.as_deref().unwrap_or("main");
+                let before = self.before(args, step.expect.as_ref());
+                let wiring = shared.wiring(&shared.faults);
+                let outcome = invoke(self.world, &wiring, args, branch)?;
+                self.check(step, step, outcome, &before)?;
             }
-            kind @ (StepKind::Resume | StepKind::CiAdmit | StepKind::CiWorker | StepKind::CiExport) => {
-                return Err(context(format!("tier 1 does not run {kind:?} steps yet")));
+            StepKind::Resume => {
+                let id = step.resume.as_ref().expect("kind");
+                let paused = self
+                    .paused
+                    .remove(id)
+                    .ok_or_else(|| format!("resume {id}: no invocation with that id is paused"))?;
+                // The invocation may have ended at a kill; it then needs no signal.
+                let _ = paused.resume.send(());
+                let outcome = paused
+                    .handle
+                    .join()
+                    .map_err(|_| format!("resume {id}: the invocation panicked"))??;
+                self.check(paused.step, step, outcome, &paused.before)?;
+            }
+            kind @ (StepKind::CiAdmit | StepKind::CiWorker | StepKind::CiExport) => {
+                return Err(format!("tier 1 does not run {kind:?} steps yet"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Start a paused `nyl` step on its own thread and return once it
+    /// reached its pause point.
+    fn pause(&mut self, scope: &'scope Scope<'scope, '_>, loaded: &'l Loaded, step: &'l Step) -> Result<(), String> {
+        let shared = self.shared;
+        let args = step.nyl.as_ref().expect("kind");
+        let id = step.id.clone().expect("validated: a paused step has an id");
+        let at = step.pause.as_ref().expect("paused");
+        let point = at.point.fault_point();
+        let unit = at
+            .unit
+            .as_deref()
+            .map(UnitName::new)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let described = match &unit {
+            Some(unit) => format!("{point} for {unit}"),
+            None => point.to_string(),
+        };
+        // The resume step's expectations decide what to record before.
+        let resume = loaded
+            .scenario
+            .steps
+            .iter()
+            .find(|candidate| candidate.resume.as_deref() == Some(id.as_str()));
+        let before = self.before(args, resume.and_then(|step| step.expect.as_ref()));
+        let branch = step.at.as_deref().unwrap_or("main");
+        let (reached_sender, reached) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let world = self.world;
+        let handle = scope.spawn(move || {
+            let pausing = Pausing {
+                shared: &shared.faults,
+                point,
+                unit,
+                reached: Mutex::new(Some(reached_sender)),
+                resume: Mutex::new(resume_receiver),
+            };
+            let wiring = shared.wiring(&pausing);
+            invoke(world, &wiring, args, branch)
+        });
+        match reached.recv_timeout(REACH_TIMEOUT) {
+            Ok(()) => {
+                self.paused.insert(
+                    id,
+                    Paused {
+                        step,
+                        handle,
+                        resume: resume_sender,
+                        before,
+                    },
+                );
+                Ok(())
+            }
+            // The injector is gone: the invocation ended without pausing.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let ended = match handle.join() {
+                    Ok(Ok(outcome)) => format!("it exited {}; stderr:\n{}", outcome.exit, outcome.stderr),
+                    Ok(Err(error)) => error,
+                    Err(_) => "it panicked".to_owned(),
+                };
+                Err(format!("{id} never reached its pause point {described}: {ended}"))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                drop(resume_sender);
+                Err(format!(
+                    "{id} did not reach its pause point {described} within {REACH_TIMEOUT:?}"
+                ))
             }
         }
     }
-    Ok(())
-}
 
-struct RunState<'a> {
-    world: &'a World,
-    wiring: &'a Wiring<'a>,
-    /// Each unit's uid as the last `units` check saw it.
-    uids: BTreeMap<String, Option<String>>,
-}
-
-impl RunState<'_> {
-    fn nyl(&mut self, step: &Step) -> Result<(), String> {
-        let args = step.nyl.as_ref().expect("kind");
+    /// What `check` compares a step's result against, taken before it runs.
+    fn before(&self, args: &[String], expect: Option<&Expect>) -> Before {
         let environment = environment_of(args);
-        let branch = step.at.as_deref().unwrap_or("main");
-        let before = self.state_counts(&environment);
-        let deploy_before = step
-            .expect
-            .as_ref()
-            .and_then(|expect| expect.deploy.as_ref())
-            .map(|deploy| self.tree(&deploy.branch));
-        let outcome = self.invoke(args, branch)?;
+        Before {
+            counts: self.state_counts(&environment),
+            written: self.written.get(&environment).copied().unwrap_or_default(),
+            deploy: expect
+                .and_then(|expect| expect.deploy.as_ref())
+                .map(|deploy| self.tree(&deploy.branch)),
+            environment,
+        }
+    }
+
+    /// Check the result of the invocation of `invoked` against the `exit`,
+    /// `killed`, and `expect` of `checked`: the same step for a `nyl` step,
+    /// the `resume` step for a paused one.
+    fn check(
+        &mut self,
+        invoked: &Step,
+        checked: &Step,
+        outcome: CommandOutcome,
+        before: &Before,
+    ) -> Result<(), String> {
+        let args = invoked.nyl.as_ref().expect("kind");
+        let branch = invoked.at.as_deref().unwrap_or("main");
+        let environment = before.environment.as_str();
+        // The invocation's own commits: the new ones less those other steps
+        // wrote while it was paused.
+        let after = self.state_counts(environment);
+        let written = self.written.entry(environment.to_owned()).or_default();
+        let others = (written.0 - before.written.0, written.1 - before.written.1);
+        let new_commits = (
+            after.0 - before.counts.0 - others.0,
+            after.1 - before.counts.1 - others.1,
+        );
+        written.0 += new_commits.0;
+        written.1 += new_commits.1;
         let describe = || {
             format!(
                 "nyl {}:\nstdout:\n{}\nstderr:\n{}",
@@ -199,20 +441,21 @@ impl RunState<'_> {
                 outcome.stderr
             )
         };
-        if step.killed == Some(true) {
+        if checked.killed == Some(true) {
+            if self.shared.faults.is_armed() {
+                return Err(format!("the armed fault never fired; {}", describe()));
+            }
             return Ok(());
         }
-        if let Some(exit) = step.exit {
+        if let Some(exit) = checked.exit {
             if i32::from(outcome.exit) != exit {
                 return Err(format!("exit {} instead of {exit}; {}", outcome.exit, describe()));
             }
         }
-        let Some(expect) = &step.expect else {
+        let Some(expect) = &checked.expect else {
             return Ok(());
         };
-        let after = self.state_counts(&environment);
-        let new_commits = (after.0 - before.0, after.1 - before.1);
-        self.check_outcomes(expect, &outcome, args, &environment, new_commits)
+        self.check_outcomes(expect, &outcome, args, environment, new_commits)
             .map_err(|error| format!("{error}; {}", describe()))?;
         if let Some(commits) = &expect.commits {
             if new_commits != (commits.desired, commits.observed) {
@@ -240,11 +483,15 @@ impl RunState<'_> {
         }
         if let Some(units) = &expect.units {
             for (unit, expectation) in units {
-                self.check_unit(unit, expectation, &environment, branch)?;
+                self.check_unit(unit, expectation, environment, branch)?;
             }
         }
         if let Some(deploy) = &expect.deploy {
-            self.check_deploy(deploy, deploy_before.as_ref().expect("taken before"))?;
+            let before = before
+                .deploy
+                .as_ref()
+                .ok_or("no deploy tree was taken before the step")?;
+            self.check_deploy(deploy, before)?;
         }
         if let Some(get) = &expect.get {
             let outcome = self.invoke(&get.args, branch)?;
@@ -270,17 +517,11 @@ impl RunState<'_> {
         Ok(())
     }
 
-    /// One in-process invocation in a fresh clone of `branch`.
+    /// One sequential in-process invocation, without faults beyond the slot.
     fn invoke(&self, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
-        let clone = self.world.fresh_clone(branch);
-        let argv = std::iter::once("nyl".to_owned())
-            .chain(args.iter().cloned())
-            .chain(std::iter::once(clone.display().to_string()));
-        let cli = Cli::try_parse_from(argv).map_err(|error| format!("nyl {}: {error}", args.join(" ")))?;
-        cli.execute_in_process(self.wiring)
-            .map_err(|error| format!("nyl {}: {error}", args.join(" ")))
+        let wiring = self.shared.wiring(&self.shared.faults);
+        invoke(self.world, &wiring, args, branch)
     }
-
     /// Commits on the environment's desired and observed refs.
     fn state_counts(&self, environment: &str) -> (usize, usize) {
         let count = |side: &str| {
@@ -323,7 +564,7 @@ impl RunState<'_> {
         outcome: &CommandOutcome,
         args: &[String],
         environment: &str,
-        new_commits: (usize, usize),
+        new_commits: Counts,
     ) -> Result<(), String> {
         let expected = [
             &expect.executed,
@@ -333,57 +574,80 @@ impl RunState<'_> {
             &expect.uncertain,
             &expect.awaiting_approval,
         ];
-        if expected.iter().all(|set| set.is_none()) {
+        let lists = [("recovered", &expect.recovered), ("imported", &expect.imported)];
+        if expected.iter().all(|set| set.is_none()) && lists.iter().all(|(_, list)| list.is_none()) {
             return Ok(());
         }
-        let units = outcome
-            .report
-            .pointer("/environments/0/units")
-            .and_then(Value::as_object)
-            .ok_or("the report has no units")?;
-        let outcome_of = |unit: &Value| {
-            unit.get("result")
-                .or_else(|| unit.get("state"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
         let reconcile = args.first().is_some_and(|command| command == "reconcile");
         let summary = if reconcile && (new_commits.0 > 0 || new_commits.1 > 0) {
             let side = if new_commits.0 > 0 { "desired" } else { "observed" };
-            Some(self.commit_units(environment, side)?)
+            Some(self.commit_summary(environment, side)?)
         } else {
             None
         };
-        for (key, expected) in OUTCOME_KEYS.iter().zip(expected) {
-            let Some(expected) = expected else { continue };
-            let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
-            let reported = units
-                .iter()
-                .filter(|(_, unit)| outcome_of(unit).as_deref() == Some(*key))
-                .map(|(name, _)| name.clone())
-                .collect::<BTreeSet<_>>();
-            if reported != expected {
-                return Err(format!("{key}: the report has {reported:?} instead of {expected:?}"));
-            }
-            if let Some(summary) = &summary {
-                let listed = summary
+        if expected.iter().any(|set| set.is_some()) {
+            let units = outcome
+                .report
+                .pointer("/environments/0/units")
+                .and_then(Value::as_object)
+                .ok_or("the report has no units")?;
+            let outcome_of = |unit: &Value| {
+                unit.get("result")
+                    .or_else(|| unit.get("state"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            let summary_units = summary.as_ref().map(summary_units);
+            for (key, expected) in OUTCOME_KEYS.iter().zip(expected) {
+                let Some(expected) = expected else { continue };
+                let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
+                let reported = units
                     .iter()
-                    .filter(|(_, result)| result.as_str() == *key)
+                    .filter(|(_, unit)| outcome_of(unit).as_deref() == Some(*key))
                     .map(|(name, _)| name.clone())
                     .collect::<BTreeSet<_>>();
-                if listed != expected {
-                    return Err(format!(
-                        "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
-                    ));
+                if reported != expected {
+                    return Err(format!("{key}: the report has {reported:?} instead of {expected:?}"));
                 }
+                if let Some(summary_units) = &summary_units {
+                    let listed = summary_units
+                        .iter()
+                        .filter(|(_, result)| result.as_str() == *key)
+                        .map(|(name, _)| name.clone())
+                        .collect::<BTreeSet<_>>();
+                    if listed != expected {
+                        return Err(format!(
+                            "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        // `recovered` and `imported` are the summary's lists, and the
+        // report's lists of the same name, which are omitted when empty.
+        for (key, expected) in lists {
+            let Some(expected) = expected else { continue };
+            let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
+            let summary = summary
+                .as_ref()
+                .ok_or_else(|| format!("{key}: the step wrote no transition commit whose summary lists it"))?;
+            let listed = names(summary.get(key));
+            if listed != expected {
+                return Err(format!(
+                    "{key}: the transition commit summary lists {listed:?} instead of {expected:?}"
+                ));
+            }
+            let reported = names(outcome.report.pointer(&format!("/environments/0/{key}")));
+            if reported != expected {
+                return Err(format!("{key}: the report lists {reported:?} instead of {expected:?}"));
             }
         }
         Ok(())
     }
 
-    /// Each unit's result in the `units:` block of the latest transition
-    /// commit on the environment's `side` ref.
-    fn commit_units(&self, environment: &str, side: &str) -> Result<BTreeMap<String, String>, String> {
+    /// The YAML summary of the latest transition commit on the
+    /// environment's `side` ref.
+    fn commit_summary(&self, environment: &str, side: &str) -> Result<Value, String> {
         let message = git_output(
             &self.world.bare(),
             &[
@@ -397,14 +661,7 @@ impl RunState<'_> {
             .split("\n\n")
             .nth(1)
             .ok_or_else(|| format!("the transition commit has no summary:\n{message}"))?;
-        let summary: Value = serde_saphyr::from_str(body).map_err(|error| format!("summary {body:?}: {error}"))?;
-        Ok(summary
-            .get("units")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter_map(|(name, value)| Some((name.clone(), value.get("result")?.as_str()?.to_owned())))
-            .collect())
+        serde_saphyr::from_str(body).map_err(|error| format!("summary {body:?}: {error}"))
     }
 
     fn check_unit(
@@ -573,4 +830,50 @@ pub fn glob_matches(pattern: &str, path: &str) -> bool {
     let pattern = pattern.split('/').collect::<Vec<_>>();
     let path = path.split('/').collect::<Vec<_>>();
     segments(&pattern, &path)
+}
+
+/// One in-process invocation in a fresh clone of `branch`.
+pub fn invoke(world: &World, wiring: &Wiring<'_>, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
+    invoke_in(world, wiring, args, branch, "")
+}
+
+/// One in-process invocation in `directory` of a fresh clone of `branch`.
+pub fn invoke_in(
+    world: &World,
+    wiring: &Wiring<'_>,
+    args: &[String],
+    branch: &str,
+    directory: &str,
+) -> Result<CommandOutcome, String> {
+    let mut path = world.fresh_clone(branch);
+    if !directory.is_empty() {
+        path.push(directory);
+    }
+    let argv = std::iter::once("nyl".to_owned())
+        .chain(args.iter().cloned())
+        .chain(std::iter::once(path.display().to_string()));
+    let cli = Cli::try_parse_from(argv).map_err(|error| format!("nyl {}: {error}", args.join(" ")))?;
+    cli.execute_in_process(wiring)
+        .map_err(|error| format!("nyl {}: {error}", args.join(" ")))
+}
+
+/// Each unit's result in a transition summary's `units:` block.
+fn summary_units(summary: &Value) -> BTreeMap<String, String> {
+    summary
+        .get("units")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| Some((name.clone(), value.get("result")?.as_str()?.to_owned())))
+        .collect()
+}
+
+/// The unit names of a list, empty when it is absent.
+fn names(list: Option<&Value>) -> BTreeSet<String> {
+    list.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }

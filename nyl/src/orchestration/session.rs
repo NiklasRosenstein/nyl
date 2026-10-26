@@ -8,12 +8,13 @@ use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
+use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
 use nyl_orchestration::run_report::{
     EnvironmentRunReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport, UnitReport,
 };
-use nyl_orchestration::shell::run::RunRequest;
+use nyl_orchestration::shell::run::{RunContext, RunRequest};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::source::GitSourceResolver;
@@ -116,10 +117,12 @@ impl Session {
         UnitSourceRenderer::new(self.entry_project_dir()).with_previous_paths(self.previous_paths())
     }
 
-    /// The shell context of one command.
+    /// The shell context of one command, working through `store`: the
+    /// environment's state store, or a [`LocalStore`](nyl_orchestration::shell::local::LocalStore)
+    /// wrapping it for `--local`.
     pub fn context<'a>(
         &self,
-        store: &'a GitStateStore,
+        store: &'a dyn StateStore,
         wiring: &'a Wiring<'_>,
         requested_by: Option<String>,
     ) -> Context<'a> {
@@ -127,11 +130,42 @@ impl Session {
             store,
             clock: wiring.clock.as_ref(),
             ids: wiring.ids,
+            faults: wiring.faults,
             runner: wiring.runner.clone(),
             requested_by: requested_by.unwrap_or_else(|| requested_by_default(&self.resolved.git_dir, &wiring.runner)),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             settings: Settings::default(),
         }
+    }
+
+    /// Run `operation` of the run shell through `store` as `identity`
+    /// (`None` for a command that writes nothing), in a fresh workspace,
+    /// with the warnings of resolving the environment added to its report.
+    pub fn run(
+        &self,
+        wiring: &Wiring<'_>,
+        store: &dyn StateStore,
+        identity: Option<&CommitIdentity>,
+        request: &RunRequest,
+        operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
+    ) -> Result<RunReport, Stop> {
+        let sources = self.sources()?;
+        let renderer = self.renderer();
+        let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
+        let base = self.context(store, wiring, identity.map(ToString::to_string));
+        let context = RunContext {
+            base: &base,
+            sources: &sources,
+            renderer: &renderer,
+            drivers: wiring.drivers,
+            tools: wiring.tools,
+            workspace: workspace.path(),
+            process_env: &wiring.process_env,
+            commit_identity: identity,
+        };
+        let mut report = operation(&context, request);
+        self.add_warnings(&mut report);
+        Ok(report)
     }
 
     /// Add the warnings of resolving the environment to `report`.
@@ -143,22 +177,32 @@ impl Session {
         }
     }
 
+    /// The `--local` options of a run, after checking that the state has
+    /// a local view (`NYL-LOCAL-RUN-UNSUPPORTED` otherwise): remote state
+    /// whose refs are branches. `approve` are the `--approve` units.
+    pub fn local_run(
+        &self,
+        local_lease: bool,
+        approve: &[String],
+    ) -> Result<nyl_orchestration::shell::local::LocalRun, Finding> {
+        use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
+        nyl_orchestration::rules::local::view(&self.resolved.location)?;
+        Ok(LocalRun {
+            lease: if local_lease {
+                LeaseScope::Local
+            } else {
+                LeaseScope::Remote
+            },
+            approve: unit_names("--approve", approve)?,
+        })
+    }
+
     /// The request of one `plan` or `reconcile`.
     pub fn request(&self, options: &RunOptions<'_>) -> Result<RunRequest, Finding> {
         let units = if options.units.is_empty() {
             None
         } else {
-            let mut names = BTreeSet::new();
-            for unit in options.units {
-                names.insert(UnitName::new(unit).map_err(|error| {
-                    Finding::new(
-                        Code::UnitUnknown,
-                        format!("--unit {unit:?} is not a unit name: {error}"),
-                        "name units as `nyl get units -e <env>` lists them",
-                    )
-                })?);
-            }
-            Some(names)
+            Some(unit_names("--unit", options.units)?)
         };
         Ok(RunRequest {
             environment: self.resolved.name.clone(),
@@ -170,8 +214,26 @@ impl Session {
             concurrency: options.concurrency.max(1),
             source_override: options.source.map(str::to_owned),
             wait: options.wait,
+            local: options.local.clone(),
+            cancellation: options.cancellation.clone(),
         })
     }
+}
+
+/// Unit names as an option names them; `flag` names the option in the finding.
+fn unit_names(flag: &str, units: &[String]) -> Result<BTreeSet<UnitName>, Finding> {
+    units
+        .iter()
+        .map(|unit| {
+            UnitName::new(unit).map_err(|error| {
+                Finding::new(
+                    Code::UnitUnknown,
+                    format!("{flag} {unit:?} is not a unit name: {error}"),
+                    "name units as `nyl get units -e <env>` lists them",
+                )
+            })
+        })
+        .collect()
 }
 
 /// The worktree-rooted directory of the inventory's `nyl.toml`, such as
@@ -194,24 +256,37 @@ pub fn project_dir(inventory: &GitOpsInventory) -> String {
     format!("/{relative}")
 }
 
-/// The options of a `plan` or `reconcile` request.
+/// The options of a `plan`, `reconcile`, or `verify` request.
 pub struct RunOptions<'a> {
     pub units: &'a [String],
     pub concurrency: usize,
     pub source: Option<&'a str>,
     pub wait: Option<Duration>,
+    /// `--local`, `--local-lease`, and `--approve` of `reconcile`; `None` elsewhere.
+    pub local: Option<nyl_orchestration::shell::local::LocalRun>,
+    /// The wiring's cancellation for `reconcile` and `verify`; never set for `plan`.
+    pub cancellation: nyl_orchestration::shell::run::Cancellation,
+}
+
+/// `environment` as a name for a report of a command that stopped before
+/// resolving it: a name the project cannot hold is reported under a
+/// placeholder, and the finding names the given one.
+pub fn placeholder_environment(environment: &str) -> EnvironmentName {
+    EnvironmentName::new(environment)
+        .or_else(|_| EnvironmentName::new("unknown"))
+        .expect("a valid placeholder name")
+}
+
+/// The pretty-printed JSON a command prints for `--output json`.
+pub fn pretty_json(value: &serde_json::Value) -> String {
+    format!("{}\n", serde_json::to_string_pretty(value).expect("JSON prints"))
 }
 
 /// A report of `kind` for `environment` that holds only `finding`, for a
 /// command that stopped before the shell ran.
-pub fn finding_report(kind: ReportKind, environment: &str, finding: Finding) -> RunReport {
+fn finding_report(kind: ReportKind, environment: &str, finding: Finding) -> RunReport {
     let mut report = RunReport::new(kind);
-    // An environment name the project cannot hold is reported under a
-    // placeholder; the finding names the given one.
-    let name = EnvironmentName::new(environment)
-        .or_else(|_| EnvironmentName::new("unknown"))
-        .expect("a valid placeholder name");
-    let mut environment = EnvironmentRunReport::new(name);
+    let mut environment = EnvironmentRunReport::new(placeholder_environment(environment));
     environment.errors.push(finding);
     environment.finish(kind);
     report.environments.push(environment);
@@ -224,7 +299,7 @@ pub fn finding_report(kind: ReportKind, environment: &str, finding: Finding) -> 
 pub fn outcome(report: &RunReport, output: RunOutput, exit: u8) -> CommandOutcome {
     let json = serde_json::to_value(report).expect("reports serialize");
     let stdout = match output {
-        RunOutput::Json => format!("{}\n", serde_json::to_string_pretty(&json).expect("JSON prints")),
+        RunOutput::Json => pretty_json(&json),
         RunOutput::Table => table(report),
     };
     CommandOutcome {
@@ -306,6 +381,7 @@ fn table(report: &RunReport) -> String {
             ReportKind::PlanReport => &["UNIT", "KIND", "STATE", "RECEIPT", "CHANGES", "DETAIL"],
             ReportKind::ReconcileReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
+            ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
         };
         if rows.is_empty() {
             let _ = writeln!(text, "{}: no units", environment.name);
@@ -325,25 +401,28 @@ fn table(report: &RunReport) -> String {
     text
 }
 
+/// A table cell for a value that serializes as a string, such as a receipt
+/// state; `-` when there is none.
+pub fn cell_label(value: Option<impl serde::Serialize>) -> String {
+    value
+        .and_then(|value| serde_json::to_value(value).ok())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "-".to_owned())
+}
+
 fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
     let dash = || "-".to_owned();
     let outcome = unit.outcome_name().map_or_else(dash, str::to_owned);
-    let receipt = unit
-        .receipt
-        .and_then(|receipt| serde_json::to_value(receipt).ok())
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(dash);
+    let receipt = cell_label(unit.receipt);
     let detail = detail(unit);
     let cells = match kind {
         ReportKind::PlanReport => {
-            let changes = unit
-                .changes
-                .and_then(|change| serde_json::to_value(change).ok())
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(dash);
+            let changes = cell_label(unit.changes);
             vec![name.to_string(), unit.kind.clone(), outcome, receipt, changes, detail]
         }
-        ReportKind::ReconcileReport => vec![name.to_string(), unit.kind.clone(), outcome, detail],
+        ReportKind::ReconcileReport | ReportKind::VerifyReport => {
+            vec![name.to_string(), unit.kind.clone(), outcome, detail]
+        }
         ReportKind::StatusReport => {
             let last_run = unit.last_run.as_ref().map_or_else(dash, ToString::to_string);
             vec![name.to_string(), unit.kind.clone(), outcome, receipt, last_run, detail]

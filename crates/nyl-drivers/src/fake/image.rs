@@ -13,7 +13,7 @@ use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, Receipt};
 use serde_json::{json, Value};
 
-use super::{directory_digests, local_directory, required_str, resolved_spec, Script, ScriptedOutcome};
+use super::{required_str, resolved_spec, source_files, Script, ScriptedOutcome};
 
 pub(super) const KIND: &str = "FakeImage";
 
@@ -141,14 +141,8 @@ impl Driver for FakeImage {
     }
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
-        let path = required_str(spec, "/context/path")?;
-        let directory = local_directory(&ctx.worktree, &ctx.project_dir, "spec.context.path", path)?;
-        let worktree = ctx
-            .worktree
-            .canonicalize()
-            .map_err(|error| DriverError::before_effects(error.to_string()))?;
         Ok(KeyInputs {
-            files: directory_digests(&worktree, &directory)?,
+            files: source_files(ctx, spec, "/context/path", "spec.context.path")?,
             excluded_fields: vec!["/builder".to_owned(), "/cache".to_owned()],
             fingerprint: None,
         })

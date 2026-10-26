@@ -96,9 +96,10 @@ global clock.
 ### Scenario files
 
 Scenarios live under `nyl/tests/scenarios/`, one directory each:
-`reference/<name>/` for the whole workflows below, and `walkthroughs/<name>/`
+`reference/<name>/` for the whole workflows below, `walkthroughs/<name>/`
 for the [orchestration core walkthroughs](orchestration-core.md#walkthroughs)
-and the other contract walkthroughs.
+and the other contract walkthroughs, and `recovery/<name>/` for the
+[crash-injection scenarios](#crash-injection).
 
 ```text
 platform/
@@ -143,8 +144,8 @@ and to the harness's validation, together with the first scenario using them.
 | `clock: {advance: <duration>}` or `{set: <timestamp>}` | Moves the injected clock |
 | `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result |
 | `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `verify`, `teardown`), returning `outcome` (`succeeded`, `failed`, `uncertain`) |
-| `fault: {point, unit}` | Tier 1: the next `nyl` step dies at `point` for `unit`, as a forced kill would: `after-effect`, `before-checkpoint`, `before-lease-update`, or `before-push`; that step has `killed: true` instead of `exit` |
-| `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease`, or a fault point), leaving it running |
+| `fault: {point, unit}` | Tier 1: the next `nyl` step dies at `point`, as a forced kill would: `after-effect` or `before-checkpoint` of `unit` (required); `before-lease-update`, where `unit` is optional and names the phase that starts that unit's batch, and without it the first phase; or `before-push` (no `unit`). That step has `killed: true` instead of `exit`, and fails when its fault never fired |
+| `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease` before a `--wait-lease` poll, or a fault point), leaving it running; the commits other steps write meanwhile do not count toward its `commits` |
 | `resume: <id>` | Lets a paused invocation continue and waits for it; `exit` and `expect` check its result |
 | `ref: {delete: <ref>}` | Deletes a ref in the state repository, as someone with push access could |
 
@@ -153,7 +154,7 @@ and to the harness's validation, together with the first scenario using them.
 | Key | Checks |
 | --- | --- |
 | `executed`, `current`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed` | Exactly the units with that outcome in the operation's report, so `executed: []` asserts that nothing executed; a key that is not given is not checked. The outcome is each unit's `result` in a reconcile report and its `state` in a plan or status report (`UnitReport::outcome_name`). For a reconcile that wrote a transition commit, the commit summary's `units:` block must list the same sets |
-| `recovered`, `imported` | The summary's lists of the same name |
+| `recovered`, `imported` | The summary's lists of the same name, and the report's |
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
 | `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit) |
 | `codes` | Stable error and warning codes the invocation reported |
@@ -165,6 +166,27 @@ Tier 2 also checks the registry's manifests and `tofu output`. Both tiers read
 the same file. `driver`, `fault`, and `pause` steps are tier 1 by kind, and a
 step that depends on one, or on a scripted observer response, carries
 `tier: 1`.
+
+### Crash injection
+
+The `recovery/` scenarios kill one `nyl reconcile` of the walkthroughs'
+project at each killable fault point and check how the next run takes over,
+as [Runs and leases](orchestration-core.md#runs-and-leases) describes. Each
+runs `state init`, the fault, the killed reconcile, a reconcile one minute
+before the dead run's deadline that exits 2 with `NYL-LEASE-HELD` and writes
+nothing, and, past the deadline, a reconcile that exits 0 with one desired
+and one observed commit and every unit current:
+
+| Scenario | Fault | Deadline left behind | `imported` | `recovered` | `executed` |
+| --- | --- | --- | --- | --- | --- |
+| `after-effect` | `after-effect` of `network` | wave 1: 60m + 10m | none | `network`, `web-image` | `database`, `kubernetes` |
+| `before-checkpoint` | `before-checkpoint` of `web-image` | wave 1: 60m + 10m | `network` | `web-image` | `database`, `kubernetes` |
+| `before-lease-update` | `before-lease-update` of `database` | the resolution before it: 30m + 10m | `network`, `web-image` | none | `database`, `kubernetes` |
+| `before-push` | `before-push` | the last resolution: 30m + 10m | all four units | none | none |
+
+A run resolves again before each wave, and that resolution phase renews the
+lease for `resolutionTimeout`, so a kill after a resolution leaves its
+deadline rather than the previous wave's.
 
 ### M8 CI conformance steps
 
@@ -532,7 +554,9 @@ Tier 1 variants:
 - **Cancellation.** A SIGTERM during `database`'s apply stops the tool,
   checkpoints finished units, marks `database` uncertain, and releases the
   lease within the grace the harness allows; the next run starts at once
-  and converges `database`.
+  and converges `database`. A second signal ends the process at once, and a
+  signal during `--wait-lease` refuses with `NYL-RUN-CANCELLED` having
+  written nothing.
 - **Broken lease.** After a forced kill, `nyl lease break -e dev --reason
   "runner lost"` lets the next run take over before the deadline.
 - **Busy instance.** While a pull request job holds `pr-124`'s lease, the
@@ -596,7 +620,7 @@ Tier 1 variants:
 
 | Milestone | Runs |
 | --- | --- |
-| M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants |
+| M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants; the [crash-injection scenarios](#crash-injection) at every killable fault point |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication` |
 | M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path; a fifth adds `prod-hotfix` and `hotfix-to-prod`, promotes a fix from `release/prod`, has the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, and covers `--supersede` with a range |

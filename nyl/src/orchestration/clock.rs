@@ -31,14 +31,12 @@ pub struct AdvancingClock {
 }
 
 impl AdvancingClock {
-    pub fn starting_at(now: Timestamp) -> Self {
-        Self { now: Mutex::new(now) }
-    }
-
     /// Parse an RFC 3339 time, as `NYL_TEST_NOW` holds it.
     pub fn parse(value: &str) -> Result<Self, String> {
         chrono::DateTime::parse_from_rfc3339(value)
-            .map(|time| Self::starting_at(time.to_utc()))
+            .map(|time| Self {
+                now: Mutex::new(time.to_utc()),
+            })
             .map_err(|error| format!("NYL_TEST_NOW {value:?} is not an RFC 3339 time: {error}"))
     }
 }

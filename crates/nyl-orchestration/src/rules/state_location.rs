@@ -26,9 +26,6 @@ use nyl_core::orchestration::state::{StateEvent, StateLocation, StateRecord};
 use nyl_core::resources::environment::{EnvironmentGroupState, EnvironmentState};
 use nyl_core::resources::{InlineGitRepository, LocalReference};
 
-/// The `repository` of a location that is the clone's own branches.
-pub const LOCAL_REPOSITORY: &str = StateLocation::LOCAL_REPOSITORY;
-
 /// The default coordination prefix.
 pub const DEFAULT_COORDINATION_PREFIX: &str = "refs/nyl/";
 
@@ -73,7 +70,7 @@ pub fn resolve(inputs: &LocationInputs<'_>) -> Result<ResolvedLocation, String> 
         Some(repository) => (repository.repo_url, repository.publish_url),
         None => match inputs.origin {
             Some(origin) => (origin.to_owned(), None),
-            None => (LOCAL_REPOSITORY.to_owned(), None),
+            None => (StateLocation::LOCAL_REPOSITORY.to_owned(), None),
         },
     };
     let location = StateLocation {
@@ -94,7 +91,7 @@ pub fn resolve(inputs: &LocationInputs<'_>) -> Result<ResolvedLocation, String> 
     };
     let warnings = [&location.desired_ref, &location.observed_ref]
         .into_iter()
-        .filter(|reference| reference.starts_with("refs/") && !reference.starts_with("refs/heads/"))
+        .filter(|reference| !StateLocation::is_branch_ref(reference))
         .map(|reference| {
             Finding::new(
                 Code::StateUnprotected,
@@ -193,17 +190,10 @@ pub fn describe(location: &StateLocation) -> String {
 pub fn ref_conflicts(locations: &[(EnvironmentName, StateLocation)]) -> Vec<Finding> {
     let mut names: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for (environment, location) in locations {
-        let full = |name: &str| {
-            if name.starts_with("refs/") {
-                name.to_owned()
-            } else {
-                format!("refs/heads/{name}")
-            }
-        };
         let prefix = &location.coordination_ref_prefix;
         for name in [
-            full(&location.desired_ref),
-            full(&location.observed_ref),
+            StateLocation::full_name(&location.desired_ref),
+            StateLocation::full_name(&location.observed_ref),
             format!("{prefix}{environment}/lease"),
             format!("{prefix}{environment}/runs/*"),
             format!("{prefix}{environment}/signals/*"),
@@ -237,11 +227,8 @@ pub fn ref_conflicts(locations: &[(EnvironmentName, StateLocation)]) -> Vec<Find
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::fixtures::env as dev;
     use nyl_core::orchestration::state::{StateRecordKind, StateV1};
-
-    fn dev() -> EnvironmentName {
-        EnvironmentName::new("dev").unwrap()
-    }
 
     fn no_repositories(reference: &LocalReference) -> Result<InlineGitRepository, String> {
         Err(format!("no GitRepository {}", reference.name))
@@ -262,7 +249,7 @@ mod tests {
             .location
         };
         let local = resolve_with(None, None);
-        assert_eq!(local.repository, LOCAL_REPOSITORY);
+        assert_eq!(local.repository, StateLocation::LOCAL_REPOSITORY);
         assert_eq!(local.desired_ref, "nyl/dev/desired");
         assert_eq!(local.observed_ref, "nyl/dev/observed");
         assert_eq!(local.coordination_ref_prefix, "refs/nyl/");

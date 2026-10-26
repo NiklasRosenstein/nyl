@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 
@@ -19,6 +20,8 @@ pub const FAKE_REGISTRY: &str = "registry.invalid:5000";
 
 pub struct World {
     root: TempDir,
+    /// Numbers fresh clones, so concurrent invocations never share one.
+    clones: AtomicUsize,
 }
 
 impl World {
@@ -26,6 +29,7 @@ impl World {
     pub fn new(project: &Path) -> Self {
         let world = Self {
             root: TempDir::new().expect("temporary directory"),
+            clones: AtomicUsize::new(0),
         };
         std::fs::create_dir_all(world.scenario_tmp()).unwrap();
         git(
@@ -129,6 +133,17 @@ impl World {
         self.commit_and_push(&step.branch, &step.message);
     }
 
+    /// Write `files` over the tip of `branch`, then commit and push them.
+    pub fn commit_files(&self, branch: &str, message: &str, files: &[(&str, &str)]) {
+        self.checkout(branch);
+        for (path, content) in files {
+            let target = self.work().join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, self.substitute(content)).unwrap();
+        }
+        self.commit_and_push(branch, message);
+    }
+
     /// A `branch` step.
     pub fn branch(&self, step: &BranchStep) {
         git(
@@ -161,7 +176,7 @@ impl World {
     pub fn fresh_clone(&self, branch: &str) -> PathBuf {
         let jobs = self.root.path().join("jobs");
         std::fs::create_dir_all(&jobs).unwrap();
-        let count = std::fs::read_dir(&jobs).unwrap().count();
+        let count = self.clones.fetch_add(1, Ordering::Relaxed);
         let path = jobs.join(format!("job-{count}"));
         git(
             &jobs,
@@ -192,6 +207,17 @@ impl World {
         .map(str::to_owned)
         .collect()
     }
+}
+
+/// `dev`'s lease in the state repository `bare`, while one is held.
+pub fn lease(bare: &Path) -> Option<nyl_core::orchestration::state::Lease> {
+    let shown = git_command(bare, &["show", "refs/nyl/dev/lease:lease.yaml"])
+        .output()
+        .expect("git runs");
+    shown
+        .status
+        .success()
+        .then(|| serde_saphyr::from_str(&String::from_utf8_lossy(&shown.stdout)).unwrap())
 }
 
 fn git_command(directory: &Path, args: &[&str]) -> Command {

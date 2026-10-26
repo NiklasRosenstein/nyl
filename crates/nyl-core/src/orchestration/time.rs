@@ -8,9 +8,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize};
-
 use crate::{CoreError, Result};
 
 /// A point in time, in UTC, serialized as RFC 3339.
@@ -120,34 +117,12 @@ impl fmt::Display for Duration {
     }
 }
 
-impl Serialize for Duration {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for Duration {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl JsonSchema for Duration {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Duration".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "pattern": "^(?=.)([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?$",
-            "description": "A duration such as `90s`, `30m`, `1h30m`, or `7d`.",
-            "examples": ["30m"]
-        })
-    }
-}
+string_serde!(Duration, {
+    "type": "string",
+    "pattern": "^(?=.)([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?$",
+    "description": "A duration such as `90s`, `30m`, `1h30m`, or `7d`.",
+    "examples": ["30m"]
+});
 
 #[cfg(test)]
 mod tests {

@@ -1,9 +1,9 @@
 //! `plan` and `reconcile` of one environment.
 //!
-//! Contract: [Execution](../../../../design/orchestration-core.md#execution),
-//! [Planning](../../../../design/orchestration-core.md#planning),
-//! [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases),
-//! and [Transition commits](../../../../design/orchestration-core.md#transition-commits).
+//! Contract: [Execution](../../../../../design/orchestration-core.md#execution),
+//! [Planning](../../../../../design/orchestration-core.md#planning),
+//! [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases),
+//! and [Transition commits](../../../../../design/orchestration-core.md#transition-commits).
 //!
 //! A reconcile takes the lease, chooses S (`rules::sources`), checks its
 //! reachability, checks out a pinned worktree of S, renders the units
@@ -12,7 +12,8 @@
 //! (`rules::references`), asking each ready unit's driver for its key inputs
 //! (`rules::execution_key`). Then waves: select ready units
 //! (`rules::selection`), execute them in parallel up to the concurrency
-//! limit on scoped threads, each in its own worktree and temp dir, write a
+//! limit on scoped threads, each in its concurrency slot's worktree
+//! ([`slots`]) and its own temp dir ([`execute`]), write a
 //! checkpoint per finished unit on the run ref, and re-resolve at the same S.
 //! When nothing is ready it writes one fenced transition commit per changed
 //! state ref, rendered from the report, releases the lease, and deletes the
@@ -30,6 +31,20 @@
 //! keeps its run ref, marked finished, so executed units' results are not
 //! lost; every other run deletes it and releases the lease, including runs
 //! that change nothing and runs whose units failed.
+//!
+//! Takeover ([`crate::rules::takeover`]): after the snapshot the run reads
+//! the run refs left by runs before it, overlays the desired documents of
+//! units they created on the snapshot it renders against (so their uids are
+//! reused), imports their checkpoints after each resolution until nothing
+//! new is imported, records units it creates on its run ref before starting
+//! them, and, once its transition commit landed (or it released without
+//! changes), deletes the leftover run refs or retires them to evidence refs.
+//!
+//! Cancellation ([`Cancellation`], "Runs and leases" item 7): once
+//! cancelled, the run starts no unit, checkpoints the units that finish
+//! (units still running become `uncertain`), keeps its run ref marked
+//! finished, releases the lease, and writes no transition commit
+//! (`NYL-RUN-CANCELLED`, exit 4).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,10 +57,10 @@ use nyl_core::orchestration::driver::{
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, RenderedSource, SourceRenderer, SourceRepository, SourceResolver,
-    StateError, Transition, TransitionChanges,
+    StateError, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit, ObservedUnitKind,
+    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
     Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
@@ -53,24 +68,30 @@ use nyl_core::resources::environment::Environment;
 use nyl_core::resources::units::OutputDeclaration;
 use serde_json::{json, Map, Value};
 
-use super::lease::{self, HeldLease, LeaseError};
-use super::state::store_error;
-use super::Context;
-use crate::fault::{FaultAction, FaultInjector, FaultPoint};
+use super::lease::{self, HeldLease};
+use super::{store_error, Context};
+use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{desire, DesireInputs, Desired};
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
-use crate::rules::freshness::receipt_is_current;
+use crate::rules::freshness::{receipt_is_current, same_incarnation};
 use crate::rules::graph::{extract, topological_order};
 use crate::rules::references::{resolve_unit, ReferenceView};
-use crate::rules::selection::{batches, select, Candidates, Skipped};
+use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
 use crate::rules::sources::{
     effective_commit, pin_refs, pin_source_fields, root_local_paths, run_source_refs, source_request, source_revisions,
     unreachable, unsupported_source, SourceRequest,
 };
-use crate::rules::state_location::check_record;
+use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
-use crate::transition::{self, Trailers};
+use crate::transition::Trailers;
+pub use cancel::{Cancellation, SIGINT, SIGTERM};
+use execute::{execute_batch, Execution};
+use slots::Slots;
+
+mod cancel;
+mod execute;
+pub(crate) mod slots;
 
 /// Default number of units a wave runs at once.
 pub const DEFAULT_CONCURRENCY: usize = 4;
@@ -82,7 +103,6 @@ pub struct RunContext<'a> {
     pub renderer: &'a dyn SourceRenderer,
     pub drivers: &'a DriverSet,
     pub tools: &'a dyn ToolRunner,
-    pub faults: &'a dyn FaultInjector,
     /// A directory this invocation owns: pinned worktrees and per-execution
     /// temp dirs are created beneath it.
     pub workspace: &'a Path,
@@ -120,6 +140,14 @@ pub struct RunRequest {
     pub source_override: Option<String>,
     /// `--wait-lease`.
     pub wait: Option<Duration>,
+    /// `--local`: the run continues from the clone's local state branches
+    /// and commits there with `Nyl-Local: true`; the command line passes a
+    /// [`super::local::LocalStore`] as the context's store. `None` for an
+    /// ordinary run. Contract: [Local runs](../../../../../design/orchestration-core.md#local-runs).
+    pub local: Option<super::local::LocalRun>,
+    /// Set by the command line's SIGINT/SIGTERM handler; never set by
+    /// default. Contract: [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases), item 7.
+    pub cancellation: Cancellation,
 }
 
 /// `nyl plan -e <env>`.
@@ -141,8 +169,11 @@ pub fn plan(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
 pub fn reconcile(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
     let environment = off_runtime(|| {
         let session = Session::new(context, request);
-        let report = reconcile_environment(&session);
+        let mut report = reconcile_environment(&session);
         session.clean();
+        if request.local.is_some() {
+            super::local::finish_local_report(&mut report, request);
+        }
         report
     });
     let mut report = RunReport::new(ReportKind::ReconcileReport);
@@ -152,11 +183,35 @@ pub fn reconcile(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
 
 /// Run `body` on a scoped thread of its own, outside any async runtime the
 /// caller may be in.
-fn off_runtime<T: Send>(body: impl FnOnce() -> T + Send) -> T {
-    std::thread::scope(|scope| match scope.spawn(body).join() {
+pub(crate) fn off_runtime<T: Send>(body: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| join(scope.spawn(body)))
+}
+
+/// The value of a scoped thread, resuming its panic.
+pub(crate) fn join<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
         Ok(value) => value,
         Err(panic) => std::panic::resume_unwind(panic),
-    })
+    }
+}
+
+/// A new directory `<prefix>-<n>` beneath the workspace, for one operation.
+pub(crate) fn fresh_directory(workspace: &Path, prefix: &str) -> PathBuf {
+    let mut index = 0usize;
+    loop {
+        let candidate = workspace.join(format!("{prefix}-{index}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+impl RunContext<'_> {
+    /// The workspace's render cache, shared by the invocation's runs.
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        self.workspace.join("cache")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +233,8 @@ struct Session<'r, 'a> {
     /// Key inputs per unit, by the resolved spec and commit they were read for.
     keys: RefCell<BTreeMap<UnitName, (Value, CommitId, KeyInputs)>>,
     executions: RefCell<usize>,
+    /// One reusable worktree per concurrency slot.
+    slots: Slots,
     /// The deadline of the lease a reconcile holds, which bounds every
     /// resolution deadline; `None` for a plan, which holds no lease.
     lease_deadline: Cell<Option<Timestamp>>,
@@ -213,14 +270,8 @@ struct Evidence<'e> {
 
 impl<'r, 'a> Session<'r, 'a> {
     fn new(context: &'r RunContext<'a>, request: &'r RunRequest) -> Self {
-        let mut index = 0usize;
-        let directory = loop {
-            let candidate = context.workspace.join(format!("session-{index}"));
-            if !candidate.exists() {
-                break candidate;
-            }
-            index += 1;
-        };
+        let directory = fresh_directory(context.workspace, "session");
+        let slots = Slots::new(&directory);
         Self {
             context,
             request,
@@ -231,6 +282,7 @@ impl<'r, 'a> Session<'r, 'a> {
             worktrees: RefCell::new(BTreeMap::new()),
             keys: RefCell::new(BTreeMap::new()),
             executions: RefCell::new(0),
+            slots,
             lease_deadline: Cell::new(None),
         }
     }
@@ -246,11 +298,6 @@ impl<'r, 'a> Session<'r, 'a> {
     /// Remove every worktree and temp dir of this operation.
     fn clean(&self) {
         let _ = std::fs::remove_dir_all(&self.directory);
-    }
-
-    /// The workspace's render cache, shared by the invocation's runs.
-    fn cache_dir(&self) -> PathBuf {
-        self.context.workspace.join("cache")
     }
 
     /// A new directory for one execution or plan of `unit`.
@@ -557,7 +604,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 deadline: resolution_deadline(&self.base().settings, now, self.lease_deadline.get()),
                 now,
                 tools: self.context.tools,
-                cache_dir: self.cache_dir(),
+                cache_dir: self.context.cache_dir(),
             };
             let inputs = driver.execution_key_inputs(&context, spec).map_err(|error| {
                 Finding::new(
@@ -595,12 +642,7 @@ impl<'r, 'a> Session<'r, 'a> {
 fn resolution_deadline(settings: &super::Settings, now: Timestamp, lease: Option<Timestamp>) -> Timestamp {
     let own = settings.resolution_timeout.after(now);
     match lease {
-        Some(lease) => {
-            let bound = lease
-                .checked_sub_signed(settings.lease_grace.to_chrono())
-                .unwrap_or(lease);
-            own.min(bound)
-        }
+        Some(lease) => own.min(lease::bound(settings, lease)),
         None => own,
     }
 }
@@ -650,7 +692,7 @@ fn environment_spec(at_source: &Environment, entry: &Environment) -> Value {
 
 /// A unit's admitted variables: `PATH` and its declared `env.passthrough`,
 /// from the process environment snapshot.
-fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value) -> BTreeMap<String, String> {
+pub(crate) fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     if let Some(path) = process_env.get("PATH") {
         env.insert("PATH".to_owned(), path.clone());
@@ -670,7 +712,7 @@ fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value) -> BTreeMa
 }
 
 /// The directory of `nyl.toml` inside a worktree, from its worktree-rooted form.
-fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
+pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
     let relative = project_dir.trim_matches('/');
     if relative.is_empty() {
         worktree.to_path_buf()
@@ -679,8 +721,13 @@ fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
     }
 }
 
+/// The longest timeout of `units`, which a phase running them needs.
+pub(crate) fn longest_timeout<'u>(units: impl Iterator<Item = &'u DesiredUnit>) -> Duration {
+    units.map(unit_timeout).max().unwrap_or_default()
+}
+
 /// A unit's `timeout`, else its kind's default from the contract's Defaults.
-fn unit_timeout(unit: &DesiredUnit) -> Duration {
+pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     if let Some(timeout) = spec
         .get("timeout")
@@ -730,25 +777,10 @@ fn blocked_by(unit: &DesiredUnit) -> Vec<BlockedBy> {
         .collect()
 }
 
-/// The observed document of the unit's current incarnation.
-fn same_incarnation<'o>(unit: &DesiredUnit, observed: Option<&'o ObservedUnit>) -> Option<&'o ObservedUnit> {
-    observed.filter(|observed| observed.unit.uid == unit.unit.uid)
-}
-
-/// The run of a unit's latest condition or receipt.
-fn last_run(observed: Option<&ObservedUnit>) -> Option<RunId> {
-    let observed = observed?;
-    match &observed.condition {
-        Some(Condition::Failed { run, .. } | Condition::Uncertain { run, .. }) => Some(run.clone()),
-        None => observed.receipt.as_ref().map(|receipt| receipt.run.clone()),
-    }
-}
-
-fn condition_message(observed: Option<&ObservedUnit>) -> Option<String> {
-    match observed?.condition.as_ref()? {
-        Condition::Failed { message, .. } => Some(message.clone()),
-        Condition::Uncertain { reason, .. } => Some(reason.clone()),
-    }
+/// The failure or uncertainty message of the unit's current incarnation.
+fn condition_message(unit: &DesiredUnit, observed: Option<&ObservedUnit>) -> Option<String> {
+    let condition = same_incarnation(unit, observed)?.condition.as_ref()?;
+    Some(condition.message().to_owned())
 }
 
 /// The warning listing the units that leave the ownership set.
@@ -782,7 +814,12 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             return;
         }
     };
-    match check_record(snapshot.record.as_ref(), environment, &request.location) {
+    match super::local::check_record(
+        context.base.store,
+        snapshot.record.as_ref(),
+        environment,
+        &request.location,
+    ) {
         Ok(()) => {}
         // A plan of an environment without state shows what its first run does.
         Err(finding) if finding.code == Code::StateMissing => report.warnings.push(finding),
@@ -823,6 +860,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         drivers: context.drivers,
         named: None,
         attempted: &attempted,
+        local: request.local.as_ref().map(|local| &local.approve),
     });
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
@@ -832,8 +870,8 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         let observed = snapshot.observed.get(name);
         let mut entry = UnitReport::new(unit.unit.kind.clone());
         entry.receipt = Some(receipt_state(Some(unit), observed));
-        entry.last_run = last_run(observed);
-        entry.message = condition_message(same_incarnation(unit, observed));
+        entry.last_run = observed.and_then(ObservedUnit::last_run).cloned();
+        entry.message = condition_message(unit, observed);
         entry.blocked_by = blocked_by(unit);
         entry.state = Some(if ready.contains(name) {
             UnitState::Ready
@@ -866,12 +904,15 @@ fn plan_unit(
         return;
     };
     let directory = session.execution_directory(name);
-    let worktree = directory.join("worktree");
     let temp_dir = directory.join("tmp");
-    if let Err(finding) = session.checkout(commit, &worktree) {
-        entry.plan_error = Some(finding.message);
-        return;
-    }
+    // Planning is sequential, so it always uses the first slot.
+    let worktree = match session.slots.checkout(context.sources, 0, commit) {
+        Ok(worktree) => worktree,
+        Err(message) => {
+            entry.plan_error = Some(message);
+            return;
+        }
+    };
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;
@@ -890,7 +931,7 @@ fn plan_unit(
         observed,
         tools: context.tools,
         commit_identity: context.commit_identity,
-        cache_dir: session.cache_dir(),
+        cache_dir: session.context.cache_dir(),
     };
     match driver.plan(&execution, unit) {
         Ok(Supported::Supported(plan)) => {
@@ -921,10 +962,16 @@ enum Ending {
     /// Release the lease and delete the run ref.
     Release,
     /// Keep the run ref, marked finished, for the next run to import;
-    /// release the lease when it is still this run's.
-    KeepRun { release: bool },
+    /// release the lease when it is still this run's. `unrecorded` names
+    /// the units that ran but whose checkpoint did not reach the run ref:
+    /// the record keeps them as started, so the run taking over gives them
+    /// an `uncertain` condition instead of losing their effects.
+    KeepRun { release: bool, unrecorded: Vec<UnitName> },
     /// A fault killed the run: write nothing more.
     Killed,
+    /// SIGINT or SIGTERM: keep the run ref, marked finished, once a
+    /// checkpoint is on it (else delete it), and release the lease.
+    Cancelled,
 }
 
 /// The mutable state of one reconcile holding the lease.
@@ -940,6 +987,18 @@ struct Reconcile<'s, 'r, 'a> {
     checkpointed: bool,
 }
 
+/// A `--local` run never imports remote run refs: it refuses while the
+/// remote holds leftovers a remote run must take over first.
+fn check_local_leftovers(session: &Session<'_, '_>, run: &RunId) -> Result<(), Finding> {
+    let base = session.base();
+    let environment = session.environment();
+    let coordination = base
+        .store
+        .coordination(&session.request.location, environment)
+        .map_err(|error| store_error(environment, &error))?;
+    crate::rules::local::check_leftovers(environment, run, &coordination, base.clock.now())
+}
+
 fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let context = session.context;
     let request = session.request;
@@ -948,23 +1007,30 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let mut report = EnvironmentRunReport::new(environment.clone());
     let run = base.ids.run_id();
     report.run = Some(run.clone());
-    let held = match lease::acquire(
-        base,
-        &request.location,
-        environment,
-        &run,
-        Operation::Reconcile,
-        base.settings.resolution_timeout,
-        request.wait,
-    ) {
+    // A `--local` run checks for remote run refs it would have to take over
+    // before it takes the lease, so a refusal leaves the remote lease (and
+    // the break it may record) as it was; it checks again once it holds it.
+    let checked = if request.local.is_some() {
+        check_local_leftovers(session, &run)
+    } else {
+        Ok(())
+    };
+    let held = checked.and_then(|()| {
+        lease::acquire(
+            base,
+            &request.location,
+            environment,
+            &run,
+            Operation::Reconcile,
+            base.settings.resolution_timeout,
+            request.wait,
+            &request.cancellation,
+        )
+    });
+    let held = match held {
         Ok(held) => held,
-        Err(LeaseError::Held(finding)) => {
+        Err(finding) => {
             report.errors.push(finding);
-            report.finish(ReportKind::ReconcileReport);
-            return report;
-        }
-        Err(LeaseError::Store(error)) => {
-            report.errors.push(store_error(environment, &error));
             report.finish(ReportKind::ReconcileReport);
             return report;
         }
@@ -1012,7 +1078,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     }
 
     fn fault(&self, point: FaultPoint, unit: Option<&UnitName>) -> bool {
-        self.context().faults.at(point, unit) == FaultAction::Kill
+        self.context().base.faults.at(point, unit) == FaultAction::Kill
     }
 
     fn killed(&mut self, point: FaultPoint) -> Ending {
@@ -1032,25 +1098,21 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             .write_run(self.location(), self.environment(), &self.record, checkpoint)
     }
 
-    /// Update the lease and the run record for a phase.
+    /// Update the lease and the run record for a phase. The
+    /// `before-lease-update` fault point is consulted without a unit, then
+    /// with each unit the phase starts, so a fault can name the phase that
+    /// starts a unit's batch.
     fn phase(&mut self, units: Vec<UnitName>, deadline: Timestamp) -> Result<(), Ending> {
-        if self.fault(FaultPoint::BeforeLeaseUpdate, None) {
+        if self.fault(FaultPoint::BeforeLeaseUpdate, None)
+            || units
+                .iter()
+                .any(|unit| self.fault(FaultPoint::BeforeLeaseUpdate, Some(unit)))
+        {
             return Err(self.killed(FaultPoint::BeforeLeaseUpdate));
         }
-        let mut lease = self.held.lease.clone();
-        lease.units.clone_from(&units);
-        lease.deadline = deadline;
-        let store = self.context().base.store;
-        match store.update_lease(self.location(), self.environment(), &lease, &self.held.version) {
-            Ok(version) => {
-                self.held.lease = lease;
-                self.held.version = version;
-                self.session.lease_deadline.set(Some(deadline));
-            }
-            Err(StateError::LeaseLost) => {
-                self.report.errors.push(lease::lost(self.environment()));
-                return Err(Ending::KeepRun { release: false });
-            }
+        match lease::update(self.context().base, &mut self.held, units.clone(), deadline) {
+            Ok(()) => self.session.lease_deadline.set(Some(deadline)),
+            Err(StateError::LeaseLost) => return Err(self.lost()),
             Err(error) => {
                 let finding = store_error(self.environment(), &error);
                 self.report.errors.push(finding);
@@ -1067,11 +1129,24 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         Ok(())
     }
 
+    /// How a run ends that lost its lease: `NYL-LEASE-LOST`, and it keeps
+    /// its run ref for the run holding the lease to import.
+    fn lost(&mut self) -> Ending {
+        self.report.errors.push(lease::lost(self.environment()));
+        Ending::KeepRun {
+            release: false,
+            unrecorded: Vec::new(),
+        }
+    }
+
     /// How a run that holds the lease ends on a store failure: it keeps its
     /// run ref once a checkpoint is on it, else it deletes it.
     fn failed(&self) -> Ending {
         if self.checkpointed {
-            Ending::KeepRun { release: true }
+            Ending::KeepRun {
+                release: true,
+                unrecorded: Vec::new(),
+            }
         } else {
             Ending::Release
         }
@@ -1091,17 +1166,56 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
         };
-        if let Err(finding) = check_record(snapshot.record.as_ref(), &environment, &request.location) {
+        if let Err(finding) = super::local::check_record(
+            context.base.store,
+            snapshot.record.as_ref(),
+            &environment,
+            &request.location,
+        ) {
             self.report.errors.push(finding);
             return Ending::Release;
         }
+        if request.local.is_none() {
+            if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location, &environment) {
+                self.report.errors.push(finding);
+                return Ending::Release;
+            }
+        } else if let Err(finding) = check_local_leftovers(session, &self.run) {
+            // A `--local` run never imports remote run refs, so it waits
+            // until remote state took over dead ones.
+            self.report.errors.push(finding);
+            return Ending::Release;
+        }
+        // The runs before this one, read after taking the lease. A
+        // `--local` run under the remote lease never takes the remote
+        // lease's units as its own leftovers (and vice versa).
+        let coordination = match context.base.store.coordination(&request.location, &environment) {
+            Ok(coordination) => coordination,
+            Err(error) => {
+                self.report.errors.push(store_error(&environment, &error));
+                return Ending::Release;
+            }
+        };
+        let replaced = match &request.local {
+            Some(local) if local.lease == super::local::LeaseScope::Remote => None,
+            _ => self.held.replaced.clone(),
+        };
+        let run = self.run.clone();
+        let leftovers = takeover::leftovers(&run, replaced.as_ref(), &coordination);
+        let mut adopted = takeover::adoptions(&leftovers);
+        adopted.retain(|name, desired| {
+            snapshot.desired.get(name).map(|stored| &stored.unit.uid) != Some(&desired.unit.uid)
+        });
+        let mut overlay = snapshot.clone();
+        overlay.desired.extend(adopted.clone());
+
         self.record.read_desired.clone_from(&snapshot.tips.desired);
         self.record.read_observed.clone_from(&snapshot.tips.observed);
         if let Err(error) = self.write_run(None) {
             self.report.errors.push(store_error(&environment, &error));
             return Ending::Release;
         }
-        let prepared = match session.prepare(&snapshot) {
+        let prepared = match session.prepare(&overlay) {
             Ok(prepared) => prepared,
             Err(findings) => {
                 self.report.errors.extend(findings);
@@ -1122,8 +1236,13 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut produced = BTreeSet::new();
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
+        let mut created: BTreeSet<UnitName> = BTreeSet::new();
+        let mut taking = Takeover::new(&leftovers, &overlay, &prepared);
         let mut first = true;
         let (resolved, skipped) = loop {
+            if request.cancellation.is_cancelled() {
+                return self.cancelled();
+            }
             // Resolution and its fingerprints run under a lease renewed for
             // the resolution timeout, never one sized for an earlier phase.
             let deadline = lease::deadline(
@@ -1151,30 +1270,76 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
             first = false;
+            if taking.active {
+                let import = takeover::import(&ImportInputs {
+                    leftovers: &leftovers,
+                    environment: &environment,
+                    now: context.base.clock.now(),
+                    resolved: &resolved.units,
+                    adopted: &taking.unresolved,
+                    snapshot: &snapshot.observed,
+                    observed: &observed,
+                    handled: &taking.handled,
+                });
+                if taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                    // Imported receipts may change downstream keys: resolve again.
+                    continue;
+                }
+            }
             let (ready, skipped) = select(&Candidates {
                 desired: &resolved.units,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),
                 attempted: &attempted,
+                local: request
+                    .local
+                    .as_ref()
+                    .and_then(|local| local_approve(&local.approve, context.commit_identity)),
             });
             if ready.is_empty() {
                 break (resolved, skipped);
             }
             for batch in batches(&ready, request.concurrency) {
+                if request.cancellation.is_cancelled() {
+                    return self.cancelled();
+                }
                 let now = context.base.clock.now();
-                let longest = batch
-                    .iter()
-                    .map(|unit| unit_timeout(&resolved.units[unit]))
-                    .max()
-                    .unwrap_or_default();
+                let longest = longest_timeout(batch.iter().map(|unit| &resolved.units[unit]));
                 if let Err(ending) = self.phase(batch.clone(), lease::deadline(context.base, now, longest)) {
                     return ending;
                 }
+                // Units whose uid this run generated go on the run ref before
+                // they start, so a run taking over adopts them.
+                let new: Vec<DesiredUnit> = batch
+                    .iter()
+                    .map(|name| &resolved.units[name])
+                    .filter(|unit| {
+                        !created.contains(&unit.unit.name)
+                            && !adopted.contains_key(&unit.unit.name)
+                            && snapshot.desired.get(&unit.unit.name).map(|stored| &stored.unit.uid)
+                                != Some(&unit.unit.uid)
+                    })
+                    .cloned()
+                    .collect();
+                if !new.is_empty() {
+                    let written =
+                        context
+                            .base
+                            .store
+                            .write_run_created(&request.location, &environment, &self.record, &new);
+                    if let Err(error) = written {
+                        self.report.errors.push(store_error(&environment, &error));
+                        return self.failed();
+                    }
+                    created.extend(new.into_iter().map(|unit| unit.unit.name));
+                }
+                let approvals = local_approvals(session, &resolved, &batch);
                 let results = execute_batch(
-                    session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot,
+                    session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot, &approvals,
                 );
-                for execution in results {
+                let mut results = results.into_iter();
+                while let Some(execution) = results.next() {
                     let name = execution.name.clone();
                     attempted.insert(name.clone());
                     if execution.killed {
@@ -1197,15 +1362,62 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                         if let Err(error) = self.write_run(Some(checkpoint)) {
                             let finding = store_error(&environment, &error);
                             self.report.errors.push(finding);
-                            return Ending::KeepRun { release: true };
+                            // This unit and the later ones of the batch ran,
+                            // but no checkpoint of theirs is on the run ref.
+                            let unrecorded = std::iter::once(name)
+                                .chain(
+                                    results
+                                        .filter(|execution| execution.checkpoint.is_some())
+                                        .map(|execution| execution.name),
+                                )
+                                .collect();
+                            return Ending::KeepRun {
+                                release: true,
+                                unrecorded,
+                            };
                         }
+                    }
+                    if matches!(execution.result, UnitResult::Recovered { .. }) {
+                        taking.recovered.insert(name.clone());
                     }
                     self.report.errors.extend(execution.errors.iter().cloned());
                     executions.insert(name, execution);
                 }
+                if request.cancellation.is_cancelled() {
+                    // The units that finished are checkpointed; units still
+                    // running at the signal are uncertain.
+                    self.report_cancelled_units(&resolved.units, &executions);
+                    return self.cancelled();
+                }
             }
         };
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
+        if taking.active {
+            // Units that never got an execution key import their
+            // checkpoints without a key comparison, so none stays behind.
+            let mut keyed = resolved.units.clone();
+            let mut unkeyed = taking.unresolved.clone();
+            keyed.retain(|name, unit| {
+                if unit.execution_key.is_some() {
+                    return true;
+                }
+                unkeyed.insert(name.clone(), unit.clone());
+                false
+            });
+            let import = takeover::import(&ImportInputs {
+                leftovers: &leftovers,
+                environment: &environment,
+                now: context.base.clock.now(),
+                resolved: &keyed,
+                adopted: &unkeyed,
+                snapshot: &snapshot.observed,
+                observed: &observed,
+                handled: &taking.handled,
+            });
+            taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report);
+        }
+        self.report.imported = taking.imported.iter().cloned().collect();
+        self.report.recovered = taking.recovered.iter().cloned().collect();
 
         // The report: one result per unit, only the named ones with --unit.
         for (name, unit) in &resolved.units {
@@ -1215,12 +1427,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let current = observed.get(name);
             let mut entry = UnitReport::new(unit.unit.kind.clone());
             entry.receipt = Some(receipt_state(Some(unit), current));
-            entry.last_run = last_run(current);
+            entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
             entry.blocked_by = blocked_by(unit);
             if let Some(execution) = executions.get(name) {
                 entry.result = Some(execution.result.clone());
                 entry.message.clone_from(&execution.message);
                 entry.warnings.clone_from(&execution.warnings);
+            } else if let Some(result) = imported_result(&taking, unit, current) {
+                entry.result = Some(result);
             } else {
                 entry.result = Some(unexecuted_result(
                     unit,
@@ -1228,7 +1442,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     skipped.get(name),
                     resolved.errors.get(name),
                 ));
-                entry.message = condition_message(same_incarnation(unit, current));
+                entry.message = condition_message(unit, current);
+                if skipped.get(name) == Some(&Skipped::LocalApproval) {
+                    entry.message = Some(format!(
+                        "a --local run executes {name} only with --approve {name}: its recovery policy is not converge"
+                    ));
+                }
             }
             self.report.units.insert(name.clone(), entry);
         }
@@ -1238,7 +1457,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if snapshot.environment.as_ref() != Some(&prepared.desired.environment) {
             changes.environment = Some(prepared.desired.environment.clone());
         }
-        for (name, unit) in &resolved.units {
+        // Adopted units no longer selected keep the desired document of the
+        // incarnation a dead run created, so its resources have state.
+        let unselected = adopted.iter().filter(|(name, _)| !resolved.units.contains_key(*name));
+        for (name, unit) in resolved.units.iter().chain(unselected) {
             if snapshot.desired.get(name) != Some(unit) {
                 changes.desired.insert(name.clone(), Some(unit.clone()));
             }
@@ -1255,58 +1477,140 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.artifacts.insert(name.clone(), after.cloned());
             }
         }
+        if request.cancellation.is_cancelled() {
+            return self.cancelled();
+        }
         if changes.is_empty() {
+            self.consume(&leftovers, &observed);
             return Ending::Release;
         }
         if self.fault(FaultPoint::BeforePush, None) {
             return self.killed(FaultPoint::BeforePush);
         }
         let mut summary = self.report.transition_summary(Operation::Reconcile);
-        summary.lease_broken.clone_from(&self.held.broken);
+        for (name, execution) in &executions {
+            let approval = execution
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.observed.receipt.as_ref())
+                .filter(|receipt| receipt.run == self.run)
+                .and_then(|receipt| receipt.approval.as_ref());
+            if let (Some(approval), Some(Value::Object(entry))) = (approval, summary.units.get_mut(name)) {
+                entry.insert("approval".to_owned(), json!(approval));
+            }
+        }
         if let Some(revision) = &request.source_override {
             summary.details.insert("sourceOverride".to_owned(), json!(revision));
         }
         let trailers = Trailers {
-            run: self.run.clone(),
             source_commit: Some(source_commit),
-            read_desired: snapshot.tips.desired.clone(),
-            read_observed: snapshot.tips.observed.clone(),
-            runner: context.base.runner.clone(),
-            evaluated_at: self.held.lease.taken_at,
-            version: context.base.version.clone(),
-            requested_by: None,
-            reason: None,
-            local: false,
+            local: request.local.is_some(),
+            ..super::trailers(context.base, &self.held, &snapshot.tips)
         };
-        let transition = Transition {
-            message: transition::message(&summary, &trailers),
-            changes,
-        };
-        match context.base.store.commit(
+        let committed = super::commit_transition(
+            context.base,
             &request.location,
-            &environment,
+            &mut self.held,
             &snapshot.tips,
-            &transition,
-            &self.held.version,
-        ) {
-            Ok(committed) => {
-                self.held.version = committed.lease_version;
-                if let Some(commit) = committed.desired {
-                    self.report.commits.insert("desired", commit);
-                }
-                if let Some(commit) = committed.observed {
-                    self.report.commits.insert("observed", commit);
-                }
+            summary,
+            changes,
+            &trailers,
+        );
+        match committed {
+            Ok(commits) => {
+                self.report.commits.extend(commits);
+                self.consume(&leftovers, &observed);
                 Ending::Release
             }
-            Err(StateError::LeaseLost) => {
-                self.report.errors.push(lease::lost(&environment));
-                Ending::KeepRun { release: false }
-            }
+            Err(StateError::LeaseLost) => self.lost(),
             Err(error) => {
                 self.report.errors.push(store_error(&environment, &error));
                 self.failed()
             }
+        }
+    }
+
+    /// End a cancelled run: `NYL-RUN-CANCELLED`, exit 4.
+    fn cancelled(&mut self) -> Ending {
+        let signal = self
+            .session
+            .request
+            .cancellation
+            .signal()
+            .map_or_else(String::new, |signal| format!(" by signal {signal}"));
+        self.report.errors.push(Finding::new(
+            Code::RunCancelled,
+            format!(
+                "the run was cancelled{signal}; it checkpointed the units that finished, left the units still running \
+                 uncertain, and wrote no transition commit"
+            ),
+            "run nyl reconcile again: it imports this run's checkpoints, and units left uncertain run again when \
+             their recovery policy converges; avoid cancelling runs that apply changes",
+        ));
+        Ending::Cancelled
+    }
+
+    /// The units a cancelled run executed, in the report.
+    fn report_cancelled_units(
+        &mut self,
+        units: &BTreeMap<UnitName, DesiredUnit>,
+        executions: &BTreeMap<UnitName, Execution>,
+    ) {
+        for (name, execution) in executions {
+            let kind = units.get(name).map(|unit| unit.unit.kind.clone()).unwrap_or_default();
+            let mut entry = UnitReport::new(kind);
+            entry.result = Some(execution.result.clone());
+            entry.message.clone_from(&execution.message);
+            entry.warnings.clone_from(&execution.warnings);
+            self.report.units.insert(name.clone(), entry);
+        }
+    }
+
+    /// Delete the leftover run refs this run consumed and retire those whose
+    /// checkpoints are evidence for a unit still uncertain; failures are
+    /// warnings, since a re-read leftover imports as a no-op.
+    ///
+    /// The coordination refs are read again first, and only refs unchanged
+    /// since the takeover read them are consumed: a run whose lease was
+    /// broken may still be alive and have checkpointed in the meantime.
+    fn consume(&mut self, leftovers: &Leftovers<'_>, observed: &BTreeMap<UnitName, ObservedUnit>) {
+        let consumption = takeover::consumed(leftovers, observed);
+        if consumption == takeover::Consumption::default() {
+            return;
+        }
+        let store = self.context().base.store;
+        let (location, environment) = (self.location(), self.environment());
+        let consumption = match store.coordination(location, environment) {
+            Ok(current) => takeover::unchanged(consumption, leftovers, &current),
+            Err(error) => {
+                let finding = store_error(environment, &error);
+                self.report.warnings.push(finding);
+                return;
+            }
+        };
+        // Consume each run ref only at the version the takeover imported; a
+        // ref that moved in between is left for the next run.
+        let version = |run: &RunId| {
+            leftovers
+                .runs
+                .iter()
+                .find(|state| &state.run.run == run)
+                .map(|state| state.version.as_str())
+        };
+        let mut failures = Vec::new();
+        for run in &consumption.delete {
+            failures.extend(store.delete_run(location, environment, run, version(run)).err());
+        }
+        for run in &consumption.retire {
+            failures.extend(store.retire_run(location, environment, run, version(run)).err());
+        }
+        failures.retain(|error| !matches!(error, StateError::Conflict { .. }));
+        for run in &consumption.delete_evidence {
+            failures.extend(store.delete_evidence(location, environment, run).err());
+        }
+        for error in failures {
+            let finding = store_error(environment, &error);
+            self.report.warnings.push(finding);
         }
     }
 
@@ -1316,18 +1620,26 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let (release, delete) = match ending {
             Ending::Killed => return,
             Ending::Release => (true, true),
-            Ending::KeepRun { release } => {
+            Ending::Cancelled if !self.checkpointed => (true, true),
+            Ending::Cancelled | Ending::KeepRun { .. } => {
+                let (release, unrecorded) = match ending {
+                    Ending::KeepRun { release, unrecorded } => (*release, unrecorded.as_slice()),
+                    _ => (true, &[][..]),
+                };
                 self.record.finished = true;
-                self.record.units.clear();
+                self.record.units = unrecorded.to_vec();
                 if let Err(error) = self.write_run(None) {
                     let finding = store_error(self.environment(), &error);
                     self.report.warnings.push(finding);
                 }
-                (*release, false)
+                (release, false)
             }
         };
         if delete {
-            if let Err(error) = base.store.delete_run(self.location(), self.environment(), &self.run) {
+            if let Err(error) = base
+                .store
+                .delete_run(self.location(), self.environment(), &self.run, None)
+            {
                 let finding = store_error(self.environment(), &error);
                 self.report.warnings.push(finding);
             }
@@ -1339,6 +1651,94 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         }
     }
+}
+
+/// The takeover state of one reconcile: what it imported, marked, and handled.
+struct Takeover {
+    /// Whether there is anything to take over.
+    active: bool,
+    /// Units with a desired document the run does not resolve (adopted
+    /// units no longer selected, and leaving units).
+    unresolved: BTreeMap<UnitName, DesiredUnit>,
+    handled: BTreeSet<(RunId, UnitName)>,
+    imported: BTreeSet<UnitName>,
+    /// Units the takeover marked uncertain and units the run recovered.
+    recovered: BTreeSet<UnitName>,
+}
+
+impl Takeover {
+    fn new(leftovers: &Leftovers<'_>, overlay: &EnvironmentSnapshot, prepared: &Prepared) -> Self {
+        Self {
+            active: !leftovers.runs.is_empty() || leftovers.replaced.is_some(),
+            unresolved: overlay
+                .desired
+                .iter()
+                .filter(|(name, _)| !prepared.desired.units.contains_key(*name))
+                .map(|(name, unit)| (name.clone(), unit.clone()))
+                .collect(),
+            handled: BTreeSet::new(),
+            imported: BTreeSet::new(),
+            recovered: BTreeSet::new(),
+        }
+    }
+
+    /// Overlay an import on the run's evidence; whether it changed any
+    /// observed document.
+    fn apply(
+        &mut self,
+        import: takeover::Import,
+        observed: &mut BTreeMap<UnitName, ObservedUnit>,
+        artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        produced: &mut BTreeSet<UnitName>,
+        report: &mut EnvironmentRunReport,
+    ) -> bool {
+        let changed = !import.observed.is_empty();
+        observed.extend(import.observed);
+        for (name, set) in import.artifacts {
+            if set.is_empty() {
+                artifacts.remove(&name);
+            } else {
+                artifacts.insert(name.clone(), set);
+            }
+            // Its receipt reaches state with this run's commit.
+            produced.insert(name);
+        }
+        self.imported.extend(import.imported);
+        self.recovered.extend(import.recovered);
+        self.handled.extend(import.handled);
+        report.warnings.extend(import.warnings);
+        changed
+    }
+}
+
+/// The result of a unit whose current receipt this run imported.
+fn imported_result(taking: &Takeover, unit: &DesiredUnit, observed: Option<&ObservedUnit>) -> Option<UnitResult> {
+    if !taking.imported.contains(&unit.unit.name) || !receipt_is_current(unit, observed) {
+        return None;
+    }
+    let receipt = observed?.receipt.as_ref()?;
+    Some(UnitResult::Imported {
+        execution_key: receipt.execution_key.clone(),
+        run: receipt.run.clone(),
+    })
+}
+
+/// The approvals a `--local` run records for the units of `batch`
+/// (`rules::selection::local_approvals`).
+fn local_approvals(
+    session: &Session<'_, '_>,
+    resolved: &Resolved,
+    batch: &[UnitName],
+) -> BTreeMap<UnitName, ApprovalRecord> {
+    let Some(local) = &session.request.local else {
+        return BTreeMap::new();
+    };
+    crate::rules::selection::local_approvals(
+        &local.approve,
+        session.context.commit_identity,
+        session.context.drivers,
+        batch.iter().map(|name| &resolved.units[name]),
+    )
 }
 
 /// The result of a unit this run did not execute.
@@ -1374,7 +1774,7 @@ fn unexecuted_result(
             category: *category,
             retryable: false,
         },
-        (Some(Skipped::AwaitingApproval), _) => UnitResult::AwaitingApproval,
+        (Some(Skipped::LocalApproval), _) => UnitResult::AwaitingApproval,
         _ if !matches!(unit.lifecycle, Lifecycle::Active) => UnitResult::Blocked {
             reason: "its lifecycle is not active".to_owned(),
         },
@@ -1382,305 +1782,6 @@ fn unexecuted_result(
             reason: "it cites receipts that are no longer current".to_owned(),
         },
     }
-}
-
-// ---------------------------------------------------------------------------
-// execution
-
-/// One finished execution.
-struct Execution {
-    name: UnitName,
-    result: UnitResult,
-    message: Option<String>,
-    warnings: Vec<Finding>,
-    errors: Vec<Finding>,
-    /// What the run ref records; `None` when nothing is recorded, such as
-    /// for a driver error before any effect.
-    checkpoint: Option<Checkpoint>,
-    /// The new artifact set of a success.
-    artifacts: Option<BTreeMap<String, ArtifactDocument>>,
-    /// A fault killed the run after the effect.
-    killed: bool,
-}
-
-/// Everything one execution thread needs, prepared before it starts.
-struct Job<'j> {
-    unit: &'j DesiredUnit,
-    commit: &'j CommitId,
-    observed: Option<&'j ObservedUnit>,
-    previous_artifacts: BTreeMap<String, ArtifactDocument>,
-    directory: PathBuf,
-}
-
-#[allow(clippy::too_many_arguments)] // One wave's inputs: the run, its resolution, its evidence, and the batch.
-fn execute_batch(
-    session: &Session<'_, '_>,
-    prepared: &Prepared,
-    resolved: &Resolved,
-    observed: &BTreeMap<UnitName, ObservedUnit>,
-    artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
-    batch: &[UnitName],
-    run: &RunId,
-    snapshot: &EnvironmentSnapshot,
-) -> Vec<Execution> {
-    let jobs: Vec<Job<'_>> = batch
-        .iter()
-        .map(|name| Job {
-            unit: &resolved.units[name],
-            commit: &resolved.commits[name],
-            observed: observed.get(name),
-            previous_artifacts: artifacts.get(name).cloned().unwrap_or_default(),
-            directory: session.execution_directory(name),
-        })
-        .collect();
-    let shared = Shared {
-        context: session.context,
-        environment: session.environment(),
-        project_dir: &prepared.rendered.project_dir,
-        cache_dir: session.cache_dir(),
-        run,
-        read_desired: snapshot.tips.desired.as_ref(),
-    };
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .into_iter()
-            .map(|job| {
-                let shared = &shared;
-                scope.spawn(move || execute(shared, job))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| match handle.join() {
-                Ok(execution) => execution,
-                Err(panic) => std::panic::resume_unwind(panic),
-            })
-            .collect()
-    })
-}
-
-/// What every execution of a wave shares.
-struct Shared<'s> {
-    context: &'s RunContext<'s>,
-    environment: &'s EnvironmentName,
-    project_dir: &'s str,
-    cache_dir: PathBuf,
-    run: &'s RunId,
-    read_desired: Option<&'s CommitId>,
-}
-
-/// Execute one unit in a worktree of its effective commit and map its outcome.
-#[allow(clippy::too_many_lines)] // One execution in order: worktree, driver call, fault point, and each outcome's record.
-fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
-    let context = shared.context;
-    let unit = job.unit;
-    let name = unit.unit.name.clone();
-    let mut execution = Execution {
-        name: name.clone(),
-        result: UnitResult::Current,
-        message: None,
-        warnings: Vec::new(),
-        errors: Vec::new(),
-        checkpoint: None,
-        artifacts: None,
-        killed: false,
-    };
-    let before_effects = |execution: &mut Execution, message: String| {
-        execution.errors.push(Finding::new(
-            Code::DriverError,
-            format!("unit {name}: {message}"),
-            "fix the cause, such as a missing tool or an unreadable worktree, then run nyl reconcile again",
-        ));
-        execution.result = UnitResult::Blocked {
-            reason: format!("driver error: {message}"),
-        };
-        execution.message = Some(message);
-    };
-    let Some(driver) = context.drivers.get(&unit.unit.api_version, &unit.unit.kind) else {
-        before_effects(&mut execution, format!("no driver serves kind {}", unit.unit.kind));
-        return execution;
-    };
-    let worktree = job.directory.join("worktree");
-    let temp_dir = job.directory.join("tmp");
-    let prepared = std::fs::create_dir_all(&worktree)
-        .and_then(|()| std::fs::create_dir_all(&temp_dir))
-        .map_err(|error| format!("cannot create {}: {error}", job.directory.display()))
-        .and_then(|()| {
-            context
-                .sources
-                .worktree(&SourceRepository::This, job.commit, &worktree)
-                .map_err(|error| format!("cannot check out commit {}: {error}", job.commit))
-        });
-    if let Err(message) = prepared {
-        before_effects(&mut execution, message);
-        let _ = std::fs::remove_dir_all(&job.directory);
-        return execution;
-    }
-    let started = context.base.clock.now();
-    let ctx = ExecutionContext {
-        unit: UnitAddress::new(shared.environment.clone(), name.clone()),
-        operation: DriverOperation::Reconcile,
-        project_dir: project_path(&worktree, shared.project_dir),
-        worktree,
-        temp_dir,
-        env: admitted_env(context.process_env, &unit.spec),
-        approved_digest: None,
-        deadline: unit_timeout(unit).after(started),
-        now: started,
-        observed: job.observed,
-        tools: context.tools,
-        commit_identity: context.commit_identity,
-        cache_dir: shared.cache_dir.clone(),
-    };
-    let outcome = driver.reconcile(&ctx, unit);
-    drop(ctx);
-    execution.killed = context.faults.at(FaultPoint::AfterEffect, Some(&name)) == FaultAction::Kill;
-    let finished = context.base.clock.now();
-    let _ = std::fs::remove_dir_all(&job.directory);
-    let outcome = match outcome {
-        Ok(Supported::Supported(outcome)) => outcome,
-        Ok(Supported::Unsupported) => {
-            before_effects(&mut execution, format!("kind {} cannot reconcile", unit.unit.kind));
-            return execution;
-        }
-        Err(error) if !error.effects_possible() => {
-            before_effects(&mut execution, error.to_string());
-            return execution;
-        }
-        Err(error) => Outcome::Uncertain {
-            reason: error.to_string(),
-        },
-    };
-    let previous_receipt = same_incarnation(unit, job.observed).and_then(|observed| observed.receipt.clone());
-    let condition = |condition: Condition| ObservedUnit {
-        api_version: StateV1,
-        kind: ObservedUnitKind,
-        unit: unit.unit.clone(),
-        receipt: previous_receipt.clone(),
-        condition: Some(condition),
-    };
-    let observed = match outcome {
-        Outcome::Succeeded { outputs, artifacts, .. } => {
-            let key = unit
-                .execution_key
-                .clone()
-                .expect("an executed unit has an execution key");
-            let (outputs, warnings) = recorded_outputs(unit, outputs);
-            execution.warnings = warnings;
-            let (set, digests) = recorded_artifacts(shared.environment, unit, &key, artifacts);
-            execution.result = UnitResult::Executed {
-                execution_key: key.clone(),
-            };
-            execution.artifacts = Some(set);
-            ObservedUnit {
-                api_version: StateV1,
-                kind: ObservedUnitKind,
-                unit: unit.unit.clone(),
-                receipt: Some(Receipt {
-                    execution_key: key,
-                    behavior_version: driver.behavior_version(),
-                    run: shared.run.clone(),
-                    read_desired: shared.read_desired.cloned(),
-                    started_at: started,
-                    finished_at: finished,
-                    versions: BTreeMap::from([("nyl".to_owned(), context.base.version.clone())]),
-                    approval: None,
-                    provenance: unit.provenance.clone(),
-                    outputs,
-                    artifacts: digests,
-                }),
-                condition: None,
-            }
-        }
-        Outcome::AwaitingApproval { .. } => {
-            execution.result = UnitResult::AwaitingApproval;
-            return execution;
-        }
-        Outcome::Failed {
-            category,
-            retryable,
-            message,
-        } => {
-            execution.result = UnitResult::Failed { category, retryable };
-            execution.message = Some(message.clone());
-            condition(Condition::Failed {
-                since: finished,
-                run: shared.run.clone(),
-                category,
-                retryable,
-                message,
-            })
-        }
-        Outcome::Uncertain { reason } | Outcome::Waiting { reason, .. } => {
-            execution.result = UnitResult::Uncertain { reason: reason.clone() };
-            execution.message = Some(reason.clone());
-            condition(Condition::Uncertain {
-                since: finished,
-                run: shared.run.clone(),
-                reason,
-            })
-        }
-    };
-    execution.checkpoint = Some(Checkpoint {
-        desired: unit.clone(),
-        observed,
-        artifacts: execution.artifacts.clone().unwrap_or(job.previous_artifacts),
-    });
-    execution
-}
-
-/// The outputs a receipt records: the declared, non-sensitive ones a
-/// driver reported, with a `NYL-OUTPUT-UNDECLARED` warning for each
-/// undeclared one.
-fn recorded_outputs(unit: &DesiredUnit, outputs: Value) -> (Value, Vec<Finding>) {
-    let name = &unit.unit.name;
-    let declared = declared_outputs(unit.resolved_spec.as_ref().unwrap_or(&unit.spec));
-    let mut recorded = Map::new();
-    let mut warnings = Vec::new();
-    if let Value::Object(outputs) = outputs {
-        for (output, value) in outputs {
-            match declared.get(&output) {
-                Some(declaration) if !declaration.sensitive => {
-                    recorded.insert(output, value);
-                }
-                Some(_) => {}
-                None => warnings.push(Finding::new(
-                    Code::OutputUndeclared,
-                    format!("unit {name} reported output {output:?}, which it does not declare; it was not recorded"),
-                    format!("declare {output} under the unit's spec.outputs to record it, or stop writing it"),
-                )),
-            }
-        }
-    }
-    (Value::Object(recorded), warnings)
-}
-
-/// A success's artifact documents with `metadata.unit` and `executionKey`
-/// filled in, and the digests its receipt lists.
-fn recorded_artifacts(
-    environment: &EnvironmentName,
-    unit: &DesiredUnit,
-    key: &ExecutionKey,
-    artifacts: Vec<ArtifactDocument>,
-) -> (BTreeMap<String, ArtifactDocument>, Vec<ArtifactDigest>) {
-    let uid = unit.unit.uid.clone().expect("an executed unit has a uid");
-    let mut set = BTreeMap::new();
-    let mut digests = Vec::new();
-    for mut document in artifacts {
-        document.metadata.unit = ArtifactUnit {
-            environment: environment.clone(),
-            name: unit.unit.name.clone(),
-            uid: uid.clone(),
-        };
-        document.execution_key = key.clone();
-        digests.push(ArtifactDigest {
-            name: document.metadata.name.clone(),
-            kind: document.kind.clone(),
-            digest: document.digest(),
-        });
-        set.insert(document.metadata.name.clone(), document);
-    }
-    (set, digests)
 }
 
 #[cfg(test)]

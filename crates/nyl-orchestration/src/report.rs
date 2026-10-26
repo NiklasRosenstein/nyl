@@ -50,7 +50,7 @@ pub struct StateOperationReport {
 impl StateOperationReport {
     pub fn new(environment: EnvironmentName, operation: &'static str) -> Self {
         Self {
-            api_version: "gitops.nyl/v1",
+            api_version: crate::run_report::REPORT_API_VERSION,
             kind: "StateOperationReport",
             environment,
             operation,

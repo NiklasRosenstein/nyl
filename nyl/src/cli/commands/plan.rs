@@ -11,11 +11,10 @@ use clap::Args;
 
 use super::reconcile::RunOutput;
 use nyl_orchestration::run_report::{ExitCategory, ReportKind};
-use nyl_orchestration::shell::run::RunContext;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use crate::Result;
 
 /// Plan an environment's run.
 #[derive(Args, Debug)]
@@ -57,27 +56,13 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
         source: args.source.as_deref(),
         wait: None,
+        local: None,
+        cancellation: nyl_orchestration::shell::run::Cancellation::default(),
     })?;
     // A plan writes nothing, so it reads through a read-only store and needs
     // no commit identity.
     let store = session.store(None)?;
-    let sources = session.sources()?;
-    let renderer = session.renderer();
-    let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
-    let base = session.context(&store, wiring, None);
-    let context = RunContext {
-        base: &base,
-        sources: &sources,
-        renderer: &renderer,
-        drivers: wiring.drivers,
-        tools: wiring.tools,
-        faults: wiring.faults,
-        workspace: workspace.path(),
-        process_env: &wiring.process_env,
-        commit_identity: None,
-    };
-    let mut report = nyl_orchestration::shell::run::plan(&context, &request);
-    session.add_warnings(&mut report);
+    let report = session.run(wiring, &store, None, &request, nyl_orchestration::shell::run::plan)?;
     let mut exit = report.exit();
     let leaving = report
         .environments

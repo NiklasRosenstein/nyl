@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
 use super::state::{
-    ArtifactDocument, DesiredUnit, EnvironmentRecord, Lease, ObservedUnit, Run, Signal, StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, EnvironmentRecord, Lease, Observation, ObservationType, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 use super::time::{Duration, Timestamp};
 use crate::resources::environment::Environment;
@@ -93,6 +94,17 @@ pub enum StateError {
     Unavailable(String),
 }
 
+impl StateError {
+    /// A [`StateError::Conflict`] on `reference`, which is at `actual`, or
+    /// absent (`nothing`) for `None`.
+    pub fn conflict(reference: impl Into<String>, actual: Option<impl std::fmt::Display>) -> Self {
+        Self::Conflict {
+            reference: reference.into(),
+            actual: actual.map_or_else(|| "nothing".to_owned(), |actual| actual.to_string()),
+        }
+    }
+}
+
 pub type StateResult<T> = std::result::Result<T, StateError>;
 
 /// The commits a snapshot was read at; `None` for a ref that does not exist.
@@ -113,6 +125,13 @@ pub struct EnvironmentSnapshot {
     pub observed: BTreeMap<UnitName, ObservedUnit>,
     /// Artifacts of the latest receipts, by unit and artifact name.
     pub artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    /// The latest observation per type, by unit
+    /// (`observed/units/<unit>/observations/<type>.yaml`), as `nyl verify`
+    /// writes them. Contract: [Commands](../../../../design/orchestration-core.md#commands).
+    pub observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    /// Driver attestations by unit and name
+    /// (`observed/units/<unit>/attestations/<name>.yaml`).
+    pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
 /// What one operation writes: `Some` puts a document, `None` removes it.
@@ -126,6 +145,12 @@ pub struct TransitionChanges {
     pub observed: BTreeMap<UnitName, Option<ObservedUnit>>,
     /// The complete artifact set of a unit's latest receipt; `None` removes all.
     pub artifacts: BTreeMap<UnitName, Option<BTreeMap<String, ArtifactDocument>>>,
+    /// The complete set of a unit's latest observations, one per type;
+    /// `None` removes all. Written by `nyl verify`.
+    pub observations: BTreeMap<UnitName, Option<BTreeMap<ObservationType, Observation>>>,
+    /// The complete set of a unit's driver attestations by name; `None`
+    /// removes all. Written by `nyl verify`.
+    pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
 }
 
 impl TransitionChanges {
@@ -135,6 +160,8 @@ impl TransitionChanges {
             && self.desired.is_empty()
             && self.observed.is_empty()
             && self.artifacts.is_empty()
+            && self.observations.is_empty()
+            && self.attestations.is_empty()
     }
 }
 
@@ -168,7 +195,19 @@ pub struct HeldLease {
 pub struct RunState {
     pub run: Run,
     pub checkpoints: Vec<Checkpoint>,
+    /// The desired documents, with their new uids, of units the run created
+    /// and started, recorded at each unit's start by
+    /// [`StateStore::write_run_created`], so a run taking over adopts them
+    /// whether or not a checkpoint followed. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
+    pub created: Vec<DesiredUnit>,
     pub version: String,
+    /// Set by a `--local` run's store on run refs it read from the remote
+    /// while the run works on the clone's local branches: such a run never
+    /// imports, retires, or deletes them; they only block it while live.
+    /// Stores themselves always return `false`. Contract:
+    /// [Local runs](../../../../design/orchestration-core.md#local-runs).
+    pub foreign: bool,
 }
 
 /// One finished unit of a run: the desired document it executed, with its
@@ -185,6 +224,56 @@ pub struct Checkpoint {
 pub struct Coordination {
     pub lease: Option<HeldLease>,
     pub runs: Vec<RunState>,
+    /// Retired run refs (`<prefix><env>/evidence/<run>`): checkpoints a
+    /// takeover already imported that are still evidence for an `uncertain`
+    /// unit, kept for `nyl recover` and never imported again or counted as a
+    /// lease. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
+    pub evidence: Vec<RunState>,
+}
+
+/// One of an environment's two state refs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StateSide {
+    Desired,
+    Observed,
+}
+
+impl StateSide {
+    pub const ALL: [Self; 2] = [Self::Desired, Self::Observed];
+
+    /// `desired` or `observed`, as reports key commits.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Desired => "desired",
+            Self::Observed => "observed",
+        }
+    }
+}
+
+/// One commit of a state ref's first-parent history, with its raw message.
+/// The store never interprets messages; `nyl-orchestration` parses their
+/// trailers, such as `Nyl-Local`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    pub commit: CommitId,
+    pub message: String,
+}
+
+/// How a clone's local state branch relates to the remote state ref it
+/// follows: commits only the local branch has, and commits only the remote has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Divergence {
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+/// The divergence of both local state branches; `None` for a side where
+/// the local branch or the remote ref does not exist.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocalDivergence {
+    pub desired: Option<Divergence>,
+    pub observed: Option<Divergence>,
 }
 
 /// An environment's state, wherever it lives. The Git implementation is
@@ -246,8 +335,35 @@ pub trait StateStore: Send + Sync {
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()>;
 
-    /// Delete a run ref and its signal ref.
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
+    /// Delete a run ref and its signal ref. With `expected` (a
+    /// [`RunState::version`]), only while the run ref is still at that
+    /// version; otherwise [`StateError::Conflict`], so a checkpoint written
+    /// after the caller read the ref is never lost.
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()>;
+
+    /// Retire a run ref a takeover imported: move its record, checkpoints,
+    /// and created units to the run's evidence ref (`<prefix><env>/evidence/<run>`),
+    /// appending its checkpoints when that ref exists already, then delete
+    /// the run ref and its signal ref. Read back in
+    /// [`Coordination::evidence`]. With `expected`, only while the run ref is
+    /// still at that version, as for [`StateStore::delete_run`]. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()>;
+
+    /// Delete a run's evidence ref, once no unit's condition needs it.
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
 
     /// Read the signals sent to a run.
     fn signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId)
@@ -276,6 +392,80 @@ pub trait StateStore: Send + Sync {
     /// own `path`; a location that shares its refs through `path` has its
     /// directory moved with a commit instead, by the caller.
     fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()>;
+
+    /// Record on the run ref the desired documents, with their new uids, of
+    /// units the run created and is about to start, together with the run
+    /// record; read back as [`RunState::created`]. Contract:
+    /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), items 3 and 4.
+    fn write_run_created(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        let _ = (location, environment, run, created);
+        Err(StateError::Unavailable(
+            "this state store cannot record created units on run refs".to_owned(),
+        ))
+    }
+
+    /// The newest `limit` commits of one state ref's first-parent history,
+    /// newest first, as last fetched (a remote location) or as the local
+    /// branch holds them (a [`StateLocation::LOCAL_REPOSITORY`] location).
+    /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
+    fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
+        let _ = (location, side, limit);
+        Err(StateError::Unavailable(
+            "this state store cannot read state history".to_owned(),
+        ))
+    }
+
+    /// How the clone's local branches of `location`'s state refs relate to
+    /// the remote refs, as of the last fetch. Contract:
+    /// [Local runs](../../../../design/orchestration-core.md#local-runs).
+    fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
+        let _ = location;
+        Err(StateError::Unavailable(
+            "this state store keeps no local state branches".to_owned(),
+        ))
+    }
+
+    /// Move the clone's local branches of `location`'s (remote) state refs
+    /// back to the remote tips, by compare-and-swap against `expected`, the
+    /// local tips the caller read: `nyl state reset --local`, the only write
+    /// that moves a local state branch other than forward. Refused for a
+    /// [`StateLocation::LOCAL_REPOSITORY`] location, whose branches are the
+    /// state. Returns the new local tips. Contract:
+    /// [Local runs](../../../../design/orchestration-core.md#local-runs).
+    fn reset_local(&self, location: &StateLocation, expected: &StateTips) -> StateResult<StateTips> {
+        let _ = (location, expected);
+        Err(StateError::Unavailable(
+            "this state store keeps no local state branches".to_owned(),
+        ))
+    }
+
+    /// A `--local` run's transition commit: one commit per changed side on
+    /// the clone's local branches of `location`'s state refs on top of
+    /// `base`, never pushed, fenced by first renewing the lease held at
+    /// `lease_location` (the remote location, or the local view with
+    /// `--local-lease`) by compare-and-swap at `lease_version`. A lost lease
+    /// writes nothing and returns [`StateError::LeaseLost`]. Contract:
+    /// [Local runs](../../../../design/orchestration-core.md#local-runs).
+    fn commit_local(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        base: &StateTips,
+        transition: &Transition,
+        lease_location: &StateLocation,
+        lease_version: &str,
+    ) -> StateResult<Committed> {
+        let _ = (location, environment, base, transition, lease_location, lease_version);
+        Err(StateError::Unavailable(
+            "this state store cannot commit to local state branches".to_owned(),
+        ))
+    }
 }
 
 /// The repository a source names.
@@ -308,6 +498,17 @@ pub trait SourceResolver: Send + Sync {
     ) -> SourceResult<Option<String>>;
     /// A detached checkout of `commit` in a directory the caller owns.
     fn worktree(&self, repository: &SourceRepository, commit: &CommitId, path: &std::path::Path) -> SourceResult<()>;
+    /// Make `path` exactly a fresh detached checkout of `commit`: create it
+    /// when missing or empty, and otherwise reset a worktree this resolver
+    /// made earlier, removing untracked and ignored files, so a run's
+    /// concurrency slot reuses one worktree across units. Contract:
+    /// [Execution](../../../../design/orchestration-core.md#execution).
+    fn reset_worktree(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &std::path::Path,
+    ) -> SourceResult<()>;
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
 }
