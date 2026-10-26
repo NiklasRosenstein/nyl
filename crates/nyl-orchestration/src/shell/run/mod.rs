@@ -160,6 +160,14 @@ impl RunMode {
         !matches!(self, Self::Recover { .. })
     }
 
+    /// Whether the run writes lifecycle changes (omission, return,
+    /// retention, release, kind change, teardown progress): reconcile and
+    /// teardown do; a recover import writes only what the import itself
+    /// changes (receipts, conditions, adopted documents and uids).
+    pub fn writes_lifecycle(&self) -> bool {
+        !matches!(self, Self::Recover { .. })
+    }
+
     /// The report kind of a run in this mode.
     pub fn report_kind(&self) -> ReportKind {
         match self {
@@ -175,7 +183,8 @@ pub enum TeardownTarget {
     /// `--unit <u>…`.
     Units(BTreeSet<UnitName>),
     /// `--all`: every unit, dependents first; units still in the ownership
-    /// set are held afterwards, and kinds that cannot tear down are released.
+    /// set are held (the hold applies right after the request, before the
+    /// teardown starts), and kinds that cannot tear down are released.
     All,
 }
 
@@ -957,6 +966,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
     let attempted = BTreeSet::new();
     let (ready, _) = select(&Candidates {
         desired: &resolved.units,
+        view: &resolved.units,
         observed: &snapshot.observed,
         drivers: context.drivers,
         named: None,
@@ -1432,6 +1442,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             let candidates = Candidates {
                 desired: &resolved.units,
+                view: &resolved.units,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),

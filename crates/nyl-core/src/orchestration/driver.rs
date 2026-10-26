@@ -505,13 +505,15 @@ pub trait Driver: Send + Sync {
         Ok(Supported::Unsupported)
     }
     /// The settings that decide whether the unit's teardown can complete,
-    /// for the teardown preflight; unsupported by default (no requirements).
-    fn teardown_settings(
-        &self,
-        ctx: &ExecutionContext<'_>,
-        unit: &DesiredUnit,
-    ) -> DriverResult<Supported<TeardownSettings>> {
-        let _ = (ctx, unit);
+    /// for the teardown preflight and the readiness `status`, `get units -e
+    /// -o wide`, `plan`, and `reconcile` report; unsupported by default (no
+    /// requirements). Read statically from the stored desired document
+    /// alone (resolution records the target's effective settings in the
+    /// resolved spec), so commands that never render source, such as
+    /// `status`, can ask it, and the answer matches what a teardown of that
+    /// document would do.
+    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+        let _ = unit;
         Ok(Supported::Unsupported)
     }
     /// `nyl build`; unsupported by default.

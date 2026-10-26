@@ -84,6 +84,8 @@ impl Harness {
             author: Some(AUTHOR.parse().unwrap()),
             process_env: self.process_env.clone(),
             cancellation: Cancellation::default(),
+            prompt: None,
+            observer: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         invoke_in(&self.world, &wiring, &args, "main", directory).unwrap()

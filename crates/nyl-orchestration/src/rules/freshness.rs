@@ -25,7 +25,13 @@ pub fn receipt_is_current(desired: &DesiredUnit, observed: Option<&ObservedUnit>
 /// provenance cites still has the cited uid in `units`, so a consumer whose
 /// producer became a new incarnation (replaced, or returned after its
 /// teardown) runs again with the new outputs (open question Q3, option B).
-/// Selection and status ask this one function.
+/// Selection, status, `nyl get output`, and the run path ask this one
+/// function.
+///
+/// `units` is the resolution view: every desired document of the
+/// environment's state, active, held, deleting, and retained alike. A held
+/// or deleting producer keeps its uid, so its consumers stay current; only
+/// a new incarnation or a removed producer makes them stale.
 ///
 /// Skeleton note: until package `lifecycle` implements the provenance part,
 /// it equals [`receipt_is_current`].

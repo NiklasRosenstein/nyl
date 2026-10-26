@@ -25,6 +25,8 @@
 //!   caller retains it in the same run).
 //! - active or deleting with intent retain, retain: retained tombstone.
 //! - active or deleting, released (a kind that cannot tear down): files removed.
+//! - retained, released (`teardown --unit` or `--all` of a tombstone whose
+//!   kind cannot tear down): files removed, resources left in place.
 //! - deleting with teardown pending and reason omission or kind-change,
 //!   returned: active (the caller keeps uid and receipt). Any other deleting
 //!   unit, returned: unchanged (an explicit request is not undone by source,
@@ -36,9 +38,13 @@
 //! - deleting, torn down: files removed.
 //! - held, torn down: held without an incarnation (the file survives
 //!   without a uid until `resume`).
-//! - active, deleting, or retained, teardown requested (explicit): deleting
-//!   with the request's reason, teardown pending; a deleting unit keeps its
-//!   progress.
+//! - active or deleting, teardown requested (explicit): deleting with the
+//!   request's reason, teardown pending; a deleting unit keeps its progress.
+//! - retained, teardown requested (explicit): deleting with the request's
+//!   reason, teardown pending, and the tombstone's receipt restored as the
+//!   observed file ([`Next::RestoreReceipt`]), so the teardown reads the
+//!   receipt's outputs and a teardown that does not finish in this run keeps
+//!   them.
 //! - held, teardown requested: held, with the deletion block next to the hold.
 //! - held, left: unchanged (a held unit leaving the ownership set is not
 //!   deleted; `hold.pending.deletion` reports it).
@@ -46,6 +52,11 @@
 //! - active, hold: held. Deleting, hold: held, keeping the deletion block.
 //!   Held, hold: unchanged. Retained, hold: refused.
 //! - held, resume: active, or deleting where it stopped. Not held, resume: unchanged.
+//!
+//! Order of events in one run: `teardown --hold` and `teardown --all` apply
+//! `Hold` right after `TeardownRequested`, before `TeardownStarted` or
+//! `Released`, so the teardown ends with [`Next::EndIncarnation`] (held
+//! without an incarnation) instead of [`Next::Remove`].
 
 use nyl_core::orchestration::state::{
     Deletion, DeletionIntent, DeletionReason, Hold, Lifecycle, Request, TeardownProgress, Tombstone,
@@ -104,6 +115,11 @@ pub enum Next {
     /// The desired file stays with this lifecycle, but the incarnation ends:
     /// the caller drops its uid, receipt, and observed file.
     EndIncarnation(Lifecycle),
+    /// The desired file stays with this lifecycle, and the caller writes the
+    /// tombstone's receipt back as the unit's observed file (of the same
+    /// uid); the artifact files stayed with the tombstone. Only a retained
+    /// tombstone's explicit teardown gives it.
+    RestoreReceipt(Lifecycle),
     /// The unit's desired and observed files are removed.
     Remove,
     /// Nothing changes.
@@ -180,14 +196,23 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
             Next::Lifecycle(Lifecycle::Retained { tombstone })
         }
         (Lifecycle::Active | Lifecycle::Deleting { .. }, Event::Released) => Next::Remove,
+        (Lifecycle::Retained { .. }, Event::Released) => Next::Remove,
         (Lifecycle::Held { hold, .. }, Event::Released) => Next::EndIncarnation(Lifecycle::Held {
             hold: hold.clone(),
             deletion: None,
         }),
 
         // Explicit teardown.
-        (Lifecycle::Active | Lifecycle::Retained { .. }, Event::TeardownRequested { reason, requested }) => {
-            Next::Lifecycle(Lifecycle::Deleting {
+        (Lifecycle::Active, Event::TeardownRequested { reason, requested }) => Next::Lifecycle(Lifecycle::Deleting {
+            deletion: Deletion {
+                reason,
+                intent: DeletionIntent::Teardown,
+                teardown: Some(TeardownProgress::Pending),
+                requested: Some(requested),
+            },
+        }),
+        (Lifecycle::Retained { .. }, Event::TeardownRequested { reason, requested }) => {
+            Next::RestoreReceipt(Lifecycle::Deleting {
                 deletion: Deletion {
                     reason,
                     intent: DeletionIntent::Teardown,
@@ -278,4 +303,47 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         (_, event) => return Err(refused(&event)),
     };
     Ok(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tombstone() -> Tombstone {
+        serde_json::from_value(serde_json::json!({"since": "2026-09-24T10:00:00Z"})).unwrap()
+    }
+
+    fn request() -> Request {
+        serde_json::from_value(serde_json::json!({"by": "alice", "at": "2026-09-24T10:00:00Z", "reason": "done"}))
+            .unwrap()
+    }
+
+    /// Deletion, "Explicit teardown": a tombstone's teardown keeps its
+    /// receipt as the observed file, so a teardown that does not finish in
+    /// this run still has the outputs it reads.
+    #[test]
+    fn test_teardown_of_a_tombstone_restores_its_receipt() {
+        let retained = Lifecycle::Retained { tombstone: tombstone() };
+        let next = transition(
+            &retained,
+            Event::TeardownRequested {
+                reason: DeletionReason::Teardown,
+                requested: request(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            next,
+            Next::RestoreReceipt(Lifecycle::Deleting { ref deletion })
+                if deletion.teardown == Some(TeardownProgress::Pending)
+        ));
+    }
+
+    /// Instances, `teardown --all`: a tombstone whose kind cannot tear down is
+    /// released; its files go and its resources stay.
+    #[test]
+    fn test_a_released_tombstone_is_removed() {
+        let retained = Lifecycle::Retained { tombstone: tombstone() };
+        assert_eq!(transition(&retained, Event::Released), Ok(Next::Remove));
+    }
 }

@@ -87,6 +87,10 @@ pub enum Pending {
     NotNamed,
     /// Already torn down or tried in this run.
     AlreadyAttempted,
+    /// The unit declares `approval: manual`; teardown approvals (`nyl
+    /// teardown --approve`, destroy-plan digests) arrive with M3 part 6, so
+    /// until then it waits (exit 2, open question Q50).
+    AwaitingApproval,
 }
 
 /// The decision of one wave.

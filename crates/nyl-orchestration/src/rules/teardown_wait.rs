@@ -35,6 +35,16 @@ pub fn strategy(spec: &Value) -> Strategy {
     todo!("publication")
 }
 
+/// When a wait ends by itself: `since + duration` for `delay`, `None` for
+/// `observe` and `manual`. The run path sets the phase deadline from this,
+/// not from `Outcome::Waiting.until`: only the recorded `since` (the
+/// phase 1 commit's time, which the run records) is authoritative, so a
+/// driver may leave `until` empty.
+pub fn ends(strategy: Strategy, waiting: &TeardownWaiting) -> Option<Timestamp> {
+    let _ = (strategy, waiting);
+    todo!("publication")
+}
+
 /// What deciding a wait reads.
 pub struct WaitInputs<'a> {
     pub strategy: Strategy,

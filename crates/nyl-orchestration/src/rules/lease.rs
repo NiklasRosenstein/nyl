@@ -86,6 +86,22 @@ pub(crate) fn run_live(coordination: &Coordination, state: &RunState, now: Times
     !state.run.finished && state.run.deadline > now && Some(&state.run.run) != broken
 }
 
+/// The broken lease whose run no operation has imported yet, if any: the
+/// lease ref is still the broken one (an importer replaces it, and its
+/// commit records the break once). The one predicate behind both
+/// [`decide`] (a non-importer gets [`LeaseDecision::Broken`]) and `nyl
+/// recover -e` (which imports whenever this is `Some`, recording the break
+/// with `TransitionChanges.commit_unchanged` even when nothing else is left
+/// to import). Contract: [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases),
+/// items 1 and 8.
+pub fn unimported_break(coordination: &Coordination) -> Option<&Lease> {
+    coordination
+        .lease
+        .as_ref()
+        .map(|held| &held.lease)
+        .filter(|lease| lease.broken.is_some())
+}
+
 /// Who holds the environment at `now`: a live lease first, then live,
 /// unfinished runs it does not name.
 pub(crate) fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder> {

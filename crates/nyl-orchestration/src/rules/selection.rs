@@ -34,7 +34,14 @@ use super::freshness::{receipt_is_current, same_incarnation};
 
 /// What selection reads.
 pub struct Candidates<'a> {
+    /// The units selection may select.
     pub desired: &'a BTreeMap<UnitName, DesiredUnit>,
+    /// The resolution view for freshness
+    /// ([`super::freshness::receipt_is_current_in`]): every desired document
+    /// of the environment, held, deleting, and retained included, so a
+    /// consumer of a held producer stays current. Skeleton note: the run
+    /// path passes `desired` until package `lifecycle` builds the view.
+    pub view: &'a BTreeMap<UnitName, DesiredUnit>,
     /// The snapshot's observed documents overlaid with this run's checkpoints.
     pub observed: &'a BTreeMap<UnitName, ObservedUnit>,
     pub drivers: &'a DriverSet,
@@ -254,6 +261,7 @@ mod tests {
         fn select(&self, named: Option<&BTreeSet<UnitName>>) -> (Vec<UnitName>, BTreeMap<UnitName, Skipped>) {
             select(&Candidates {
                 desired: &self.desired,
+                view: &self.desired,
                 observed: &self.observed,
                 drivers: &self.drivers,
                 named,

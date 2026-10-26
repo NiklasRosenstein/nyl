@@ -149,6 +149,23 @@ impl Session {
         request: &RunRequest,
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
+        let mut report = self.run_with(wiring, store, identity, request, operation)?;
+        self.add_warnings(&mut report);
+        Ok(report)
+    }
+
+    /// [`Self::run`] for an operation on the run path whose report is not a
+    /// [`RunReport`], such as `recover_environment` and `state_delete`
+    /// (a `StateOperationReport`): the same sources, renderer, drivers,
+    /// workspace, prompt, and observer, without the environment's warnings.
+    pub fn run_with<T>(
+        &self,
+        wiring: &Wiring<'_>,
+        store: &dyn StateStore,
+        identity: Option<&CommitIdentity>,
+        request: &RunRequest,
+        operation: impl FnOnce(&RunContext<'_>, &RunRequest) -> T,
+    ) -> Result<T, Stop> {
         let sources = self.sources()?;
         let renderer = self.renderer();
         let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
@@ -162,12 +179,10 @@ impl Session {
             workspace: workspace.path(),
             process_env: &wiring.process_env,
             commit_identity: identity,
-            observer: None,
-            prompt: None,
+            observer: wiring.observer,
+            prompt: wiring.prompt,
         };
-        let mut report = operation(&context, request);
-        self.add_warnings(&mut report);
-        Ok(report)
+        Ok(operation(&context, request))
     }
 
     /// Add the warnings of resolving the environment to `report`.
