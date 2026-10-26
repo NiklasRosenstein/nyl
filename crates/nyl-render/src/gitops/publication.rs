@@ -16,6 +16,12 @@
 //! commit that reconciles only the files the previous ownership index
 //! recorded, refusing owned files modified outside Nyl, and making no commit
 //! for an unchanged tree.
+//!
+//! A publication's two-phase teardown uses the same path:
+//! [`without_workload_applications`] gives phase 1's tree, published with
+//! [`prepare_target_publication`], and [`prepare_target_removal`] removes
+//! the index-owned files in phase 2. Trees published without orchestration
+//! keep index version 2 and stay byte-identical.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -558,6 +564,155 @@ impl PreparedPublication {
             auth,
         )
         .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
+    }
+}
+
+/// Phase 1 of a publication's teardown: `rendered` without its workload
+/// Applications. The tree's `_nyl/catalog` keeps the catalog Application
+/// (the one sourcing that directory, when the target has one) and every
+/// other generated object, such as the AppProjects, but no other
+/// Application; the workload trees stay. Publishing it with
+/// [`prepare_target_publication`] lets the catalog's own sync prune the
+/// workload Applications while the catalog is never empty. In a shared
+/// catalog the target's catalog directory keeps its AppProjects, and the
+/// shared manifest, outside the target's prefix, is untouched.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// Teardown, phase 1.
+pub fn without_workload_applications(rendered: &RenderedTarget) -> Result<RenderedTarget> {
+    let catalog_source = if rendered.destination.path_prefix.is_empty() {
+        super::CATALOG_DIRECTORY.to_owned()
+    } else {
+        format!("{}/{}", rendered.destination.path_prefix, super::CATALOG_DIRECTORY)
+    };
+    let mut phase1 = rendered.clone();
+    let mut removed = Vec::new();
+    for (path, bytes) in &rendered.files {
+        if !path.starts_with(super::CATALOG_DIRECTORY) {
+            continue;
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| NylError::config(format!("generated catalog file {} is not UTF-8", path.display())))?;
+        let manifests = serde_saphyr::from_multiple::<serde_json::Value>(text).map_err(NylError::Yaml)?;
+        let workload = |manifest: &serde_json::Value| {
+            manifest.get("kind").and_then(serde_json::Value::as_str) == Some("Application")
+                && manifest
+                    .pointer("/spec/source/path")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(catalog_source.as_str())
+        };
+        match manifests.iter().filter(|manifest| workload(manifest)).count() {
+            0 => {}
+            count if count == manifests.len() => removed.push(path.clone()),
+            _ => {
+                return Err(NylError::config(format!(
+                    "generated catalog file {} mixes workload Applications with other objects",
+                    path.display()
+                )))
+            }
+        }
+    }
+    for path in removed {
+        phase1.files.remove(&path);
+    }
+    Ok(phase1)
+}
+
+/// Phase 2 of a publication's teardown: remove exactly the files the
+/// target's ownership index records beneath its prefix, and the index
+/// itself, in one commit pushed by compare-and-swap, as every publication
+/// is. Unowned files in the prefix, such as state files other tools commit,
+/// stay; an index naming another owner, or an owned file modified outside
+/// Nyl, refuses the removal as reconciliation does. A prefix without an
+/// index has nothing left to remove and makes no commit, so repeating an
+/// interrupted removal converges.
+///
+/// `rendered` identifies the owner and the destination; its files are not
+/// published. Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// Teardown, phase 2.
+pub fn prepare_target_removal(
+    rendered: &RenderedTarget,
+    project_dir: &Path,
+    message: &str,
+    author: &PublicationAuthor,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<PreparedRemoval> {
+    let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
+    let branch = writable_branch_name(&rendered.destination.branch)?;
+    let index_bytes = rendered.files.get(Path::new(DEFAULT_INDEX_PATH)).ok_or_else(|| {
+        NylError::config(format!(
+            "Rendered target tree for {} has no {DEFAULT_INDEX_PATH}",
+            rendered.destination.repository
+        ))
+    })?;
+    let mut owner = parse_index(index_bytes, DEFAULT_INDEX_PATH)?;
+    owner.files.clear();
+    let checkout = tempfile::TempDir::new()?;
+    let repository = clone_branch(&rendered.destination.push_url, branch, checkout.path(), &auth)?;
+    let expected = remote_branch_oid(&repository, branch);
+    let output_root = if rendered.destination.path_prefix.is_empty() {
+        checkout.path().to_path_buf()
+    } else {
+        checkout.path().join(&rendered.destination.path_prefix)
+    };
+    let index_path = output_root.join(DEFAULT_INDEX_PATH);
+    let commit = if index_path.is_file() {
+        reconcile_rendered_tree_with_options(
+            &output_root,
+            &DesiredFiles::new(),
+            owner.clone(),
+            rendered.reconcile.clone(),
+        )?;
+        std::fs::remove_file(&index_path)?;
+        commit_worktree(&repository, branch, &output_root, message, || author.git())?
+    } else {
+        None
+    };
+    let prepared = PreparedPublication {
+        repository,
+        push_url: rendered.destination.push_url.clone(),
+        branch: branch.to_owned(),
+        expected,
+        commit,
+        index: owner,
+        _checkout: checkout,
+    };
+    prepared.verify_unmoved(&auth)?;
+    Ok(PreparedRemoval {
+        prepared,
+        auth,
+        destination: rendered.destination.clone(),
+    })
+}
+
+/// A teardown's removal of a target's owned files, ready to push.
+pub struct PreparedRemoval {
+    prepared: PreparedPublication,
+    auth: GitAuth,
+    destination: PublicationDestination,
+}
+
+/// Where a teardown removed a target's owned files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedTree {
+    pub repository: String,
+    pub branch: String,
+    pub path_prefix: String,
+    /// The removal commit; `None` when the prefix held no index any more.
+    pub commit: Option<String>,
+}
+
+impl PreparedRemoval {
+    /// Push the removal commit, if any, while the branch is still where it
+    /// was checked out.
+    pub fn push(self) -> Result<RemovedTree> {
+        self.prepared.push(&self.auth)?;
+        Ok(RemovedTree {
+            repository: self.destination.repository,
+            branch: self.prepared.branch.clone(),
+            path_prefix: self.destination.path_prefix,
+            commit: self.prepared.commit().map(|commit| commit.to_string()),
+        })
     }
 }
 
@@ -1276,5 +1431,177 @@ spec:
         assert!(!checkout.path().join("source.txt").exists());
         assert!(repository.statuses(None).unwrap().is_empty());
         assert!(repository.head().is_err());
+    }
+
+    /// The generated catalog's documents as `(kind, name, source path)`.
+    fn catalog(files: &BTreeMap<PathBuf, Vec<u8>>) -> Vec<(String, String, Option<String>)> {
+        files
+            .iter()
+            .filter(|(path, _)| path.starts_with(super::super::CATALOG_DIRECTORY))
+            .flat_map(|(_, bytes)| {
+                serde_saphyr::from_multiple::<serde_json::Value>(std::str::from_utf8(bytes).unwrap()).unwrap()
+            })
+            .map(|manifest| {
+                (
+                    manifest["kind"].as_str().unwrap().to_owned(),
+                    manifest["metadata"]["name"].as_str().unwrap().to_owned(),
+                    manifest
+                        .pointer("/spec/source/path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                )
+            })
+            .collect()
+    }
+
+    /// Commit `path` with `contents` to `branch` of the bare repository at
+    /// `url`, as another tool would.
+    fn commit_unowned(url: &str, branch: &str, path: &str, contents: &str) {
+        let checkout = TempDir::new().unwrap();
+        let repository = clone_branch(url, branch, checkout.path(), &GitAuth::none()).unwrap();
+        let expected = remote_branch_oid(&repository, branch);
+        let file = checkout.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, contents).unwrap();
+        commit_worktree(&repository, branch, checkout.path(), "other tool", || author(5).git()).unwrap();
+        crate::git::transport::push_branch_if_unchanged(&repository, url, branch, expected, &GitAuth::none()).unwrap();
+    }
+
+    /// Catches phase 1 emptying the catalog (Argo CD's empty-tree guard and
+    /// the catalog's self-prune would then act) or leaving a workload
+    /// Application for the catalog to keep.
+    #[test]
+    fn test_phase1_publishes_the_catalog_without_workload_applications() {
+        let (publication, url) = publication_repository();
+        let bare = publication.path().join("deploy.git");
+        let worktree = project(&url);
+        let project_dir = worktree.path().join("nyl");
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        publish_target(&rendered, &project_dir, "nyl: publish", &author(10), &|_| None).unwrap();
+
+        let full = catalog(&rendered.files);
+        let phase1 = without_workload_applications(&rendered).unwrap();
+        let kept = catalog(&phase1.files);
+        assert!(
+            full.iter()
+                .any(|(kind, _, path)| kind == "Application" && path.as_deref() != Some("dev/_nyl/catalog")),
+            "the full catalog lists a workload Application: {full:?}"
+        );
+        assert_eq!(
+            kept,
+            full.iter()
+                .filter(|(kind, _, path)| kind != "Application" || path.as_deref() == Some("dev/_nyl/catalog"))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert!(kept.iter().any(|(kind, _, _)| kind == "AppProject"), "{kept:?}");
+        assert!(
+            kept.iter()
+                .any(|(kind, _, path)| kind == "Application" && path.as_deref() == Some("dev/_nyl/catalog")),
+            "{kept:?}"
+        );
+        // The workload trees stay.
+        for (path, bytes) in rendered.files.iter().filter(|(path, _)| path.starts_with("web")) {
+            assert_eq!(phase1.files.get(path), Some(bytes));
+        }
+
+        let published =
+            prepare_target_publication(&phase1, &project_dir, "nyl: teardown phase 1", &author(20), &|_| None)
+                .unwrap()
+                .push()
+                .unwrap();
+        let files = branch_files(&bare, "deploy");
+        let expected = phase1
+            .files
+            .keys()
+            .map(|path| format!("dev/{}", path.display()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(files.into_iter().collect::<std::collections::BTreeSet<_>>(), expected);
+        let repository = Repository::open_bare(&bare).unwrap();
+        let head = repository
+            .find_reference("refs/heads/deploy")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(published.commit, head.to_string());
+
+        // Publishing phase 1 again converges without a commit.
+        let again = prepare_target_publication(&phase1, &project_dir, "nyl: teardown phase 1", &author(30), &|_| None)
+            .unwrap()
+            .push()
+            .unwrap();
+        assert_eq!(again.commit, published.commit);
+    }
+
+    /// Catches phase 2 deleting files the target does not own, or leaving
+    /// an owned file or the ownership index behind.
+    #[test]
+    fn test_phase2_removes_exactly_the_index_owned_files() {
+        let (publication, url) = publication_repository();
+        let bare = publication.path().join("deploy.git");
+        let worktree = project(&url);
+        let project_dir = worktree.path().join("nyl");
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        publish_target(&rendered, &project_dir, "nyl: publish", &author(10), &|_| None).unwrap();
+        commit_unowned(&url, "deploy", "dev/state/notes.yaml", "kept: true\n");
+
+        let removed = prepare_target_removal(&rendered, &project_dir, "nyl: teardown phase 2", &author(40), &|_| None)
+            .unwrap()
+            .push()
+            .unwrap();
+        assert_eq!(branch_files(&bare, "deploy"), vec!["dev/state/notes.yaml".to_owned()]);
+        let repository = Repository::open_bare(&bare).unwrap();
+        let head = repository
+            .find_reference("refs/heads/deploy")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(removed.commit, Some(head.to_string()));
+        let commit = repository.find_commit(head).unwrap();
+        assert_eq!(commit.message().unwrap(), "nyl: teardown phase 2");
+        assert_eq!(commit.author().when().seconds(), 40);
+        assert_eq!(
+            (removed.branch.as_str(), removed.path_prefix.as_str()),
+            ("deploy", "dev")
+        );
+
+        // Repeating an interrupted removal converges without a commit.
+        let again = prepare_target_removal(&rendered, &project_dir, "nyl: teardown phase 2", &author(50), &|_| None)
+            .unwrap()
+            .push()
+            .unwrap();
+        assert_eq!(again.commit, None);
+        assert_eq!(
+            repository
+                .find_reference("refs/heads/deploy")
+                .unwrap()
+                .target()
+                .unwrap(),
+            head
+        );
+    }
+
+    /// Catches phase 2 deleting an owned file someone changed outside Nyl,
+    /// which reconciliation refuses everywhere else.
+    #[test]
+    fn test_phase2_refuses_owned_files_modified_outside_nyl() {
+        let (publication, url) = publication_repository();
+        let bare = publication.path().join("deploy.git");
+        let worktree = project(&url);
+        let project_dir = worktree.path().join("nyl");
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        publish_target(&rendered, &project_dir, "nyl: publish", &author(10), &|_| None).unwrap();
+        let owned = branch_files(&bare, "deploy")
+            .into_iter()
+            .find(|path| path.starts_with("dev/web/"))
+            .unwrap();
+        commit_unowned(&url, "deploy", &owned, "edited: true\n");
+
+        let error = prepare_target_removal(&rendered, &project_dir, "nyl: teardown phase 2", &author(40), &|_| None)
+            .err()
+            .expect("the removal is refused")
+            .to_string();
+        assert!(error.contains("modified outside Nyl"), "{error}");
+        assert!(branch_files(&bare, "deploy").contains(&owned));
     }
 }

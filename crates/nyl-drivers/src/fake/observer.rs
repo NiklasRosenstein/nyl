@@ -24,14 +24,48 @@ impl FakeObserver {
 
     /// What the observer reports for `target` from now on.
     pub fn set(&self, target: &str, observation: ApplicationsObservation) {
-        let _ = (target, observation);
-        todo!("publication")
+        self.targets
+            .lock()
+            .expect("observer lock")
+            .insert(target.to_owned(), observation);
     }
 }
 
 impl ArgoObserver for FakeObserver {
+    /// What a test set for `target`; a target nothing was set for has no
+    /// workload Applications left.
     fn workload_applications(&self, target: &str) -> ApplicationsObservation {
-        let _ = (target, &self.targets);
-        todo!("publication")
+        self.targets
+            .lock()
+            .expect("observer lock")
+            .get(target)
+            .cloned()
+            .unwrap_or(ApplicationsObservation::Remaining(Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches clones observing separately, which would let a scenario's
+    /// script miss the observer the run holds.
+    #[test]
+    fn test_clones_share_scripted_observations_and_default_to_removed() {
+        let observer = FakeObserver::new();
+        let run_side = observer.clone();
+        assert_eq!(
+            run_side.workload_applications("dev"),
+            ApplicationsObservation::Remaining(Vec::new())
+        );
+        observer.set("dev", ApplicationsObservation::Remaining(vec!["web".to_owned()]));
+        assert_eq!(
+            run_side.workload_applications("dev"),
+            ApplicationsObservation::Remaining(vec!["web".to_owned()])
+        );
+        assert_eq!(
+            run_side.workload_applications("prod"),
+            ApplicationsObservation::Remaining(Vec::new())
+        );
     }
 }
