@@ -18,8 +18,13 @@ use std::path::PathBuf;
 use clap::Args;
 use nyl_core::orchestration::time::Duration;
 
+use nyl_orchestration::run_report::ReportKind;
+use nyl_orchestration::shell::run::{LifecycleOptions, RunMode, TeardownTarget};
+use nyl_state::git::CommitAuthor;
+
 use super::reconcile::RunOutput;
 use crate::orchestration::run::{CommandOutcome, Wiring};
+use crate::orchestration::session::{outcome, stopped, unit_names, RunOptions, Session, Stop};
 use crate::Result;
 
 /// Tear units down.
@@ -66,7 +71,7 @@ pub struct TeardownArgs {
 
     /// With --all, take the units' source files from this revision when the
     /// recorded source commit cannot be fetched.
-    #[arg(long, requires = "all")]
+    #[arg(long, requires = "all", conflicts_with = "units")]
     pub source: Option<String>,
 
     /// Why, recorded as the transition commit's Nyl-Reason.
@@ -92,6 +97,112 @@ pub struct TeardownArgs {
 
 /// Run the command in-process with `wiring`.
 pub fn run(args: &TeardownArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    let _ = (args, wiring);
-    todo!("operator: build the request with RunMode::Teardown and call shell::teardown::teardown")
+    Ok(teardown(args, wiring)
+        .unwrap_or_else(|stop| stopped(ReportKind::TeardownReport, &args.environment, args.output, stop)))
+}
+
+/// What `--unit` or `--all` names.
+fn target(args: &TeardownArgs) -> std::result::Result<TeardownTarget, Stop> {
+    if args.all {
+        Ok(TeardownTarget::All)
+    } else {
+        Ok(TeardownTarget::Units(unit_names("--unit", &args.units)?))
+    }
+}
+
+fn teardown(args: &TeardownArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
+    let session = Session::open(&args.path, &args.environment)?;
+    let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
+    let request = session.request(&RunOptions {
+        // The units are the mode's target; a teardown run selects nothing else.
+        units: &[],
+        concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
+        source: args.source.as_deref(),
+        wait: args.wait_lease,
+        local: None,
+        cancellation: wiring.cancellation.clone(),
+        mode: RunMode::Teardown { target: target(args)? },
+        lifecycle: LifecycleOptions {
+            allow_dependents: args.allow_dependents,
+            allow_incomplete: args.allow_incomplete,
+            confirm_removed: args.confirm_removed,
+            hold: args.hold,
+            ..LifecycleOptions::default()
+        },
+        reapply: false,
+        fail_fast: args.fail_fast,
+        reason: args.reason.as_deref(),
+    })?;
+    let store = session.store(Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    }))?;
+    let report = session.run(
+        wiring,
+        &store,
+        Some(&identity),
+        &request,
+        nyl_orchestration::shell::teardown::teardown,
+    )?;
+    let exit = report.exit().code();
+    Ok(outcome(&report, args.output, exit))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::Cli;
+
+    fn parses(args: &[&str]) -> bool {
+        Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()
+    }
+
+    /// Catches a teardown that names nothing (and so would tear down
+    /// nothing, or everything) being accepted: `--unit` or `--all` is
+    /// required, and `--source` only applies to `--all`.
+    #[test]
+    fn test_teardown_needs_unit_or_all() {
+        assert!(!parses(&["teardown", "-e", "dev"]));
+        assert!(parses(&["teardown", "-e", "dev", "--unit", "api"]));
+        assert!(parses(&["teardown", "-e", "dev", "--all", "--fail-fast"]));
+        assert!(!parses(&["teardown", "-e", "dev", "--unit", "api", "--all"]));
+        assert!(!parses(&["teardown", "-e", "dev", "--unit", "api", "--source", "main"]));
+    }
+
+    /// Catches `state delete` options that only mean something for the
+    /// teardown being accepted without it.
+    #[test]
+    fn test_state_delete_teardown_options_require_teardown() {
+        assert!(parses(&["state", "delete", "-e", "dev"]));
+        assert!(!parses(&["state", "delete", "-e", "dev", "--allow-dependents"]));
+        assert!(parses(&[
+            "state",
+            "delete",
+            "-e",
+            "dev",
+            "--teardown",
+            "--allow-dependents",
+            "--allow-incomplete"
+        ]));
+    }
+
+    /// Drift decisions: `--reapply` forces named units only, and records why.
+    #[test]
+    fn test_reconcile_reapply_needs_unit_and_reason() {
+        assert!(!parses(&["reconcile", "-e", "dev", "--reapply"]));
+        assert!(!parses(&["reconcile", "-e", "dev", "--reapply", "--unit", "api"]));
+        assert!(parses(&[
+            "reconcile",
+            "-e",
+            "dev",
+            "--reapply",
+            "--unit",
+            "api",
+            "--reason",
+            "repair"
+        ]));
+        assert!(parses(&["hold", "-e", "dev", "--unit", "api", "--reason", "incident"]));
+        assert!(!parses(&["resume", "-e", "dev"]));
+    }
 }

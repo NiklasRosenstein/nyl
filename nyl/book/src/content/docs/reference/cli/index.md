@@ -31,8 +31,10 @@ closely related pair.
   - [`reconcile`](/nyl/reference/cli/reconcile/) - Execute an environment's ready units and record the results
   - [`status`](/nyl/reference/cli/status/) - Report each unit's state from one snapshot of an environment's state
   - [`verify`](/nyl/reference/cli/verify/) - Check current receipts for drift and record the observations
+  - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
+  - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result
-  - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, and restore an environment's state; break a lost lease
+  - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, restore, and delete an environment's state; break a lost lease
 
 ## Global Options
 

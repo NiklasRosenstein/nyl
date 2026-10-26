@@ -24,12 +24,49 @@
 //! - `resume` only lifts the hold and deletes nothing (Q26); a uid-less
 //!   held file outside the ownership set is removed by the next reconcile.
 
-use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_core::orchestration::state::StateLocation;
+use std::collections::BTreeMap;
 
-use super::state::Requested;
-use super::Context;
+use nyl_core::orchestration::codes::{Code, Finding};
+use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ports::TransitionChanges;
+use nyl_core::orchestration::state::{Hold, Lifecycle, Operation, SignalAction, StateLocation};
+use serde_json::json;
+
+use super::local::{check_record, check_remote_tips};
+use super::signal::{deliver, Delivery};
+use super::state::{commit, read, summary, with_lease, Requested};
+use super::{store_error, Context};
 use crate::report::StateOperationReport;
+use crate::rules::hold::{self as hold_rule, HoldWrite};
+use crate::rules::lease::{self as lease_rule, BrokenLease, LeaseDecision};
+use crate::rules::lifecycle::{transition, Event, Next};
+
+/// The summary entry of an operator action on `unit`.
+fn action(name: &str, requested: &Requested) -> serde_json::Value {
+    let mut entry = json!({"action": name});
+    if let Some(reason) = &requested.reason {
+        entry["reason"] = json!(reason);
+    }
+    entry
+}
+
+/// The report of a hold delivered to the run holding the lease: done,
+/// exit 0, no commit of its own.
+fn delivered(environment: &EnvironmentName, unit: &UnitName, run: &RunId, runner: &str) -> StateOperationReport {
+    let mut report = StateOperationReport::new(environment.clone(), Operation::Hold.as_str()).done();
+    report.warnings.push(Finding::new(
+        Code::HoldDelivered,
+        format!("run {run} by {runner} holds the lease of {environment}; the hold of {unit} was delivered to it"),
+        format!(
+            "the run starts no further work on {unit} and records the hold in its own transition commit; check it with `nyl status -e {environment}`"
+        ),
+    ));
+    report
+        .details
+        .insert("deliveredTo".to_owned(), json!({"run": run, "runner": runner}));
+    report.details.insert("unit".to_owned(), json!(unit));
+    report
+}
 
 /// `nyl hold`.
 pub fn hold(
@@ -39,8 +76,108 @@ pub fn hold(
     unit: &UnitName,
     requested: &Requested,
 ) -> StateOperationReport {
-    let _ = (context, environment, location, unit, requested);
-    todo!("operator")
+    let refuse = |finding| StateOperationReport::new(environment.clone(), Operation::Hold.as_str()).refused(finding);
+    // A run holding the lease (a live lease or run ref) receives the hold
+    // through its signal ref and applies it before starting the unit (Q28).
+    let coordination = match context.store.coordination(location, environment) {
+        Ok(coordination) => coordination,
+        Err(error) => return refuse(store_error(environment, &error)),
+    };
+    let running = matches!(
+        lease_rule::decide(&coordination, context.clock.now(), BrokenLease::Refuse),
+        LeaseDecision::Held(_)
+    );
+    if running {
+        match deliver(
+            context,
+            location,
+            environment,
+            unit,
+            SignalAction::Hold,
+            requested.reason.as_deref(),
+        ) {
+            // The run finished meanwhile: hold directly, under this lease.
+            Ok(Delivery::Direct) => {}
+            Ok(Delivery::Delivered { run, runner }) => return delivered(environment, unit, &run, &runner),
+            Err(finding) => return refuse(finding),
+        }
+    }
+    with_lease(
+        context,
+        environment,
+        Operation::Hold,
+        location,
+        requested,
+        |held, report| {
+            let snapshot = read(context, location, environment)?;
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+            check_remote_tips(context.store, location, environment)?;
+            let coordination = context
+                .store
+                .coordination(location, environment)
+                .map_err(|error| store_error(environment, &error))?;
+            let runs = coordination
+                .runs
+                .iter()
+                .chain(&coordination.evidence)
+                .cloned()
+                .collect::<Vec<_>>();
+            let stored = snapshot.desired.get(unit);
+            let observed = snapshot.observed.get(unit);
+            let the_hold = Hold {
+                since: held.lease.taken_at,
+                by: context.requested_by.clone(),
+                reason: requested.reason.clone(),
+                pending: None,
+            };
+            report.details.insert("unit".to_owned(), json!(unit));
+            let document = match hold_rule::hold(environment, unit, stored, observed, &runs, the_hold)? {
+                HoldWrite::Unchanged => {
+                    report
+                        .details
+                        .insert("note".to_owned(), json!(format!("{unit} is already held")));
+                    return Ok(());
+                }
+                HoldWrite::Desired(document) => *document,
+            };
+            if document.is_held_marker() {
+                report.details.insert("marker".to_owned(), json!(true));
+            }
+            if let Lifecycle::Held {
+                hold: Hold {
+                    pending: Some(pending), ..
+                },
+                ..
+            } = &document.lifecycle
+            {
+                report
+                    .details
+                    .insert("pending".to_owned(), json!(pending.source_commit));
+            }
+            let mut changes = TransitionChanges::default();
+            // The incarnation ended (nothing showed it ever ran): its
+            // observed documents go with its uid.
+            let ended = document.unit.uid.is_none() && stored.is_some_and(|stored| stored.unit.uid.is_some());
+            if ended {
+                if snapshot.observed.contains_key(unit) {
+                    changes.observed.insert(unit.clone(), None);
+                }
+                if snapshot.artifacts.contains_key(unit) {
+                    changes.artifacts.insert(unit.clone(), None);
+                }
+                if snapshot.observations.contains_key(unit) {
+                    changes.observations.insert(unit.clone(), None);
+                }
+                if snapshot.attestations.contains_key(unit) {
+                    changes.attestations.insert(unit.clone(), None);
+                }
+            }
+            changes.desired.insert(unit.clone(), Some(document));
+            let mut summary = summary(Operation::Hold, environment, unit.as_str());
+            summary.units = BTreeMap::from([(unit.clone(), action("hold", requested))]);
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
+        },
+    )
 }
 
 /// `nyl resume`.
@@ -51,6 +188,50 @@ pub fn resume(
     unit: &UnitName,
     requested: &Requested,
 ) -> StateOperationReport {
-    let _ = (context, environment, location, unit, requested);
-    todo!("operator")
+    with_lease(
+        context,
+        environment,
+        Operation::Resume,
+        location,
+        requested,
+        |held, report| {
+            let snapshot = read(context, location, environment)?;
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+            check_remote_tips(context.store, location, environment)?;
+            report.details.insert("unit".to_owned(), json!(unit));
+            let Some(stored) = snapshot.desired.get(unit) else {
+                return Err(Finding::new(
+                    Code::UnitUnknown,
+                    format!("{environment} has no unit {unit} in its state"),
+                    format!("list the units with `nyl get units -e {environment}`"),
+                ));
+            };
+            let lifecycle = match transition(&stored.lifecycle, Event::Resume) {
+                Ok(Next::Lifecycle(lifecycle)) => lifecycle,
+                Ok(Next::Unchanged) => {
+                    report
+                        .details
+                        .insert("note".to_owned(), json!(format!("{unit} is not held")));
+                    return Ok(());
+                }
+                Ok(next) => unreachable!("resume only lifts a hold: {next:?}"),
+                Err(refusal) => unreachable!("every state has a resume row: {refusal:?}"),
+            };
+            // Resume only lifts the hold: the document, its uid (or its
+            // absence), and the observed file with any condition stay (Q26).
+            let mut document = stored.clone();
+            report.details.insert(
+                "state".to_owned(),
+                json!(crate::rules::lifecycle::state_name(&lifecycle)),
+            );
+            document.lifecycle = lifecycle;
+            let changes = TransitionChanges {
+                desired: BTreeMap::from([(unit.clone(), Some(document))]),
+                ..TransitionChanges::default()
+            };
+            let mut summary = summary(Operation::Resume, environment, unit.as_str());
+            summary.units = BTreeMap::from([(unit.clone(), action("resume", requested))]);
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
+        },
+    )
 }

@@ -9,15 +9,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::DriverSet;
+use nyl_core::orchestration::driver::{DriverSet, Supported};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateStore, StateTips};
-use nyl_core::orchestration::state::{DesiredUnit, ObservedUnit, StateLocation};
+use nyl_core::orchestration::state::{DesiredUnit, Lifecycle, ObservedUnit, StateLocation};
 use serde_json::Value;
 
 use super::{store_error, Context};
 use crate::rules::references::{resolve_reference, ReferenceValue, ReferenceView};
-use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport};
+use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownReadiness};
 
 /// `nyl status -e <env>`, with a `NYL-STATE-LOCAL-DIVERGED` warning when
 /// the clone's local state branches diverged from the remote. Through a
@@ -44,12 +44,14 @@ pub fn status_with(
             .store
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
-        Ok(crate::rules::unit_state::status(
+        let readiness = drivers.map(|drivers| teardown_readiness(environment, &snapshot, drivers));
+        Ok(crate::rules::unit_state::status_with_readiness(
             environment,
             &snapshot,
             &coordination,
             context.clock.now(),
             drivers,
+            &readiness.unwrap_or_default(),
         ))
     };
     let mut environment_report = read().unwrap_or_else(|finding: Finding| {
@@ -67,6 +69,44 @@ pub fn status_with(
     let mut report = RunReport::new(ReportKind::StatusReport);
     report.environments.push(environment_report);
     report
+}
+
+/// The teardown readiness of every unit whose driver reports teardown
+/// settings (publications), read from the stored desired document alone,
+/// so status never renders. Held markers and retained tombstones have none.
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+pub fn teardown_readiness(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    drivers: &DriverSet,
+) -> BTreeMap<UnitName, TeardownReadiness> {
+    snapshot
+        .desired
+        .iter()
+        .filter(|(_, desired)| !desired.is_held_marker() && !matches!(desired.lifecycle, Lifecycle::Retained { .. }))
+        .filter_map(|(name, desired)| {
+            let driver = drivers.get(&desired.unit.api_version, &desired.unit.kind)?;
+            let Ok(Supported::Supported(settings)) = driver.teardown_settings(desired) else {
+                return None;
+            };
+            let readiness = crate::rules::teardown_readiness::evaluate(environment, name, &settings);
+            Some((
+                name.clone(),
+                if readiness.ready() {
+                    TeardownReadiness::Ready
+                } else {
+                    TeardownReadiness::Incomplete {
+                        reasons: readiness
+                            .blocking
+                            .iter()
+                            .map(|finding| format!("{}: {}", finding.code, finding.message))
+                            .collect(),
+                    }
+                },
+            ))
+        })
+        .collect()
 }
 
 /// One snapshot, at the refs' tips or at `--state-revision`.

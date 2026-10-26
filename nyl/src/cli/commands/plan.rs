@@ -56,11 +56,28 @@ pub struct PlanArgs {
 /// The run mode of `plan --teardown`: a teardown preview of the `--unit`
 /// units or, with `--all`, of every unit.
 fn teardown_mode(args: &PlanArgs) -> std::result::Result<nyl_orchestration::shell::run::RunMode, Stop> {
-    use nyl_orchestration::shell::run::RunMode;
+    use nyl_orchestration::shell::run::{RunMode, TeardownTarget};
     if !args.teardown {
         return Ok(RunMode::Reconcile);
     }
-    todo!("operator: plan --teardown needs --unit or --all, and maps them to TeardownTarget")
+    if args.all {
+        return Ok(RunMode::Teardown {
+            target: TeardownTarget::All,
+        });
+    }
+    if args.units.is_empty() {
+        return Err(Stop::Finding(nyl_core::orchestration::codes::Finding::new(
+            nyl_core::orchestration::codes::Code::UnitUnknown,
+            "plan --teardown names no unit to preview tearing down",
+            format!(
+                "name the units with `nyl plan -e {} --teardown --unit <u>`, or preview tearing down every unit with --all",
+                args.environment
+            ),
+        )));
+    }
+    Ok(RunMode::Teardown {
+        target: TeardownTarget::Units(crate::orchestration::session::unit_names("--unit", &args.units)?),
+    })
 }
 
 /// Run the command in-process with `wiring`.

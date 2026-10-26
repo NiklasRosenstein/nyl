@@ -11,9 +11,13 @@
 
 use clap::Args;
 
-use super::state::Common;
+use nyl_core::orchestration::ids::UnitName;
+use nyl_core::orchestration::state::Operation;
+use nyl_orchestration::shell::lifecycle;
+
+use super::state::{requested, run, Common};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::Result;
+use crate::{NylError, Result};
 
 /// Freeze a unit.
 #[derive(Args, Debug)]
@@ -39,12 +43,22 @@ pub struct ResumeArgs {
 
 /// Run `nyl hold` in-process with `wiring`.
 pub fn run_hold(args: &HoldArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    let _ = (args, wiring);
-    todo!("operator: through commands::state::run and shell::lifecycle::hold")
+    let unit = unit_name(&args.unit)?;
+    let requested = requested(&args.common, wiring);
+    run(&args.common, wiring, Operation::Hold.as_str(), None, |ctx| {
+        lifecycle::hold(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
+    })
 }
 
 /// Run `nyl resume` in-process with `wiring`.
 pub fn run_resume(args: &ResumeArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    let _ = (args, wiring);
-    todo!("operator: through commands::state::run and shell::lifecycle::resume")
+    let unit = unit_name(&args.unit)?;
+    let requested = requested(&args.common, wiring);
+    run(&args.common, wiring, Operation::Resume.as_str(), None, |ctx| {
+        lifecycle::resume(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
+    })
+}
+
+fn unit_name(unit: &str) -> Result<UnitName> {
+    UnitName::new(unit).map_err(|error| NylError::config(format!("--unit {unit:?} is not a unit name: {error}")))
 }

@@ -22,7 +22,7 @@
 //! <run>` where a run or evidence ref holds a checkpointed receipt of the
 //! unit's incarnation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::DriverSet;
@@ -35,7 +35,9 @@ use nyl_core::resources::environment::DriftRepair;
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::lease::{holders, lease_live, run_live};
 use crate::rules::takeover::checkpointed_receipt;
-use crate::run_report::{BlockedBy, EnvironmentRunReport, ReceiptState, ReportKind, UnitReport, UnitState};
+use crate::run_report::{
+    BlockedBy, ConditionState, EnvironmentRunReport, ReceiptState, ReportKind, TeardownReadiness, UnitReport, UnitState,
+};
 
 /// The stable reason of a blocker waiting for a producer's receipt.
 pub const NO_CURRENT_RECEIPT: &str = "no-current-receipt";
@@ -275,6 +277,87 @@ fn condition_warning(
     }
 }
 
+/// What a unit's lifecycle adds to its status: a held unit's pending
+/// changes and pending teardown request (`NYL-UNIT-HELD`, naming `nyl
+/// resume`), and the next action of a unit waiting to be torn down
+/// (`NYL-TEARDOWN-PENDING`) or waiting under its `teardownWait`
+/// (`NYL-TEARDOWN-WAITING`). Contract: [Deletion](../../../../design/orchestration-core.md#deletion)
+/// and [Inspection](../../../../design/orchestration-core.md#inspection).
+fn lifecycle_details(
+    environment: &EnvironmentName,
+    name: &UnitName,
+    desired: &DesiredUnit,
+    observed: Option<&ObservedUnit>,
+    unit: &mut UnitReport,
+) {
+    match &desired.lifecycle {
+        Lifecycle::Held { hold, deletion } => {
+            unit.pending = hold.pending.as_ref().map(|pending| pending.source_commit.clone());
+            let mut what = Vec::new();
+            if let Some(pending) = &unit.pending {
+                what.push(format!("pending changes from {pending}"));
+            }
+            if hold.pending.as_ref().is_some_and(|pending| pending.deletion) {
+                what.push("left the ownership set".to_owned());
+            }
+            if deletion.is_some() {
+                let teardown = "teardown pending, carried out after resume".to_owned();
+                unit.summary = Some(teardown.clone());
+                what.push(teardown);
+            }
+            let by = match &hold.reason {
+                Some(reason) => format!("{} ({reason})", hold.by),
+                None => hold.by.clone(),
+            };
+            let what = if what.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", what.join(", "))
+            };
+            unit.warnings.push(Finding::new(
+                Code::UnitHeld,
+                format!(
+                    "{name} is held by {by} since {}{what}",
+                    hold.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ),
+                format!("reconcile changes nothing about it until `nyl resume -e {environment} --unit {name}`"),
+            ));
+        }
+        Lifecycle::Deleting { deletion } => {
+            if let Some(waiting) = observed.and_then(|observed| observed.waiting.as_ref()) {
+                unit.warnings.push(Finding::new(
+                    Code::TeardownWaiting,
+                    format!(
+                        "the teardown of {name} waits after phase {}: {}",
+                        waiting.phase, waiting.reason
+                    ),
+                    format!(
+                        "the next teardown-capable run continues the wait; once its workloads are gone, confirm it with \
+                         `nyl teardown -e {environment} --unit {name} --confirm-removed`, or proceed with \
+                         `--allow-incomplete`, recording what may remain"
+                    ),
+                ));
+            } else if deletion.teardown == Some(TeardownProgress::Pending) {
+                let fix = if deletion.requested.is_some() {
+                    format!(
+                        "run `nyl teardown -e {environment} --unit {name}` again once what it waits for is done (`--allow-dependents` tears down a unit retained tombstones cite)"
+                    )
+                } else {
+                    format!("run `nyl reconcile -e {environment} --allow-teardown` to tear it down")
+                };
+                unit.warnings.push(Finding::new(
+                    Code::TeardownPending,
+                    format!("{name} left the ownership set and waits to be torn down"),
+                    format!(
+                        "{fix}, or drop it from state and keep its resources with `nyl state forget -e {environment} --unit {name}`"
+                    ),
+                ));
+            }
+        }
+        Lifecycle::Active | Lifecycle::Retained { .. } => {}
+    }
+}
+
 /// The `status -e` report of one environment from one snapshot of both refs
 /// plus the lease and run refs: per-unit state, receipt, blockers, the
 /// running unit and holder, and suggested next actions as warnings with fixes.
@@ -283,13 +366,28 @@ fn condition_warning(
 /// with a current receipt show their drift observation
 /// ([`crate::rules::drift::status_drift`]), which needs each unit's
 /// recovery policy.
-#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, blockers.
 pub fn status(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     coordination: &Coordination,
     now: Timestamp,
     drivers: Option<&DriverSet>,
+) -> EnvironmentRunReport {
+    status_with_readiness(environment, snapshot, coordination, now, drivers, &BTreeMap::new())
+}
+
+/// [`status`], with each publication unit's teardown readiness, which the
+/// shell computes from the stored desired document
+/// (`Driver::teardown_settings` and
+/// [`crate::rules::teardown_readiness::evaluate`]) without rendering.
+#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
+pub fn status_with_readiness(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    coordination: &Coordination,
+    now: Timestamp,
+    drivers: Option<&DriverSet>,
+    readiness: &BTreeMap<UnitName, TeardownReadiness>,
 ) -> EnvironmentRunReport {
     let drift_repair = snapshot
         .environment
@@ -311,8 +409,9 @@ pub fn status(
             Code::LeaseLost,
             format!("run {} {how} before it finished", lost.run),
             format!(
-                "run nyl reconcile to take over the environment and import the run's checkpoints; a unit left \
-                 uncertain runs again when its recovery policy converges, otherwise check it and run \
+                "run nyl reconcile to take over the environment and import the run's checkpoints (after nyl lease \
+                 break, `nyl recover -e {environment}` imports them without executing); a unit left uncertain runs \
+                 again when its recovery policy converges, otherwise check it and run \
                  `nyl recover -e {environment} --unit <unit> --retry --reason <text>`"
             ),
         ));
@@ -376,14 +475,24 @@ pub fn status(
         }
         if let Some(condition) = condition {
             unit.message = Some(condition.message().to_owned());
-            if desired.lifecycle == Lifecycle::Active {
+            if !matches!(desired.lifecycle, Lifecycle::Retained { .. }) {
                 let accept = observed
                     .map(|observed| acceptable_runs(coordination, observed))
                     .unwrap_or_default();
                 unit.warnings
                     .push(condition_warning(environment, name, condition, &accept));
             }
+            if desired.lifecycle != Lifecycle::Active {
+                // A held or deleting unit shows its condition next to its
+                // lifecycle state, and exits by it (Q20).
+                unit.condition = Some(match condition {
+                    Condition::Uncertain { .. } => ConditionState::Uncertain,
+                    Condition::Failed { .. } => ConditionState::Failed,
+                });
+            }
         }
+        lifecycle_details(environment, name, desired, observed, &mut unit);
+        unit.teardown_readiness = readiness.get(name).cloned();
         report.units.insert(name.clone(), unit);
     }
     for holder in holders(coordination, now) {
@@ -750,6 +859,163 @@ mod tests {
         let report = status_at(&snapshot, &coordination, at("00:30"));
         assert_eq!(report.units[&name("web")].state, Some(UnitState::Running));
         assert!(report.errors.is_empty());
+    }
+
+    fn lifecycle(value: serde_json::Value) -> Lifecycle {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// Q20: a held unit with an uncertain condition shows `held` with the
+    /// condition next to it, and status exits 4 by the condition, so a
+    /// hold never hides that the unit still needs recovery.
+    #[test]
+    fn test_held_and_uncertain_exits_4_with_the_condition() {
+        let mut snapshot = snapshot(&[("database", 2)]);
+        snapshot.desired.get_mut(&name("database")).unwrap().lifecycle = lifecycle(json!({
+            "state": "held", "hold": {"since": "2026-01-01T00:00:00Z", "by": "jane",
+                "pending": {"sourceCommit": "5a90000000000000000000000000000000000000"}}
+        }));
+        snapshot.observed.get_mut(&name("database")).unwrap().condition = Some(condition(json!({
+            "state": "uncertain", "since": "2026-01-01T00:00:00Z", "run": RUN, "reason": "lost its lease"
+        })));
+        let report = status_at(&snapshot, &Coordination::default(), at("00:30"));
+        let unit = &report.units[&name("database")];
+        assert_eq!(unit.state, Some(UnitState::Held));
+        assert_eq!(unit.condition, Some(ConditionState::Uncertain));
+        assert_eq!(
+            unit.pending.as_ref().map(ToString::to_string).as_deref(),
+            Some("5a90000000000000000000000000000000000000")
+        );
+        let held = unit
+            .warnings
+            .iter()
+            .find(|warning| warning.code == Code::UnitHeld)
+            .unwrap();
+        assert!(held.fix.contains("nyl resume -e dev --unit database"), "{}", held.fix);
+        assert!(held.message.contains("pending changes from 5a90"), "{}", held.message);
+        assert_eq!(report.exit, ExitCategory::Uncertain);
+    }
+
+    /// A deleting unit whose teardown failed shows `tearing-down` with the
+    /// failed condition and exits 3, not 2 as a plain wait would.
+    #[test]
+    fn test_a_failed_teardown_exits_3() {
+        let mut snapshot = snapshot(&[("network", 1)]);
+        snapshot.desired.get_mut(&name("network")).unwrap().lifecycle = lifecycle(json!({
+            "state": "deleting",
+            "deletion": {"reason": "omission", "intent": "teardown", "teardown": "in-progress"}
+        }));
+        snapshot.observed.get_mut(&name("network")).unwrap().condition = Some(failed(false));
+        let report = status_at(&snapshot, &Coordination::default(), at("00:30"));
+        let unit = &report.units[&name("network")];
+        assert_eq!(unit.state, Some(UnitState::TearingDown));
+        assert_eq!(unit.condition, Some(ConditionState::Failed));
+        assert_eq!(report.exit, ExitCategory::Failed);
+    }
+
+    /// Q19, Q26: a held marker (never reconciled) is listed as held without
+    /// a receipt, and a held unit's recorded teardown request is shown as
+    /// carried out after resume.
+    #[test]
+    fn test_a_held_marker_and_a_pending_teardown_are_listed() {
+        let mut snapshot = snapshot(&[("network", 1)]);
+        let hold: nyl_core::orchestration::state::Hold =
+            serde_json::from_value(json!({"since": "2026-01-01T00:00:00Z", "by": "jane"})).unwrap();
+        snapshot.desired.insert(
+            name("api"),
+            DesiredUnit::held_marker(EnvironmentName::new("dev").unwrap(), name("api"), hold),
+        );
+        snapshot.desired.get_mut(&name("network")).unwrap().lifecycle = lifecycle(json!({
+            "state": "held", "hold": {"since": "2026-01-01T00:00:00Z", "by": "jane"},
+            "deletion": {"reason": "replace", "intent": "teardown", "teardown": "pending",
+                "requested": {"by": "jane", "at": "2026-01-01T00:00:00Z"}}
+        }));
+        let report = status_at(&snapshot, &Coordination::default(), at("00:30"));
+        let api = &report.units[&name("api")];
+        assert_eq!(api.state, Some(UnitState::Held));
+        assert_eq!(api.receipt, Some(ReceiptState::None));
+        assert_eq!(api.kind, "");
+        let network = &report.units[&name("network")];
+        assert_eq!(
+            network.summary.as_deref(),
+            Some("teardown pending, carried out after resume")
+        );
+        assert_eq!(report.exit, ExitCategory::Incomplete);
+    }
+
+    /// A unit left pending teardown names how to proceed: `--allow-teardown`
+    /// for an omission, or forgetting it while keeping its resources.
+    #[test]
+    fn test_a_pending_teardown_names_allow_teardown_and_forget() {
+        let mut snapshot = snapshot(&[("network", 1)]);
+        snapshot.desired.get_mut(&name("network")).unwrap().lifecycle = lifecycle(json!({
+            "state": "deleting",
+            "deletion": {"reason": "omission", "intent": "teardown", "teardown": "pending"}
+        }));
+        let report = status_at(&snapshot, &Coordination::default(), at("00:30"));
+        let warning = &report.units[&name("network")].warnings[0];
+        assert_eq!(warning.code, Code::TeardownPending);
+        assert!(warning.fix.contains("--allow-teardown") && warning.fix.contains("nyl state forget"));
+    }
+
+    /// The fix for a run that lost its lease names `nyl recover -e`, the
+    /// importer that does not execute.
+    #[test]
+    fn test_the_dead_run_fix_names_recover() {
+        let snapshot = snapshot(&[("web", 3)]);
+        let coordination = Coordination {
+            lease: Some(held(lease_record(RUN, at("01:00")))),
+            runs: vec![run_state(run_naming(&["web"]))],
+            evidence: Vec::new(),
+        };
+        let report = status_at(&snapshot, &coordination, at("02:00"));
+        assert_eq!(report.errors[0].code, Code::LeaseLost);
+        assert!(
+            report.errors[0].fix.contains("nyl recover -e dev"),
+            "{}",
+            report.errors[0].fix
+        );
+    }
+
+    /// Drift: a current unit whose latest drift observation is `drifted` is
+    /// work for the next reconcile: state `drifted`, exit 2.
+    #[test]
+    #[ignore = "needs drift: rules::drift::status_drift"]
+    fn test_a_drifted_current_unit_is_drifted_and_exits_2() {
+        use nyl_core::orchestration::state::{Drift, Observation, ObservationKind, ObservationType, StateV1};
+        let mut snapshot = snapshot(&[("network", 1)]);
+        let unit = snapshot.desired[&name("network")].unit.clone();
+        snapshot.observations.insert(
+            name("network"),
+            BTreeMap::from([(
+                ObservationType::Drift,
+                Observation {
+                    api_version: StateV1,
+                    kind: ObservationKind,
+                    unit,
+                    observation_type: ObservationType::Drift,
+                    execution_key: hex_key('a'),
+                    at: at("00:10"),
+                    result: Drift::Drifted {
+                        summary: "changed outside Nyl".to_owned(),
+                    },
+                    details: serde_json::Value::Null,
+                },
+            )]),
+        );
+        let mut drivers = DriverSet::new();
+        drivers.register(std::sync::Arc::new(crate::rules::fixtures::TestDriver {
+            kind: "Command",
+        }));
+        let report = status(
+            &EnvironmentName::new("dev").unwrap(),
+            &snapshot,
+            &Coordination::default(),
+            at("00:30"),
+            Some(&drivers),
+        );
+        assert_eq!(report.units[&name("network")].state, Some(UnitState::Drifted));
+        assert_eq!(report.exit, ExitCategory::Incomplete);
     }
 
     fn codes(findings: &[Finding]) -> Vec<Code> {
