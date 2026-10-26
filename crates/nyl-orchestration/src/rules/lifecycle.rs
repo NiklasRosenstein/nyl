@@ -334,20 +334,42 @@ mod tests {
             .unwrap()
     }
 
+    fn hold() -> Hold {
+        serde_json::from_value(
+            serde_json::json!({"since": "2026-09-24T12:05:00Z", "by": "alice", "reason": "incident"}),
+        )
+        .unwrap()
+    }
+
+    fn deleting(reason: DeletionReason, intent: DeletionIntent, teardown: Option<TeardownProgress>) -> Lifecycle {
+        Lifecycle::Deleting {
+            deletion: Deletion {
+                reason,
+                intent,
+                teardown,
+                requested: None,
+            },
+        }
+    }
+
+    fn pending_teardown(reason: DeletionReason) -> Lifecycle {
+        deleting(reason, DeletionIntent::Teardown, Some(TeardownProgress::Pending))
+    }
+
+    fn requested(reason: DeletionReason) -> Event {
+        Event::TeardownRequested {
+            reason,
+            requested: request(),
+        }
+    }
+
     /// Deletion, "Explicit teardown": a tombstone's teardown keeps its
     /// receipt as the observed file, so a teardown that does not finish in
     /// this run still has the outputs it reads.
     #[test]
     fn test_teardown_of_a_tombstone_restores_its_receipt() {
         let retained = Lifecycle::Retained { tombstone: tombstone() };
-        let next = transition(
-            &retained,
-            Event::TeardownRequested {
-                reason: DeletionReason::Teardown,
-                requested: request(),
-            },
-        )
-        .unwrap();
+        let next = transition(&retained, requested(DeletionReason::Teardown)).unwrap();
         assert!(matches!(
             next,
             Next::RestoreReceipt(Lifecycle::Deleting { ref deletion })
@@ -361,5 +383,304 @@ mod tests {
     fn test_a_released_tombstone_is_removed() {
         let retained = Lifecycle::Retained { tombstone: tombstone() };
         assert_eq!(transition(&retained, Event::Released { hold: None }), Ok(Next::Remove));
+    }
+
+    /// "Tear down, then hold" (`teardown --hold`, `--all` in the ownership
+    /// set): catches the hold being lost, which would let the next run
+    /// recreate the unit, or the file surviving with its old uid.
+    #[test]
+    fn test_tear_down_then_hold_ends_the_incarnation_held() {
+        let in_progress = deleting(
+            DeletionReason::Teardown,
+            DeletionIntent::Teardown,
+            Some(TeardownProgress::InProgress),
+        );
+        let held = Next::EndIncarnation(Lifecycle::Held {
+            hold: hold(),
+            deletion: None,
+        });
+        assert_eq!(
+            transition(&in_progress, Event::TornDown { hold: Some(hold()) }),
+            Ok(held.clone())
+        );
+        assert_eq!(
+            transition(&in_progress, Event::TornDown { hold: None }),
+            Ok(Next::Remove)
+        );
+        assert_eq!(
+            transition(&Lifecycle::Active, Event::Released { hold: Some(hold()) }),
+            Ok(held)
+        );
+    }
+
+    /// Holds (Q26): a held unit never progresses. Catches a teardown of a
+    /// held unit destroying anything; its request is recorded and carried
+    /// out after `resume`.
+    #[test]
+    fn test_a_held_unit_never_progresses_and_records_a_teardown_request() {
+        let held = Lifecycle::Held {
+            hold: hold(),
+            deletion: None,
+        };
+        for event in [
+            Event::TeardownStarted,
+            Event::TornDown { hold: None },
+            Event::Released { hold: None },
+        ] {
+            assert!(
+                matches!(transition(&held, event.clone()), Err(Refusal::NotApplicable { .. })),
+                "{event:?}"
+            );
+        }
+        let Ok(Next::Lifecycle(recorded)) = transition(&held, requested(DeletionReason::Replace)) else {
+            panic!("a teardown request on a held unit is recorded");
+        };
+        let Lifecycle::Held {
+            deletion: Some(ref deletion),
+            ..
+        } = recorded
+        else {
+            panic!("the request is recorded next to the hold: {recorded:?}");
+        };
+        assert_eq!(deletion.reason, DeletionReason::Replace);
+        assert_eq!(deletion.teardown, Some(TeardownProgress::Pending));
+        assert_eq!(deletion.requested, Some(request()));
+        assert_eq!(
+            transition(&recorded, Event::Resume),
+            Ok(Next::Lifecycle(Lifecycle::Deleting {
+                deletion: deletion.clone()
+            }))
+        );
+    }
+
+    /// Q26: a uid-less file left outside the ownership set after `resume`
+    /// is removed, but a held one stays until its hold is lifted.
+    #[test]
+    fn test_left_without_incarnation_removes_only_unheld_files() {
+        assert_eq!(
+            transition(&Lifecycle::Active, Event::LeftWithoutIncarnation),
+            Ok(Next::Remove)
+        );
+        let held = Lifecycle::Held {
+            hold: hold(),
+            deletion: None,
+        };
+        assert_eq!(transition(&held, Event::LeftWithoutIncarnation), Ok(Next::Unchanged));
+    }
+
+    /// Q19: only a hold applies to a unit without state, and it writes a
+    /// held marker.
+    #[test]
+    fn test_only_a_hold_applies_to_a_unit_without_state() {
+        assert_eq!(
+            transition_absent(Event::Hold { hold: hold() }),
+            Ok(Next::Lifecycle(Lifecycle::Held {
+                hold: hold(),
+                deletion: None
+            }))
+        );
+        assert!(transition_absent(requested(DeletionReason::Teardown)).is_err());
+        assert!(transition_absent(Event::Resume).is_err());
+    }
+
+    /// Fencing and "Explicit teardown": a kind change leaves the old
+    /// incarnation pending teardown (which `--allow-teardown` gates), while
+    /// an explicit request records who asked.
+    #[test]
+    fn test_kind_change_is_pending_and_explicit_teardown_records_its_request() {
+        let left = transition(
+            &Lifecycle::Active,
+            Event::Left {
+                reason: DeletionReason::KindChange,
+                intent: DeletionIntent::Teardown,
+            },
+        );
+        assert_eq!(left, Ok(Next::Lifecycle(pending_teardown(DeletionReason::KindChange))));
+        let Ok(Next::Lifecycle(Lifecycle::Deleting { deletion })) =
+            transition(&Lifecycle::Active, requested(DeletionReason::Replace))
+        else {
+            panic!("an explicit teardown makes the unit deleting");
+        };
+        assert_eq!(deletion.requested, Some(request()));
+        assert_eq!(deletion.teardown, Some(TeardownProgress::Pending));
+    }
+
+    /// Omission: a unit restored before its teardown starts is active
+    /// again; a started teardown or an explicit request is not undone by
+    /// source.
+    #[test]
+    fn test_return_undoes_only_a_pending_teardown_caused_by_source() {
+        let pending = pending_teardown(DeletionReason::Omission);
+        assert_eq!(
+            transition(&pending, Event::Returned),
+            Ok(Next::Lifecycle(Lifecycle::Active))
+        );
+        let started = deleting(
+            DeletionReason::Omission,
+            DeletionIntent::Teardown,
+            Some(TeardownProgress::InProgress),
+        );
+        assert_eq!(transition(&started, Event::Returned), Ok(Next::Unchanged));
+        let explicit = pending_teardown(DeletionReason::Replace);
+        assert_eq!(transition(&explicit, Event::Returned), Ok(Next::Unchanged));
+        let retained = Lifecycle::Retained { tombstone: tombstone() };
+        assert_eq!(
+            transition(&retained, Event::Returned),
+            Ok(Next::Lifecycle(Lifecycle::Active))
+        );
+    }
+
+    /// A retained tombstone is reconciled by nothing, so holding it is refused.
+    #[test]
+    fn test_hold_of_a_tombstone_is_refused() {
+        let retained = Lifecycle::Retained { tombstone: tombstone() };
+        assert_eq!(
+            transition(&retained, Event::Hold { hold: hold() }),
+            Err(Refusal::HoldRetained)
+        );
+    }
+
+    fn lifecycle_strategy() -> impl proptest::strategy::Strategy<Value = Lifecycle> {
+        use proptest::prelude::*;
+        let reason = proptest::sample::select(vec![
+            DeletionReason::Omission,
+            DeletionReason::Teardown,
+            DeletionReason::Replace,
+            DeletionReason::KindChange,
+            DeletionReason::Decommission,
+        ]);
+        let progress = proptest::sample::select(vec![TeardownProgress::Pending, TeardownProgress::InProgress]);
+        prop_oneof![
+            Just(Lifecycle::Active),
+            (reason.clone(), progress).prop_map(|(reason, progress)| deleting(
+                reason,
+                DeletionIntent::Teardown,
+                Some(progress)
+            )),
+            reason
+                .clone()
+                .prop_map(|reason| deleting(reason, DeletionIntent::Retain, None)),
+            Just(Lifecycle::Held {
+                hold: hold(),
+                deletion: None
+            }),
+            reason.prop_map(|reason| Lifecycle::Held {
+                hold: hold(),
+                deletion: Some(Deletion {
+                    reason,
+                    intent: DeletionIntent::Teardown,
+                    teardown: Some(TeardownProgress::Pending),
+                    requested: None,
+                }),
+            }),
+            Just(Lifecycle::Retained { tombstone: tombstone() }),
+        ]
+    }
+
+    fn event_strategy() -> impl proptest::strategy::Strategy<Value = Event> {
+        use proptest::prelude::*;
+        let reason = proptest::sample::select(vec![
+            DeletionReason::Omission,
+            DeletionReason::Teardown,
+            DeletionReason::Replace,
+            DeletionReason::KindChange,
+            DeletionReason::Decommission,
+        ]);
+        let intent = proptest::sample::select(vec![DeletionIntent::Retain, DeletionIntent::Teardown]);
+        let held = proptest::option::of(Just(hold()));
+        prop_oneof![
+            (reason.clone(), intent).prop_map(|(reason, intent)| Event::Left { reason, intent }),
+            Just(Event::Returned),
+            reason.prop_map(requested),
+            Just(Event::TeardownStarted),
+            held.clone().prop_map(|hold| Event::TornDown { hold }),
+            Just(Event::Retain { tombstone: tombstone() }),
+            held.prop_map(|hold| Event::Released { hold }),
+            Just(Event::LeftWithoutIncarnation),
+            Just(Event::Hold { hold: hold() }),
+            Just(Event::Resume),
+        ]
+    }
+
+    /// The lifecycle after an accepted event; `None` once the files are gone.
+    fn after(current: &Lifecycle, next: &Next) -> Option<Lifecycle> {
+        match next {
+            Next::Lifecycle(lifecycle) | Next::EndIncarnation(lifecycle) | Next::RestoreReceipt(lifecycle) => {
+                Some(lifecycle.clone())
+            }
+            Next::Remove => None,
+            Next::Unchanged => Some(current.clone()),
+        }
+    }
+
+    proptest::proptest! {
+        /// Catches a row that removes a unit's files (and with them the last
+        /// desired document a teardown needs) for any event but a finished
+        /// teardown or release without a hold, a uid-less unit leaving, or
+        /// a tombstone of another kind being dropped.
+        #[test]
+        fn test_only_finishing_events_remove_a_unit(
+            start in lifecycle_strategy(),
+            events in proptest::collection::vec(event_strategy(), 1..10),
+        ) {
+            let mut current = start;
+            for event in events {
+                let removes_by_rule = matches!(
+                    event,
+                    Event::TornDown { hold: None }
+                        | Event::Released { hold: None }
+                        | Event::LeftWithoutIncarnation
+                        | Event::Left { reason: DeletionReason::KindChange, .. }
+                );
+                let Ok(next) = transition(&current, event) else { continue };
+                if next == Next::Remove {
+                    proptest::prop_assert!(removes_by_rule);
+                    break;
+                }
+                current = after(&current, &next).expect("only Remove removes");
+            }
+        }
+
+        /// Catches a hold that does not return the unit to where it stopped
+        /// when it is lifted.
+        #[test]
+        fn test_hold_then_resume_restores_the_lifecycle(start in lifecycle_strategy()) {
+            let held_or_retained = matches!(start, Lifecycle::Held { .. } | Lifecycle::Retained { .. });
+            proptest::prop_assume!(!held_or_retained);
+            let held = after(&start, &transition(&start, Event::Hold { hold: hold() }).unwrap()).unwrap();
+            let resumed = after(&held, &transition(&held, Event::Resume).unwrap()).unwrap();
+            proptest::prop_assert_eq!(resumed, start);
+        }
+
+        /// Catches a held unit's teardown starting or finishing without
+        /// `resume` (Q26: a held unit never progresses).
+        #[test]
+        fn test_a_held_unit_reaches_no_teardown_without_resume(
+            deletion in proptest::option::of(proptest::strategy::Just(())),
+            events in proptest::collection::vec(event_strategy(), 1..10),
+        ) {
+            let mut current = Lifecycle::Held {
+                hold: hold(),
+                deletion: deletion.map(|()| Deletion {
+                    reason: DeletionReason::Omission,
+                    intent: DeletionIntent::Teardown,
+                    teardown: Some(TeardownProgress::Pending),
+                    requested: None,
+                }),
+            };
+            for event in events {
+                if matches!(event, Event::Resume) {
+                    break;
+                }
+                let Ok(next) = transition(&current, event) else { continue };
+                proptest::prop_assert!(next != Next::Remove, "a held unit was removed");
+                let lifecycle = after(&current, &next).unwrap();
+                proptest::prop_assert!(matches!(lifecycle, Lifecycle::Held { .. }), "{:?}", lifecycle);
+                if let Lifecycle::Held { deletion: Some(deletion), .. } = &lifecycle {
+                    proptest::prop_assert_ne!(deletion.teardown, Some(TeardownProgress::InProgress));
+                }
+                current = lifecycle;
+            }
+        }
     }
 }

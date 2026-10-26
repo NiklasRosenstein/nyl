@@ -71,7 +71,9 @@ use serde_json::{json, Map, Value};
 use super::lease::{self, HeldLease};
 use super::{store_error, Context};
 use crate::fault::{FaultAction, FaultPoint};
-use crate::rules::desired::{desire, DesireInputs, Desired};
+use crate::rules::desired::{
+    adopt_tombstone, desire, hold_pending, same_pending, DesireInputs, Desired, LifecycleOutcome, LifecycleWrite,
+};
 use crate::rules::drift;
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
 use crate::rules::freshness::{receipt_is_current, same_incarnation};
@@ -83,6 +85,7 @@ use crate::rules::sources::{
     unreachable, unsupported_source, SourceRequest,
 };
 use crate::rules::takeover::{self, ImportInputs, Leftovers};
+use crate::rules::teardown::TeardownOptions;
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
 use crate::transition::Trailers;
@@ -93,6 +96,7 @@ use slots::Slots;
 mod cancel;
 mod execute;
 pub(crate) mod slots;
+mod teardown;
 pub(crate) mod wait;
 
 /// Default number of units a wave runs at once.
@@ -388,11 +392,15 @@ struct Prepared {
 
 /// One resolution pass over the ownership set.
 struct Resolved {
+    /// The units the run may execute: held units are left out.
     units: BTreeMap<UnitName, DesiredUnit>,
     /// The effective commit of every unit with an execution key.
     commits: BTreeMap<UnitName, CommitId>,
     /// Resolution errors, per unit.
     errors: BTreeMap<UnitName, Vec<Finding>>,
+    /// Held units of the ownership set as source would resolve them, for
+    /// the `hold.pending` their documents record; never executed or written.
+    shadow: BTreeMap<UnitName, DesiredUnit>,
 }
 
 /// What resolution reads besides the desired documents.
@@ -591,7 +599,8 @@ impl<'r, 'a> Session<'r, 'a> {
         );
         let mut errors = desired.errors.clone();
         if let Some(named) = &self.request.units {
-            for unit in named.iter().filter(|unit| !desired.units.contains_key(*unit)) {
+            let known = |unit: &UnitName| desired.units.contains_key(unit) || desired.held.contains_key(unit);
+            for unit in named.iter().filter(|unit| !known(unit)) {
                 errors.push(Finding::new(
                     Code::UnitUnknown,
                     format!(
@@ -608,7 +617,15 @@ impl<'r, 'a> Session<'r, 'a> {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let graph = extract(self.environment(), &source_commit, &desired.units)?;
+        // Held units of the ownership set are nodes too, as source renders
+        // them, so their consumers' references are checked and ordered.
+        let mut nodes = desired.units.clone();
+        for (name, held) in &desired.held {
+            if let Some(rendered) = &held.rendered {
+                nodes.insert(name.clone(), rendered.clone());
+            }
+        }
+        let graph = extract(self.environment(), &source_commit, &nodes)?;
         let order = topological_order(&graph);
         Ok(Prepared {
             source_commit,
@@ -618,13 +635,33 @@ impl<'r, 'a> Session<'r, 'a> {
         })
     }
 
-    /// Resolve every unit in dependency order against `evidence`.
-    fn resolve(&self, prepared: &Prepared, evidence: &Evidence<'_>) -> Resolved {
+    /// Resolve every unit in dependency order against `evidence`. Held
+    /// units resolve as `held` stores them: consumers read their receipts,
+    /// and their rendering is resolved only in the shadow, for
+    /// `hold.pending`. Fenced units stay blocked without an execution key.
+    fn resolve(
+        &self,
+        prepared: &Prepared,
+        evidence: &Evidence<'_>,
+        held: &BTreeMap<UnitName, DesiredUnit>,
+    ) -> Resolved {
         let mut units = prepared.desired.units.clone();
+        units.extend(held.iter().map(|(name, unit)| (name.clone(), unit.clone())));
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
+        let mut shadow = BTreeMap::new();
         for name in &prepared.order {
-            let mut unit = prepared.desired.units[name].clone();
+            let (mut unit, in_shadow) = if held.contains_key(name) {
+                match prepared.desired.held.get(name).and_then(|held| held.rendered.as_ref()) {
+                    Some(rendered) => (rendered.clone(), true),
+                    None => continue,
+                }
+            } else {
+                match prepared.desired.units.get(name) {
+                    Some(unit) => (unit.clone(), false),
+                    None => continue,
+                }
+            };
             let resolution = {
                 let view = ReferenceView {
                     environment: self.environment(),
@@ -640,7 +677,7 @@ impl<'r, 'a> Session<'r, 'a> {
             };
             unit.provenance = resolution.provenance;
             unit.readiness = resolution.readiness;
-            if !resolution.errors.is_empty() {
+            if !resolution.errors.is_empty() && !in_shadow {
                 errors.insert(
                     name.clone(),
                     resolution
@@ -656,7 +693,8 @@ impl<'r, 'a> Session<'r, 'a> {
                         .collect(),
                 );
             }
-            if let (Some(mut spec), true) = (resolution.resolved_spec, resolution.errors.is_empty()) {
+            let fenced = prepared.desired.fenced.contains(name);
+            if let (Some(mut spec), true, false) = (resolution.resolved_spec, resolution.errors.is_empty(), fenced) {
                 match self.key(
                     name,
                     &unit,
@@ -669,14 +707,33 @@ impl<'r, 'a> Session<'r, 'a> {
                         unit.execution_key = Some(keyed.key);
                         unit.fingerprint = keyed.fingerprint;
                         unit.resolved_spec = Some(spec);
-                        commits.insert(name.clone(), keyed.commit);
+                        if !in_shadow {
+                            commits.insert(name.clone(), keyed.commit);
+                        }
                     }
-                    Err(finding) => errors.entry(name.clone()).or_default().push(finding),
+                    Err(finding) if !in_shadow => errors.entry(name.clone()).or_default().push(finding),
+                    Err(_) => {}
                 }
             }
-            units.insert(name.clone(), unit);
+            if fenced {
+                // It waits for the old incarnation, whatever its references say.
+                unit.readiness = prepared.desired.units[name].readiness.clone();
+            }
+            if in_shadow {
+                shadow.insert(name.clone(), unit);
+            } else {
+                units.insert(name.clone(), unit);
+            }
         }
-        Resolved { units, commits, errors }
+        for name in held.keys() {
+            units.remove(name);
+        }
+        Resolved {
+            units,
+            commits,
+            errors,
+            shadow,
+        }
     }
 
     /// Pin the unit's Git source fields in `spec`, root its other local path
@@ -940,6 +997,7 @@ fn leaving_warning(environment: &EnvironmentName, leaving: &[crate::run_report::
 // ---------------------------------------------------------------------------
 // plan
 
+#[allow(clippy::too_many_lines)] // The plan's steps in order: snapshot, resolve, units, held units, the leaving section.
 fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
     let context = session.context;
     let request = session.request;
@@ -965,6 +1023,10 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             return;
         }
     }
+    if let RunMode::Teardown { target } = &request.mode {
+        plan_teardown(session, report, &snapshot, target);
+        return;
+    }
     let prepared = match session.prepare(&snapshot) {
         Ok(prepared) => prepared,
         Err(findings) => {
@@ -978,22 +1040,38 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         report.warnings.push(leaving_warning(environment, &report.leaving));
     }
     let produced = BTreeSet::new();
-    let resolved = session.resolve(
-        &prepared,
-        &Evidence {
-            observed: &snapshot.observed,
-            artifacts: &snapshot.artifacts,
-            observed_commit: snapshot.tips.observed.as_ref(),
-            run: None,
-            produced_in_run: &produced,
-            previous: &snapshot.desired,
-        },
-    );
+    let held_view: BTreeMap<UnitName, DesiredUnit> = prepared
+        .desired
+        .held
+        .iter()
+        .map(|(name, held)| (name.clone(), held.stored.clone()))
+        .collect();
+    // Returning tombstones whose key is unchanged are current at once.
+    let mut observed = snapshot.observed.clone();
+    let mut adoptions = BTreeSet::new();
+    let resolved = loop {
+        let resolved = session.resolve(
+            &prepared,
+            &Evidence {
+                observed: &observed,
+                artifacts: &snapshot.artifacts,
+                observed_commit: snapshot.tips.observed.as_ref(),
+                run: None,
+                produced_in_run: &produced,
+                previous: &snapshot.desired,
+            },
+            &held_view,
+        );
+        if !adopt_tombstones(&prepared, &resolved, &mut adoptions, &mut observed) {
+            break resolved;
+        }
+    };
     report.errors.extend(resolved.errors.values().flatten().cloned());
     let attempted = BTreeSet::new();
-    let (ready, _) = select(&Candidates {
-        desired: &resolved.units,
-        observed: &snapshot.observed,
+    let selectable = selection_view(&resolved, &held_view);
+    let candidates = Candidates {
+        desired: &selectable,
+        observed: &observed,
         drivers: context.drivers,
         named: None,
         attempted: &attempted,
@@ -1002,38 +1080,324 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         drift_repair: drift::drift_repair(&prepared.rendered.environment),
         // `nyl plan` has no `--reapply`.
         reapply: &BTreeSet::new(),
-    });
+    };
+    let (ready, _) = select(&candidates);
+    // Drifted units selection would repair are listed as drifted.
+    let drifted: BTreeSet<UnitName> = drift::repairs(&candidates, &ready)
+        .into_iter()
+        .filter(|(_, repair)| *repair == drift::Repair::Drift)
+        .map(|(name, _)| name)
+        .collect();
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
         if request.units.as_ref().is_some_and(|named| !named.contains(name)) {
             continue;
         }
-        let observed = snapshot.observed.get(name);
+        let current = observed.get(name);
         let mut entry = UnitReport::new(unit.unit.kind.clone());
-        entry.receipt = Some(receipt_state(Some(unit), observed));
-        entry.last_run = observed.and_then(ObservedUnit::last_run).cloned();
-        entry.message = condition_message(unit, observed);
+        entry.receipt = Some(receipt_state(Some(unit), current));
+        entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
+        entry.message = condition_message(unit, current);
         entry.blocked_by = blocked_by(unit);
-        entry.state = Some(if ready.contains(name) {
+        entry.state = Some(if drifted.contains(name) {
+            UnitState::Drifted
+        } else if ready.contains(name) {
             UnitState::Ready
         } else if matches!(unit.readiness, Readiness::Blocked { .. }) || unit.execution_key.is_none() {
             UnitState::Blocked
         } else {
-            unit_state(unit, same_incarnation(unit, observed), false)
+            unit_state(unit, same_incarnation(unit, current), false)
         });
         if ready.contains(name) {
             if let Some(commit) = resolved.commits.get(name) {
-                plan_unit(session, &prepared, unit, commit, observed, &mut entry);
+                plan_unit(
+                    session,
+                    &prepared.rendered.project_dir,
+                    unit,
+                    commit,
+                    current,
+                    &mut entry,
+                );
             }
         }
         report.units.insert(name.clone(), entry);
     }
+    for (name, held) in &prepared.desired.held {
+        if request.units.as_ref().is_some_and(|named| !named.contains(name)) {
+            continue;
+        }
+        let pending = hold_pending(held, &prepared.source_commit, resolved.shadow.get(name));
+        let mut stored = held.stored.clone();
+        if let Lifecycle::Held { hold, .. } = &mut stored.lifecycle {
+            hold.pending = pending;
+        }
+        let mut entry = teardown::held_report(environment, name, &stored, false);
+        entry.result = None;
+        entry.state = Some(UnitState::Held);
+        report.units.insert(name.clone(), entry);
+    }
+
+    // The leaving section: what a reconcile with the same flags would do to
+    // the units leaving the ownership set and the deleting ones.
+    if request.units.is_some() {
+        return;
+    }
+    let mut life = teardown::Life::new(&snapshot.desired);
+    let mut artifacts = snapshot.artifacts.clone();
+    for (name, write) in &prepared.desired.lifecycle {
+        match (&write.desired, prepared.desired.units.contains_key(name)) {
+            (Some(desired), true) if !prepared.desired.fenced.contains(name) => {
+                life.desired.insert(name.clone(), desired.clone());
+            }
+            _ => life.apply(name, write.clone(), &mut observed, &mut artifacts),
+        }
+        if write.outcome == LifecycleOutcome::KindChange {
+            let warning = kind_change_warning(
+                environment,
+                name,
+                &snapshot.desired[name],
+                &prepared.desired.units[name],
+            );
+            report.warnings.push(warning);
+        }
+    }
+    for name in &prepared.desired.fenced {
+        if matches!(
+            snapshot.desired.get(name).map(|stored| &stored.lifecycle),
+            Some(Lifecycle::Retained { .. })
+        ) {
+            life.releases.insert(name.clone());
+        }
+    }
+    let options = TeardownOptions {
+        allow_teardown: request.lifecycle.allow_teardown,
+        allow_dependents: request.lifecycle.allow_dependents,
+        allow_incomplete: request.lifecycle.allow_incomplete,
+        named: None,
+        explicit: false,
+    };
+    plan_leaving(
+        session,
+        report,
+        &prepared.rendered.project_dir,
+        &mut life,
+        &observed,
+        options,
+        None,
+    );
 }
 
-/// Ask a ready unit's driver for its plan, in a worktree of its own.
+/// `nyl plan --teardown`: what `nyl teardown` would remove, from the
+/// stored documents only.
+fn plan_teardown(
+    session: &Session<'_, '_>,
+    report: &mut EnvironmentRunReport,
+    snapshot: &EnvironmentSnapshot,
+    target: &TeardownTarget,
+) {
+    let context = session.context;
+    let request = session.request;
+    let source = match &request.source_override {
+        Some(revision) => match session.resolve_revision(revision) {
+            Ok(commit) => Some(commit),
+            Err(finding) => {
+                report.errors.push(finding);
+                return;
+            }
+        },
+        None => None,
+    };
+    let ownership: BTreeSet<UnitName> = snapshot
+        .environment
+        .as_ref()
+        .map(|record| record.ownership.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut life = teardown::Life::new(&snapshot.desired);
+    let mut observed = snapshot.observed.clone();
+    let mut artifacts = snapshot.artifacts.clone();
+    let now = context.base.clock.now();
+    if let Err(findings) = teardown::mark_teardowns(
+        context,
+        request,
+        &mut life,
+        target,
+        &ownership,
+        now,
+        &mut observed,
+        &mut artifacts,
+    ) {
+        report.errors.extend(findings);
+        return;
+    }
+    let named = match target {
+        TeardownTarget::Units(names) => Some(names.clone()),
+        TeardownTarget::All => None,
+    };
+    let options = TeardownOptions {
+        allow_teardown: true,
+        allow_dependents: request.lifecycle.allow_dependents,
+        allow_incomplete: request.lifecycle.allow_incomplete,
+        named: named.as_ref(),
+        explicit: true,
+    };
+    for (name, mut entry) in std::mem::take(&mut life.results) {
+        entry.state = Some(UnitState::Held);
+        entry.result = None;
+        report.units.insert(name, entry);
+    }
+    plan_leaving(
+        session,
+        report,
+        &request.entry_project_dir,
+        &mut life,
+        &observed,
+        options,
+        source.as_ref(),
+    );
+}
+
+/// Report what the leaving waves would do: destroy plans of the teardowns
+/// that would start, the retentions and releases, and why the others wait.
+#[allow(clippy::too_many_lines)] // Readiness, the plan, then one entry per ready, pending, and retained unit.
+fn plan_leaving(
+    session: &Session<'_, '_>,
+    report: &mut EnvironmentRunReport,
+    project_dir: &str,
+    life: &mut teardown::Life,
+    observed: &BTreeMap<UnitName, ObservedUnit>,
+    options: TeardownOptions<'_>,
+    source: Option<&CommitId>,
+) {
+    let context = session.context;
+    let environment = session.environment();
+    let mut readiness = BTreeMap::new();
+    let mut readiness_state = BTreeMap::new();
+    for (name, unit) in &life.desired {
+        let teardown_unit = matches!(&unit.lifecycle, Lifecycle::Deleting { deletion }
+            if deletion.intent == nyl_core::orchestration::state::DeletionIntent::Teardown);
+        if !teardown_unit {
+            continue;
+        }
+        if let Some((blocking, _)) = teardown::readiness(context.drivers, environment, name, unit) {
+            readiness_state.insert(
+                name.clone(),
+                if blocking.is_empty() {
+                    crate::run_report::TeardownReadiness::Ready
+                } else {
+                    crate::run_report::TeardownReadiness::Incomplete {
+                        reasons: blocking.iter().map(|finding| finding.message.clone()).collect(),
+                    }
+                },
+            );
+            if !blocking.is_empty() {
+                readiness.insert(name.clone(), blocking);
+            }
+        }
+    }
+    let attempted = BTreeSet::new();
+    let waiting = BTreeSet::new();
+    let plan = crate::rules::teardown::plan(&crate::rules::teardown::TeardownInputs {
+        environment,
+        desired: &life.desired,
+        observed,
+        drivers: context.drivers,
+        options,
+        attempted: &attempted,
+        waiting: &waiting,
+        readiness: &readiness,
+        drops: &life.releases,
+    });
+    for name in &plan.ready {
+        let unit = &life.desired[name];
+        let mut entry = UnitReport::new(unit.unit.kind.clone());
+        entry.state = Some(unit_state(unit, same_incarnation(unit, observed.get(name)), false));
+        entry.teardown_readiness = readiness_state.get(name).cloned();
+        let retains = life.releases.contains(name)
+            || matches!(&unit.lifecycle, Lifecycle::Deleting { deletion }
+                if deletion.intent == nyl_core::orchestration::state::DeletionIntent::Retain);
+        if retains {
+            let retained = !life.releases.contains(name)
+                && crate::rules::desired::declares_retain(unit)
+                && !matches!(&unit.lifecycle, Lifecycle::Deleting { deletion }
+                    if deletion.reason == nyl_core::orchestration::state::DeletionReason::KindChange);
+            entry.summary = Some(if retained {
+                "would be retained: its resources stay, and its state becomes a tombstone".to_owned()
+            } else {
+                "would be released: its resources stay in place, and its state is removed".to_owned()
+            });
+        } else if let Some(commit) = source.or(unit.source_revision.as_ref()) {
+            plan_unit(
+                session,
+                project_dir,
+                unit,
+                commit,
+                same_incarnation(unit, observed.get(name)),
+                &mut entry,
+            );
+        }
+        if let Some(tombstones) = plan.overrides.get(name) {
+            entry.warnings.push(Finding::new(
+                Code::TeardownHasDependents,
+                format!(
+                    "unit {name} is cited by the retained tombstones {}; --allow-dependents tears it down anyway",
+                    tombstones.iter().map(UnitName::as_str).collect::<Vec<_>>().join(", ")
+                ),
+                "check that the tombstones' resources no longer need it",
+            ));
+        }
+        report.units.insert(name.clone(), entry);
+    }
+    for (name, pending) in &plan.pending {
+        if matches!(
+            pending,
+            crate::rules::teardown::Pending::NotNamed | crate::rules::teardown::Pending::Held
+        ) || report
+            .units
+            .get(name)
+            .is_some_and(|entry| entry.state == Some(UnitState::Held))
+        {
+            continue;
+        }
+        let unit = &life.desired[name];
+        let mut entry = UnitReport::new(unit.unit.kind.clone());
+        entry.state = Some(unit_state(unit, same_incarnation(unit, observed.get(name)), false));
+        entry.teardown_readiness = readiness_state.get(name).cloned();
+        // What `--allow-teardown` would destroy.
+        if *pending == crate::rules::teardown::Pending::NeedsAllowTeardown {
+            if let Some(commit) = source.or(unit.source_revision.as_ref()) {
+                plan_unit(
+                    session,
+                    project_dir,
+                    unit,
+                    commit,
+                    same_incarnation(unit, observed.get(name)),
+                    &mut entry,
+                );
+            }
+        }
+        entry
+            .warnings
+            .extend(crate::rules::teardown::finding(environment, name, pending));
+        if let crate::rules::teardown::Pending::Readiness { findings } = pending {
+            entry.warnings.extend(findings.iter().cloned());
+        }
+        report.units.insert(name.clone(), entry);
+    }
+    // Retained tombstones that stay.
+    for (name, unit) in &life.desired {
+        if matches!(unit.lifecycle, Lifecycle::Retained { .. }) && !report.units.contains_key(name) {
+            let mut entry = UnitReport::new(unit.unit.kind.clone());
+            entry.state = Some(UnitState::Retained);
+            report.units.insert(name.clone(), entry);
+        }
+    }
+}
+
+/// Ask a unit's driver for its plan, in a worktree of its own: a ready
+/// unit's changes, or a deleting unit's destroy plan.
 fn plan_unit(
     session: &Session<'_, '_>,
-    prepared: &Prepared,
+    project_dir: &str,
     unit: &DesiredUnit,
     commit: &CommitId,
     observed: Option<&ObservedUnit>,
@@ -1062,7 +1426,7 @@ fn plan_unit(
     let execution = ExecutionContext {
         unit: UnitAddress::new(session.environment().clone(), name.clone()),
         operation: DriverOperation::Plan,
-        project_dir: project_path(&worktree, &prepared.rendered.project_dir),
+        project_dir: project_path(&worktree, project_dir),
         worktree,
         temp_dir,
         env: admitted_env(context.process_env, &unit.spec),
@@ -1131,6 +1495,121 @@ struct Reconcile<'s, 'r, 'a> {
     /// changes after its import: a run that took a broken lease over and
     /// ends otherwise restores the break when it releases.
     landed: bool,
+    /// Units of the ownership set fenced by a deleting incarnation of their name.
+    fenced: BTreeSet<UnitName>,
+    /// Whether the run read signals sent to it: its signal ref goes when it ends.
+    signalled: bool,
+}
+
+/// What a run read before it renders: the snapshot, the runs before it,
+/// and the desired documents of units they created.
+struct Begun {
+    snapshot: EnvironmentSnapshot,
+    coordination: nyl_core::orchestration::ports::Coordination,
+    replaced: Option<nyl_core::orchestration::state::Lease>,
+    adopted: BTreeMap<UnitName, DesiredUnit>,
+    overlay: EnvironmentSnapshot,
+}
+
+/// The hold signals a run acted on.
+#[derive(Debug, Default)]
+pub(super) struct Signals {
+    /// Signals already read, by unit and time.
+    seen: BTreeSet<(UnitName, Timestamp)>,
+    /// Units a signal held during the run.
+    pub(super) held: BTreeSet<UnitName>,
+}
+
+/// Restore the receipts of returning tombstones whose execution key is
+/// unchanged ([`adopt_tombstone`]); whether any receipt was restored.
+fn adopt_tombstones(
+    prepared: &Prepared,
+    resolved: &Resolved,
+    decided: &mut BTreeSet<UnitName>,
+    observed: &mut BTreeMap<UnitName, ObservedUnit>,
+) -> bool {
+    let mut restored = false;
+    for (name, tombstone) in &prepared.desired.tombstones {
+        let Some(unit) = resolved.units.get(name) else {
+            continue;
+        };
+        if decided.contains(name) || unit.execution_key.is_none() {
+            continue;
+        }
+        decided.insert(name.clone());
+        if let Some(receipt) = adopt_tombstone(unit, tombstone) {
+            observed.insert(
+                name.clone(),
+                ObservedUnit {
+                    api_version: StateV1,
+                    kind: nyl_core::orchestration::state::ObservedUnitKind,
+                    unit: unit.unit.clone(),
+                    receipt: Some(receipt),
+                    condition: None,
+                    desired: Some(Box::new(unit.clone())),
+                    waiting: None,
+                },
+            );
+            restored = true;
+        }
+    }
+    restored
+}
+
+/// What selection reads: the resolved units, and held units as stored,
+/// whose receipts their consumers' citations name. A held unit is never
+/// selected: its lifecycle is not active.
+fn selection_view(resolved: &Resolved, held: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitName, DesiredUnit> {
+    let mut view = resolved.units.clone();
+    view.extend(held.iter().map(|(name, unit)| (name.clone(), unit.clone())));
+    view
+}
+
+/// The documents a takeover imports checkpoints against: the resolved
+/// units, and held units as stored (Q28); fenced names import against
+/// their stored, deleting incarnation instead.
+fn import_targets(
+    resolved: &Resolved,
+    held: &BTreeMap<UnitName, DesiredUnit>,
+    fenced: &BTreeSet<UnitName>,
+) -> BTreeMap<UnitName, DesiredUnit> {
+    resolved
+        .units
+        .iter()
+        .chain(held.iter().filter(|(_, unit)| unit.unit.uid.is_some()))
+        .filter(|(name, _)| !fenced.contains(*name))
+        .map(|(name, unit)| (name.clone(), unit.clone()))
+        .collect()
+}
+
+/// `NYL-UNIT-KIND-CHANGE`: the old incarnation is deleting, the new kind waits.
+fn kind_change_warning(
+    environment: &EnvironmentName,
+    name: &UnitName,
+    stored: &DesiredUnit,
+    new: &DesiredUnit,
+) -> Finding {
+    Finding::new(
+        Code::UnitKindChange,
+        format!(
+            "unit {name} of {environment} changed its kind from {} to {}: its old incarnation is deleting, and the new \
+             kind starts once it is removed",
+            stored.unit.kind, new.unit.kind
+        ),
+        format!(
+            "pass --allow-teardown to nyl reconcile to tear the old incarnation down, restore the old kind in source, \
+             or drop the old incarnation without a teardown with `nyl state forget -e {environment} --unit {name}`"
+        ),
+    )
+}
+
+/// `NYL-RUN-STOPPED`: `--fail-fast` started no unit after `unit`.
+fn stopped_warning(environment: &EnvironmentName, unit: &UnitName) -> Finding {
+    Finding::new(
+        Code::RunStopped,
+        format!("--fail-fast stopped the run of {environment} after unit {unit}: it started no further unit"),
+        format!("fix {unit}, then run again; without --fail-fast a run continues with every unit that does not depend on it"),
+    )
 }
 
 /// A `--local` run never imports remote run refs: it refuses while the
@@ -1203,6 +1682,8 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         report,
         checkpointed: false,
         landed: false,
+        fenced: BTreeSet::new(),
+        signalled: false,
     };
     session.lease_deadline.set(Some(state.held.lease.deadline));
     let ending = state.holding();
@@ -1325,70 +1806,30 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
     }
 
-    /// Everything a reconcile does while it holds the lease.
-    #[allow(clippy::too_many_lines)] // The contract's steps in order: snapshot, resolve, waves, report, commit.
+    /// Everything a reconcile or teardown does while it holds the lease.
+    #[allow(clippy::too_many_lines)] // The contract's steps in order: snapshot, resolve, waves, leaving waves, report, commit.
     fn holding(&mut self) -> Ending {
         let session = self.session;
         let context = session.context;
         let request = session.request;
         let environment = session.environment().clone();
-        let snapshot = match context.base.store.snapshot(&request.location) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.report.errors.push(store_error(&environment, &error));
-                return Ending::Release;
-            }
+        let begun = match self.begin() {
+            Ok(begun) => begun,
+            Err(ending) => return ending,
         };
-        if let Err(finding) = super::local::check_record(
-            context.base.store,
-            snapshot.record.as_ref(),
-            &environment,
-            &request.location,
-        ) {
-            self.report.errors.push(finding);
-            return Ending::Release;
+        if let RunMode::Teardown { target } = &request.mode {
+            return self.teardown_holding(&begun, target);
         }
-        if request.local.is_none() {
-            if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location, &environment) {
-                self.report.errors.push(finding);
-                return Ending::Release;
-            }
-        } else if let Err(finding) = check_local_leftovers(session, &self.run) {
-            // A `--local` run never imports remote run refs, so it waits
-            // until remote state took over dead ones.
-            self.report.errors.push(finding);
-            return Ending::Release;
-        }
-        // The runs before this one, read after taking the lease. A
-        // `--local` run under the remote lease never takes the remote
-        // lease's units as its own leftovers (and vice versa).
-        let coordination = match context.base.store.coordination(&request.location, &environment) {
-            Ok(coordination) => coordination,
-            Err(error) => {
-                self.report.errors.push(store_error(&environment, &error));
-                return Ending::Release;
-            }
-        };
-        let replaced = match &request.local {
-            Some(local) if local.lease == super::local::LeaseScope::Remote => None,
-            _ => self.held.replaced.clone(),
-        };
+        let Begun {
+            snapshot,
+            coordination,
+            replaced,
+            adopted,
+            overlay,
+        } = &begun;
         let run = self.run.clone();
-        let leftovers = takeover::leftovers(&run, replaced.as_ref(), &coordination);
-        let mut adopted = takeover::adoptions(&leftovers);
-        adopted.retain(|name, desired| {
-            snapshot.desired.get(name).map(|stored| &stored.unit.uid) != Some(&desired.unit.uid)
-        });
-        let mut overlay = snapshot.clone();
-        overlay.desired.extend(adopted.clone());
-
-        self.record.read_desired.clone_from(&snapshot.tips.desired);
-        self.record.read_observed.clone_from(&snapshot.tips.observed);
-        if let Err(error) = self.write_run(None) {
-            self.report.errors.push(store_error(&environment, &error));
-            return Ending::Release;
-        }
-        let prepared = match session.prepare(&overlay) {
+        let leftovers = takeover::leftovers(&run, replaced.as_ref(), coordination);
+        let prepared = match session.prepare(overlay) {
             Ok(prepared) => prepared,
             Err(findings) => {
                 self.report.errors.extend(findings);
@@ -1403,14 +1844,54 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let warning = leaving_warning(&environment, &self.report.leaving);
             self.report.warnings.push(warning);
         }
+        self.fenced.clone_from(&prepared.desired.fenced);
+        // `--unit` does no lifecycle work (Q5), and a recover import writes
+        // only what it imports (Q56).
+        let lifecycle_work = request.mode.writes_lifecycle() && request.units.is_none();
 
         let mut observed = snapshot.observed.clone();
         let mut artifacts = snapshot.artifacts.clone();
+        let mut life = teardown::Life::new(&overlay.desired);
+        if lifecycle_work {
+            for (name, write) in &prepared.desired.lifecycle {
+                match (&write.desired, prepared.desired.units.contains_key(name)) {
+                    // A returning unit's document is the one resolution writes.
+                    (Some(desired), true) if !prepared.desired.fenced.contains(name) => {
+                        life.desired.insert(name.clone(), desired.clone());
+                    }
+                    _ => life.apply(name, write.clone(), &mut observed, &mut artifacts),
+                }
+                if write.outcome == LifecycleOutcome::KindChange {
+                    let stored = &overlay.desired[name];
+                    let new = &prepared.desired.units[name];
+                    self.report
+                        .warnings
+                        .push(kind_change_warning(&environment, name, stored, new));
+                }
+            }
+            // Tombstones of another kind are dropped once nothing deleting depends on them.
+            for name in &prepared.desired.fenced {
+                if matches!(
+                    overlay.desired.get(name).map(|stored| &stored.lifecycle),
+                    Some(Lifecycle::Retained { .. })
+                ) {
+                    life.releases.insert(name.clone());
+                }
+            }
+        }
+        let mut held_view: BTreeMap<UnitName, DesiredUnit> = prepared
+            .desired
+            .held
+            .iter()
+            .map(|(name, held)| (name.clone(), held.stored.clone()))
+            .collect();
         let mut produced = BTreeSet::new();
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
         let mut created: BTreeSet<UnitName> = BTreeSet::new();
-        let mut taking = Takeover::new(&leftovers, &overlay, &prepared);
+        let mut taking = Takeover::new(&leftovers, overlay, &prepared.desired.units);
+        let runs: Vec<_> = leftovers.runs.iter().map(|state| (*state).clone()).collect();
+        let mut adoptions: BTreeSet<UnitName> = BTreeSet::new();
         let reapply = request.reapply_units();
         let mut first = true;
         let (resolved, skipped) = loop {
@@ -1437,6 +1918,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     produced_in_run: &produced,
                     previous: &snapshot.desired,
                 },
+                &held_view,
             );
             if first && !resolved.errors.is_empty() {
                 // Resolution errors before anything ran stop the run, as configuration errors do.
@@ -1444,12 +1926,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
             first = false;
+            // A returning tombstone adopts its receipt while its execution
+            // key is unchanged (Q3); otherwise it runs as an ordinary change.
+            if adopt_tombstones(&prepared, &resolved, &mut adoptions, &mut observed) {
+                continue;
+            }
             if taking.active {
+                let import_targets = import_targets(&resolved, &held_view, &prepared.desired.fenced);
                 let import = takeover::import(&ImportInputs {
                     leftovers: &leftovers,
                     environment: &environment,
                     now: context.base.clock.now(),
-                    resolved: &resolved.units,
+                    resolved: &import_targets,
                     adopted: &taking.unresolved,
                     snapshot: &snapshot.observed,
                     observed: &observed,
@@ -1460,12 +1948,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     continue;
                 }
             }
-            if !request.mode.executes() {
-                // A recover import resolves and imports; nothing executes.
+            if !request.mode.executes() || request.lifecycle.leaving || life.stopped.is_some() {
+                // A recover import resolves and imports; `--leaving` acts
+                // only on units outside the ownership set.
                 break (resolved, BTreeMap::new());
             }
+            // Holds sent to this run take effect before it starts a unit (Q28).
+            if self.apply_hold_signals(&mut life, &runs, &mut observed, &mut artifacts, Some(&mut held_view)) {
+                continue;
+            }
+            let selectable = selection_view(&resolved, &held_view);
             let candidates = Candidates {
-                desired: &resolved.units,
+                desired: &selectable,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),
@@ -1495,6 +1989,13 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 if request.cancellation.is_cancelled() {
                     return self.cancelled();
                 }
+                if life.stopped.is_some() {
+                    break;
+                }
+                // A hold that arrived since the wave began keeps its unit from starting.
+                if self.apply_hold_signals(&mut life, &runs, &mut observed, &mut artifacts, Some(&mut held_view)) {
+                    break;
+                }
                 let now = context.base.clock.now();
                 let longest = longest_timeout(batch.iter().map(|unit| &resolved.units[unit]));
                 // Units whose uid this run generated go on the run ref before
@@ -1516,7 +2017,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 created.extend(new.into_iter().map(|unit| unit.unit.name));
                 let approvals = local_approvals(session, &resolved, &batch);
                 let results = execute_batch(
-                    session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot, &approvals,
+                    session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, snapshot, &approvals,
                 );
                 let mut results = results.into_iter();
                 while let Some(execution) = results.next() {
@@ -1560,6 +2061,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     if matches!(execution.result, UnitResult::Recovered { .. }) {
                         taking.recovered.insert(name.clone());
                     }
+                    if request.fail_fast
+                        && life.stopped.is_none()
+                        && matches!(
+                            execution.result,
+                            UnitResult::Failed { .. } | UnitResult::Uncertain { .. } | UnitResult::AwaitingApproval
+                        )
+                    {
+                        life.stopped = Some(name.clone());
+                    }
                     self.report.errors.extend(execution.errors.iter().cloned());
                     executions.insert(name, execution);
                 }
@@ -1575,7 +2085,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if taking.active {
             // Units that never got an execution key import their
             // checkpoints without a key comparison, so none stays behind.
-            let mut keyed = resolved.units.clone();
+            let mut keyed = import_targets(&resolved, &held_view, &prepared.desired.fenced);
             let mut unkeyed = taking.unresolved.clone();
             keyed.retain(|name, unit| {
                 if unit.execution_key.is_some() {
@@ -1621,9 +2131,89 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         }
 
+        // The leaving waves: teardowns, retentions, releases, and drops,
+        // after the units of the ownership set (Q5: not with `--unit`).
+        if lifecycle_work && request.mode == RunMode::Reconcile && life.stopped.is_none() {
+            let inputs = teardown::LeaveInputs {
+                project_dir: &prepared.rendered.project_dir,
+                source: None,
+                runs: &runs,
+                options: TeardownOptions {
+                    allow_teardown: request.lifecycle.allow_teardown,
+                    allow_dependents: request.lifecycle.allow_dependents,
+                    allow_incomplete: request.lifecycle.allow_incomplete,
+                    named: None,
+                    explicit: false,
+                },
+            };
+            if let Err(ending) = self.leave(&mut life, &inputs, &mut observed, &mut artifacts) {
+                return ending;
+            }
+        }
+        // A hold that arrived while the last units ran is still written by this run.
+        if request.mode.executes() {
+            self.apply_hold_signals(&mut life, &runs, &mut observed, &mut artifacts, None);
+        }
+        // Held units record what source would change, only when that changes.
+        if lifecycle_work {
+            for (name, held) in &prepared.desired.held {
+                if life.signals.held.contains(name) {
+                    continue;
+                }
+                let pending = hold_pending(held, &source_commit, resolved.shadow.get(name));
+                let Lifecycle::Held { hold, deletion } = &held.stored.lifecycle else {
+                    continue;
+                };
+                if same_pending(hold.pending.as_ref(), pending.as_ref()) {
+                    continue;
+                }
+                let mut hold = hold.clone();
+                hold.pending = pending;
+                let document = DesiredUnit {
+                    lifecycle: Lifecycle::Held {
+                        hold,
+                        deletion: deletion.clone(),
+                    },
+                    ..held.stored.clone()
+                };
+                life.apply(
+                    name,
+                    LifecycleWrite {
+                        desired: Some(document),
+                        remove_observed: false,
+                        outcome: LifecycleOutcome::PendingTeardown,
+                    },
+                    &mut observed,
+                    &mut artifacts,
+                );
+            }
+        }
+
         // The report: one result per unit, only the named ones with --unit.
+        let named = |name: &UnitName| request.units.as_ref().is_none_or(|named| named.contains(name));
+        let not_started = if life.stopped.is_some() {
+            let selectable = selection_view(&resolved, &held_view);
+            let (ready, _) = select(&Candidates {
+                desired: &selectable,
+                observed: &observed,
+                drivers: context.drivers,
+                named: request.units.as_ref(),
+                attempted: &attempted,
+                local: request
+                    .local
+                    .as_ref()
+                    .and_then(|local| local_approve(&local.approve, context.commit_identity)),
+                observations: &snapshot.observations,
+                drift_repair: drift::drift_repair(&prepared.rendered.environment),
+                reapply: &reapply,
+            });
+            ready.into_iter().collect()
+        } else {
+            BTreeSet::new()
+        };
         for (name, unit) in &resolved.units {
-            if request.units.as_ref().is_some_and(|named| !named.contains(name)) {
+            // `--leaving` reports only the units outside the ownership set.
+            if !named(name) || request.lifecycle.leaving {
                 continue;
             }
             let current = observed.get(name);
@@ -1637,6 +2227,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 entry.warnings.clone_from(&execution.warnings);
             } else if let Some(result) = imported_result(&taking, unit, current) {
                 entry.result = Some(result);
+            } else if let (Some(stopped), true) = (&life.stopped, not_started.contains(name)) {
+                entry.result = Some(UnitResult::Blocked {
+                    reason: format!("--fail-fast stopped the run after {stopped}"),
+                });
             } else {
                 entry.result = Some(unexecuted_result(
                     unit,
@@ -1653,51 +2247,67 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             self.report.units.insert(name.clone(), entry);
         }
+        for (name, held) in &prepared.desired.held {
+            if named(name)
+                && !life.signals.held.contains(name)
+                && (!request.lifecycle.leaving || held.rendered.is_none())
+            {
+                let document = life.desired.get(name).unwrap_or(&held.stored);
+                let entry = teardown::held_report(&environment, name, document, false);
+                self.report.units.insert(name.clone(), entry);
+            }
+        }
+        if request.units.is_none() {
+            // Retained tombstones stay retained, run after run.
+            for (name, stored) in &life.desired {
+                if matches!(stored.lifecycle, Lifecycle::Retained { .. })
+                    && !self.report.units.contains_key(name)
+                    && !life.results.contains_key(name)
+                {
+                    let mut entry = UnitReport::new(stored.unit.kind.clone());
+                    entry.result = Some(UnitResult::Retained);
+                    self.report.units.insert(name.clone(), entry);
+                }
+            }
+        }
+        for (name, entry) in std::mem::take(&mut life.results) {
+            if named(&name) {
+                self.report.units.insert(name, entry);
+            }
+        }
+        if let Some(stopped) = &life.stopped {
+            self.report.warnings.push(stopped_warning(&environment, stopped));
+        }
 
         // The transition: only the documents that differ from the snapshot.
         let mut changes = TransitionChanges::default();
         if snapshot.environment.as_ref() != Some(&prepared.desired.environment) {
             changes.environment = Some(prepared.desired.environment.clone());
         }
-        // Adopted units no longer selected keep the desired document of the
-        // incarnation a dead run created, so its resources have state.
-        let unselected = adopted.iter().filter(|(name, _)| !resolved.units.contains_key(*name));
+        // Without lifecycle work, adopted units no longer selected keep the
+        // desired document of the incarnation a dead run created, so its
+        // resources have state; with it, they leave like any other unit.
+        let unselected = adopted
+            .iter()
+            .filter(|(name, _)| !lifecycle_work && !resolved.units.contains_key(*name));
         for (name, unit) in resolved.units.iter().chain(unselected) {
+            if prepared.desired.fenced.contains(name) || life.signals.held.contains(name) {
+                continue;
+            }
             if snapshot.desired.get(name) != Some(unit) {
                 changes.desired.insert(name.clone(), Some(unit.clone()));
             }
         }
-        for (name, document) in &observed {
-            if snapshot.observed.get(name) != Some(document) {
-                changes.observed.insert(name.clone(), Some(document.clone()));
+        for (name, write) in &life.writes {
+            if snapshot.desired.get(name) == write.as_ref() {
+                changes.desired.remove(name);
+            } else {
+                changes.desired.insert(name.clone(), write.clone());
             }
         }
-        let names: BTreeSet<&UnitName> = artifacts.keys().chain(snapshot.artifacts.keys()).collect();
-        for name in names {
-            let after = artifacts.get(name);
-            if snapshot.artifacts.get(name) != after {
-                changes.artifacts.insert(name.clone(), after.cloned());
-            }
-        }
-        // A new receipt replaces the one a drift observation was about.
-        changes
-            .observations
-            .extend(drift::observation_changes(&snapshot, &observed));
+        Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
         if request.cancellation.is_cancelled() {
             return self.cancelled();
-        }
-        if changes.is_empty() && lease::records_break(&self.held) {
-            // The takeover of a broken lease is recorded once, even when
-            // its import changed nothing ("Runs and leases" item 8).
-            changes.commit_unchanged = true;
-        }
-        if changes.is_empty() {
-            self.consume(&leftovers, &observed);
-            self.landed = true;
-            return Ending::Release;
-        }
-        if self.fault(FaultPoint::BeforePush, None) {
-            return self.killed(FaultPoint::BeforePush);
         }
         let mut summary = self.report.transition_summary(request.mode.operation());
         if let Some((unit, entry)) = recover_entry {
@@ -1724,11 +2334,272 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 entry.insert("approval".to_owned(), json!(approval));
             }
         }
+        life.details.insert_into(&mut summary.details);
+        self.commit(snapshot, &leftovers, &observed, changes, summary, Some(source_commit))
+    }
+
+    /// A teardown run (`nyl teardown`): it acts on the stored desired
+    /// documents and renders nothing (Q4).
+    #[allow(clippy::too_many_lines)] // The steps in order: import, requests, leaving waves, report, commit.
+    fn teardown_holding(&mut self, begun: &Begun, target: &TeardownTarget) -> Ending {
+        let session = self.session;
+        let context = session.context;
+        let request = session.request;
+        let environment = session.environment().clone();
+        let Begun {
+            snapshot,
+            coordination,
+            replaced,
+            adopted: _,
+            overlay,
+        } = begun;
+        let run = self.run.clone();
+        let leftovers = takeover::leftovers(&run, replaced.as_ref(), coordination);
+        let mut observed = snapshot.observed.clone();
+        let mut artifacts = snapshot.artifacts.clone();
+        // `--source`: every teardown runs with that revision's files.
+        let source = match &request.source_override {
+            Some(revision) => match session.resolve_revision(revision) {
+                Ok(commit) => Some(commit),
+                Err(finding) => {
+                    self.report.errors.push(finding);
+                    return Ending::Release;
+                }
+            },
+            None => None,
+        };
+        // A run taking over imports against the stored documents.
+        let stored: BTreeMap<UnitName, DesiredUnit> = overlay.desired.clone();
+        let mut taking = Takeover::new(&leftovers, overlay, &BTreeMap::new());
+        if taking.active {
+            let mut produced = BTreeSet::new();
+            loop {
+                let mut keyed = stored.clone();
+                let mut unkeyed = BTreeMap::new();
+                keyed.retain(|name, unit| {
+                    if unit.execution_key.is_some() && unit.unit.uid.is_some() {
+                        return true;
+                    }
+                    unkeyed.insert(name.clone(), unit.clone());
+                    false
+                });
+                let import = takeover::import(&ImportInputs {
+                    leftovers: &leftovers,
+                    environment: &environment,
+                    now: context.base.clock.now(),
+                    resolved: &keyed,
+                    adopted: &unkeyed,
+                    snapshot: &snapshot.observed,
+                    observed: &observed,
+                    handled: &taking.handled,
+                });
+                if !taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                    break;
+                }
+            }
+        }
+        self.report.imported = taking.imported.iter().cloned().collect();
+        self.report.recovered = taking.recovered.iter().cloned().collect();
+
+        let ownership: BTreeSet<UnitName> = snapshot
+            .environment
+            .as_ref()
+            .map(|record| record.ownership.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut life = teardown::Life::new(&stored);
+        if let Err(findings) = self.request_teardowns(&mut life, target, &ownership, &mut observed, &mut artifacts) {
+            self.report.errors.extend(findings);
+            return Ending::Release;
+        }
+        let named: Option<BTreeSet<UnitName>> = match target {
+            TeardownTarget::Units(names) => Some(names.clone()),
+            TeardownTarget::All => None,
+        };
+        let runs: Vec<_> = leftovers.runs.iter().map(|state| (*state).clone()).collect();
+        let inputs = teardown::LeaveInputs {
+            project_dir: &request.entry_project_dir,
+            source: source.as_ref(),
+            runs: &runs,
+            options: TeardownOptions {
+                allow_teardown: true,
+                allow_dependents: request.lifecycle.allow_dependents,
+                allow_incomplete: request.lifecycle.allow_incomplete,
+                named: named.as_ref(),
+                explicit: true,
+            },
+        };
+        if let Err(ending) = self.leave(&mut life, &inputs, &mut observed, &mut artifacts) {
+            return ending;
+        }
+        self.hold_unfinished(&mut life, &mut observed, &mut artifacts);
+        let in_scope = |name: &UnitName| named.as_ref().is_none_or(|named| named.contains(name));
+        for (name, entry) in std::mem::take(&mut life.results) {
+            if in_scope(&name) {
+                self.report.units.insert(name, entry);
+            }
+        }
+        if let Some(stopped) = &life.stopped {
+            self.report.warnings.push(stopped_warning(&environment, stopped));
+        }
+
+        let mut changes = TransitionChanges::default();
+        for (name, write) in &life.writes {
+            if snapshot.desired.get(name) != write.as_ref() {
+                changes.desired.insert(name.clone(), write.clone());
+            }
+        }
+        Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
+        if request.cancellation.is_cancelled() {
+            return self.cancelled();
+        }
+        let mut summary = self.report.transition_summary(request.mode.operation());
+        life.details.insert_into(&mut summary.details);
+        self.commit(snapshot, &leftovers, &observed, changes, summary, None)
+    }
+
+    /// Take the snapshot, check it, and read the runs before this one.
+    fn begin(&mut self) -> Result<Begun, Ending> {
+        let session = self.session;
+        let context = session.context;
+        let request = session.request;
+        let environment = session.environment().clone();
+        let snapshot = match context.base.store.snapshot(&request.location) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.report.errors.push(store_error(&environment, &error));
+                return Err(Ending::Release);
+            }
+        };
+        if let Err(finding) = super::local::check_record(
+            context.base.store,
+            snapshot.record.as_ref(),
+            &environment,
+            &request.location,
+        ) {
+            self.report.errors.push(finding);
+            return Err(Ending::Release);
+        }
+        if request.local.is_none() {
+            if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location, &environment) {
+                self.report.errors.push(finding);
+                return Err(Ending::Release);
+            }
+        } else if let Err(finding) = check_local_leftovers(session, &self.run) {
+            // A `--local` run never imports remote run refs, so it waits
+            // until remote state took over dead ones.
+            self.report.errors.push(finding);
+            return Err(Ending::Release);
+        }
+        // The runs before this one, read after taking the lease. A
+        // `--local` run under the remote lease never takes the remote
+        // lease's units as its own leftovers (and vice versa).
+        let coordination = match context.base.store.coordination(&request.location, &environment) {
+            Ok(coordination) => coordination,
+            Err(error) => {
+                self.report.errors.push(store_error(&environment, &error));
+                return Err(Ending::Release);
+            }
+        };
+        let replaced = match &request.local {
+            Some(local) if local.lease == super::local::LeaseScope::Remote => None,
+            _ => self.held.replaced.clone(),
+        };
+        let mut adopted = {
+            let leftovers = takeover::leftovers(&self.run, replaced.as_ref(), &coordination);
+            takeover::adoptions(&leftovers)
+        };
+        adopted.retain(|name, desired| {
+            snapshot.desired.get(name).map(|stored| &stored.unit.uid) != Some(&desired.unit.uid)
+        });
+        let mut overlay = snapshot.clone();
+        overlay.desired.extend(adopted.clone());
+
+        self.record.read_desired.clone_from(&snapshot.tips.desired);
+        self.record.read_observed.clone_from(&snapshot.tips.observed);
+        if let Err(error) = self.write_run(None) {
+            self.report.errors.push(store_error(&environment, &error));
+            return Err(Ending::Release);
+        }
+        Ok(Begun {
+            snapshot,
+            coordination,
+            replaced,
+            adopted,
+            overlay,
+        })
+    }
+
+    /// The observed side of the transition: changed and removed observed
+    /// documents, artifact sets, and the observations and attestations of
+    /// units whose receipt was replaced or whose state was removed.
+    fn observed_changes(
+        snapshot: &EnvironmentSnapshot,
+        observed: &BTreeMap<UnitName, ObservedUnit>,
+        artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        life: &teardown::Life,
+        changes: &mut TransitionChanges,
+    ) {
+        for (name, document) in observed {
+            if snapshot.observed.get(name) != Some(document) {
+                changes.observed.insert(name.clone(), Some(document.clone()));
+            }
+        }
+        for name in snapshot.observed.keys().filter(|name| !observed.contains_key(*name)) {
+            changes.observed.insert(name.clone(), None);
+        }
+        let names: BTreeSet<&UnitName> = artifacts.keys().chain(snapshot.artifacts.keys()).collect();
+        for name in names {
+            let after = artifacts.get(name);
+            if snapshot.artifacts.get(name) != after {
+                changes.artifacts.insert(name.clone(), after.cloned());
+            }
+        }
+        // A new receipt replaces the one a drift observation was about.
+        changes
+            .observations
+            .extend(drift::observation_changes(snapshot, observed));
+        for name in &life.cleared {
+            if snapshot.observations.contains_key(name) {
+                changes.observations.insert(name.clone(), None);
+            }
+            if snapshot.attestations.contains_key(name) {
+                changes.attestations.insert(name.clone(), None);
+            }
+        }
+    }
+
+    /// Write the transition commit, or release without one when nothing
+    /// changed, then consume the leftover runs.
+    fn commit(
+        &mut self,
+        snapshot: &EnvironmentSnapshot,
+        leftovers: &Leftovers<'_>,
+        observed: &BTreeMap<UnitName, ObservedUnit>,
+        mut changes: TransitionChanges,
+        mut summary: crate::transition::TransitionSummary,
+        source_commit: Option<CommitId>,
+    ) -> Ending {
+        let context = self.context();
+        let request = self.session.request;
+        let environment = self.environment().clone();
+        if changes.is_empty() && lease::records_break(&self.held) {
+            // The takeover of a broken lease is recorded once, even when
+            // its import changed nothing ("Runs and leases" item 8).
+            changes.commit_unchanged = true;
+        }
+        if changes.is_empty() {
+            self.consume(leftovers, observed);
+            self.landed = true;
+            return Ending::Release;
+        }
+        if self.fault(FaultPoint::BeforePush, None) {
+            return self.killed(FaultPoint::BeforePush);
+        }
         if let Some(revision) = &request.source_override {
             summary.details.insert("sourceOverride".to_owned(), json!(revision));
         }
         let trailers = Trailers {
-            source_commit: Some(source_commit),
+            source_commit,
             local: request.local.is_some(),
             requested_by: request.requested().then(|| context.base.requested_by.clone()),
             reason: request.requested().then(|| request.reason.clone()).flatten(),
@@ -1747,7 +2618,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             Ok(commits) => {
                 self.report.commits.extend(commits);
                 self.landed = true;
-                self.consume(&leftovers, &observed);
+                self.consume(leftovers, observed);
                 Ending::Release
             }
             Err(StateError::LeaseLost) => self.lost(),
@@ -1756,6 +2627,74 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 self.failed()
             }
         }
+    }
+
+    /// Apply the holds sent to this run since it last looked (Q28): each
+    /// held unit's document is decided by [`crate::rules::hold::hold`] and
+    /// written in this run's transition commit; the run starts no held unit.
+    /// Whether any hold was applied.
+    pub(super) fn apply_hold_signals(
+        &mut self,
+        life: &mut teardown::Life,
+        runs: &[nyl_core::orchestration::ports::RunState],
+        observed: &mut BTreeMap<UnitName, ObservedUnit>,
+        artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        mut held_view: Option<&mut BTreeMap<UnitName, DesiredUnit>>,
+    ) -> bool {
+        let context = self.context();
+        let environment = self.environment().clone();
+        // A store failure reads as no signal.
+        let received = context
+            .base
+            .store
+            .signals(self.location(), &environment, &self.run)
+            .unwrap_or_default();
+        if !received.is_empty() {
+            self.signalled = true;
+        }
+        let mut applied = false;
+        for signal in received {
+            if signal.action != nyl_core::orchestration::state::SignalAction::Hold
+                || !life.signals.seen.insert((signal.unit.clone(), signal.at))
+                || life.signals.held.contains(&signal.unit)
+            {
+                continue;
+            }
+            let name = signal.unit.clone();
+            let hold = nyl_core::orchestration::state::Hold {
+                since: signal.at,
+                by: signal.by.clone(),
+                reason: signal.reason.clone(),
+                pending: None,
+            };
+            let stored = life.desired.get(&name);
+            match crate::rules::hold::hold(&environment, &name, stored, observed.get(&name), runs, hold) {
+                Ok(crate::rules::hold::HoldWrite::Unchanged) => {}
+                Ok(crate::rules::hold::HoldWrite::Desired(document)) => {
+                    let document = *document;
+                    life.apply(
+                        &name,
+                        LifecycleWrite {
+                            desired: Some(document.clone()),
+                            remove_observed: false,
+                            outcome: LifecycleOutcome::PendingTeardown,
+                        },
+                        observed,
+                        artifacts,
+                    );
+                    let entry = teardown::held_report(&environment, &name, &document, false);
+                    life.results.insert(name.clone(), entry);
+                    life.details.held.push(name.clone());
+                    if let Some(view) = held_view.as_deref_mut() {
+                        view.insert(name.clone(), document);
+                    }
+                    life.signals.held.insert(name);
+                    applied = true;
+                }
+                Err(finding) => self.report.warnings.push(finding),
+            }
+        }
+        applied
     }
 
     /// End a cancelled run: `NYL-RUN-CANCELLED`, exit 4.
@@ -1863,6 +2802,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 (release, false)
             }
         };
+        if self.signalled && self.session.request.mode.writes_run_record() {
+            // The signals sent to this run are consumed with it.
+            let _ = base
+                .store
+                .delete_signals(self.location(), self.environment(), &self.run);
+        }
         if delete && self.session.request.mode.writes_run_record() {
             if let Err(error) = base
                 .store
@@ -1895,13 +2840,13 @@ struct Takeover {
 }
 
 impl Takeover {
-    fn new(leftovers: &Leftovers<'_>, overlay: &EnvironmentSnapshot, prepared: &Prepared) -> Self {
+    fn new(leftovers: &Leftovers<'_>, overlay: &EnvironmentSnapshot, units: &BTreeMap<UnitName, DesiredUnit>) -> Self {
         Self {
             active: !leftovers.runs.is_empty() || leftovers.replaced.is_some(),
             unresolved: overlay
                 .desired
                 .iter()
-                .filter(|(name, _)| !prepared.desired.units.contains_key(*name))
+                .filter(|(name, _)| !units.contains_key(*name))
                 .map(|(name, unit)| (name.clone(), unit.clone()))
                 .collect(),
             handled: BTreeSet::new(),

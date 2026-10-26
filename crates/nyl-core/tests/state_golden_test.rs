@@ -146,6 +146,26 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            // A publication's two-phase teardown waiting after phase 1: the
+            // receipt and its desired copy stay until the teardown completes.
+            "observed-unit-waiting.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": identity("kubernetes", "KubernetesPublication"),
+                "receipt": {"executionKey": KEY, "behaviorVersion": 1, "run": RUN,
+                            "startedAt": "2026-09-24T10:00:00Z", "finishedAt": "2026-09-24T10:01:00Z"},
+                "desired": {
+                    "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("kubernetes", "KubernetesPublication"),
+                    "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
+                    "spec": {"target": "dev", "teardownWait": {"strategy": "delay", "duration": "10m"}},
+                    "resolvedSpec": {"target": "dev", "teardownWait": {"strategy": "delay", "duration": "10m"}},
+                    "executionKey": KEY, "readiness": {"state": "ready"}
+                },
+                "condition": null,
+                "waiting": {"phase": "applications-removed", "reason": "waiting 10m for Argo CD to delete the Applications",
+                            "since": "2026-09-25T12:00:00Z", "until": "2026-09-25T12:10:00Z", "phase1Commit": COMMIT, "run": RUN}
+            }),
+        ),
+        (
             "artifact-container-image.v1.yaml",
             json!({
                 "apiVersion": "artifacts.gitops.nyl/v1", "kind": "ContainerImage",

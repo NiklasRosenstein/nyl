@@ -45,7 +45,7 @@
 //! - A `--local` run never imports, retires, or deletes run refs it read
 //!   from the remote ([`RunState::foreign`]), and a replaced lease counts only
 //!   when its operation has effects ([`leftovers`]).
-//! - Every change goes through [`crate::rules::transitions::apply`]. After
+//! - Every change goes through [`crate::rules::transitions::apply_to`]. After
 //!   the transition commit lands, [`consumed`] decides which leftover run
 //!   refs are deleted and which are retired to evidence refs
 //!   (`<prefix><env>/evidence/<run>`), because a checkpointed receipt on them
@@ -63,7 +63,7 @@ use nyl_core::orchestration::state::{
 use nyl_core::orchestration::time::Timestamp;
 
 use super::freshness::same_incarnation;
-use super::transitions::{apply, Applied, Event};
+use super::transitions::{apply_to, Applied, Event};
 
 /// What a run that took over the lease found of the runs before it.
 #[derive(Debug, Clone)]
@@ -419,7 +419,7 @@ fn mark_uncertain(
         run: run.clone(),
         reason,
     };
-    match apply(&target.unit, current, event) {
+    match apply_to(target, current, event) {
         Ok(Applied::Changed(observed)) => Some(observed),
         Ok(Applied::Evidence) | Err(_) => None,
     }
@@ -482,7 +482,7 @@ fn checkpointed(
         let event = Event::Imported {
             checkpointed: checkpoint.observed.clone(),
         };
-        return Some(match apply(&target.unit, current, event) {
+        return Some(match apply_to(target, current, event) {
             Ok(Applied::Changed(observed)) => Decision::Imported {
                 observed,
                 artifacts: checkpointed_receipt(run, checkpoint).map(|_| checkpoint.artifacts.clone()),
@@ -747,10 +747,10 @@ mod tests {
         world.resolve("network", "v1");
         let import = world.import();
         assert_eq!(import.imported, [name("network")]);
-        assert_eq!(
-            import.observed[&name("network")],
-            success("network", "v1", RUN_2, "10:00")
-        );
+        // The imported receipt carries a copy of the document it was produced for (Q16).
+        let mut expected = success("network", "v1", RUN_2, "10:00");
+        expected.desired = Some(Box::new(unit("network", "v1")));
+        assert_eq!(import.observed[&name("network")], expected);
         assert!(import.artifacts.contains_key(&name("network")));
         assert!(import.recovered.is_empty() && import.warnings.is_empty());
     }
