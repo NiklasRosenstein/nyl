@@ -415,9 +415,10 @@ Release becomes an inventoried resource: it can point at its manifests with
 `spec.manifests` instead of holding them, with its own file remaining the
 default, and an ApplicationGroup can select Releases by literal labels as
 well as by path. Both modes stay, because path membership lets CODEOWNERS
-decide who may join a group. Label membership is guarded instead by Kyverno
-policies that admit Releases with their trusted source path, since a
-generated AppProject admits its members' namespaces. A Release reads
+decide who may join a group. A generated AppProject admits its members'
+namespaces and rendered kinds, so label membership requires an AppProject
+that derives nothing from its members, or Kyverno policies that admit each
+Release and its rendered manifests with their trusted source. A Release reads
 collections, never owns them, and can be instantiated once per domain
 resource with `forEach`. A bundle carries the resources its members
 reference, so a Release that reads GitHub teams also sees their

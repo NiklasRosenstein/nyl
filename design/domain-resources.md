@@ -898,16 +898,18 @@ spec:                                 # rendered once per (environment, resource
   a resource that instantiates units.
 - **Escaping across the trust boundary.** Structural templating renders text
   and then parses YAML. Until now that text was platform-authored; `resource`
-  is not. A string from `resource` printed with `{{ … }}` must therefore
-  consist only of letters, digits, spaces, and `. _ - / @ + =`, which cannot
-  change YAML structure whether the template places it in a plain or a quoted
-  scalar, so `'teams/{{ resource.metadata.name }}'` renders as
-  `'teams/payments'`. Any other string fails rendering with
-  `NYL-UNIT-RESOURCE-UNSAFE-VALUE`, naming the field, so `"x\napproval: auto"`
-  never becomes structure. A template inserts such a value as a whole YAML
-  value with `{{ resource.spec.description | tojson }}`, which renders a
-  quoted JSON string, or a list or object. Names already follow the DNS label
-  rule, and schemas should constrain the other fields that templates use.
+  is not. In a unit with `forEach`, every `{{ … }}` that emits a string must
+  therefore emit only letters, digits, spaces, and `. _ - / @ + =`, which
+  cannot change YAML structure in a plain or a quoted scalar, or a value that
+  `tojson` produced. Otherwise rendering fails with
+  `NYL-UNIT-RESOURCE-UNSAFE-VALUE`, naming the field. The check runs in the
+  template engine's output formatter, so it holds whatever filters or
+  concatenation built the string: `'teams/{{ resource.metadata.name }}'`
+  renders as `'teams/payments'`, and `"x\napproval: auto"` never becomes
+  structure. A template inserts any other value whole with
+  `{{ resource.spec.description | tojson }}`, which renders a quoted JSON
+  string, or a list or object. Names already follow the DNS label rule, and
+  schemas should constrain the other fields that templates use.
 - `nyl get units` lists the instances under their base unit. `nyl get unit
   team-aws` shows the `forEach` match for each instance.
 
@@ -950,7 +952,7 @@ instantiating it differently in some environments.
 | Rule or type | Home |
 | --- | --- |
 | `ResourceDefinition`, the domain envelope, `collections`, `fromCollection`, `ResourceBundle`, its provenance, golden files | `nyl-core` (`resources::domain`, `bindings`) |
-| Identity, duplicates, ordering, membership, ownership claims, the reference closure, removal detection, transition rules | `nyl-collections`, pure rules, one module each |
+| Identity, duplicates, ordering, membership, ownership claims, the reference closure, removal detection, transition-rule decisions | `nyl-collections`, pure rules, one module each; CEL evaluation behind a `RuleEvaluator` port in `nyl-core` |
 | Schema validation and defaulting (JSON Schema 2020-12, a new dependency to evaluate) | `nyl-collections`, pure |
 | Bundle assembly and its canonical digest | `nyl-collections`, shared by units and [Releases](release-catalog.md) |
 | Discovery of definitions and resources, the catalog, Kyverno admission | `nyl-render` (`gitops::discovery`, `validation`), returned through `SourceRenderer` as part of `RenderedSource` |

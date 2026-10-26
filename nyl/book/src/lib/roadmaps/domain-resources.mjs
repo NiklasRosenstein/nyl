@@ -113,11 +113,12 @@ export const domainResourcesRoadmap = {
       summary: 'Releases point at their manifests and ApplicationGroups select them by label as well as by path.',
       needs: ['M2'],
       items: [
-        { text: 'Literal Release `metadata.labels`', done: false },
+        { text: 'Literal Release `metadata.labels`, scanned and verified after rendering', done: false },
         { text: '`spec.manifests` under the local path rule, with `spec.include` deprecated', done: false },
         { text: 'Several Releases in one file, next to other Releases or control resources', done: false },
         { text: 'The Release catalog keyed by path and document, and `nyl get releases`', done: false },
-        { text: 'ApplicationGroup source `selector` combined with path membership', done: false },
+        { text: 'ApplicationGroup source `selector` combined with path membership, guarded by an AppProject that derives nothing', done: false },
+        { text: '`--release` for shared files in direct commands', done: false },
       ],
     },
     {
@@ -126,19 +127,19 @@ export const domainResourcesRoadmap = {
       summary: 'Policies decide which folders may declare which Releases, so label membership cannot widen a generated AppProject.',
       needs: ['R3', 'R8'],
       items: [
-        { text: 'Kyverno validating policies over rendered Releases, per target', done: false },
-        { text: 'Trusted source, target, and ApplicationGroup annotations', done: false },
+        { text: 'Kyverno validating policies over rendered Releases and their manifests, per target', done: false },
+        { text: 'Trusted repository, source, target, and ApplicationGroup annotations, and the effective namespace', done: false },
       ],
     },
     {
       id: 'R10',
       title: 'Collections in Releases',
       summary: 'Releases read domain resource collections as template data, without orchestration.',
-      needs: ['R1', 'R8'],
+      needs: ['R1', 'R3', 'R8'],
       items: [
         { text: 'The pure `nyl-collections` crate with membership, the reference closure, and bundle assembly, shared with R2', done: false },
         { text: 'Release `spec.collections`, read-only, with `${ … }` selector values', done: false },
-        { text: '`collections` and `referenced` template variables with YAML-safe printing', done: false },
+        { text: '`collections` and `referenced` template variables with YAML-safe output', done: false },
         { text: 'Bundle digests in the dependency recorder and the ownership index', done: false },
         { text: 'Rejection in remote sources and of unresolvable references', done: false },
       ],
