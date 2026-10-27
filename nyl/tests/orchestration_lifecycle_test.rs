@@ -316,30 +316,38 @@ fn test_a_failed_teardown_waits_for_recover_and_then_runs_again() {
 }
 
 /// Recovery: an uncertain teardown of an idempotent unit runs again by
-/// itself; a teardown that passes the unit's timeout is uncertain.
+/// itself; a teardown that passes the unit's timeout is uncertain. A
+/// teardown killed by a signal is uncertain too, where processes die of
+/// signals (unix).
 #[test]
 fn test_uncertain_teardowns_converge_and_a_timed_out_teardown_is_uncertain() {
-    let (_project, harness) = harness_with(&format!(
-        "{}---\n{}",
-        command_unit(
-            "flaky",
-            "true",
-            Some("if [ -e %SCENARIO_TMP%/die ]; then kill -9 $$; fi"),
-            "  idempotent: true\n",
-        ),
-        command_unit("slow", "true", Some("sleep 5"), "  idempotent: true\n  timeout: 1s\n"),
-    ));
+    let slow = command_unit("slow", "true", Some("sleep 5"), "  idempotent: true\n  timeout: 1s\n");
+    let flaky = command_unit(
+        "flaky",
+        "true",
+        Some("if [ -e %SCENARIO_TMP%/die ]; then kill -9 $$; fi"),
+        "  idempotent: true\n",
+    );
+    let units = if cfg!(unix) {
+        format!("{flaky}---\n{slow}")
+    } else {
+        slow
+    };
+    let (_project, harness) = harness_with(&units);
     assert_eq!(harness.reconcile(&[]).exit.code(), 0);
     std::fs::write(harness.world.scenario_tmp().join("die"), "").unwrap();
     remove_units(&harness);
     let uncertain = reconcile_allowing(&harness, false);
     assert_eq!(uncertain.exit.code(), 4, "{uncertain:#?}");
-    assert_eq!(outcome(&uncertain, "uncertain"), set(&["flaky", "slow"]));
+    let expected: &[&str] = if cfg!(unix) { &["flaky", "slow"] } else { &["slow"] };
+    assert_eq!(outcome(&uncertain, "uncertain"), set(expected));
     assert!(uncertain_run(harness.snapshot().observed.get(&unit("slow"))).is_some());
 
-    std::fs::remove_file(harness.world.scenario_tmp().join("die")).unwrap();
-    let converged = harness.reconcile(&[]);
-    assert_eq!(outcome(&converged, "removed"), set(&["flaky"]), "{converged:#?}");
+    if cfg!(unix) {
+        std::fs::remove_file(harness.world.scenario_tmp().join("die")).unwrap();
+        let converged = harness.reconcile(&[]);
+        assert_eq!(outcome(&converged, "removed"), set(&["flaky"]), "{converged:#?}");
+    }
 }
 
 /// Replace (`nyl teardown --unit` of a unit in the ownership set) and Q3:
