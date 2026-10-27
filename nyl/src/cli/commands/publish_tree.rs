@@ -158,9 +158,10 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         ));
     };
     if dirty && args.source.require_clean {
-        return Err(NylError::config(
-            "publish-tree --require-clean requires a clean source worktree",
-        ));
+        let summary = crate::gitops::provenance::dirty_worktree_summary(&inventory.project_root, &carried)?;
+        return Err(NylError::config(format!(
+            "publish-tree --require-clean requires a clean source worktree\n{summary}\nCommit, stash, or remove the changes before publishing."
+        )));
     }
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
