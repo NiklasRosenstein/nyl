@@ -1,6 +1,6 @@
 [package]
 name = "nyl-git"
-description = "Nyl remote Git transport: the hardened git command line and optional credentials"
+description = "Nyl Git transport and worktree inspection through the hardened git command line"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

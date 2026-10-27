@@ -7,7 +7,7 @@
     clippy::module_name_repetitions
 )]
 
-//! Remote Git transport shared by rendering, publication, and state.
+//! Git transport and worktree inspection shared by rendering, publication, and state.
 //!
 //! Remote operations run the `git` command line, so they authenticate exactly
 //! as the user's own `git` does: OpenSSH reads `~/.ssh/config` (`Host`
@@ -23,11 +23,13 @@
 
 mod auth;
 mod error;
+mod status;
 mod transport;
 mod url;
 
 pub use auth::{CredentialEntry, GitAuth, GitSettings};
 pub use error::{GitError, Rejection, Result};
+pub use status::{worktree_status, WorktreeStatusEntry};
 pub use transport::{
     fetch, fetch_branch, ls_remote, push_atomic, push_branch_if_unchanged, remote_branch, Expect, RefUpdate,
 };

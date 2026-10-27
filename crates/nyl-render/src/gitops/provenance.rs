@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use git2::{Repository, Status, StatusOptions};
+use git2::Repository;
 
 use super::{CompiledTargetTree, GitOpsInventory};
 use crate::resources::GitOpsResourceKind;
@@ -59,68 +59,28 @@ pub fn dirty_worktree_summary(project_root: &Path, carried: &[PathBuf]) -> Resul
 }
 
 fn dirty_worktree_changes(repository: &Repository, project_root: &Path, carried: &[PathBuf]) -> Result<Vec<String>> {
-    let mut options = StatusOptions::new();
-    options
-        .include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(false);
-    let statuses = repository
-        .statuses(Some(&mut options))
+    let worktree = repository
+        .workdir()
+        .ok_or_else(|| NylError::config("Source Git repository has no worktree"))?;
+    let statuses = nyl_git::worktree_status(repository.path(), worktree)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?;
     let carried = carried.iter().map(|path| canonical_file_path(path)).collect::<Vec<_>>();
-    let worktree = repository.workdir().map(canonical_file_path);
+    let worktree = canonical_file_path(worktree);
     let mut changes = Vec::new();
-    for entry in statuses.iter() {
-        let carried_file = entry.status().is_wt_new()
-            && worktree
-                .as_ref()
-                .zip(entry.path().ok())
-                .is_some_and(|(worktree, path)| carried.contains(&worktree.join(path)));
-        if carried_file || is_project_cache_status(repository, project_root, entry.path().ok()) {
+    for entry in &statuses {
+        let carried_file = entry.untracked && carried.contains(&worktree.join(&entry.path));
+        if carried_file || is_project_cache_status(repository, project_root, &entry.path) {
             continue;
         }
-        let status = entry.status();
-        let (index, worktree) = if status.is_conflicted() {
-            ('U', 'U')
-        } else if status.is_wt_new() {
-            ('?', '?')
-        } else {
-            (
-                status_column(
-                    status,
-                    &[
-                        (Status::INDEX_NEW, 'A'),
-                        (Status::INDEX_DELETED, 'D'),
-                        (Status::INDEX_RENAMED, 'R'),
-                        (Status::INDEX_TYPECHANGE, 'T'),
-                        (Status::INDEX_MODIFIED, 'M'),
-                    ],
-                ),
-                status_column(
-                    status,
-                    &[
-                        (Status::WT_DELETED, 'D'),
-                        (Status::WT_RENAMED, 'R'),
-                        (Status::WT_TYPECHANGE, 'T'),
-                        (Status::WT_MODIFIED, 'M'),
-                    ],
-                ),
-            )
-        };
         changes.push(format!(
-            "{index}{worktree} {:?}",
-            String::from_utf8_lossy(entry.path_bytes())
+            "{}{} {:?}",
+            char::from(entry.status[0]),
+            char::from(entry.status[1]),
+            entry.path.to_string_lossy()
         ));
     }
     changes.sort();
     Ok(changes)
-}
-
-fn status_column(status: Status, codes: &[(Status, char)]) -> char {
-    codes
-        .iter()
-        .find(|(flag, _)| status.contains(*flag))
-        .map_or(' ', |(_, code)| *code)
 }
 
 /// Canonical form of a possibly missing file: its canonical parent plus name.
@@ -136,7 +96,7 @@ fn canonical_file_path(path: &Path) -> PathBuf {
     })
 }
 
-fn is_project_cache_status(repository: &Repository, project_root: &Path, status_path: Option<&str>) -> bool {
+fn is_project_cache_status(repository: &Repository, project_root: &Path, status_path: &Path) -> bool {
     let Some(worktree) = repository.workdir() else {
         return false;
     };
@@ -149,7 +109,7 @@ fn is_project_cache_status(repository: &Repository, project_root: &Path, status_
     let Ok(project_relative) = project_root.strip_prefix(worktree) else {
         return false;
     };
-    status_path.is_some_and(|path| Path::new(path).starts_with(project_relative.join(".nyl/cache")))
+    status_path.starts_with(project_relative.join(".nyl/cache"))
 }
 
 /// Digests of every project file a compiled target read, keyed by
@@ -293,5 +253,32 @@ mod tests {
         // A carried path does not excuse a modified tracked file.
         std::fs::write(root.join("nyl.toml"), "[project]\n").unwrap();
         assert!(worktree_source_state(root, &carried).unwrap().dirty);
+    }
+
+    #[test]
+    fn test_worktree_source_state_checks_the_entire_worktree_from_a_nested_project() {
+        let (directory, repository) = committed_worktree();
+        let root = directory.path();
+        let project = root.join("nested");
+        std::fs::create_dir_all(project.join(".nyl/cache")).unwrap();
+        std::fs::write(project.join(".nyl/cache/entry"), "cached").unwrap();
+        let state = project.join("state file.json");
+        std::fs::write(&state, "{}").unwrap();
+        let carried = [state];
+        assert!(!worktree_source_state(&project, &carried).unwrap().dirty);
+
+        // Only the selected project's cache is excluded.
+        std::fs::create_dir_all(root.join(".nyl/cache")).unwrap();
+        std::fs::write(root.join(".nyl/cache/entry"), "cached").unwrap();
+        assert!(worktree_source_state(&project, &carried).unwrap().dirty);
+        std::fs::remove_dir_all(root.join(".nyl")).unwrap();
+
+        std::fs::remove_file(root.join("nyl.toml")).unwrap();
+        assert!(worktree_source_state(&project, &carried).unwrap().dirty);
+        // Staging the deletion must not hide it either.
+        let mut index = repository.index().unwrap();
+        index.remove_path(Path::new("nyl.toml")).unwrap();
+        index.write().unwrap();
+        assert!(worktree_source_state(&project, &carried).unwrap().dirty);
     }
 }
