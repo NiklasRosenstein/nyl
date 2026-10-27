@@ -263,11 +263,13 @@ impl Driver for FakeInfra {
         unit: &DesiredUnit,
         _receipt: &Receipt,
     ) -> DriverResult<Supported<Verification>> {
-        let planned = Self::plan_change(unit, resolved_spec(unit)?)?;
-        let drift = match planned.changes {
-            Change::None => Drift::Clean,
-            changes => Drift::Drifted {
-                summary: format!("applying would {changes:?}").to_lowercase(),
+        let drift = match self.script.verification(&unit.unit.name)? {
+            Some(drift) => drift,
+            None => match Self::plan_change(unit, resolved_spec(unit)?)?.changes {
+                Change::None => Drift::Clean,
+                changes => Drift::Drifted {
+                    summary: format!("applying would {changes:?}").to_lowercase(),
+                },
             },
         };
         Ok(Supported::Supported(Verification {
@@ -289,7 +291,8 @@ impl Driver for FakeInfra {
                 },
                 artifacts: Vec::new(),
             },
-            Some(Scripted::Failed { .. }) => Inspection::NotApplied,
+            // A drift verdict scripts `verify`, never `inspect`.
+            Some(Scripted::Failed { .. } | Scripted::Drifted) => Inspection::NotApplied,
             Some(Scripted::Uncertain) => Inspection::Unknown {
                 reason: "scripted unknown inspect".to_owned(),
             },

@@ -1,0 +1,8 @@
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: extra
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  idempotent: true

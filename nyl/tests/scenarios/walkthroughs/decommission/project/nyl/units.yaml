@@ -1,0 +1,74 @@
+# cache and job tear down (deletionPolicy Teardown by default);
+# worker consumes cache's endpoint and declares Retain; ledger can tear
+# down but declares Retain; seed has no teardown step, so it is Retain.
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: cache
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+  command: ['./resource.sh', 'create', 'endpoint']
+  teardown: ['./resource.sh', 'remove']
+  outputs:
+    endpoint: {type: string}
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: job
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+  command: ['./resource.sh', 'create']
+  teardown: ['./resource.sh', 'remove']
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: ledger
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+  command: ['./resource.sh', 'create']
+  teardown: ['./resource.sh', 'remove']
+  deletionPolicy: Retain
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: seed
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+  command: ['./resource.sh', 'create']
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: probe
+  labels: {qa: 'true'}
+spec:
+  files: ['../scripts/resource.sh']
+  workingDir: ../scripts
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true
+  command: ['./resource.sh', 'create']
+  teardown: ['./resource.sh', 'remove']

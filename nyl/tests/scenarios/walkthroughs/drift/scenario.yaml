@@ -1,0 +1,95 @@
+# Drift: `verify` finds drift, `reconcile` repairs the idempotent unit, and
+# the other waits for an approval (design/orchestration-core.md, Drift, as
+# amended by the part 5 decisions).
+contract: design/orchestration-core.md#drift
+milestone: M3
+tiers: [1]                            # the local approval and --local run need tier 1's clones
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [idempotent, other]
+
+  # Something outside Nyl changes both resources; their execution keys do not change.
+  - file: {path: resources/idempotent, content: "changed outside Nyl\n"}
+  - file: {path: resources/other, content: "changed outside Nyl\n"}
+  - nyl: [verify, -e, dev]
+    exit: 3                           # verify records drift and fails
+    expect:
+      drifted: [idempotent, other]
+      codes: [NYL-VERIFY-DRIFT]
+      commits: {desired: 0, observed: 1}
+
+  # `drifted` is a unit state: work for the next reconcile, like a change,
+  # so status exits 2 for it, as for `ready`.
+  - nyl: [status, -e, dev]
+    exit: 2
+    expect:
+      drifted: [idempotent, other]
+      units:
+        idempotent: {receipt: current, drift: {result: drifted}}
+        other: {receipt: current, drift: {result: drifted}}
+  # Decision on drift: "`drifted` is a unit state in status, plan, and
+  # reports"; "`nyl plan` lists it as a unit that would execute".
+  - nyl: [plan, -e, dev]
+    exit: 0
+    expect:
+      drifted: [idempotent, other]
+
+  # driftRepair: converge (the default) re-executes the converging unit; the
+  # unit that is not safe to re-run awaits approval, and the run continues.
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: [idempotent]
+      awaiting-approval: [other]
+      driftRepaired: [idempotent]
+      commits: {desired: 0, observed: 1}
+  # The new receipt drops idempotent's drift observation in the same commit.
+  - nyl: [status, -e, dev]
+    exit: 2
+    expect:
+      current: [idempotent]
+      drifted: [other]
+
+  # A local run repairs it with the local approval identity. Its commits stay
+  # in its own clone, so the remote state still shows `other` drifted.
+  - nyl: [reconcile, -e, dev, --local, --approve, other]
+    exit: 0
+    expect:
+      executed: [other]
+      current: [idempotent]
+      driftRepaired: [other]
+      commits: {desired: 0, observed: 0}
+  - nyl: [verify, -e, dev]
+    exit: 0                           # the local run restored other's resource
+    expect:
+      commits: {desired: 0, observed: 1}
+
+  # driftRepair: manual: reconcile repairs nothing by itself; drifted units
+  # wait until a forced run.
+  - commit: {branch: main, message: "Review every repair in dev", apply: patches/manual}
+  - file: {path: resources/idempotent, content: "changed outside Nyl again\n"}
+  - nyl: [verify, -e, dev]
+    exit: 3
+    expect:
+      drifted: [idempotent]
+      codes: [NYL-VERIFY-DRIFT]
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: []
+      drifted: [idempotent]
+      current: [other]
+  - nyl: [reconcile, -e, dev, --unit, idempotent, --reapply, --reason, "repair reviewed"]
+    exit: 0
+    expect:
+      executed: [idempotent]
+      reapplied: [idempotent]
+      commits: {desired: 0, observed: 1}
+  - nyl: [status, -e, dev]
+    exit: 0
+    expect:
+      current: [idempotent, other]

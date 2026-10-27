@@ -1,0 +1,143 @@
+# Decommissioning with the operator commands on Command units: teardown of
+# units in source (a replace, and tear down then hold), holds that freeze a
+# requested teardown, a retained tombstone, a kind change, and `state delete`
+# (design/orchestration-core.md, Deletion, as amended by the part 5 decisions).
+contract: design/orchestration-core.md#deletion
+milestone: M3
+tiers: [1]                            # the qa environment shares tier 1's state repository
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [state, init, -e, qa]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [cache, worker, scratch, job, ledger, seed]
+      units:
+        cache: {receipt: current}
+        worker: {receipt: current}
+  - nyl: [reconcile, -e, qa]
+    exit: 0
+    expect:
+      executed: [probe]
+
+  # Tearing down a unit still in source replaces it: the next reconcile
+  # creates a new incarnation. worker's key is unchanged (the new cache has
+  # the same endpoint), so it stays current (Q3: the execution key alone decides).
+  - nyl: [teardown, -e, dev, --unit, cache, --reason, "replace the cache"]
+    exit: 0
+    expect:
+      removed: [cache]
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [cache]
+      current: [worker, scratch, job, ledger, seed]
+      units:
+        cache: {lifecycle: active, uid: new, receipt: current}
+        worker: {lifecycle: active, uid: same, receipt: current}
+
+  # Tear down, then hold: scratch stays held without an incarnation, and
+  # reconcile does not recreate it until resume.
+  - nyl: [teardown, -e, dev, --unit, scratch, --hold, --reason, "pause scratch"]
+    exit: 0
+    expect:
+      removed: [scratch]
+      units:
+        scratch: {lifecycle: held, uid: none}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: []
+      held: [scratch]
+  - nyl: [resume, -e, dev, --unit, scratch]
+    exit: 0
+    expect:
+      outcome: done
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [scratch]
+      units:
+        scratch: {lifecycle: active, uid: new}
+
+  # A held unit never progresses: tearing it down only records the request,
+  # and resume deletes nothing; the next run carries the teardown out.
+  - nyl: [hold, -e, dev, --unit, job, --reason, "keep job"]
+    exit: 0
+  - nyl: [teardown, -e, dev, --unit, job, --reason, "remove job"]
+    exit: 0
+    expect:
+      held: [job]
+      commits: {desired: 1, observed: 0}
+      units:
+        job: {lifecycle: held, receipt: current}
+  - nyl: [resume, -e, dev, --unit, job]
+    exit: 0
+    expect:
+      units:
+        job: {lifecycle: deleting, receipt: current}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      removed: [job]
+  - nyl: [reconcile, -e, dev]
+    exit: 0                           # job is still in source: a new incarnation
+    expect:
+      executed: [job]
+
+  # A Retain unit leaving source becomes a retained tombstone; tearing the
+  # tombstone down removes it.
+  - commit: {branch: main, message: "Remove worker", delete: [nyl/worker.yaml]}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      retained: [worker]
+      units:
+        worker: {lifecycle: retained}
+  - nyl: [teardown, -e, dev, --unit, worker, --reason, "remove the retained worker"]
+    exit: 0
+    expect:
+      removed: [worker]
+
+  # A kind change tears the old incarnation down first, which an omission
+  # or kind change starts only with --allow-teardown; the new kind is fenced.
+  - commit: {branch: main, message: "Build scratch as an image", apply: patches/scratch-image}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      pending-teardown: [scratch]
+      codes: [NYL-UNIT-KIND-CHANGE]
+
+  # state delete refuses while incarnations remain; with --teardown it tears
+  # every unit down first, releasing kinds without teardown and declared
+  # Retain units (Q7), and leaves the deleted marker in state.yaml.
+  - nyl: [state, delete, -e, dev]
+    exit: 1
+    expect:
+      codes: [NYL-STATE-DELETE-INCARNATIONS]
+      commits: {desired: 0, observed: 0}
+  - nyl: [state, delete, -e, dev, --teardown, --allow-dependents, --reason, "decommission dev"]
+    exit: 0
+    expect:
+      outcome: done
+      removed: [cache, scratch, job]
+      released: [ledger, seed]
+  - nyl: [reconcile, -e, dev]
+    exit: 1
+    expect:
+      codes: [NYL-STATE-DELETED]
+      commits: {desired: 0, observed: 0}
+  # qa's state beneath its own path on the same refs is untouched.
+  - nyl: [reconcile, -e, qa]
+    exit: 0
+    expect:
+      executed: []
+      current: [probe]
+  - nyl: [state, init, -e, dev]
+    exit: 1
+    expect:
+      codes: [NYL-STATE-DELETED]
+  - nyl: [state, init, -e, dev, --fresh]
+    exit: 0

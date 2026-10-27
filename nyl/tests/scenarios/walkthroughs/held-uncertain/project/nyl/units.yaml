@@ -1,0 +1,31 @@
+# producer is not idempotent: an uncertain execution waits for recover
+# (recovery policy manual). consumer reads its output.
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: producer
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/producer.sh']
+  values:
+    release: 'v1'
+  workingDir: ../scripts
+  command: ['./producer.sh']
+  outputs:
+    release: {type: string}
+  timeout: 10m
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: consumer
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/consumer.sh']
+  values:
+    release: {fromUnit: {unit: producer, output: release}}
+    replicas: '1'
+  workingDir: ../scripts
+  command: ['./consumer.sh']
+  idempotent: true
+  timeout: 10m

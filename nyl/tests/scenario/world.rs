@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 
-use super::format::{BranchStep, CommitStep, SquashMergeStep};
+use super::format::{BranchStep, CommitStep, FileStep, SquashMergeStep};
 
 /// The registry host tier 1 substitutes for `%REGISTRY%`; nothing listens there.
 pub const FAKE_REGISTRY: &str = "registry.invalid:5000";
@@ -168,6 +168,21 @@ impl World {
     }
 
     /// A `ref: {delete}` step: delete any ref in the state repository.
+    /// A `file` step: a change made outside Nyl beneath `%SCENARIO_TMP%`,
+    /// writing the file (and its parents) or removing it.
+    pub fn file(&self, step: &FileStep) -> Result<(), String> {
+        let path = self.scenario_tmp().join(&step.path);
+        match &step.content {
+            Some(content) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+                }
+                std::fs::write(&path, content).map_err(|error| format!("{}: {error}", path.display()))
+            }
+            None => std::fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display())),
+        }
+    }
+
     pub fn delete_ref(&self, reference: &str) {
         git(&self.bare(), &["update-ref", "-d", reference]);
     }

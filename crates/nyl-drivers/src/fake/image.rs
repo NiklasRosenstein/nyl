@@ -184,11 +184,12 @@ impl Driver for FakeImage {
     fn verify(
         &self,
         _ctx: &ExecutionContext<'_>,
-        _unit: &DesiredUnit,
+        unit: &DesiredUnit,
         _receipt: &Receipt,
     ) -> DriverResult<Supported<Verification>> {
+        // The fake registry never changes, so only a script makes it drift.
         Ok(Supported::Supported(Verification {
-            drift: Drift::Clean,
+            drift: self.script.verification(&unit.unit.name)?.unwrap_or(Drift::Clean),
             observations: Vec::new(),
             attestations: Vec::new(),
         }))
