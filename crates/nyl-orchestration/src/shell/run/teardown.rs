@@ -116,6 +116,37 @@ impl Details {
 }
 
 impl Life {
+    /// `teardown --all` holds every unit still in the ownership set once its
+    /// teardown completes ([Instances](../../../../../design/orchestration-core.md#instances)).
+    /// A decommission that did not finish in its invocation stays `deleting`
+    /// (so `--confirm-removed` and running it again continue it); whichever
+    /// later run completes the teardown applies the hold recorded by the
+    /// deletion's request, so the unit is not recreated.
+    pub(super) fn carry_decommission_holds(&mut self, ownership: &BTreeSet<UnitName>) {
+        for (name, unit) in &self.desired {
+            let Lifecycle::Deleting { deletion } = &unit.lifecycle else {
+                continue;
+            };
+            if deletion.reason != DeletionReason::Decommission
+                || !ownership.contains(name)
+                || self.hold_after.contains_key(name)
+            {
+                continue;
+            }
+            if let Some(requested) = &deletion.requested {
+                self.hold_after.insert(
+                    name.clone(),
+                    Hold {
+                        since: requested.at,
+                        by: requested.by.clone(),
+                        reason: requested.reason.clone(),
+                        pending: None,
+                    },
+                );
+            }
+        }
+    }
+
     pub(super) fn new(stored: &BTreeMap<UnitName, DesiredUnit>) -> Self {
         Self {
             desired: stored.clone(),
@@ -958,9 +989,11 @@ impl Reconcile<'_, '_, '_> {
         )
     }
 
-    /// "Tear down, then hold" for teardowns that did not finish in this
-    /// invocation: the deleting unit is held with its deletion block, so no
-    /// later run recreates it; after `resume` the teardown continues.
+    /// "Tear down, then hold" for `--hold` teardowns that did not finish in
+    /// this invocation: the deleting unit is held with its deletion block,
+    /// so no later run recreates it; after `resume` the teardown continues.
+    /// A decommission (`--all`) is not held here; see
+    /// [`Life::carry_decommission_holds`].
     pub(super) fn hold_unfinished(
         &mut self,
         life: &mut Life,
@@ -978,6 +1011,12 @@ impl Reconcile<'_, '_, '_> {
                 continue;
             };
             if !matches!(unit.lifecycle, Lifecycle::Deleting { .. } | Lifecycle::Active) || unit.unit.uid.is_none() {
+                continue;
+            }
+            // A decommission stays deleting: its hold is applied by the run
+            // that completes it (`carry_decommission_holds`).
+            if matches!(&unit.lifecycle, Lifecycle::Deleting { deletion } if deletion.reason == DeletionReason::Decommission)
+            {
                 continue;
             }
             let Ok(next) = lifecycle::transition(&unit.lifecycle, LifecycleEvent::Hold { hold }) else {

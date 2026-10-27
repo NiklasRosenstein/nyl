@@ -360,6 +360,8 @@ fn test_an_importer_ending_before_its_commit_puts_the_broken_lease_back() {
 /// selects: the takeover adopts its uid, commits its desired document and
 /// an uncertain observed document naming the dead run, and only then
 /// deletes the run ref, so its resources are never left without state.
+/// The unit is leaving the ownership set, and an uncertain unit is neither
+/// dropped nor torn down, so the run reports it uncertain (exit 4).
 #[test]
 fn test_takeover_records_state_for_a_deselected_unit_the_dead_run_created() {
     let project = project(&[
@@ -393,7 +395,7 @@ fn test_takeover_records_state_for_a_deselected_unit_the_dead_run_created() {
     // The Command timeout of 30 minutes plus the 10-minute grace.
     harness.advance(41);
     let report = harness.reconcile(&[]);
-    assert_eq!(report.exit.code(), 0, "{report:#?}");
+    assert_eq!(report.exit.code(), 4, "{report:#?}");
     assert_eq!(names(&report.imported), set(&["alpha"]));
     assert_eq!(names(&report.recovered), set(&["beta"]));
     assert_eq!(report.leaving.len(), 1, "{report:#?}");

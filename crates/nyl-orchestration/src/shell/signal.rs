@@ -177,7 +177,6 @@ fn rejected(environment: &EnvironmentName, unit: &UnitName) -> Finding {
 /// The signals sent to `run` that it has not acted on yet, oldest first.
 /// The run path reads them before starting each unit (holds) and while a
 /// teardown waits (confirmations); a store failure reads as none.
-#[allow(dead_code)] // Skeleton: package `lifecycle` calls it from the run path.
 pub(crate) fn received(
     context: &Context<'_>,
     location: &StateLocation,

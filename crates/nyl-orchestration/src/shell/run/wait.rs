@@ -10,10 +10,6 @@
 //! [`OperatorPrompt`](nyl_core::orchestration::ports::OperatorPrompt) when
 //! there is one, and stops on cancellation. A `manual` wait returns at once.
 
-// Skeleton: package `lifecycle` calls `wait` from the teardown waves; remove
-// this allowance once it does.
-#![allow(dead_code)]
-
 use nyl_core::orchestration::driver::WaitCompletion;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId};
 use nyl_core::orchestration::ports::ApplicationsObservation;

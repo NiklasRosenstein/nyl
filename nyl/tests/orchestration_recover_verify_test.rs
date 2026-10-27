@@ -914,7 +914,6 @@ fn test_recover_imports_a_broken_run_without_executing() {
 /// Q44: the recover commit's headline gives the import's counts, then the
 /// unit action.
 #[test]
-#[ignore = "needs lifecycle: run/mod.rs completes a Recover-mode summary with shell::recover::summarize"]
 fn test_recover_import_headline_counts_then_the_unit_action() {
     let harness = Harness::new();
     harness.break_after_database();

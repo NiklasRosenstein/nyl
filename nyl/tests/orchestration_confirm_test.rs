@@ -510,7 +510,6 @@ fn result<'a>(outcome: &'a CommandOutcome, unit: &str) -> &'a serde_json::Value 
 /// confirmation not reaching the stored wait, or the wait not gating the
 /// units the publication depends on.
 #[test]
-#[ignore = "needs lifecycle and operator: the teardown run mode and `nyl teardown`"]
 fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
     let harness = harness::Harness::new(&shared_project(), true);
     let init = invoke(&harness, &["state", "init", "-e", "dev"]);
@@ -555,6 +554,17 @@ fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
         &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
     );
     assert!(message.contains("confirmedRemoval"), "{message}");
+    // `--all` holds what it tore down while the unit is still in the
+    // ownership set, also when a later invocation completes the teardown.
+    let kubernetes = git_output(
+        &harness.world.bare(),
+        &["show", "refs/heads/nyl/dev/desired:desired/units/kubernetes.yaml"],
+    );
+    assert!(kubernetes.contains("state: held"), "{kubernetes}");
+    assert!(
+        kubernetes.contains("name: kubernetes\n  apiVersion:"),
+        "the held file has no uid: {kubernetes}"
+    );
 
     let rest = invoke(&harness, &["teardown", "-e", "dev", "--all", "-o", "json"]);
     assert_eq!(rest.exit, 0, "{}", rest.stderr);

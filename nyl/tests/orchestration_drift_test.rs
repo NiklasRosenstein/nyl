@@ -283,7 +283,6 @@ fn test_reapply_requires_unit_and_reason() {
 /// `nyl plan` lists a drifted unit selection would repair as `drifted`
 /// among the units it would execute.
 #[test]
-#[ignore = "needs lifecycle: plan_into reports drift repairs as drifted"]
 fn test_plan_lists_a_drifted_unit_as_drifted() {
     let harness = Harness::reconciled(None);
     harness.drift("api");

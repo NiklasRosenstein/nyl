@@ -980,7 +980,6 @@ mod tests {
     /// Drift: a current unit whose latest drift observation is `drifted` is
     /// work for the next reconcile: state `drifted`, exit 2.
     #[test]
-    #[ignore = "needs drift: rules::drift::status_drift"]
     fn test_a_drifted_current_unit_is_drifted_and_exits_2() {
         use nyl_core::orchestration::state::{Drift, Observation, ObservationKind, ObservationType, StateV1};
         let mut snapshot = snapshot(&[("network", 1)]);

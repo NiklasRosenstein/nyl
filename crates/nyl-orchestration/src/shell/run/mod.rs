@@ -646,7 +646,20 @@ impl<'r, 'a> Session<'r, 'a> {
         held: &BTreeMap<UnitName, DesiredUnit>,
     ) -> Resolved {
         let mut units = prepared.desired.units.clone();
-        units.extend(held.iter().map(|(name, unit)| (name.clone(), unit.clone())));
+        units.extend(held.iter().map(|(name, unit)| {
+            // A held unit without an incarnation (a marker included) declares
+            // what source renders for it but has no receipt, so its
+            // consumers' references are valid and stay blocked.
+            let declared = match prepared.desired.held.get(name).and_then(|held| held.rendered.as_ref()) {
+                Some(rendered) if unit.unit.uid.is_none() => {
+                    let mut rendered = rendered.clone();
+                    rendered.unit.uid = None;
+                    rendered
+                }
+                _ => unit.clone(),
+            };
+            (name.clone(), declared)
+        }));
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
         let mut shadow = BTreeMap::new();
@@ -1213,6 +1226,7 @@ fn plan_teardown(
         .map(|record| record.ownership.keys().cloned().collect())
         .unwrap_or_default();
     let mut life = teardown::Life::new(&snapshot.desired);
+    life.carry_decommission_holds(&ownership);
     let mut observed = snapshot.observed.clone();
     let mut artifacts = snapshot.artifacts.clone();
     let now = context.base.clock.now();
@@ -1878,6 +1892,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     life.releases.insert(name.clone());
                 }
             }
+            let ownership: BTreeSet<UnitName> = prepared
+                .desired
+                .units
+                .keys()
+                .chain(&prepared.desired.fenced)
+                .cloned()
+                .collect();
+            life.carry_decommission_holds(&ownership);
         }
         let mut held_view: BTreeMap<UnitName, DesiredUnit> = prepared
             .desired
@@ -2310,7 +2332,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             return self.cancelled();
         }
         let mut summary = self.report.transition_summary(request.mode.operation());
-        if let Some((unit, entry)) = recover_entry {
+        if let RunMode::Recover { .. } = &request.mode {
+            // A recover executes nothing: its summary lists what it imported
+            // and recovered, and its headline gives their counts, then the
+            // `--unit` action (Q44).
+            let listed: BTreeSet<UnitName> = summary.imported.iter().chain(&summary.recovered).cloned().collect();
+            summary.units.retain(|name, _| listed.contains(name));
+            super::recover::summarize(&mut summary, recover_entry);
+        } else if let Some((unit, entry)) = recover_entry {
             summary.units.insert(unit, entry);
         }
         if !self.report.reapplied.is_empty() {
@@ -2407,6 +2436,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             .map(|record| record.ownership.keys().cloned().collect())
             .unwrap_or_default();
         let mut life = teardown::Life::new(&stored);
+        life.carry_decommission_holds(&ownership);
         if let Err(findings) = self.request_teardowns(&mut life, target, &ownership, &mut observed, &mut artifacts) {
             self.report.errors.extend(findings);
             return Ending::Release;
@@ -2431,7 +2461,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if let Err(ending) = self.leave(&mut life, &inputs, &mut observed, &mut artifacts) {
             return ending;
         }
-        self.hold_unfinished(&mut life, &mut observed, &mut artifacts);
+        // `--all` leaves an unfinished decommission deleting (its hold is
+        // carried to the run that completes it); `--hold` holds it now.
+        if !matches!(target, TeardownTarget::All) {
+            self.hold_unfinished(&mut life, &mut observed, &mut artifacts);
+        }
         let in_scope = |name: &UnitName| named.as_ref().is_none_or(|named| named.contains(name));
         for (name, entry) in std::mem::take(&mut life.results) {
             if in_scope(&name) {
@@ -2643,12 +2677,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     ) -> bool {
         let context = self.context();
         let environment = self.environment().clone();
-        // A store failure reads as no signal.
-        let received = context
-            .base
-            .store
-            .signals(self.location(), &environment, &self.run)
-            .unwrap_or_default();
+        // Oldest first; a store failure reads as no signal.
+        let received = crate::shell::signal::received(context.base, self.location(), &environment, &self.run);
         if !received.is_empty() {
             self.signalled = true;
         }

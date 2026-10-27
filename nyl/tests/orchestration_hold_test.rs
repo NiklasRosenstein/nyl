@@ -207,7 +207,6 @@ fn test_hold_and_resume_write_one_desired_commit_each_and_nothing_when_unchanged
 /// blocked), and after `resume` the next reconcile creates the unit as a
 /// new incarnation.
 #[test]
-#[ignore = "needs lifecycle: the run path keeps held markers out of the units"]
 fn test_a_held_marker_is_excluded_until_resumed() {
     let harness = Harness::new();
     harness.init();
@@ -230,7 +229,6 @@ fn test_a_held_marker_is_excluded_until_resumed() {
 /// (status: held and uncertain, exit 4), and `resume` keeps it too, so the
 /// unit still needs a run under its recovery policy or `recover`.
 #[test]
-#[ignore = "needs lifecycle: receipts carry the desired document they were produced for"]
 fn test_a_hold_on_an_uncertain_unit_keeps_the_receipts_document_and_the_condition() {
     let harness = Harness::new();
     harness.init();
@@ -317,7 +315,6 @@ fn test_resume_of_a_held_deleting_unit_returns_it_to_deleting_and_deletes_nothin
 /// through its signal ref instead of failing with NYL-LEASE-HELD: exit 0,
 /// NYL-HOLD-DELIVERED, no commit of its own.
 #[test]
-#[ignore = "needs publication: shell::signal::deliver"]
 fn test_hold_while_a_run_holds_the_lease_is_delivered() {
     let harness = Harness::new();
     harness.init();
@@ -362,7 +359,6 @@ fn test_hold_after_the_run_finished_applies_directly() {
 /// lease whose run is not imported refuses it with NYL-LEASE-BROKEN, exit
 /// 2, naming `nyl recover -e`.
 #[test]
-#[ignore = "needs lease-break: rules::lease::decide honours BrokenLease::Refuse"]
 fn test_hold_refuses_a_broken_lease() {
     let harness = Harness::new();
     harness.init();

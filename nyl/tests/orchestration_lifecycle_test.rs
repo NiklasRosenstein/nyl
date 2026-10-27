@@ -698,7 +698,6 @@ fn test_fail_fast_starts_no_unit_after_a_failure() {
 /// Q28: a hold sent to a running run takes effect before the run starts the
 /// unit: it does not run, and the run writes the hold in its own commit.
 #[test]
-#[ignore = "needs operator: rules::hold"]
 fn test_a_hold_signal_keeps_the_unit_from_starting() {
     let (_project, harness) = harness_with(&format!(
         "{}---\n{}",

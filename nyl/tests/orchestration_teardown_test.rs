@@ -12,9 +12,12 @@ mod scenario;
 
 use nyl::orchestration::run::{CommandOutcome, Wiring};
 use nyl_core::orchestration::driver::DriverOperation;
-use nyl_core::orchestration::ids::RunId;
+use nyl_core::orchestration::ids::{CommitId, RunId};
+use nyl_core::orchestration::ports::Checkpoint;
 use nyl_core::orchestration::ports::Clock as _;
-use nyl_core::orchestration::state::{FailureCategory, Lease, LeaseKind, Operation, Request, Run, RunKind, StateV1};
+use nyl_core::orchestration::state::{
+    FailureCategory, Lease, LeaseKind, Operation, Request, Run, RunKind, StateV1, TeardownWaiting,
+};
 use nyl_drivers::fake::Scripted;
 use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::NoFaults;
@@ -220,15 +223,31 @@ fn test_state_delete_leaves_the_deleted_marker_and_refuses_later_commands() {
     assert!(!status.stderr.contains("NYL-STATE-DELETED"), "{}", status.stderr);
 }
 
-/// `state delete --teardown` tears every unit down and continues to the
-/// deletion in the same command; held files without an incarnation do not
-/// stop it.
+/// Instances: `state delete --teardown` stops with exit 2 while the
+/// publication's `manual` teardown wait (the default of `mode: publish`)
+/// waits; once `--confirm-removed` ran phase 2, running it again resumes,
+/// tears the rest down, and continues to the deletion in the same command.
+/// Held files without an incarnation (the units `--all` holds) do not stop
+/// it. Catches a decommission that cannot be resumed after a manual wait.
 #[test]
-#[ignore = "needs lifecycle: RunMode::Teardown on the run path"]
 fn test_state_delete_teardown_tears_down_and_deletes() {
     let harness = Harness::new();
     harness.init();
     assert_eq!(harness.reconcile().exit, 0);
+    let waits = harness.delete(&["--teardown"]);
+    assert_eq!(waits.exit, 2, "{}", waits.stderr);
+    assert!(harness.files(DESIRED).contains("desired/units/kubernetes.yaml"));
+    let confirmed = harness.invoke(&[
+        "teardown",
+        "-e",
+        "dev",
+        "--unit",
+        "kubernetes",
+        "--confirm-removed",
+        "--reason",
+        "checked by hand",
+    ]);
+    assert_eq!(confirmed.exit, 0, "{}", confirmed.stderr);
     let deleted = harness.delete(&["--teardown"]);
     assert_eq!(deleted.exit, 0, "{}", deleted.stderr);
     assert_eq!(deleted.report["details"]["teardown"]["kind"], "TeardownReport");
@@ -240,7 +259,6 @@ fn test_state_delete_teardown_tears_down_and_deletes() {
 /// remaining unit waits (a held unit only records the teardown request),
 /// exit 1 when a teardown failed, keeping the teardown's report.
 #[test]
-#[ignore = "needs lifecycle: RunMode::Teardown on the run path and the receipt's desired copy"]
 fn test_state_delete_teardown_stops_while_units_remain() {
     let harness = Harness::new();
     harness.init();
@@ -257,6 +275,18 @@ fn test_state_delete_teardown_stops_while_units_remain() {
     assert!(harness.files(DESIRED).contains("desired/units/network.yaml"));
 
     assert_eq!(harness.invoke(&["resume", "-e", "dev", "--unit", "network"]).exit, 0);
+    // The publication's manual wait gates network, the unit it depends on.
+    let confirmed = harness.invoke(&[
+        "teardown",
+        "-e",
+        "dev",
+        "--unit",
+        "kubernetes",
+        "--confirm-removed",
+        "--reason",
+        "checked by hand",
+    ]);
+    assert_eq!(confirmed.exit, 0, "{}", confirmed.stderr);
     harness.script.push(
         shell::unit("network"),
         DriverOperation::Teardown,
@@ -290,7 +320,6 @@ fn test_teardown_of_an_unknown_unit_exits_1() {
 /// to the run waiting on the unit's teardown is delivered (exit 0) and
 /// starts no run of its own.
 #[test]
-#[ignore = "needs publication: shell::signal::deliver"]
 fn test_confirm_removed_is_delivered_to_the_waiting_run() {
     let harness = Harness::new();
     harness.init();
@@ -301,6 +330,42 @@ fn test_confirm_removed_is_delivered_to_the_waiting_run() {
     harness
         .store
         .take_lease(&harness.location, &dev(), &lease, None)
+        .unwrap();
+    // The run waits on kubernetes's teardown after phase 1: its checkpoint
+    // records the wait.
+    let snapshot = harness.store.snapshot(&harness.location).unwrap();
+    let name = shell::unit("kubernetes");
+    let mut observed = snapshot.observed[&name].clone();
+    observed.waiting = Some(TeardownWaiting {
+        phase: "applications-removed".to_owned(),
+        reason: "phase 1 published".to_owned(),
+        since: harness.clock.now(),
+        until: None,
+        phase1_commit: Some(CommitId::new(&harness.tip(DESIRED)).unwrap()),
+        run: lease.run.clone(),
+    });
+    let run = Run {
+        api_version: StateV1,
+        kind: RunKind,
+        run: lease.run.clone(),
+        runner: lease.runner.clone(),
+        operation: Operation::Teardown,
+        source_commit: None,
+        read_desired: None,
+        read_observed: None,
+        deadline: lease.deadline,
+        units: vec![name.clone()],
+        finished: false,
+    };
+    harness.store.write_run(&harness.location, &dev(), &run, None).unwrap();
+    let checkpoint = Checkpoint {
+        desired: snapshot.desired[&name].clone(),
+        observed,
+        artifacts: std::collections::BTreeMap::new(),
+    };
+    harness
+        .store
+        .write_run(&harness.location, &dev(), &run, Some(&checkpoint))
         .unwrap();
     let desired = harness.tip(DESIRED);
     let outcome = harness.invoke(&[
@@ -324,7 +389,6 @@ fn test_confirm_removed_is_delivered_to_the_waiting_run() {
 /// Runs and leases, item 1: `lease break` of a lease that is already broken
 /// reports it as such and names the importers.
 #[test]
-#[ignore = "needs lease-break: rules::lease::decide honours BrokenLease::Refuse"]
 fn test_lease_break_of_a_broken_lease_reports_it_broken() {
     let harness = Harness::new();
     harness.init();
