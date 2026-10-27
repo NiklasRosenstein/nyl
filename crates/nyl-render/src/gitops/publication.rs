@@ -1514,7 +1514,7 @@ spec:
         let expected = phase1
             .files
             .keys()
-            .map(|path| format!("dev/{}", path.display()))
+            .map(|path| format!("dev/{}", path.display().to_string().replace('\\', "/")))
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(files.into_iter().collect::<std::collections::BTreeSet<_>>(), expected);
         let repository = Repository::open_bare(&bare).unwrap();
