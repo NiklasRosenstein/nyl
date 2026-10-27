@@ -90,7 +90,10 @@ impl World {
     }
 
     fn substitute(&self, text: &str) -> String {
-        text.replace("%SCENARIO_TMP%", &self.scenario_tmp().display().to_string())
+        // Forward slashes: units quote the path into `sh` scripts, which read
+        // a Windows path's backslashes as escapes.
+        let scenario_tmp = self.scenario_tmp().display().to_string().replace('\\', "/");
+        text.replace("%SCENARIO_TMP%", &scenario_tmp)
             .replace("%PROJECT_URL%", &self.project_url())
             .replace("%REGISTRY%", FAKE_REGISTRY)
     }
