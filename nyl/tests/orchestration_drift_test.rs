@@ -42,7 +42,8 @@ struct Harness {
 impl Harness {
     fn new(drift_repair: Option<&str>) -> Self {
         let markers = TempDir::new().unwrap();
-        let dir = markers.path().display().to_string();
+        // `sh` reads backslashes as escapes; Windows accepts forward slashes.
+        let dir = markers.path().display().to_string().replace('\\', "/");
         let unit = |name: &str, idempotent: bool| {
             command(
                 name,
