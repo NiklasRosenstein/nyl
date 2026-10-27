@@ -86,17 +86,27 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Windows Defender scans every file the build writes and every
-      # executable the tests start (git, nyl, sh). Exclude the workspace, the
-      # Rust toolchain, and the temporary directory from scanning before the
-      # cache restore and the build.
-      - name: Exclude build directories from Defender scanning
+      # Windows Defender scans every file the build writes and the tests'
+      # temporary Git repositories synchronously, which dominated the Windows
+      # job. A trusted Dev Drive (ReFS) scans asynchronously, so the target
+      # directory and the temporary directory move onto one.
+      - name: Set up a Dev Drive
+        if: runner.os == 'Windows'
+        uses: samypr100/setup-dev-drive@v4
+        with:
+          drive-size: 40GB
+          trusted-dev-drive: true
+          env-mapping: |
+            TMP,{{ DEV_DRIVE }}/tmp
+            TEMP,{{ DEV_DRIVE }}/tmp
+
+      # The cache action restores ./target, so it links to the Dev Drive.
+      - name: Keep the build on the Dev Drive
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Add-MpPreference -ExclusionPath `
-            "$env:GITHUB_WORKSPACE", "$env:USERPROFILE\.cargo", `
-            "$env:USERPROFILE\.rustup", "$env:RUNNER_TEMP", "$env:TEMP"
+          New-Item -ItemType Directory -Force "$env:DEV_DRIVE/tmp", "$env:DEV_DRIVE/target" | Out-Null
+          New-Item -ItemType Junction -Path target -Target "$env:DEV_DRIVE/target" | Out-Null
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.98.1
