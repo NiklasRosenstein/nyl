@@ -695,6 +695,35 @@ fn test_fail_fast_starts_no_unit_after_a_failure() {
     assert_eq!(outcome(&continued, "executed"), set(&["good"]), "{continued:#?}");
 }
 
+/// `--fail-fast` on `nyl teardown`, which shares the run path: after a
+/// failed teardown the run starts no further teardown, still commits what
+/// finished, and the next teardown carries on with the rest.
+#[test]
+fn test_fail_fast_teardown_starts_no_teardown_after_a_failure() {
+    let (_project, harness) = harness_with(&format!(
+        "{}---\n{}",
+        command_unit("bad", "true", Some("exit 1"), ""),
+        command_unit("good", "touch %SCENARIO_TMP%/good", Some("rm %SCENARIO_TMP%/good"), ""),
+    ));
+    assert_eq!(harness.reconcile(&[]).exit.code(), 0);
+    let stopped = teardown(&harness, TeardownTarget::All, |job| {
+        job.request.fail_fast = true;
+        job.request.concurrency = 1;
+    });
+    assert_eq!(stopped.exit.code(), 3, "{stopped:#?}");
+    assert_eq!(outcome(&stopped, "failed"), set(&["bad"]), "{stopped:#?}");
+    assert!(
+        harness.world.scenario_tmp().join("good").exists(),
+        "no teardown starts after the failure"
+    );
+    assert_eq!(codes(&stopped.warnings), [Code::RunStopped], "{stopped:#?}");
+    assert!(harness.snapshot().observed[&unit("bad")].condition.is_some());
+
+    let continued = teardown(&harness, TeardownTarget::All, |job| job.request.concurrency = 1);
+    assert_eq!(outcome(&continued, "removed"), set(&["good"]), "{continued:#?}");
+    assert!(!harness.world.scenario_tmp().join("good").exists());
+}
+
 /// Q28: a hold sent to a running run takes effect before the run starts the
 /// unit: it does not run, and the run writes the hold in its own commit.
 #[test]

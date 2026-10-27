@@ -101,3 +101,23 @@ steps:
       executed: [extra]
       units:
         extra: {lifecycle: active, uid: new, receipt: current}
+
+  # A hold while a run holds the lease is delivered to that run through its
+  # signal ref (exit 0). The run reads its signals before it starts each
+  # unit, so it starts no held unit and writes the hold in its own commit.
+  - commit: {branch: main, message: "Release v3", apply: patches/v3}
+  - nyl: [reconcile, -e, dev]
+    id: running
+    pause: {point: executing, unit: producer}
+  - nyl: [hold, -e, dev, --unit, consumer, --reason, "check v3 first"]
+    exit: 0
+    expect:
+      codes: [NYL-HOLD-DELIVERED]
+      commits: {desired: 0, observed: 0}
+  - resume: running
+    exit: 2
+    expect:
+      executed: [producer]
+      held: [consumer]
+      units:
+        consumer: {lifecycle: held, receipt: current}

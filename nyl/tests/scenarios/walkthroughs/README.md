@@ -18,12 +18,11 @@ deadlines match the walkthroughs' prose. The
 | [`ci-lifecycle`](ci-lifecycle/scenario.yaml) | Leaving units in planning and a separate lifecycle job | M8 |
 | [`unavailable-upstream-output`](unavailable-upstream-output/scenario.yaml) | Unavailable upstream output | M3 |
 | [`effects-without-receipt`](effects-without-receipt/scenario.yaml) | Effects without a receipt | M3 |
-| [`competing-runners`](competing-runners/scenario.yaml) | Competing runners | M3 |
+| [`competing-runners`](competing-runners/scenario.yaml) | Competing runners, and a lease break: `verify` refuses, `recover` imports the dead run once | M3 |
 | [`deletion`](deletion/scenario.yaml) | Deletion | M3 |
 | [`decommission`](decommission/scenario.yaml) | Deletion with the operator commands: `teardown` (a replace, `--hold`, a retained tombstone), a teardown requested while held, a kind change, and `state delete --teardown` next to an environment sharing its refs | M3 |
 | [`held-uncertain`](held-uncertain/scenario.yaml) | Holds on uncertain units: a consumer reconciles against the held producer's last receipt; a held marker for a unit never reconciled | M3 |
 | [`drift`](drift/scenario.yaml) | Drift: `verify` finds drift, `reconcile` repairs the idempotent unit, the other awaits approval, and `driftRepair: manual` waits for `--reapply` | M3 |
-| [`broken-lease`](broken-lease/scenario.yaml) | A lease break: `verify` refuses, `recover` imports the dead run once (joins `competing-runners`) | M3 |
 | [`stale-promotion-evidence`](stale-promotion-evidence/scenario.yaml) | Promotion with stale source evidence | M6 |
 
 These files are the contract's acceptance tests.

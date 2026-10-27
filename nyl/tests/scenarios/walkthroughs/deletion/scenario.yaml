@@ -50,12 +50,14 @@ steps:
     expect:
       removed: [cache]
 
-  # Restoring both now starts a new cache; worker adopts its tombstone but runs again.
+  # Restoring both now starts a new cache with the same endpoint, so worker
+  # adopts its tombstone and stays current: its execution key is unchanged.
   - commit: {branch: main, message: "Restore cache and worker", apply: patches/add-cache}
   - nyl: [reconcile, -e, dev]
     exit: 0
     expect:
-      executed: [cache, worker]
+      executed: [cache]
+      current: [worker]
       units:
         cache: {lifecycle: {state: active}, uid: new}
-        worker: {lifecycle: {state: active}, uid: same}
+        worker: {lifecycle: {state: active}, uid: same, receipt: current}

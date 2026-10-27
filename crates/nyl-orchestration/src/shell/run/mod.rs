@@ -1094,12 +1094,19 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         // `nyl plan` has no `--reapply`.
         reapply: &BTreeSet::new(),
     };
-    let (ready, _) = select(&candidates);
-    // Drifted units selection would repair are listed as drifted.
+    let (ready, skipped) = select(&candidates);
+    // `drifted` is a unit state in plans too: the drifted units selection
+    // would repair, and those that await an approval or a forced run.
     let drifted: BTreeSet<UnitName> = drift::repairs(&candidates, &ready)
         .into_iter()
         .filter(|(_, repair)| *repair == drift::Repair::Drift)
         .map(|(name, _)| name)
+        .chain(
+            skipped
+                .into_iter()
+                .filter(|(_, skip)| matches!(skip, Skipped::Drifted | Skipped::RepairApproval))
+                .map(|(name, _)| name),
+        )
         .collect();
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
