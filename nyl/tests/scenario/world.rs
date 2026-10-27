@@ -50,6 +50,13 @@ impl World {
         self.root.path().join("scenario-tmp")
     }
 
+    /// [`Self::scenario_tmp`] as units' scripts see it: with forward
+    /// slashes, because `sh` reads a Windows path's backslashes as escapes
+    /// and scripts write the path into JSON outputs.
+    pub fn scenario_tmp_for_scripts(&self) -> String {
+        self.scenario_tmp().display().to_string().replace('\\', "/")
+    }
+
     /// The URL of `project.git`, `%PROJECT_URL%`.
     pub fn project_url(&self) -> String {
         format!("file://{}", self.root.path().join("project.git").display())
@@ -90,10 +97,7 @@ impl World {
     }
 
     fn substitute(&self, text: &str) -> String {
-        // Forward slashes: units quote the path into `sh` scripts, which read
-        // a Windows path's backslashes as escapes.
-        let scenario_tmp = self.scenario_tmp().display().to_string().replace('\\', "/");
-        text.replace("%SCENARIO_TMP%", &scenario_tmp)
+        text.replace("%SCENARIO_TMP%", &self.scenario_tmp_for_scripts())
             .replace("%PROJECT_URL%", &self.project_url())
             .replace("%REGISTRY%", FAKE_REGISTRY)
     }

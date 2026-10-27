@@ -175,7 +175,7 @@ pub fn run(loaded: &Loaded) -> Result<(), String> {
     // Command units admit `SCENARIO_TMP` through `env.passthrough` to reach
     // the files `file` steps change outside Nyl.
     let mut process_env = super::shell::process_env();
-    process_env.insert("SCENARIO_TMP".to_owned(), world.scenario_tmp().display().to_string());
+    process_env.insert("SCENARIO_TMP".to_owned(), world.scenario_tmp_for_scripts());
     let shared = Shared {
         world,
         clock: Arc::new(FakeClock::new(start)),
