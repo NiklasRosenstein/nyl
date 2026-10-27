@@ -1986,7 +1986,9 @@ execution key unchanged. `nyl verify` asks each driver whether a current
 receipt still holds and records the answer as the unit's `drift` observation,
 tied to that receipt's execution key. Nyl does not watch for drift itself: a
 pipeline runs `nyl verify` on a schedule, followed by `nyl reconcile`, until a
-continuous runner (M7) takes over the cadence.
+continuous runner (M7) takes over the cadence. A planned opt-in
+`nyl reconcile --verify` (M7) does both under one lease and in one transition
+commit; without it, reconcile never verifies.
 
 - **`drifted` is a unit state.** A unit with a current receipt whose latest
   drift observation for that receipt is `drifted` is work for the next
