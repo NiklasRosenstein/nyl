@@ -10,7 +10,7 @@ spec:
   workingDir: ../scripts
   env:
     passthrough: [SCENARIO_TMP]
-  command: ['./resource.sh', 'create']
-  teardown: ['./resource.sh', 'remove']
+  command: [sh, './resource.sh', 'create']
+  teardown: [sh, './resource.sh', 'remove']
   idempotent: true
   deletionPolicy: Retain

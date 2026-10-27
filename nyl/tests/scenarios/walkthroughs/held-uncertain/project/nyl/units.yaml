@@ -10,7 +10,7 @@ spec:
   values:
     release: 'v1'
   workingDir: ../scripts
-  command: ['./producer.sh']
+  command: [sh, './producer.sh']
   outputs:
     release: {type: string}
   timeout: 10m
@@ -26,6 +26,6 @@ spec:
     release: {fromUnit: {unit: producer, output: release}}
     replicas: '1'
   workingDir: ../scripts
-  command: ['./consumer.sh']
+  command: [sh, './consumer.sh']
   idempotent: true
   timeout: 10m

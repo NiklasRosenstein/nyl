@@ -9,5 +9,5 @@ spec:
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
-  command: ['./resource.sh', 'create']
-  teardown: ['./resource.sh', 'remove']
+  command: [sh, './resource.sh', 'create']
+  teardown: [sh, './resource.sh', 'remove']

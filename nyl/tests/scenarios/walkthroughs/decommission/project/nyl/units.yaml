@@ -12,8 +12,8 @@ spec:
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
-  command: ['./resource.sh', 'create', 'endpoint']
-  teardown: ['./resource.sh', 'remove']
+  command: [sh, './resource.sh', 'create', 'endpoint']
+  teardown: [sh, './resource.sh', 'remove']
   outputs:
     endpoint: {type: string}
 ---
@@ -28,8 +28,8 @@ spec:
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
-  command: ['./resource.sh', 'create']
-  teardown: ['./resource.sh', 'remove']
+  command: [sh, './resource.sh', 'create']
+  teardown: [sh, './resource.sh', 'remove']
 ---
 apiVersion: units.gitops.nyl/v1
 kind: Command
@@ -42,8 +42,8 @@ spec:
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
-  command: ['./resource.sh', 'create']
-  teardown: ['./resource.sh', 'remove']
+  command: [sh, './resource.sh', 'create']
+  teardown: [sh, './resource.sh', 'remove']
   deletionPolicy: Retain
 ---
 apiVersion: units.gitops.nyl/v1
@@ -57,7 +57,7 @@ spec:
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
-  command: ['./resource.sh', 'create']
+  command: [sh, './resource.sh', 'create']
 ---
 apiVersion: units.gitops.nyl/v1
 kind: Command
@@ -70,5 +70,5 @@ spec:
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
-  command: ['./resource.sh', 'create']
-  teardown: ['./resource.sh', 'remove']
+  command: [sh, './resource.sh', 'create']
+  teardown: [sh, './resource.sh', 'remove']

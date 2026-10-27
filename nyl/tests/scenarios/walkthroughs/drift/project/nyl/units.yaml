@@ -9,8 +9,8 @@ metadata:
 spec:
   files: ['../scripts/resource.sh']
   workingDir: ../scripts
-  command: ['./resource.sh', 'apply']
-  verify: ['./resource.sh', 'verify']
+  command: [sh, './resource.sh', 'apply']
+  verify: [sh, './resource.sh', 'verify']
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
@@ -23,7 +23,7 @@ metadata:
 spec:
   files: ['../scripts/resource.sh']
   workingDir: ../scripts
-  command: ['./resource.sh', 'apply']
-  verify: ['./resource.sh', 'verify']
+  command: [sh, './resource.sh', 'apply']
+  verify: [sh, './resource.sh', 'verify']
   env:
     passthrough: [SCENARIO_TMP]
