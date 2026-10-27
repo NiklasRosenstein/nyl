@@ -291,6 +291,7 @@ fn test_resume_of_a_held_deleting_unit_returns_it_to_deleting_and_deletes_nothin
     let kubernetes = unit("kubernetes");
     let mut deleting = harness.snapshot().desired[&kubernetes].clone();
     let deletion = Deletion {
+        hold: false,
         reason: DeletionReason::Omission,
         intent: DeletionIntent::Teardown,
         teardown: Some(TeardownProgress::Pending),

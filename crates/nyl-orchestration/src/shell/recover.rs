@@ -136,12 +136,13 @@ fn nothing_to_import(environment: &EnvironmentName) -> Finding {
 }
 
 /// Whether `recover -e` clears a break where it would otherwise refuse
-/// (Q40): state missing, moved away, or with a `Nyl-Local` remote tip,
-/// which only `state init`, `state move`, and `state restore` resolve.
+/// (Q40): state missing, moved away, deleted by `nyl state delete`, or with
+/// a `Nyl-Local` remote tip, which only `state init` (`--fresh` for deleted
+/// state), `state move`, and `state restore` resolve.
 fn way_out(finding: &Finding) -> bool {
     matches!(
         finding.code,
-        Code::StateMissing | Code::StateMoved | Code::StateLocalTip
+        Code::StateMissing | Code::StateMoved | Code::StateLocalTip | Code::StateDeleted
     )
 }
 

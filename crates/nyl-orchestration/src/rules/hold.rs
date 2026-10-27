@@ -272,6 +272,7 @@ mod tests {
     fn test_hold_of_a_deleting_unit_keeps_its_deletion() {
         let mut stored = desired("api", "Command", json!({}), "k");
         let deletion = Deletion {
+            hold: false,
             reason: DeletionReason::Omission,
             intent: DeletionIntent::Teardown,
             teardown: Some(TeardownProgress::Pending),

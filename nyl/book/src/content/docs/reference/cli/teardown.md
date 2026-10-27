@@ -45,7 +45,8 @@ transition commit per state ref with the operation `teardown` and the
   without a uid, until [`nyl resume`](/nyl/reference/cli/hold/). When the
   teardown does not finish in the invocation, because it waits, failed, or is
   uncertain, the deleting unit is held where it stopped; after `nyl resume`
-  the teardown continues and the unit is not held afterwards. An unfinished
+  the teardown continues, and the unit is held again once it completes, so
+  it is not recreated until it is resumed again. An unfinished
   `--all` instead leaves its units deleting, so running it again or
   `--confirm-removed` continues it, and the run that completes a unit's
   teardown applies the hold.

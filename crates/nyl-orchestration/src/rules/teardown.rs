@@ -472,6 +472,7 @@ mod tests {
         let mut document = fixtures::desired(unit, "Publication", spec, unit);
         document.lifecycle = Lifecycle::Deleting {
             deletion: Deletion {
+                hold: false,
                 reason,
                 intent,
                 teardown: (intent == DeletionIntent::Teardown).then_some(TeardownProgress::Pending),
@@ -744,6 +745,7 @@ mod tests {
                 pending: None,
             },
             deletion: Some(Deletion {
+                hold: false,
                 reason: DeletionReason::Teardown,
                 intent: DeletionIntent::Teardown,
                 teardown: Some(TeardownProgress::Pending),

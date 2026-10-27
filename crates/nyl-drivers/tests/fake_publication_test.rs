@@ -290,6 +290,7 @@ fn deleting(unit: DesiredUnit) -> DesiredUnit {
     DesiredUnit {
         lifecycle: Lifecycle::Deleting {
             deletion: Deletion {
+                hold: false,
                 reason: DeletionReason::Omission,
                 intent: DeletionIntent::Teardown,
                 teardown: Some(TeardownProgress::InProgress),

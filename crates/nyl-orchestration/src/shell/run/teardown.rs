@@ -116,21 +116,22 @@ impl Details {
 }
 
 impl Life {
-    /// `teardown --all` holds every unit still in the ownership set once its
-    /// teardown completes ([Instances](../../../../../design/orchestration-core.md#instances)).
-    /// A decommission that did not finish in its invocation stays `deleting`
-    /// (so `--confirm-removed` and running it again continue it); whichever
-    /// later run completes the teardown applies the hold recorded by the
-    /// deletion's request, so the unit is not recreated.
+    /// The holds that later runs must apply when a teardown requested with
+    /// a hold completes: `teardown --hold` (the deletion's `hold`), and a
+    /// decommission (`--all`) of a unit still in the ownership set
+    /// ([Instances](../../../../../design/orchestration-core.md#instances)).
+    /// A `--hold` teardown that did not finish is held where it stopped and
+    /// continues after `nyl resume`; a decommission that did not finish stays
+    /// `deleting`. Whichever later run completes the teardown applies the
+    /// hold recorded with the deletion's request, so the unit is not
+    /// recreated until it is resumed again.
     pub(super) fn carry_decommission_holds(&mut self, ownership: &BTreeSet<UnitName>) {
         for (name, unit) in &self.desired {
             let Lifecycle::Deleting { deletion } = &unit.lifecycle else {
                 continue;
             };
-            if deletion.reason != DeletionReason::Decommission
-                || !ownership.contains(name)
-                || self.hold_after.contains_key(name)
-            {
+            let decommission = deletion.reason == DeletionReason::Decommission && ownership.contains(name);
+            if !(deletion.hold || decommission) || self.hold_after.contains_key(name) {
                 continue;
             }
             if let Some(requested) = &deletion.requested {
@@ -145,6 +146,25 @@ impl Life {
                 );
             }
         }
+    }
+
+    /// Record on a unit whose teardown was just requested with `--hold` that
+    /// the hold applies once the teardown completes, also in a later run.
+    fn mark_hold_after_teardown(&mut self, name: &UnitName) {
+        let Some(unit) = self.desired.get_mut(name) else {
+            return;
+        };
+        let (Lifecycle::Deleting { deletion }
+        | Lifecycle::Held {
+            deletion: Some(deletion),
+            ..
+        }) = &mut unit.lifecycle
+        else {
+            return;
+        };
+        deletion.hold = true;
+        let updated = unit.clone();
+        self.writes.insert(name.clone(), Some(updated));
     }
 
     pub(super) fn new(stored: &BTreeMap<UnitName, DesiredUnit>) -> Self {
@@ -1040,9 +1060,18 @@ impl Reconcile<'_, '_, '_> {
             {
                 continue;
             }
-            let Ok(next) = lifecycle::transition(&unit.lifecycle, LifecycleEvent::Hold { hold }) else {
+            let Ok(mut next) = lifecycle::transition(&unit.lifecycle, LifecycleEvent::Hold { hold }) else {
                 continue;
             };
+            // The hold applies again once the teardown completes after
+            // `nyl resume`, so the unit is not recreated.
+            if let Next::Lifecycle(Lifecycle::Held {
+                deletion: Some(deletion),
+                ..
+            }) = &mut next
+            {
+                deletion.hold = true;
+            }
             if let Some(write) = desired_rules::write(&unit, next, LifecycleOutcome::PendingTeardown) {
                 life.apply(&name, write, observed, artifacts);
             }
@@ -1252,6 +1281,11 @@ pub(super) fn mark_teardowns(
                         life.apply(&name, write, observed, artifacts);
                     }
                 }
+                // A held unit never progresses (Q26): the request waits for
+                // `nyl resume`, and `--hold` holds it again once torn down.
+                if request.lifecycle.hold {
+                    life.mark_hold_after_teardown(&name);
+                }
                 let entry = held_report(&environment, &name, &life.desired[&name], true);
                 life.results.insert(name.clone(), entry);
                 life.details.teardown_requested.push(name);
@@ -1294,6 +1328,7 @@ pub(super) fn mark_teardowns(
                     }
                 }
                 if let Some(hold) = hold {
+                    life.mark_hold_after_teardown(&name);
                     life.hold_after.insert(name, hold);
                 }
             }
@@ -1308,6 +1343,7 @@ pub(super) fn mark_teardowns(
                     }
                 }
                 if let Some(hold) = hold {
+                    life.mark_hold_after_teardown(&name);
                     life.hold_after.insert(name, hold);
                 }
             }

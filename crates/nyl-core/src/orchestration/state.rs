@@ -398,6 +398,11 @@ pub struct Deletion {
     pub teardown: Option<TeardownProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested: Option<Request>,
+    /// `nyl teardown --hold`: hold the unit once its teardown completes,
+    /// also when that is a later run after `nyl resume`, so it is not
+    /// recreated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

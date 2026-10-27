@@ -1937,9 +1937,10 @@ so an operator can break a lease, import, and decide a unit in one command.
 Once the import is recorded, `recover` exits 0 and lists what it imported;
 `nyl status` then exits 4 for the units left uncertain. Without `--unit` and
 without a broken run to import, `recover` refuses with `NYL-RECOVER-NOTHING`.
-Where no state can be read, because it is missing, moved, or has a local
-tip, `nyl recover -e <env>` still takes the broken lease over, records the
-break where state exists, and releases it, so `state init`, `state move`, or
+Where no state can be read, because it is missing, moved, deleted by
+`nyl state delete`, or has a local tip, `nyl recover -e <env>` still takes
+the broken lease over, records the break where state exists, and releases
+it, so `state init` (`--fresh` for deleted state), `state move`, or
 `state restore` can run.
 
 **Holds on uncertain units.** A hold on a unit with an `uncertain` condition
@@ -2230,7 +2231,8 @@ lifecycle:
     held file stays without a uid. When the teardown does not finish in the
     invocation, because it waits, failed, or is uncertain, the deleting unit
     is held with its deletion block, so nothing recreates it; after `resume`
-    the teardown continues and the unit is not held afterwards.
+    the teardown continues, and the unit is held again once it completes, so
+    it is not recreated until it is resumed again.
   - `--all` tears down every unit, honouring `deletionPolicy: Retain` (see
     [Instances](#instances)).
   - `--fail-fast` stops the teardown after the first failure, uncertain

@@ -110,6 +110,10 @@
       "additionalProperties": false,
       "description": "Why and how a unit is being deleted.",
       "properties": {
+        "hold": {
+          "description": "`nyl teardown --hold`: hold the unit once its teardown completes,\nalso when that is a later run after `nyl resume`, so it is not\nrecreated.",
+          "type": "boolean"
+        },
         "intent": {
           "$ref": "#/$defs/DeletionIntent"
         },

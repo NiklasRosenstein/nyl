@@ -1040,6 +1040,42 @@ fn test_recover_clears_the_break_on_moved_state() {
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
 }
 
+/// A broken lease on state that `nyl state delete` removed: `recover -e
+/// dev` records the break and releases the lease, so `state init --fresh`,
+/// which refuses a broken lease, can start the environment over.
+#[test]
+fn test_recover_clears_the_break_on_deleted_state() {
+    let harness = Harness::new();
+    harness.init();
+    let mut record = harness.snapshot().record.unwrap();
+    record
+        .events
+        .push(nyl_core::orchestration::state::StateEvent::StateDeleted {
+            at: harness.clock.now(),
+            by: "alice".to_owned(),
+            reason: None,
+        });
+    harness.stage(
+        TransitionChanges {
+            record: Some(record),
+            ..TransitionChanges::default()
+        },
+        "nyl: state-delete dev\n\nunits: {}\n\nNyl-Operation: state-delete\nNyl-Environment: dev\n",
+    );
+    harness.break_dead_holder(Operation::StateDelete);
+    let refused = harness.invoke(&["state", "init", "-e", "dev", "--fresh", "-o", "json"]);
+    assert_eq!(refused.exit, 2, "{}", refused.stderr);
+    assert_eq!(refused.report["errors"][0]["code"], "NYL-LEASE-BROKEN");
+
+    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.report["warnings"][0]["code"], "NYL-STATE-DELETED");
+    assert!(harness.message(OBSERVED).contains("\nleaseBroken: {"));
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+    let fresh = harness.invoke(&["state", "init", "-e", "dev", "--fresh"]);
+    assert_eq!(fresh.exit, 0, "{}", fresh.stderr);
+}
+
 /// Q40: with a `Nyl-Local` commit at the remote tip, `recover -e dev`
 /// releases the broken lease without committing on that tip (Nyl commits
 /// only on tips that pass the local-tip check), so `state restore` can run.

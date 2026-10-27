@@ -315,6 +315,7 @@ mod tests {
         let mut deleting = unit.clone();
         deleting.lifecycle = Lifecycle::Deleting {
             deletion: nyl_core::orchestration::state::Deletion {
+                hold: false,
                 reason: DeletionReason::Omission,
                 intent: DeletionIntent::Teardown,
                 teardown: None,

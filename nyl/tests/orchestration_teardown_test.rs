@@ -410,3 +410,56 @@ fn test_lease_break_of_a_broken_lease_reports_it_broken() {
         "{note}"
     );
 }
+
+/// `teardown --hold` whose teardown does not finish in its invocation: the
+/// unit is held where it stopped, `resume` lets the next run finish the
+/// teardown, and that run holds the unit again, so it is not recreated
+/// until it is resumed once more.
+#[test]
+fn test_an_unfinished_teardown_hold_holds_again_once_it_completes_after_resume() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile().exit, 0);
+    harness.script.push(
+        shell::unit("network"),
+        DriverOperation::Teardown,
+        &Scripted::Failed {
+            category: FailureCategory::ToolError,
+            retryable: true,
+        },
+        1,
+    );
+    let failed = harness.invoke(&[
+        "teardown",
+        "-e",
+        "dev",
+        "--unit",
+        "network",
+        "--hold",
+        "--reason",
+        "pause network",
+        "-o",
+        "json",
+    ]);
+    assert_ne!(failed.exit, 0, "{}", failed.stderr);
+    let stopped = harness.show(DESIRED, "desired/units/network.yaml");
+    assert!(
+        stopped.contains("state: held") && stopped.contains("hold: true"),
+        "{stopped}"
+    );
+
+    let resumed = harness.invoke(&["resume", "-e", "dev", "--unit", "network"]);
+    assert_eq!(resumed.exit, 0, "{}", resumed.stderr);
+    let finished = harness.reconcile();
+    assert_eq!(
+        finished.report["environments"][0]["units"]["network"]["result"], "removed",
+        "{}",
+        finished.stdout
+    );
+    let held = harness.show(DESIRED, "desired/units/network.yaml");
+    assert!(held.contains("state: held") && !held.contains("uid:"), "{held}");
+
+    let next = harness.reconcile();
+    assert_eq!(next.exit, 2, "{}", next.stdout);
+    assert_eq!(next.report["environments"][0]["units"]["network"]["result"], "held");
+}

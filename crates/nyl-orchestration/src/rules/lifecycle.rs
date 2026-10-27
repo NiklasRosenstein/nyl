@@ -199,6 +199,7 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         // Leaving the ownership set.
         (Lifecycle::Active, Event::Left { reason, intent }) => Next::Lifecycle(Lifecycle::Deleting {
             deletion: Deletion {
+                hold: false,
                 reason,
                 intent,
                 teardown: (intent == DeletionIntent::Teardown).then_some(TeardownProgress::Pending),
@@ -244,6 +245,7 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         // Explicit teardown.
         (Lifecycle::Active, Event::TeardownRequested { reason, requested }) => Next::Lifecycle(Lifecycle::Deleting {
             deletion: Deletion {
+                hold: false,
                 reason,
                 intent: DeletionIntent::Teardown,
                 teardown: Some(TeardownProgress::Pending),
@@ -253,6 +255,7 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         (Lifecycle::Retained { .. }, Event::TeardownRequested { reason, requested }) => {
             Next::RestoreReceipt(Lifecycle::Deleting {
                 deletion: Deletion {
+                    hold: false,
                     reason,
                     intent: DeletionIntent::Teardown,
                     teardown: Some(TeardownProgress::Pending),
@@ -263,6 +266,7 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         (Lifecycle::Deleting { deletion }, Event::TeardownRequested { reason, requested }) => {
             Next::Lifecycle(Lifecycle::Deleting {
                 deletion: Deletion {
+                    hold: false,
                     reason,
                     intent: DeletionIntent::Teardown,
                     teardown: Some(deletion.teardown.unwrap_or(TeardownProgress::Pending)),
@@ -274,6 +278,7 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
             Next::Lifecycle(Lifecycle::Held {
                 hold: hold.clone(),
                 deletion: Some(Deletion {
+                    hold: false,
                     reason,
                     intent: DeletionIntent::Teardown,
                     teardown: Some(
@@ -291,6 +296,7 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         (Lifecycle::Deleting { deletion }, Event::TeardownStarted) if deletion.intent == DeletionIntent::Teardown => {
             Next::Lifecycle(Lifecycle::Deleting {
                 deletion: Deletion {
+                    hold: false,
                     teardown: Some(TeardownProgress::InProgress),
                     ..deletion.clone()
                 },
@@ -344,6 +350,7 @@ mod tests {
     fn deleting(reason: DeletionReason, intent: DeletionIntent, teardown: Option<TeardownProgress>) -> Lifecycle {
         Lifecycle::Deleting {
             deletion: Deletion {
+                hold: false,
                 reason,
                 intent,
                 teardown,
@@ -567,6 +574,7 @@ mod tests {
             reason.prop_map(|reason| Lifecycle::Held {
                 hold: hold(),
                 deletion: Some(Deletion {
+                    hold: false,
                     reason,
                     intent: DeletionIntent::Teardown,
                     teardown: Some(TeardownProgress::Pending),
@@ -662,6 +670,7 @@ mod tests {
             let mut current = Lifecycle::Held {
                 hold: hold(),
                 deletion: deletion.map(|()| Deletion {
+                    hold: false,
                     reason: DeletionReason::Omission,
                     intent: DeletionIntent::Teardown,
                     teardown: Some(TeardownProgress::Pending),

@@ -36,7 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`reapplied`). `--fail-fast` on `reconcile` and `teardown` starts no unit
   after the first failure, uncertain outcome, or approval wait
   (`NYL-RUN-STOPPED`). `nyl recover -e <env>` imports a broken lease's run
-  without executing and without a run record. New codes:
+  without executing and without a run record, and clears a broken lease on
+  state that is missing, moved, deleted, or under a local tip, so the
+  command that repairs it can run. An unfinished `teardown --hold` is held
+  where it stopped, continues after `nyl resume`, and holds the unit again
+  once it completes. New codes:
   `NYL-LEASE-BROKEN`, `NYL-TEARDOWN-PENDING`, `NYL-TEARDOWN-HAS-DEPENDENTS`,
   `NYL-TEARDOWN-WAITING`, `NYL-TEARDOWN-INCOMPLETE`,
   `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`,
