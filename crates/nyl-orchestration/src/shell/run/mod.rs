@@ -1299,7 +1299,8 @@ fn plan_leaving(
         if !teardown_unit {
             continue;
         }
-        if let Some((blocking, _)) = teardown::readiness(context.drivers, environment, name, unit) {
+        if let Some(preflight) = teardown::readiness(context.drivers, environment, name, unit) {
+            let blocking = &preflight.blocking;
             readiness_state.insert(
                 name.clone(),
                 if blocking.is_empty() {
@@ -1311,7 +1312,7 @@ fn plan_leaving(
                 },
             );
             if !blocking.is_empty() {
-                readiness.insert(name.clone(), blocking);
+                readiness.insert(name.clone(), preflight);
             }
         }
     }

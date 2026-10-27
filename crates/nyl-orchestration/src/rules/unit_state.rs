@@ -30,7 +30,6 @@ use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
 use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
 use nyl_core::orchestration::time::Timestamp;
-use nyl_core::resources::environment::DriftRepair;
 
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::lease::{holders, lease_live, run_live};
@@ -389,12 +388,6 @@ pub fn status_with_readiness(
     drivers: Option<&DriverSet>,
     readiness: &BTreeMap<UnitName, TeardownReadiness>,
 ) -> EnvironmentRunReport {
-    let drift_repair = snapshot
-        .environment
-        .as_ref()
-        .and_then(|record| record.spec.get("driftRepair"))
-        .and_then(|value| serde_json::from_value::<DriftRepair>(value.clone()).ok())
-        .unwrap_or_default();
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
     let running = running_units(coordination, now);
@@ -449,14 +442,8 @@ pub fn status_with_readiness(
             unit_state(desired, observed, running.contains(name))
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
-        if let Some(drivers) = drivers {
-            unit.drift = crate::rules::drift::status_drift(
-                desired,
-                observed,
-                snapshot.observations.get(name),
-                drivers,
-                drift_repair,
-            );
+        if drivers.is_some() {
+            unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.observations.get(name));
             // A current unit whose latest drift observation is `drifted` is
             // work for the next reconcile: state `drifted`, exit 2.
             if unit.state == Some(UnitState::Current)

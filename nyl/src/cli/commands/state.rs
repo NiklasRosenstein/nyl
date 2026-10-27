@@ -410,21 +410,47 @@ fn run_delete(
         allow_incomplete,
         ..LifecycleOptions::default()
     };
+    run_lifecycle(
+        common,
+        wiring,
+        Operation::StateDelete.as_str(),
+        RunMode::Teardown {
+            target: TeardownTarget::All,
+        },
+        lifecycle,
+        source,
+        |context, request| nyl_orchestration::shell::teardown::state_delete(context, request, teardown),
+    )
+}
+
+/// Run a state operation that needs source access and the shared run context.
+pub(crate) fn run_lifecycle(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    operation_name: &'static str,
+    mode: RunMode,
+    lifecycle: LifecycleOptions,
+    source: Option<&str>,
+    operation: impl FnOnce(
+        &nyl_orchestration::shell::run::RunContext<'_>,
+        &nyl_orchestration::shell::run::RunRequest,
+    ) -> StateOperationReport,
+) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
         let environment = placeholder_environment(&common.environment);
-        Ok(render(
-            &StateOperationReport::new(environment, Operation::StateDelete.as_str()).refused(finding),
+        render(
+            &StateOperationReport::new(environment, operation_name).refused(finding),
             common.output,
-        ))
+        )
     };
     let session = match Session::open(&common.path, &common.environment) {
         Ok(session) => session,
-        Err(Stop::Finding(finding)) => return refused(finding),
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),
     };
     let identity = match wiring.commit_identity(&session.resolved.git_dir, common.author.as_deref()) {
         Ok(identity) => identity,
-        Err(finding) => return refused(finding),
+        Err(finding) => return Ok(refused(finding)),
     };
     let request = match session.request(&RunOptions {
         units: &[],
@@ -433,29 +459,24 @@ fn run_delete(
         wait: common.wait_lease,
         local: None,
         cancellation: wiring.cancellation.clone(),
-        mode: RunMode::Teardown {
-            target: TeardownTarget::All,
-        },
+        mode,
         lifecycle,
         reapply: false,
         fail_fast: false,
         reason: common.reason.as_deref(),
     }) {
         Ok(request) => request,
-        Err(finding) => return refused(finding),
+        Err(finding) => return Ok(refused(finding)),
     };
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
     }))?;
-    let report = match session.run_with(wiring, &store, Some(&identity), &request, |context, request| {
-        nyl_orchestration::shell::teardown::state_delete(context, request, teardown)
-    }) {
+    let mut report = match session.run_with(wiring, &store, Some(&identity), &request, operation) {
         Ok(report) => report,
-        Err(Stop::Finding(finding)) => return refused(finding),
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),
     };
-    let mut report = report;
     let mut warnings = session.resolved.warnings.clone();
     warnings.append(&mut report.warnings);
     report.warnings = warnings;

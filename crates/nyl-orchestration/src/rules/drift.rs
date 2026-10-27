@@ -26,7 +26,6 @@
 
 use std::collections::BTreeMap;
 
-use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
@@ -158,15 +157,12 @@ pub fn observation_changes(
 /// current receipt or without an observation of it. The state does not
 /// depend on the recovery policy or `driftRepair`: a drifted unit is work
 /// for the next reconcile either way (repaired, awaiting approval, or
-/// awaiting `--reapply`), so `drivers` and `repair` do not change it.
+/// awaiting `--reapply`).
 pub fn status_drift(
     desired: &DesiredUnit,
     observed: Option<&ObservedUnit>,
     observations: Option<&BTreeMap<ObservationType, Observation>>,
-    drivers: &DriverSet,
-    repair: DriftRepair,
 ) -> Option<DriftAttribute> {
-    let _ = (drivers, repair);
     if !receipt_is_current(desired, observed) {
         return None;
     }
@@ -182,6 +178,7 @@ pub fn status_drift(
 
 #[cfg(test)]
 mod tests {
+    use nyl_core::orchestration::driver::DriverSet;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -389,8 +386,6 @@ mod tests {
                 &world.desired[&name(unit)],
                 world.observed.get(&name(unit)),
                 world.observations.get(&name(unit)),
-                &world.drivers,
-                DriftRepair::Manual,
             )
             .map(|drift| drift.result)
         };

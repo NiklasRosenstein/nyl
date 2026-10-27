@@ -1,75 +1,8 @@
-//! The lifecycle transition table of a desired unit: deletion, retention,
-//! release, explicit teardown, and holds.
+//! Pure lifecycle transitions for deletion, retention, release, and holds.
 //!
-//! Contract: [Deletion](../../../../design/orchestration-core.md#deletion)
-//! (the `lifecycle` block, omission, teardown, retain, fencing, explicit
-//! teardown, holds), [Identity](../../../../design/orchestration-core.md#identity)
-//! (a kind change ends the incarnation), [Instances](../../../../design/orchestration-core.md#instances)
-//! (`teardown --all` holds and releases), and
-//! [Recovery](../../../../design/orchestration-core.md#recovery), "Holds on
-//! uncertain units". `design/implementation-architecture.md`: lifecycle
-//! transitions live in this one table, and each rule is one row with one
-//! test.
-//!
-//! Every change of a desired unit's `lifecycle` goes through [`transition`]:
-//! `reconcile` (omission, return, retention, release, kind change, teardown
-//! progress), `nyl teardown`, `nyl hold`, and `nyl resume`. The table decides
-//! the lifecycle only; the caller moves documents accordingly (a tombstone's
-//! receipt, an observed file, a uid), and receipts and conditions keep
-//! following [`super::transitions`].
-//!
-//! Rows (current state, event: next):
-//!
-//! - active, left with intent teardown: deleting, teardown pending.
-//! - active, left with intent retain: deleting with intent retain (the
-//!   caller retains it in the same run).
-//! - active or deleting with intent retain, retain: retained tombstone.
-//! - active or deleting, released (a kind that cannot tear down, or a
-//!   `Retain` unit under `teardown --all`): files removed; with a hold to
-//!   apply afterwards, held without an incarnation.
-//! - retained, released (`teardown --unit` of a tombstone whose kind cannot
-//!   tear down, or `teardown --all` of any tombstone, which honours
-//!   `Retain`): files removed, resources left in place; with a hold, held
-//!   without an incarnation.
-//! - deleting with teardown pending and reason omission or kind-change,
-//!   returned: active (the caller keeps uid and receipt). Any other deleting
-//!   unit, returned: unchanged (an explicit request is not undone by source,
-//!   and a started teardown continues; a new incarnation waits for it).
-//! - retained, returned (same name and kind): active, adopting the tombstone.
-//! - retained, left with reason kind-change: files removed (the tombstone of
-//!   another kind is dropped, resources left in place).
-//! - deleting, teardown started: teardown in progress.
-//! - deleting, torn down: files removed; with a hold to apply afterwards
-//!   (`teardown --hold`, or `--all` for a unit in the ownership set), held
-//!   without an incarnation (the file survives without a uid until `resume`).
-//! - active or deleting without an incarnation, outside the ownership set
-//!   (a uid-less file after `resume`): files removed.
-//! - active or deleting, teardown requested (explicit): deleting with the
-//!   request's reason, teardown pending; a deleting unit keeps its progress.
-//! - retained, teardown requested (explicit): deleting with the request's
-//!   reason, teardown pending, and the tombstone's receipt restored as the
-//!   observed file ([`Next::RestoreReceipt`]), so the teardown reads the
-//!   receipt's outputs and a teardown that does not finish in this run keeps
-//!   them.
-//! - held, teardown requested: held, with the deletion block (teardown
-//!   pending, the request) next to the hold. That is all a teardown of a
-//!   held unit does: a held unit never progresses, so there is no row for
-//!   a held unit's teardown starting, finishing, or its release. After
-//!   `resume` the unit is deleting, and the next teardown-capable run
-//!   carries the request out as an explicit teardown.
-//! - held, left: unchanged (a held unit leaving the ownership set is not
-//!   deleted; `hold.pending.deletion` reports it).
-//! - active, hold: held. Deleting, hold: held, keeping the deletion block.
-//!   Held, hold: unchanged. Retained, hold: refused.
-//! - no desired document, hold ([`transition_absent`]): a held marker
-//!   ([`nyl_core::orchestration::state::DesiredUnit::held_marker`]).
-//! - held, resume: active, or deleting where it stopped. Not held, resume: unchanged.
-//!
-//! `teardown --hold` is "tear down, then hold": the hold rides on the
-//! teardown's last event (`TornDown { hold }` or `Released { hold }`), so
-//! the teardown ends with [`Next::EndIncarnation`] (held without an
-//! incarnation) instead of [`Next::Remove`]. `teardown --all` does the same
-//! for units still in the ownership set.
+//! Contract: [Deletion](../../../../design/orchestration-core.md#deletion) and
+//! [Instances](../../../../design/orchestration-core.md#instances). All lifecycle
+//! changes go through [`transition`]; callers move documents according to [`Next`].
 
 use nyl_core::orchestration::state::{
     Deletion, DeletionIntent, DeletionReason, Hold, Lifecycle, Request, TeardownProgress, Tombstone,

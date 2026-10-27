@@ -20,12 +20,11 @@ use nyl_core::orchestration::state::Operation;
 use nyl_orchestration::report::StateOperationReport;
 use nyl_orchestration::rules::recovery::RecoverAction;
 use nyl_orchestration::shell::recover::{recover_environment, RecoverUnit};
-use nyl_orchestration::shell::run::{LifecycleOptions, RunMode, DEFAULT_CONCURRENCY};
-use nyl_state::git::CommitAuthor;
+use nyl_orchestration::shell::run::{LifecycleOptions, RunMode};
 
 use super::state::{render, Common};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::{placeholder_environment, RunOptions, Session, Stop};
+use crate::orchestration::session::placeholder_environment;
 use crate::{NylError, Result};
 
 /// Import a broken lease's run, clear a unit's condition, or accept a checkpointed result.
@@ -80,44 +79,15 @@ pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             Some(RecoverUnit { unit, action })
         }
     };
-    let session = match Session::open(&common.path, &common.environment) {
-        Ok(session) => session,
-        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
-        Err(Stop::Error(error)) => return Err(error),
-    };
-    let identity = match wiring.commit_identity(&session.resolved.git_dir, common.author.as_deref()) {
-        Ok(identity) => identity,
-        Err(finding) => return Ok(refused(finding)),
-    };
-    let request = match session.request(&RunOptions {
-        units: &[],
-        concurrency: DEFAULT_CONCURRENCY,
-        source: None,
-        wait: common.wait_lease,
-        local: None,
-        cancellation: wiring.cancellation.clone(),
-        mode: RunMode::Recover { unit },
-        lifecycle: LifecycleOptions::default(),
-        reapply: false,
-        fail_fast: false,
-        reason: common.reason.as_deref(),
-    }) {
-        Ok(request) => request,
-        Err(finding) => return Ok(refused(finding)),
-    };
-    let store = session.store(Some(CommitAuthor {
-        identity: identity.clone(),
-        clock: wiring.clock.clone(),
-    }))?;
-    let mut report = match session.run_with(wiring, &store, Some(&identity), &request, recover_environment) {
-        Ok(report) => report,
-        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
-        Err(Stop::Error(error)) => return Err(error),
-    };
-    let mut warnings = session.resolved.warnings.clone();
-    warnings.append(&mut report.warnings);
-    report.warnings = warnings;
-    Ok(render(&report, common.output))
+    super::state::run_lifecycle(
+        common,
+        wiring,
+        Operation::Recover.as_str(),
+        RunMode::Recover { unit },
+        LifecycleOptions::default(),
+        None,
+        recover_environment,
+    )
 }
 
 #[cfg(test)]

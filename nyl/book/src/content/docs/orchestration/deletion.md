@@ -211,7 +211,9 @@ resources. A held unit never progresses:
 
 `nyl hold` also works while a run holds the environment's lease: the run
 reads the hold before it starts each unit, starts no held unit, and writes
-the hold in its own transition commit.
+the hold in its own transition commit. Holds are checked between teardown
+batches. Holding a publication during its teardown wait pauses it before
+phase two; its recorded wait stays in state until you resume it.
 
 ## Publication teardown waits
 

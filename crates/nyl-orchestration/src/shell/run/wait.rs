@@ -47,6 +47,8 @@ pub(crate) enum WaitEnd {
     Stop { reason: String },
     /// Removal could not be established: the teardown is uncertain.
     Uncertain { reason: String },
+    /// A hold pauses the teardown before phase 2.
+    Held,
     /// SIGINT or SIGTERM.
     Cancelled,
 }
@@ -72,6 +74,12 @@ pub(crate) fn wait(context: &RunContext<'_>, request: &WaitRequest<'_>) -> WaitE
         }
         let now = base.clock.now();
         let signals = received(base, request.location, request.environment, request.run);
+        if signals
+            .iter()
+            .any(|signal| &signal.unit == unit && signal.action == nyl_core::orchestration::state::SignalAction::Hold)
+        {
+            return WaitEnd::Held;
+        }
         let confirmation = signals
             .iter()
             .find(|signal| &signal.unit == unit && confirms(signal, request.run, request.waiting));
@@ -341,7 +349,7 @@ mod tests {
         let sender = store.clone();
         let clock = HookedClock::new(move |waits| {
             if waits == 2 {
-                sender.push(signal(SignalAction::Hold, &run_id(), "kubernetes", None, 20));
+                sender.push(signal(SignalAction::Hold, &run_id(), "unrelated", None, 20));
                 sender.push(signal(
                     SignalAction::ConfirmRemoved,
                     &run_id(),
@@ -504,5 +512,34 @@ mod tests {
         );
         assert!(matches!(end, WaitEnd::Stop { .. }), "{end:?}");
         assert!(clock.waits().is_empty());
+    }
+    /// A hold delivered during a delay pauses it before phase 2, even if
+    /// the same poll would otherwise complete the delay or confirm removal.
+    #[test]
+    fn test_a_hold_during_a_wait_pauses_before_phase_two() {
+        let store = std::sync::Arc::new(SignalStore::default());
+        let sender = store.clone();
+        let clock = HookedClock::new(move |_| {
+            sender.push(signal(SignalAction::Hold, &run_id(), "kubernetes", None, 15));
+            sender.push(signal(
+                SignalAction::ConfirmRemoved,
+                &run_id(),
+                "kubernetes",
+                Some(&phase1()),
+                15,
+            ));
+        });
+        assert_eq!(
+            wait_for(
+                &store,
+                &clock,
+                &unit(&json!({"strategy": "delay", "duration": "15s"})),
+                None,
+                None,
+                &Cancellation::new()
+            ),
+            WaitEnd::Held
+        );
+        assert_eq!(clock.waits(), vec![Duration::from_secs(15)]);
     }
 }

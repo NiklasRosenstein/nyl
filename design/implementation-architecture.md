@@ -73,6 +73,10 @@ functions over an immutable snapshot:
 fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp) -> Decisions
 ```
 
+- The teardown planner returns both the forecast order for previews and the
+  next executable wave. Releases, drops, retentions, and teardowns share the
+  dependency barriers. The shell runs one batch and replans from its outcomes,
+  applying hold signals between batches and before publication phase 2.
 - The shell in `nyl-orchestration` executes decisions and records results
   through the `StateStore` and `Driver` traits. It is the only code that
   performs effects.

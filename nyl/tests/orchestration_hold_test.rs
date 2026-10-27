@@ -12,7 +12,7 @@ mod scenario;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use nyl::orchestration::run::{CommandOutcome, Wiring};
+use nyl::orchestration::run::CommandOutcome;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, Clock as _, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, StateResult, StateStore,
@@ -23,13 +23,12 @@ use nyl_core::orchestration::state::{
     Signal, SignalAction, SignalKind, StateLocation, StateV1, TeardownProgress,
 };
 use nyl_core::orchestration::time::Duration;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 use nyl_orchestration::shell::lifecycle::hold;
 use nyl_orchestration::shell::run::Cancellation;
 use nyl_orchestration::shell::state::Requested;
 use nyl_orchestration::shell::{Context, Settings};
-use scenario::runner::{invoke_in, AUTHOR};
+use scenario::runner::AUTHOR;
 use scenario::shell::{self, dev, shared_project, unit};
 use scenario::world::git_output;
 
@@ -54,31 +53,6 @@ impl Harness {
         Self {
             shell: shell::Harness::new(&shared_project(), true),
         }
-    }
-
-    /// `nyl <args>` in-process in a fresh clone of `main`.
-    fn invoke(&self, args: &[&str]) -> CommandOutcome {
-        self.invoke_with(&NoFaults, args)
-    }
-
-    /// `nyl <args>` with `faults` consulted at the run's fault points.
-    fn invoke_with(&self, faults: &dyn FaultInjector, args: &[&str]) -> CommandOutcome {
-        let tools = ProcessRunner::new();
-        let wiring = Wiring {
-            clock: self.clock.clone(),
-            ids: &self.ids,
-            drivers: &self.drivers,
-            tools: &tools,
-            faults,
-            runner: "test-runner".to_owned(),
-            author: Some(AUTHOR.parse().unwrap()),
-            process_env: self.process_env.clone(),
-            cancellation: Cancellation::default(),
-            prompt: None,
-            observer: None,
-        };
-        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-        invoke_in(&self.world, &wiring, &args, "main", "").unwrap()
     }
 
     fn init(&self) {
@@ -106,14 +80,6 @@ impl Harness {
 
     fn resume(&self, unit: &str) -> CommandOutcome {
         self.invoke(&["resume", "-e", "dev", "--unit", unit, "-o", "json"])
-    }
-
-    fn tip(&self, reference: &str) -> String {
-        git_output(&self.world.bare(), &["rev-parse", reference])
-    }
-
-    fn message(&self, reference: &str) -> String {
-        git_output(&self.world.bare(), &["log", "-1", "--format=%B", reference])
     }
 
     /// A lease of another runner's run, live for `minutes`.
@@ -713,4 +679,84 @@ fn test_hold_applies_directly_when_the_run_finishes_before_reading_the_signal() 
         .signals(&harness.location, &dev(), &lease.run)
         .unwrap()
         .is_empty());
+}
+
+/// A hold delivered during an earlier teardown must protect the next batch.
+#[test]
+fn test_a_hold_between_teardown_batches_keeps_the_resource() {
+    let units: String = ["first", "second"].iter().map(|name| format!(
+        "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: {name}\n  labels: {{dev: 'true'}}\nspec:\n  command: [sh, -c, 'touch %SCENARIO_TMP%/{name}']\n  teardown: [sh, -c, 'rm %SCENARIO_TMP%/{name}']\n---\n"
+    )).collect();
+    let project = shell::project(&[
+        shell::NYL_TOML,
+        ("nyl/environment.yaml", shell::ENVIRONMENT),
+        ("nyl/units.yaml", &units),
+    ]);
+    let harness = Harness {
+        shell: shell::Harness::new(project.path(), true),
+    };
+    harness.init();
+    assert_eq!(harness.reconcile().exit, 0);
+    harness
+        .world
+        .commit_files("main", "Remove both units", &[("nyl/units.yaml", "")]);
+    let faults = HoldDuringRun::new(&harness, FaultPoint::AfterEffect, Some("first"), "second");
+    let report = harness.invoke_with(
+        &faults,
+        &[
+            "reconcile",
+            "-e",
+            "dev",
+            "--allow-teardown",
+            "--concurrency",
+            "1",
+            "-o",
+            "json",
+        ],
+    );
+    assert_eq!(
+        report.report["environments"][0]["units"]["second"]["result"], "held",
+        "{:#}",
+        report.report
+    );
+    assert!(!harness.world.scenario_tmp().join("first").exists());
+    assert!(harness.world.scenario_tmp().join("second").exists());
+    let snapshot = harness.snapshot();
+    let second = &snapshot.desired[&unit("second")];
+    assert!(matches!(second.lifecycle, Lifecycle::Held { deletion: Some(_), .. }));
+    assert!(second.unit.uid.is_some());
+}
+
+/// A publication held after phase 1 keeps its incarnation and wait, so
+/// phase 2 can only run after resume.
+#[test]
+fn test_a_hold_after_publication_phase_one_prevents_phase_two() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile().exit, 0);
+    let mut publication = harness.snapshot().desired[&unit("kubernetes")].clone();
+    publication.spec["teardownWait"] = serde_json::json!({"strategy": "delay", "duration": "15s"});
+    publication.resolved_spec.as_mut().unwrap()["teardownWait"] = publication.spec["teardownWait"].clone();
+    harness.stage(TransitionChanges {
+        desired: BTreeMap::from([(unit("kubernetes"), Some(publication))]),
+        ..TransitionChanges::default()
+    });
+    let faults = HoldDuringRun::new(&harness, FaultPoint::AfterEffect, Some("kubernetes"), "kubernetes");
+    let report = harness.invoke_with(
+        &faults,
+        &["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"],
+    );
+    assert_eq!(
+        report.report["environments"][0]["units"]["kubernetes"]["result"], "held",
+        "{:#}",
+        report.report
+    );
+    let snapshot = harness.snapshot();
+    let publication = &snapshot.desired[&unit("kubernetes")];
+    assert!(matches!(
+        publication.lifecycle,
+        Lifecycle::Held { deletion: Some(_), .. }
+    ));
+    assert!(publication.unit.uid.is_some());
+    assert!(snapshot.observed[&unit("kubernetes")].waiting.is_some());
 }

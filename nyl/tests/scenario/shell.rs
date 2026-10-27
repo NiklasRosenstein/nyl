@@ -190,6 +190,47 @@ impl Harness {
         }
     }
 
+    /// Invoke the CLI in a fresh source clone, using this world's injected dependencies.
+    pub fn invoke(&self, args: &[&str]) -> nyl::orchestration::run::CommandOutcome {
+        self.invoke_with(self.faults.as_ref(), args)
+    }
+
+    pub fn invoke_with(&self, faults: &dyn FaultInjector, args: &[&str]) -> nyl::orchestration::run::CommandOutcome {
+        let cancellation = Cancellation::default();
+        let tools = ProcessRunner::new().cancelled_by(cancellation.shared());
+        let wiring = nyl::orchestration::run::Wiring {
+            clock: self.clock.clone(),
+            ids: &self.ids,
+            drivers: &self.drivers,
+            tools: &tools,
+            faults,
+            runner: "test-runner".to_owned(),
+            author: Some(self.identity.clone()),
+            process_env: self.process_env.clone(),
+            cancellation,
+            prompt: None,
+            observer: None,
+        };
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        super::runner::invoke_in(&self.world, &wiring, &args, "main", "").unwrap()
+    }
+
+    pub fn tip(&self, reference: &str) -> String {
+        git_output(&self.world.bare(), &["rev-parse", reference])
+    }
+
+    pub fn message(&self, reference: &str) -> String {
+        git_output(&self.world.bare(), &["log", "-1", "--format=%B", reference])
+    }
+
+    pub fn files(&self, reference: &str) -> String {
+        git_output(&self.world.bare(), &["ls-tree", "-r", "--name-only", reference])
+    }
+
+    pub fn show(&self, reference: &str, path: &str) -> String {
+        git_output(&self.world.bare(), &["show", &format!("{reference}:{path}")])
+    }
+
     pub fn context(&self) -> Context<'_> {
         self.context_on(self.store.as_ref())
     }

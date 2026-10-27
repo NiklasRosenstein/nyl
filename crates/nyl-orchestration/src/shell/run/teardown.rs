@@ -1,33 +1,10 @@
-//! The leaving waves of a run: teardowns, retentions, releases, and drops,
-//! in reverse dependency order, and `nyl teardown` as a run mode.
+//! Execute leaving waves and publication teardown phases.
 //!
-//! Contract: [Deletion](../../../../../design/orchestration-core.md#deletion)
-//! (omission, teardown, retained dependents, retain, explicit teardown,
-//! holds, fencing), [Instances](../../../../../design/orchestration-core.md#instances)
-//! (`teardown --all` honours `Retain`), [Kubernetes publication
-//! unit](../../../../../design/orchestration-core.md#kubernetes-publication-unit)
-//! (two-phase teardown, `teardownWait`, readiness), [Runs and
-//! leases](../../../../../design/orchestration-core.md#runs-and-leases) item 2 (a
-//! teardown wait's deadline), and [Recovery](../../../../../design/orchestration-core.md#recovery)
-//! (the teardown recovery policy), as amended by the part 5 decisions (Q4,
-//! Q6, Q7, Q8, Q10, Q11, Q26, Q50, Q55).
-//!
-//! - Every lifecycle change goes through [`lifecycle::transition`], and the
-//!   documents move as [`desired_rules::write`] says; receipts and
-//!   conditions follow [`transitions::apply_to`].
-//! - Which unit acts next is [`teardown_rules::plan`]'s: consumers first,
-//!   one reverse-dependency rule for teardowns, retentions, releases, and
-//!   drops (Q6). A unit acts once no deleting unit that depends on it is
-//!   left, and the run plans again after every wave.
-//! - A teardown runs its driver in the unit's recorded `sourceRevision`
-//!   (or `--source`), from the stored desired document; a teardown run
-//!   renders nothing (Q4). Its outcome: success removes the unit's files
-//!   (or keeps a held file without an incarnation, "tear down, then
-//!   hold"); a failure or uncertain outcome leaves the teardown in progress
-//!   with a condition (Q8); a two-phase teardown that waits records the wait
-//!   and waits under its `teardownWait` ([`super::wait`]).
-//! - A held unit never progresses: a teardown of it records the request
-//!   only (Q26).
+//! Contract: [Deletion](../../../../../design/orchestration-core.md#deletion) and
+//! [Kubernetes publication](../../../../../design/orchestration-core.md#kubernetes-publication-unit).
+//! The pure planner owns ordering; this shell runs one batch, records outcomes,
+//! and checks holds before planning again. Teardowns use stored desired documents
+//! and recorded source revisions, without rendering.
 
 #[allow(clippy::wildcard_imports)] // The run module's private helpers and imports.
 use super::*;
@@ -66,10 +43,8 @@ pub(super) struct Life {
     pub(super) waiting: BTreeSet<UnitName>,
     /// Units the run tore down, released, retained, or tried to.
     pub(super) attempted: BTreeSet<UnitName>,
-    /// Unmet blocking readiness requirements, and what a teardown leaves.
-    pub(super) readiness: BTreeMap<UnitName, Vec<Finding>>,
-    pub(super) remnants: BTreeMap<UnitName, Vec<String>>,
-    pub(super) preflighted: BTreeSet<UnitName>,
+    /// Cached preflight results, including successful checks and remnants.
+    pub(super) readiness: BTreeMap<UnitName, crate::rules::teardown_readiness::Readiness>,
     /// The unit after which `--fail-fast` stopped the run.
     pub(super) stopped: Option<UnitName>,
     /// The hold signals the run acted on.
@@ -211,29 +186,6 @@ impl Life {
         entry.result = Some(result);
         entry
     }
-
-    /// The leaving units whose deleting dependents are all gone.
-    fn unblocked(&self, ready: &[UnitName]) -> Vec<UnitName> {
-        let dependencies = teardown_rules::dependencies(&self.desired);
-        ready
-            .iter()
-            .filter(|name| {
-                !dependencies.iter().any(|(consumer, producers)| {
-                    consumer != *name && producers.contains(*name) && self.desired.get(consumer).is_some_and(leaving)
-                })
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-/// Whether a desired document is on its way out: deleting, or held with a
-/// pending deletion.
-pub(super) fn leaving(unit: &DesiredUnit) -> bool {
-    matches!(
-        unit.lifecycle,
-        Lifecycle::Deleting { .. } | Lifecycle::Held { deletion: Some(_), .. }
-    )
 }
 
 /// The hold of a held document's `hold` block.
@@ -353,7 +305,6 @@ impl Reconcile<'_, '_, '_> {
         observed: &mut BTreeMap<UnitName, ObservedUnit>,
         artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
     ) -> Result<(), Ending> {
-        let context = self.context();
         let environment = self.environment().clone();
         loop {
             if self.session.request.cancellation.is_cancelled() {
@@ -364,7 +315,7 @@ impl Reconcile<'_, '_, '_> {
             }
             // Holds sent to this run take effect before it starts a unit (Q28).
             self.apply_hold_signals(life, inputs.runs, observed, artifacts, None);
-            self.preflight(life, inputs);
+            self.preflight(life);
             let plan = self.leaving_plan(life, inputs, observed);
             // `--fail-fast` starts no teardown after the first approval wait.
             if let Some((name, _)) = plan.pending.iter().find(|(name, pending)| {
@@ -375,11 +326,13 @@ impl Reconcile<'_, '_, '_> {
                     break;
                 }
             }
-            let unblocked = life.unblocked(&plan.ready);
-            if unblocked.is_empty() {
+            if plan.wave.is_empty() {
                 break;
             }
-            let (instant, teardowns): (Vec<UnitName>, Vec<UnitName>) = unblocked.into_iter().partition(|name| {
+            // Run one batch, then read holds and plan again from its outcomes.
+            let concurrency = self.session.request.concurrency.max(1);
+            let batch: Vec<_> = plan.wave.into_iter().take(concurrency).collect();
+            let (instant, teardowns): (Vec<_>, Vec<_>) = batch.into_iter().partition(|name| {
                 life.releases.contains(name)
                     || matches!(&life.desired[name].lifecycle, Lifecycle::Deleting { deletion }
                         if deletion.intent == DeletionIntent::Retain)
@@ -387,21 +340,12 @@ impl Reconcile<'_, '_, '_> {
             for name in &instant {
                 self.retire(life, name, observed, artifacts);
             }
-            for (name, tombstones) in plan.overrides {
-                if teardowns.contains(&name) {
-                    life.details.allow_dependents.insert(name, tombstones);
+            for name in &teardowns {
+                if let Some(tombstones) = plan.overrides.get(name) {
+                    life.details.allow_dependents.insert(name.clone(), tombstones.clone());
                 }
             }
-            let concurrency = self.session.request.concurrency.max(1);
-            for chunk in teardowns.chunks(concurrency) {
-                if self.session.request.cancellation.is_cancelled() {
-                    return Err(self.cancelled());
-                }
-                self.tear_down(life, inputs, chunk, observed, artifacts)?;
-                if life.stopped.is_some() {
-                    break;
-                }
-            }
+            self.tear_down(life, inputs, &teardowns, observed, artifacts)?;
         }
         // Every leaving unit this run did not finish reports why it waits.
         let plan = self.leaving_plan(life, inputs, observed);
@@ -446,7 +390,6 @@ impl Reconcile<'_, '_, '_> {
                 entry.warnings.extend(findings.iter().cloned());
             }
         }
-        let _ = context;
         Ok(())
     }
 
@@ -471,29 +414,18 @@ impl Reconcile<'_, '_, '_> {
     }
 
     /// The readiness preflight of every deleting teardown unit, once.
-    fn preflight(&self, life: &mut Life, inputs: &LeaveInputs<'_>) {
-        let _ = inputs;
-        let units: Vec<(UnitName, DesiredUnit)> = life
-            .desired
-            .iter()
-            .filter(|(name, unit)| {
-                !life.preflighted.contains(*name)
-                    && matches!(&unit.lifecycle, Lifecycle::Deleting { deletion }
-                        if deletion.intent == DeletionIntent::Teardown)
-            })
-            .map(|(name, unit)| (name.clone(), unit.clone()))
-            .collect();
-        for (name, unit) in units {
-            life.preflighted.insert(name.clone());
-            let Some((blocking, remnants)) = readiness(self.context().drivers, self.environment(), &name, &unit) else {
+    fn preflight(&self, life: &mut Life) {
+        for (name, unit) in &life.desired {
+            if life.readiness.contains_key(name)
+                || !matches!(&unit.lifecycle, Lifecycle::Deleting { deletion }
+                if deletion.intent == DeletionIntent::Teardown)
+            {
                 continue;
-            };
-            if !blocking.is_empty() {
-                life.readiness.insert(name.clone(), blocking);
             }
-            if !remnants.is_empty() {
-                life.remnants.insert(name, remnants);
-            }
+            life.readiness.insert(
+                name.clone(),
+                readiness(self.context().drivers, self.environment(), name, unit).unwrap_or_default(),
+            );
         }
     }
 
@@ -553,6 +485,7 @@ impl Reconcile<'_, '_, '_> {
             return;
         };
         life.apply(name, write, observed, artifacts);
+        life.releases.remove(name);
         let environment = self.environment().clone();
         if outcome == LifecycleOutcome::Retained {
             life.details.retained.push(name.clone());
@@ -738,83 +671,86 @@ impl Reconcile<'_, '_, '_> {
         };
         let since = call.finished;
         let run = self.run.clone();
-        let (result, message, document, waits) = match outcome {
-            Outcome::Succeeded { .. } => {
-                let hold = life.hold_after.get(name).cloned();
-                match lifecycle::transition(&in_progress.lifecycle, LifecycleEvent::TornDown { hold }) {
-                    Ok(next) => {
-                        if let Some(write) = desired_rules::write(&in_progress, next, LifecycleOutcome::Removed) {
-                            life.apply(name, write, observed, artifacts);
+        let (result, message, document, waits) =
+            match outcome {
+                Outcome::Succeeded { .. } => {
+                    let hold = life.hold_after.get(name).cloned();
+                    match lifecycle::transition(&in_progress.lifecycle, LifecycleEvent::TornDown { hold }) {
+                        Ok(next) => {
+                            if let Some(write) = desired_rules::write(&in_progress, next, LifecycleOutcome::Removed) {
+                                life.apply(name, write, observed, artifacts);
+                            }
+                            if let Some(findings) = life.readiness.get(name).filter(|readiness| {
+                                self.session.request.lifecycle.allow_incomplete && !readiness.ready()
+                            }) {
+                                let remains: Vec<String> = findings
+                                    .blocking
+                                    .iter()
+                                    .map(|finding| finding.message.clone())
+                                    .collect();
+                                self.incomplete(life, name, remains);
+                            }
+                            life.result(name, &kind, UnitResult::Removed);
                         }
-                        if let Some(findings) = life
-                            .readiness
-                            .get(name)
-                            .filter(|_| self.session.request.lifecycle.allow_incomplete)
-                        {
-                            let remains: Vec<String> = findings.iter().map(|finding| finding.message.clone()).collect();
-                            self.incomplete(life, name, remains);
+                        Err(refusal) => {
+                            self.report.warnings.push(Finding::new(
+                                Code::TeardownPending,
+                                format!("unit {name}: its finished teardown was not recorded: {refusal:?}"),
+                                "report this as a bug in Nyl",
+                            ));
                         }
-                        life.result(name, &kind, UnitResult::Removed);
                     }
-                    Err(refusal) => {
-                        self.report.warnings.push(Finding::new(
-                            Code::TeardownPending,
-                            format!("unit {name}: its finished teardown was not recorded: {refusal:?}"),
-                            "report this as a bug in Nyl",
-                        ));
-                    }
+                    return Ok(false);
                 }
-                return Ok(false);
-            }
-            Outcome::AwaitingApproval { .. } => {
-                life.result(name, &kind, UnitResult::AwaitingApproval);
-                self.fail_fast(life, name);
-                return Ok(false);
-            }
-            Outcome::Failed {
-                category,
-                retryable,
-                message,
-            } => (
-                UnitResult::Failed { category, retryable },
-                Some(message.clone()),
-                condition(Event::Failed {
-                    since,
-                    run,
+                Outcome::AwaitingApproval { .. } => {
+                    life.result(name, &kind, UnitResult::AwaitingApproval);
+                    self.fail_fast(life, name);
+                    return Ok(false);
+                }
+                Outcome::Failed {
                     category,
                     retryable,
                     message,
-                }),
-                false,
-            ),
-            Outcome::Uncertain { reason } => (
-                UnitResult::Uncertain { reason: reason.clone() },
-                Some(reason.clone()),
-                condition(Event::Uncertain { since, run, reason }),
-                false,
-            ),
-            Outcome::Waiting {
-                phase,
-                reason,
-                until,
-                published,
-            } => {
-                let waiting = TeardownWaiting {
+                } => (
+                    UnitResult::Failed { category, retryable },
+                    Some(message.clone()),
+                    condition(Event::Failed {
+                        since,
+                        run,
+                        category,
+                        retryable,
+                        message,
+                    }),
+                    false,
+                ),
+                Outcome::Uncertain { reason } => (
+                    UnitResult::Uncertain { reason: reason.clone() },
+                    Some(reason.clone()),
+                    condition(Event::Uncertain { since, run, reason }),
+                    false,
+                ),
+                Outcome::Waiting {
                     phase,
-                    reason: reason.clone(),
-                    since,
+                    reason,
                     until,
-                    phase1_commit: published,
-                    run,
-                };
-                (
-                    UnitResult::TearingDown { reason: reason.clone() },
-                    Some(reason),
-                    condition(Event::Waiting { waiting }),
-                    true,
-                )
-            }
-        };
+                    published,
+                } => {
+                    let waiting = TeardownWaiting {
+                        phase,
+                        reason: reason.clone(),
+                        since,
+                        until,
+                        phase1_commit: published,
+                        run,
+                    };
+                    (
+                        UnitResult::TearingDown { reason: reason.clone() },
+                        Some(reason),
+                        condition(Event::Waiting { waiting }),
+                        true,
+                    )
+                }
+            };
         life.apply(
             name,
             LifecycleWrite {
@@ -962,9 +898,21 @@ impl Reconcile<'_, '_, '_> {
                     self.fail_fast(life, name);
                     return Ok(());
                 }
+                super::wait::WaitEnd::Held => {
+                    self.apply_hold_signals(life, inputs.runs, observed, artifacts, None);
+                    return Ok(());
+                }
                 super::wait::WaitEnd::Cancelled => return Err(self.cancelled()),
             }
         };
+        self.apply_hold_signals(life, inputs.runs, observed, artifacts, None);
+        if life
+            .desired
+            .get(name)
+            .is_some_and(|unit| matches!(unit.lifecycle, Lifecycle::Held { .. }))
+        {
+            return Ok(());
+        }
         life.details
             .confirmed_removal
             .insert(name.clone(), completion_detail(&completion));
@@ -1000,7 +948,17 @@ impl Reconcile<'_, '_, '_> {
                 life.waiting.insert(name.clone());
             }
             if finished && incomplete {
-                let remains = life.remnants.get(name).cloned().unwrap_or_default();
+                let remains = life
+                    .readiness
+                    .get(name)
+                    .map(|readiness| {
+                        readiness
+                            .remnants
+                            .iter()
+                            .map(|finding| finding.message.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 self.incomplete(life, name, remains);
             }
         }
@@ -1099,17 +1057,11 @@ pub(super) fn readiness(
     environment: &EnvironmentName,
     name: &UnitName,
     unit: &DesiredUnit,
-) -> Option<(Vec<Finding>, Vec<String>)> {
+) -> Option<crate::rules::teardown_readiness::Readiness> {
     let driver = drivers.get(&unit.unit.api_version, &unit.unit.kind)?;
     match driver.teardown_settings(unit) {
         Ok(Supported::Supported(settings)) => {
-            let readiness = crate::rules::teardown_readiness::evaluate(environment, name, &settings);
-            let remnants = readiness
-                .remnants
-                .iter()
-                .map(|finding| finding.message.clone())
-                .collect();
-            Some((readiness.blocking, remnants))
+            Some(crate::rules::teardown_readiness::evaluate(environment, name, &settings))
         }
         Ok(Supported::Unsupported) | Err(_) => None,
     }

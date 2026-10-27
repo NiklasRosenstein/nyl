@@ -827,3 +827,44 @@ impl Probe for Harness {
         RunId::new(format!("00000000-0000-7000-9000-{:012x}", number + 1)).unwrap()
     }
 }
+
+/// Releasing an intermediate unit must not let a producer overtake a
+/// blocked consumer, and a completed release must unblock that producer.
+#[test]
+fn test_teardown_all_orders_a_release_between_consumer_and_producer() {
+    let consumer = |teardown: &str| command_unit("consumer", "true", Some(teardown), "  dependsOn: [release]\n");
+    let release = command_unit("release", "true", None, "  dependsOn: [producer]\n");
+    let producer = command_unit(
+        "producer",
+        "touch %SCENARIO_TMP%/producer",
+        Some("rm %SCENARIO_TMP%/producer"),
+        "",
+    );
+    let (_project, harness) = harness_with(&format!("{}---\n{}---\n{}", consumer("exit 1"), release, producer));
+    assert_eq!(harness.reconcile(&[]).exit.code(), 0);
+    let failed = teardown(&harness, TeardownTarget::All, |_| {});
+    assert_eq!(outcome(&failed, "failed"), set(&["consumer"]), "{failed:#?}");
+    assert!(harness.world.scenario_tmp().join("producer").exists());
+    assert!(harness.snapshot().desired[&unit("release")].unit.uid.is_some());
+
+    // The explicit teardown uses its stored spec; repair that definition
+    // and clear the failure as an operator would before retrying.
+    let snapshot = harness.snapshot();
+    let mut desired = snapshot.desired[&unit("consumer")].clone();
+    desired.spec["teardown"] = serde_json::json!(["sh", "-c", "true"]);
+    desired.resolved_spec.as_mut().unwrap()["teardown"] = desired.spec["teardown"].clone();
+    let mut observed = snapshot.observed[&unit("consumer")].clone();
+    observed.condition = None;
+    put(
+        &harness,
+        TransitionChanges {
+            desired: BTreeMap::from([(unit("consumer"), Some(desired))]),
+            observed: BTreeMap::from([(unit("consumer"), Some(observed))]),
+            ..TransitionChanges::default()
+        },
+    );
+    let completed = teardown(&harness, TeardownTarget::All, |_| {});
+    assert_eq!(completed.exit.code(), 0, "{completed:#?}");
+    assert!(!harness.world.scenario_tmp().join("producer").exists());
+    assert_eq!(outcome(&completed, "released"), set(&["release"]));
+}

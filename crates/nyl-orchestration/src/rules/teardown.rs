@@ -75,7 +75,7 @@ pub struct TeardownInputs<'a> {
     pub waiting: &'a BTreeSet<UnitName>,
     /// Unmet blocking readiness requirements per unit, from the preflight
     /// ([`super::teardown_readiness`]).
-    pub readiness: &'a BTreeMap<UnitName, Vec<Finding>>,
+    pub readiness: &'a BTreeMap<UnitName, super::teardown_readiness::Readiness>,
     /// `retained` tombstones the run drops (a kind change of their name, or
     /// a release under `teardown --all`): they wait for their deleting
     /// dependents like every other leaving unit (Q6).
@@ -116,8 +116,11 @@ pub enum Pending {
 /// The decision of one wave.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TeardownPlan {
-    /// Units to tear down now, in order: consumers before producers.
+    /// Forecast order for previews: consumers before producers. Execution
+    /// uses `wave` and replans after each batch.
     pub ready: Vec<UnitName>,
+    /// Units that can act in parallel now, before any dependent leaves.
+    pub wave: Vec<UnitName>,
     /// Every other deleting unit and why it waits.
     pub pending: BTreeMap<UnitName, Pending>,
     /// Units torn down although retained tombstones cite them
@@ -129,11 +132,11 @@ pub struct TeardownPlan {
 pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
     let desired = inputs.desired;
     let dependencies = dependencies(desired);
-    // Deleting units, and held units with a pending deletion, whose
-    // consumers go first.
+    // Every leaving action is a barrier for its producers, including
+    // releases whose stored lifecycle is still active or retained.
     let leaving: BTreeSet<&UnitName> = desired
         .iter()
-        .filter(|(_, unit)| deleting(unit))
+        .filter(|(name, unit)| deleting(unit) || inputs.drops.contains(*name))
         .map(|(name, _)| name)
         .collect();
     let candidates: Vec<&UnitName> = desired
@@ -167,7 +170,16 @@ pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
             open.push(name);
         }
     }
-    // Consumers first: a unit is ready once every deleting unit that depends
+    plan.wave = open
+        .iter()
+        .filter(|name| {
+            !leaving
+                .iter()
+                .any(|dependent| *dependent != **name && depends(&dependencies, dependent, name))
+        })
+        .map(|name| (*name).clone())
+        .collect();
+    // Consumers first: a unit is ready once every leaving unit that depends
     // on it is gone or ready earlier in this order.
     let mut ready: BTreeSet<&UnitName> = BTreeSet::new();
     loop {
@@ -299,9 +311,9 @@ fn gate(
         return Some(Pending::AwaitingApproval);
     }
     if !options.allow_incomplete {
-        if let Some(findings) = inputs.readiness.get(name).filter(|findings| !findings.is_empty()) {
+        if let Some(readiness) = inputs.readiness.get(name).filter(|readiness| !readiness.ready()) {
             return Some(Pending::Readiness {
-                findings: findings.clone(),
+                findings: readiness.blocking.clone(),
             });
         }
     }
@@ -769,5 +781,44 @@ mod tests {
             finding(&env(), &name("api"), &Pending::Held).map(|finding| finding.code),
             Some(Code::UnitHeld)
         );
+    }
+    /// A release remains a dependency barrier until its own consumers leave.
+    #[test]
+    fn test_a_release_keeps_its_producers_behind_a_blocked_consumer() {
+        let mut case = Case::new(vec![
+            teardown("consumer", json!({"dependsOn": ["release"]})),
+            fixtures::desired("release", "Command", json!({"dependsOn": ["producer"]}), "release"),
+            teardown("producer", json!({})),
+        ]);
+        case.drops.insert(name("release"));
+        // A manual approval blocks only the consumer directly, but must also
+        // keep the release and its producer from proceeding.
+        case.desired.get_mut(&name("consumer")).unwrap().spec["approval"] = json!({"mode": "manual"});
+        let plan = case.plan();
+        assert!(plan.ready.is_empty(), "{plan:?}");
+        assert!(plan.wave.is_empty());
+        assert_eq!(
+            plan.pending[&name("producer")],
+            Pending::Dependents {
+                units: names(&["release"])
+            }
+        );
+    }
+
+    /// A forecast may list a whole chain, but only independent leaves execute now.
+    #[test]
+    fn test_the_next_wave_waits_for_each_dependent_to_finish() {
+        let mut case = Case::new(vec![
+            teardown("consumer", reads("release")),
+            fixtures::desired("release", "Command", reads("producer"), "release"),
+            teardown("producer", json!({})),
+        ]);
+        case.drops.insert(name("release"));
+        assert_eq!(case.plan().ready, names(&["consumer", "release", "producer"]));
+        assert_eq!(case.plan().wave, names(&["consumer"]));
+        case.desired.remove(&name("consumer"));
+        assert_eq!(case.plan().wave, names(&["release"]));
+        case.desired.remove(&name("release"));
+        assert_eq!(case.plan().wave, names(&["producer"]));
     }
 }

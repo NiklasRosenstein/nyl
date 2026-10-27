@@ -10,7 +10,7 @@
 
 mod scenario;
 
-use nyl::orchestration::run::{CommandOutcome, Wiring};
+use nyl::orchestration::run::CommandOutcome;
 use nyl_core::orchestration::driver::DriverOperation;
 use nyl_core::orchestration::ids::{CommitId, RunId};
 use nyl_core::orchestration::ports::Checkpoint;
@@ -19,10 +19,7 @@ use nyl_core::orchestration::state::{
     FailureCategory, Lease, LeaseKind, Operation, Request, Run, RunKind, StateV1, TeardownWaiting,
 };
 use nyl_drivers::fake::Scripted;
-use nyl_drivers::process::ProcessRunner;
-use nyl_orchestration::fault::NoFaults;
-use nyl_orchestration::shell::run::Cancellation;
-use scenario::runner::{invoke_in, AUTHOR};
+
 use scenario::shell::{self, dev, shared_project};
 use scenario::world::git_output;
 
@@ -49,26 +46,6 @@ impl Harness {
         }
     }
 
-    /// `nyl <args>` in-process in a fresh clone of `main`.
-    fn invoke(&self, args: &[&str]) -> CommandOutcome {
-        let tools = ProcessRunner::new();
-        let wiring = Wiring {
-            clock: self.clock.clone(),
-            ids: &self.ids,
-            drivers: &self.drivers,
-            tools: &tools,
-            faults: &NoFaults,
-            runner: "test-runner".to_owned(),
-            author: Some(AUTHOR.parse().unwrap()),
-            process_env: self.process_env.clone(),
-            cancellation: Cancellation::default(),
-            prompt: None,
-            observer: None,
-        };
-        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-        invoke_in(&self.world, &wiring, &args, "main", "").unwrap()
-    }
-
     fn init(&self) {
         let outcome = self.invoke(&["state", "init", "-e", "dev"]);
         assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
@@ -82,19 +59,6 @@ impl Harness {
         let mut args = vec!["state", "delete", "-e", "dev", "--reason", "decommission", "-o", "json"];
         args.extend_from_slice(extra);
         self.invoke(&args)
-    }
-
-    fn tip(&self, reference: &str) -> String {
-        git_output(&self.world.bare(), &["rev-parse", reference])
-    }
-
-    /// The files on `reference`.
-    fn files(&self, reference: &str) -> String {
-        git_output(&self.world.bare(), &["ls-tree", "-r", "--name-only", reference])
-    }
-
-    fn show(&self, reference: &str, path: &str) -> String {
-        git_output(&self.world.bare(), &["show", &format!("{reference}:{path}")])
     }
 
     fn lease(&self, minutes: i64) -> Lease {
