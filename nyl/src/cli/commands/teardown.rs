@@ -69,9 +69,9 @@ pub struct TeardownArgs {
     #[arg(long)]
     pub allow_incomplete: bool,
 
-    /// With --all, take the units' source files from this revision when the
-    /// recorded source commit cannot be fetched.
-    #[arg(long, requires = "all", conflicts_with = "units")]
+    /// Take the units' source files from this revision when their recorded
+    /// source commit cannot be fetched; recorded as an override.
+    #[arg(long)]
     pub source: Option<String>,
 
     /// Why, recorded as the transition commit's Nyl-Reason.
@@ -160,14 +160,14 @@ mod tests {
 
     /// Catches a teardown that names nothing (and so would tear down
     /// nothing, or everything) being accepted: `--unit` or `--all` is
-    /// required, and `--source` only applies to `--all`.
+    /// required, and `--source` applies to both (its fix names `--unit`).
     #[test]
     fn test_teardown_needs_unit_or_all() {
         assert!(!parses(&["teardown", "-e", "dev"]));
         assert!(parses(&["teardown", "-e", "dev", "--unit", "api"]));
         assert!(parses(&["teardown", "-e", "dev", "--all", "--fail-fast"]));
         assert!(!parses(&["teardown", "-e", "dev", "--unit", "api", "--all"]));
-        assert!(!parses(&["teardown", "-e", "dev", "--unit", "api", "--source", "main"]));
+        assert!(parses(&["teardown", "-e", "dev", "--unit", "api", "--source", "main"]));
     }
 
     /// Catches `state delete` options that only mean something for the

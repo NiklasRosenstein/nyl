@@ -892,6 +892,9 @@ fn test_recover_imports_a_broken_run_without_executing() {
         "nyl: recover dev",
         "\nimported: [network, web-image]",
         "\nrecovered: [database]",
+        // The units block reports the condition the import gave it.
+        "  database: {\"reason\":",
+        "\"result\":\"uncertain\"}",
         "\nleaseBroken: {",
         "runner lost",
         "Nyl-Operation: recover",

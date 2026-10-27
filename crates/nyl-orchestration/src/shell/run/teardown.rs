@@ -244,15 +244,21 @@ pub(super) fn held_report(
     });
     entry.pending.clone_from(&pending);
     if pending.is_some() || teardown {
-        let what = match (pending.as_ref(), teardown) {
-            (Some(commit), true) => format!("the changes of source commit {commit} and a pending teardown"),
-            (Some(commit), false) => format!("the changes of source commit {commit}"),
-            (None, _) => "a pending teardown".to_owned(),
+        let (what, then) = match (pending.as_ref(), teardown) {
+            (Some(commit), true) => (
+                format!("the changes of source commit {commit} and a pending teardown"),
+                "to apply them; the next reconcile or teardown carries the teardown out",
+            ),
+            (Some(commit), false) => (format!("the changes of source commit {commit}"), "to apply them"),
+            (None, _) => (
+                "a pending teardown".to_owned(),
+                "and the next reconcile or teardown carries it out",
+            ),
         };
         entry.warnings.push(Finding::new(
             Code::UnitHeld,
             format!("unit {name} of {environment} is held; the hold keeps {what} from applying"),
-            format!("lift the hold with `nyl resume -e {environment} --unit {name}` to apply them"),
+            format!("lift the hold with `nyl resume -e {environment} --unit {name}` {then}"),
         ));
     }
     entry

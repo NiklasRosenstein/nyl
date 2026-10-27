@@ -14,8 +14,9 @@ read the result.
 :::note
 Runs cover one environment at a time and the [Command](/nyl/orchestration/resource-guides/command/)
 unit kind today, with [recovery](/nyl/orchestration/recovery/) from runs that
-died. Teardown, holds, approvals, and runs over several environments follow
-in later parts of milestone M3.
+died, drift repair, and [deletion and holds](/nyl/orchestration/deletion/).
+Remote approvals and runs over several environments follow in the last part
+of milestone M3.
 :::
 
 ## Units
@@ -127,7 +128,13 @@ repository are not supported yet.
 Each execution records a **receipt** in the observed state: the execution key
 it ran with, its outputs, its artifacts, and the receipts it read through
 references. A unit executes when it has no receipt whose key matches its
-current execution key, or when a receipt it read is no longer current.
+current execution key, or when a receipt it read is no longer current. The
+execution key alone decides: a producer recreated with a new identity and the
+same outputs leaves its consumers current, and a unit that must run again
+whenever a producer is recreated says so in its inputs, for example by
+reading an output that changes with every creation. A unit whose latest
+drift observation is `drifted` runs again too, as
+[Recovery](/nyl/orchestration/recovery/#repairing-drift) describes.
 
 The execution key is a digest of everything that decides what the unit does:
 its resolved spec, including the values its references resolved to, the
@@ -146,10 +153,15 @@ reconcile with no changes executes nothing and writes no commit.
    `--concurrency` (default 4), and checkpoints each result on the run ref.
    Each of the `--concurrency` slots keeps one checkout for the run and resets
    it to the next unit's effective commit, removing untracked and ignored
-   files, so a unit sees exactly what a fresh checkout of its commit holds;
+   files, so a unit sees exactly what a fresh checkout of its commit holds.
+   Before it starts each unit, the run reads holds that
+   [`nyl hold`](/nyl/reference/cli/hold/) sent it, and starts no held unit;
 4. resolves again at the same S, because new receipts unblock dependents, and
    repeats from step 3 until nothing is ready;
-5. writes one transition commit per state ref, then releases the lease.
+5. carries out lifecycle work: units that left the ownership set, and
+   teardowns an operator requested, are torn down, retained, released, or
+   dropped, consumers first ([Deletion and holds](/nyl/orchestration/deletion/));
+6. writes one transition commit per state ref, then releases the lease.
 
 A failed execution records a condition and keeps the unit's previous receipt.
 An execution that may have had effects without completing, such as one that
@@ -159,9 +171,18 @@ converge, wait for [`nyl recover`](/nyl/reference/cli/recover/).
 [Recovery](/nyl/orchestration/recovery/) explains conditions, recovery
 policies, and how a run takes over from a run that died, and the
 [Command guide](/nyl/orchestration/resource-guides/command/#failures-and-retries)
-describes how a Command converges. `--unit` executes only the named units;
-resolution still covers the whole environment, and a named unit whose
-dependency has no current receipt stays blocked.
+describes how a Command converges. `--unit` executes only the named units
+and does no lifecycle work; resolution still covers the whole environment,
+and a named unit whose dependency has no current receipt stays blocked.
+`--leaving` does only the lifecycle work.
+
+A unit that fails, becomes uncertain, waits for an approval, or is blocked
+does not stop the units that do not depend on it: a run reconciles everything
+it can. With `--fail-fast`, the run starts no further unit after the first
+failure, uncertain outcome, or approval wait; units already running finish,
+and the run still checkpoints them and writes its transition commit. The
+units it did not start are `blocked` with the reason `--fail-fast stopped the
+run after <unit>`, and it warns with `NYL-RUN-STOPPED`.
 
 ## Transition commits
 
@@ -202,14 +223,50 @@ Each unit's `result` is one of:
 | `recovered` | The unit was uncertain, and this run executed it again or found its effects applied. |
 | `failed` | The execution failed, with its `category` and whether it is `retryable`. |
 | `uncertain` | Effects may have happened; the unit waits for its recovery policy or `nyl recover`. |
-| `blocked` | A reference or dependency has no current receipt. |
-| `awaiting-approval` | The unit needs an approval, such as `--approve` in a `--local` run. |
+| `blocked` | A reference or dependency has no current receipt, a held unit it depends on has none, or `--fail-fast` stopped the run first. |
+| `awaiting-approval` | The unit needs an approval, such as `--approve` in a `--local` run, including a drifted unit that is not safe to re-run. |
+| `drifted` | The unit's receipt is current but drifted, and this run did not repair it (`driftRepair: manual`, or not named by `--unit`). |
+| `held` | The unit is [held](/nyl/orchestration/deletion/#holds); the detail names the source commit whose changes wait, and a pending teardown. |
+| `pending-teardown` | The unit left the ownership set and its teardown has not started: it waits for `--allow-teardown`, its deleting dependents, readiness, or an approval. |
+| `tearing-down` | The unit's teardown started and continues later, such as a publication waiting under its `teardownWait`. |
+| `removed` | The unit was torn down, and its files were removed. |
+| `retained` | The unit left the ownership set with `deletionPolicy: Retain` and became a tombstone. |
+| `released` | The unit's resources were left in place, because its kind cannot tear down, and its state was removed or held. |
+
+`held`, `drifted`, `pending-teardown`, and `tearing-down` make a reconcile
+exit 2, because work remains; a held unit whose teardown request a
+`nyl teardown` only recorded exits 0. `removed`, `retained`, and `released`
+exit 0.
 
 `imported` lists the units whose receipts came from checkpoints of earlier
 runs, and `recovered` the units this run marked uncertain while taking over or
 recovered by executing them again. `leaseBroken` appears when the run took
 over a lease that [`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break)
-broke. The headline counts each result except `current`.
+broke. `driftRepaired` lists the units the run executed again because they
+drifted, and `reapplied` records who forced which units with `--reapply`, and
+why; each appears only when it is not empty:
+
+```text
+nyl: reconcile dev (1 executed, 1 awaiting-approval)
+
+units:
+  cache: {"result":"current"}
+  config: {"executionKey":"sha256:42971c708f5916f2fab3a4319476c9a88123240b1cac2134e08d570e504a40b1","result":"executed"}
+  extra: {"result":"current"}
+  seed: {"result":"awaiting-approval"}
+  worker: {"result":"current"}
+recovered: []
+imported: []
+driftRepaired: [config]
+```
+
+Lifecycle work adds its details: `released` and `retained` list the units
+and what they left in place, `allowDependents` the tombstones an override
+passed, `confirmedRemoval` how a publication's teardown wait ended,
+`incomplete` what a teardown may have left behind, `sourceOverride` a
+teardown's `--source`, `teardownRequested` the held units whose teardown
+request was recorded, and `held` the units a hold reached during the run.
+The headline counts each result except `current`.
 
 State commits are authored by `--author "Name <email>"`, else by Git's
 `user.name` and `user.email`; without either, `nyl reconcile` exits 1 with

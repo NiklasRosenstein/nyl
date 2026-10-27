@@ -256,10 +256,33 @@ whether what its current receipt describes still holds, without executing
 anything. It records the latest drift observation, a health observation when
 the driver reports one, and the attestations the driver reports, in one
 observed commit, and writes nothing when nothing changed. It never changes a
-receipt or a condition. Drift does not yet make a reconcile execute the unit
-again; `verify` exits 3 on drift so that a pipeline can alert on it.
-Automatic repair of idempotent units and `nyl reconcile --reapply` are planned
-for the next part of M3.
+receipt or a condition; `verify` exits 3 on drift so that a pipeline can
+alert on it.
+
+## Repairing drift
+
+A unit whose latest drift observation is `drifted` is `drifted` in
+[`nyl status`](/nyl/reference/cli/status/), which exits 2 for it, and
+[`nyl plan`](/nyl/reference/cli/plan/) lists it as a unit that would execute:
+like a changed unit, it is work for the next reconcile.
+
+- With the Environment's `driftRepair: converge`, the default, the next
+  `nyl reconcile` executes every drifted unit whose recovery policy is
+  `converge` again, and its transition commit lists it under `driftRepaired`.
+  The new receipt removes the drift observation in the same commit, so the
+  unit is not repaired again until `verify` finds new drift.
+- A drifted unit that is not safe to re-run is reported `awaiting-approval`
+  (exit 2) while the rest of the run continues. A `--local` run executes it
+  with `--approve <unit>`; remote approvals arrive in a later part of M3.
+- `driftRepair: manual`, on the Environment or its EnvironmentGroup, turns
+  automatic repair off: drifted units stay `drifted` until a forced run.
+- `nyl reconcile -e <env> --unit <u> --reapply --reason <text>` executes the
+  named units again although their receipts are current, drifted or not, and
+  records who asked and why under `reapplied`. A named unit that is not safe
+  to re-run follows the approval rule above.
+
+`nyl verify`'s `NYL-VERIFY-DRIFT` warning says for each unit what the next
+reconcile does with it.
 
 ## Recovery next to local runs
 

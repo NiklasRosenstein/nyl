@@ -2992,6 +2992,18 @@ fn unexecuted_result(
             retryable: false,
         },
         (Some(Skipped::LocalApproval), _) => UnitResult::AwaitingApproval,
+        // A run that selects nothing, such as a recover import, reports a
+        // unit's condition as it is.
+        (None, Some(Condition::Uncertain { reason, .. })) => UnitResult::Uncertain { reason: reason.clone() },
+        (
+            None,
+            Some(Condition::Failed {
+                category, retryable, ..
+            }),
+        ) => UnitResult::Failed {
+            category: *category,
+            retryable: *retryable,
+        },
         _ if !matches!(unit.lifecycle, Lifecycle::Active) => UnitResult::Blocked {
             reason: "its lifecycle is not active".to_owned(),
         },

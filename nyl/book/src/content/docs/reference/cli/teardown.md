@@ -28,7 +28,12 @@ transition commit per state ref with the operation `teardown` and the
   is torn down and its files are removed. A unit still **in** the
   ownership set is replaced: its incarnation is torn down, and the next
   `reconcile` creates it again with a new uid. Units that consume it keep
-  their receipts and run again only when their own inputs change.
+  their receipts and run again only when their own inputs change. A unit
+  whose kind cannot tear down, such as a Command without a `teardown` step,
+  is released: its resources stay and its state is removed, so a unit still
+  in source is created fresh by the next `reconcile` unless `--hold` keeps
+  it. Only the named units are touched: a named unit that a deleting unit
+  still depends on waits for it, `pending-teardown`, exit 2.
 - `--all`: every unit, consumers first. Units still in the ownership set are
   held afterwards, without an incarnation, so nothing recreates them.
   `--all` honours `deletionPolicy: Retain`: Retain units and retained
@@ -37,7 +42,27 @@ transition commit per state ref with the operation `teardown` and the
   transition commit lists what was left (`NYL-UNIT-RELEASED`).
 - `--hold`: tear down, then hold, in the same operation, so no run can
   recreate the unit in between. The unit's desired file stays, held and
-  without a uid, until [`nyl resume`](/nyl/reference/cli/hold/).
+  without a uid, until [`nyl resume`](/nyl/reference/cli/hold/). When the
+  teardown does not finish in the invocation, because it waits, failed, or is
+  uncertain, the deleting unit is held where it stopped; after `nyl resume`
+  the teardown continues and the unit is not held afterwards. An unfinished
+  `--all` instead leaves its units deleting, so running it again or
+  `--confirm-removed` continues it, and the run that completes a unit's
+  teardown applies the hold.
+
+```console
+$ nyl teardown -e dev --unit worker --hold --reason rotate the worker
+removed worker
+UNIT    KIND     RESULT   DETAIL
+worker  Command  removed
+run: 01a17ac1-500c-78e8-b8fb-c969e048c5e9
+desired: 9814c8340010cbe310ccd53887148ff5930e5ff7
+observed: 1313296c5fff4adec9bc761c42af4c666d67673b
+```
+
+A unit that needs a manual approval is reported `awaiting-approval` and is
+not torn down; `nyl teardown --approve` arrives with remote approvals in the
+last part of M3.
 
 A named unit the state does not hold exits 1 with `NYL-UNIT-UNKNOWN`.
 
@@ -47,6 +72,16 @@ A held unit never progresses. A teardown of a held unit only records the
 request on its held desired file, tears nothing down, and exits 0, reporting
 the unit `held` with a pending teardown. After `nyl resume`, the next
 `reconcile` or `teardown` carries the request out as an explicit teardown.
+
+```console
+$ nyl teardown -e dev --unit config --reason replace config
+UNIT    KIND     RESULT  DETAIL
+config  Command  held
+run: 01a17ac9-068c-7804-b8ec-12a293ec3f77
+desired: c61ce895d31795f4dd681bc8fb50101a1f4ea7b8
+warning NYL-UNIT-HELD (config): unit config of dev is held; the hold keeps a pending teardown from applying
+  fix: lift the hold with `nyl resume -e dev --unit config` and the next reconcile or teardown carries it out
+```
 
 ### Order and waits
 
@@ -88,7 +123,7 @@ A run that waits in a terminal also accepts Enter as the confirmation.
 | `--allow-dependents` | Tear down units that retained tombstones still cite; the commit records the override. |
 | `--allow-incomplete` | Proceed despite unmet readiness requirements or an unconfirmed removal, recording what may remain (`NYL-TEARDOWN-INCOMPLETE`). |
 | `--fail-fast` | Start no further teardown after the first failure, uncertain outcome, or approval wait. What finished is still recorded in the transition commit. Without it, every unit that does not depend on a stopped one continues. |
-| `--source <revision>` | With `--all`, take the units' source files from this revision when the recorded source commit cannot be fetched. Nyl warns and records the substitution; it never refuses. |
+| `--source <revision>` | Take the units' source files from this revision when their recorded source commit cannot be fetched; a teardown that cannot fetch it fails before any effect and names this option. Nyl warns and records the substitution under `sourceOverride`; it never refuses. |
 | `--reason <text>` | Why, recorded as `Nyl-Reason`. |
 | `--wait-lease <duration>` | Wait up to this long for another run's lease, such as `10m`. |
 | `--author "Name <email>"` | The author of the state commits; defaults to Git's `user.name` and `user.email`. |
@@ -122,3 +157,6 @@ teardown request), `pending-teardown`, `tearing-down`, `failed`, or
 | `NYL-CONFIRMATION-DELIVERED` | Nothing to fix: the waiting run completes the teardown; follow it with `nyl status -e <env>`. |
 | `NYL-CONFIRMATION-REJECTED` | Check `nyl status -e <env>` for the unit whose teardown waits. |
 | `NYL-LEASE-HELD` | Wait for the run to finish, or pass `--wait-lease`. |
+| `NYL-UNIT-HELD` | A held unit only recorded the teardown request. Lift the hold with `nyl resume`. |
+| `NYL-RUN-STOPPED` | `--fail-fast` stopped the teardown after a unit failed, became uncertain, or waited for an approval. |
+| `NYL-SOURCE-UNAVAILABLE` | The unit's recorded source commit cannot be fetched. Fetch it, or pass `--source <revision>`. |

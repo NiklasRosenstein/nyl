@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Orchestration deletes units, holds them, and repairs drift (M3 part 5).
+  Units that leave an environment become `pending-teardown` until
+  `nyl reconcile --allow-teardown`, `retained` tombstones under
+  `deletionPolicy: Retain`, or are released when their kind cannot tear down,
+  consumers first; `--allow-dependents` tears down a unit retained tombstones
+  cite, and `--leaving` does only this lifecycle work. A returning unit keeps
+  its uid and receipt, or adopts its tombstone. New commands:
+  `nyl teardown -e <env> (--unit <u> | --all)` with `--hold`,
+  `--confirm-removed`, `--allow-dependents`, `--allow-incomplete`,
+  `--source`, and `--fail-fast` (`--all` honours `deletionPolicy: Retain`);
+  `nyl hold` and `nyl resume`, which freeze a unit at the desired document
+  its receipt was produced for, hold a unit never reconciled with a held
+  marker, and reach a running run through its signal ref
+  (`NYL-HOLD-DELIVERED`); and `nyl state delete [--teardown]`, which leaves a
+  deleted marker that later commands refuse with `NYL-STATE-DELETED` until
+  `nyl state init --fresh`. A two-phase publication teardown waits under
+  `teardownWait` (`observe`, `delay`, `manual`), ends early on
+  `--confirm-removed` or Enter in a terminal, and is preflighted for
+  teardown readiness, shown by `nyl status` and `nyl get units -o wide`.
+  `drifted` is a unit state: `nyl reconcile` executes drifted units whose
+  recovery policy is `converge` again (`driftRepaired`), others await
+  approval (`--local --approve`), `Environment.spec.driftRepair: manual`
+  (also from an EnvironmentGroup) turns that off, and
+  `nyl reconcile --unit <u> --reapply --reason <text>` forces named units
+  (`reapplied`). `--fail-fast` on `reconcile` and `teardown` starts no unit
+  after the first failure, uncertain outcome, or approval wait
+  (`NYL-RUN-STOPPED`). `nyl recover -e <env>` imports a broken lease's run
+  without executing and without a run record. New codes:
+  `NYL-LEASE-BROKEN`, `NYL-TEARDOWN-PENDING`, `NYL-TEARDOWN-HAS-DEPENDENTS`,
+  `NYL-TEARDOWN-WAITING`, `NYL-TEARDOWN-INCOMPLETE`,
+  `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`,
+  `NYL-TEARDOWN-NAMESPACE-CONFIRM`, `NYL-TEARDOWN-NAMESPACES-REMAIN`,
+  `NYL-TEARDOWN-CATALOG-REMAINS`, `NYL-UNIT-RELEASED`,
+  `NYL-UNIT-KIND-CHANGE`, `NYL-UNIT-HELD`, `NYL-HOLD-REFUSED`,
+  `NYL-HOLD-DELIVERED`, `NYL-CONFIRMATION-REJECTED`,
+  `NYL-CONFIRMATION-DELIVERED`, `NYL-STATE-DELETED`,
+  `NYL-STATE-DELETE-INCARNATIONS`, and `NYL-RUN-STOPPED`.
+
 - Orchestration recovers from interrupted runs (M3 part 4). A reconcile that
   finds an expired or broken lease takes over: it adopts the uids of units
   the dead run created, imports its checkpoints as receipts (`imported` in
@@ -147,6 +185,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same. The report names the baseline project directory.
 
 ### Changed
+
+- **Breaking:** only an operation that imports the run of a broken lease
+  (`nyl reconcile`, `nyl teardown`, `nyl recover`) takes that lease over.
+  Every other state writer, the `nyl state` commands, `nyl hold`, and
+  `nyl verify` included, exits 2 with `NYL-LEASE-BROKEN` and names
+  `nyl recover -e <env>`, and no longer puts the broken lease back after
+  writing. A `--local` run refuses a broken remote lease the same way.
+
+- A receipt's freshness is decided by its execution key alone: a producer
+  recreated with the same outputs leaves its consumers current. Observed unit
+  documents keep a copy of the desired document their receipt was produced
+  for (`desired`), and a publication's teardown wait (`waiting`); signals
+  name their `action`. The state format version stays `v1`.
 
 - **Breaking:** `nyl render`, `diff`, and `apply` take the path `render-tree`
   takes, so a local run and a published tree agree:

@@ -341,7 +341,7 @@ fn test_confirm_removed_is_delivered_to_the_waiting_run() {
         reason: "phase 1 published".to_owned(),
         since: harness.clock.now(),
         until: None,
-        phase1_commit: Some(CommitId::new(&harness.tip(DESIRED)).unwrap()),
+        phase1_commit: Some(CommitId::new(harness.tip(DESIRED)).unwrap()),
         run: lease.run.clone(),
     });
     let run = Run {

@@ -570,3 +570,194 @@ fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
     assert_eq!(rest.exit, 0, "{}", rest.stderr);
     assert_eq!(result(&rest, "database"), "removed");
 }
+
+/// A clock that, on the run's first wait, tells the test the run is
+/// waiting and blocks until the test lets it go on.
+struct PausingClock {
+    clock: std::sync::Arc<nyl_orchestration::testing::FakeClock>,
+    reached: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    proceed: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl nyl_core::orchestration::ports::Clock for PausingClock {
+    fn now(&self) -> Timestamp {
+        self.clock.now()
+    }
+
+    fn wait(&self, duration: nyl_core::orchestration::time::Duration) {
+        if let Some(reached) = self.reached.lock().unwrap().take() {
+            reached.send(()).unwrap();
+            self.proceed.lock().unwrap().recv().unwrap();
+        }
+        self.clock.wait(duration);
+    }
+}
+
+/// End to end, the signal path of a `delay` wait: a `teardown` run sits in
+/// its publication's 10-minute wait, a second invocation's
+/// `--confirm-removed` is delivered to it (exit 0, nothing committed), and
+/// the waiting run ends its wait early, runs phase 2, and records the
+/// confirmation. Catches a delivered confirmation that the waiting run
+/// never reads, so it waits out the delay and records it as not observed.
+#[test]
+fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
+    use nyl_core::orchestration::ports::Clock as _;
+
+    let harness = harness::Harness::new(&shared_project(), true);
+    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml")).unwrap();
+    let units = units.replace(
+        "  mode: publish\n",
+        "  mode: publish\n  teardownWait: {strategy: delay, duration: 10m}\n",
+    );
+    harness
+        .world
+        .commit_files("main", "Wait 10 minutes for removal", &[("nyl/units.yaml", &units)]);
+    assert_eq!(invoke(&harness, &["state", "init", "-e", "dev"]).exit, 0);
+    let reconcile = invoke(&harness, &["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(reconcile.exit, 0, "{}", reconcile.stderr);
+    let started = harness.clock.now();
+
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    let clock = std::sync::Arc::new(PausingClock {
+        clock: harness.clock.clone(),
+        reached: std::sync::Mutex::new(Some(reached_tx)),
+        proceed: std::sync::Mutex::new(proceed_rx),
+    });
+    let (waiting, delivered) = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            let tools = ProcessRunner::new();
+            let wiring = Wiring {
+                clock: clock.clone(),
+                ids: &harness.ids,
+                drivers: &harness.drivers,
+                tools: &tools,
+                faults: &NoFaults,
+                runner: "ci-job".to_owned(),
+                author: Some(AUTHOR.parse().unwrap()),
+                process_env: harness.process_env.clone(),
+                cancellation: Cancellation::default(),
+                prompt: None,
+                observer: None,
+            };
+            let args = ["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]
+                .map(str::to_owned)
+                .to_vec();
+            invoke_in(&harness.world, &wiring, &args, "main", "").unwrap()
+        });
+        reached_rx.recv().expect("the teardown reaches its wait");
+        let delivered = invoke(
+            &harness,
+            &[
+                "teardown",
+                "-e",
+                "dev",
+                "--unit",
+                "kubernetes",
+                "--confirm-removed",
+                "--reason",
+                "checked the cluster by hand",
+                "-o",
+                "json",
+            ],
+        );
+        proceed_tx.send(()).unwrap();
+        (waiting.join().unwrap(), delivered)
+    });
+
+    assert_eq!(delivered.exit, 0, "{}", delivered.stderr);
+    assert!(
+        delivered.report.to_string().contains("NYL-CONFIRMATION-DELIVERED"),
+        "{}",
+        delivered.report
+    );
+    assert_eq!(waiting.exit, 0, "{}", waiting.stderr);
+    assert_eq!(result(&waiting, "kubernetes"), "removed");
+    // The wait ended on the confirmation, well before the delay ran out.
+    assert!(harness.clock.now() < started + chrono::Duration::minutes(10));
+    let message = git_output(
+        &harness.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+    );
+    assert!(message.contains("confirmedRemoval"), "{message}");
+    assert!(message.contains("checked the cluster by hand"), "{message}");
+    let files = git_output(
+        &harness.world.bare(),
+        &["ls-tree", "-r", "--name-only", "refs/heads/deploy"],
+    );
+    assert!(!files.lines().any(|path| path.starts_with("dev/")), "{files}");
+}
+
+/// End to end, teardown readiness from the stored document: a publication
+/// whose target does not prune its catalog shows `incomplete` in `status`
+/// without rendering, its teardown does not start (exit 2, the blocking
+/// code, the deploy branch untouched), and `--allow-incomplete` tears it
+/// down at once, recording what may remain. Catches a teardown that
+/// starts although it cannot complete, or one that completes without the
+/// record that it may have left workloads behind.
+#[test]
+fn test_unmet_readiness_keeps_a_teardown_pending_until_allow_incomplete() {
+    let harness = harness::Harness::new(&shared_project(), true);
+    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml")).unwrap();
+    let units = units.replace(
+        "  mode: publish\n",
+        "  mode: publish\n  teardownSettings: {catalogPrunes: false}\n",
+    );
+    harness
+        .world
+        .commit_files("main", "A catalog without pruning", &[("nyl/units.yaml", &units)]);
+    assert_eq!(invoke(&harness, &["state", "init", "-e", "dev"]).exit, 0);
+    let reconcile = invoke(&harness, &["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(reconcile.exit, 0, "{}", reconcile.stderr);
+
+    let status = invoke(&harness, &["status", "-e", "dev", "-o", "json"]);
+    let readiness = &status.report["environments"][0]["units"]["kubernetes"]["teardownReadiness"];
+    assert!(
+        readiness.to_string().contains("NYL-TEARDOWN-CATALOG-MANUAL-SYNC"),
+        "{}",
+        status.report
+    );
+
+    let deploy = git_output(&harness.world.bare(), &["rev-parse", "refs/heads/deploy"]);
+    let blocked = invoke(
+        &harness,
+        &["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"],
+    );
+    assert_eq!(blocked.exit, 2, "{}", blocked.stderr);
+    assert_eq!(result(&blocked, "kubernetes"), "pending-teardown");
+    assert!(
+        blocked.report.to_string().contains("NYL-TEARDOWN-CATALOG-MANUAL-SYNC"),
+        "{}",
+        blocked.report
+    );
+    assert_eq!(
+        git_output(&harness.world.bare(), &["rev-parse", "refs/heads/deploy"]),
+        deploy
+    );
+
+    let forced = invoke(
+        &harness,
+        &[
+            "teardown",
+            "-e",
+            "dev",
+            "--unit",
+            "kubernetes",
+            "--allow-incomplete",
+            "-o",
+            "json",
+        ],
+    );
+    assert_eq!(forced.exit, 0, "{}", forced.stderr);
+    assert_eq!(result(&forced, "kubernetes"), "removed");
+    assert!(
+        forced.report.to_string().contains("NYL-TEARDOWN-INCOMPLETE"),
+        "{}",
+        forced.report
+    );
+    let message = git_output(
+        &harness.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+    );
+    assert!(message.contains("incomplete:"), "{message}");
+}

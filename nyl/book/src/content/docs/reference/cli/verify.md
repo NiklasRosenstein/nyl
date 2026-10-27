@@ -38,6 +38,19 @@ nothing is recorded for that unit.
 A unit without a current receipt is reported as `no-receipt`, and a unit
 whose kind cannot verify as `unsupported`; neither is skipped silently.
 
+`verify` does not import runs, so it refuses a lease that
+[`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break) broke while
+the broken run is not imported yet, writing nothing; a `verify` with nothing
+to verify needs no lease and does not refuse:
+
+```console
+$ nyl verify -e dev
+dev: no units
+run: 01a17ac1-6115-73be-9b83-6ec5c43ada42
+error NYL-LEASE-BROKEN: the lease of dev was broken and its run 01a17ac1-5ed7-770a-9da3-a4fe0b96a2a1 has not been imported yet
+  fix: run `nyl recover -e dev` to import it (a `nyl reconcile` or `nyl teardown` of dev imports it too), then run this command again
+```
+
 A drifted unit is `drifted` in [`nyl status`](/nyl/reference/cli/status/)
 and work for the next [`nyl reconcile`](/nyl/reference/cli/reconcile/). What
 that reconcile does depends on the environment's `driftRepair` and the
@@ -89,6 +102,7 @@ headline counts them, such as `nyl: verify dev (3 clean, 1 drifted)`.
 | `NYL-VERIFY-UNKNOWN` | The driver could not tell whether the unit drifted, for example because its tool failed. Fix the cause and verify again. |
 | `NYL-VERIFY-UNSUPPORTED` | The unit's kind cannot verify, such as a Command unit without a `verify` step. |
 | `NYL-DRIVER-ERROR` | The verification could not run, for example because the unit's commit could not be checked out, or it passed its `timeout` (the message reads `timeout: verify passed …`). Fix the cause, or raise the unit's `timeout`, and verify again. |
+| `NYL-LEASE-BROKEN` | The lease was broken and its run is not imported yet. Run `nyl recover -e <env>`, then verify again. |
 
 ## Exit codes
 
@@ -96,7 +110,7 @@ headline counts them, such as `nyl: verify dev (3 clean, 1 drifted)`.
 | --- | --- |
 | 0 | Every verified unit is clean and its attestations pass. |
 | 1 | An error, such as `NYL-STATE-MISSING`, `NYL-UNIT-UNKNOWN`, `NYL-DRIVER-ERROR`, or `NYL-COMMIT-IDENTITY-MISSING`. |
-| 2 | A unit could not be verified: it has no current receipt, its kind cannot verify, or its drift is unknown; or another run holds the lease (`NYL-LEASE-HELD`). |
+| 2 | A unit could not be verified: it has no current receipt, its kind cannot verify, or its drift is unknown; or another run holds the lease (`NYL-LEASE-HELD`), or the lease is broken and its run not imported (`NYL-LEASE-BROKEN`). |
 | 3 | A unit drifted, or one of its attestations failed. |
 | 4 | The lease was taken over before the commit (`NYL-LEASE-LOST`), or a signal cancelled the verification (`NYL-RUN-CANCELLED`); nothing was written. |
 

@@ -333,7 +333,9 @@ Cluster.
 - A `fromUnit` reference is a dependency edge. It resolves against the
   producer's current receipt: the receipt must match the producer's current
   desired unit. Missing or stale evidence blocks the consumer; invalid evidence
-  fails validation.
+  fails validation. Freshness is decided by the execution key alone: a
+  producer recreated with the same outputs leaves its consumers current, and a
+  unit that must re-run when a producer is recreated says so in its inputs.
 - Only outputs declared in `outputs` are persisted, typed with the Release
   input type set. Outputs declared `sensitive` are validated but never
   persisted or referenceable; undeclared outputs are ignored, and a declared
@@ -515,13 +517,18 @@ The lifecycle contract must address:
   and fence it against a new incarnation of the same name.
 - Ordering: creation dependencies do not automatically define safe replacement
   or decommissioning order. Units are torn down before the units they depend
-  on, and the units a Kubernetes publication depends on also wait until its
-  workloads are gone, per the publication's `teardownWait` strategy (observed
-  removal, a fixed delay, or operator confirmation).
+  on, and drops and retentions follow the same reverse-dependency rule; the
+  units a Kubernetes publication depends on also wait until its workloads are
+  gone, per the publication's `teardownWait` strategy (observed removal, a
+  fixed delay, or operator confirmation).
 - Deletion defaults: `deletionPolicy` defaults to `Teardown` where a kind
   supports it, gated by `--allow-teardown` for omissions, so an accidental
   omission destroys nothing and is undone by restoring the unit. A declared
-  `Retain` keeps a tombstone, so restoring a retained unit never re-runs it.
+  `Retain` keeps a tombstone, so restoring a retained unit never re-runs it
+  while its execution key is unchanged.
+- Holds: a hold freezes a unit at the desired document its receipt was
+  produced for, kept next to the receipt in state, so no decision reads Git
+  history; a hold reaches a running run through its signal ref.
 
 ### Kubernetes rendering path
 
@@ -617,11 +624,11 @@ policy.
 | plan | Preview effects and unresolved inputs without executing |
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
-| verify | Observe external state and report drift without writing receipts |
+| verify | Observe external state and report drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
 | promote | Move a proven source commit and selected values into the target environment, or open a change for review |
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
-| recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason |
+| recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason, or import the run of a broken lease without executing |
 | attest | Record an external attestation for a unit's current receipt or an environment's state |
 | state init / move / forget / delete | Create state, relocate it and retire the old location, drop a unit from state without touching its resources, or remove an environment's state after its units are torn down |
 | state reset / restore | Drop local transitions and follow the remote again, or restore remote state after local transitions were pushed by hand |
