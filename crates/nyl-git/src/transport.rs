@@ -253,7 +253,7 @@ fn run(git_dir: &Path, url: &str, operation: &str, args: &[&str], auth: &GitAuth
     Ok(stdout)
 }
 
-fn base_command(git_dir: &Path) -> Command {
+pub(super) fn base_command(git_dir: &Path) -> Command {
     // A hooks directory that never exists: the user's hooks, such as a
     // global `core.hooksPath` pre-push hook, must not judge Nyl's own
     // fetches and pushes.
