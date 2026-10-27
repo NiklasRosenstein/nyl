@@ -1163,7 +1163,10 @@ fn test_a_recover_import_writes_no_lifecycle_changes() {
     assert_ne!(killed.exit, 0);
     harness.break_lease();
     // kubernetes leaves the ownership set.
-    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml")).unwrap();
+    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml"))
+        .unwrap()
+        // A Windows checkout has CRLF line endings; the edits below match LF.
+        .replace("\r\n", "\n");
     let leaving = units.replace(
         "name: kubernetes\n  labels: {dev: 'true'}",
         "name: kubernetes\n  labels: {dev: 'false'}",

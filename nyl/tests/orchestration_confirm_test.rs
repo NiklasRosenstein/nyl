@@ -658,7 +658,10 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
     use nyl_core::orchestration::ports::Clock as _;
 
     let harness = harness::Harness::new(&shared_project(), true);
-    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml")).unwrap();
+    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml"))
+        .unwrap()
+        // A Windows checkout has CRLF line endings; the edits below match LF.
+        .replace("\r\n", "\n");
     let units = units.replace(
         "  mode: publish\n",
         "  mode: publish\n  teardownWait: {strategy: delay, duration: 10m}\n",
@@ -699,7 +702,21 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
                 .to_vec();
             invoke_in(&harness.world, &wiring, &args, "main", "").unwrap()
         });
-        reached_rx.recv().expect("the teardown reaches its wait");
+        // A teardown that ends before its wait never signals: fail with its
+        // outcome instead of blocking the test run.
+        loop {
+            match reached_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !waiting.is_finished() => {}
+                Err(_) => {
+                    let outcome = waiting.join().unwrap();
+                    panic!(
+                        "the teardown ended before it reached its wait: exit {}\n{}\n{}",
+                        outcome.exit, outcome.stdout, outcome.stderr
+                    );
+                }
+            }
+        }
         let delivered = invoke(
             &harness,
             &[
@@ -752,7 +769,10 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
 #[test]
 fn test_unmet_readiness_keeps_a_teardown_pending_until_allow_incomplete() {
     let harness = harness::Harness::new(&shared_project(), true);
-    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml")).unwrap();
+    let units = std::fs::read_to_string(shared_project().join("nyl/units.yaml"))
+        .unwrap()
+        // A Windows checkout has CRLF line endings; the edits below match LF.
+        .replace("\r\n", "\n");
     let units = units.replace(
         "  mode: publish\n",
         "  mode: publish\n  teardownSettings: {catalogPrunes: false}\n",
