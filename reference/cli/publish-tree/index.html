@@ -78,7 +78,11 @@ Publication proceeds when both rendered trees and their publication coordinates
 match, using the clean checkout for provenance. Local files such as editor
 configuration therefore do not block a reproducible publication.</p>
 <p><code dir="auto">--require-clean</code> rejects any non-ignored source worktree change before
-rendering. <code dir="auto">--allow-dirty</code> skips the clean-checkout comparison and publishes the
+rendering. Its error lists up to 20 dirty files with Git index/worktree status
+codes and repository-relative paths, and reports how many more were omitted.
+It identifies the repository root so the full status can be inspected even when
+Nyl is invoked from a project subdirectory.</p>
+<p><code dir="auto">--allow-dirty</code> skips the clean-checkout comparison and publishes the
 working-tree render explicitly; the ownership index records <code dir="auto">dirty: true</code> and
 the commit message includes <code dir="auto">Nyl-Source-Dirty: true</code>. The two options are
 mutually exclusive.</p>
