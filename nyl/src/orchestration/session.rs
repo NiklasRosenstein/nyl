@@ -384,7 +384,10 @@ fn table(report: &RunReport) -> String {
             ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
         };
         if rows.is_empty() {
-            let _ = writeln!(text, "{}: no units", environment.name);
+            // A refused operation reaches no units; its error says why.
+            if environment.errors.is_empty() {
+                let _ = writeln!(text, "{}: no units", environment.name);
+            }
         } else {
             let _ = writeln!(text, "{}", render_table(headers, &rows));
         }

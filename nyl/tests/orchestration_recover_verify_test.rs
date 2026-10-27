@@ -214,6 +214,47 @@ fn test_recover_exits_2_while_another_run_holds_the_lease() {
     assert_eq!(harness.tip(OBSERVED), observed);
 }
 
+/// A refused reconcile or verify reports no run: none exists until the
+/// lease is held, so neither the table nor the JSON names a run ID, and
+/// the table shows the refusal instead of an empty unit list.
+#[test]
+fn test_a_refused_run_reports_no_run_and_no_empty_unit_list() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let now = harness.clock.now();
+    let lease = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: RunId::new("00000000-0000-7000-9000-0000000000fe").unwrap(),
+        runner: "https://ci.example.com/runs/7".to_owned(),
+        operation: Operation::Reconcile,
+        units: Vec::new(),
+        deadline: Duration::from_mins(30).after(now),
+        taken_at: now,
+        broken: None,
+    };
+    harness
+        .store
+        .take_lease(&harness.location, &dev(), &lease, None)
+        .unwrap();
+    for command in ["reconcile", "verify"] {
+        let json = harness.invoke(&[command, "-e", "dev", "-o", "json"]);
+        assert_eq!(json.exit, 2, "{}", json.stderr);
+        let environment = &json.report["environments"][0];
+        assert_eq!(environment["errors"][0]["code"], "NYL-LEASE-HELD");
+        assert!(
+            environment.get("run").is_none_or(serde_json::Value::is_null),
+            "{environment}"
+        );
+
+        let table = harness.invoke(&[command, "-e", "dev"]);
+        assert_eq!(table.exit, 2, "{}", table.stderr);
+        assert!(!table.stdout.contains("run: "), "{}", table.stdout);
+        assert!(!table.stdout.contains("no units"), "{}", table.stdout);
+    }
+}
+
 /// A dead run that crashed after an effect, before its checkpoint.
 fn crash_after_effect(harness: &Harness) {
     harness.init();

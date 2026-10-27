@@ -112,7 +112,6 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
     }
 
     let run = base.ids.run_id();
-    report.run = Some(run.clone());
     let longest = longest_timeout(verified.iter().map(|name| &snapshot.desired[*name]));
     let mut held = match lease::acquire(
         base,
@@ -130,6 +129,8 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
             return finish(report);
         }
     };
+    // A run exists only once it holds the lease: a refused one reports none.
+    report.run = Some(run.clone());
 
     if let Err(finding) = holding(context, request, &mut held, &mut report) {
         report.errors.push(finding);
