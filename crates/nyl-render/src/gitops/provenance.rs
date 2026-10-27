@@ -52,8 +52,7 @@ pub fn dirty_worktree_summary(project_root: &Path, carried: &[PathBuf]) -> Resul
         summary.push_str(change);
     }
     if changes.len() > MAX_PATHS {
-        write!(summary, "\n  ... and {} more", changes.len() - MAX_PATHS)
-            .expect("writing to a String cannot fail");
+        write!(summary, "\n  ... and {} more", changes.len() - MAX_PATHS).expect("writing to a String cannot fail");
     }
     summary.push_str("\nRun `git status --short --untracked-files=all` at that repository root for the full status.");
     Ok(summary)
