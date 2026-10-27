@@ -28,6 +28,21 @@
       "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
       "type": "string"
     },
+    "SignalAction": {
+      "description": "What a signal asks the running run to do.",
+      "oneOf": [
+        {
+          "const": "confirm-removed",
+          "description": "`nyl teardown --confirm-removed`: the publication's removal is\nconfirmed; bound to the phase 1 commit.",
+          "type": "string"
+        },
+        {
+          "const": "hold",
+          "description": "`nyl hold`: the run starts no further work on the unit and writes\nthe hold in its own transition commit.",
+          "type": "string"
+        }
+      ]
+    },
     "SignalKind": {
       "const": "Signal"
     },
@@ -41,8 +56,11 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A message to a running run, such as a teardown confirmation.",
+  "description": "A message to a running run: a teardown confirmation or a hold.",
   "properties": {
+    "action": {
+      "$ref": "#/$defs/SignalAction"
+    },
     "apiVersion": {
       "$ref": "#/$defs/StateV1"
     },
@@ -54,7 +72,7 @@
       "type": "string"
     },
     "from": {
-      "description": "Where the confirmation came from, such as a CI run URL.",
+      "description": "Where the signal came from, such as a CI run URL.",
       "type": "string"
     },
     "identity": {
@@ -64,7 +82,15 @@
       "$ref": "#/$defs/SignalKind"
     },
     "phase1Commit": {
-      "$ref": "#/$defs/CommitId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The phase 1 commit a `confirm-removed` signal confirms; absent for a hold."
     },
     "reason": {
       "type": [
@@ -83,8 +109,8 @@
     "apiVersion",
     "kind",
     "run",
+    "action",
     "unit",
-    "phase1Commit",
     "by",
     "identity",
     "at",
