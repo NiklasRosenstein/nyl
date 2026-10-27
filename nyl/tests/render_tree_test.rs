@@ -3173,7 +3173,9 @@ fn publish_tree_require_clean_rejects_irrelevant_worktree_changes() {
         .failure()
         .stderr(predicate::str::contains(
             "publish-tree --require-clean requires a clean source worktree",
-        ));
+        ))
+        .stderr(predicate::str::contains("?? \"untracked-publication-note.txt\""))
+        .stderr(predicate::str::contains("git status --short --untracked-files=all"));
 }
 
 #[test]

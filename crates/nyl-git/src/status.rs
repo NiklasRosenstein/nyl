@@ -9,6 +9,8 @@ use crate::transport::base_command;
 /// A changed path relative to the worktree root.
 #[derive(Debug, PartialEq, Eq)]
 pub struct WorktreeStatusEntry {
+    /// Git porcelain v1 index and worktree status codes, respectively.
+    pub status: [u8; 2],
     pub path: PathBuf,
     /// The path is untracked, rather than a change to a tracked file.
     pub untracked: bool,
@@ -60,6 +62,7 @@ pub fn worktree_status(git_dir: &Path, worktree: &Path) -> Result<Vec<WorktreeSt
                     .map_err(|error| GitError::Command(format!("invalid UTF-8 path in git status: {error}")))?,
             );
             Ok(WorktreeStatusEntry {
+                status: [record[0], record[1]],
                 path,
                 untracked: &record[..2] == b"??",
             })
@@ -127,6 +130,7 @@ mod tests {
         assert_eq!(
             worktree_status(repository.path(), root).unwrap(),
             vec![WorktreeStatusEntry {
+                status: *b" M",
                 path: "chart.tgz".into(),
                 untracked: false,
             }]
@@ -164,14 +168,17 @@ mod tests {
             worktree_status(repository.path(), root).unwrap(),
             vec![
                 WorktreeStatusEntry {
+                    status: *b"A ",
                     path: "renamed".into(),
                     untracked: false,
                 },
                 WorktreeStatusEntry {
+                    status: *b"D ",
                     path: "tracked".into(),
                     untracked: false,
                 },
                 WorktreeStatusEntry {
+                    status: *b"??",
                     path: "untracked/state file".into(),
                     untracked: true,
                 },
@@ -199,6 +206,7 @@ mod tests {
             assert_eq!(
                 worktree_status(repository.path(), root).unwrap(),
                 vec![WorktreeStatusEntry {
+                    status: *b"??",
                     path: path.clone(),
                     untracked: true
                 }]
@@ -247,6 +255,7 @@ mod tests {
         assert_eq!(
             worktree_status(linked_repository.path(), &linked).unwrap(),
             vec![WorktreeStatusEntry {
+                status: *b"??",
                 path: "input".into(),
                 untracked: true,
             }]

@@ -19,7 +19,12 @@ match, using the clean checkout for provenance. Local files such as editor
 configuration therefore do not block a reproducible publication.
 
 `--require-clean` rejects any non-ignored source worktree change before
-rendering. `--allow-dirty` skips the clean-checkout comparison and publishes the
+rendering. Its error lists up to 20 dirty files with Git index/worktree status
+codes and repository-relative paths, and reports how many more were omitted.
+It identifies the repository root so the full status can be inspected even when
+Nyl is invoked from a project subdirectory.
+
+`--allow-dirty` skips the clean-checkout comparison and publishes the
 working-tree render explicitly; the ownership index records `dirty: true` and
 the commit message includes `Nyl-Source-Dirty: true`. The two options are
 mutually exclusive.
