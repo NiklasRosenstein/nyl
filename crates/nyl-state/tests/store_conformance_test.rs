@@ -1312,9 +1312,10 @@ fn test_clear_with_a_record_leaves_only_the_deleted_marker() {
             );
             assert!(after.environment.is_none(), "{}", subject.name);
             // The history before the deletion stays readable.
-            if let Ok(earlier) = store.snapshot_at(location, &before.tips) {
-                assert_eq!(earlier.desired.len(), 1, "{}: history kept", subject.name);
-            }
+            let earlier = store
+                .snapshot_at(location, &before.tips)
+                .unwrap_or_else(|error| panic!("{}: history unreadable: {error}", subject.name));
+            assert_eq!(earlier.desired.len(), 1, "{}: history kept", subject.name);
         }
         let kept = store.snapshot(&other).unwrap();
         assert_eq!(kept.desired.len(), 1, "{}: the other environment stays", subject.name);

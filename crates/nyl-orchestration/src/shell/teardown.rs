@@ -41,7 +41,7 @@ use super::signal::{deliver, Delivery};
 use super::state::{commit, read, summary, with_lease, Requested};
 use super::{store_error, Context};
 use crate::report::{Outcome, StateOperationReport};
-use crate::rules::lease::{self as lease_rule, BrokenLease, LeaseDecision};
+use crate::rules::lease as lease_rule;
 use crate::run_report::{EnvironmentRunReport, ExitCategory, ReportKind, RunReport};
 
 /// A teardown report of `environment` that holds only `errors` and `warnings`.
@@ -72,19 +72,6 @@ fn unknown_units(
             )
         })
         .collect()
-}
-
-/// Whether a run holds the lease of the request's environment (a live lease
-/// or run ref): a signal goes to it instead of a run of this invocation.
-fn run_holds_lease(context: &Context<'_>, request: &RunRequest) -> Result<bool, Finding> {
-    let coordination = context
-        .store
-        .coordination(&request.location, &request.environment)
-        .map_err(|error| store_error(&request.environment, &error))?;
-    Ok(matches!(
-        lease_rule::decide(&coordination, context.clock.now(), BrokenLease::Refuse),
-        LeaseDecision::Held(_)
-    ))
 }
 
 /// `nyl teardown`: `request.mode` is [`RunMode::Teardown`](super::run::RunMode::Teardown).
@@ -120,35 +107,43 @@ pub fn teardown(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
                 .map(|(unit, _)| unit.clone())
                 .collect(),
         };
-        let running = match run_holds_lease(base, request) {
-            Ok(running) => running,
-            Err(finding) => return teardown_report(environment, vec![finding], Vec::new()),
-        };
-        if running {
-            let mut delivered = Vec::new();
-            for unit in &confirmed {
-                match deliver(
-                    base,
-                    &request.location,
-                    environment,
-                    unit,
-                    SignalAction::ConfirmRemoved,
-                    request.reason.as_deref(),
-                ) {
-                    Ok(Delivery::Direct) => {}
-                    Ok(Delivery::Delivered { run, runner }) => delivered.push(Finding::new(
-                        Code::ConfirmationDelivered,
-                        format!(
-                            "the removal of {unit} was confirmed to run {run} by {runner}, which waits on its teardown"
-                        ),
-                        format!("the run completes the teardown; check it with `nyl status -e {environment}`"),
-                    )),
-                    Err(finding) => return teardown_report(environment, vec![finding], Vec::new()),
-                }
+        // Each confirmation goes to the run waiting on it, or applies
+        // directly to a wait recorded in state; a unit neither waits on is
+        // rejected (`NYL-CONFIRMATION-REJECTED`). The run below confirms
+        // only waits recorded before it, never one its own phase 1 starts.
+        let mut delivered = Vec::new();
+        let mut direct = 0;
+        for unit in &confirmed {
+            match deliver(
+                base,
+                &request.location,
+                environment,
+                unit,
+                SignalAction::ConfirmRemoved,
+                request.reason.as_deref(),
+            ) {
+                Ok(Delivery::Direct) => direct += 1,
+                Ok(Delivery::Delivered { run, runner }) => delivered.push(Finding::new(
+                    Code::ConfirmationDelivered,
+                    format!(
+                        "the removal of {unit} was confirmed to run {run} by {runner}, which waits on its teardown"
+                    ),
+                    format!("the run completes the teardown; check it with `nyl status -e {environment}`"),
+                )),
+                Err(finding) => return teardown_report(environment, vec![finding], Vec::new()),
             }
-            if !delivered.is_empty() {
-                return teardown_report(environment, Vec::new(), delivered);
+        }
+        if !delivered.is_empty() && direct == 0 {
+            return teardown_report(environment, Vec::new(), delivered);
+        }
+        if !delivered.is_empty() {
+            let mut request = request.clone();
+            request.mode = RunMode::Teardown { target };
+            let mut report = super::run::reconcile(context, &request);
+            if let Some(run) = report.environments.first_mut() {
+                run.warnings.extend(delivered);
             }
+            return report;
         }
     }
     let mut request = request.clone();

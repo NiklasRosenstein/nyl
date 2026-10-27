@@ -346,6 +346,15 @@ impl Reconcile<'_, '_, '_> {
             self.apply_hold_signals(life, inputs.runs, observed, artifacts, None);
             self.preflight(life, inputs);
             let plan = self.leaving_plan(life, inputs, observed);
+            // `--fail-fast` starts no teardown after the first approval wait.
+            if let Some((name, _)) = plan.pending.iter().find(|(name, pending)| {
+                matches!(pending, Pending::AwaitingApproval) && !life.results.contains_key(*name)
+            }) {
+                if self.session.request.fail_fast {
+                    self.fail_fast(life, name);
+                    break;
+                }
+            }
             let unblocked = life.unblocked(&plan.ready);
             if unblocked.is_empty() {
                 break;
@@ -868,8 +877,14 @@ impl Reconcile<'_, '_, '_> {
             return Ok(());
         };
         let kind = unit.unit.kind.clone();
-        let completion = if request.lifecycle.confirm_removed {
-            // `--confirm-removed` with no other run waiting (operator's Direct delivery).
+        let confirmed = request.lifecycle.confirm_removed
+            && self
+                .confirmable
+                .get(name)
+                .is_some_and(|recorded| recorded.phase1_commit == waiting.phase1_commit);
+        let completion = if confirmed {
+            // `--confirm-removed` of a wait recorded before this run, with
+            // no other run waiting on it (the operator's direct confirmation).
             WaitCompletion::Confirmed {
                 by: context.base.requested_by.clone(),
                 reason: request.reason.clone(),

@@ -507,3 +507,31 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
         stderr,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::Cli;
+
+    fn parses(args: &[&str]) -> bool {
+        Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()
+    }
+
+    /// Catches `state delete` options that only mean something for the
+    /// teardown being accepted without it.
+    #[test]
+    fn test_state_delete_teardown_options_require_teardown() {
+        assert!(parses(&["state", "delete", "-e", "dev"]));
+        assert!(!parses(&["state", "delete", "-e", "dev", "--allow-dependents"]));
+        assert!(parses(&[
+            "state",
+            "delete",
+            "-e",
+            "dev",
+            "--teardown",
+            "--allow-dependents",
+            "--allow-incomplete"
+        ]));
+    }
+}

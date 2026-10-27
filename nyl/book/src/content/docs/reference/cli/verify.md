@@ -41,7 +41,8 @@ whose kind cannot verify as `unsupported`; neither is skipped silently.
 `verify` does not import runs, so it refuses a lease that
 [`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break) broke while
 the broken run is not imported yet, writing nothing; a `verify` with nothing
-to verify needs no lease and does not refuse:
+to verify needs no lease and does not refuse. The refusal comes before any
+unit is verified, so its report lists no units:
 
 ```console
 $ nyl verify -e dev

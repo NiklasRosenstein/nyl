@@ -10,18 +10,25 @@
 mod scenario;
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use nyl::orchestration::run::{CommandOutcome, Wiring};
-use nyl_core::orchestration::ids::RunId;
-use nyl_core::orchestration::ports::{Clock as _, Transition, TransitionChanges};
+use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ports::{
+    Checkpoint, Clock as _, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, StateResult, StateStore,
+    StateTips, Transition, TransitionChanges,
+};
 use nyl_core::orchestration::state::{
-    Condition, Deletion, DeletionIntent, DeletionReason, Lease, LeaseKind, Lifecycle, Operation, SignalAction, StateV1,
-    TeardownProgress,
+    ApprovalIdentity, Condition, Deletion, DeletionIntent, DeletionReason, Lease, LeaseKind, Lifecycle, Operation, Run,
+    Signal, SignalAction, SignalKind, StateLocation, StateV1, TeardownProgress,
 };
 use nyl_core::orchestration::time::Duration;
 use nyl_drivers::process::ProcessRunner;
-use nyl_orchestration::fault::NoFaults;
+use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
+use nyl_orchestration::shell::lifecycle::hold;
 use nyl_orchestration::shell::run::Cancellation;
+use nyl_orchestration::shell::state::Requested;
+use nyl_orchestration::shell::{Context, Settings};
 use scenario::runner::{invoke_in, AUTHOR};
 use scenario::shell::{self, dev, shared_project, unit};
 use scenario::world::git_output;
@@ -51,13 +58,18 @@ impl Harness {
 
     /// `nyl <args>` in-process in a fresh clone of `main`.
     fn invoke(&self, args: &[&str]) -> CommandOutcome {
+        self.invoke_with(&NoFaults, args)
+    }
+
+    /// `nyl <args>` with `faults` consulted at the run's fault points.
+    fn invoke_with(&self, faults: &dyn FaultInjector, args: &[&str]) -> CommandOutcome {
         let tools = ProcessRunner::new();
         let wiring = Wiring {
             clock: self.clock.clone(),
             ids: &self.ids,
             drivers: &self.drivers,
             tools: &tools,
-            faults: &NoFaults,
+            faults,
             runner: "test-runner".to_owned(),
             author: Some(AUTHOR.parse().unwrap()),
             process_env: self.process_env.clone(),
@@ -374,4 +386,330 @@ fn test_hold_refuses_a_broken_lease() {
     assert_eq!(held.exit, 2, "{}", held.stderr);
     assert_eq!(held.report["errors"][0]["code"], "NYL-LEASE-BROKEN");
     assert!(held.stderr.contains("nyl recover -e dev"), "{}", held.stderr);
+}
+
+/// Sends a hold of `unit` from Bob to the run holding the lease, once, when
+/// the run reaches `point` (for `at`, the point concerning that unit).
+struct HoldDuringRun<'h> {
+    harness: &'h shell::Harness,
+    point: FaultPoint,
+    at: Option<&'static str>,
+    unit: &'static str,
+    sent: Mutex<Option<RunId>>,
+}
+
+impl<'h> HoldDuringRun<'h> {
+    fn new(harness: &'h shell::Harness, point: FaultPoint, at: Option<&'static str>, unit: &'static str) -> Self {
+        Self {
+            harness,
+            point,
+            at,
+            unit,
+            sent: Mutex::new(None),
+        }
+    }
+
+    fn sent_to(&self) -> RunId {
+        self.sent.lock().unwrap().clone().expect("the hold was sent")
+    }
+}
+
+impl FaultInjector for HoldDuringRun<'_> {
+    fn at(&self, point: FaultPoint, unit: Option<&UnitName>) -> FaultAction {
+        let mut sent = self.sent.lock().unwrap();
+        if point != self.point || sent.is_some() || self.at.is_some_and(|at| unit.map(UnitName::as_str) != Some(at)) {
+            return FaultAction::Continue;
+        }
+        let (store, location) = (self.harness.store.as_ref(), &self.harness.location);
+        let lease = store
+            .coordination(location, &dev())
+            .unwrap()
+            .lease
+            .expect("the run holds the lease");
+        store
+            .send_signal(
+                location,
+                &dev(),
+                &Signal {
+                    api_version: StateV1,
+                    kind: SignalKind,
+                    run: lease.lease.run.clone(),
+                    action: SignalAction::Hold,
+                    unit: unit_name(self.unit),
+                    phase1_commit: None,
+                    by: "Bob <bob@example.invalid>".to_owned(),
+                    identity: ApprovalIdentity::Asserted,
+                    reason: Some("incident 4712".to_owned()),
+                    at: self.harness.clock.now(),
+                    from: "bob@workstation".to_owned(),
+                },
+            )
+            .unwrap();
+        *sent = Some(lease.lease.run);
+        FaultAction::Continue
+    }
+}
+
+fn unit_name(name: &str) -> UnitName {
+    UnitName::new(name).unwrap()
+}
+
+/// Q28: a hold sent after the run's last read of its signals, while it
+/// pushes its transition commit, still takes effect: the run reads its
+/// signals again once it released the lease and applies the hold as
+/// `nyl hold` would, requested by the sender, then consumes the signal.
+/// Catches a hold reported delivered that no run ever applies.
+#[test]
+fn test_a_hold_sent_while_the_run_commits_is_applied_after_it() {
+    let harness = Harness::new();
+    harness.init();
+    let faults = HoldDuringRun::new(&harness, FaultPoint::BeforePush, None, "network");
+    let run = harness.invoke_with(&faults, &["reconcile", "-e", "dev", "-o", "json"]);
+    // A held unit waits, as when the run reads the hold during its work.
+    assert_eq!(run.exit, 2, "{:#}", run.report);
+    assert_eq!(
+        run.report["environments"][0]["units"]["network"]["result"], "held",
+        "{:#}",
+        run.report
+    );
+
+    let network = unit("network");
+    let after = harness.snapshot();
+    let document = &after.desired[&network];
+    assert!(
+        matches!(&document.lifecycle, Lifecycle::Held { hold, .. } if hold.reason.as_deref() == Some("incident 4712")),
+        "{:?}",
+        document.lifecycle
+    );
+    assert_eq!(
+        document.unit.uid, after.observed[&network].unit.uid,
+        "the incarnation that ran is held"
+    );
+    let message = harness.message(DESIRED);
+    assert!(message.contains("Nyl-Operation: hold"), "{message}");
+    assert!(
+        message.contains("Nyl-Requested-By: Bob <bob@example.invalid>"),
+        "{message}"
+    );
+    let signals = harness
+        .store
+        .signals(&harness.location, &dev(), &faults.sent_to())
+        .unwrap();
+    assert!(signals.is_empty(), "the signal is consumed: {signals:?}");
+}
+
+/// Q28 with Q16: a hold signal for a unit this run created and already
+/// executed holds the incarnation that ran: its uid stays with its new
+/// receipt, so `resume` does not create it again.
+#[test]
+fn test_a_hold_signal_for_a_unit_the_run_executed_keeps_its_incarnation() {
+    let harness = Harness::new();
+    harness.init();
+    let faults = HoldDuringRun::new(&harness, FaultPoint::Executing, Some("database"), "network");
+    let run = harness.invoke_with(&faults, &["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(run.exit, 2, "{:#}", run.report);
+    assert_eq!(
+        run.report["environments"][0]["units"]["network"]["result"], "held",
+        "{:#}",
+        run.report
+    );
+
+    let network = unit("network");
+    let after = harness.snapshot();
+    let document = &after.desired[&network];
+    assert!(
+        matches!(document.lifecycle, Lifecycle::Held { .. }),
+        "{:?}",
+        document.lifecycle
+    );
+    assert!(!document.is_held_marker(), "not a marker: the unit ran");
+    assert!(document.unit.uid.is_some());
+    assert_eq!(document.unit.uid, after.observed[&network].unit.uid);
+    assert!(
+        matches!(&document.lifecycle, Lifecycle::Held { hold, .. } if hold.pending.is_none()),
+        "the run executed the current document: nothing pending"
+    );
+
+    assert_eq!(harness.resume("network").exit, 0);
+    let run = harness.reconcile();
+    assert_eq!(
+        run.report["environments"][0]["units"]["network"]["result"], "current",
+        "{:#}",
+        run.report
+    );
+}
+
+/// Q28: only a reconcile or teardown run reads hold signals. While another
+/// operation holds the lease (here `verify`), `nyl hold` meets a held
+/// lease (NYL-LEASE-HELD, exit 2) and sends no signal nothing would read.
+#[test]
+fn test_hold_while_a_verify_holds_the_lease_refuses_as_a_held_lease() {
+    let harness = Harness::new();
+    harness.init();
+    let (store, location) = (harness.store.as_ref(), &harness.location);
+    let mut lease = harness.other_lease(30);
+    lease.operation = Operation::Verify;
+    store.take_lease(location, &dev(), &lease, None).unwrap();
+
+    let held = harness.hold("network");
+    assert_eq!(held.exit, 2, "{}", held.stderr);
+    assert_eq!(held.report["errors"][0]["code"], "NYL-LEASE-HELD");
+    assert!(store.signals(location, &dev(), &lease.run).unwrap().is_empty());
+}
+
+/// The state store of `inner`, where the run holding the lease finishes
+/// (its lease goes) right after a signal is sent to it.
+struct FinishesOnSignal<'s> {
+    inner: &'s dyn StateStore,
+}
+
+impl StateStore for FinishesOnSignal<'_> {
+    fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
+        self.inner.snapshot(location)
+    }
+    fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {
+        self.inner.coordination(location, environment)
+    }
+    fn take_lease(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        expected: Option<&str>,
+    ) -> StateResult<String> {
+        self.inner.take_lease(location, environment, lease, expected)
+    }
+    fn update_lease(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        lease: &Lease,
+        expected: &str,
+    ) -> StateResult<String> {
+        self.inner.update_lease(location, environment, lease, expected)
+    }
+    fn release_lease(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        expected: &str,
+    ) -> StateResult<()> {
+        self.inner.release_lease(location, environment, expected)
+    }
+    fn delete_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()> {
+        self.inner.delete_lease(location, environment)
+    }
+    fn write_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        checkpoint: Option<&Checkpoint>,
+    ) -> StateResult<()> {
+        self.inner.write_run(location, environment, run, checkpoint)
+    }
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
+        self.inner.delete_run(location, environment, run, expected)
+    }
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
+        self.inner.retire_run(location, environment, run, expected)
+    }
+    fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.delete_evidence(location, environment, run)
+    }
+    fn signals(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+    ) -> StateResult<Vec<Signal>> {
+        self.inner.signals(location, environment, run)
+    }
+    fn send_signal(&self, location: &StateLocation, environment: &EnvironmentName, signal: &Signal) -> StateResult<()> {
+        self.inner.send_signal(location, environment, signal)?;
+        // The run finishes before it reads the signal.
+        self.inner.delete_lease(location, environment)
+    }
+    fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        self.inner.delete_signals(location, environment, run)
+    }
+    fn commit(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        base: &StateTips,
+        transition: &Transition,
+        lease_version: &str,
+    ) -> StateResult<Committed> {
+        self.inner
+            .commit(location, environment, base, transition, lease_version)
+    }
+    fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
+        self.inner.import_history(from, to)
+    }
+    fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
+        self.inner.local_divergence(location)
+    }
+}
+
+/// Q28: when the run holding the lease finishes after the signal is pushed
+/// but before it read it, `nyl hold` deletes the signal and applies the
+/// hold directly under its own lease, instead of reporting it delivered.
+#[test]
+fn test_hold_applies_directly_when_the_run_finishes_before_reading_the_signal() {
+    let harness = Harness::new();
+    harness.init();
+    let lease = harness.other_lease(30);
+    harness
+        .store
+        .take_lease(&harness.location, &dev(), &lease, None)
+        .unwrap();
+    let store = FinishesOnSignal {
+        inner: harness.store.as_ref(),
+    };
+    let context = Context {
+        store: &store,
+        clock: harness.clock.as_ref(),
+        ids: &harness.ids,
+        faults: &NoFaults,
+        runner: "bob@workstation".to_owned(),
+        requested_by: AUTHOR.to_owned(),
+        version: "test".to_owned(),
+        settings: Settings::default(),
+    };
+    let report = hold(
+        &context,
+        &dev(),
+        &harness.location,
+        &unit("network"),
+        &Requested {
+            reason: Some("incident 4711".to_owned()),
+            wait: None,
+            cancellation: Cancellation::default(),
+        },
+    );
+    assert_eq!(report.exit, 0, "{report:?}");
+    assert!(report.warnings.is_empty(), "not delivered: {report:?}");
+    assert!(harness.message(DESIRED).contains("Nyl-Operation: hold"));
+    assert!(matches!(
+        harness.snapshot().desired[&unit("network")].lifecycle,
+        Lifecycle::Held { .. }
+    ));
+    assert!(harness
+        .store
+        .signals(&harness.location, &dev(), &lease.run)
+        .unwrap()
+        .is_empty());
 }

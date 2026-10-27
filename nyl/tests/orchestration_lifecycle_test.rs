@@ -19,6 +19,7 @@ use nyl_core::orchestration::state::{
     ObservationType, Operation, Signal, SignalAction, SignalKind, StateV1, TeardownProgress,
 };
 use nyl_core::orchestration::time::Duration;
+use nyl_orchestration::fault::{FaultPoint, NoFaults};
 use nyl_orchestration::rules::lifecycle::{transition, Event, Next};
 use nyl_orchestration::rules::recovery::RecoverAction;
 use nyl_orchestration::run_report::{EnvironmentRunReport, UnitResult};
@@ -660,6 +661,53 @@ fn test_teardown_of_an_unfetchable_revision_needs_source() {
     });
     assert_eq!(outcome(&removed, "removed"), set(&["svc"]), "{removed:#?}");
     assert!(!harness.world.scenario_tmp().join("svc").exists());
+}
+
+/// Runs and leases, item 4, for a fenced name: a run killed during the
+/// teardown of a unit whose kind changed leaves that teardown without a
+/// checkpoint. The next reconcile, with the new kind in source, takes the
+/// run over and marks the deleting incarnation uncertain, so the
+/// interrupted teardown is not lost with the run ref.
+#[test]
+fn test_a_takeover_marks_an_interrupted_kind_change_teardown_uncertain() {
+    let (_project, mut harness) = harness_with(&command_unit(
+        "db",
+        "touch %SCENARIO_TMP%/db",
+        Some("rm %SCENARIO_TMP%/db"),
+        "",
+    ));
+    assert_eq!(harness.reconcile(&[]).exit.code(), 0);
+    let old_uid = harness.snapshot().desired[&unit("db")].unit.uid.clone();
+    harness.world.commit_files(
+        "main",
+        "Build db as an image",
+        &[
+            (
+                "nyl/units.yaml",
+                "apiVersion: units.gitops.nyl/v1\nkind: OciImage\nmetadata:\n  name: db\n  labels: {dev: 'true'}\nspec:\n  context: {path: ../image}\n  repository: '%REGISTRY%/db'\n",
+            ),
+            ("image/Dockerfile", "FROM scratch\n"),
+        ],
+    );
+    harness.faults = Box::new(FaultSlot::kill_once(FaultPoint::AfterEffect, Some("db")));
+    reconcile_allowing(&harness, false);
+    assert!(
+        !harness.world.scenario_tmp().join("db").exists(),
+        "the teardown's effect happened"
+    );
+    harness.faults = Box::new(NoFaults);
+    harness.advance(24 * 60);
+
+    let takeover = harness.reconcile(&[]);
+    assert!(takeover.recovered.contains(&unit("db")), "{takeover:#?}");
+    let snapshot = harness.snapshot();
+    let observed = &snapshot.observed[&unit("db")];
+    assert_eq!(observed.unit.uid, old_uid, "the deleting incarnation");
+    assert!(
+        matches!(observed.condition, Some(Condition::Uncertain { .. })),
+        "{:?}",
+        observed.condition
+    );
 }
 
 /// `--fail-fast`: after a failure the run starts no further unit, still

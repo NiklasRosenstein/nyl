@@ -1520,6 +1520,12 @@ struct Reconcile<'s, 'r, 'a> {
     fenced: BTreeSet<UnitName>,
     /// Whether the run read signals sent to it: its signal ref goes when it ends.
     signalled: bool,
+    /// The hold signals the run read, by unit and time.
+    seen_signals: BTreeSet<(UnitName, Timestamp)>,
+    /// `teardown --confirm-removed`: the waits recorded in state before
+    /// this run that the operator confirmed, by unit. A wait this run's own
+    /// phase 1 starts is never confirmed by it.
+    confirmable: BTreeMap<UnitName, nyl_core::orchestration::state::TeardownWaiting>,
 }
 
 /// What a run read before it renders: the snapshot, the runs before it,
@@ -1535,10 +1541,13 @@ struct Begun {
 /// The hold signals a run acted on.
 #[derive(Debug, Default)]
 pub(super) struct Signals {
-    /// Signals already read, by unit and time.
-    seen: BTreeSet<(UnitName, Timestamp)>,
     /// Units a signal held during the run.
     pub(super) held: BTreeSet<UnitName>,
+    /// The documents, as this run resolved them, of the units it executed
+    /// or created: a hold of such a unit decides from the incarnation that
+    /// ran (its uid, and the document its new receipt was produced for),
+    /// not from the document stored before the run.
+    pub(super) ran: BTreeMap<UnitName, DesiredUnit>,
 }
 
 /// Restore the receipts of returning tombstones whose execution key is
@@ -1588,7 +1597,8 @@ fn selection_view(resolved: &Resolved, held: &BTreeMap<UnitName, DesiredUnit>) -
 
 /// The documents a takeover imports checkpoints against: the resolved
 /// units, and held units as stored (Q28); fenced names import against
-/// their stored, deleting incarnation instead.
+/// their stored, deleting incarnation instead, which [`Takeover::new`]
+/// lists among the unresolved documents.
 fn import_targets(
     resolved: &Resolved,
     held: &BTreeMap<UnitName, DesiredUnit>,
@@ -1705,6 +1715,8 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
         landed: false,
         fenced: BTreeSet::new(),
         signalled: false,
+        seen_signals: BTreeSet::new(),
+        confirmable: BTreeMap::new(),
     };
     session.lease_deadline.set(Some(state.held.lease.deadline));
     let ending = state.holding();
@@ -1918,7 +1930,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
         let mut created: BTreeSet<UnitName> = BTreeSet::new();
-        let mut taking = Takeover::new(&leftovers, overlay, &prepared.desired.units);
+        let mut taking = Takeover::new(&leftovers, overlay, &prepared.desired.units, &prepared.desired.fenced);
         let runs: Vec<_> = leftovers.runs.iter().map(|state| (*state).clone()).collect();
         let mut adoptions: BTreeSet<UnitName> = BTreeSet::new();
         let reapply = request.reapply_units();
@@ -2002,6 +2014,17 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 reapply: &reapply,
             };
             let (ready, skipped) = select(&candidates);
+            // `--fail-fast` starts no unit after the first approval wait,
+            // including one decided at selection.
+            if request.fail_fast && life.stopped.is_none() {
+                let approval = skipped
+                    .iter()
+                    .find(|(_, why)| matches!(why, Skipped::RepairApproval | Skipped::LocalApproval));
+                if let Some((name, _)) = approval {
+                    life.stopped = Some(name.clone());
+                    break (resolved, skipped);
+                }
+            }
             for (name, repair) in drift::repairs(&candidates, &ready) {
                 let list = match repair {
                     drift::Repair::Drift => &mut self.report.drift_repaired,
@@ -2100,6 +2123,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                         life.stopped = Some(name.clone());
                     }
                     self.report.errors.extend(execution.errors.iter().cloned());
+                    life.signals.ran.insert(name.clone(), resolved.units[&name].clone());
                     executions.insert(name, execution);
                 }
                 if request.cancellation.is_cancelled() {
@@ -2111,6 +2135,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         };
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
+        // Drift repairs and reapplies list only the units the run executed
+        // again, with a new receipt replacing the drifted one.
+        let executed = |name: &UnitName| {
+            executions
+                .get(name)
+                .is_some_and(|execution| matches!(execution.result, UnitResult::Executed { .. }))
+        };
+        self.report.drift_repaired.retain(executed);
+        self.report.reapplied.retain(executed);
         if taking.active {
             // Units that never got an execution key import their
             // checkpoints without a key comparison, so none stays behind.
@@ -2393,6 +2426,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let leftovers = takeover::leftovers(&run, replaced.as_ref(), coordination);
         let mut observed = snapshot.observed.clone();
         let mut artifacts = snapshot.artifacts.clone();
+        if request.lifecycle.confirm_removed {
+            let named = |name: &UnitName| match target {
+                TeardownTarget::Units(names) => names.contains(name),
+                TeardownTarget::All => true,
+            };
+            self.confirmable = snapshot
+                .observed
+                .iter()
+                .filter(|(name, _)| named(name))
+                .filter_map(|(name, observed)| Some((name.clone(), observed.waiting.clone()?)))
+                .collect();
+        }
         // `--source`: every teardown runs with that revision's files.
         let source = match &request.source_override {
             Some(revision) => match session.resolve_revision(revision) {
@@ -2406,7 +2451,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         };
         // A run taking over imports against the stored documents.
         let stored: BTreeMap<UnitName, DesiredUnit> = overlay.desired.clone();
-        let mut taking = Takeover::new(&leftovers, overlay, &BTreeMap::new());
+        let mut taking = Takeover::new(&leftovers, overlay, &BTreeMap::new(), &BTreeSet::new());
         if taking.active {
             let mut produced = BTreeSet::new();
             loop {
@@ -2692,7 +2737,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut applied = false;
         for signal in received {
             if signal.action != nyl_core::orchestration::state::SignalAction::Hold
-                || !life.signals.seen.insert((signal.unit.clone(), signal.at))
+                || !self.seen_signals.insert((signal.unit.clone(), signal.at))
                 || life.signals.held.contains(&signal.unit)
             {
                 continue;
@@ -2704,8 +2749,24 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 reason: signal.reason.clone(),
                 pending: None,
             };
-            let stored = life.desired.get(&name);
-            match crate::rules::hold::hold(&environment, &name, stored, observed.get(&name), runs, hold) {
+            // A unit this run executed or created is held as the incarnation
+            // that ran, which this run's own record lists.
+            let ran = life.signals.ran.get(&name);
+            let stored = ran.or_else(|| life.desired.get(&name));
+            let mut listing = runs.to_vec();
+            if ran.is_some() {
+                listing.push(nyl_core::orchestration::ports::RunState {
+                    run: Run {
+                        units: vec![name.clone()],
+                        ..self.record.clone()
+                    },
+                    checkpoints: Vec::new(),
+                    created: Vec::new(),
+                    version: String::new(),
+                    foreign: false,
+                });
+            }
+            match crate::rules::hold::hold(&environment, &name, stored, observed.get(&name), &listing, hold) {
                 Ok(crate::rules::hold::HoldWrite::Unchanged) => {}
                 Ok(crate::rules::hold::HoldWrite::Desired(document)) => {
                     let document = *document;
@@ -2839,26 +2900,115 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 (release, false)
             }
         };
-        if self.signalled && self.session.request.mode.writes_run_record() {
-            // The signals sent to this run are consumed with it.
-            let _ = base
-                .store
-                .delete_signals(self.location(), self.environment(), &self.run);
-        }
-        if delete && self.session.request.mode.writes_run_record() {
-            if let Err(error) = base
-                .store
-                .delete_run(self.location(), self.environment(), &self.run, None)
-            {
+        let records = self.session.request.mode.writes_run_record();
+        // Holds sent after the run's last read are read once the run holds
+        // nothing: its lease is released and its run ref finished (see
+        // [`Self::late_holds`]), so the run ref goes only after that read.
+        let mut late = release && self.reads_late_holds();
+        if delete && records && late {
+            self.record.finished = true;
+            self.record.units = Vec::new();
+            if let Err(error) = self.write_run(None) {
                 let finding = store_error(self.environment(), &error);
                 self.report.warnings.push(finding);
+                late = false;
             }
+        }
+        if delete && records && !late {
+            self.delete_run_ref();
         }
         if release {
             if let Err(error) = lease::release(base, &self.held, self.landed) {
                 let finding = store_error(self.environment(), &error);
                 self.report.warnings.push(finding);
             }
+            if self.reads_late_holds() {
+                self.late_holds();
+            }
+        }
+        if delete && records && late {
+            self.delete_run_ref();
+        }
+        if self.signalled && records {
+            // The signals sent to this run are consumed with it.
+            let _ = base
+                .store
+                .delete_signals(self.location(), self.environment(), &self.run);
+        }
+    }
+
+    /// Delete this run's run ref (and its signal ref).
+    fn delete_run_ref(&mut self) {
+        let base = self.context().base;
+        if let Err(error) = base
+            .store
+            .delete_run(self.location(), self.environment(), &self.run, None)
+        {
+            let finding = store_error(self.environment(), &error);
+            self.report.warnings.push(finding);
+        }
+    }
+
+    /// Whether the run reads its signals again after it released its lease:
+    /// a run that executes, other than a `--local` run, whose signals live
+    /// with the remote lease, which a remote run or `nyl hold` acts on.
+    fn reads_late_holds(&self) -> bool {
+        let request = self.session.request;
+        request.mode.executes() && request.local.is_none()
+    }
+
+    /// Apply the holds sent to this run that it did not read before it
+    /// released its lease (Q28).
+    ///
+    /// `nyl hold` reports a hold delivered only while the run still holds
+    /// the environment after the signal is pushed. The run reads here once
+    /// it holds nothing (its lease released and its run ref finished or
+    /// kept as finished) and before its run ref and signal ref go, so every
+    /// hold reported delivered is applied by the run during its work or
+    /// read here; a later one finds the run gone and `nyl hold` applies it
+    /// directly. Each goes through `nyl hold`'s own path, as requested by
+    /// the signal's sender: it takes the lease (waiting up to the lease
+    /// grace for a `nyl hold` applying the same hold directly), or delivers
+    /// the hold to a run that took the lease since. A hold the unit already
+    /// has writes nothing.
+    fn late_holds(&mut self) {
+        let request = self.session.request;
+        let base = self.context().base;
+        let environment = self.environment().clone();
+        let received = crate::shell::signal::received(base, self.location(), &environment, &self.run);
+        if !received.is_empty() {
+            self.signalled = true;
+        }
+        for signal in received {
+            if signal.action != nyl_core::orchestration::state::SignalAction::Hold
+                || !self.seen_signals.insert((signal.unit.clone(), signal.at))
+            {
+                continue;
+            }
+            let report = crate::shell::lifecycle::hold_signalled(
+                base,
+                &environment,
+                self.location(),
+                &signal,
+                Some(base.settings.lease_grace),
+                &request.cancellation,
+            );
+            // The hold's own commit is not this run's transition: the report
+            // shows the unit held, and a refusal as a warning.
+            if report.outcome == crate::report::Outcome::Refused {
+                self.report.warnings.extend(report.errors.iter().cloned());
+            } else if !report.commits.is_empty() {
+                if let Some(document) = base
+                    .store
+                    .snapshot(self.location())
+                    .ok()
+                    .and_then(|snapshot| snapshot.desired.get(&signal.unit).cloned())
+                {
+                    let entry = teardown::held_report(&environment, &signal.unit, &document, false);
+                    self.report.units.insert(signal.unit.clone(), entry);
+                }
+            }
+            self.report.warnings.extend(report.warnings.iter().cloned());
         }
     }
 }
@@ -2868,7 +3018,9 @@ struct Takeover {
     /// Whether there is anything to take over.
     active: bool,
     /// Units with a desired document the run does not resolve (adopted
-    /// units no longer selected, and leaving units).
+    /// units no longer selected, and leaving units), and fenced names with
+    /// their stored, deleting incarnation: a leftover run's touches of them
+    /// (an interrupted teardown) import against that incarnation.
     unresolved: BTreeMap<UnitName, DesiredUnit>,
     handled: BTreeSet<(RunId, UnitName)>,
     imported: BTreeSet<UnitName>,
@@ -2877,13 +3029,18 @@ struct Takeover {
 }
 
 impl Takeover {
-    fn new(leftovers: &Leftovers<'_>, overlay: &EnvironmentSnapshot, units: &BTreeMap<UnitName, DesiredUnit>) -> Self {
+    fn new(
+        leftovers: &Leftovers<'_>,
+        overlay: &EnvironmentSnapshot,
+        units: &BTreeMap<UnitName, DesiredUnit>,
+        fenced: &BTreeSet<UnitName>,
+    ) -> Self {
         Self {
             active: !leftovers.runs.is_empty() || leftovers.replaced.is_some(),
             unresolved: overlay
                 .desired
                 .iter()
-                .filter(|(name, _)| !units.contains_key(*name))
+                .filter(|(name, _)| !units.contains_key(*name) || fenced.contains(*name))
                 .map(|(name, unit)| (name.clone(), unit.clone()))
                 .collect(),
             handled: BTreeSet::new(),

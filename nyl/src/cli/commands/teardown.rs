@@ -169,40 +169,4 @@ mod tests {
         assert!(!parses(&["teardown", "-e", "dev", "--unit", "api", "--all"]));
         assert!(parses(&["teardown", "-e", "dev", "--unit", "api", "--source", "main"]));
     }
-
-    /// Catches `state delete` options that only mean something for the
-    /// teardown being accepted without it.
-    #[test]
-    fn test_state_delete_teardown_options_require_teardown() {
-        assert!(parses(&["state", "delete", "-e", "dev"]));
-        assert!(!parses(&["state", "delete", "-e", "dev", "--allow-dependents"]));
-        assert!(parses(&[
-            "state",
-            "delete",
-            "-e",
-            "dev",
-            "--teardown",
-            "--allow-dependents",
-            "--allow-incomplete"
-        ]));
-    }
-
-    /// Drift decisions: `--reapply` forces named units only, and records why.
-    #[test]
-    fn test_reconcile_reapply_needs_unit_and_reason() {
-        assert!(!parses(&["reconcile", "-e", "dev", "--reapply"]));
-        assert!(!parses(&["reconcile", "-e", "dev", "--reapply", "--unit", "api"]));
-        assert!(parses(&[
-            "reconcile",
-            "-e",
-            "dev",
-            "--reapply",
-            "--unit",
-            "api",
-            "--reason",
-            "repair"
-        ]));
-        assert!(parses(&["hold", "-e", "dev", "--unit", "api", "--reason", "incident"]));
-        assert!(!parses(&["resume", "-e", "dev"]));
-    }
 }

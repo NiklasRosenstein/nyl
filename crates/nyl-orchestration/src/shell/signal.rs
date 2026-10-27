@@ -11,12 +11,14 @@
 //!   does anything else, exit 2 as for a held lease. A confirmation for a
 //!   unit the run is not waiting on is rejected when it is sent
 //!   (`NYL-CONFIRMATION-REJECTED`).
-//! - `nyl hold`: with no lease held, hold directly; when a run holds the
-//!   lease, push a `hold` signal to its signal ref, report that it was
-//!   delivered (`NYL-HOLD-DELIVERED`), and exit 0. The run checks its
+//! - `nyl hold`: with no lease held, hold directly; when a reconcile or
+//!   teardown run holds the lease, push a `hold` signal to its signal ref,
+//!   report that it was delivered (`NYL-HOLD-DELIVERED`), and exit 0. The
+//!   run checks its
 //!   signals before starting each unit ([`received`]), starts no held unit,
 //!   writes the hold in its own transition commit, and reports the unit as
-//!   held.
+//!   held. Any other holder reads no signals: the hold meets its lease as
+//!   a held lease.
 //! - Either way, after pushing, check that the lease still belongs to that
 //!   run; if the run finished meanwhile, delete the signal and act directly
 //!   under the invocation's own lease ([`Delivery::Direct`]).
@@ -25,7 +27,7 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::Coordination;
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, Signal, SignalAction, SignalKind, StateLocation, StateV1, TeardownWaiting,
+    ApprovalIdentity, Operation, Signal, SignalAction, SignalKind, StateLocation, StateV1, TeardownWaiting,
 };
 use nyl_core::orchestration::time::Timestamp;
 
@@ -43,7 +45,12 @@ pub enum Delivery {
 }
 
 /// Decide where `action` for `unit` goes, sending the signal when a run
-/// holds the lease (for `confirm-removed`, a run waiting on that unit).
+/// holds the lease (for `hold`, a reconcile or teardown run, which reads
+/// signals; for `confirm-removed`, a run waiting on that unit).
+///
+/// [`Delivery::Direct`] for a hold whose lease holder reads no signals
+/// means the invocation acts under its own lease, so it meets the held
+/// lease there (`NYL-LEASE-HELD`, or a wait with `--wait-lease`).
 ///
 /// A broken lease is no live holder: the caller refuses it (or, for an
 /// importer such as `nyl teardown`, takes it over) as for any operation.
@@ -82,10 +89,16 @@ pub fn deliver(
             }
         };
     };
-    let (run, runner) = match &holder {
-        Holder::Lease(lease) => (lease.run.clone(), lease.runner.clone()),
-        Holder::Run(record) => (record.run.clone(), record.runner.clone()),
+    let (run, runner, operation) = match &holder {
+        Holder::Lease(lease) => (lease.run.clone(), lease.runner.clone(), lease.operation),
+        Holder::Run(record) => (record.run.clone(), record.runner.clone(), record.operation),
     };
+    // Only a reconcile or teardown run reads hold signals: any other holder
+    // (verify, recover, a state operation) is a held lease, which the
+    // invocation's own lease acquisition refuses or waits for.
+    if action == SignalAction::Hold && !reads_signals(operation) {
+        return Ok(Delivery::Direct);
+    }
     let phase1_commit = match action {
         SignalAction::Hold => None,
         SignalAction::ConfirmRemoved => match waiting_on(&coordination, &holder, unit) {
@@ -153,6 +166,11 @@ fn waiting_on<'a>(coordination: &'a Coordination, holder: &Holder, unit: &UnitNa
         .rev()
         .find(|checkpoint| &checkpoint.observed.unit.name == unit)?;
     checkpoint.observed.waiting.as_ref()
+}
+
+/// Whether a run of `operation` reads the signals sent to it.
+fn reads_signals(operation: Operation) -> bool {
+    matches!(operation, Operation::Reconcile | Operation::Teardown)
 }
 
 /// Whether `run` still holds the environment at `now`.

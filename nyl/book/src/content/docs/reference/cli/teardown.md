@@ -104,10 +104,13 @@ word, under any `teardownWait` strategy. When a run waits on the unit's
 teardown, the confirmation is delivered to it through its signal ref: the
 command reports `NYL-CONFIRMATION-DELIVERED`, exits 0, and starts no run of
 its own; the waiting run finishes the teardown. When no run holds the lease,
-the command runs the teardown itself and confirms the removal directly. A
-confirmation for a unit no teardown waits on exits 1 with
-`NYL-CONFIRMATION-REJECTED`, and a run doing anything else keeps the lease
-(exit 2, `NYL-LEASE-HELD`).
+the command runs the teardown itself and confirms the wait recorded in
+state directly. A confirmation for a unit no teardown waits on exits 1 with
+`NYL-CONFIRMATION-REJECTED` before anything runs, and a run doing anything
+else keeps the lease (exit 2, `NYL-LEASE-HELD`). With `--all`, it confirms
+every recorded wait. A confirmation never ends a wait that the same
+command's phase 1 starts: that wait follows its strategy, and a later
+`--confirm-removed` ends it.
 
 A run that waits in a terminal also accepts Enter as the confirmation.
 

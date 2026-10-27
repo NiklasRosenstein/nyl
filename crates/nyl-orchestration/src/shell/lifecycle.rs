@@ -16,11 +16,14 @@
 //!   desired document the receipt was produced for, read from the observed
 //!   unit's copy (Q16); with an `uncertain` condition the condition and any
 //!   evidence ref stay, and `resume` does not clear it.
-//! - When a run holds the lease, `hold` does not refuse with
-//!   `NYL-LEASE-HELD`: it delivers the hold through
+//! - When a reconcile or teardown run holds the lease, `hold` does not
+//!   refuse with `NYL-LEASE-HELD`: it delivers the hold through
 //!   [`super::signal::deliver`] (`SignalAction::Hold`), reports
 //!   `NYL-HOLD-DELIVERED`, and exits 0; if the run finished meanwhile, it
-//!   applies the hold directly under its own lease (Q28).
+//!   applies the hold directly under its own lease (Q28). Any other holder
+//!   reads no signals, so `hold` meets its lease as a held lease. A run
+//!   applies a hold it read only after releasing its lease through
+//!   [`hold_signalled`].
 //! - `resume` only lifts the hold and deletes nothing (Q26); a uid-less
 //!   held file outside the ownership set is removed by the next reconcile.
 
@@ -29,10 +32,12 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::TransitionChanges;
-use nyl_core::orchestration::state::{Hold, Lifecycle, Operation, SignalAction, StateLocation};
+use nyl_core::orchestration::state::{Hold, Lifecycle, Operation, Signal, SignalAction, StateLocation};
+use nyl_core::orchestration::time::{Duration, Timestamp};
 use serde_json::json;
 
 use super::local::{check_record, check_remote_tips};
+use super::run::Cancellation;
 use super::signal::{deliver, Delivery};
 use super::state::{commit, read, summary, with_lease, Requested};
 use super::{store_error, Context};
@@ -75,6 +80,54 @@ pub fn hold(
     location: &StateLocation,
     unit: &UnitName,
     requested: &Requested,
+) -> StateOperationReport {
+    hold_since(context, environment, location, unit, requested, None)
+}
+
+/// The hold of `signal`, which the run it was sent to read only after
+/// releasing its lease: applied as `nyl hold` applies it, requested by the
+/// signal's sender, with its reason and time (Q28).
+pub(crate) fn hold_signalled(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    signal: &Signal,
+    wait: Option<Duration>,
+    cancellation: &Cancellation,
+) -> StateOperationReport {
+    let context = Context {
+        store: context.store,
+        clock: context.clock,
+        ids: context.ids,
+        faults: context.faults,
+        runner: context.runner.clone(),
+        requested_by: signal.by.clone(),
+        version: context.version.clone(),
+        settings: context.settings,
+    };
+    let requested = Requested {
+        reason: signal.reason.clone(),
+        wait,
+        cancellation: cancellation.clone(),
+    };
+    hold_since(
+        &context,
+        environment,
+        location,
+        &signal.unit,
+        &requested,
+        Some(signal.at),
+    )
+}
+
+/// `nyl hold`, its hold dated `since` or, without one, when it takes the lease.
+fn hold_since(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    unit: &UnitName,
+    requested: &Requested,
+    since: Option<Timestamp>,
 ) -> StateOperationReport {
     let refuse = |finding| StateOperationReport::new(environment.clone(), Operation::Hold.as_str()).refused(finding);
     // A run holding the lease (a live lease or run ref) receives the hold
@@ -125,7 +178,7 @@ pub fn hold(
             let stored = snapshot.desired.get(unit);
             let observed = snapshot.observed.get(unit);
             let the_hold = Hold {
-                since: held.lease.taken_at,
+                since: since.unwrap_or(held.lease.taken_at),
                 by: context.requested_by.clone(),
                 reason: requested.reason.clone(),
                 pending: None,

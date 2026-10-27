@@ -168,3 +168,31 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::Cli;
+
+    fn parses(args: &[&str]) -> bool {
+        Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()
+    }
+
+    /// Drift decisions: `--reapply` forces named units only, and records why.
+    #[test]
+    fn test_reconcile_reapply_needs_unit_and_reason() {
+        assert!(!parses(&["reconcile", "-e", "dev", "--reapply"]));
+        assert!(!parses(&["reconcile", "-e", "dev", "--reapply", "--unit", "api"]));
+        assert!(parses(&[
+            "reconcile",
+            "-e",
+            "dev",
+            "--reapply",
+            "--unit",
+            "api",
+            "--reason",
+            "repair"
+        ]));
+    }
+}

@@ -291,3 +291,78 @@ fn test_plan_lists_a_drifted_unit_as_drifted() {
     assert_eq!(plan.exit, 0, "{}", plan.stderr);
     assert_eq!(unit(&plan.report, "api")["state"], "drifted");
 }
+
+/// `driftRepaired` lists only the units the run executed again with a new
+/// receipt: a repair whose execution fails stays out of it, and its drift
+/// observation stays. Catches a commit history recording a drift as
+/// repaired that is not.
+#[test]
+fn test_a_failed_repair_is_not_recorded_as_repaired() {
+    let harness = Harness::reconciled(None);
+    harness.drift("api");
+    assert_eq!(harness.verify().exit, 3);
+    // The repair's append to its run log fails.
+    let runs = harness.markers.path().join("api.runs");
+    std::fs::remove_file(&runs).unwrap();
+    std::fs::create_dir(&runs).unwrap();
+
+    let failed = harness.reconcile(&[]);
+    assert_eq!(unit(&failed.report, "api")["result"], "failed", "{:#}", failed.report);
+    assert!(
+        failed.report["environments"][0]["driftRepaired"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{:#}",
+        failed.report
+    );
+    let message = harness.message();
+    assert!(!message.contains("driftRepaired"), "{message}");
+    let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(
+        unit(&status.report, "api")["drift"]["result"],
+        "drifted",
+        "{:#}",
+        status.report
+    );
+}
+
+/// `--fail-fast` starts no unit after the first approval wait, also one
+/// decided at selection: a drifted unit that is not safe to re-run awaits
+/// approval, and the drifted `converge` unit it would otherwise repair is
+/// not started (NYL-RUN-STOPPED). Without `--fail-fast` the run goes on.
+#[test]
+fn test_fail_fast_stops_at_an_approval_wait_decided_at_selection() {
+    let harness = Harness::reconciled(None);
+    harness.drift("api");
+    harness.drift("job");
+    assert_eq!(harness.verify().exit, 3);
+
+    let stopped = harness.reconcile(&["--fail-fast"]);
+    assert_eq!(
+        unit(&stopped.report, "job")["result"],
+        "awaiting-approval",
+        "{:#}",
+        stopped.report
+    );
+    assert_eq!(
+        unit(&stopped.report, "api")["result"],
+        "blocked",
+        "{:#}",
+        stopped.report
+    );
+    assert_eq!(
+        stopped.report["environments"][0]["warnings"][0]["code"], "NYL-RUN-STOPPED",
+        "{:#}",
+        stopped.report
+    );
+    assert_eq!(harness.runs("api"), 1, "api is not started");
+
+    let continued = harness.reconcile(&[]);
+    assert_eq!(
+        unit(&continued.report, "api")["result"],
+        "executed",
+        "{:#}",
+        continued.report
+    );
+    assert_eq!(harness.runs("api"), 2);
+}

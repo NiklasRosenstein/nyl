@@ -320,7 +320,7 @@ fn test_confirm_while_the_holder_does_something_else_exits_2() {
 /// Catches a hold failing with `NYL-LEASE-HELD` while a run holds the
 /// lease, instead of reaching that run (Q28).
 #[test]
-fn test_hold_is_delivered_to_any_live_run() {
+fn test_hold_is_delivered_to_a_running_reconcile() {
     let store = MemoryStateStore::new();
     running(&store, Operation::Reconcile, &["network"], &[]);
     let delivery = Sender::new().deliver(&store, "database", SignalAction::Hold);
@@ -571,6 +571,60 @@ fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
     assert_eq!(result(&rest, "database"), "removed");
 }
 
+/// End to end through the command: `--confirm-removed` confirms only a
+/// wait that exists before the invocation. Named for a publication whose
+/// teardown has not started, it is rejected before anything runs
+/// (`NYL-CONFIRMATION-REJECTED`, exit 1); with `--all` it never confirms
+/// the wait of a phase 1 its own run publishes, so the manual wait holds
+/// (exit 2). Catches a confirmation recorded for a removal that phase 1
+/// had only just started.
+#[test]
+fn test_confirm_removed_confirms_only_a_wait_recorded_before_it() {
+    let harness = harness::Harness::new(&shared_project(), true);
+    let init = invoke(&harness, &["state", "init", "-e", "dev"]);
+    assert_eq!(init.exit, 0, "{}", init.stderr);
+    let reconcile = invoke(&harness, &["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(reconcile.exit, 0, "{}", reconcile.stderr);
+    let desired = git_output(&harness.world.bare(), &["rev-parse", "refs/heads/nyl/dev/desired"]);
+
+    let rejected = invoke(
+        &harness,
+        &[
+            "teardown",
+            "-e",
+            "dev",
+            "--unit",
+            "kubernetes",
+            "--confirm-removed",
+            "-o",
+            "json",
+        ],
+    );
+    assert_eq!(rejected.exit, 1, "{}", rejected.stderr);
+    assert_eq!(
+        rejected.report["environments"][0]["errors"][0]["code"], "NYL-CONFIRMATION-REJECTED",
+        "{:#}",
+        rejected.report
+    );
+    assert_eq!(
+        git_output(&harness.world.bare(), &["rev-parse", "refs/heads/nyl/dev/desired"]),
+        desired,
+        "nothing ran"
+    );
+
+    let all = invoke(
+        &harness,
+        &["teardown", "-e", "dev", "--all", "--confirm-removed", "-o", "json"],
+    );
+    assert_eq!(all.exit, 2, "{}", all.stderr);
+    assert_eq!(result(&all, "kubernetes"), "tearing-down");
+    let message = git_output(
+        &harness.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+    );
+    assert!(!message.contains("confirmedRemoval"), "{message}");
+}
+
 /// A clock that, on the run's first wait, tells the test the run is
 /// waiting and blocks until the test lets it go on.
 struct PausingClock {
@@ -717,6 +771,17 @@ fn test_unmet_readiness_keeps_a_teardown_pending_until_allow_incomplete() {
         "{}",
         status.report
     );
+
+    // `get units -o wide` shows the unmet requirement in its own column.
+    let wide = invoke(&harness, &["get", "units", "-e", "dev", "-o", "wide"]);
+    assert_eq!(wide.exit, 0, "{}", wide.stderr);
+    let mut lines = wide.stdout.lines();
+    let header = lines.next().unwrap_or_default();
+    assert!(header.ends_with("TEARDOWN READINESS"), "{}", wide.stdout);
+    let row = lines
+        .find(|line| line.starts_with("kubernetes "))
+        .unwrap_or_else(|| panic!("{}", wide.stdout));
+    assert!(row.contains("incomplete:"), "{}", wide.stdout);
 
     let deploy = git_output(&harness.world.bare(), &["rev-parse", "refs/heads/deploy"]);
     let blocked = invoke(

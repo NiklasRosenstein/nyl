@@ -80,13 +80,22 @@ warning NYL-UNIT-HELD (migrate): migrate is held by Alice <alice@example.com> (i
 
 ## While a run holds the lease
 
-`nyl hold` does not wait for a running run. It delivers the hold to the run
-through the run's signal ref, reports `NYL-HOLD-DELIVERED` with the run and
-runner under `details.deliveredTo`, and exits 0 without a commit of its
-own. The run checks its signals before starting each unit, starts no held
-unit, writes the hold in its own transition commit (listed under `held`),
-and reports the unit as held. If the run finished before it read the
-signal, `nyl hold` removes the signal and holds the unit itself.
+`nyl hold` does not wait for a running reconcile or teardown. It delivers
+the hold to the run through the run's signal ref, reports
+`NYL-HOLD-DELIVERED` with the run and runner under `details.deliveredTo`,
+and exits 0 without a commit of its own. The run checks its signals before
+starting each unit, starts no held unit, writes the hold in its own
+transition commit (listed under `held`), and reports the unit as held; a
+unit it already ran is held as it ran. If the run finished before it read
+the signal, `nyl hold` removes the signal and holds the unit itself. A hold
+that reaches the run after its last unit is applied by the run once it
+released its lease, in a `hold` commit requested by you, so a delivered
+hold always takes effect.
+
+Only reconcile and teardown runs read signals. While another operation
+holds the lease, such as `nyl verify`, `nyl recover`, or a state
+operation, `nyl hold` exits 2 with `NYL-LEASE-HELD` like `resume`;
+`--wait-lease <duration>` waits for it instead.
 
 `nyl resume` takes the lease like every state operation: while a run holds
 it, `resume` exits 2 with `NYL-LEASE-HELD`; `--wait-lease <duration>` waits
@@ -114,7 +123,7 @@ whose run is not imported yet stops both with `NYL-LEASE-BROKEN` (exit 2):
 | --- | --- |
 | 0 | Done, delivered to the running run, or nothing to change. |
 | 1 | An error or refusal, such as `NYL-HOLD-REFUSED`, `NYL-UNIT-UNKNOWN` (`resume` of a unit the state does not hold), or `NYL-STATE-DELETED`. |
-| 2 | The lease is broken and its run not imported (`NYL-LEASE-BROKEN`), or, for `resume`, another run holds it (`NYL-LEASE-HELD`). |
+| 2 | The lease is broken and its run not imported (`NYL-LEASE-BROKEN`), or another operation holds it (`NYL-LEASE-HELD`): for `hold`, one other than a reconcile or teardown run. |
 
 ## Codes
 

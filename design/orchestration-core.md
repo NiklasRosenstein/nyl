@@ -666,7 +666,11 @@ ref carries `nyl hold` to a running run (see [Deletion](#deletion)); each
 `rules::teardown_wait` decides what a confirmation ends):
 
 - `--confirm-removed` looks at the lease first. With no lease held, it
-  confirms directly as above. When the lease holder is waiting on that unit's
+  confirms directly as above the wait recorded in the unit's observed
+  state, and a unit without one is rejected before anything runs; with
+  `--all` it confirms every recorded wait. It never confirms a wait that
+  its own run's phase 1 starts, which waits under its strategy like any
+  other (owner: `nyl_orchestration::shell::teardown`). When the lease holder is waiting on that unit's
   teardown, it pushes a `Signal` to the run's signal ref,
   `refs/nyl/<env>/signals/<run-id>`, naming the operator, the reason, the time, the
   run ID, and the phase 1 commit it confirms. It reports where the
@@ -692,6 +696,13 @@ ref carries `nyl hold` to a running run (see [Deletion](#deletion)); each
   same way.
 - A `manual` wait never keeps a run waiting, because the run exits 2 at once;
   a later `--confirm-removed` applies directly.
+- A wait that goes on beyond the run is reported with
+  `NYL-TEARDOWN-WAITING`: on the waiting publication, `tearing-down` with
+  why it waits (the run, owner `nyl_orchestration::shell::run::teardown`,
+  and `status` from the recorded wait, owner `rules::unit_state`), and on
+  each unit whose teardown waits for it, naming the publication
+  (`rules::teardown`). The run exits 2. The fix names the next
+  teardown-capable run, which continues the wait, and `--confirm-removed`.
 - A recorded wait persists between runs in the unit's observed document under
   `waiting` (phase, reason, `since`, the advisory `until`, `phase1Commit`, and
   the run that published phase 1), so a later run, `--confirm-removed`, or
@@ -1515,7 +1526,10 @@ picked up by the next run.
 reconcile: a unit that fails, becomes uncertain, waits for approval, or is
 blocked does not stop units that do not depend on it. With `--fail-fast`, on
 `reconcile` and `teardown`, the run starts no further unit after the first
-failure, uncertain outcome, or approval wait; units already running finish.
+failure, uncertain outcome, or approval wait, including one decided when
+units are selected, such as a drifted unit whose recovery policy is not
+`converge` or a teardown that needs manual approval; units already running
+finish.
 It still checkpoints what finished and writes its transition commit. The units
 it did not start report `blocked` with the reason `--fail-fast stopped the
 run after <unit>`, and the run warns with `NYL-RUN-STOPPED` (owner:
@@ -1744,6 +1758,11 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
      marked when its observed document changed at or after that run's
      deadline. When several leftover runs touched a unit, the newest, by
      deadline and then run ID, decides, and older checkpoints are superseded.
+   - A name fenced by a deleting incarnation (a kind change, or a replace)
+     imports a leftover run's touches of it against that stored, deleting
+     incarnation, not the new one in source, so a teardown the dead run
+     started without a checkpoint gives it an `uncertain` condition rather
+     than being lost with the run ref.
    - An adopted unit that the new resolution no longer selects is written with
      its checkpointed receipt, since there is no new key to compare, or,
      without a checkpoint, with an `uncertain` condition, so the transition
@@ -2265,17 +2284,31 @@ lifecycle:
     applies whatever changed, including a pending deletion.
   - Holding a held unit and resuming one that is not held change nothing:
     both exit 0 with a note and write no commit, so scripts can repeat them.
-  - `nyl hold` while a run holds the environment's lease is delivered to that
-    run through its signal ref, as a `Signal` with `action: hold`; it
-    reports `NYL-HOLD-DELIVERED` with the run it went to and exits 0. The
-    running run reads its signals before it starts each unit, starts no held
-    unit, writes the hold in its own transition commit (listed under
-    `details.held`), and reports the unit `held`; units already running
-    finish first. When the run finished before it read the signal, `nyl
-    hold` deletes the signal and applies the hold directly under its own
-    lease (owner: `nyl_orchestration::shell::signal`). A broken lease
-    refuses `nyl hold` with `NYL-LEASE-BROKEN`, as it refuses every
-    non-importer.
+  - `nyl hold` while a reconcile or teardown run holds the environment's
+    lease is delivered to that run through its signal ref, as a `Signal`
+    with `action: hold`; it reports `NYL-HOLD-DELIVERED` with the run it
+    went to and exits 0. The running run reads its signals before it starts
+    each unit, starts no held unit, writes the hold in its own transition
+    commit (listed under `details.held`), and reports the unit `held`;
+    units already running finish first. A unit the run already executed or
+    created is held as the incarnation that ran: its uid and the document
+    of its new receipt. When the run finished before it read the signal,
+    `nyl hold` deletes the signal and applies the hold directly under its
+    own lease (owner: `nyl_orchestration::shell::signal`). `nyl hold`
+    reports a delivery only while the run still holds the environment
+    after the signal is pushed, and the run reads its signals once more
+    after its transition commit, once it holds nothing (its lease released
+    and its run ref marked finished) and before its run ref and signal ref
+    go: a hold it had not read yet is applied as `nyl hold` applies it,
+    requested by the signal's sender, under a lease of its own that it
+    waits for up to the lease grace period, or delivered to a run that took
+    the lease since (owner: `nyl_orchestration::shell::run`). Every hold
+    reported delivered therefore takes effect. Only reconcile and teardown
+    runs read signals: while any other operation holds the lease, such as
+    `verify`, `recover`, or a state operation, `nyl hold` meets a held
+    lease like every state operation (`NYL-LEASE-HELD`, exit 2, or a wait
+    with `--wait-lease`). A broken lease refuses `nyl hold` with
+    `NYL-LEASE-BROKEN`, as it refuses every non-importer.
   - A hold is for incidents and investigations: stop reconciling a unit while
     something is wrong, without a source change and its review cycle. It is
     the only desired state that does not come from source, and it is an
