@@ -1662,7 +1662,6 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let environment = session.environment();
     let mut report = EnvironmentRunReport::new(environment.clone());
     let run = base.ids.run_id();
-    report.run = Some(run.clone());
     // A `--local` run checks for remote run refs it would have to take over
     // before it takes the lease, so a refusal leaves the remote lease (and
     // the break it may record) as it was; it checks again once it holds it.
@@ -1692,6 +1691,8 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
             return report;
         }
     };
+    // A run exists only once it holds the lease: a refused one reports none.
+    report.run = Some(run.clone());
     let record = Run {
         api_version: StateV1,
         kind: RunKind,

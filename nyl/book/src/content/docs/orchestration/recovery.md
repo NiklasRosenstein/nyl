@@ -27,8 +27,6 @@ While a run is alive, its lease and its run ref both hold the environment:
 
 ```console
 $ nyl reconcile -e dev
-dev: no units
-run: 01a1732a-217d-70c4-a4dc-a5a15c9087ad
 error NYL-LEASE-HELD: dev is held by run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 (reconcile) by unknown@localhost, until 2026-10-25T13:19:59.431883317+00:00
   fix: wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone
 ```

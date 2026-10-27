@@ -180,6 +180,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `nyl reconcile` or `nyl verify` refused before it held the lease, such as
+  with `NYL-LEASE-HELD`, no longer prints an empty unit list and a run ID
+  for a run that never started; the JSON report has no `run` either.
 - `diff-tree --against source` renders the baseline from the project directory
   of the checkout, so projects whose `nyl.toml` is not at the repository root
   can be compared. When the baseline has the project elsewhere, it tries the
