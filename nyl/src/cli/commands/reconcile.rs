@@ -32,6 +32,7 @@ pub enum RunOutput {
 
 /// Execute an environment's ready units.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent command-line switches.
 pub struct ReconcileArgs {
     /// The environment to reconcile.
     #[arg(short = 'e', long = "environment")]
@@ -70,6 +71,39 @@ pub struct ReconcileArgs {
     #[arg(long = "approve", value_name = "UNIT", requires = "local", value_delimiter = ',')]
     pub approve: Vec<String>,
 
+    /// Tear down units that left the ownership set (omission) or whose kind
+    /// changed, instead of leaving them pending teardown.
+    #[arg(long)]
+    pub allow_teardown: bool,
+
+    /// Tear down units that retained tombstones still cite.
+    #[arg(long)]
+    pub allow_dependents: bool,
+
+    /// Proceed with teardowns whose readiness requirements are unmet, or
+    /// whose removal is not confirmed, recording what may remain.
+    #[arg(long)]
+    pub allow_incomplete: bool,
+
+    /// Act only on units outside the ownership set: newly leaving, deleting,
+    /// pending teardown, or tearing down.
+    #[arg(long, conflicts_with = "units")]
+    pub leaving: bool,
+
+    /// Execute the --unit units again although their receipts are current,
+    /// such as to repair drift; needs --unit and --reason.
+    #[arg(long, requires_all = ["units", "reason"])]
+    pub reapply: bool,
+
+    /// Why, recorded as the transition commit's Nyl-Reason for --reapply.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Start no further unit after the first failure, uncertain outcome, or
+    /// approval wait; what finished is still recorded.
+    #[arg(long)]
+    pub fail_fast: bool,
+
     /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
     pub author: Option<String>,
@@ -105,6 +139,17 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
         wait: args.wait_lease,
         local: local.clone(),
         cancellation: wiring.cancellation.clone(),
+        mode: nyl_orchestration::shell::run::RunMode::Reconcile,
+        lifecycle: nyl_orchestration::shell::run::LifecycleOptions {
+            allow_teardown: args.allow_teardown,
+            allow_dependents: args.allow_dependents,
+            allow_incomplete: args.allow_incomplete,
+            leaving: args.leaving,
+            ..nyl_orchestration::shell::run::LifecycleOptions::default()
+        },
+        reapply: args.reapply,
+        fail_fast: args.fail_fast,
+        reason: args.reason.as_deref(),
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
@@ -122,4 +167,32 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
     )?;
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::Cli;
+
+    fn parses(args: &[&str]) -> bool {
+        Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()
+    }
+
+    /// Drift decisions: `--reapply` forces named units only, and records why.
+    #[test]
+    fn test_reconcile_reapply_needs_unit_and_reason() {
+        assert!(!parses(&["reconcile", "-e", "dev", "--reapply"]));
+        assert!(!parses(&["reconcile", "-e", "dev", "--reapply", "--unit", "api"]));
+        assert!(parses(&[
+            "reconcile",
+            "-e",
+            "dev",
+            "--reapply",
+            "--unit",
+            "api",
+            "--reason",
+            "repair"
+        ]));
+    }
 }

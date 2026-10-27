@@ -9,13 +9,18 @@ use std::collections::BTreeSet;
 
 use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::Code;
+use nyl_core::orchestration::driver::Change;
 use nyl_core::orchestration::ports::{SourceRepository, SourceResolver};
 use nyl_git::GitAuth;
-use nyl_orchestration::run_report::{EnvironmentRunReport, UnitResult};
+use nyl_orchestration::run_report::{EnvironmentRunReport, LeavingConsequence, UnitResult, UnitState};
 use nyl_orchestration::shell::inspect::{self, GetValue};
+use nyl_orchestration::shell::run::{self, Cancellation, RunMode, TeardownTarget};
 use nyl_state::source::GitSourceResolver;
 use scenario::format::BranchStep;
-use scenario::shell::{codes, dev, outcome, project, set, shared_project, unit, FaultyStore, Harness, NYL_TOML};
+use scenario::format::CommitStep;
+use scenario::shell::{
+    codes, command, dev, outcome, project, set, shared_project, unit, FaultyStore, Harness, ENVIRONMENT, NYL_TOML,
+};
 use scenario::world::World;
 use tempfile::TempDir;
 
@@ -279,4 +284,79 @@ fn test_store_failure_after_a_checkpoint_keeps_the_run_ref() {
         .map(|checkpoint| checkpoint.desired.unit.name.to_string())
         .collect();
     assert_eq!(checkpointed, set(&["network", "web-image"]));
+}
+
+/// A plan of `mode` with a fresh clone of `main`.
+fn plan_with(harness: &Harness, mode: RunMode) -> EnvironmentRunReport {
+    let mut job = harness.job(&[], Cancellation::default());
+    job.request.mode = mode;
+    harness
+        .run_on(harness.store.as_ref(), &job, false, run::plan)
+        .environments
+        .remove(0)
+}
+
+fn teardown_project() -> TempDir {
+    project(&[
+        NYL_TOML,
+        ("nyl/environment.yaml", ENVIRONMENT),
+        (
+            "nyl/units.yaml",
+            &command("svc", "true", "  teardown: [sh, -c, 'true']\n"),
+        ),
+    ])
+}
+
+/// Planning, the leaving section: a unit leaving the ownership set is
+/// listed with its consequence, its pending teardown and why it waits, and
+/// the destroy plan `--allow-teardown` would carry out; the plan writes
+/// nothing.
+#[test]
+fn test_plan_lists_a_leaving_unit_with_its_destroy_plan() {
+    let project = teardown_project();
+    let harness = Harness::new(project.path(), false);
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit.code(), 0);
+    let steps = TempDir::new().unwrap();
+    harness.world.commit(
+        &CommitStep {
+            branch: "main".to_owned(),
+            message: "Remove svc".to_owned(),
+            apply: None,
+            delete: vec!["nyl/units.yaml".to_owned()],
+        },
+        steps.path(),
+    );
+    let before = harness.tips();
+    let plan = harness.plan(&[]);
+    assert_eq!(plan.exit.code(), 0, "{plan:#?}");
+    assert_eq!(plan.leaving[0].consequence, LeavingConsequence::Teardown);
+    let svc = &plan.units[&unit("svc")];
+    assert_eq!(svc.state, Some(UnitState::PendingTeardown));
+    assert_eq!(svc.changes, Some(Change::Destroy));
+    assert!(codes(&svc.warnings).contains(&Code::TeardownPending));
+    assert_eq!(harness.tips(), before, "a plan writes nothing");
+}
+
+/// `nyl plan --teardown` previews what `nyl teardown` removes from the
+/// stored documents alone (Q4): it works when source no longer renders.
+#[test]
+fn test_plan_teardown_previews_from_stored_documents() {
+    let project = teardown_project();
+    let harness = Harness::new(project.path(), false);
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit.code(), 0);
+    harness
+        .world
+        .commit_files("main", "Break source", &[("nyl/units.yaml", "kind: [\n")]);
+    let before = harness.tips();
+    let plan = plan_with(
+        &harness,
+        RunMode::Teardown {
+            target: TeardownTarget::Units(std::collections::BTreeSet::from([unit("svc")])),
+        },
+    );
+    assert!(plan.errors.is_empty(), "{plan:#?}");
+    assert_eq!(plan.units[&unit("svc")].changes, Some(Change::Destroy), "{plan:#?}");
+    assert_eq!(harness.tips(), before);
 }

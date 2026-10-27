@@ -163,7 +163,11 @@ fn apply_side(
         .and_then(|state_ref| state_ref.directories.get(path))
         .cloned()
         .unwrap_or_default();
-    let mut directory = before.clone();
+    let mut directory = if changes.clear {
+        Directory::default()
+    } else {
+        before.clone()
+    };
     if let Some(record) = &changes.record {
         directory.record = Some(record.clone());
     }
@@ -179,7 +183,7 @@ fn apply_side(
         apply_map(&mut directory.observations, &changes.observations);
         apply_map(&mut directory.attestations, &changes.attestations);
     }
-    if directory == before {
+    if directory == before && !(changes.commit_unchanged && observed_side) {
         return None;
     }
     let commit = inner.next_commit();
@@ -532,6 +536,13 @@ impl StateStore for MemoryStateStore {
             .entry((repository, prefix, environment, signal.run.clone()))
             .or_default()
             .push(signal.clone());
+        Ok(())
+    }
+
+    fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+        let mut inner = self.lock();
+        let (repository, prefix, environment) = coordination_key(location, environment);
+        inner.signals.remove(&(repository, prefix, environment, run.clone()));
         Ok(())
     }
 

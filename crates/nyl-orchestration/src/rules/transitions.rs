@@ -6,10 +6,10 @@
 //! [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases)
 //! (takeover and late checkpoints).
 //!
-//! Every change of a unit's receipt or condition goes through [`apply`]:
-//! executions, `inspect`, imported checkpoints, takeover, and `nyl recover`.
+//! Every change of a unit's receipt or condition goes through [`apply_to`]
+//! (or [`apply`] where only the unit's identity is at hand): executions,
+//! `inspect`, imported checkpoints, takeover, teardowns, and `nyl recover`.
 //! No other module builds an observed document with a changed condition.
-//! Lifecycle transitions (teardown, holds) join this table in part 5.
 //!
 //! - A condition records the latest failure or uncertainty and stays until
 //!   the unit next succeeds or an operator runs `recover`; it never removes
@@ -20,15 +20,25 @@
 //! - `recover --retry` clears a condition and records nothing else;
 //!   `recover --accept` replaces it with the accepted receipt. Both refuse a
 //!   unit without a condition.
+//! - Every new receipt carries a copy of the desired document it was
+//!   produced for (`desired`), written in the same document, so `nyl hold`
+//!   reverts to it without reading history (part 5 decision Q16): the
+//!   document [`apply_to`] is given, or the copy an imported checkpoint
+//!   carries. An event that writes no receipt keeps the existing copy.
+//! - A publication teardown that published its first phase and waits
+//!   records the wait ([`Event::Waiting`]) next to the receipt it keeps;
+//!   conditions keep a recorded wait, and a new receipt ends it.
 
 use nyl_core::orchestration::ids::RunId;
 use nyl_core::orchestration::state::{
-    Condition, FailureCategory, ObservedUnit, ObservedUnitKind, Receipt, StateV1, UnitIdentity,
+    Condition, DesiredUnit, FailureCategory, ObservedUnit, ObservedUnitKind, Receipt, StateV1, TeardownWaiting,
+    UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 
 /// What happened to a unit.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Short-lived values, built and applied at once.
 pub enum Event {
     /// An execution succeeded, or `inspect` found its effects applied: the
     /// receipt replaces the last one and clears any condition.
@@ -57,6 +67,9 @@ pub enum Event {
     RecoverRetry,
     /// `nyl recover --accept <run>`, with the receipt that run checkpointed.
     RecoverAccept { receipt: Receipt },
+    /// A two-phase teardown published its first phase and waits under its
+    /// `teardownWait`: the wait is recorded, the receipt and any condition stay.
+    Waiting { waiting: TeardownWaiting },
 }
 
 /// The result of an accepted event.
@@ -77,24 +90,57 @@ pub enum Refusal {
 }
 
 /// Apply `event` to a unit whose observed document of the same incarnation
-/// is `current` (`None` when it has none yet); `unit` names the incarnation.
+/// is `current` (`None` when it has none yet); `desired` is the document the
+/// event is about, whose copy a new receipt carries.
+pub fn apply_to(desired: &DesiredUnit, current: Option<&ObservedUnit>, event: Event) -> Result<Applied, Refusal> {
+    transition(&desired.unit, current, event, Some(desired))
+}
+
+/// [`apply_to`] for a caller that has only the unit's identity: a new
+/// receipt keeps the existing desired copy (or the copy an imported
+/// checkpoint carries), since there is no document to copy.
 pub fn apply(unit: &UnitIdentity, current: Option<&ObservedUnit>, event: Event) -> Result<Applied, Refusal> {
+    transition(unit, current, event, None)
+}
+
+fn transition(
+    unit: &UnitIdentity,
+    current: Option<&ObservedUnit>,
+    event: Event,
+    produced_for: Option<&DesiredUnit>,
+) -> Result<Applied, Refusal> {
     let receipt = current.and_then(|observed| observed.receipt.clone());
     let condition = current.and_then(|observed| observed.condition.as_ref());
-    let document = |receipt: Option<Receipt>, condition: Option<Condition>| {
+    let existing_copy = || current.and_then(|observed| observed.desired.clone());
+    let existing_wait = || current.and_then(|observed| observed.waiting.clone());
+    // The copy of the document a new receipt was produced for.
+    let new_copy = || {
+        produced_for
+            .map(|desired| Box::new(desired.clone()))
+            .or_else(existing_copy)
+    };
+    let document = |receipt: Option<Receipt>,
+                    condition: Option<Condition>,
+                    desired: Option<Box<DesiredUnit>>,
+                    waiting: Option<TeardownWaiting>| {
         Applied::Changed(Box::new(ObservedUnit {
             api_version: StateV1,
             kind: ObservedUnitKind,
             unit: unit.clone(),
+            // A document without a receipt has no copy.
+            desired: receipt.as_ref().and(desired),
             receipt,
             condition,
+            waiting,
         }))
     };
     if matches!(event, Event::RecoverRetry | Event::RecoverAccept { .. }) && condition.is_none() {
         return Err(Refusal::NothingToRecover);
     }
     Ok(match event {
-        Event::Succeeded { receipt } | Event::RecoverAccept { receipt } => document(Some(receipt), None),
+        Event::Succeeded { receipt } | Event::RecoverAccept { receipt } => {
+            document(Some(receipt), None, new_copy(), None)
+        }
         Event::Failed {
             since,
             run,
@@ -110,11 +156,30 @@ pub fn apply(unit: &UnitIdentity, current: Option<&ObservedUnit>, event: Event) 
                 retryable,
                 message,
             }),
+            existing_copy(),
+            existing_wait(),
         ),
-        Event::Uncertain { since, run, reason } => document(receipt, Some(Condition::Uncertain { since, run, reason })),
+        Event::Uncertain { since, run, reason } => document(
+            receipt,
+            Some(Condition::Uncertain { since, run, reason }),
+            existing_copy(),
+            existing_wait(),
+        ),
         Event::Imported { .. } if matches!(condition, Some(Condition::Uncertain { .. })) => Applied::Evidence,
-        Event::Imported { checkpointed } => document(checkpointed.receipt.or(receipt), checkpointed.condition),
-        Event::RecoverRetry => document(receipt, None),
+        Event::Imported { checkpointed } => match checkpointed.receipt {
+            Some(imported) => {
+                let copy = checkpointed.desired.or_else(new_copy);
+                document(Some(imported), checkpointed.condition, copy, checkpointed.waiting)
+            }
+            None => document(
+                receipt,
+                checkpointed.condition,
+                existing_copy(),
+                checkpointed.waiting.or_else(existing_wait),
+            ),
+        },
+        Event::RecoverRetry => document(receipt, None, existing_copy(), existing_wait()),
+        Event::Waiting { waiting } => document(receipt, condition.cloned(), existing_copy(), Some(waiting)),
     })
 }
 
@@ -147,6 +212,82 @@ mod tests {
             apply(&identity(), Some(&current), Event::Imported { checkpointed }),
             Ok(Applied::Evidence)
         );
+    }
+
+    /// Catches a receipt written without the document it was produced for,
+    /// which `nyl hold` reverts to (decision Q16): an execution's receipt
+    /// carries a copy of the executed document.
+    #[test]
+    fn test_a_new_receipt_carries_a_copy_of_its_desired_document() {
+        let executed = fixtures::desired("database", "Command", json!({"command": ["./db.sh"]}), "b");
+        let older = fixtures::desired("database", "Command", json!({"command": ["./old.sh"]}), "a");
+        let mut current = document(Some('a'), 0);
+        current.desired = Some(Box::new(older));
+        let Ok(Applied::Changed(after)) =
+            apply_to(&executed, Some(&current), Event::Succeeded { receipt: receipt('b') })
+        else {
+            panic!("a success changes the observed document");
+        };
+        assert_eq!(after.desired.as_deref(), Some(&executed));
+    }
+
+    /// Catches a failure or uncertainty replacing the copy of the document
+    /// the kept receipt was produced for with the failed document, so a
+    /// hold would revert to something that never ran.
+    #[test]
+    fn test_a_condition_keeps_the_copy_of_the_kept_receipt() {
+        let older = fixtures::desired("database", "Command", json!({"command": ["./old.sh"]}), "a");
+        let failing = fixtures::desired("database", "Command", json!({"command": ["./db.sh"]}), "b");
+        let mut current = document(Some('a'), 0);
+        current.desired = Some(Box::new(older.clone()));
+        let since: Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
+        let event = Event::Uncertain {
+            since,
+            run: run(),
+            reason: "interrupted".to_owned(),
+        };
+        let Ok(Applied::Changed(after)) = apply_to(&failing, Some(&current), event) else {
+            panic!("an uncertain outcome changes the observed document");
+        };
+        assert_eq!(after.desired.as_deref(), Some(&older));
+        assert_eq!(after.receipt, current.receipt);
+    }
+
+    /// Catches a teardown wait losing the receipt (whose outputs the second
+    /// phase reads) or a later condition dropping the recorded wait.
+    #[test]
+    fn test_a_teardown_wait_keeps_the_receipt_and_survives_a_condition() {
+        let unit = fixtures::desired("database", "Command", json!({}), "a");
+        let since: Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
+        let waiting = TeardownWaiting {
+            phase: "applications-removed".to_owned(),
+            reason: "waiting".to_owned(),
+            since,
+            until: None,
+            phase1_commit: None,
+            run: run(),
+        };
+        let current = document(Some('a'), 0);
+        let Ok(Applied::Changed(waited)) = apply_to(
+            &unit,
+            Some(&current),
+            Event::Waiting {
+                waiting: waiting.clone(),
+            },
+        ) else {
+            panic!("a wait changes the observed document");
+        };
+        assert_eq!(waited.receipt, current.receipt);
+        assert_eq!(waited.waiting.as_ref(), Some(&waiting));
+        let failed = Event::Uncertain {
+            since,
+            run: run(),
+            reason: "the wait could not observe Argo CD".to_owned(),
+        };
+        let Ok(Applied::Changed(after)) = apply_to(&unit, Some(&waited), failed) else {
+            panic!("an uncertain outcome changes the observed document");
+        };
+        assert_eq!(after.waiting.as_ref(), Some(&waiting));
     }
 
     /// One generated event, with receipts drawn from a small set of keys.
@@ -201,6 +342,9 @@ mod tests {
                     reason: "interrupted".to_owned(),
                 }),
             },
+            desired: None,
+
+            waiting: None,
         }
     }
 

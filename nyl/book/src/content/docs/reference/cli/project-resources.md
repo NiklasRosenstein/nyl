@@ -52,7 +52,8 @@ state instead of source. It only reads: it needs read access to the state
 repository, never takes the lease, and needs no commit identity.
 
 ```bash
-nyl get units -e dev                          # NAME KIND STATE RECEIPT LAST RUN
+nyl get units -e dev                          # NAME KIND STATE RECEIPT LAST RUN DETAIL
+nyl get units -e dev -o wide                  # ... and TEARDOWN READINESS
 nyl get unit migrate -e dev -o yaml           # the persisted desired and observed documents
 nyl get unit migrate -e dev -o json --observed
 nyl get output database/host -e dev           # resolves like {fromUnit: {unit: database, output: host}}
@@ -64,7 +65,13 @@ nyl get units -e dev --local                  # this clone's local view
 
 - `get units -e` joins desired and observed state into one row per unit:
   its kind, its [state](/nyl/reference/cli/status/), whether its latest
-  receipt is current, and the run of its latest receipt or condition.
+  receipt is current, the run of its latest receipt or condition, and a
+  detail such as what a blocked unit waits for or the changes a held unit
+  keeps pending. A held marker, which has no kind, shows `-` as its kind,
+  and a held unit with a condition shows it, such as `held (uncertain)`.
+  `-o wide` adds the teardown readiness of units whose kind reports
+  teardown settings, such as a `KubernetesPublication`: `ready`, or
+  `incomplete:` with the unmet requirements, and `-` for other kinds.
 - `get unit <name> -e <env> -o yaml|json` prints exactly the persisted
   `{desired, observed}` documents, never a synthesized merge. `--desired` or
   `--observed` prints only one of them.

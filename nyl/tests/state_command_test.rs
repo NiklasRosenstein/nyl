@@ -151,23 +151,68 @@ fn test_state_commands_refuse_with_stable_codes_and_exit_categories() {
         .stderr(
             predicate::str::contains("NYL-LEASE-HELD").and(predicate::str::contains("https://ci.example.com/runs/1")),
         );
+}
 
-    // Breaking the lease lets the next command take over at once.
+/// "Runs and leases" items 1 and 8: a broken lease refuses every state
+/// command (exit 2, naming `nyl recover -e dev`) until an import records
+/// the break; `nyl recover -e dev` is that import. The fake kinds stand in
+/// for the shared project's units, which the import resolves.
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_a_broken_lease_refuses_state_commands_until_recover_imports_it() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();
+    let lease = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: RunId::new("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90").unwrap(),
+        runner: "https://ci.example.com/runs/1".to_owned(),
+        operation: Operation::StateInit,
+        units: Vec::new(),
+        deadline: "2999-01-01T00:00:00Z".parse().unwrap(),
+        taken_at: shell::start(),
+        broken: None,
+    };
+    let clock = Arc::new(FakeClock::new(shell::start()));
+    shell::git_store(&world.fresh_clone("main"), &clock)
+        .take_lease(&shell::location(&world), &shell::dev(), &lease, None)
+        .unwrap();
     nyl(&checkout, &["lease", "break", "-e", "dev", "--reason", "runner lost"])
         .assert()
         .success()
         .stdout(predicate::str::contains("lease-break dev: done"));
     nyl(&checkout, &["state", "init", "-e", "dev", "--fresh"])
         .assert()
-        .success();
-    let message = git_output(
-        &world.bare(),
-        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/desired"],
-    );
+        .code(2)
+        .stderr(predicate::str::contains("NYL-LEASE-BROKEN").and(predicate::str::contains("nyl recover -e dev")));
+    // The broken holder left no run ref: recover imports nothing and
+    // records the break once, in its transition commit.
+    nyl(&checkout, &["recover", "-e", "dev", "--reason", "runner gone"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("recover dev: done"));
+    let message = ["desired", "observed"]
+        .iter()
+        .map(|side| {
+            git_output(
+                &world.bare(),
+                &["log", "-1", "--format=%B", &format!("refs/heads/nyl/dev/{side}")],
+            )
+        })
+        .find(|message| message.starts_with("nyl: recover dev"))
+        .expect("recover wrote a transition commit");
     assert!(
-        message.contains("leaseBroken:") && message.contains("runner lost"),
+        message.starts_with("nyl: recover dev")
+            && message.contains("leaseBroken:")
+            && message.contains("runner lost")
+            && message.contains("Nyl-Reason: runner gone"),
         "{message}"
     );
+    assert!(git_output(&world.bare(), &["for-each-ref", "refs/nyl/"]).is_empty());
+    nyl(&checkout, &["state", "init", "-e", "dev", "--fresh"])
+        .assert()
+        .success();
 }
 
 #[test]

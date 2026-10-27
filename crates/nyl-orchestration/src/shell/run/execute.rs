@@ -7,8 +7,9 @@
 //! (checkpoints and cancellation).
 //!
 //! - Every outcome becomes the unit's observed document through
-//!   [`transitions::apply`]: a success replaces the receipt and clears any
-//!   condition; a failure or uncertain outcome keeps the last receipt.
+//!   [`transitions::apply_to`]: a success replaces the receipt, with a copy
+//!   of the executed desired document, and clears any condition; a failure
+//!   or uncertain outcome keeps the last receipt and its copy.
 //! - A unit with an `uncertain` condition whose execution recovery policy is
 //!   `inspect` is inspected first: applied records the receipt (outputs
 //!   filtered like a success), not applied executes it, and unknown or
@@ -204,6 +205,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         tools: context.tools,
         commit_identity: context.commit_identity,
         cache_dir: shared.cache_dir.clone(),
+        teardown_wait: None,
     };
 
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
@@ -327,7 +329,8 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     };
     // Executions always change the observed document; the table refuses
     // only `recover` events and keeps late imports as evidence.
-    let Ok(Applied::Changed(observed)) = transitions::apply(&unit.unit, current, event) else {
+    // A new receipt carries a copy of the document it was produced for (Q16).
+    let Ok(Applied::Changed(observed)) = transitions::apply_to(unit, current, event) else {
         return execution;
     };
     execution.checkpoint = Some(Checkpoint {

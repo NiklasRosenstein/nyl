@@ -73,6 +73,10 @@ functions over an immutable snapshot:
 fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp) -> Decisions
 ```
 
+- The teardown planner returns both the forecast order for previews and the
+  next executable wave. Releases, drops, retentions, and teardowns share the
+  dependency barriers. The shell runs one batch and replans from its outcomes,
+  applying hold signals between batches and before publication phase 2.
 - The shell in `nyl-orchestration` executes decisions and records results
   through the `StateStore` and `Driver` traits. It is the only code that
   performs effects.
@@ -93,13 +97,22 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Typed identifiers instead of strings: `EnvironmentName`, `UnitAddress`,
   `Uid`, `ExecutionKey`, `CommitId`, `RunId`, `JsonPointer`, `ChangeDigest`.
 - Lifecycle and conditions are enums that carry their data, such as
-  `Lifecycle::Held { hold, pending }`, `Lifecycle::Deleting { reason, intent }`,
+  `Lifecycle::Held { hold, deletion }`, `Lifecycle::Deleting { deletion }`,
   `Lifecycle::Retained { tombstone }`, and `Condition::Uncertain { run, since }`,
   so exhaustive matching forces every
   new state through every decision.
 - Lifecycle transitions live in one table, `lifecycle::transition(current,
-  event) -> Result<Next>`. Rules such as "a hold survives teardown" or "a kind
-  change needs `--allow-teardown`" are one row and one test each.
+  event) -> Result<Next>`, with `transition_absent(event)` for a unit without
+  a desired document, where only a hold applies (a held marker). Its events
+  are `Left`, `Returned`, `TeardownRequested`, `TeardownStarted`,
+  `TornDown { hold }`, `Retain`, `Released { hold }`,
+  `LeftWithoutIncarnation`, `Hold`, and `Resume`, and its results say how the
+  documents move: `Lifecycle`, `EndIncarnation`, `RestoreReceipt`, `Remove`,
+  or `Unchanged`. Rules such as "a held unit never progresses" (no row for a
+  held unit's teardown start, completion, or release, while a teardown request
+  on a held unit is recorded), "tear down, then hold" (the hold rides on the
+  last event), or "a kind change needs `--allow-teardown`" are one row and one
+  test each.
 - One implementation each for canonical JSON, digests, JSON Pointer resolution,
   reference resolution, and Git sources: one `GitSource` type
   (`repositoryRef`/`repository`, `revision`, `commit`, `path`) serves
@@ -127,7 +140,9 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   binary, next to `test-clock`, so tier 2 can stand in for kinds a milestone
   has not built yet.
 - Property tests (proptest) cover invariants: no unit executes with non-current
-  provenance; a held unit's desired document never changes; replaying
+  provenance; a held unit's desired document never changes, except for the
+  record of skipped source changes (`hold.pending`) and a recorded teardown
+  request; replaying
   transition commits reproduces the state; a transition commit touches only its
   operation's paths; every receipt and condition change follows the
   transition table (`rules::transitions`); importing leftover run refs is

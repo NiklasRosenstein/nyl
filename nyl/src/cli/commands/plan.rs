@@ -35,6 +35,15 @@ pub struct PlanArgs {
     #[arg(long)]
     pub fail_on_leaving: bool,
 
+    /// Preview a teardown that has not been requested: the destroy plans of
+    /// what `nyl teardown` would remove, for the --unit units or with --all.
+    #[arg(long)]
+    pub teardown: bool,
+
+    /// With --teardown, preview tearing down every unit.
+    #[arg(long, requires = "teardown", conflicts_with = "units")]
+    pub all: bool,
+
     /// Output format.
     #[arg(short = 'o', long = "output", value_enum, default_value_t)]
     pub output: RunOutput,
@@ -42,6 +51,33 @@ pub struct PlanArgs {
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
+}
+
+/// The run mode of `plan --teardown`: a teardown preview of the `--unit`
+/// units or, with `--all`, of every unit.
+fn teardown_mode(args: &PlanArgs) -> std::result::Result<nyl_orchestration::shell::run::RunMode, Stop> {
+    use nyl_orchestration::shell::run::{RunMode, TeardownTarget};
+    if !args.teardown {
+        return Ok(RunMode::Reconcile);
+    }
+    if args.all {
+        return Ok(RunMode::Teardown {
+            target: TeardownTarget::All,
+        });
+    }
+    if args.units.is_empty() {
+        return Err(Stop::Finding(nyl_core::orchestration::codes::Finding::new(
+            nyl_core::orchestration::codes::Code::UnitUnknown,
+            "plan --teardown names no unit to preview tearing down",
+            format!(
+                "name the units with `nyl plan -e {} --teardown --unit <u>`, or preview tearing down every unit with --all",
+                args.environment
+            ),
+        )));
+    }
+    Ok(RunMode::Teardown {
+        target: TeardownTarget::Units(crate::orchestration::session::unit_names("--unit", &args.units)?),
+    })
 }
 
 /// Run the command in-process with `wiring`.
@@ -58,6 +94,11 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         wait: None,
         local: None,
         cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+        mode: teardown_mode(args)?,
+        lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
+        reapply: false,
+        fail_fast: false,
+        reason: None,
     })?;
     // A plan writes nothing, so it reads through a read-only store and needs
     // no commit identity.

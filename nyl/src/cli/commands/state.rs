@@ -13,13 +13,14 @@ use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::rules::local::Discard;
+use nyl_orchestration::shell::run::{LifecycleOptions, RunMode, TeardownTarget};
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
 use crate::gitops::discover_gitops_inventory;
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, Session, Stop};
+use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
 use crate::{NylError, Result};
 
 /// Output format of state commands.
@@ -120,6 +121,26 @@ pub enum StateCommand {
         #[arg(long)]
         discard_all: bool,
     },
+    /// Remove the environment's state once no unit has an incarnation left;
+    /// with --teardown, tear every unit down first.
+    Delete {
+        #[command(flatten)]
+        common: Common,
+        /// Run `nyl teardown --all` first and continue to the deletion in the same command.
+        #[arg(long)]
+        teardown: bool,
+        /// With --teardown, tear down units that retained tombstones still cite.
+        #[arg(long, requires = "teardown")]
+        allow_dependents: bool,
+        /// With --teardown, proceed despite unmet readiness requirements or
+        /// unconfirmed removals, recording what may remain.
+        #[arg(long, requires = "teardown")]
+        allow_incomplete: bool,
+        /// With --teardown, take the units' source files from this revision
+        /// when the recorded source commit cannot be fetched.
+        #[arg(long, requires = "teardown")]
+        source: Option<String>,
+    },
     /// Restore remote state to an earlier commit's content with forward commits,
     /// after local transitions were pushed by hand.
     Restore {
@@ -174,6 +195,19 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 state::reset(ctx.context, &ctx.environment, ctx.location, discard.as_ref())
             })
         }
+        StateCommand::Delete {
+            common,
+            teardown,
+            allow_dependents,
+            allow_incomplete,
+            source,
+        } => run_delete(
+            common,
+            wiring,
+            *teardown,
+            (*allow_dependents, *allow_incomplete),
+            source.as_deref(),
+        ),
         StateCommand::Restore { common, to } => {
             let to = CommitId::new(to.trim().to_ascii_lowercase()).map_err(|error| {
                 NylError::config(format!(
@@ -192,63 +226,81 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             observed_ref,
             state_path,
             coordination_refs,
-        } => {
-            let inventory = discover_gitops_inventory(&common.path, None)?;
-            // The old repository and, unless it is this clone's branches, how to reach it.
-            let from = from
-                .as_ref()
-                .map(|from| -> Result<_> {
-                    Ok(match from.as_str() {
-                        StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
-                        name if !name.contains(':') && !name.contains('/') => {
-                            let (repository, _) = inventory.resolve_git_repository(
-                                Some(&crate::resources::LocalReference { name: name.to_owned() }),
-                                None,
-                            )?;
-                            (
-                                repository.repo_url.clone(),
-                                Some(Endpoint {
-                                    read: repository.repo_url,
-                                    write: repository.publish_url,
-                                }),
-                            )
-                        }
-                        url => (
-                            crate::util::credential_free_url(url),
-                            Some(Endpoint {
-                                read: url.to_owned(),
-                                write: None,
-                            }),
-                        ),
-                    })
-                })
-                .transpose()?;
-            let extra = from
-                .as_ref()
-                .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
-            let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
-                let location = ctx.location;
-                let mut old = location.clone();
-                if let Some((repository, _)) = &from {
-                    old.repository.clone_from(repository);
-                }
-                if let Some(desired) = desired_ref {
-                    old.desired_ref.clone_from(desired);
-                }
-                if let Some(observed) = observed_ref {
-                    old.observed_ref.clone_from(observed);
-                }
-                if let Some(path) = state_path {
-                    path.trim_matches('/').clone_into(&mut old.path);
-                }
-                if let Some(prefix) = coordination_refs {
-                    old.coordination_ref_prefix.clone_from(prefix);
-                }
-                state::relocate(ctx.context, &ctx.environment, location, &old, &requested)
-            })
-        }
+        } => run_move(
+            common,
+            wiring,
+            from.as_ref(),
+            [
+                desired_ref.as_ref(),
+                observed_ref.as_ref(),
+                state_path.as_ref(),
+                coordination_refs.as_ref(),
+            ],
+        ),
     }
+}
+
+/// `nyl state move`: `old` holds `--desired-ref`, `--observed-ref`,
+/// `--state-path`, and `--coordination-refs`.
+fn run_move(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    from: Option<&String>,
+    [desired_ref, observed_ref, state_path, coordination_refs]: [Option<&String>; 4],
+) -> Result<CommandOutcome> {
+    let inventory = discover_gitops_inventory(&common.path, None)?;
+    // The old repository and, unless it is this clone's branches, how to reach it.
+    let from = from
+        .map(|from| -> Result<_> {
+            Ok(match from.as_str() {
+                StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
+                name if !name.contains(':') && !name.contains('/') => {
+                    let (repository, _) = inventory.resolve_git_repository(
+                        Some(&crate::resources::LocalReference { name: name.to_owned() }),
+                        None,
+                    )?;
+                    (
+                        repository.repo_url.clone(),
+                        Some(Endpoint {
+                            read: repository.repo_url,
+                            write: repository.publish_url,
+                        }),
+                    )
+                }
+                url => (
+                    crate::util::credential_free_url(url),
+                    Some(Endpoint {
+                        read: url.to_owned(),
+                        write: None,
+                    }),
+                ),
+            })
+        })
+        .transpose()?;
+    let extra = from
+        .as_ref()
+        .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
+    let requested = requested(common, wiring);
+    run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
+        let location = ctx.location;
+        let mut old = location.clone();
+        if let Some((repository, _)) = &from {
+            old.repository.clone_from(repository);
+        }
+        if let Some(desired) = desired_ref {
+            old.desired_ref.clone_from(desired);
+        }
+        if let Some(observed) = observed_ref {
+            old.observed_ref.clone_from(observed);
+        }
+        if let Some(path) = state_path {
+            path.trim_matches('/').clone_into(&mut old.path);
+        }
+        if let Some(prefix) = coordination_refs {
+            old.coordination_ref_prefix.clone_from(prefix);
+        }
+        state::relocate(ctx.context, &ctx.environment, location, &old, &requested)
+    })
 }
 
 /// Run a `nyl lease` command in-process with `wiring`.
@@ -343,8 +395,96 @@ pub(crate) fn run(
     Ok(render(&report, common.output))
 }
 
+/// `nyl state delete [--teardown]`: on the run path, through
+/// [`Session::run_with`], since `--teardown` runs `teardown --all` first.
+fn run_delete(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    teardown: bool,
+    (allow_dependents, allow_incomplete): (bool, bool),
+    source: Option<&str>,
+) -> Result<CommandOutcome> {
+    // `teardown --all` holds what stays in the ownership set.
+    let lifecycle = LifecycleOptions {
+        allow_dependents,
+        allow_incomplete,
+        ..LifecycleOptions::default()
+    };
+    run_lifecycle(
+        common,
+        wiring,
+        Operation::StateDelete.as_str(),
+        RunMode::Teardown {
+            target: TeardownTarget::All,
+        },
+        lifecycle,
+        source,
+        |context, request| nyl_orchestration::shell::teardown::state_delete(context, request, teardown),
+    )
+}
+
+/// Run a state operation that needs source access and the shared run context.
+pub(crate) fn run_lifecycle(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    operation_name: &'static str,
+    mode: RunMode,
+    lifecycle: LifecycleOptions,
+    source: Option<&str>,
+    operation: impl FnOnce(
+        &nyl_orchestration::shell::run::RunContext<'_>,
+        &nyl_orchestration::shell::run::RunRequest,
+    ) -> StateOperationReport,
+) -> Result<CommandOutcome> {
+    let refused = |finding: Finding| {
+        let environment = placeholder_environment(&common.environment);
+        render(
+            &StateOperationReport::new(environment, operation_name).refused(finding),
+            common.output,
+        )
+    };
+    let session = match Session::open(&common.path, &common.environment) {
+        Ok(session) => session,
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
+        Err(Stop::Error(error)) => return Err(error),
+    };
+    let identity = match wiring.commit_identity(&session.resolved.git_dir, common.author.as_deref()) {
+        Ok(identity) => identity,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let request = match session.request(&RunOptions {
+        units: &[],
+        concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
+        source,
+        wait: common.wait_lease,
+        local: None,
+        cancellation: wiring.cancellation.clone(),
+        mode,
+        lifecycle,
+        reapply: false,
+        fail_fast: false,
+        reason: common.reason.as_deref(),
+    }) {
+        Ok(request) => request,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let store = session.store(Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    }))?;
+    let mut report = match session.run_with(wiring, &store, Some(&identity), &request, operation) {
+        Ok(report) => report,
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
+        Err(Stop::Error(error)) => return Err(error),
+    };
+    let mut warnings = session.resolved.warnings.clone();
+    warnings.append(&mut report.warnings);
+    report.warnings = warnings;
+    Ok(render(&report, common.output))
+}
+
 /// Render a state operation's report as the command's outcome.
-fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
+pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
     let json = serde_json::to_value(report).expect("reports serialize");
     let mut stdout = String::new();
     let mut stderr = String::new();
@@ -363,6 +503,12 @@ fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
                 let _ = writeln!(stdout, "  {side}: {commit}");
             }
             for (key, value) in &report.details {
+                if key == "teardown" {
+                    // The teardown's own report: its exit and headline, in full with -o json.
+                    let exit = &value["environments"][0]["exit"];
+                    let _ = writeln!(stdout, "  teardown: exit {exit}");
+                    continue;
+                }
                 let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
                 let _ = writeln!(stdout, "  {key}: {value}");
             }
@@ -380,5 +526,33 @@ fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
         report: json,
         stdout,
         stderr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::Cli;
+
+    fn parses(args: &[&str]) -> bool {
+        Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()
+    }
+
+    /// Catches `state delete` options that only mean something for the
+    /// teardown being accepted without it.
+    #[test]
+    fn test_state_delete_teardown_options_require_teardown() {
+        assert!(parses(&["state", "delete", "-e", "dev"]));
+        assert!(!parses(&["state", "delete", "-e", "dev", "--allow-dependents"]));
+        assert!(parses(&[
+            "state",
+            "delete",
+            "-e",
+            "dev",
+            "--teardown",
+            "--allow-dependents",
+            "--allow-incomplete"
+        ]));
     }
 }

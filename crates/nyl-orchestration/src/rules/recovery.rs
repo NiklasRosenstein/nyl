@@ -12,6 +12,13 @@
 //! - Both refuse a unit without a condition (`NYL-RECOVER-NOTHING`); accept
 //!   refuses a run without such a checkpoint (`NYL-RECOVER-CHECKPOINT-MISSING`)
 //!   or with another key (`NYL-RECOVER-KEY-MISMATCH`).
+//! - An accepted checkpoint becomes the unit's receipt, so its observed
+//!   document carries the copy of the desired document it was produced for
+//!   (`ObservedUnit.desired`), which a later hold reverts to.
+//! - Holds on uncertain units: `--retry` on a held unit clears only its
+//!   condition, and the unit stays held; `--accept` on a held unit is
+//!   refused (`NYL-RECOVER-KEY-MISMATCH`, a held unit runs nothing a
+//!   checkpoint could match), naming `nyl resume` first.
 //! - Changes go through [`crate::rules::transitions::apply`].
 
 use std::collections::BTreeMap;
@@ -19,7 +26,7 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId, UnitName};
 use nyl_core::orchestration::ports::{Checkpoint, RunState};
-use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, ObservedUnit};
+use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Lifecycle, ObservedUnit};
 use serde::Serialize;
 
 use crate::rules::freshness::same_incarnation;
@@ -74,6 +81,17 @@ pub fn decide(
             format!("list the units with `nyl get units -e {environment}`"),
         ));
     };
+    // A held unit runs nothing, so no checkpoint is for what it runs now:
+    // resume first. `--retry` clears the condition and keeps the hold.
+    if matches!(action, RecoverAction::Accept { .. }) && matches!(desired.lifecycle, Lifecycle::Held { .. }) {
+        return Err(Finding::new(
+            Code::RecoverKeyMismatch,
+            format!("{unit} in {environment} is held; a checkpoint is accepted only for what the unit runs, and a held unit runs nothing"),
+            format!(
+                "run `nyl resume -e {environment} --unit {unit}` first, then accept the checkpoint; or clear the condition with --retry, which keeps the hold"
+            ),
+        ));
+    }
     // A condition applies only to the incarnation it was recorded for.
     let observed = same_incarnation(desired, observed);
     let nothing = || {
@@ -145,7 +163,11 @@ pub fn decide(
                     "a checkpoint is accepted only for what the unit runs now; use --retry to execute the unit again",
                 ));
             }
-            recovered(Event::RecoverAccept { receipt }, Some(checkpoint.artifacts.clone()))
+            let mut recovery = recovered(Event::RecoverAccept { receipt }, Some(checkpoint.artifacts.clone()))?;
+            // The accepted receipt was produced for the unit's desired
+            // document (its uid and key equal the checkpoint's).
+            recovery.observed.desired = Some(Box::new(desired.clone()));
+            Ok(recovery)
         }
     }
 }
@@ -361,6 +383,65 @@ mod tests {
         assert_eq!(recovery.observed.condition, None);
         assert_eq!(recovery.observed.receipt, late.checkpoints[0].observed.receipt);
         assert_eq!(recovery.artifacts, Some(late.checkpoints[0].artifacts.clone()));
+        assert_eq!(
+            recovery.observed.desired.as_deref(),
+            Some(&desired_numbered("database", 1, Some(hex_key('b')))),
+            "the receipt carries the desired document it was produced for"
+        );
+    }
+
+    fn held(mut desired: DesiredUnit) -> DesiredUnit {
+        desired.lifecycle = Lifecycle::Held {
+            hold: serde_json::from_value(serde_json::json!({"since": "2026-01-01T03:00:00Z", "by": "alice"})).unwrap(),
+            deletion: None,
+        };
+        desired
+    }
+
+    /// Q21: catches `--retry` on a held uncertain unit refused, or touching
+    /// more than the condition (the hold is the desired document's, which
+    /// recover never writes).
+    #[test]
+    fn test_retry_on_a_held_uncertain_unit_clears_only_the_condition() {
+        let current = uncertain(observed_numbered("database", 1, Some(hex_key('a'))));
+        let desired = held(desired_numbered("database", 1, Some(hex_key('a'))));
+        let recovery = decide(
+            &env(),
+            &database(),
+            Some(&desired),
+            Some(&current),
+            &RecoverAction::Retry,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(recovery.observed.condition, None);
+        assert_eq!(recovery.observed.receipt, current.receipt);
+        assert_eq!(recovery.observed.desired, current.desired);
+        assert_eq!(recovery.artifacts, None);
+    }
+
+    /// Q21: catches `--accept` adopting a checkpoint onto a held unit, whose
+    /// desired document is the reverted one, with a fix naming `nyl resume`.
+    #[test]
+    fn test_accept_on_a_held_unit_is_refused_naming_resume() {
+        let current = uncertain(observed_numbered("database", 1, Some(hex_key('a'))));
+        let desired = held(desired_numbered("database", 1, Some(hex_key('b'))));
+        let late = run_ref(2, 1, 'b', observed_numbered("database", 1, Some(hex_key('b'))));
+        let refusal = decide(
+            &env(),
+            &database(),
+            Some(&desired),
+            Some(&current),
+            &RecoverAction::Accept { run: run_id(2) },
+            &[late],
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, Code::RecoverKeyMismatch);
+        assert!(
+            refusal.fix.contains("nyl resume -e dev --unit database"),
+            "{}",
+            refusal.fix
+        );
     }
 
     /// Catches `--accept` adopting a receipt for other inputs or another

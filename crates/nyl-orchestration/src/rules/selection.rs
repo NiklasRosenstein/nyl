@@ -18,6 +18,14 @@
 //!   `converge` only when `--approve <unit>` names it; otherwise the unit
 //!   awaits approval ([`Skipped::LocalApproval`]). Contract:
 //!   [Local runs](../../../../design/orchestration-core.md#local-runs).
+//! - A unit with a current receipt is a candidate again when
+//!   [`drift::repair`] says so: its latest drift observation of that receipt
+//!   is `drifted`, or `--reapply` names it. Under `driftRepair: manual` a
+//!   drifted unit that is not reapplied stays [`Skipped::Drifted`]. A
+//!   candidate whose execution recovery policy is `converge` is selected;
+//!   any other needs an approval: `--approve` in a `--local` run, else it is
+//!   [`Skipped::RepairApproval`] (`awaiting-approval`) and the run goes on.
+//!   Contract: [Drift](../../../../design/orchestration-core.md#drift).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,13 +33,17 @@ use nyl_core::orchestration::driver::{DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness,
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, Observation, ObservationType, ObservedUnit,
+    Provenance, Readiness,
 };
+use nyl_core::resources::environment::DriftRepair;
 
+use super::drift::{self, Repair};
 use super::freshness::{receipt_is_current, same_incarnation};
 
 /// What selection reads.
 pub struct Candidates<'a> {
+    /// The units selection may select.
     pub desired: &'a BTreeMap<UnitName, DesiredUnit>,
     /// The snapshot's observed documents overlaid with this run's checkpoints.
     pub observed: &'a BTreeMap<UnitName, ObservedUnit>,
@@ -45,6 +57,17 @@ pub struct Candidates<'a> {
     /// approval ([`Skipped::LocalApproval`]). `None` for an ordinary run.
     /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
     pub local: Option<&'a BTreeSet<UnitName>>,
+    /// The latest observations per unit and type (`nyl verify`'s drift
+    /// observations select drifted units again). Contract:
+    /// [Drift](../../../../design/orchestration-core.md#drift).
+    pub observations: &'a BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    /// The environment's `driftRepair`, as rendered at S.
+    pub drift_repair: DriftRepair,
+    /// `nyl reconcile --unit <u>… --reapply`: the named units, to execute
+    /// again although their receipt is current; empty without `--reapply`.
+    /// A named unit whose recovery policy is not `converge` awaits approval
+    /// instead (`--approve` in a `--local` run).
+    pub reapply: &'a BTreeSet<UnitName>,
 }
 
 /// Why a unit is not selected.
@@ -61,6 +84,16 @@ pub enum Skipped {
     /// execution recovery policy is not `converge`. Reported as
     /// `awaiting-approval`.
     LocalApproval,
+    /// Current, its latest drift observation is `drifted`, and this run
+    /// does not repair it (`driftRepair: manual`). Reported as `drifted`.
+    /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    Drifted,
+    /// Current and drifted (or named by `--reapply`), but its execution
+    /// recovery policy is not `converge`, so re-running it needs an
+    /// approval this run does not have (a remote run, or a `--local` run
+    /// without `--approve`). Reported as `awaiting-approval`; the rest of
+    /// the run continues.
+    RepairApproval,
 }
 
 /// The ready units, by name, and why each other unit is skipped.
@@ -109,7 +142,27 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         Some(Condition::Failed { retryable: false, .. }) => return Err(Skipped::FailedNonRetryable),
         Some(Condition::Failed { retryable: true, .. }) | None => {
             if receipt_is_current(desired, observed) {
-                return Err(Skipped::Current);
+                // Current: a candidate again only for drift repair or
+                // `--reapply`, by the drift rule.
+                let Some(repair) = drift::repair(candidates, name, desired, observed) else {
+                    return Err(Skipped::Current);
+                };
+                if repair == Repair::Drift && candidates.drift_repair == DriftRepair::Manual {
+                    return Err(Skipped::Drifted);
+                }
+                if !citations_current(candidates, desired) {
+                    return Err(Skipped::Blocked);
+                }
+                // Re-running a unit that does not converge needs an approval:
+                // `--approve` in a `--local` run; remote approvals do not
+                // exist yet, so a remote run leaves it awaiting approval.
+                let converges = execution_recovery(candidates.drivers, desired) == Some(RecoveryPolicy::Converge);
+                let approved = candidates.local.is_some_and(|approved| approved.contains(name));
+                return if converges || approved {
+                    Ok(())
+                } else {
+                    Err(Skipped::RepairApproval)
+                };
             }
         }
     }
@@ -171,7 +224,7 @@ pub fn local_approvals<'u>(
 
 /// The unit's execution recovery policy, from its resolved spec when it has
 /// one; `None` when no driver serves its kind.
-fn execution_recovery(drivers: &DriverSet, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
+pub(crate) fn execution_recovery(drivers: &DriverSet, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
     let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
     drivers
         .get(&desired.unit.api_version, &desired.unit.kind)
@@ -203,11 +256,31 @@ pub fn batches(ready: &[UnitName], concurrency: usize) -> Vec<Vec<UnitName>> {
 mod tests {
     use std::sync::Arc;
 
-    use nyl_core::orchestration::state::{FailureCategory, ReceiptProvenance};
+    use nyl_core::orchestration::state::{Drift, FailureCategory, ReceiptProvenance};
     use serde_json::{json, Value};
 
     use super::*;
     use crate::rules::fixtures::*;
+
+    /// A drift observation of `desired`'s current receipt.
+    fn drift_observation(desired: &DesiredUnit, result: Drift) -> Observation {
+        Observation {
+            api_version: nyl_core::orchestration::state::StateV1,
+            kind: nyl_core::orchestration::state::ObservationKind,
+            unit: desired.unit.clone(),
+            observation_type: ObservationType::Drift,
+            execution_key: desired.execution_key.clone().unwrap(),
+            at: "2026-09-24T12:00:00Z".parse().unwrap(),
+            result,
+            details: Value::Null,
+        }
+    }
+
+    fn drifted() -> Drift {
+        Drift::Drifted {
+            summary: "1 change".to_owned(),
+        }
+    }
 
     struct World {
         desired: BTreeMap<UnitName, DesiredUnit>,
@@ -215,6 +288,9 @@ mod tests {
         drivers: DriverSet,
         attempted: BTreeSet<UnitName>,
         local: Option<BTreeSet<UnitName>>,
+        observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+        drift_repair: DriftRepair,
+        reapply: BTreeSet<UnitName>,
     }
 
     impl World {
@@ -227,7 +303,28 @@ mod tests {
                 drivers,
                 attempted: BTreeSet::new(),
                 local: None,
+                observations: BTreeMap::new(),
+                drift_repair: DriftRepair::default(),
+                reapply: BTreeSet::new(),
             }
+        }
+
+        /// A unit with a current receipt.
+        fn current(&mut self, unit: &str, spec: Value) {
+            self.add(unit, spec.clone());
+            self.observed.insert(
+                name(unit),
+                observed(unit, "Command", Some(receipt(unit, spec, Vec::new()))),
+            );
+        }
+
+        /// Record a drift observation of `unit`'s current receipt.
+        fn observe(&mut self, unit: &str, result: Drift) {
+            let observation = drift_observation(&self.desired[&name(unit)], result);
+            self.observations
+                .entry(name(unit))
+                .or_default()
+                .insert(ObservationType::Drift, observation);
         }
 
         fn add(&mut self, unit: &str, spec: Value) {
@@ -248,6 +345,9 @@ mod tests {
                 named,
                 attempted: &self.attempted,
                 local: self.local.as_ref(),
+                observations: &self.observations,
+                drift_repair: self.drift_repair,
+                reapply: &self.reapply,
             })
         }
     }
@@ -414,5 +514,111 @@ mod tests {
         assert_eq!(batches(&ready, 2), [vec![name("a"), name("b")], vec![name("c")]]);
         assert_eq!(batches(&ready, 0).len(), 3);
         assert!(batches(&[], 4).is_empty());
+    }
+
+    /// Catches drift observations being ignored (an idempotent unit that
+    /// drifted is never repaired), or a unit that is not safe to re-run
+    /// executing without an approval.
+    #[test]
+    fn test_select_repairs_drifted_converge_units_and_awaits_approval_for_others() {
+        let mut world = World::new();
+        world.current("converge", json!({"idempotent": true}));
+        world.current("manual", json!({}));
+        world.current("clean", json!({"idempotent": true}));
+        world.observe("converge", drifted());
+        world.observe("manual", drifted());
+        world.observe("clean", Drift::Clean);
+        let (ready, skipped) = world.select(None);
+        assert_eq!(ready, [name("converge")]);
+        assert_eq!(
+            skipped,
+            BTreeMap::from([
+                (name("clean"), Skipped::Current),
+                (name("manual"), Skipped::RepairApproval),
+            ])
+        );
+
+        // A `--local` run repairs it with `--approve`, and only then.
+        world.local = Some(BTreeSet::new());
+        assert_eq!(world.select(None).1[&name("manual")], Skipped::RepairApproval);
+        world.local = Some(BTreeSet::from([name("manual")]));
+        assert_eq!(world.select(None).0, [name("converge"), name("manual")]);
+    }
+
+    /// Catches `driftRepair: manual` repairing drift on its own, which an
+    /// environment that reviews every repair forbids.
+    #[test]
+    fn test_select_leaves_drifted_units_under_manual_drift_repair() {
+        let mut world = World::new();
+        world.current("converge", json!({"idempotent": true}));
+        world.observe("converge", drifted());
+        world.drift_repair = DriftRepair::Manual;
+        world.local = Some(BTreeSet::from([name("converge")]));
+        let (ready, skipped) = world.select(None);
+        assert!(ready.is_empty(), "{ready:?}");
+        assert_eq!(skipped, BTreeMap::from([(name("converge"), Skipped::Drifted)]));
+    }
+
+    /// Catches a stale observation re-running a unit: `unknown` drift, or
+    /// `drifted` about another incarnation or another receipt, says nothing
+    /// about the current receipt.
+    #[test]
+    fn test_select_ignores_observations_that_do_not_say_the_current_receipt_drifted() {
+        let mut world = World::new();
+        for unit in ["unknown", "incarnation", "key"] {
+            world.current(unit, json!({"idempotent": true}));
+        }
+        world.observe(
+            "unknown",
+            Drift::Unknown {
+                reason: "no credentials".to_owned(),
+            },
+        );
+        world.observe("incarnation", drifted());
+        world.observe("key", drifted());
+        let observations = &mut world.observations;
+        observations
+            .get_mut(&name("incarnation"))
+            .unwrap()
+            .get_mut(&ObservationType::Drift)
+            .unwrap()
+            .unit
+            .uid = Some(uid("earlier"));
+        observations
+            .get_mut(&name("key"))
+            .unwrap()
+            .get_mut(&ObservationType::Drift)
+            .unwrap()
+            .execution_key = key("earlier");
+        let (ready, skipped) = world.select(None);
+        assert!(ready.is_empty(), "{ready:?}");
+        assert!(
+            skipped.values().all(|reason| *reason == Skipped::Current),
+            "{skipped:?}"
+        );
+    }
+
+    /// Catches `--reapply` not forcing a current unit, forcing one that is
+    /// not safe to re-run without an approval, or reaching past `--unit`.
+    #[test]
+    fn test_select_reapplies_named_current_units_under_the_approval_rule() {
+        let mut world = World::new();
+        world.current("converge", json!({"idempotent": true}));
+        world.current("manual", json!({}));
+        world.current("other", json!({"idempotent": true}));
+        world.drift_repair = DriftRepair::Manual;
+        world.reapply = BTreeSet::from([name("converge"), name("manual")]);
+        let named = world.reapply.clone();
+        let (ready, skipped) = world.select(Some(&named));
+        assert_eq!(ready, [name("converge")]);
+        assert_eq!(
+            skipped,
+            BTreeMap::from([
+                (name("manual"), Skipped::RepairApproval),
+                (name("other"), Skipped::NotNamed),
+            ])
+        );
+        world.local = Some(BTreeSet::from([name("manual")]));
+        assert_eq!(world.select(Some(&named)).0, [name("converge"), name("manual")]);
     }
 }

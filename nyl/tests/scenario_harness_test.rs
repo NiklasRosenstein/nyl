@@ -12,7 +12,7 @@ use scenario::REACHED;
 /// Scenarios the harness has reached that cannot run yet, with what they
 /// wait for. A scenario leaves this list in the change that makes it run, so
 /// none is skipped silently: every reached scenario runs, or is pending.
-const PENDING: [(&str, &str); 1] = [("walkthroughs/deletion", "deletion and teardown (M3)")];
+const PENDING: [(&str, &str); 0] = [];
 
 /// Every reached scenario that is not pending runs in tier 1 and passes its
 /// checks.
@@ -60,7 +60,7 @@ fn test_deploy_globs_match_by_segment() {
 fn test_every_scenario_follows_the_format() {
     let (loaded, problems) = scenario::load_all();
     assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    assert!(loaded.len() >= 9, "only {} scenarios were found", loaded.len());
+    assert!(loaded.len() >= 13, "only {} scenarios were found", loaded.len());
 }
 
 #[test]
@@ -98,6 +98,27 @@ fn test_reached_scenarios_run_or_are_listed_as_pending() {
                     loaded.name,
                     kind.executes_from()
                 );
+            }
+        }
+    }
+}
+
+/// Every `nyl` step of a scenario that runs parses with the real command
+/// line, so a misused option fails here with its step, not mid-scenario.
+#[test]
+fn test_running_scenarios_parse_with_the_command_line() {
+    let (loaded, problems) = scenario::load_all();
+    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
+    let pending = PENDING.into_iter().collect::<BTreeMap<_, _>>();
+    for loaded in loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.milestone <= REACHED && !pending.contains_key(loaded.name.as_str()))
+    {
+        for (index, step) in loaded.scenario.steps.iter().enumerate() {
+            if let Some(args) = &step.nyl {
+                if let Err(error) = scenario::format::validate_arguments(args) {
+                    panic!("{}: step {}: {error}", loaded.name, index + 1);
+                }
             }
         }
     }
@@ -410,4 +431,215 @@ steps:
     )
     .unwrap_err();
     assert!(error.contains("step 4: the armed fault never fired"), "{error}");
+}
+
+fn expect(text: &str) -> scenario::format::Expect {
+    serde_saphyr::from_str(text).unwrap()
+}
+
+fn json(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap()
+}
+
+/// The part 5 keys parse, so scenarios can state them; a misspelt key is
+/// rejected instead of silently checking nothing.
+#[test]
+fn test_expect_accepts_part_five_keys_and_rejects_misspelt_ones() {
+    let parsed = expect(
+        "held: [a]\ndrifted: [b]\nreleased: [c]\npending-teardown: [d]\ntearing-down: [e]\ndriftRepaired: [b]\n\
+         reapplied: [b]\nlease-broken: true\noutcome: done\nunits:\n  a: {uid: none, condition-state: uncertain, drift: {result: drifted}}\n",
+    );
+    assert_eq!(parsed.held, Some(vec!["a".to_owned()]));
+    assert_eq!(parsed.lease_broken, Some(true));
+    let unit = &parsed.units.unwrap()["a"];
+    assert_eq!(unit.uid, Some(scenario::format::UidExpectation::None));
+    assert_eq!(unit.condition_state, Some(serde_json::json!("uncertain")));
+    for misspelt in [
+        "drift-repaired: [a]\n",
+        "lease_broken: true\n",
+        "releasd: [a]\n",
+        "outcome: delivered\n",
+        "units:\n  a: {condition_state: uncertain}\n",
+        "units:\n  a: {drift: {result: drifted, waits: true}}\n",
+        "units:\n  a: {uid: gone}\n",
+    ] {
+        assert!(
+            serde_saphyr::from_str::<scenario::format::Expect>(misspelt).is_err(),
+            "{misspelt:?} parsed"
+        );
+    }
+}
+
+/// A drift verdict scripts only `verify`; a file step stays inside
+/// `%SCENARIO_TMP%`; and `nyl` arguments must parse with the real command
+/// line, so the boolean `--reapply` given a unit is caught up front.
+#[test]
+fn test_validate_part_five_steps_and_options() {
+    let drifted = validation_error("  - driver: {unit: network, operation: reconcile, outcome: drifted}\n");
+    assert!(drifted.contains("only a verify outcome can be drifted"), "{drifted}");
+    for (step, error) in [
+        ("{path: ../outside, content: x}", "stay inside it"),
+        ("{path: /etc/passwd, delete: true}", "stay inside it"),
+        ("{path: resources/a}", "exactly one of content and delete"),
+        (
+            "{path: resources/a, content: x, delete: true}",
+            "exactly one of content and delete",
+        ),
+    ] {
+        let message = validation_error(&format!("  - file: {step}\n"));
+        assert!(message.contains(error), "{step}: {message}");
+    }
+    let arguments = |args: &[&str]| {
+        scenario::format::validate_arguments(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    };
+    assert!(arguments(&["reconcile", "-e", "dev", "--reapply", "network", "--reason", "why"]).is_err());
+    assert!(arguments(&["reconcile", "-e", "dev", "--reapply", "--reason", "why"]).is_err());
+    assert_eq!(
+        arguments(&[
+            "reconcile",
+            "-e",
+            "dev",
+            "--unit",
+            "network",
+            "--reapply",
+            "--reason",
+            "why",
+            "--fail-fast"
+        ]),
+        Ok(())
+    );
+    assert_eq!(
+        arguments(&["teardown", "-e", "dev", "--unit", "network", "--fail-fast"]),
+        Ok(())
+    );
+    let valid = |steps: &str| {
+        let text = format!(
+            "contract: design/orchestration-core.md#walkthroughs\nmilestone: M3\ntiers: [1]\nproject: ../_project\nsteps:\n{steps}"
+        );
+        let loaded = inline_scenario("inline/valid", &text);
+        scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
+    };
+    assert_eq!(
+        valid(concat!(
+            "  - driver: {unit: network, operation: verify, outcome: drifted}\n",
+            "  - file: {path: resources/network, content: changed}\n",
+            "  - file: {path: resources/network, delete: true}\n",
+        )),
+        Ok(())
+    );
+}
+
+/// The outcome sets compare against both the report and the transition
+/// summary: a run that reported the right units but whose commit listed
+/// another, or the reverse, fails the step.
+#[test]
+fn test_outcome_sets_compare_report_and_summary() {
+    use scenario::runner::check_results;
+    let report = json(
+        r#"{"environments": [{"units": {
+            "cache": {"result": "pending-teardown", "reason": "awaits --allow-teardown"},
+            "worker": {"result": "retained"},
+            "api": {"result": "drifted"}}}]}"#,
+    );
+    let summary = json(
+        r#"{"units": {"cache": {"result": "pending-teardown"}, "worker": {"result": "retained"}, "api": {"result": "drifted"}}}"#,
+    );
+    let summaries = [summary];
+    let check = |text: &str, summaries: Option<&[serde_json::Value]>| check_results(&expect(text), &report, summaries);
+    assert_eq!(
+        check(
+            "pending-teardown: [cache]\nretained: [worker]\ndrifted: [api]\n",
+            Some(&summaries)
+        ),
+        Ok(())
+    );
+    let error = check("pending-teardown: [cache, worker]\n", Some(&summaries)).unwrap_err();
+    assert!(error.contains("pending-teardown: the report has"), "{error}");
+    let error = check("drifted: []\n", Some(&summaries)).unwrap_err();
+    assert!(error.contains("drifted: the report has"), "{error}");
+
+    // The report is right, the commit is not.
+    let wrong = [json(
+        r#"{"units": {"cache": {"result": "removed"}, "api": {"result": "executed"}}}"#,
+    )];
+    let error = check("pending-teardown: [cache]\n", Some(&wrong)).unwrap_err();
+    assert!(
+        error.contains("pending-teardown: the transition commit summary lists {}"),
+        "{error}"
+    );
+    let error = check("drifted: [api]\n", Some(&wrong)).unwrap_err();
+    assert!(
+        error.contains("drifted: the transition commit summary lists {}"),
+        "{error}"
+    );
+
+    // A state operation's actions carry no outcome: only its report is read,
+    // here the teardown run a `state delete --teardown` report carries.
+    let state_delete = json(
+        r#"{"kind": "StateOperationReport", "outcome": "done",
+            "details": {"teardown": {"environments": [{"units": {"seed": {"result": "released"}}}]}}}"#,
+    );
+    let actions = [json(r#"{"units": {}}"#)];
+    assert_eq!(
+        check_results(
+            &expect("released: [seed]\noutcome: done\n"),
+            &state_delete,
+            Some(&actions)
+        ),
+        Ok(())
+    );
+    let error = check_results(&expect("outcome: refused\n"), &state_delete, Some(&actions)).unwrap_err();
+    assert!(error.contains("outcome: the report has Some(\"done\")"), "{error}");
+}
+
+/// `driftRepaired`, `reapplied`, and `lease-broken` are read from the
+/// summary (and the lists from the report), missing meaning empty, so a run
+/// that repaired drift without recording it, or recorded a break twice, fails.
+#[test]
+fn test_summary_lists_and_lease_break_are_read_from_the_summary() {
+    use scenario::runner::check_results;
+    let report = json(r#"{"environments": [{"units": {}, "driftRepaired": ["api"], "reapplied": ["db"]}]}"#);
+    let summary = json(
+        r#"{"units": {}, "recovered": [], "imported": [], "driftRepaired": ["api"],
+            "reapplied": {"by": "Scenario", "at": "2026-09-24T10:00:00Z", "reason": "why", "units": ["db"]},
+            "leaseBroken": {"by": "Scenario", "at": "2026-09-24T10:00:00Z", "reason": "runner lost"}}"#,
+    );
+    let summaries = [summary];
+    let check = |text: &str| check_results(&expect(text), &report, Some(&summaries));
+    assert_eq!(
+        check("driftRepaired: [api]\nreapplied: [db]\nlease-broken: true\nrecovered: []\n"),
+        Ok(())
+    );
+    assert!(check("driftRepaired: []\n")
+        .unwrap_err()
+        .contains("driftRepaired: the transition commit summary lists"));
+    assert!(check("reapplied: [api]\n")
+        .unwrap_err()
+        .contains("reapplied: the transition commit summary lists"));
+    assert!(check("lease-broken: false\n")
+        .unwrap_err()
+        .contains("records a lease break"));
+
+    // Without a commit, there is no break and no list to read.
+    let none: [serde_json::Value; 0] = [];
+    assert_eq!(
+        check_results(&expect("lease-broken: false\n"), &report, Some(&none)),
+        Ok(())
+    );
+    assert!(check_results(&expect("driftRepaired: [api]\n"), &report, Some(&none))
+        .unwrap_err()
+        .contains("wrote no transition commit"));
+    // A `--local` run's commit stays in its clone: only the report is read.
+    assert_eq!(check_results(&expect("driftRepaired: [api]\n"), &report, None), Ok(()));
+    // A recover reports its lists in `details`.
+    let recover = json(r#"{"kind": "StateOperationReport", "details": {"imported": [], "recovered": ["web"]}}"#);
+    let recover_summary = [json(r#"{"units": {}, "recovered": ["web"], "imported": []}"#)];
+    assert_eq!(
+        check_results(
+            &expect("recovered: [web]\nimported: []\n"),
+            &recover,
+            Some(&recover_summary)
+        ),
+        Ok(())
+    );
 }

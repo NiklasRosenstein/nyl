@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ids::{ChangeDigest, EnvironmentName, UnitAddress};
+use super::ids::{ChangeDigest, CommitId, EnvironmentName, UnitAddress};
 use super::ports::CommitIdentity;
 use super::state::{ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, ObservedUnit, Receipt};
 use super::time::Timestamp;
@@ -197,11 +197,16 @@ pub enum Outcome {
     },
     /// The plan changed since its approval; nothing was applied.
     AwaitingApproval { digest: ChangeDigest },
-    /// A two-phase teardown waits; effects so far are recorded. Only teardown returns it.
+    /// A two-phase teardown waits; effects so far are recorded. Only teardown
+    /// returns it. `until` is when the wait ends by itself (a `delay`), or
+    /// `None` when only an observation or a confirmation ends it;
+    /// `published` is the phase 1 commit, the teardown's published evidence.
     Waiting {
         phase: String,
         reason: String,
         until: Option<Timestamp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        published: Option<CommitId>,
     },
     Failed {
         category: FailureCategory,
@@ -355,6 +360,51 @@ pub struct ExecutionContext<'a> {
     /// A cache directory of this invocation's workspace, for render caches;
     /// never the user's default cache, so parallel runs stay isolated.
     pub cache_dir: PathBuf,
+    /// For a teardown call after phase 1: how its `teardownWait` ended, so
+    /// the driver runs phase 2; `None` while the wait has not ended, and for
+    /// every other call. Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit), Teardown.
+    pub teardown_wait: Option<WaitCompletion>,
+}
+
+/// How a teardown's wait after phase 1 ended, decided by the orchestration
+/// shell (`rules::teardown_wait`) and recorded in the transition commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "completion", rename_all = "kebab-case")]
+pub enum WaitCompletion {
+    /// An observer saw the workload Applications gone (`observe`).
+    Observed,
+    /// The `delay` passed; removal was not observed.
+    Delayed,
+    /// An operator confirmed removal (`--confirm-removed`, a signal, or Enter on a terminal).
+    Confirmed {
+        by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Where the confirmation came from, such as a CI run URL or `terminal`.
+        from: String,
+    },
+    /// `--allow-incomplete`: proceeding without any claim of removal.
+    Incomplete,
+}
+
+/// A target's settings that decide whether its teardown can complete,
+/// read statically by its driver. Contract: [Kubernetes publication
+/// unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness; `rules::teardown_readiness` evaluates it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TeardownSettings {
+    /// Whether the catalog prunes removed workload Applications on its own
+    /// (`syncPolicy.automated` with `prune: true`); `None` when a parent the
+    /// project writes syncs it, which Nyl cannot see (`external: not checked`).
+    pub catalog_prunes: Option<bool>,
+    /// The catalog's `applicationDeletionPolicy`, such as `Foreground` or `Orphan`; `None` when external.
+    pub application_deletion_policy: Option<String>,
+    /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
+    pub namespace_delete_policies: BTreeMap<String, String>,
+    /// Whether a parent owns the target's catalog, so phase 2 removes the
+    /// catalog Application and AppProjects too.
+    pub catalog_owned_by_parent: bool,
 }
 
 /// What resolution provides to compute execution-key inputs.
@@ -452,6 +502,18 @@ pub trait Driver: Send + Sync {
     /// Tear the unit down; unsupported by default.
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
         let _ = (ctx, unit);
+        Ok(Supported::Unsupported)
+    }
+    /// The settings that decide whether the unit's teardown can complete,
+    /// for the teardown preflight and the readiness `status`, `get units -e
+    /// -o wide`, `plan`, and `reconcile` report; unsupported by default (no
+    /// requirements). Read statically from the stored desired document
+    /// alone (resolution records the target's effective settings in the
+    /// resolved spec), so commands that never render source, such as
+    /// `status`, can ask it, and the answer matches what a teardown of that
+    /// document would do.
+    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+        let _ = unit;
         Ok(Supported::Unsupported)
     }
     /// `nyl build`; unsupported by default.

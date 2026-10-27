@@ -1,0 +1,10 @@
+# dev reviews every repair: drift waits for an explicit --reapply.
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  driftRepair: manual
+  allowUnprotectedSource: true

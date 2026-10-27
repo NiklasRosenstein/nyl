@@ -25,7 +25,9 @@ use crate::gitops::units::discover_units;
 use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::{cell_label, pretty_json, write_finding, Session, Stop};
+use crate::orchestration::session::{
+    cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, write_finding, Session, Stop,
+};
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
@@ -177,7 +179,7 @@ struct GetValueArgs {
 /// Run `get` in-process with `wiring`. Declarations and state documents
 /// exit 0 when they can be read; value forms exit 1 when the reference
 /// would not resolve.
-pub fn run(args: &GetArgs, _wiring: &Wiring<'_>) -> Result<CommandOutcome> {
+pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
         GetCommand::Repositories(selection) => declarations(GitOpsResourceKind::GitRepository, selection),
         GetCommand::Clusters(selection) => declarations(GitOpsResourceKind::Cluster, selection),
@@ -189,13 +191,13 @@ pub fn run(args: &GetArgs, _wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::Units(units) => match &units.state.environment {
             None => unit_declarations(&units.path, units.state.output),
             Some(environment) => state_form(&units.path, environment, &units.state, |snapshot, env| {
-                units_table(env, snapshot, units.state.output)
+                units_table(env, snapshot, units.state.output, wiring.drivers)
             }),
         },
         GetCommand::Unit(unit) => {
             let environment = required_environment(&unit.state, "get unit")?;
             state_form(&unit.path, environment, &unit.state, |snapshot, _| {
-                unit_form(unit, snapshot)
+                unit_form(unit, snapshot, wiring.drivers)
             })
         }
         GetCommand::Output(value) => {
@@ -304,9 +306,19 @@ fn units_table(
     environment: &nyl_core::orchestration::ids::EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     output: GetOutput,
+    drivers: &nyl_core::orchestration::driver::DriverSet,
 ) -> Result<CommandOutcome> {
-    let report = // No run refs are read here, so `now` decides nothing.
-    nyl_orchestration::rules::unit_state::status(environment, snapshot, &Coordination::default(), chrono::DateTime::UNIX_EPOCH);
+    // Readiness reads the stored desired documents, never source.
+    let readiness = inspect::teardown_readiness(environment, snapshot, drivers);
+    // No run refs are read here, so `now` decides nothing.
+    let report = nyl_orchestration::rules::unit_state::status_with_readiness(
+        environment,
+        snapshot,
+        &Coordination::default(),
+        chrono::DateTime::UNIX_EPOCH,
+        Some(drivers),
+        &readiness,
+    );
     let documents = snapshot
         .desired
         .iter()
@@ -328,9 +340,9 @@ fn units_table(
                 .iter()
                 .map(|(name, unit)| unit_state_row(name, unit, output == GetOutput::Wide))
                 .collect::<Vec<_>>();
-            let mut headers = vec!["NAME", "KIND", "STATE", "RECEIPT", "LAST RUN"];
+            let mut headers = vec!["NAME", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"];
             if output == GetOutput::Wide {
-                headers.push("DETAIL");
+                headers.push("TEARDOWN READINESS");
             }
             format!("{}\n", render_table(&headers, &rows))
         }
@@ -342,28 +354,26 @@ fn unit_state_row(name: &UnitName, unit: &UnitReport, wide: bool) -> Vec<Cell> {
     let receipt = cell_label(unit.receipt);
     let mut cells = vec![
         name.to_string(),
-        unit.kind.clone(),
-        unit.outcome_name().unwrap_or("-").to_owned(),
+        kind_cell(unit),
+        state_cell(unit),
         receipt,
         unit.last_run
             .as_ref()
             .map_or_else(|| "-".to_owned(), ToString::to_string),
+        detail(unit),
     ];
     if wide {
-        let detail = unit.message.clone().unwrap_or_else(|| {
-            unit.blocked_by
-                .iter()
-                .map(|blocked| format!("{}: {}", blocked.pointer, blocked.reason))
-                .collect::<Vec<_>>()
-                .join("; ")
-        });
-        cells.push(detail);
+        cells.push(readiness_cell(unit));
     }
     cells.into_iter().map(Cell::plain).collect()
 }
 
 /// `nyl get unit <u> -e <env>`: the exact persisted documents.
-fn unit_form(args: &GetUnitArgs, snapshot: &EnvironmentSnapshot) -> Result<CommandOutcome> {
+fn unit_form(
+    args: &GetUnitArgs,
+    snapshot: &EnvironmentSnapshot,
+    drivers: &nyl_core::orchestration::driver::DriverSet,
+) -> Result<CommandOutcome> {
     let unit = match UnitName::new(&args.unit) {
         Ok(unit) => unit,
         Err(error) => {
@@ -408,7 +418,7 @@ fn unit_form(args: &GetUnitArgs, snapshot: &EnvironmentSnapshot) -> Result<Comma
                         .map(|observed| observed.unit.environment.clone())
                 });
             match environment {
-                Some(environment) => units_table(&environment, &single, args.state.output)?.stdout,
+                Some(environment) => units_table(&environment, &single, args.state.output, drivers)?.stdout,
                 None => String::new(),
             }
         }

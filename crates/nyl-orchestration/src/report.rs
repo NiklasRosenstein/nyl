@@ -63,11 +63,16 @@ impl StateOperationReport {
         }
     }
 
-    /// Refuse with `finding`: exit 2 while another run holds the lease, so a
+    /// Refuse with `finding`: exit 2 while another run holds the lease or a
+    /// broken lease waits for its import (`NYL-LEASE-BROKEN`), so a
     /// pipeline can wait and retry, and exit 1 for every other refusal.
     #[must_use]
     pub fn refused(mut self, finding: Finding) -> Self {
-        self.exit = if finding.code == Code::LeaseHeld { 2 } else { 1 };
+        self.exit = if matches!(finding.code, Code::LeaseHeld | Code::LeaseBroken) {
+            2
+        } else {
+            1
+        };
         self.outcome = Outcome::Refused;
         self.errors.push(finding);
         self

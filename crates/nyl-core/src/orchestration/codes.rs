@@ -143,6 +143,61 @@ codes! {
     /// A run ended without its transition commit, cancelled or after losing
     /// its lease, and its run ref waits for the next reconcile to import it.
     RunUnimported => "NYL-RUN-UNIMPORTED",
+    /// A broken lease's run has not been imported yet; only `reconcile`,
+    /// `teardown`, and `recover` take such a lease over. Exit 2.
+    LeaseBroken => "NYL-LEASE-BROKEN",
+    /// A unit left the ownership set and its teardown waits for
+    /// `--allow-teardown` (omission or kind change). Exit 2.
+    TeardownPending => "NYL-TEARDOWN-PENDING",
+    /// Tearing a unit down would leave a `retained` tombstone whose receipt
+    /// cites it without its producer; `--allow-dependents` overrides. Exit 2.
+    TeardownHasDependents => "NYL-TEARDOWN-HAS-DEPENDENTS",
+    /// A publication's teardown waits under its `teardownWait`, and the units
+    /// it depends on wait with it. Exit 2.
+    TeardownWaiting => "NYL-TEARDOWN-WAITING",
+    /// A teardown proceeded, or would proceed, without everything removed:
+    /// an unmet readiness requirement or an unconfirmed removal.
+    TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
+    /// Teardown readiness: the catalog does not prune removed workload
+    /// Applications on its own (blocking).
+    TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
+    /// Teardown readiness: deleting an Application orphans its workloads (blocking).
+    TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
+    /// Teardown readiness: an owned Namespace's `deletePolicy: Confirm` holds
+    /// the Application's finalizer until someone confirms (blocking).
+    TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
+    /// Teardown readiness: owned Namespaces remain after teardown (remnant).
+    TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",
+    /// Teardown readiness: a self-managing catalog Application and its
+    /// AppProjects remain after teardown (remnant).
+    TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
+    /// A unit whose kind cannot tear down was released: its resources were
+    /// left in place and the transition commit lists them.
+    UnitReleased => "NYL-UNIT-RELEASED",
+    /// A unit's `apiVersion` or `kind` changed: the old incarnation is
+    /// deleted under its policy before the new kind starts.
+    UnitKindChange => "NYL-UNIT-KIND-CHANGE",
+    /// A unit is held: reconcile changes nothing about it until `nyl resume`.
+    UnitHeld => "NYL-UNIT-HELD",
+    /// `nyl hold` cannot hold this unit: a `retained` tombstone.
+    HoldRefused => "NYL-HOLD-REFUSED",
+    /// `--confirm-removed` was rejected: no teardown of that unit waits for
+    /// a confirmation, or the waiting run is not waiting on it.
+    ConfirmationRejected => "NYL-CONFIRMATION-REJECTED",
+    /// `--confirm-removed` was delivered to the run waiting on the unit's teardown.
+    ConfirmationDelivered => "NYL-CONFIRMATION-DELIVERED",
+    /// The environment's state was deleted with `nyl state delete`.
+    StateDeleted => "NYL-STATE-DELETED",
+    /// `nyl state delete` refuses while units still have an incarnation.
+    StateDeleteIncarnations => "NYL-STATE-DELETE-INCARNATIONS",
+    /// `nyl hold` was delivered to the run holding the lease, through its
+    /// signal ref: the run starts no held unit and writes the hold in its
+    /// own transition commit. Exit 0.
+    HoldDelivered => "NYL-HOLD-DELIVERED",
+    /// `--fail-fast` stopped the run after a unit failed, became uncertain,
+    /// or waited for an approval: it started no further unit, and the units
+    /// it did not start report what their state gives. A warning.
+    RunStopped => "NYL-RUN-STOPPED",
 }
 
 impl fmt::Display for Code {

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::driver::{DriverSet, ToolRunner};
-use nyl_core::orchestration::ports::{Clock, CommitIdentity, IdGenerator};
+use nyl_core::orchestration::ports::{ArgoObserver, Clock, CommitIdentity, IdGenerator, OperatorPrompt};
 use nyl_orchestration::fault::FaultInjector;
 use nyl_orchestration::shell::run::Cancellation;
 
@@ -41,6 +41,14 @@ pub struct Wiring<'a> {
     /// item 7); `tools` forwards
     /// it to running tools. Never set elsewhere.
     pub cancellation: Cancellation,
+    /// The terminal Enter confirmation of a run waiting on a teardown; `Some`
+    /// only when stdin is a terminal (`from_process` detects it). Tests pass
+    /// `None` or a scripted prompt.
+    pub prompt: Option<&'a dyn OperatorPrompt>,
+    /// The Argo CD observer of `teardownWait: observe`; `None` until M5
+    /// brings a real one (an `observe` wait without one is uncertain).
+    /// Tests pass a `FakeObserver`.
+    pub observer: Option<&'a dyn ArgoObserver>,
 }
 
 /// How one orchestration command ended, without printing or exiting.
@@ -65,6 +73,9 @@ pub struct ProcessWiring {
     pub faults: nyl_orchestration::fault::NoFaults,
     /// The flag the signal handler sets; `tools` forwards it to running tools.
     pub cancellation: Cancellation,
+    /// The terminal Enter confirmation of a waiting teardown; `Some` only
+    /// when stdin is a terminal.
+    pub prompt: Option<TerminalPrompt>,
 }
 
 impl ProcessWiring {
@@ -88,7 +99,45 @@ impl ProcessWiring {
             tools: nyl_drivers::process::ProcessRunner::new().cancelled_by(cancellation.shared()),
             faults: nyl_orchestration::fault::NoFaults,
             cancellation,
+            prompt: {
+                use std::io::IsTerminal as _;
+                std::io::stdin().is_terminal().then(TerminalPrompt::default)
+            },
         }
+    }
+}
+
+/// The terminal of a run waiting on a teardown: shows the message on stderr
+/// and takes Enter on stdin as the operator's confirmation. One reader
+/// thread, started at the first prompt, feeds the lines it reads to every
+/// later prompt; lines typed before a prompt do not confirm it.
+#[derive(Default)]
+pub struct TerminalPrompt {
+    lines: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl OperatorPrompt for TerminalPrompt {
+    fn confirm(&self, message: &str, timeout: nyl_core::orchestration::time::Duration) -> bool {
+        use std::io::{BufRead as _, Write as _};
+        let mut lines = self.lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let receiver = lines.get_or_insert_with(|| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for line in std::io::stdin().lock().lines() {
+                    if line.is_err() || sender.send(()).is_err() {
+                        break;
+                    }
+                }
+            });
+            receiver
+        });
+        while receiver.try_recv().is_ok() {}
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "{message} (press Enter to confirm, {timeout} left)");
+        let _ = stderr.flush();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(timeout.as_secs()))
+            .is_ok()
     }
 }
 
@@ -117,6 +166,8 @@ impl<'a> Wiring<'a> {
             author: None,
             process_env: unicode_env(std::env::vars_os()),
             cancellation: owned.cancellation.clone(),
+            prompt: owned.prompt.as_ref().map(|prompt| prompt as &dyn OperatorPrompt),
+            observer: None,
         })
     }
 

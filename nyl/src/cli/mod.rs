@@ -114,6 +114,15 @@ enum Commands {
 
     /// Clear a unit's uncertain or failed condition, or accept a checkpointed result
     Recover(commands::recover::RecoverArgs),
+
+    /// Tear units down, replacing a unit that is still selected
+    Teardown(commands::teardown::TeardownArgs),
+
+    /// Freeze a unit: reconcile changes nothing about it until resumed
+    Hold(commands::hold::HoldArgs),
+
+    /// Lift a unit's hold
+    Resume(commands::hold::ResumeArgs),
 }
 
 impl Cli {
@@ -143,7 +152,10 @@ impl Cli {
             | Commands::Reconcile(_)
             | Commands::Status(_)
             | Commands::Verify(_)
-            | Commands::Recover(_) => {
+            | Commands::Recover(_)
+            | Commands::Teardown(_)
+            | Commands::Hold(_)
+            | Commands::Resume(_) => {
                 let cancellation = nyl_orchestration::shell::run::Cancellation::new();
                 // reconcile, verify, and recover end cleanly on SIGINT or
                 // SIGTERM instead of dying with the lease held.
@@ -191,7 +203,13 @@ impl Cli {
     fn cancels_on_signal(&self) -> bool {
         matches!(
             self.command,
-            Commands::Reconcile(_) | Commands::Verify(_) | Commands::Recover(_) | Commands::State(_)
+            Commands::Reconcile(_)
+                | Commands::Verify(_)
+                | Commands::Recover(_)
+                | Commands::State(_)
+                | Commands::Teardown(_)
+                | Commands::Hold(_)
+                | Commands::Resume(_)
         )
     }
 
@@ -214,9 +232,12 @@ impl Cli {
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
             Commands::Verify(args) => commands::verify::run(&args, wiring),
             Commands::Recover(args) => commands::recover::run(&args, wiring),
+            Commands::Teardown(args) => commands::teardown::run(&args, wiring),
+            Commands::Hold(args) => commands::hold::run_hold(&args, wiring),
+            Commands::Resume(args) => commands::hold::run_resume(&args, wiring),
             _ => {
                 return Err(crate::NylError::config(
-                    "only plan, reconcile, status, verify, recover, get, state, and lease run in-process",
+                    "only plan, reconcile, status, verify, recover, teardown, hold, resume, get, state, and lease run in-process",
                 ))
             }
         };

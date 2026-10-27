@@ -11,7 +11,7 @@ use nyl_core::orchestration::time::{Duration, Timestamp};
 use super::run::Cancellation;
 use super::{store_error, Context, Settings};
 use crate::fault::FaultPoint;
-use crate::rules::lease::{decide, LeaseDecision};
+use crate::rules::lease::{decide, BrokenLease, LeaseDecision};
 
 /// A lease this run holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,9 @@ pub struct HeldLease {
 /// lease is read again until it is released or `wait` has passed; a
 /// `cancellation` set meanwhile (SIGINT or SIGTERM, "Runs and leases" item 7)
 /// stops waiting with `NYL-RUN-CANCELLED`, having written nothing. Another
-/// run holding it is `NYL-LEASE-HELD`, exit 2.
+/// run holding it is `NYL-LEASE-HELD`, exit 2. A broken lease whose run is
+/// not imported yet is taken over only with [`BrokenLease::TakeOver`];
+/// otherwise it is `NYL-LEASE-BROKEN`, exit 2, waited for like a held lease.
 #[allow(clippy::too_many_arguments)] // Each is one aspect of the request; a struct would only rename them.
 pub fn acquire(
     context: &Context<'_>,
@@ -41,6 +43,7 @@ pub fn acquire(
     environment: &EnvironmentName,
     run: &RunId,
     operation: Operation,
+    broken: BrokenLease,
     phase: Duration,
     wait: Option<Duration>,
     cancellation: &Cancellation,
@@ -53,7 +56,7 @@ pub fn acquire(
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
         let replaced = coordination.lease.as_ref().map(|held| held.lease.clone());
-        match decide(&coordination, now) {
+        match decide(&coordination, now, broken) {
             LeaseDecision::Take { expected, broken } => {
                 let lease = Lease {
                     api_version: StateV1,
@@ -86,14 +89,18 @@ pub fn acquire(
                     Err(error) => return Err(store_error(environment, &error)),
                 }
             }
-            LeaseDecision::Held(holder) => {
+            decision @ (LeaseDecision::Held(_) | LeaseDecision::Broken(_)) => {
                 let waited_out = wait.is_none_or(|wait| now >= wait.after(started));
                 if waited_out {
-                    return Err(Finding::new(
-                        Code::LeaseHeld,
-                        format!("{environment} is held by {}", holder.describe()),
-                        "wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone",
-                    ));
+                    return Err(match decision {
+                        LeaseDecision::Broken(lease) => broken_lease(environment, &lease),
+                        LeaseDecision::Held(holder) => Finding::new(
+                            Code::LeaseHeld,
+                            format!("{environment} is held by {}", holder.describe()),
+                            "wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone",
+                        ),
+                        LeaseDecision::Take { .. } => unreachable!("matched held or broken"),
+                    });
                 }
                 if let Some(signal) = cancellation.signal() {
                     return Err(cancelled_waiting(environment, signal));
@@ -141,32 +148,66 @@ pub fn update(
     Ok(())
 }
 
+/// `NYL-LEASE-BROKEN`: the broken lease's run waits for an operation that
+/// imports it.
+pub fn broken_lease(environment: &EnvironmentName, lease: &Lease) -> Finding {
+    Finding::new(
+        Code::LeaseBroken,
+        format!(
+            "the lease of {environment} was broken and its run {} has not been imported yet",
+            lease.run
+        ),
+        format!(
+            "run `nyl recover -e {environment}` to import it (a `nyl reconcile` or `nyl teardown` of {environment} imports it too), then run this command again"
+        ),
+    )
+}
+
+/// Whether a run on the shared run path takes a broken lease over: a
+/// `reconcile`, `teardown`, or `recover` imports the broken run, except a
+/// `--local` run under the remote lease, which never imports remote run
+/// refs and so refuses a broken remote lease with `NYL-LEASE-BROKEN`
+/// (a `--local-lease` run takes only the clone's own lease). Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases)
+/// item 1, and [Local runs](../../../../design/orchestration-core.md#local-runs).
+pub fn run_takeover(local: Option<&super::local::LocalRun>) -> BrokenLease {
+    match local {
+        Some(local) if local.lease == super::local::LeaseScope::Remote => BrokenLease::Refuse,
+        _ => BrokenLease::TakeOver,
+    }
+}
+
+/// Whether a run holding `held` must write a transition commit although
+/// nothing changed, to record the lease break it took over once
+/// ([`TransitionChanges::commit_unchanged`](nyl_core::orchestration::ports::TransitionChanges::commit_unchanged)):
+/// exactly when it took a broken lease over. Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases) item 8.
+pub fn records_break(held: &HeldLease) -> bool {
+    held.broken.is_some()
+}
+
 /// Release a lease this run holds. A lease that was taken over meanwhile is
-/// not this run's to release.
+/// not this run's to release. `landed` says whether the operation's
+/// transition commit landed (or it ended without changes after importing).
 ///
-/// A broken lease declares its holder gone only while it exists
-/// (`rules::lease`). When this run took over a broken lease and the broken
-/// run's ref is still on the remote, unconsumed, the break is put back by
-/// compare-and-swap from this run's lease version instead of deleting the
-/// lease ref: it keeps the original request and names the original run, so
-/// the next run still takes over at once and records the break ("Runs and
-/// leases" item 8).
-pub fn release(context: &Context<'_>, held: &HeldLease) -> Result<(), StateError> {
-    if let Some(broken) = held.replaced.as_ref().filter(|lease| lease.broken.is_some()) {
-        let coordination = context.store.coordination(&held.location, &held.environment)?;
-        let pending = coordination
-            .runs
-            .iter()
-            .any(|state| !state.foreign && state.run.run == broken.run && !state.run.finished);
-        if pending {
-            return match context
-                .store
-                .take_lease(&held.location, &held.environment, broken, Some(&held.version))
-            {
-                Ok(_) | Err(StateError::LeaseRace | StateError::LeaseLost) => Ok(()),
-                Err(error) => Err(error),
-            };
-        }
+/// An importer that took a broken lease over and ends before that, such as
+/// a reconcile failing during resolution or a cancelled one, puts the broken
+/// lease back by compare-and-swap from its own lease version instead of
+/// deleting the lease ref: it keeps the original request and names the
+/// original run, so the break stays in effect until an import is committed
+/// ("Runs and leases" item 8). Once the commit landed, the break is
+/// recorded and the lease is released normally; a broken holder that is
+/// still alive and checkpoints afterwards leaves its run ref for the next
+/// import.
+pub fn release(context: &Context<'_>, held: &HeldLease, landed: bool) -> Result<(), StateError> {
+    if let Some(broken) = held.replaced.as_ref().filter(|lease| !landed && lease.broken.is_some()) {
+        return match context
+            .store
+            .take_lease(&held.location, &held.environment, broken, Some(&held.version))
+        {
+            Ok(_) | Err(StateError::LeaseRace | StateError::LeaseLost) => Ok(()),
+            Err(error) => Err(error),
+        };
     }
     match context
         .store

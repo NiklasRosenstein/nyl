@@ -165,15 +165,16 @@ spec:
 - Shared fields are defaults. `values` merge recursively beneath the
   Environment's `values`, where the Environment wins, as target values win over
   Cluster values; `state.repositoryRef`, `state.repository`, `protectedRefs`,
-  `allowUnprotectedSource`, and `admission` apply where the Environment leaves
-  them unset. A group sets no refs, paths, sources, or unit selectors, which stay each
+  `allowUnprotectedSource`, `driftRepair`, and `admission` apply where the
+  Environment leaves them unset (owner: `effective_environment` in
+  `nyl_core::resources::environment`). A group sets no refs, paths, sources, or unit selectors, which stay each
   environment's own.
 - The defaults belong to the Environment's configuration, not to the
   invocation: they apply whether an environment is reconciled through its
   group, with `-e`, or by a selector.
 - Groups are read like the Environment itself (see [Source](#source)): the
-  defaults for `state`, `protectedRefs`, `allowUnprotectedSource`, and
-  `admission` come from the entry worktree, together with any GitRepository they name, because
+  defaults for `state`, `protectedRefs`, `allowUnprotectedSource`,
+  `driftRepair`, and `admission` come from the entry worktree, together with any GitRepository they name, because
   they are needed before the source commit S is known; `values` come from S.
   Execution keys depend only on what is read at S, so the same source commit
   always renders the same units and execution keys.
@@ -612,6 +613,16 @@ in two phases, both through Git:
    Unowned files in the prefix, such as state files committed by other tools,
    are preserved, as in every reconciliation.
 
+Implementation status (M3): the stand-in `FakePublication` kind carries out
+both phases through Git on the real publication path
+(`nyl_drivers::fake::publication`, with the tree changes in
+`nyl_render::gitops::publication`), records the phase 1 commit as the wait's
+`phase1Commit`, and removes in phase 2 exactly the files of its own
+`_nyl/index.json`. The fake Argo CD observer (`FakeObserver`) stands in for
+`observe` in tests. Publication target ownership (ownership index v3) ships
+with the `KubernetesPublication` driver in M5; until then a teardown removes
+only the files its own index records.
+
 `teardownWait` decides when phase 1 counts as complete. The same point gates
 phase 2 and the teardown of the units the publication depends on, such as the
 IAM roles, subnets, or databases its workloads use, and through the reverse
@@ -638,8 +649,9 @@ published and the wait is pending or uncertain. Both are needed because a
   commit records who confirmed (`Nyl-Requested-By`), the reason, and that
   completion was confirmed by an operator rather than observed.
 - `--allow-incomplete` proceeds without any claim: phase 2 and the
-  dependencies' teardown run at once, and the teardown is recorded with a
-  condition saying removal was not confirmed.
+  dependencies' teardown run at once, and the transition commit records the
+  teardown under `details.incomplete` with what may remain, reported with
+  `NYL-TEARDOWN-INCOMPLETE`, so state never claims a confirmed removal.
 
 `status` suggests both for an uncertain wait: fix the observer configuration
 and retry, or confirm after checking by hand.
@@ -647,16 +659,25 @@ and retry, or confirm after checking by hand.
 A confirmation can also end a wait that a run is still sitting in, such as a
 CI job's `state delete --teardown` waiting out a `delay`, or an `observe` wait
 whose observer lags. That run holds the environment's lease, so the
-confirmation travels through a signal ref instead of a second run:
+confirmation travels through a signal ref instead of a second run. The same
+ref carries `nyl hold` to a running run (see [Deletion](#deletion)); each
+`Signal` names its `action`, `confirm-removed` or `hold`
+(`nyl_orchestration::shell::signal` delivers both, and
+`rules::teardown_wait` decides what a confirmation ends):
 
 - `--confirm-removed` looks at the lease first. With no lease held, it
-  confirms directly as above. When the lease holder is waiting on that unit's
+  confirms directly as above the wait recorded in the unit's observed
+  state, and a unit without one is rejected before anything runs; with
+  `--all` it confirms every recorded wait. It never confirms a wait that
+  its own run's phase 1 starts, which waits under its strategy like any
+  other (owner: `nyl_orchestration::shell::teardown`). When the lease holder is waiting on that unit's
   teardown, it pushes a `Signal` to the run's signal ref,
   `refs/nyl/<env>/signals/<run-id>`, naming the operator, the reason, the time, the
   run ID, and the phase 1 commit it confirms. It reports where the
-  confirmation went, such as `confirmation delivered to run 0b8f…
-  (https://ci.example.com/runs/1234)`, and exits 0. When the lease holder is
-  doing anything else, it exits 2 as for any held lease. After pushing the
+  confirmation went with `NYL-CONFIRMATION-DELIVERED`, such as
+  `confirmation delivered to run 0b8f… (https://ci.example.com/runs/1234)`,
+  and exits 0. When the lease holder is doing anything else, it exits 2 as for
+  any held lease. After pushing the
   signal, it checks that the lease still belongs to that run; if the run
   finished in the meantime, it deletes its signal and confirms directly.
 - A waiting run checks its signal ref about every 15 seconds. A confirmation
@@ -665,8 +686,9 @@ confirmation travels through a signal ref instead of a second run:
   commit records who confirmed, from where, and that removal was confirmed
   rather than waited out or observed.
 - A confirmation is bound to its run ID and phase 1 commit, so a leftover
-  signal can never end another teardown's wait. A confirmation for a unit the
-  run is not waiting on is rejected when it is sent.
+  signal can never end another teardown's wait. A confirmation for a unit no
+  run or recorded wait is waiting on is rejected when it is sent, with
+  `NYL-CONFIRMATION-REJECTED` (exit 1).
 - Without a confirmation, the wait ends as its strategy says: a `delay` runs
   out and is recorded as not observed.
 - When the waiting run's stdin is a terminal, it shows the remaining time and
@@ -674,8 +696,24 @@ confirmation travels through a signal ref instead of a second run:
   same way.
 - A `manual` wait never keeps a run waiting, because the run exits 2 at once;
   a later `--confirm-removed` applies directly.
+- A wait that goes on beyond the run is reported with
+  `NYL-TEARDOWN-WAITING`: on the waiting publication, `tearing-down` with
+  why it waits (the run, owner `nyl_orchestration::shell::run::teardown`,
+  and `status` from the recorded wait, owner `rules::unit_state`), and on
+  each unit whose teardown waits for it, naming the publication
+  (`rules::teardown`). The run exits 2. The fix names the next
+  teardown-capable run, which continues the wait, and `--confirm-removed`.
+- A recorded wait persists between runs in the unit's observed document under
+  `waiting` (phase, reason, `since`, the advisory `until`, `phase1Commit`, and
+  the run that published phase 1), so a later run, `--confirm-removed`, or
+  `--allow-incomplete` continues it without publishing phase 1 again. The
+  wait's end is computed from the recorded `since` and the strategy
+  (`rules::teardown_wait::ends`); a driver's `until` is advisory.
 
-Teardown readiness is checked statically from the target's effective settings:
+Teardown readiness is checked statically from the target's effective
+settings, as recorded in the unit's stored desired document, so `status`,
+`plan`, and a teardown agree without rendering. The driver reads them through
+`Driver::teardown_settings`, and `rules::teardown_readiness` evaluates them:
 
 | Requirement | Setting | If unmet |
 | --- | --- | --- |
@@ -758,8 +796,14 @@ Nyl reports unmet requirements where they matter:
   `teardown --all`, and `state delete --teardown`. When a blocking requirement
   is unmet, the teardown does not start unless the invocation passes
   `--allow-incomplete`; the unit is reported as pending teardown with the
-  reasons, exit 2. An incomplete teardown is recorded with a condition listing
-  what may remain, so state never claims a clean teardown that did not happen.
+  reasons and `NYL-TEARDOWN-INCOMPLETE`, exit 2. A teardown that proceeds
+  under `--allow-incomplete`, or ends a wait without a claim of removal, is
+  recorded in the run's transition commit under `details.incomplete`, listing
+  per unit what may remain, so state never claims a clean teardown that did
+  not happen. The blocking rows raise `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
+  `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, and `NYL-TEARDOWN-NAMESPACE-CONFIRM`;
+  the remnant rows warn with `NYL-TEARDOWN-NAMESPACES-REMAIN` and
+  `NYL-TEARDOWN-CATALOG-REMAINS`; each names the setting that fixes it.
 - `nyl validate` does not check teardown readiness, because it cannot know
   whether a target will ever be torn down.
 
@@ -843,8 +887,8 @@ Instances use the ordinary commands:
 nyl reconcile -e pr-123 --template preview --param pr=123    # create or update, extend, and reconcile
 nyl state init -e pr-123 --template preview --param pr=123   # create or update without reconciling
 nyl get units -e pr-123 / nyl status -e pr-123
-nyl teardown -e pr-123 --all                                 # tear down every unit
-nyl state delete -e pr-123                                   # remove the instance's state
+nyl teardown -e pr-123 --all                                 # tear down every unit, honouring Retain
+nyl state delete -e pr-123                                   # remove the instance's state, leaving the deleted marker
 nyl get environments                                         # declared environments and instances
 ```
 
@@ -862,31 +906,56 @@ nyl get environments                                         # declared environm
   moves every instance like `state move` moves one environment.
 - `state init --template` records its entry worktree's commit as the
   instance's source commit, so a later plain run of the instance has one.
-- `nyl teardown -e <env> --all` tears down every unit, dependents first, and
-  holds every unit that is still in the ownership set, so nothing is
-  recreated. Units whose kind has no teardown support are released: their
-  resources are left in place, and they too become held desired files without
-  an incarnation, so a later `reconcile` does not rebuild an image or re-run a
-  command. Consumers of a publication are torn down before it, and the units
-  the publication depends on wait until its teardown completes under its
+- `nyl teardown -e <env> --all` tears down every unit whose deletion policy
+  allows it, dependents first, and then holds every unit that is still in the
+  recorded ownership set, so nothing is recreated. It honours
+  `deletionPolicy: Retain`: units that declare `Retain`, retained tombstones,
+  and units whose kind has no teardown support are released instead. Their
+  resources are left in place, they are listed under `details.released` in
+  the transition commit, and a released unit inside the ownership set becomes
+  a held desired file without an incarnation, so a later `reconcile` does not
+  rebuild an image or re-run a command; one outside it is dropped from state.
+  Consumers of a publication are torn down before it, and the units the
+  publication depends on wait until its teardown completes under its
   `teardownWait`, so with the `manual` strategy `teardown --all` stops after
-  the publication and exits 2 until `--confirm-removed`.
-- `nyl state delete -e <env>` removes an environment's state: its directory in
-  a shared ref, or its refs. It works for template instances and declared
-  environments alike, once no unit has an incarnation left, and it removes
-  everything, including held desired files and records of units that were
-  left in place. `--teardown` runs `teardown --all` first and continues to the
-  deletion in the same command; manual approvals and `manual` teardown waits
-  still stop it with exit 2, and running it again resumes. History keeps the
-  removed state.
+  the publication and exits 2 until `--confirm-removed`. A decommission that
+  does not finish in one invocation leaves its remaining units `deleting`
+  with `reason: decommission`; `--confirm-removed`, running `teardown --all`
+  again, or a plain `reconcile` continue it, and the run that completes a
+  unit's teardown applies the hold the request recorded
+  (`nyl_orchestration::shell::run::teardown`).
+- `nyl state delete -e <env>` removes an environment's state in one
+  transition commit (owner: `nyl_orchestration::shell::teardown`). It works
+  for template instances and declared environments alike, once no unit has an
+  incarnation left (`NYL-STATE-DELETE-INCARNATIONS` otherwise, exit 1, which
+  also refuses while run refs wait for an import, naming `nyl reconcile` and
+  `nyl recover`). The commit removes every file of the environment's state
+  on both refs, including held desired files and records of units that were
+  left in place, and leaves only `state.yaml`, whose last event is
+  `state-deleted` with who deleted it, when, and why: the deleted marker. The
+  refs and their history stay, and so do other environments' files on a shared
+  ref; the environment's evidence and signal refs are deleted.
+  `--teardown` runs `teardown --all` first and continues to the deletion in
+  the same command exactly when, re-reading state after the teardown, no
+  desired document has a uid and no unit is deleting or holds a pending
+  teardown request. Otherwise it stops: exit 2 when every remaining unit
+  waits (a teardown wait, an approval, dependents, readiness, or a held
+  unit), and exit 1, with the failed or uncertain units in the report, when
+  a teardown failed or is uncertain. Running it again resumes. A broken
+  lease refuses both forms with `NYL-LEASE-BROKEN` until `nyl recover -e
+  <env>` imports the dead run.
 - Decommissioning a declared environment is `nyl state delete -e <env>
   --teardown`, then removing its Environment from source. Until the
-  Environment is removed, every command for it fails with exit 1, because its
-  location has no `state.yaml`; the message names both ways forward (removing
-  the Environment, or `state init --fresh`), so a pipeline that still runs it
-  fails visibly instead of silently re-creating anything. The recommended layout for previews is a shared
-  ref with `state.path`, so `state delete` removes a directory instead of a
-  ref; separate refs per instance need permission to delete refs matching the
+  Environment is removed, every command for it, a plain `nyl state init`
+  included, fails with `NYL-STATE-DELETED`, exit 1, because its `state.yaml`
+  carries the deleted marker; the message names both ways forward (removing
+  the Environment, or `state init --fresh`, which appends a
+  `state-initialized` event and starts over), so a pipeline that still runs
+  it fails visibly instead of silently re-creating anything. Detection reads
+  the marker in `state.yaml` (`rules::state_location::check_record`), never
+  commit trailers or history. The recommended layout for previews is a
+  shared ref with `state.path`, so an instance's state is a directory;
+  separate refs per instance need permission to create refs matching the
   template's ref pattern.
 - With `keepSource` (the default), Nyl keeps each instance's latest source
   commit fetchable with a keep ref in the source repository,
@@ -1095,17 +1164,17 @@ files cover every version, and a reader rejects a version it does not know.
 
 | Kind | Location | Content |
 | --- | --- | --- |
-| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, each with time, requester, and reason |
+| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
 | `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, `admission` with the generation, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
 | `DeploymentAdmission` (M8) | `admission.yaml` on the admission ref | The current generation: ID, sequence, source commit and how it was chosen, semantic graph digest, and normalized authorizing actor, request, and reason; only a newer admission replaces it (see [Deployment admission](ci-execution.md#deployment-admission)) |
-| `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file |
+| `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file; a held marker is a DesiredUnit with `lifecycle.state: held` and only the unit's environment and name (see [Deletion](#deletion)) |
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
 | `Observation` | `observed/units/<unit>/observations/<type>.yaml` | `unit`, `type` (`drift`, `health`), `executionKey`, `at`, `result`, driver-specific `details` |
 | `Attestation` | `observed/units/<unit>/attestations/<name>.yaml`, `observed/attestations/<name>.yaml` | See [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
 | `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
-| `Signal` | the signal ref | `run`, `unit`, `phase1Commit`, `by`, `identity`, `reason`, `at`, `from` |
+| `Signal` | the signal ref | `run`, `unit`, `action` (`confirm-removed` or `hold`), `phase1Commit` (for `confirm-removed`), `by`, `identity`, `reason`, `at`, `from` |
 
 Each unit has one desired file and at most one observed file, holding only the
 latest state. Earlier states exist in Git history, which is enough for audit
@@ -1178,6 +1247,11 @@ readiness: {state: ready}
   run renders every unit from its own source commit S, so the next run
   replaces a blocked unit's kept spec with that run's rendering.
 - `lifecycle` carries deletion and holds (see [Deletion](#deletion)).
+- A held marker, written by `nyl hold` for a unit that has no desired
+  document in the environment, has `unit: {environment, name}` without uid,
+  `apiVersion`, or `kind`, no source commit, no spec, and `lifecycle.state:
+  held`. It is the only desired document without a rendering; every rendered
+  document has all fields.
 
 **Behavior versions.** Each driver declares a behavior version and bumps it
 only when its execution semantics change in a way that requires re-execution.
@@ -1208,6 +1282,10 @@ receipt:
     /variables/vpc_id: {unit: network, uid: 8c1f…, executionKey: sha256:…, observedCommit: 41f0…}
   outputs: {host: db.dev.internal, port: 5432}   # declared, non-sensitive only
   artifacts: []                                   # e.g. [{name: image, kind: ContainerImage, digest: sha256:…}]
+desired:                             # the DesiredUnit the receipt was produced for
+  unit: {environment: dev, name: database, uid: 5d2a…, apiVersion: units.gitops.nyl/v1, kind: OpenTofu}
+  executionKey: sha256:…
+  # … the full document, as written to desired/units/database.yaml by that run
 condition: null
 # or, when an operator or retry is needed:
 # condition: {state: uncertain, since: 2026-09-24T11:12:00Z, run: 0b8f…, reason: run lost its lease}
@@ -1215,12 +1293,31 @@ condition: null
 ```
 
 - A receipt is **current** when its unit uid and execution key equal those of
-  the unit's current desired document. When the desired document changes, the
-  receipt remains until the next execution replaces it; it documents what ran
-  but satisfies no reference.
+  the unit's current desired document (owner:
+  `nyl_orchestration::rules::freshness::receipt_is_current`). The execution
+  key alone decides: producer identity, such as the uids its provenance
+  cites, never makes a receipt stale and is not part of the execution key. A
+  unit that must run again when a producer is recreated encodes that in its
+  inputs, for example by consuming an output that changes with every
+  creation. When the desired document changes, the receipt remains until the
+  next execution replaces it; it documents what ran but satisfies no
+  reference.
+- `desired` is a copy of the desired document the receipt was produced for,
+  written by the same transition that writes the receipt (a run, a takeover
+  import, or `recover --accept`) and absent without a receipt. A hold reverts
+  to it directly, so no decision reads Git history for it (see
+  [Deletion](#deletion)).
+- `waiting` records a two-phase publication teardown that published phase 1
+  and waits under its `teardownWait`: `phase`, `reason`, `since`, the
+  advisory `until`, `phase1Commit`, and the `run` that published it (see
+  [Kubernetes publication unit](#kubernetes-publication-unit)). It persists
+  between runs until phase 2 completes.
 - `condition` records the latest failure or uncertainty and stays until the
   unit next succeeds or an operator runs `recover`. A condition does not remove
   the last receipt.
+- A new receipt removes the unit's `drift` observation in the same commit,
+  because the observation was about the receipt it replaces (owner:
+  `rules::drift::observation_changes`).
 
 ### Attestations
 
@@ -1262,7 +1359,9 @@ being current, and every consumer that resolved from it becomes `blocked` on
 that producer, even if the consumer already has its own receipt. The
 consumer's existing receipt still documents what ran; the consumer executes
 again only after the producer's new receipt exists and re-resolution changes
-the consumer's execution key.
+the consumer's execution key. A producer recreated with a new uid and the same
+outputs therefore leaves its consumers current: re-resolution cites the new
+receipt and the consumers' execution keys stay the same.
 
 ### Transition commits
 
@@ -1301,9 +1400,32 @@ Nyl-Version: 0.7.0
   (with `executionKey` and the `run` whose checkpoint became the receipt),
   `recovered` (with `executionKey`: an uncertain unit this run executed again
   under `converge`, or whose effects `inspect` found applied), `failed`,
-  `uncertain`, `blocked`, and `awaiting-approval`. The headline counts
-  `executed`, `recovered`, `imported`, `failed`, `uncertain`, `blocked`, and
-  `awaiting-approval`, in that order, leaving out zero counts.
+  `uncertain`, `blocked`, and `awaiting-approval`, and for lifecycle work and
+  drift: `removed` (torn down, its files removed), `retained` (a new
+  tombstone), `released` (resources left in place, with what was left),
+  `held` (with the pending source commit, and whether a teardown request is
+  recorded on it), `drifted` (a current, drifted unit the run did not
+  repair), `pending-teardown` (with the reason), and `tearing-down` (with the
+  reason, such as a teardown wait). In a reconcile or teardown, `held`,
+  `drifted`, `pending-teardown`, and `tearing-down` exit 2, except a held unit
+  whose teardown request this invocation recorded, which exits 0; `removed`,
+  `retained`, and `released` exit 0 (owner: `nyl_orchestration::run_report`).
+  The headline counts `executed`, `recovered`, `imported`, `removed`,
+  `retained`, `released`, `failed`, `uncertain`, `held`, `drifted`,
+  `pending-teardown`, `tearing-down`, `blocked`, and `awaiting-approval`, in
+  that order, leaving out zero counts.
+- `driftRepaired` lists the units the run executed again because their
+  latest drift observation was `drifted`, and `reapplied` records
+  `{by, at, reason, units}` of a `--reapply`; each appears only when not
+  empty.
+- Lifecycle work adds its specifics under `details`: `retained`, `released`
+  (each unit with what it left in place), `allowDependents` (each unit with
+  the tombstones the override passed), `confirmedRemoval` (each unit with
+  `{by, reason, from}` of a confirmation, or `observed`, `not-observed`, or
+  `incomplete`), `incomplete` (each unit with what may remain),
+  `sourceOverride` (a teardown's `--source`), `teardownRequested` (held units
+  whose teardown request the run recorded), and `held` (units a hold signal
+  held during the run).
 - `imported` lists the units whose checkpoints, left by a run that died or
   lost its lease, became receipts in this run. `recovered` lists the units a
   takeover gave an `uncertain` condition, because a dead run was executing
@@ -1371,11 +1493,12 @@ rules below apply unchanged.
    policy allows it: `converge` executes it again, and `inspect` runs
    `inspect` first (see [Recovery](#recovery)). Under `manual`, the unit waits
    for `recover`. A unit with a non-retryable `failed` condition is not
-   selected until `recover --retry` clears it. A unit with a current receipt
-   is a candidate again when its latest drift observation for that receipt is
-   `drifted`; it is selected when its recovery policy is `converge` and the
-   environment's `driftRepair` is `converge`, the default, and otherwise waits
-   for `nyl reconcile --reapply` (see [Drift](#drift)).
+   selected until `recover --retry` clears it. Freshness is decided by the
+   execution key alone (see [Observed unit](#observed-unit)). A unit with a
+   current receipt is a candidate again when its latest drift observation for
+   that receipt is `drifted`, or when `--reapply` names it; the drift rules
+   decide whether it is selected or awaits approval (see [Drift](#drift)).
+   Held units are never selected (see [Deletion](#deletion)).
 4. **Wave.** Execute ready units, independent units in parallel up to a
    concurrency limit, and checkpoint each result on the run ref. Each
    concurrency slot keeps one worktree for the run and resets it to the next
@@ -1385,14 +1508,32 @@ rules below apply unchanged.
    once per tree. Planning uses the first slot.
 5. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
    same S.
-6. **Repeat** from step 3 until nothing is ready.
-7. **Commit.** Write one transition commit per state ref, fenced by the lease,
+6. **Repeat** from step 3 until nothing is ready. Before it starts each unit,
+   the run reads its signal ref and applies every `hold` it received, so it
+   starts no held unit (see [Deletion](#deletion)).
+7. **Lifecycle.** After the execution waves, units leaving the ownership set
+   and units whose teardown was requested are torn down, retained, released,
+   or dropped in reverse dependency order (see [Deletion](#deletion)).
+8. **Commit.** Write one transition commit per state ref, fenced by the lease,
    then release the lease and delete the run ref. After a takeover, the run
    then consumes the leftover run refs it imported (see
    [Runs and leases](#runs-and-leases)).
 
 A run never reads a source commit newer than S; later source changes are
 picked up by the next run.
+
+**Stopping early.** By default a run continues with everything it can
+reconcile: a unit that fails, becomes uncertain, waits for approval, or is
+blocked does not stop units that do not depend on it. With `--fail-fast`, on
+`reconcile` and `teardown`, the run starts no further unit after the first
+failure, uncertain outcome, or approval wait, including one decided when
+units are selected, such as a drifted unit whose recovery policy is not
+`converge` or a teardown that needs manual approval; units already running
+finish.
+It still checkpoints what finished and writes its transition commit. The units
+it did not start report `blocked` with the reason `--fail-fast stopped the
+run after <unit>`, and the run warns with `NYL-RUN-STOPPED` (owner:
+`nyl_orchestration::shell::run`).
 
 **Who writes desired state.** Desired state is derived deterministically from
 source and observed evidence, so the reconcile runner writes it. Review happens
@@ -1413,6 +1554,10 @@ apply to desired state without mixing with observed commits.
 - `--leaving` selects exactly the units with state outside the ownership set:
   newly leaving, `deleting`, `pending-teardown`, or `tearing-down`. Lifecycle
   work can then run on its own after unit-scoped runs. It excludes `--unit`.
+  A `--unit` run does no deletion work at all.
+- `--reapply` executes the named units again although their receipts are
+  current (see [Drift](#drift)). It is a flag that requires `--unit` and
+  `--reason`; the names go through the same validation as every `--unit`.
 
 **Transition commit conflicts.** Operations on one environment are serialized
 by its lease, and the final push is fenced by it (see
@@ -1453,7 +1598,10 @@ spec:
 - Teardown of a manual unit needs approval the same way; for `bind: plan` the
   digest is that of the destroy plan. `nyl plan` covers `deleting` units with
   teardown intent and prints their destroy-plan digest, and `nyl teardown`
-  accepts `--approve` like `reconcile`.
+  accepts `--approve` like `reconcile`. Implementation status (M3): teardown
+  approvals arrive with remote approvals in part 6; until then a manual
+  unit's teardown is never started, it is reported `awaiting-approval`, and
+  the run exits 2.
 - The approved digest reaches the driver through `ExecutionContext`, and the
   driver compares it with the plan it is about to apply. A mismatch returns
   `Outcome::AwaitingApproval` with the new digest: no effects, the unit waits,
@@ -1539,7 +1687,7 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 | --- | --- | --- |
 | `refs/nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
 | `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record, carrying the same deadline and units executing as the lease; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before the unit starts; and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit; after a takeover, deleted or retired to an evidence ref by the run that imported it |
-| `refs/nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
+| `refs/nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run: teardown confirmations (see [Teardown](#kubernetes-publication-unit)) and holds (see [Deletion](#deletion)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 | `refs/nyl/<env>/evidence/<run-id>` | A retired run ref: the `Run` record and checkpoints of a dead run that are still evidence for a unit with an `uncertain` condition, such as a late checkpoint `nyl recover --accept` may adopt | Created by a takeover in place of the run ref; deleted by a later takeover or by `nyl recover` once no `uncertain` unit needs it |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
@@ -1563,7 +1711,11 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    under `--wait-lease`, and names `nyl recover -e <env>` as the fix, so the
    dead run's effects and created units are recorded before anything else
    writes state. Read-only commands (`plan`, `status`, `get`, `state log`)
-   never take the lease and work whatever its state.
+   never take the lease and work whatever its state, and neither does a
+   `verify` with nothing to verify, which writes nothing. `nyl hold` does not
+   refuse a live holder: it delivers the hold to the running run through the
+   run's signal ref (see [Deletion](#deletion)); a broken lease refuses it
+   like every other non-importer.
 2. **Deadline.** Every phase sets the deadline before it starts, plus a grace
    period that also absorbs clock skew, and no phase runs without one:
    resolution, including target renders and `fingerprint` scripts, by
@@ -1606,6 +1758,11 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
      marked when its observed document changed at or after that run's
      deadline. When several leftover runs touched a unit, the newest, by
      deadline and then run ID, decides, and older checkpoints are superseded.
+   - A name fenced by a deleting incarnation (a kind change, or a replace)
+     imports a leftover run's touches of it against that stored, deleting
+     incarnation, not the new one in source, so a teardown the dead run
+     started without a checkpoint gives it an `uncertain` condition rather
+     than being lost with the run ref.
    - An adopted unit that the new resolution no longer selects is written with
      its checkpointed receipt, since there is no new key to compare, or,
      without a checkpoint, with an `uncertain` condition, so the transition
@@ -1630,7 +1787,9 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
      lease may still be alive and checkpoint in between; a changed ref is
      left for the next run, which imports what arrived.
    - `nyl recover` touches run refs only when it imports the run of a broken
-     lease (see [Recovery](#recovery)). A `--local` run never imports,
+     lease (see [Recovery](#recovery)). It writes a single transition commit
+     and executes nothing, so it writes no `Run` record or run ref of its
+     own: its phases renew only the lease. A `--local` run never imports,
      retires, or deletes remote run refs (see [Local runs](#local-runs)).
 5. **Fenced commit.** The final transition commit is pushed with
    `git push --atomic`, together with a compare-and-swap of the lease ref that
@@ -1682,7 +1841,14 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    broke it and why, next to the import it caused. A run that took a broken
    lease over and ends before its transition commit lands, such as a
    reconcile that fails during resolution, restores the broken lease when it
-   releases, so the break stays in effect until an import is committed.
+   releases, so the break stays in effect until an import is committed. Once
+   the import lands, the break is cleared: a holder that is in fact alive
+   notices the lost lease at its next update and stops, and its later
+   checkpoints are imported by the next `reconcile` or `recover`, with
+   `nyl status` showing `NYL-RUN-UNIMPORTED` meanwhile. When the broken run
+   left nothing to import, the importing operation still writes a transition
+   commit recording the break (owner: `nyl_orchestration::shell::lease`;
+   the predicate shared by every importer is `rules::lease::unimported_break`).
 
 `nyl status` reads the lease and run refs, so it shows a run in progress and
 the units it is executing. A finished run ref that no reconcile has imported
@@ -1735,11 +1901,14 @@ evidence, every checkpoint of the unit there, newest run first, with whether
 `--accept` would adopt it.
 
 `recover` takes the lease and writes one observed commit, with a desired
-commit beside it when an import adopts units a dead run created, with the
-operation `recover`, the unit under `recovered`, the action under `units`, such as
-`database: {action: accept, run: 0b8f…}` or `{action: retry}`, a headline such
-as `nyl: recover dev (database: accept 0b8f…)`, and the `Nyl-Requested-By` and
-`Nyl-Reason` trailers. Every receipt and condition change, of a run, a
+commit beside it when an import adopts units a dead run created or
+`--accept` writes the receipt's desired copy, with the operation `recover`,
+the unit under `recovered`, the action under `units`, such as
+`database: {action: accept, run: 0b8f…}` or `{action: retry}`, a headline
+such as `nyl: recover dev (database: accept 0b8f…)`, and the
+`Nyl-Requested-By` and `Nyl-Reason` trailers. An importing recover's headline
+gives the counts first, then the action after a semicolon, such as
+`nyl: recover dev (1 imported, 2 recovered; database: retry)`. Every receipt and condition change, of a run, a
 takeover, or `recover`, follows one transition table: a success or an
 accepted checkpoint replaces the receipt and clears the condition; a failure
 or an uncertain outcome keeps the receipt; an import onto an `uncertain` unit
@@ -1750,27 +1919,46 @@ touches run refs; after its commit it deletes the evidence refs that no
 **Importing a broken run.** When the lease is broken and its run has not been
 imported, `nyl recover -e <env>` takes the lease over and imports that run the
 way a `reconcile` takeover does, through the same run path with execution
-switched off: it resolves the desired units, adopts the uids of units the
-dead run created, turns checkpoints whose execution key matches into
-`imported` receipts, and gives units the run left without a checkpoint an
-`uncertain` condition. Nothing executes, so a converging unit made
-`uncertain` runs again in the next `reconcile` under its recovery policy. The
-transition commit, operation `recover`, lists the import under `imported`
-and the break under `leaseBroken`, and consumes the run ref as a takeover
-does (see [Runs and leases](#runs-and-leases), item 4). With `--unit`, the
+switched off (owner: `nyl_orchestration::shell::recover::recover_environment`):
+it resolves the desired units, adopts the uids of units the dead run
+created, turns checkpoints whose execution key matches into `imported`
+receipts, and gives units the run left without a checkpoint an `uncertain`
+condition. Nothing executes, so a converging unit made `uncertain` runs again
+in the next `reconcile` under its recovery policy. It records the units as
+they are: units that left the ownership set are marked `pending-teardown` by
+the next `reconcile`, not by the import. `recover` writes no run record: it
+reads the broken run's refs, writes its one transition commit, operation
+`recover`, listing the import under `imported` and the break under
+`leaseBroken`, and consumes the run ref as a takeover does (see
+[Runs and leases](#runs-and-leases), item 4). If it crashes before its commit
+lands, the broken run's refs stay for the next import. With `--unit`, the
 `--retry` or `--accept` action applies after the import, in the same commit,
 so an operator can break a lease, import, and decide a unit in one command.
-Without `--unit` and without a broken run to import, `recover` refuses with
-`NYL-RECOVER-NOTHING`.
+Once the import is recorded, `recover` exits 0 and lists what it imported;
+`nyl status` then exits 4 for the units left uncertain. Without `--unit` and
+without a broken run to import, `recover` refuses with `NYL-RECOVER-NOTHING`.
+Where no state can be read, because it is missing, moved, deleted by
+`nyl state delete`, or has a local tip, `nyl recover -e <env>` still takes
+the broken lease over, records the break where state exists, and releases
+it, so `state init` (`--fresh` for deleted state), `state move`, or
+`state restore` can run.
 
 **Holds on uncertain units.** A hold on a unit with an `uncertain` condition
 keeps the desired document and uid of the unit's last receipt as its desired
-state, so consumers keep resolving from that receipt and downstream work can
-proceed while the unit is investigated. The condition and any evidence ref
-stay: `status` shows the unit as held and uncertain, and `resume` does not
-clear the condition, which still needs a run under its recovery policy or
-`recover`. A unit without a receipt has nothing to fall back on, and its
-dependents stay blocked (see [Deletion](#deletion)).
+state, read from the receipt's `desired` copy, so consumers keep resolving
+from that receipt and downstream work can proceed while the unit is
+investigated. The condition and any evidence ref stay: runs report the unit
+`held` (exit 2), `status` shows it held with its `uncertain` condition and
+exits 4, and `resume` does not clear the condition, which still needs a run
+under its recovery policy or `recover`. On a held unit, `recover --retry`
+clears only the condition, and the unit runs after `nyl resume`; `recover
+--accept` is refused, naming `nyl resume`, because a held unit runs nothing.
+A takeover import of a held unit works as usual: a checkpoint matching the
+held document becomes its receipt, other units are marked uncertain, and the
+unit stays held. A unit without a receipt has nothing to fall back on, and
+its dependents stay blocked (see [Deletion](#deletion)). The walkthrough
+[`held-uncertain`](#walkthroughs) holds an uncertain producer and reconciles
+a consumer against its previous outputs.
 
 A retryable failure is retried by the next `reconcile`; a non-retryable one
 waits for `recover --retry`. A failure is a claim that the execution made no
@@ -1798,28 +1986,50 @@ execution key unchanged. `nyl verify` asks each driver whether a current
 receipt still holds and records the answer as the unit's `drift` observation,
 tied to that receipt's execution key. Nyl does not watch for drift itself: a
 pipeline runs `nyl verify` on a schedule, followed by `nyl reconcile`, until a
-continuous runner (M7) takes over the cadence.
+continuous runner (M7) takes over the cadence. A planned opt-in
+`nyl reconcile --verify` (M7) does both under one lease and in one transition
+commit; without it, reconcile never verifies.
 
+- **`drifted` is a unit state.** A unit with a current receipt whose latest
+  drift observation for that receipt is `drifted` is work for the next
+  reconcile, like a changed unit: `nyl status` shows it `drifted` and exits 2
+  for it, as for `ready`, and `nyl plan` lists it as a unit that would
+  execute. Owners: `rules::selection` decides selection, `rules::drift`
+  names repairs and the status attribute, and `rules::unit_state` the state.
 - **Automatic repair.** With `driftRepair: converge`, the default, the next
-  `reconcile` executes again every unit whose recovery policy is `converge`
-  and whose latest drift observation for its current receipt is `drifted`, as
-  it would execute a unit whose inputs changed. Its result is `executed`, its
-  transition commit lists it under `driftRepaired`, and the new receipt
-  replaces the one the observation was about, so the observation no longer
-  selects it. Idempotent units therefore repair drift without an operator.
-- **Units that do not converge** report drift and wait: `nyl status` shows them
-  as `drifted`, without changing the exit category, and an operator repairs
-  them explicitly.
-- **`driftRepair: manual`** turns automatic repair off for an environment, such
-  as production where every repair is reviewed; drifted units then wait like
-  units that do not converge.
-- **Explicit repair.** `nyl reconcile -e <env> --reapply <unit> --reason
-  <text>` executes a unit with a current receipt again, drifted or not, and
-  records the requester and reason in its transition commit under
-  `reapplied`. A unit whose recovery policy is not `converge` also needs an
-  approval: `--approve <unit>` with the `local` source in a local run, and the
-  approval sources of [Approval](#approval) otherwise. Until remote approvals
-  exist, `--reapply` refuses such units in remote runs.
+  `reconcile` executes again every drifted unit whose recovery policy is
+  `converge`, as it would execute a unit whose inputs changed. Its result is
+  `executed`, its transition commit lists it under `driftRepaired`, and the
+  new receipt replaces the one the observation was about and removes the
+  observation in the same commit, so it is not repaired again until a later
+  `verify` finds new drift. Idempotent units therefore repair drift without
+  an operator.
+- **Units that do not converge.** Under `driftRepair: converge`, a drifted
+  unit that is not safe to re-run is reported `awaiting-approval` (exit 2)
+  while the rest of the run continues. In a `--local` run, `--approve <unit>`
+  executes it, recorded with the `local` approval identity; remote approvals
+  arrive in part 6.
+- **`driftRepair: manual`** turns automatic repair off for an environment,
+  such as production where every repair is reviewed: reconcile repairs no
+  drift by itself, and drifted units stay `drifted` (exit 2) until a forced
+  run. An EnvironmentGroup may set `driftRepair` for its members (see
+  [Environment groups](#environment-groups)).
+- **Forced runs.** `nyl reconcile -e <env> --unit <u> --reapply --reason
+  <text>` executes the named units again although their receipts are
+  current, drifted or not, and records `{by, at, reason, units}` in its
+  transition commit under `reapplied`. `--reapply` is a flag that requires
+  `--unit` and `--reason`; the names go through the ordinary `--unit`
+  validation. A named unit whose recovery policy is not `converge` follows
+  the approval rule above: `awaiting-approval` in a remote run, executed with
+  `--approve` in a `--local` run. It never fails the whole run. `nyl plan`
+  has no `--reapply`.
+- **Verification warnings.** `nyl verify` reports each drifted unit with
+  `NYL-VERIFY-DRIFT`, whose fix says, per unit, what the next reconcile does:
+  it repairs the unit, the unit awaits approval, or, under `manual`, it needs
+  `nyl reconcile --unit <u> --reapply --reason <text>`.
+- The walkthrough [`drift`](#walkthroughs) shows `verify` finding drift,
+  `reconcile` repairing the idempotent unit, and the other awaiting
+  approval.
 
 #### Operator exec
 
@@ -1880,8 +2090,9 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
 - **Exit status.** Once the tool has started, `exec` exits with the tool's
   status, or 128 plus the signal that ended it. Before that, Nyl refuses with
   exit 125 and a stable code, such as `NYL-EXEC-NOT-HELD`,
-  `NYL-EXEC-UNSUPPORTED`, `NYL-EXEC-SCOPE-CONFLICT`, or `NYL-LEASE-HELD`, so
-  scripts can tell a refusal from the tool's own failure.
+  `NYL-EXEC-UNSUPPORTED`, `NYL-EXEC-SCOPE-CONFLICT`, `NYL-LEASE-HELD`, or
+  `NYL-LEASE-BROKEN` (a broken lease whose run `nyl recover -e <env>` has not
+  imported), so scripts can tell a refusal from the tool's own failure.
 - `exec` ignores deployment admission: it repairs a unit, it does not deploy a
   source.
 
@@ -1889,7 +2100,10 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
 
 Deletion and holds are recorded in the desired unit's `lifecycle` block, so a
 unit's whole history is one file's diff and the last desired spec needed for
-teardown is already there:
+teardown is already there. Every lifecycle change goes through one transition
+table, `nyl_orchestration::rules::lifecycle::transition`; what a run deletes,
+retains, or keeps waiting is decided by `rules::desired` and
+`rules::teardown`, and what a hold writes by `rules::hold`:
 
 ```yaml
 lifecycle:
@@ -1909,7 +2123,10 @@ lifecycle:
 - `teardown: pending` means the teardown has not started, because it awaits
   `--allow-teardown`, an approval, a dependent's teardown, or a readiness
   override. `in-progress` means the driver's teardown has started, including a
-  publication waiting under its `teardownWait`.
+  publication waiting under its `teardownWait`. A teardown that failed or is
+  uncertain stays `in-progress` with its condition beside it: the unit reads
+  `tearing-down`, `status` exits 3 or 4, and the next attempt needs no new
+  `--allow-teardown`.
 - The status values are projections of this block: `pending-teardown` is
   `deleting` with `teardown: pending`, and `tearing-down` is `deleting` with
   `teardown: in-progress`.
@@ -1941,15 +2158,22 @@ lifecycle:
   the driver's teardown recovery policy. Teardown follows the reverse of
   creation order: a unit is torn down only after every deleting unit that
   depends on it, so consumers go first and producers follow once nothing uses
-  them. A `KubernetesPublication` counts as torn down only once its
-  `teardownWait` completes, so the units it depends on, and transitively
-  theirs, wait for it. Units with no dependency path to a waiting unit are
-  torn down in the same run without waiting. Teardown caused by omission
-  requires `--allow-teardown` on `reconcile`; without it the unit is
-  `pending-teardown` and the run exits 2, so an unintended omission, such as a
-  selector typo, destroys nothing, and fixing it returns the unit to `active`
-  with its uid and receipt. When teardown succeeds, the run removes both
-  files.
+  them. The same reverse-dependency rule orders every drop and every declared
+  retention: a unit leaving with any intent is dropped, retained, or released
+  only once its deleting dependents are gone. A `KubernetesPublication`
+  counts as torn down only once its `teardownWait` completes, so the units it
+  depends on, and transitively theirs, wait for it. Units with no dependency
+  path to a waiting unit are torn down in the same run without waiting.
+  Teardown caused by omission or a kind change requires `--allow-teardown` on
+  `reconcile` to start; without it the unit is `pending-teardown` with
+  `NYL-TEARDOWN-PENDING` and the run exits 2, so an unintended omission, such
+  as a selector typo, destroys nothing, and fixing it returns the unit to
+  `active` with its uid and receipt. `--allow-teardown` gates only the start:
+  a plain `reconcile` continues every teardown that started, and every
+  teardown an operator requested with `nyl teardown`, unless the unit is
+  held. When teardown succeeds, the run removes both files and reports the
+  unit `removed`. Lifecycle work runs after the execution waves; `reconcile
+  --leaving` does only that work, and `reconcile --unit` none of it.
 - **Retained dependents.** A `retained` tombstone keeps running resources that
   may still use its producers. Tearing down a unit that a tombstone's receipt
   cites in its provenance refuses unless the invocation passes
@@ -1961,63 +2185,134 @@ lifecycle:
   its resources when it leaves the ownership set. The run replaces its desired
   and observed files with a `retained` tombstone: the last desired document,
   uid, and receipt, under `lifecycle.state: retained`. A unit that returns with
-  the same name and kind adopts the tombstone: with an unchanged execution key
-  and every producer its receipt cites still at the cited incarnation and
-  receipt, it is current at once; otherwise it is resolved and runs as an
-  ordinary change of the same incarnation. Restoring an accidentally omitted
-  unit therefore never re-runs it while its inputs still exist.
-  `nyl status` lists tombstones, and the transition commit's summary lists
-  every newly retained unit.
+  the same name and kind adopts the tombstone (`rules::desired::adopt_tombstone`):
+  with an unchanged execution key it is current at once, even when a
+  producer was recreated in the meantime; otherwise it is resolved and runs
+  as an ordinary change of the same incarnation. Restoring an accidentally
+  omitted unit therefore never re-runs it while its inputs are unchanged. The
+  tombstone keeps the unit's artifact files, so a retained image's digest
+  stays readable; its observed file, observations, and attestations are
+  removed. `nyl status` lists tombstones, and the transition commit's summary
+  lists every newly retained unit under `details.retained`.
 - **Retain, by kind.** A unit whose kind cannot tear down and that does not
-  declare `Retain` leaves no tombstone: the run removes its files and lists
-  what was left in place, such as an image reference, in the transition
-  commit's summary. Returning later starts a new incarnation.
+  declare `Retain` leaves no tombstone: the run releases it, removing its
+  files, reporting it `released` with `NYL-UNIT-RELEASED`, and listing what
+  was left in place, such as an image reference, under `details.released` in
+  the transition commit. Returning later starts a new incarnation.
 - **Forgetting.** `nyl state forget -e <env> --unit <u>` drops a `retained`
   tombstone or a `pending-teardown` unit from state without touching its
   resources, for example to let a Teardown unit go without destroying it.
   A returning unit then starts a new incarnation.
 - **Explicit teardown.** `nyl teardown -e <env> --unit <u>` tears a unit down
   whether or not it is in the ownership set. The command is itself explicit
-  intent, so it needs no `--allow-teardown`.
+  intent, so it needs no `--allow-teardown`. It runs on the shared run path
+  as a run mode, from recorded state only: it renders nothing, checks
+  ownership against the recorded ownership set, and runs each teardown with
+  the files of the unit's recorded `sourceRevision`. When that commit cannot
+  be fetched, the teardown fails before any effect with a fix naming
+  `--source <revision>`, which the transition commit records under
+  `details.sourceOverride`. Unknown unit names are refused.
   - For a unit outside the ownership set (a `deleting` unit, or a `retained`
     tombstone, whose last desired document it holds), it completes the
     deletion and removes the files, including the tombstone.
   - For a unit still in the ownership set, it replaces the unit
     (`reason: replace`): the incarnation is torn down, and the next
-    `reconcile` writes a new desired file with a new uid. Dependents are
-    blocked until the new receipt exists, then run with its outputs. This
-    rebuilds corrupted resources or rotates something that can only be
-    recreated.
-  - `--hold` holds the unit in the same operation, so no run can recreate it
-    between the teardown and a separate `nyl hold`. It is equivalent to
-    `teardown` followed by `hold`.
+    `reconcile` writes a new desired file with a new uid. Dependents resolve
+    against the new receipt's outputs and run only if their execution key
+    changes. This rebuilds corrupted resources or rotates something that can
+    only be recreated.
+  - A unit whose kind cannot tear down is released, as `--all` does: its
+    resources stay and its state is removed, so a unit still in source is
+    created fresh by the next `reconcile`, unless `--hold` keeps it.
+  - Only the named units are touched. A named unit that a deleting unit still
+    depends on waits for it: it is reported `pending-teardown` and the command
+    exits 2.
+  - `--hold` on a unit that is not held means "tear down, then hold": the
+    hold rides on the last event of the teardown or release, so no run can
+    recreate the unit between the teardown and a separate `nyl hold`, and the
+    held file stays without a uid. When the teardown does not finish in the
+    invocation, because it waits, failed, or is uncertain, the deleting unit
+    is held with its deletion block, so nothing recreates it; after `resume`
+    the teardown continues, and the unit is held again once it completes, so
+    it is not recreated until it is resumed again.
+  - `--all` tears down every unit, honouring `deletionPolicy: Retain` (see
+    [Instances](#instances)).
+  - `--fail-fast` stops the teardown after the first failure, uncertain
+    outcome, or approval wait (see [Execution](#execution)).
+  - A unit that needs manual approval is reported `awaiting-approval`, exit 2;
+    teardown approvals arrive in part 6.
 - **Holds freeze a unit.** `nyl hold -e <env> --unit <u> [--reason <text>]`
-  makes `reconcile` change nothing about the unit, whatever state it is in,
-  without touching its resources. Resolution records what source would change
-  under `hold.pending`, with its source commit and execution key, but applies
-  nothing:
-  - A unit with a running incarnation keeps its last executed desired
-    document. Its receipt stays current against that document, so consumers
-    keep resolving from it; the frozen state is what actually runs. This
-    holds for a unit with an `uncertain` condition too: its desired state is
-    the document and uid of its last receipt, the condition stays, and
+  makes runs change nothing about the unit, whatever state it is in, without
+  touching its resources. A held unit never progresses. `nyl hold` writes the
+  final held document in its own commit and never renders source; later runs
+  record what source would change under `hold.pending`, with its source
+  commit and execution key, write the held file only when that record
+  changes, apply nothing else, and report the unit `held` (exit 2) with
+  `NYL-UNIT-HELD` when changes or a teardown are pending:
+  - A unit with a running incarnation keeps the desired document its receipt
+    was produced for: the hold reverts to the receipt's `desired` copy in the
+    observed document (see [Observed unit](#observed-unit)), never to a
+    document found in history, and records a newer document under
+    `hold.pending`. Its receipt stays current against that document, so
+    consumers keep resolving from it; the frozen state is what actually runs.
+    This holds for a unit with an `uncertain` condition too: its desired state
+    is the document and uid of its last receipt, the condition stays, and
     `resume` does not clear it (see [Recovery](#recovery)). An uncertain unit
     without a receipt keeps its dependents blocked.
   - A unit without an incarnation (after a teardown, or declared but never
     executed) is not created. Its desired file has no uid, and its dependents
-    stay blocked.
+    stay blocked. A unit with state loses its uid only when nothing shows it
+    ever ran: no receipt, no condition, and no leftover run listing it.
+  - A unit that has never been reconciled in the environment can be held too:
+    `nyl hold` writes a held marker, a desired file with `lifecycle.state:
+    held` and no uid, kind, or rendering (see [Desired unit](#desired-unit)).
+    Runs exclude it until `nyl resume`, and its consumers stay blocked.
   - A unit that is `deleting` pauses: no retention or teardown happens. Its
     file has `state: held` and keeps its `deletion` block next to `hold`, so
     `resume` returns it to `deleting` where it stopped.
+  - A `retained` tombstone cannot be held, because nothing of it runs:
+    `nyl hold` refuses it with `NYL-HOLD-REFUSED`.
   - A held unit that leaves the ownership set is not deleted; it is reported
-    as held with a pending deletion.
-  - An explicit `nyl teardown` of a held unit is still allowed, because it is
-    an operator action; the unit stays held afterwards and is not recreated.
-    A held unit's desired file survives its teardown (held, without a uid),
-    even outside the ownership set, and is removed only after `resume`.
-  - `nyl resume -e <env> --unit <u>` lifts the hold. The next `reconcile`
-    renders the unit from source again and applies whatever changed, including
-    a pending deletion.
+    as held with a pending deletion. After `nyl resume`, a held file without
+    a uid outside the ownership set is removed by the next `reconcile`.
+  - `nyl teardown --unit` of a held unit only records the request, as the
+    held file's pending deletion: it tears nothing down and exits 0,
+    reporting the unit `held` with a pending teardown, listed under
+    `details.teardownRequested`. After `nyl resume`, the next
+    teardown-capable run, a `reconcile` or a `teardown`, carries it out as an
+    explicitly requested teardown. `teardown --all` records the request on
+    held units the same way, tears down the rest, and then holds what
+    remains in the ownership set.
+  - `nyl resume -e <env> --unit <u>` lifts the hold and deletes nothing
+    itself. The next `reconcile` renders the unit from source again and
+    applies whatever changed, including a pending deletion.
+  - Holding a held unit and resuming one that is not held change nothing:
+    both exit 0 with a note and write no commit, so scripts can repeat them.
+  - `nyl hold` while a reconcile or teardown run holds the environment's
+    lease is delivered to that run through its signal ref, as a `Signal`
+    with `action: hold`; it reports `NYL-HOLD-DELIVERED` with the run it
+    went to and exits 0. The running run reads its signals before it starts
+    each unit, starts no held unit, writes the hold in its own transition
+    commit (listed under `details.held`), and reports the unit `held`;
+    units already running finish first. A unit the run already executed or
+    created is held as the incarnation that ran: its uid and the document
+    of its new receipt. When the run finished before it read the signal,
+    `nyl hold` deletes the signal and applies the hold directly under its
+    own lease (owner: `nyl_orchestration::shell::signal`). `nyl hold`
+    reports a delivery only while the run still holds the environment
+    after the signal is pushed, and the run reads its signals once more
+    after its transition commit, once it holds nothing (its lease released
+    and its run ref marked finished) and before its run ref and signal ref
+    go: a hold it had not read yet is applied as `nyl hold` applies it,
+    requested by the signal's sender, under a lease of its own that it
+    waits for up to the lease grace period, or delivered to a run that took
+    the lease since (owner: `nyl_orchestration::shell::run`). Every hold
+    reported delivered therefore takes effect. Only reconcile and teardown
+    runs read signals: while any other operation holds the lease, such as
+    `verify`, `recover`, or a state operation, `nyl hold` meets a held
+    lease like every state operation (`NYL-LEASE-HELD`, exit 2, or a wait
+    with `--wait-lease`). A broken lease refuses `nyl hold` with
+    `NYL-LEASE-BROKEN`, as it refuses every non-importer.
   - A hold is for incidents and investigations: stop reconciling a unit while
     something is wrong, without a source change and its review cycle. It is
     the only desired state that does not come from source, and it is an
@@ -2030,9 +2325,11 @@ lifecycle:
   teardown` acts on state directly and never edits source.
 - **Fencing.** A new incarnation cannot take a name whose desired file is
   `deleting`; it waits until the file is removed, then receives a new uid. A
-  kind change under the same name is a deletion with `reason: kind-change`; a
-  `retained` tombstone of another kind is dropped, with its resources left in
-  place, and the new kind starts a new incarnation.
+  kind change under the same name is a deletion with `reason: kind-change`,
+  reported with `NYL-UNIT-KIND-CHANGE`, whose teardown starts only with
+  `--allow-teardown` like an omission; a `retained` tombstone of another kind
+  is dropped, with its resources left in place, and the new kind starts a new
+  incarnation.
 
 ## Credentials
 
@@ -2113,6 +2410,13 @@ initialization, move, or fresh start, each as its own event.
     refuses, so no two runners can hold leases at different prefixes.
 - A location whose `state.yaml` names a different environment is an error, so
   two environments can never share state by accident.
+- A location whose `state.yaml` carries the deleted marker of `nyl state
+  delete` (a last event `state-deleted`) refuses every command, a plain
+  `nyl state init` included, with `NYL-STATE-DELETED`, exit 1, naming both
+  ways forward: removing the Environment from source, or `nyl state init
+  --fresh`, which appends a `state-initialized` event and starts over (see
+  [Instances](#instances)). The check reads the marker, never commit trailers
+  (owner: `rules::state_location::check_record`).
 
 ### Local runs
 
@@ -2168,6 +2472,10 @@ experiments from a workstation:
   holder of a broken lease. It checks before taking the lease, leaving the
   lease and any break as they were; a remote `reconcile` or `recover` takes
   them over first. It never retires or deletes remote run refs or evidence refs.
+  Under the remote lease, it also refuses a broken remote lease whose run is
+  not imported with `NYL-LEASE-BROKEN`, exit 2, naming `nyl recover -e
+  <env>`, even when the broken holder left no run ref, because only an import
+  records the break (owner: `shell::lease::run_takeover`).
 - `--local-lease` explicitly opts into a local lease instead, for working
   without that access, and accepts that CI may run at the same time. It
   reads only the clone's own lease and run refs.
@@ -2286,6 +2594,7 @@ trait Driver {
     fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Verification>>; // drift, observations, attestations
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
+    fn teardown_settings(&self, unit: &DesiredUnit) -> Result<Supported<TeardownSettings>>; // readiness from the stored document; default Unsupported
     fn build(&self, ctx: &ExecutionContext, unit: &DesiredUnit, push: bool) -> Result<Supported<Vec<Artifact>>>; // outside orchestration
     fn exec(&self, ctx: &ExecutionContext, unit: &DesiredUnit, args: &[OsString]) -> Result<Supported<ExecStatus>>; // operator repair, see Operator exec
 }
@@ -2306,7 +2615,7 @@ enum Supported<T> {
 enum Outcome {
     Succeeded { outputs: Outputs, artifacts: Vec<Artifact>, attestations: Vec<AttestationResult> },
     AwaitingApproval { digest: ChangeDigest },               // plan changed since approval; no effects
-    Waiting { phase: String, reason: String, until: Option<Timestamp> }, // effects so far are recorded; call again
+    Waiting { phase: String, reason: String, until: Option<Timestamp>, published: Option<CommitId> }, // effects so far are recorded; call again
     Failed { category: FailureCategory, retryable: bool, message: String },
     Uncertain { reason: String },
 }
@@ -2320,13 +2629,23 @@ enum Outcome {
 | `Artifact` | An artifact document without `metadata.unit` and `executionKey`, which Nyl fills in |
 | `Verification` | `drift`: `clean`, `drifted` with a summary, or `unknown` with a reason; `observations`; `attestations` |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
+| `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
+| `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
 | `OwnershipScope` | A typed claim, such as `{terraformBackend: <canonical backend config and key>, workspace}`, `{ociRepository, tagPrefix}`, or `{publication: {repository, revision, pathPrefix}}` |
 
 - `Waiting` is how a two-phase teardown reports that phase 1 is published and
   its `teardownWait` has not completed: the unit stays `tearing-down`, the
-  run checkpoints it, and the driver is called again in the same run while the
-  wait allows, or in a later run. Only teardown may return it.
+  run records the wait in the observed document and checkpoints it, and the
+  driver is called again in the same run while the wait allows, or in a later
+  run. Only teardown may return it. `published` is the phase 1 commit, and
+  `until` is advisory: the run computes the wait's end from the recorded
+  `since` and the strategy. Once the wait ends, the run calls `teardown`
+  again with `ExecutionContext.teardown_wait` set to the `WaitCompletion`,
+  which tells the driver to run phase 2; every other call passes none.
+- `teardown_settings` reads the stored desired document only, so `status`,
+  `get units -o wide`, `plan`, and a teardown show the same readiness without
+  rendering. A held marker has no kind and never reaches a driver.
 - `Result` errors are Nyl-side problems, such as an unreadable worktree; they
   give the unit an `uncertain` condition when an effect may have started, and
   otherwise fail the invocation with exit 1.
@@ -2506,19 +2825,19 @@ spec:
 | Command | Effect | Writes |
 | --- | --- | --- |
 | `plan` | Resolve and run driver planning for ready units and for `deleting` units with teardown intent (destroy plans); report units leaving the ownership set, blocked units, and incomplete plans; `--teardown` previews a requested teardown (see [Planning](#planning)) | Nothing |
-| `reconcile` | Resolve, then execute waves until nothing is ready | One transition commit per state ref |
+| `reconcile` | Resolve, then execute waves until nothing is ready, and carry out lifecycle work: teardowns (`--allow-teardown` to start one caused by omission), retentions, releases, and drops; `--leaving` does only the lifecycle work; `--unit … --reapply --reason …` forces named units; `--fail-fast` stops after the first failure, uncertain outcome, or approval wait | One transition commit per state ref |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations and driver attestations |
 | `attest` | Record an external attestation for a unit's current receipt or the environment's current state (see [Attestations](#attestations)) | One observed commit |
-| `recover` | Clear an uncertain condition or a failure for re-execution, or with `--accept <run>` adopt a checkpointed result; refuses a unit without a condition | One observed commit, and deletion of evidence refs no uncertain unit needs |
-| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy | One transition commit per state ref |
-| `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
+| `recover` | Import a broken lease's run (`-e` alone), clear an uncertain condition or a failure for re-execution, or with `--accept <run>` adopt a checkpointed result; refuses a unit without a condition, and refuses without `--unit` when there is nothing to import | One observed commit (with a desired commit beside it when needed), the consumed run refs, and deletion of evidence refs no uncertain unit needs; never a run record |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit, honouring `deletionPolicy: Retain`; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy; a held unit only records the request; `--fail-fast` as for `reconcile` | One transition commit per state ref |
+| `hold` | Freeze a unit, or hold a unit never reconciled with a held marker: reconcile no changes to it until resumed; delivered to a running run through its signal ref | One desired commit, or a signal to the running run |
 | `exec` | Run a held unit's tool, through its driver's `exec` capability, with the deployed spec or one rendered from the worktree (see [Operator exec](#operator-exec)) | One observed commit |
 | `ci admit` (M8) | Record a new deployment generation, or confirm the current one (see [Deployment admission](ci-execution.md#deployment-admission)) | One commit on the admission ref |
 | `ci export` (M8) | Export the dependency graph as a provider workflow (see [CI execution](ci-execution.md)) | Nothing |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
-| `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing its directory from a shared ref, or deletion of its own refs |
+| `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing the environment's files and leaving the deleted marker in `state.yaml`; the refs and their history stay |
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
 | `state reset` | With `--local`, drop local transitions and follow the remote state again (see [Local runs](#local-runs)) | The clone's local state branches only |
 | `state restore` | Restore remote state to an earlier commit's content after local transitions were pushed by hand | One desired and one observed commit |
@@ -2585,7 +2904,9 @@ reviewers see what a merge would do before anything runs. It reads state and
 never takes the lease.
 
 - It reports every unit that would execute: first creations, updates with the
-  driver's change summary, and units waiting for evidence or approval.
+  driver's change summary, `drifted` units the next reconcile would repair or
+  that await approval or a forced run, and units waiting for evidence or
+  approval. Held units are reported `held` with their pending change.
 - It reports every unit that would leave the ownership set, grouped by what
   would happen, in a section that always comes first:
 
@@ -2607,7 +2928,9 @@ never takes the lease.
   has not been requested yet: the destroy plans and digests of what
   `nyl teardown` would remove, so manual units can be approved with
   `nyl teardown … --approve <unit>=<digest>`. Without `--teardown`, `plan`
-  shows destroy plans only for units already `deleting`.
+  shows destroy plans only for units already `deleting`. Leaving units carry
+  their teardown readiness and `NYL-TEARDOWN-*` warnings, and `plan` lists
+  the retained tombstones a teardown would pass with `--allow-dependents`.
 
 ### Inspection
 
@@ -2674,10 +2997,18 @@ Common options: `-e`/`--environment`, `--unit`/`--units`,
 stdout, with human diagnostics on stderr.
 
 Each unit has one state in `status`: `blocked` (with the unresolved reference or
-non-current dependency), `ready`, `awaiting-approval`, `running` (with the run
+non-current dependency), `ready`, `drifted` (a current receipt whose latest
+drift observation is `drifted`), `awaiting-approval`, `running` (with the run
 holding the lease), `uncertain`, `failed`, `current`, `held`,
-`pending-teardown`, `tearing-down`, or `retained`. Whether the latest receipt is current is
-shown as a separate attribute.
+`pending-teardown`, `tearing-down`, or `retained` (owner:
+`rules::unit_state`). Whether the latest receipt is current is shown as a
+separate attribute, and so is a unit's condition next to a lifecycle state:
+a held uncertain unit reads `held` with its `uncertain` condition, and a
+failed teardown `tearing-down` with its `failed` condition; a condition
+decides the exit first (4 for uncertain, 3 for failed). Held markers are
+listed as held without an incarnation, tombstones as `retained`, and
+`status` and `get units -o wide` show each publication unit's teardown
+readiness (`ready` or `incomplete: <reasons>`).
 
 Exit categories, where "selected" means the units the invocation was allowed to
 execute (all of them without `--unit`/`--units`):
@@ -2686,7 +3017,7 @@ execute (all of them without `--unit`/`--units`):
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed; or the run's deployment generation was superseded and it executed nothing |
 | 1 | Configuration, resolution, or operational error |
-| 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, `--allow-dependents`, a teardown wait, or another run's lease |
+| 2 | Not everything was reconciled, and nothing failed: a unit is held, drifted, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, `--allow-dependents`, readiness, a teardown wait, or another run's lease, or the lease is broken and waits for an import (`NYL-LEASE-BROKEN`) |
 | 3 | At least one execution or verification failed |
 | 4 | At least one execution is uncertain and needs recovery, the run lost its lease, or the run was cancelled by a signal (`NYL-RUN-CANCELLED`) |
 
@@ -2708,7 +3039,7 @@ The table applies to each command as follows:
 | `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
 | `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |
 | `exec` | The tool's own exit status once it has started; 125 when Nyl refuses before starting it (see [Operator exec](#operator-exec)) | | | | |
-| `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done | Error or refusal | The lease is held, `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
+| `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done, including a hold delivered to a running run and a `recover` import that left units uncertain | Error or refusal, including `state delete --teardown` after a failed or uncertain teardown | The lease is held or broken (`NYL-LEASE-BROKEN`), `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
 
 `--output json` prints the operation's typed report, the same one that renders
 tables and the transition commit summary:
@@ -2825,7 +3156,16 @@ still carries an unexpired deadline; the first run exits 4 at its next lease
 update, marks its run ref finished, and pushes nothing to the state refs. The
 next run imports its checkpoint of `web-image` as the receipt, executes
 `kubernetes`, and deletes the run ref after its commit. If the holder is
-lost, its lease expires and a later run takes over as above.
+lost, its lease expires and a later run takes over as above. When a runner
+dies after `web-image`'s effect and before its checkpoint, an operator breaks
+its lease with `nyl lease break` instead of waiting for the deadline. `verify`
+then refuses with `NYL-LEASE-BROKEN`, exit 2, naming `nyl recover -e dev`,
+because only an importer takes over a broken lease whose run is not imported.
+`nyl recover -e dev` imports the dead run without executing: one desired and
+one observed commit list `web-image` under `recovered` and the break under
+`leaseBroken`, the run ref is consumed, and no run record of its own is
+written; it exits 0. The next `reconcile` starts at once, converges
+`web-image` under its recovery policy, and executes `kubernetes`.
 ([`competing-runners`](../nyl/tests/scenarios/walkthroughs/competing-runners/scenario.yaml))
 
 **Promotion with stale source evidence.** Dev's run R1 at source commit S1
@@ -2863,9 +3203,51 @@ nothing, exit 0: `cache` returns to `active` with its uid and receipt, and
 `NYL-TEARDOWN-HAS-DEPENDENTS`, because `worker`'s tombstone cites it;
 `--allow-teardown --allow-dependents` tears it down, removes its files, and
 exits 0. Restoring both afterwards starts a new `cache` incarnation with a new
-uid, and `worker` adopts its tombstone but executes again, because the `cache`
-incarnation its receipt cites is gone; exit 0.
+uid and the same endpoint, so `worker` adopts its tombstone and stays current:
+its execution key is unchanged, and producer identity never makes a receipt
+stale; exit 0.
 ([`deletion`](../nyl/tests/scenarios/walkthroughs/deletion/scenario.yaml))
+
+**Decommissioning.** `nyl teardown --unit cache` of a unit still in source
+replaces it: the next `reconcile` creates a new incarnation, and `worker`,
+whose execution key is unchanged, stays current. `teardown --unit scratch
+--hold` tears down, then holds: `scratch` stays held without a uid, and
+`reconcile` does not recreate it until `resume`. A teardown of the held unit
+`job` only records the request and exits 0; `resume` returns it to
+`deleting`, and the next `reconcile` tears it down. A `Retain` unit leaving
+source becomes a tombstone, which `teardown --unit` removes. A kind change
+leaves the old incarnation `pending-teardown` with `NYL-UNIT-KIND-CHANGE`.
+`state delete` refuses while incarnations remain
+(`NYL-STATE-DELETE-INCARNATIONS`); `state delete --teardown` tears every unit
+down, releases the kinds without teardown and the declared `Retain` units,
+and leaves the deleted marker, so the next `reconcile` and a plain `state
+init` fail with `NYL-STATE-DELETED`, while an environment sharing the refs
+under another `path` is untouched, and `state init --fresh` starts over.
+([`decommission`](../nyl/tests/scenarios/walkthroughs/decommission/scenario.yaml))
+
+**Holds on uncertain units.** A run dies after `producer`'s effect and before
+its checkpoint; the next run leaves `producer` `uncertain` and `consumer`
+blocked, exit 4. `nyl hold` reverts `producer` to the desired document of its
+last receipt, from the copy the observed unit keeps, with the same uid, so the
+next `reconcile` runs `consumer` against `producer`'s previous outputs and
+reports `producer` `held`, exit 2, while `status` exits 4 for the condition.
+`resume` lifts only the hold; `recover --retry` clears the condition, and the
+next run executes both. A unit never reconciled is held with a marker without
+a uid, which runs exclude until `resume`. A hold sent while a reconcile is
+executing is delivered to that run (`NYL-HOLD-DELIVERED`, exit 0), which
+starts no held unit and writes the hold in its own commit.
+([`held-uncertain`](../nyl/tests/scenarios/walkthroughs/held-uncertain/scenario.yaml))
+
+**Drift repair.** Something outside Nyl changes the resources of an
+idempotent Command and of one that is not. `verify` records both as drifted,
+exit 3 with `NYL-VERIFY-DRIFT`; `status` shows them `drifted`, exit 2, and
+`plan` lists them as units that would execute. The next `reconcile` repairs
+the idempotent unit, listed under `driftRepaired`, and reports the other
+`awaiting-approval`, exit 2; a `--local` run executes it with `--approve`.
+Under `driftRepair: manual`, `reconcile` repairs nothing and the unit stays
+`drifted` until `reconcile --unit idempotent --reapply --reason …`, recorded
+under `reapplied`.
+([`drift`](../nyl/tests/scenarios/walkthroughs/drift/scenario.yaml))
 
 **Preview expiry.** Instance `pr-123` of template `preview` (`ttl: 7d`,
 `allowTeardown: true`) was last reconciled with `reconcile -e pr-123` eight days

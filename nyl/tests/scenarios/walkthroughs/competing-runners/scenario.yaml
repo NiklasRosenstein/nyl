@@ -48,3 +48,47 @@ steps:
     expect:
       imported: [web-image]
       executed: [kubernetes]
+
+  # A lease break: the runner dies after web-image's effect, before its
+  # checkpoint, and an operator breaks its lease instead of waiting for the
+  # deadline (Runs and leases, and Recovery, "Importing a broken run").
+  - commit: {branch: main, message: "Change the web page again", apply: patches/web-page-again}
+  - fault: {point: after-effect, unit: web-image}
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - nyl: [lease, break, -e, dev, --reason, "runner lost"]
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 0}
+
+  # Only reconcile, teardown, and recover take over a broken lease whose run
+  # is not imported; verify refuses and names `nyl recover -e dev`.
+  - nyl: [verify, -e, dev]
+    exit: 2
+    expect:
+      codes: [NYL-LEASE-BROKEN]
+      commits: {desired: 0, observed: 0}
+
+  # recover imports the dead run without executing, in one transition that
+  # records the break once, and consumes its run ref. web-image, which the
+  # dead run left without a checkpoint, is listed under recovered.
+  - nyl: [recover, -e, dev]
+    exit: 0
+    expect:
+      outcome: done
+      imported: []
+      recovered: [web-image]
+      lease-broken: true
+      commits: {desired: 1, observed: 1}
+
+  # No run ref is left to take over: the next run starts at once, converges
+  # web-image under its recovery policy, and publishes the new image.
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      recovered: [web-image]
+      executed: [kubernetes]
+      lease-broken: false
+      commits: {desired: 1, observed: 1}
+      units:
+        web-image: {condition: null, receipt: current}

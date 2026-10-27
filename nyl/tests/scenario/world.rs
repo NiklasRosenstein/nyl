@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 
-use super::format::{BranchStep, CommitStep, SquashMergeStep};
+use super::format::{BranchStep, CommitStep, FileStep, SquashMergeStep};
 
 /// The registry host tier 1 substitutes for `%REGISTRY%`; nothing listens there.
 pub const FAKE_REGISTRY: &str = "registry.invalid:5000";
@@ -48,6 +48,13 @@ impl World {
     /// The scenario's own temporary directory, `%SCENARIO_TMP%`.
     pub fn scenario_tmp(&self) -> PathBuf {
         self.root.path().join("scenario-tmp")
+    }
+
+    /// [`Self::scenario_tmp`] as units' scripts see it: with forward
+    /// slashes, because `sh` reads a Windows path's backslashes as escapes
+    /// and scripts write the path into JSON outputs.
+    pub fn scenario_tmp_for_scripts(&self) -> String {
+        self.scenario_tmp().display().to_string().replace('\\', "/")
     }
 
     /// The URL of `project.git`, `%PROJECT_URL%`.
@@ -90,7 +97,7 @@ impl World {
     }
 
     fn substitute(&self, text: &str) -> String {
-        text.replace("%SCENARIO_TMP%", &self.scenario_tmp().display().to_string())
+        text.replace("%SCENARIO_TMP%", &self.scenario_tmp_for_scripts())
             .replace("%PROJECT_URL%", &self.project_url())
             .replace("%REGISTRY%", FAKE_REGISTRY)
     }
@@ -168,6 +175,21 @@ impl World {
     }
 
     /// A `ref: {delete}` step: delete any ref in the state repository.
+    /// A `file` step: a change made outside Nyl beneath `%SCENARIO_TMP%`,
+    /// writing the file (and its parents) or removing it.
+    pub fn file(&self, step: &FileStep) -> Result<(), String> {
+        let path = self.scenario_tmp().join(&step.path);
+        match &step.content {
+            Some(content) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+                }
+                std::fs::write(&path, content).map_err(|error| format!("{}: {error}", path.display()))
+            }
+            None => std::fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display())),
+        }
+    }
+
     pub fn delete_ref(&self, reference: &str) {
         git(&self.bare(), &["update-ref", "-d", reference]);
     }

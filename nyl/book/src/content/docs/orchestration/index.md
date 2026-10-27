@@ -7,12 +7,14 @@ Orchestration is in development in milestone M3. Environments, their state in
 Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
 [Command](/nyl/orchestration/resource-guides/command/) units, one
 environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
-[`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs),
-and [`nyl status`](/nyl/reference/cli/status/), and recovery with
-[`nyl recover`](/nyl/reference/cli/recover/) and
-[`nyl verify`](/nyl/reference/cli/verify/) exist today. Teardown, holds,
-approvals, and runs over several environments follow. The
-[roadmap](/nyl/orchestration/roadmap/) tracks the milestones.
+[`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs,
+drift repair, and lifecycle work), and [`nyl status`](/nyl/reference/cli/status/),
+recovery with [`nyl recover`](/nyl/reference/cli/recover/) and
+[`nyl verify`](/nyl/reference/cli/verify/), and deletion with
+[`nyl teardown`](/nyl/reference/cli/teardown/),
+[`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), and `nyl state
+delete` exist today. Remote approvals and runs over several environments
+follow. The [roadmap](/nyl/orchestration/roadmap/) tracks the milestones.
 :::
 
 Orchestration makes Nyl a Git-driven reconciler for whole environments. Units
@@ -32,6 +34,9 @@ whether it starts on a workstation or in CI.
   commit, resolves references between units, decides what executes, and
   records the result.
 - [Recovery](/nyl/orchestration/recovery/) explains how a run takes over from
-  one that died, what an uncertain unit is, and how to recover it.
+  one that died, what an uncertain unit is, how to recover it, and how drift
+  is repaired.
+- [Deletion and holds](/nyl/orchestration/deletion/) explains how units leave
+  an environment, how they are torn down, and how a hold freezes one.
 - [Git storage](/nyl/reference/git-storage/) lists every repository and ref
   orchestration reads and writes.

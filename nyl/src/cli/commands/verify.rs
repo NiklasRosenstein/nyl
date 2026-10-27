@@ -9,6 +9,11 @@
 //! verify, or unknown drift) or the lease is held; 3 drift or a failing
 //! attestation; 4 cancelled by SIGINT or SIGTERM (`NYL-RUN-CANCELLED`,
 //! nothing recorded); 1 error; the most severe wins.
+//!
+//! A drifted unit's `NYL-VERIFY-DRIFT` fix says what the next reconcile does
+//! with it under the environment's stored `driftRepair` and the unit's
+//! recovery policy ([Drift](../../../../design/orchestration-core.md#drift);
+//! `nyl_orchestration::rules::verification::warnings`).
 
 use std::path::PathBuf;
 
@@ -68,6 +73,11 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         wait: args.wait_lease,
         local: None,
         cancellation: wiring.cancellation.clone(),
+        mode: nyl_orchestration::shell::run::RunMode::default(),
+        lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
+        reapply: false,
+        fail_fast: false,
+        reason: None,
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),

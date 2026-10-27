@@ -1,0 +1,123 @@
+# Holds on uncertain units: a hold keeps the desired document and uid of the
+# unit's last receipt, so consumers resolve against it while the producer is
+# investigated (design/orchestration-core.md, Recovery, "Holds on uncertain
+# units", and Deletion, holds, as amended by the part 5 decisions).
+contract: design/orchestration-core.md#recovery
+milestone: M3
+tiers: [1]                            # scripts faults
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [producer, consumer]
+      units:
+        producer: {receipt: current}
+
+  # Both change; the run dies after producer's effect, before its checkpoint.
+  - commit: {branch: main, message: "Release v2", apply: patches/v2}
+  - fault: {point: after-effect, unit: producer}
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - clock: {advance: 21m}             # producer's 10m timeout plus the 10m grace
+  - nyl: [reconcile, -e, dev]
+    exit: 4                           # "Command units without idempotent: true" recover manually
+    expect:
+      uncertain: [producer]
+      blocked: [consumer]
+      units:
+        producer: {condition: {state: uncertain}, receipt: stale}
+
+  # Holding the uncertain producer reverts it to its last receipt's document
+  # (the copy the observed unit keeps next to its receipt), keeping its uid.
+  - nyl: [hold, -e, dev, --unit, producer, --reason, "investigating v2"]
+    exit: 0
+    expect:
+      outcome: done
+      commits: {desired: 1, observed: 0}
+      units:
+        producer: {lifecycle: held, condition: {state: uncertain}, receipt: current, uid: same}
+  # The consumer runs against the producer's previous outputs; the held
+  # producer never progresses.
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: [consumer]
+      held: [producer]
+  - nyl: [status, -e, dev]
+    exit: 4                           # a condition decides the exit first
+    expect:
+      held: [producer]
+      current: [consumer]
+      units:
+        producer: {condition-state: uncertain, condition: {state: uncertain}}
+
+  # resume lifts the hold only; the condition still needs recover.
+  - nyl: [resume, -e, dev, --unit, producer, --reason, "investigated"]
+    exit: 0
+    expect:
+      outcome: done
+      units:
+        producer: {lifecycle: active, condition: {state: uncertain}, uid: same}
+  - nyl: [reconcile, -e, dev]
+    exit: 4
+    expect:
+      uncertain: [producer]
+  - nyl: [recover, -e, dev, --unit, producer, --retry, --reason, "verified v2 was not applied"]
+    exit: 0                           # clears the condition; recover executes nothing
+    expect:
+      commits: {desired: 0, observed: 1}
+      units:
+        producer: {condition: null, receipt: stale}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [producer, consumer]
+      units:
+        producer: {condition: null, receipt: current, uid: same}
+
+  # A unit never reconciled can be held too: a held marker without a uid,
+  # which reconcile excludes until resume.
+  - commit: {branch: main, message: "Add extra", apply: patches/add-extra}
+  - nyl: [hold, -e, dev, --unit, extra, --reason, "not yet"]
+    exit: 0
+    expect:
+      outcome: done
+      commits: {desired: 1, observed: 0}
+      units:
+        extra: {lifecycle: held, uid: none}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: []
+      held: [extra]
+      current: [producer, consumer]
+  - nyl: [resume, -e, dev, --unit, extra]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [extra]
+      units:
+        extra: {lifecycle: active, uid: new, receipt: current}
+
+  # A hold while a run holds the lease is delivered to that run through its
+  # signal ref (exit 0). The run reads its signals before it starts each
+  # unit, so it starts no held unit and writes the hold in its own commit.
+  - commit: {branch: main, message: "Release v3", apply: patches/v3}
+  - nyl: [reconcile, -e, dev]
+    id: running
+    pause: {point: executing, unit: producer}
+  - nyl: [hold, -e, dev, --unit, consumer, --reason, "check v3 first"]
+    exit: 0
+    expect:
+      codes: [NYL-HOLD-DELIVERED]
+      commits: {desired: 0, observed: 0}
+  - resume: running
+    exit: 2
+    expect:
+      executed: [producer]
+      held: [consumer]
+      units:
+        consumer: {lifecycle: held, receipt: current}

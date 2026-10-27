@@ -28,8 +28,23 @@ pub struct TransitionSummary {
     pub imported: Vec<UnitName>,
     /// A `nyl lease break` this run's lease took over.
     pub lease_broken: Option<Request>,
+    /// Units executed again because their latest drift observation was
+    /// `drifted`; printed only when not empty. Contract:
+    /// [Drift](../../../../design/orchestration-core.md#drift).
+    pub drift_repaired: Vec<UnitName>,
+    /// `nyl reconcile --reapply`: the units, with who asked and why;
+    /// printed only when present.
+    pub reapplied: Option<Reapplied>,
     /// Operation specifics, such as a move's source and target.
     pub details: BTreeMap<String, Value>,
+}
+
+/// The units `--reapply` executed again, with the request.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Reapplied {
+    #[serde(flatten)]
+    pub request: Request,
+    pub units: Vec<UnitName>,
 }
 
 /// The trailers of a transition commit.
@@ -74,6 +89,16 @@ pub fn message(summary: &TransitionSummary, trailers: &Trailers) -> String {
             text,
             "\nleaseBroken: {}",
             flow(&serde_json::to_value(broken).expect("requests serialize"))
+        );
+    }
+    if !summary.drift_repaired.is_empty() {
+        let _ = write!(text, "\ndriftRepaired: {}", list(&summary.drift_repaired));
+    }
+    if let Some(reapplied) = &summary.reapplied {
+        let _ = write!(
+            text,
+            "\nreapplied: {}",
+            flow(&serde_json::to_value(reapplied).expect("requests serialize"))
         );
     }
     for (key, value) in &summary.details {
@@ -147,6 +172,8 @@ mod tests {
             recovered: Vec::new(),
             imported: vec![UnitName::new("network").unwrap()],
             lease_broken: None,
+            drift_repaired: Vec::new(),
+            reapplied: None,
             details: BTreeMap::new(),
         };
         let trailers = Trailers {

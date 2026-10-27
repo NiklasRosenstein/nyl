@@ -87,6 +87,29 @@ impl ProcessRunner {
     }
 }
 
+/// How often a spawn that hits `ETXTBSY` is tried again.
+const BUSY_ATTEMPTS: u32 = 20;
+
+/// Spawn `command`, trying again while its program is busy.
+///
+/// Linux refuses to exec a file that is open for writing (`ETXTBSY`). A
+/// file just written by this process (a checked-out script) can stay open
+/// for writing in a child that another thread forks at that moment, until
+/// that child execs and closes it. The window is short, so the spawn is
+/// tried again with a growing pause instead of failing the unit.
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt + 1 < BUSY_ATTEMPTS => {
+                attempt += 1;
+                thread::sleep(StdDuration::from_millis(5 * u64::from(attempt)));
+            }
+            result => return result,
+        }
+    }
+}
+
 impl ToolRunner for ProcessRunner {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
         let mut masked = invocation
@@ -124,7 +147,7 @@ impl ToolRunner for ProcessRunner {
                 reason: format!("the run was cancelled by signal {signal}"),
             });
         }
-        let mut child = match command.spawn() {
+        let mut child = match spawn(&mut command) {
             Ok(child) => child,
             Err(error) => {
                 return Ok(ToolExit::NotStarted {
@@ -489,6 +512,46 @@ mod tests {
             ..ProcessRunner::new()
         };
         (runner, buffer)
+    }
+
+    /// Catches a unit failing with "Text file busy" when its script was
+    /// written just before it runs and a concurrent fork still holds the
+    /// file open for writing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_run_retries_a_spawn_while_the_program_is_busy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let script = directory.path().join("busy.sh");
+        let mut writer = std::fs::File::create(&script).unwrap();
+        writer.write_all(b"#!/bin/sh\necho ran\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The file stays open for writing until shortly after the spawn starts.
+        let closer = thread::spawn(move || {
+            thread::sleep(StdDuration::from_millis(30));
+            drop(writer);
+        });
+        let (runner, _) = quiet();
+        let exit = runner
+            .run(ToolInvocation {
+                program: script,
+                args: Vec::new(),
+                working_dir: directory.path().to_path_buf(),
+                env: BTreeMap::new(),
+                stdin: None,
+                timeout: None,
+                masked: Vec::new(),
+            })
+            .unwrap();
+        closer.join().unwrap();
+        match exit {
+            ToolExit::Exited { code, stdout, .. } => {
+                assert_eq!(code, 0);
+                assert_eq!(String::from_utf8_lossy(&stdout), "ran\n");
+            }
+            other => panic!("expected the script to run, got {other:?}"),
+        }
     }
 
     #[test]

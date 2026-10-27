@@ -3,7 +3,13 @@
 //! Contract: [Observed unit](../../../../design/orchestration-core.md#observed-unit):
 //! a receipt is current exactly when its unit's uid and its execution key
 //! equal the current desired document's. Readiness, reference resolution,
-//! status, and `nyl get` all ask this one function.
+//! status, and `nyl get` all ask this one function. Producer identity
+//! (the uids in provenance) never makes a receipt stale and is not part of
+//! the execution key: a consumer of a recreated producer runs again only
+//! when its own execution key changes, such as when it consumes an output
+//! that changed with the producer. A returning tombstone with an unchanged
+//! key is current at once, and the dependents of a replaced unit with an
+//! unchanged key stay current.
 
 use nyl_core::orchestration::state::{DesiredUnit, ObservedUnit};
 

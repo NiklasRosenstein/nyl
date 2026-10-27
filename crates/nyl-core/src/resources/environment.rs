@@ -79,6 +79,25 @@ pub struct EnvironmentSpec {
     /// CI deployment admission: `required` makes state-writing runs use the source of the current admission. Omitted, the group's, else `off`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<Admission>,
+    /// Whether `reconcile` repairs drift by itself: `converge` executes units whose latest drift observation is `drifted` again (units not safe to re-run await approval); `manual` leaves them `drifted` until `--reapply`. Omitted, the group's, else `converge`.
+    #[serde(rename = "driftRepair", default, skip_serializing_if = "Option::is_none")]
+    pub drift_repair: Option<DriftRepair>,
+}
+
+/// Whether reconcile repairs drift on its own.
+///
+/// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DriftRepair {
+    /// The next reconcile executes drifted units whose recovery policy is
+    /// `converge` again; a drifted unit that is not safe to re-run awaits
+    /// approval.
+    #[default]
+    Converge,
+    /// Reconcile repairs no drift by itself: drifted units stay `drifted`
+    /// until `nyl reconcile --unit <unit> --reapply --reason <text>`.
+    Manual,
 }
 
 /// Whether state-writing runs require a CI deployment admission.
@@ -207,6 +226,9 @@ pub struct EnvironmentGroupSpec {
     /// Default `admission` of the members.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<Admission>,
+    /// Default `driftRepair` of the members.
+    #[serde(rename = "driftRepair", default, skip_serializing_if = "Option::is_none")]
+    pub drift_repair: Option<DriftRepair>,
 }
 
 /// The state repository a group's members default to. Refs and paths stay
@@ -341,6 +363,7 @@ impl EnvironmentGroup {
             || spec.protected_refs.is_some()
             || spec.allow_unprotected_source.is_some()
             || spec.admission.is_some()
+            || spec.drift_repair.is_some()
     }
 }
 
@@ -386,8 +409,8 @@ pub fn sharing_group<'a>(
 /// and [Environment groups](../../../../design/orchestration-core.md#environment-groups).
 /// - `values` merge recursively: the group's beneath the Environment's, and
 ///   the Environment wins; arrays and scalars are replaced, objects merge.
-/// - `protectedRefs`, `allowUnprotectedSource`, and `admission` take the
-///   group's value when the Environment omits them.
+/// - `protectedRefs`, `allowUnprotectedSource`, `admission`, and
+///   `driftRepair` take the group's value when the Environment omits them.
 /// - `state` is left as written: the state location rule
 ///   (`nyl_orchestration::rules::state_location`) applies the group's
 ///   repository itself.
@@ -416,6 +439,9 @@ pub fn effective_environment(
     }
     if spec.admission.is_none() {
         spec.admission = group.spec.admission;
+    }
+    if spec.drift_repair.is_none() {
+        spec.drift_repair = group.spec.drift_repair;
     }
     Ok(effective)
 }
@@ -588,5 +614,53 @@ mod tests {
         }))
         .unwrap();
         assert!(sharing.has_shared_fields());
+    }
+
+    /// Catches a typo such as `driftRepair: off` being accepted (and read
+    /// as the default) instead of failing at discovery.
+    #[test]
+    fn test_drift_repair_parses_converge_and_manual_only() {
+        assert_eq!(environment(json!({})).unwrap().spec.drift_repair, None);
+        assert_eq!(
+            environment(json!({"driftRepair": "converge"}))
+                .unwrap()
+                .spec
+                .drift_repair,
+            Some(DriftRepair::Converge)
+        );
+        assert_eq!(
+            environment(json!({"driftRepair": "manual"})).unwrap().spec.drift_repair,
+            Some(DriftRepair::Manual)
+        );
+        assert!(environment(json!({"driftRepair": "off"})).is_err());
+    }
+
+    /// Catches a group's `driftRepair` overriding a member that declares
+    /// its own, or not applying to a member that omits it, and a group that
+    /// carries only `driftRepair` not counting as sharing (so two such
+    /// groups would silently compete).
+    #[test]
+    fn test_group_drift_repair_applies_only_when_the_environment_omits_it() {
+        let shared = group(
+            "production",
+            &json!({
+                "environmentSelector": {"matchLabels": {"stage": "production"}},
+                "driftRepair": "manual"
+            }),
+        );
+        assert!(shared.has_shared_fields());
+        let omitted = environment(json!({})).unwrap();
+        assert_eq!(
+            effective_environment(&omitted, std::slice::from_ref(&shared))
+                .unwrap()
+                .spec
+                .drift_repair,
+            Some(DriftRepair::Manual)
+        );
+        let declared = environment(json!({"driftRepair": "converge"})).unwrap();
+        assert_eq!(
+            effective_environment(&declared, &[shared]).unwrap().spec.drift_repair,
+            Some(DriftRepair::Converge)
+        );
     }
 }

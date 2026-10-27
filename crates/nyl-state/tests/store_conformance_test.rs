@@ -12,7 +12,7 @@ use nyl_core::orchestration::ports::{
 };
 use nyl_core::orchestration::state::{
     ApprovalIdentity, Attestation, DesiredUnit, Lease, LeaseKind, Observation, ObservationType, ObservedUnit,
-    Operation, Run, RunKind, Signal, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
+    Operation, Run, RunKind, Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
 use nyl_state::git::{CommitAuthor, GitStateStore};
@@ -501,8 +501,9 @@ fn test_run_refs_carry_checkpoints_and_signals_until_deleted() {
             api_version: StateV1,
             kind: SignalKind,
             run: run.run.clone(),
+            action: SignalAction::ConfirmRemoved,
             unit: UnitName::new("kubernetes").unwrap(),
-            phase1_commit: nyl_core::orchestration::ids::CommitId::new(COMMIT).unwrap(),
+            phase1_commit: Some(nyl_core::orchestration::ids::CommitId::new(COMMIT).unwrap()),
             by: "alice".to_owned(),
             identity: ApprovalIdentity::Local,
             reason: None,
@@ -1230,5 +1231,169 @@ fn test_local_writes_refuse_a_stale_base_and_full_refs_and_drop_branches_without
             "{}: the local branches survived the reset",
             subject.name
         );
+    }
+}
+
+/// The record `nyl state delete` writes: `record` with a `state-deleted` event.
+fn deleted_record(location: &StateLocation, name: &str) -> StateRecord {
+    let mut deleted = record(location, name);
+    deleted
+        .events
+        .push(nyl_core::orchestration::state::StateEvent::StateDeleted {
+            at: at(),
+            by: "alice".to_owned(),
+            reason: Some("decommission".to_owned()),
+        });
+    deleted
+}
+
+/// Instances, `state delete` (Q14, Q15): `clear` with a `record` removes
+/// every other file of the environment on both refs and leaves `state.yaml`
+/// as the deleted marker; another environment's directory on a shared ref
+/// stays; the refs and the history before the deletion stay readable.
+#[test]
+fn test_clear_with_a_record_leaves_only_the_deleted_marker() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let separate = separate(&subject);
+        let shared = location(&subject.repository, "nyl/previews", "nyl/previews", "pr-1");
+        let other = location(&subject.repository, "nyl/previews", "nyl/previews", "pr-2");
+        for (location, name, run) in [
+            (&separate, "dev", RUN_A),
+            (&shared, "pr-1", RUN_A),
+            (&other, "pr-2", RUN_B),
+        ] {
+            let environment = environment(name);
+            let version = store.take_lease(location, &environment, &lease(run), None).unwrap();
+            let base = store.snapshot(location).unwrap().tips;
+            let (desired, observed) = unit("seed");
+            let mut changes = init(location, name).changes;
+            changes.desired = BTreeMap::from([(UnitName::new("seed").unwrap(), Some(desired))]);
+            changes.observed = BTreeMap::from([(UnitName::new("seed").unwrap(), Some(observed))]);
+            let committed = store
+                .commit(location, &environment, &base, &transition(changes), &version)
+                .unwrap();
+            store
+                .release_lease(location, &environment, &committed.lease_version)
+                .unwrap();
+        }
+        for (location, name, run) in [(&separate, "dev", RUN_A), (&shared, "pr-1", RUN_A)] {
+            let environment = environment(name);
+            let before = store.snapshot(location).unwrap();
+            let version = store.take_lease(location, &environment, &lease(run), None).unwrap();
+            let committed = store
+                .commit(
+                    location,
+                    &environment,
+                    &before.tips,
+                    &transition(TransitionChanges {
+                        clear: true,
+                        record: Some(deleted_record(location, name)),
+                        ..TransitionChanges::default()
+                    }),
+                    &version,
+                )
+                .unwrap();
+            assert!(
+                committed.desired.is_some() && committed.observed.is_some(),
+                "{}",
+                subject.name
+            );
+            store
+                .release_lease(location, &environment, &committed.lease_version)
+                .unwrap();
+            let after = store.snapshot(location).unwrap();
+            let record = after.record.as_ref().expect("state.yaml stays");
+            assert!(record.deleted().is_some(), "{}: the marker", subject.name);
+            assert!(
+                after.desired.is_empty() && after.observed.is_empty(),
+                "{}",
+                subject.name
+            );
+            assert!(after.environment.is_none(), "{}", subject.name);
+            // The history before the deletion stays readable.
+            let earlier = store
+                .snapshot_at(location, &before.tips)
+                .unwrap_or_else(|error| panic!("{}: history unreadable: {error}", subject.name));
+            assert_eq!(earlier.desired.len(), 1, "{}: history kept", subject.name);
+        }
+        let kept = store.snapshot(&other).unwrap();
+        assert_eq!(kept.desired.len(), 1, "{}: the other environment stays", subject.name);
+        assert!(kept.record.unwrap().deleted().is_none(), "{}", subject.name);
+    }
+}
+
+/// Runs and leases, item 8: `commit_unchanged` records the transition with
+/// an observed commit although no document changes.
+#[test]
+fn test_commit_unchanged_writes_an_observed_commit_without_changes() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let committed = initialized(store, &location, &dev);
+        let before = store.snapshot(&location).unwrap();
+        let unchanged = store
+            .commit(
+                &location,
+                &dev,
+                &before.tips,
+                &transition(TransitionChanges {
+                    commit_unchanged: true,
+                    ..TransitionChanges::default()
+                }),
+                &committed.lease_version,
+            )
+            .unwrap();
+        assert!(unchanged.observed.is_some(), "{}", subject.name);
+        assert_eq!(
+            unchanged.desired, None,
+            "{}: the desired side changed nothing",
+            subject.name
+        );
+        let after = store.snapshot(&location).unwrap();
+        assert_ne!(after.tips.observed, before.tips.observed, "{}", subject.name);
+        assert_eq!(after.tips.desired, before.tips.desired, "{}", subject.name);
+        assert_eq!(after.record, before.record, "{}", subject.name);
+    }
+}
+
+/// Signals (Q28): a `hold` signal round-trips without a phase 1 commit, and
+/// `delete_signals` removes a run's signal ref and is a no-op without one.
+#[test]
+fn test_hold_signals_round_trip_and_delete_signals_removes_them() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let run = RunId::new(RUN_A).unwrap();
+        store.delete_signals(&location, &dev, &run).unwrap();
+        let signal = Signal {
+            api_version: StateV1,
+            kind: SignalKind,
+            run: run.clone(),
+            action: SignalAction::Hold,
+            unit: UnitName::new("network").unwrap(),
+            phase1_commit: None,
+            by: "alice".to_owned(),
+            identity: ApprovalIdentity::Local,
+            reason: Some("incident 4711".to_owned()),
+            at: at(),
+            from: "workstation".to_owned(),
+        };
+        store.send_signal(&location, &dev, &signal).unwrap();
+        assert_eq!(
+            store.signals(&location, &dev, &run).unwrap(),
+            vec![signal],
+            "{}",
+            subject.name
+        );
+        store.delete_signals(&location, &dev, &run).unwrap();
+        assert!(
+            store.signals(&location, &dev, &run).unwrap().is_empty(),
+            "{}",
+            subject.name
+        );
+        store.delete_signals(&location, &dev, &run).unwrap();
     }
 }

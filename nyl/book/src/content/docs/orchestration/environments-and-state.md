@@ -27,6 +27,16 @@ never overwrite state. Nyl never force-pushes a state ref. Protect the state
 branches against force pushes and deletion, and give push access to the CI
 identity and the operators who run `nyl` commands.
 
+When a run dies without releasing the lease, it holds the environment until
+its deadline passes, or until
+[`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break) declares it
+gone. A broken lease is taken over only by an operation that imports the
+dead run, `nyl reconcile`, `nyl teardown`, or `nyl recover -e <env>`, which
+records the break in its transition commit. Every other command that writes
+state exits 2 with `NYL-LEASE-BROKEN` and names `nyl recover -e <env>`, so
+the dead run's effects are recorded before anything else changes the
+environment. See [Breaking a lease](/nyl/orchestration/recovery/#breaking-a-lease).
+
 ## Local runs
 
 Every command that reads an environment's remote state keeps the clone's own
@@ -68,8 +78,10 @@ pushing state:
 - It never imports remote run refs, so while remote state has runs to take
   over (finished, past their deadline, or the holder of a broken lease) it
   exits 1 with `NYL-LOCAL-RUN-LEFTOVERS` before taking the lease, leaving the
-  lease and any break as they were; an ordinary `nyl reconcile -e <env>`
-  takes them over first.
+  lease and any break as they were; a remote `nyl reconcile -e <env>` or
+  `nyl recover -e <env>` takes them over first. Under the remote lease, it
+  also refuses a broken remote lease whose holder left no run ref, with
+  `NYL-LEASE-BROKEN` (exit 2), since only an import records the break.
 - `nyl status` and `nyl get` with `--local` show the local view.
 
 Once the remote moves, the local branches have diverged and Nyl stops

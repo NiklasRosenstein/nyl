@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{DriverOperation, ExecutionContext, Supported};
+use nyl_core::orchestration::driver::{DriverOperation, DriverSet, ExecutionContext, Supported};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, TransitionChanges};
 use nyl_core::orchestration::state::{Operation, StateLocation};
@@ -52,6 +52,8 @@ use super::run::{
     RunRequest,
 };
 use super::{store_error, Settings};
+use crate::rules::drift::stored_drift_repair;
+use crate::rules::selection::execution_recovery;
 use crate::rules::sources::effective_commit;
 use crate::rules::unit_state::receipt_state;
 use crate::rules::verification::{records, targets, warnings, Records, Target};
@@ -107,7 +109,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
         .collect();
     if verified.is_empty() {
         // Nothing to verify writes nothing, so it needs no lease.
-        report_units(&mut report, &snapshot, &planned, Vec::new());
+        report_units(&mut report, &snapshot, &planned, Vec::new(), context.drivers);
         return finish(report);
     }
 
@@ -119,6 +121,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
         environment,
         &run,
         Operation::Verify,
+        crate::rules::lease::BrokenLease::Refuse,
         longest,
         request.wait,
         &request.cancellation,
@@ -135,7 +138,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
     if let Err(finding) = holding(context, request, &mut held, &mut report) {
         report.errors.push(finding);
     }
-    if let Err(error) = lease::release(base, &held) {
+    if let Err(error) = lease::release(base, &held, true) {
         report.warnings.push(store_error(environment, &error));
     }
     finish(report)
@@ -172,7 +175,7 @@ fn holding(
             changes.attestations.insert(result.name.clone(), attestations);
         }
     }
-    report_units(report, &snapshot, &planned, results);
+    report_units(report, &snapshot, &planned, results, context.drivers);
     if changes.is_empty() {
         return Ok(());
     }
@@ -321,7 +324,11 @@ fn project_dirs(
     let mut located: BTreeMap<CommitId, Result<String, String>> = BTreeMap::new();
     let mut projects = BTreeMap::new();
     for name in names {
-        let revision = &snapshot.desired[*name].source_revision;
+        // Only rendered documents have receipts to verify; a held marker has none.
+        let Some(revision) = &snapshot.desired[*name].source_revision else {
+            projects.insert((*name).clone(), Err(format!("{name} has never been rendered")));
+            continue;
+        };
         let project = located
             .entry(revision.clone())
             .or_insert_with(|| {
@@ -362,6 +369,7 @@ fn driver_failure(name: &UnitName, message: String, fix: &str) -> Verified {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One unit's verification in order: locate, check out, verify, record.
 fn verify_unit(
     context: &RunContext<'_>,
     request: &RunRequest,
@@ -392,7 +400,10 @@ fn verify_unit(
         return failed(format!("no driver serves kind {}", unit.unit.kind));
     };
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-    let commit = match effective_commit(spec, &driver.source_fields(spec), &unit.source_revision) {
+    let Some(revision) = &unit.source_revision else {
+        return failed(format!("{name} has never been rendered"));
+    };
+    let commit = match effective_commit(spec, &driver.source_fields(spec), revision) {
         Ok(commit) => commit,
         Err(message) => return failed(message),
     };
@@ -421,6 +432,7 @@ fn verify_unit(
         tools: context.tools,
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
+        teardown_wait: None,
     };
     let outcome = driver.verify(&ctx, unit, receipt);
     drop(ctx);
@@ -478,7 +490,9 @@ fn report_units(
     snapshot: &EnvironmentSnapshot,
     planned: &BTreeMap<UnitName, Target>,
     results: Vec<Verified>,
+    drivers: &DriverSet,
 ) {
+    let drift_repair = stored_drift_repair(snapshot.environment.as_ref());
     let mut results: BTreeMap<UnitName, Verified> = results
         .into_iter()
         .map(|result| (result.name.clone(), result))
@@ -499,7 +513,8 @@ fn report_units(
             }
             None => VerifyResult::NoReceipt.into(),
         };
-        entry.warnings = warnings(&report.name, name, &verification);
+        let policy = execution_recovery(drivers, desired);
+        entry.warnings = warnings(&report.name, name, &verification, policy, drift_repair);
         entry.verification = Some(verification);
         report.units.insert(name.clone(), entry);
     }

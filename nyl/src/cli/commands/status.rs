@@ -56,8 +56,12 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
     };
     let state = local_store.as_ref().map_or(&store as &dyn StateStore, |local| local);
     let context = session.context(state, wiring, None);
-    let mut report =
-        nyl_orchestration::shell::inspect::status(&context, &session.resolved.name, &session.resolved.location);
+    let mut report = nyl_orchestration::shell::inspect::status_with(
+        &context,
+        &session.resolved.name,
+        &session.resolved.location,
+        Some(wiring.drivers),
+    );
     session.add_warnings(&mut report);
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))

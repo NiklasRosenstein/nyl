@@ -84,6 +84,7 @@ impl World {
             tools,
             commit_identity: None,
             cache_dir: self.root.path().join("cache"),
+            teardown_wait: None,
         }
     }
 
@@ -123,8 +124,8 @@ fn desired(spec: Value) -> DesiredUnit {
             kind: "Command".to_owned(),
         },
         lifecycle: Lifecycle::Active,
-        source_commit: CommitId::new("a".repeat(40)).unwrap(),
-        source_revision: CommitId::new("a".repeat(40)).unwrap(),
+        source_commit: Some(CommitId::new("a".repeat(40)).unwrap()),
+        source_revision: Some(CommitId::new("a".repeat(40)).unwrap()),
         spec: spec.clone(),
         resolved_spec: Some(spec),
         provenance: BTreeMap::new(),

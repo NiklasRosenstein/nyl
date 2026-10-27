@@ -11,7 +11,7 @@ Nyl decided and observed.
 
 :::note
 Orchestration is being built in milestone M3. These commands create,
-maintain, and repair state; [`nyl reconcile`](/nyl/reference/cli/reconcile/) runs units
+maintain, repair, and delete state; [`nyl reconcile`](/nyl/reference/cli/reconcile/) runs units
 against it.
 :::
 
@@ -35,7 +35,9 @@ it again. Commits of environments sharing the ref through `path` never cause
 this: Nyl rebases past them.
 
 `--fresh` starts over deliberately: every unit becomes a new incarnation and
-executes again at the next reconcile.
+executes again at the next reconcile. It is also the way to start over at a
+location whose state was deleted with [`nyl state delete`](#nyl-state-delete):
+a plain `state init` there exits 1 with `NYL-STATE-DELETED`.
 
 ## `nyl state move`
 
@@ -70,6 +72,68 @@ nyl state forget -e dev --unit cache --reason "removed by hand"
 
 Drops a `retained` tombstone or a `pending-teardown` unit from state without
 touching its resources. A unit that returns later starts a new incarnation.
+
+## `nyl state delete`
+
+```bash
+nyl state delete -e pr-123 --reason "pull request closed"
+nyl state delete -e staging --teardown --reason "decommission staging"
+```
+
+Removes an environment's state, for template instances and declared
+environments alike, once no unit has an incarnation left. One commit per
+state ref, with the operation `state-delete`, removes every file of the
+environment's state, including held desired files without an incarnation and
+records of units whose resources were left in place, and leaves `state.yaml`
+with a `state-deleted` event as the deleted marker. The state refs and their
+history stay: on a ref shared through `path`, only the environment's
+directory changes, and its own refs keep the history of everything removed.
+Evidence and signal refs of the environment are deleted.
+
+It refuses, exit 1, while:
+
+- a unit still has an incarnation, a teardown in progress, or a recorded
+  teardown request (`NYL-STATE-DELETE-INCARNATIONS`, listing the units and
+  naming `--teardown`, `nyl teardown --unit`, and `nyl state forget`);
+- a run ref no run has imported yet exists, because it may be the only
+  record of units its run created (`NYL-STATE-DELETE-INCARNATIONS`, naming
+  `nyl reconcile -e <env>` and `nyl recover -e <env>`).
+
+`--teardown` runs [`nyl teardown --all`](/nyl/reference/cli/teardown/) first
+and continues to the deletion in the same command, once the state holds no
+incarnation, no deleting unit, and no recorded teardown request. Otherwise it
+stops and deletes nothing: exit 2 when every remaining unit waits (a teardown
+wait, an approval, dependents, readiness, or a held unit that still has an
+incarnation), and exit 1 when a teardown failed or is uncertain. The
+teardown's findings are kept, and its report is under `details.teardown`.
+Running the command again resumes. `--allow-dependents`,
+`--allow-incomplete`, and `--source <revision>` apply to the teardown and
+require `--teardown`. A lease broken with `nyl lease break` whose run is not
+imported refuses with `NYL-LEASE-BROKEN` before the teardown.
+
+Every later command for the environment, including `reconcile`, `status`,
+and `hold`, exits 1 with `NYL-STATE-DELETED`, naming both ways forward:
+removing the Environment from source to decommission it, or `nyl state init
+-e <env> --fresh` to start it over. A pipeline that still runs the
+environment fails visibly instead of re-creating anything. Nyl reads the
+marker from `state.yaml`, never from commit history.
+
+```console
+$ nyl state delete -e dev --reason "decommission"
+state-delete dev: done
+  desired: 412024ed0e8a7fcc259f628136bfb2d34d25973c
+  observed: 54e76c2392b75867ce1ef67444c77e4cb3b715de
+  removed: ["migrate"]
+$ nyl status -e dev
+dev: no units
+error NYL-STATE-DELETED: the state of dev was deleted with `nyl state delete`
+  fix: remove the Environment dev from source to decommission it, or start it over with `nyl state init -e dev --fresh`
+$ nyl state init -e dev --fresh --reason "start over"
+state-init dev: done
+  desired: fc0c49c407eff5f6b2c4e92fea5f530e287aacfa
+  observed: e04a73265608a6e3775bbdb42a975e3d58be4578
+  fresh: every unit becomes a new incarnation and executes again at the next reconcile
+```
 
 ## `nyl state reset`
 
@@ -134,13 +198,15 @@ nyl lease break -e dev --reason "runner was killed"
 ```
 
 Declares the lease holder gone, for example after a forced kill. The holder is
-the lease, or a live run whose lease ref is already gone. The next run
-takes over at once instead of waiting for the lease's deadline, and records
-who broke the lease and why in its transition commit. The break stays in effect
-until a `reconcile` takes the broken run over: `verify`, `recover`, and the
-state operations, which do not, put the broken lease back when they finish. A
-holder that is in fact still running can still cause effects, but it can no
-longer write state.
+the lease, or a live run whose lease ref is already gone. Only an importer
+takes the broken lease over at once, without waiting for its deadline:
+`nyl reconcile`, `nyl teardown`, or `nyl recover -e <env>`, which imports
+the broken run's results without executing anything. It records who broke
+the lease and why in its transition commit. Until then every other state
+writer, such as `hold`, `resume`, `verify`, and the state operations,
+refuses with `NYL-LEASE-BROKEN` (exit 2), naming `nyl recover -e <env>`. A
+lease that is already broken is reported as such. A holder that is in fact
+still running can still cause effects, but it can no longer write state.
 
 ## Options and exit codes
 
@@ -156,7 +222,10 @@ from the same clock as the command's other time-based decisions. `state
 reset` writes no commit, but still resolves the identity.
 
 They exit 0 when done or when nothing needed to change, 2 while another run
-holds the lease (`NYL-LEASE-HELD`), and 1 for every other refusal; each error
+holds the lease (`NYL-LEASE-HELD`), a broken lease waits for its import
+(`NYL-LEASE-BROKEN`), or `state delete --teardown` waits as `teardown` does,
+and 1 for every other refusal, including `NYL-STATE-DELETED` on a deleted
+location; each error
 and warning carries a stable code and its fix. SIGINT or SIGTERM during
 `--wait-lease` refuses with `NYL-RUN-CANCELLED` (exit 1) and writes nothing.
 Every command that writes

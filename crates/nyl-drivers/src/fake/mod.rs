@@ -13,10 +13,13 @@
 //! can also give `FakeInfra` the `inspect` recovery policy
 //! ([`Script::recover_by`]) and script its `inspect` results: a scripted
 //! success reports the effects applied, a failure not applied, and an
-//! uncertain result unknown.
+//! uncertain result unknown. A scripted `verify` decides the fake's next
+//! drift verdict ([`Script::verification`]): `drifted`, `clean` for a
+//! success, and `unknown` for an uncertain result.
 
 mod image;
 mod infra;
+mod observer;
 mod publication;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -25,13 +28,14 @@ use std::sync::{Arc, Mutex};
 
 use nyl_core::orchestration::driver::{DriverError, DriverOperation, DriverResult, Outcome, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
-use nyl_core::orchestration::state::FailureCategory;
+use nyl_core::orchestration::state::{Drift, FailureCategory};
 use serde_json::Value;
 
 use crate::command::resolved_spec;
 
 pub use image::FakeImage;
 pub use infra::FakeInfra;
+pub use observer::FakeObserver;
 pub use publication::FakePublication;
 
 /// API version of the fake kinds.
@@ -49,6 +53,8 @@ pub enum Scripted {
     Succeeded {
         outputs: Option<Value>,
     },
+    /// `verify` only: the resources no longer match the receipt.
+    Drifted,
 }
 
 /// Queued results by unit and operation name.
@@ -95,12 +101,32 @@ impl Script {
             .and_then(VecDeque::pop_front)
     }
 
+    /// The scripted drift verdict of the fake's next `verify` of `unit`, or
+    /// `None` when none is queued and the fake decides itself. A scripted
+    /// failure is a verification error, which records no observation.
+    fn verification(&self, unit: &UnitName) -> DriverResult<Option<Drift>> {
+        Ok(match self.take(unit, DriverOperation::Verify) {
+            None => None,
+            Some(Scripted::Drifted) => Some(Drift::Drifted {
+                summary: "scripted drift".to_owned(),
+            }),
+            Some(Scripted::Succeeded { .. }) => Some(Drift::Clean),
+            Some(Scripted::Uncertain) => Some(Drift::Unknown {
+                reason: "scripted unknown verify".to_owned(),
+            }),
+            Some(Scripted::Failed { .. }) => {
+                return Err(DriverError::before_effects("scripted verify failure"));
+            }
+        })
+    }
+
     /// The scripted outcome of a reconcile or teardown, when one is queued.
     /// A scripted success falls through to the fake's own behavior with
-    /// replaced outputs, reported through `outputs`.
+    /// replaced outputs, reported through `outputs`; a `drifted` script
+    /// only applies to `verify`, so it falls through unchanged.
     fn outcome(&self, unit: &UnitName, operation: DriverOperation) -> ScriptedOutcome {
         match self.take(unit, operation) {
-            None => ScriptedOutcome::Run { outputs: None },
+            None | Some(Scripted::Drifted) => ScriptedOutcome::Run { outputs: None },
             Some(Scripted::Succeeded { outputs }) => ScriptedOutcome::Run { outputs },
             Some(Scripted::Uncertain) => ScriptedOutcome::Return(Outcome::Uncertain {
                 reason: format!("scripted uncertain {}", operation.as_str()),
@@ -207,8 +233,8 @@ mod tests {
                 kind: "OpenTofu".to_owned(),
             },
             lifecycle: Lifecycle::Active,
-            source_commit: CommitId::new("a".repeat(40)).unwrap(),
-            source_revision: CommitId::new("a".repeat(40)).unwrap(),
+            source_commit: Some(CommitId::new("a".repeat(40)).unwrap()),
+            source_revision: Some(CommitId::new("a".repeat(40)).unwrap()),
             spec: spec.clone(),
             resolved_spec: Some(spec),
             provenance: BTreeMap::new(),
@@ -234,6 +260,7 @@ mod tests {
             tools,
             commit_identity: None,
             cache_dir: directory.path().join("cache"),
+            teardown_wait: None,
         }
     }
 
@@ -288,6 +315,7 @@ mod tests {
         let mut deleting = unit.clone();
         deleting.lifecycle = Lifecycle::Deleting {
             deletion: nyl_core::orchestration::state::Deletion {
+                hold: false,
                 reason: DeletionReason::Omission,
                 intent: DeletionIntent::Teardown,
                 teardown: None,
@@ -316,6 +344,84 @@ mod tests {
         // Equal inputs keep consumers current; changed inputs change the outputs.
         assert_eq!(outputs("10.0.0.0/16"), outputs("10.0.0.0/16"));
         assert_ne!(outputs("10.0.0.0/16"), outputs("10.1.0.0/16"));
+    }
+
+    fn receipt(unit: &DesiredUnit) -> nyl_core::orchestration::state::Receipt {
+        nyl_core::orchestration::state::Receipt {
+            execution_key: unit.execution_key.clone().unwrap(),
+            behavior_version: 1,
+            run: nyl_core::orchestration::ids::RunId::new("00000000-0000-7000-8000-0000000000aa").unwrap(),
+            read_desired: None,
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            versions: BTreeMap::new(),
+            approval: None,
+            provenance: BTreeMap::new(),
+            outputs: json!({}),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn drift_of(verification: DriverResult<Supported<nyl_core::orchestration::driver::Verification>>) -> Drift {
+        match verification.unwrap() {
+            Supported::Supported(verification) => verification.drift,
+            Supported::Unsupported => panic!("the fakes verify"),
+        }
+    }
+
+    /// A scenario's `driver: {operation: verify, outcome: drifted}` step is
+    /// how tier 1 makes a fake unit drift; if the verdict never reached the
+    /// fakes' `verify`, drift scenarios would only ever see clean units.
+    #[test]
+    fn test_scripted_drift_reaches_the_fakes_verify_once() {
+        let directory = TempDir::new().unwrap();
+        let script = Script::new();
+        let image = desired(
+            "web-image",
+            json!({"context": {"path": "web"}, "repository": "registry.test/web"}),
+        );
+        let backend = directory.path().join("tofu/dev-network.tfstate");
+        let network = desired(
+            "network",
+            json!({"source": {"path": "infra"}, "backend": {"path": backend.to_str().unwrap()},
+                   "variables": {"cidr": "10.0.0.0/16"}, "outputs": {"vpcId": {"type": "string"}}}),
+        );
+        let infra = FakeInfra::new(script.clone());
+        let Supported::Supported(Outcome::Succeeded { .. }) =
+            infra.reconcile(&context(&directory, &NoTools, None), &network).unwrap()
+        else {
+            panic!("the network applies");
+        };
+        for name in ["web-image", "network"] {
+            script.push(
+                UnitName::new(name).unwrap(),
+                DriverOperation::Verify,
+                &Scripted::Drifted,
+                1,
+            );
+        }
+        let image_driver = FakeImage::new(script.clone());
+        let verify_image = || image_driver.verify(&context(&directory, &NoTools, None), &image, &receipt(&image));
+        let verify_network = || infra.verify(&context(&directory, &NoTools, None), &network, &receipt(&network));
+        assert!(matches!(drift_of(verify_image()), Drift::Drifted { .. }));
+        assert!(matches!(drift_of(verify_network()), Drift::Drifted { .. }));
+        // Only the next call is scripted: afterwards each fake decides itself,
+        // and the applied network still matches its state file.
+        assert_eq!(drift_of(verify_image()), Drift::Clean);
+        assert_eq!(drift_of(verify_network()), Drift::Clean);
+        // A drift script applies to verify only; a reconcile runs as usual.
+        script.push(
+            UnitName::new("web-image").unwrap(),
+            DriverOperation::Reconcile,
+            &Scripted::Drifted,
+            1,
+        );
+        assert!(matches!(
+            image_driver
+                .reconcile(&context(&directory, &NoTools, None), &image)
+                .unwrap(),
+            Supported::Supported(Outcome::Succeeded { .. })
+        ));
     }
 
     #[test]

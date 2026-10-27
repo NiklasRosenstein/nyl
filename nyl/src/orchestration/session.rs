@@ -149,6 +149,23 @@ impl Session {
         request: &RunRequest,
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
+        let mut report = self.run_with(wiring, store, identity, request, operation)?;
+        self.add_warnings(&mut report);
+        Ok(report)
+    }
+
+    /// [`Self::run`] for an operation on the run path whose report is not a
+    /// [`RunReport`], such as `recover_environment` and `state_delete`
+    /// (a `StateOperationReport`): the same sources, renderer, drivers,
+    /// workspace, prompt, and observer, without the environment's warnings.
+    pub fn run_with<T>(
+        &self,
+        wiring: &Wiring<'_>,
+        store: &dyn StateStore,
+        identity: Option<&CommitIdentity>,
+        request: &RunRequest,
+        operation: impl FnOnce(&RunContext<'_>, &RunRequest) -> T,
+    ) -> Result<T, Stop> {
         let sources = self.sources()?;
         let renderer = self.renderer();
         let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
@@ -162,10 +179,10 @@ impl Session {
             workspace: workspace.path(),
             process_env: &wiring.process_env,
             commit_identity: identity,
+            observer: wiring.observer,
+            prompt: wiring.prompt,
         };
-        let mut report = operation(&context, request);
-        self.add_warnings(&mut report);
-        Ok(report)
+        Ok(operation(&context, request))
     }
 
     /// Add the warnings of resolving the environment to `report`.
@@ -216,12 +233,17 @@ impl Session {
             wait: options.wait,
             local: options.local.clone(),
             cancellation: options.cancellation.clone(),
+            mode: options.mode.clone(),
+            lifecycle: options.lifecycle,
+            reapply: options.reapply,
+            fail_fast: options.fail_fast,
+            reason: options.reason.map(str::to_owned),
         })
     }
 }
 
 /// Unit names as an option names them; `flag` names the option in the finding.
-fn unit_names(flag: &str, units: &[String]) -> Result<BTreeSet<UnitName>, Finding> {
+pub fn unit_names(flag: &str, units: &[String]) -> Result<BTreeSet<UnitName>, Finding> {
     units
         .iter()
         .map(|unit| {
@@ -266,6 +288,17 @@ pub struct RunOptions<'a> {
     pub local: Option<nyl_orchestration::shell::local::LocalRun>,
     /// The wiring's cancellation for `reconcile` and `verify`; never set for `plan`.
     pub cancellation: nyl_orchestration::shell::run::Cancellation,
+    /// The operation on the run path: reconcile, a recover import, or a teardown.
+    pub mode: nyl_orchestration::shell::run::RunMode,
+    /// `--allow-teardown`, `--allow-dependents`, `--allow-incomplete`,
+    /// `--leaving`, `--confirm-removed`, and `--hold`.
+    pub lifecycle: nyl_orchestration::shell::run::LifecycleOptions,
+    /// `reconcile --reapply` (with `--unit`).
+    pub reapply: bool,
+    /// `--fail-fast` of `reconcile` and `teardown`.
+    pub fail_fast: bool,
+    /// `--reason` of an operator action.
+    pub reason: Option<&'a str>,
 }
 
 /// `environment` as a name for a report of a command that stopped before
@@ -379,7 +412,7 @@ fn table(report: &RunReport) -> String {
             .collect::<Vec<_>>();
         let headers: &[&str] = match report.kind {
             ReportKind::PlanReport => &["UNIT", "KIND", "STATE", "RECEIPT", "CHANGES", "DETAIL"],
-            ReportKind::ReconcileReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
+            ReportKind::ReconcileReport | ReportKind::TeardownReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
             ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
         };
@@ -413,30 +446,50 @@ pub fn cell_label(value: Option<impl serde::Serialize>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
+/// The state or result cell of a unit: its name, with the condition of a
+/// held or deleting unit next to it, such as `held (uncertain)`.
+pub fn state_cell(unit: &UnitReport) -> String {
+    let outcome = unit.outcome_name().unwrap_or("-");
+    match unit.condition {
+        Some(condition) => format!("{outcome} ({})", cell_label(Some(condition))),
+        None => outcome.to_owned(),
+    }
+}
+
+/// The kind cell of a unit: `-` for a held marker, which names no kind.
+pub fn kind_cell(unit: &UnitReport) -> String {
+    if unit.kind.is_empty() {
+        "-".to_owned()
+    } else {
+        unit.kind.clone()
+    }
+}
+
 fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
     let dash = || "-".to_owned();
-    let outcome = unit.outcome_name().map_or_else(dash, str::to_owned);
+    let outcome = state_cell(unit);
     let receipt = cell_label(unit.receipt);
     let detail = detail(unit);
     let cells = match kind {
         ReportKind::PlanReport => {
             let changes = cell_label(unit.changes);
-            vec![name.to_string(), unit.kind.clone(), outcome, receipt, changes, detail]
+            vec![name.to_string(), kind_cell(unit), outcome, receipt, changes, detail]
         }
-        ReportKind::ReconcileReport | ReportKind::VerifyReport => {
-            vec![name.to_string(), unit.kind.clone(), outcome, detail]
+        ReportKind::ReconcileReport | ReportKind::TeardownReport | ReportKind::VerifyReport => {
+            vec![name.to_string(), kind_cell(unit), outcome, detail]
         }
         ReportKind::StatusReport => {
             let last_run = unit.last_run.as_ref().map_or_else(dash, ToString::to_string);
-            vec![name.to_string(), unit.kind.clone(), outcome, receipt, last_run, detail]
+            vec![name.to_string(), kind_cell(unit), outcome, receipt, last_run, detail]
         }
     };
     cells.into_iter().map(Cell::plain).collect()
 }
 
 /// The most useful single line about a unit: its plan error, blockers,
-/// failure message, or driver summary.
-fn detail(unit: &UnitReport) -> String {
+/// failure message, or driver summary, followed by a held unit's pending
+/// changes (`pending changes from <commit>`) and the drift observation.
+pub fn detail(unit: &UnitReport) -> String {
     if let Some(error) = &unit.plan_error {
         return format!("plan failed: {error}");
     }
@@ -454,11 +507,27 @@ fn detail(unit: &UnitReport) -> String {
     if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
         return reason.clone();
     }
-    unit.message
-        .clone()
-        .or_else(|| unit.summary.clone())
-        .map(|text| text.lines().next().unwrap_or_default().to_owned())
-        .unwrap_or_default()
+    let mut parts = Vec::new();
+    if let Some(pending) = &unit.pending {
+        parts.push(format!("pending changes from {pending}"));
+    }
+    if let Some(text) = unit.message.as_ref().or(unit.summary.as_ref()) {
+        parts.push(text.lines().next().unwrap_or_default().to_owned());
+    }
+    if let Some(drift) = &unit.drift {
+        parts.push(format!("drift: {}", drift.result));
+    }
+    parts.join("; ")
+}
+
+/// A publication's teardown readiness: `ready`, or the unmet requirements.
+pub fn readiness_cell(unit: &UnitReport) -> String {
+    use nyl_orchestration::run_report::TeardownReadiness;
+    match &unit.teardown_readiness {
+        None => "-".to_owned(),
+        Some(TeardownReadiness::Ready) => "ready".to_owned(),
+        Some(TeardownReadiness::Incomplete { reasons }) => format!("incomplete: {}", reasons.join("; ")),
+    }
 }
 
 /// Warnings and errors of a report, as printed to stderr.

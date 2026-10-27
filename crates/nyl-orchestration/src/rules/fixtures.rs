@@ -79,8 +79,8 @@ pub fn desired(unit: &str, kind: &str, spec: Value, seed: &str) -> DesiredUnit {
         kind: DesiredUnitKind,
         unit: identity(unit, kind),
         lifecycle: Lifecycle::Active,
-        source_commit: commit(COMMIT),
-        source_revision: commit(COMMIT),
+        source_commit: Some(commit(COMMIT)),
+        source_revision: Some(commit(COMMIT)),
         spec,
         resolved_spec: None,
         provenance: BTreeMap::new(),
@@ -115,6 +115,9 @@ pub fn observed(unit: &str, kind: &str, receipt: Option<Receipt>) -> ObservedUni
         unit: identity(unit, kind),
         receipt,
         condition: None,
+        desired: None,
+
+        waiting: None,
     }
 }
 
