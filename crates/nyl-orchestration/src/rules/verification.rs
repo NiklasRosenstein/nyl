@@ -254,7 +254,7 @@ pub fn unit_exit(unit: &UnitReport) -> ExitCategory {
 /// from its execution recovery `policy` (`None` when no driver serves its
 /// kind) and the environment's stored `driftRepair`: under `converge`, a
 /// `converge` unit is repaired by the next `nyl reconcile`, and any other
-/// awaits approval (`--local --approve`); under `manual`, only `--reapply`
+/// awaits approval (`--approve`); under `manual`, only `--reapply`
 /// repairs it.
 pub fn warnings(
     environment: &EnvironmentName,
@@ -313,13 +313,13 @@ fn drift_fix(
             format!("the next `nyl reconcile -e {environment}` repairs it by executing {unit} again")
         }
         DriftRepair::Converge => format!(
-            "it awaits approval, since {unit} is not safe to re-run: run `nyl reconcile -e {environment} --local --approve {unit}`, or wait for remote approvals"
+            "it awaits approval, since {unit} is not safe to re-run: run `nyl reconcile -e {environment} --approve {unit}`"
         ),
         DriftRepair::Manual if converges => format!(
             "repair it with `nyl reconcile -e {environment} --unit {unit} --reapply --reason <text>` (driftRepair: manual)"
         ),
         DriftRepair::Manual => format!(
-            "repair it with `nyl reconcile -e {environment} --unit {unit} --reapply --reason <text> --local --approve {unit}` (driftRepair: manual; {unit} is not safe to re-run without an approval)"
+            "repair it with `nyl reconcile -e {environment} --unit {unit} --reapply --reason <text> --approve {unit}` (driftRepair: manual; {unit} is not safe to re-run without an approval)"
         ),
     }
 }
@@ -563,7 +563,7 @@ mod tests {
             assert_eq!(
                 fix(policy, DriftRepair::Converge),
                 format!(
-                    "it awaits approval, since network is not safe to re-run: run `nyl reconcile -e {environment} --local --approve network`, or wait for remote approvals"
+                    "it awaits approval, since network is not safe to re-run: run `nyl reconcile -e {environment} --approve network`"
                 )
             );
         }
@@ -573,8 +573,10 @@ mod tests {
                 "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text>` (driftRepair: manual)"
             )
         );
-        assert!(fix(Some(RecoveryPolicy::Manual), DriftRepair::Manual).starts_with(&format!(
-            "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text> --local --approve network`"
-        )));
+        assert!(
+            fix(Some(RecoveryPolicy::Manual), DriftRepair::Manual).starts_with(&format!(
+            "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text> --approve network`"
+        ))
+        );
     }
 }

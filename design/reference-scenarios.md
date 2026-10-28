@@ -44,7 +44,28 @@ Everything lives in one per-test temporary directory, as the existing
 
 ### Tiers
 
-The same scenario files run in two tiers:
+The same scenario files run in two tiers. M3's executable platform slice is
+`nyl/tests/scenarios/reference/platform/scenario.yaml`: dependency waves,
+output inspection, no-op repetition, isolated source changes, selector mistakes
+and restoration, and decommissioning through a manually confirmed publication
+teardown that preserves an operator-owned file. Native drivers, preview
+templates, and promotion references join it in their owning milestones.
+
+Run the harness from the repository root:
+
+```sh
+cargo test -p nyl --test scenario_harness_test
+cargo test -p nyl --features tier2 --test scenario_harness_test
+```
+
+Tier 2 enables `test-clock` and, while M3 needs them, `test-kinds`. It runs
+each command as a separate binary process in a fresh checkout with its own
+home and explicit Git identity, passes time and admitted variables to that
+child only, and checks the same reports, state commits, and publication trees
+as tier 1. Scripted drivers, fault injection, pauses, and steps marked
+`tier: 1` remain exclusive to tier 1.
+
+The tiers are:
 
 - **Tier 1, always in CI.** The scenario harness runs orchestration in-process
   with the real Git `StateStore` on the local bare repositories and a scripted
@@ -52,9 +73,10 @@ The same scenario files run in two tiers:
   gone, or cannot be read. Drivers are the real ones where they exist and fakes
   otherwise, see [Fake kinds](#fake-kinds).
 - **Tier 2, the real tools.** The same steps run the real `nyl` binary as
-  separate processes, with the real `tofu` and `docker buildx` against the local
-  registry. Tier 2 scenarios compile only with the `tier2` Cargo feature, and
-  with it a missing `tofu`, `docker buildx`, or registry fails the test instead
+  separate processes. M3 uses the fake image, infrastructure, and publication
+  drivers; from M4 the real `tofu` and `docker buildx` run against the local
+  registry. Tier 2 scenarios compile only with the `tier2` Cargo feature; from
+  M4 a missing `tofu`, `docker buildx`, or registry fails the test instead
   of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
   tools installed (OpenTofu through mise, Docker with buildx, and `registry:2`
   as a service container) runs `cargo test --features tier2` and is required

@@ -52,6 +52,32 @@ impl RunReport {
         }
     }
 
+    /// Producer units whose plan cannot be treated as existing current evidence.
+    /// Multi-environment planning uses this typed result rather than preview values.
+    pub fn planned_changes(&self) -> BTreeMap<EnvironmentName, std::collections::BTreeSet<UnitName>> {
+        if self.kind != ReportKind::PlanReport {
+            return BTreeMap::new();
+        }
+        self.environments
+            .iter()
+            .map(|environment| {
+                (
+                    environment.name.clone(),
+                    environment
+                        .units
+                        .iter()
+                        .filter(|(_, unit)| {
+                            unit.state.is_some_and(|state| {
+                                !matches!(state, UnitState::Current | UnitState::Held | UnitState::Retained)
+                            })
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     /// The invocation's exit category: the most severe of its environments'.
     pub fn exit(&self) -> ExitCategory {
         self.environments
@@ -221,7 +247,7 @@ impl EnvironmentRunReport {
             .filter_map(|(name, unit)| unit.result.as_ref().map(|result| (name, result)))
             .collect();
         let headline = headline(results.iter().map(|(_, result)| result.name()), &HEADLINE_RESULTS);
-        TransitionSummary {
+        let mut summary = TransitionSummary {
             operation,
             environment: self.name.clone(),
             headline,
@@ -240,7 +266,15 @@ impl EnvironmentRunReport {
             drift_repaired: self.drift_repaired.clone(),
             reapplied: None,
             details: BTreeMap::new(),
+        };
+        for (name, unit) in &self.units {
+            if let (Some(approval), Some(serde_json::Value::Object(entry))) =
+                (&unit.approval, summary.units.get_mut(name))
+            {
+                entry.insert("approval".to_owned(), serde_json::json!(approval));
+            }
         }
+        summary
     }
 }
 
@@ -393,6 +427,9 @@ pub struct UnitReport {
     pub changes: Option<Change>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_digest: Option<ChangeDigest>,
+    /// Approval used for this execution, including teardown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<nyl_core::orchestration::state::ApprovalRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -463,6 +500,7 @@ impl UnitReport {
             receipt: None,
             changes: None,
             change_digest: None,
+            approval: None,
             summary: None,
             blocked_by: Vec::new(),
             plan_error: None,

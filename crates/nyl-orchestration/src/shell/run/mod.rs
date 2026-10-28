@@ -116,9 +116,10 @@ pub struct RunContext<'a> {
     /// line, never by the shell. The shell admits from it only `PATH` and
     /// each unit's declared `env.passthrough` into that unit's
     /// `ExecutionContext.env`/`ResolutionContext.env`; nothing else reaches a
-    /// driver. Units declaring `env.secrets` are rejected in M3
-    /// (`NYL-UNIT-SECRETS-UNSUPPORTED`) because no secrets provider is wired.
+    /// driver. Secret values are resolved separately, only for execution.
     pub process_env: &'a BTreeMap<String, String>,
+    /// Project secrets, admitted only by the unit's explicit env.secrets.
+    pub secrets: Option<&'a dyn nyl_core::orchestration::ports::SecretProvider>,
     /// Who authors commits drivers write, such as publication commits, with the
     /// clock's time: the identity the command line resolved for state
     /// commits. `None` for `plan`, which writes nothing.
@@ -230,6 +231,14 @@ pub struct LifecycleOptions {
 /// One `plan` or `reconcile` of one environment.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
+    /// Selected environments whose source/state preflight failed.
+    pub unavailable: BTreeSet<EnvironmentName>,
+    /// Declared locations that could not be resolved; references and teardown fail closed.
+    pub environment_errors: BTreeMap<EnvironmentName, Finding>,
+    /// Producer units that preceding environment plans would change; preview values never become inputs.
+    pub planned: BTreeMap<EnvironmentName, BTreeSet<UnitName>>,
+    /// Declared environments and their state locations; producer snapshots are read lazily once.
+    pub environments: BTreeMap<EnvironmentName, StateLocation>,
     pub environment: EnvironmentName,
     /// The Environment as the entry worktree declares it, with group
     /// defaults applied: the source of `source`, `state`, `protectedRefs`,
@@ -244,6 +253,8 @@ pub struct RunRequest {
     /// `--unit`/`--units`; `None` executes every ready unit.
     pub units: Option<BTreeSet<UnitName>>,
     pub concurrency: usize,
+    /// Invocation approvals and their recorded identity.
+    pub approvals: crate::rules::approval::Approvals,
     /// `--source <rev>`.
     pub source_override: Option<String>,
     /// `--wait-lease`.
@@ -374,6 +385,8 @@ struct Session<'r, 'a> {
     /// Key inputs per unit, by the resolved spec and commit they were read for.
     keys: RefCell<BTreeMap<UnitName, (Value, CommitId, KeyInputs)>>,
     executions: RefCell<usize>,
+    approval_keys: RefCell<Option<BTreeMap<UnitName, Option<nyl_core::orchestration::ids::ExecutionKey>>>>,
+    environments: RefCell<BTreeMap<EnvironmentName, EnvironmentSnapshot>>,
     /// One reusable worktree per concurrency slot.
     slots: Slots,
     /// The deadline of the lease a reconcile holds, which bounds every
@@ -414,6 +427,15 @@ struct Evidence<'e> {
 }
 
 impl<'r, 'a> Session<'r, 'a> {
+    fn approvals(&self, units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitName, ApprovalRecord> {
+        let initial = self.approval_keys.borrow();
+        let keys = units
+            .iter()
+            .map(|(name, unit)| (name.clone(), unit.execution_key.clone()))
+            .collect();
+        self.request.approvals.records(initial.as_ref().unwrap_or(&keys), units)
+    }
+
     fn new(context: &'r RunContext<'a>, request: &'r RunRequest) -> Self {
         let directory = fresh_directory(context.workspace, "session");
         let slots = Slots::new(&directory);
@@ -426,10 +448,66 @@ impl<'r, 'a> Session<'r, 'a> {
             pins: RefCell::new(BTreeSet::new()),
             worktrees: RefCell::new(BTreeMap::new()),
             keys: RefCell::new(BTreeMap::new()),
+            approval_keys: RefCell::new(None),
             executions: RefCell::new(0),
+            environments: RefCell::new(BTreeMap::new()),
             slots,
             lease_deadline: Cell::new(None),
         }
+    }
+
+    /// Read declared consumers once, without taking their leases. Stored specs,
+    /// including held and retained ones, protect producers throughout teardown.
+    fn external_dependents(
+        &self,
+        desired: &BTreeMap<UnitName, DesiredUnit>,
+    ) -> Result<BTreeMap<UnitName, Vec<String>>, Finding> {
+        if let Some(finding) = self.request.environment_errors.values().next() {
+            return Err(finding.clone());
+        }
+        let mut dependents: BTreeMap<UnitName, Vec<String>> = BTreeMap::new();
+        for (environment, location) in &self.request.environments {
+            if environment == self.environment() {
+                continue;
+            }
+            if !self.environments.borrow().contains_key(environment) {
+                let snapshot = self
+                    .base()
+                    .store
+                    .snapshot(location)
+                    .map_err(|error| store_error(environment, &error))?;
+                self.environments.borrow_mut().insert(environment.clone(), snapshot);
+            }
+            let environments = self.environments.borrow();
+            for (consumer, unit) in &environments[environment].desired {
+                let mut referenced = BTreeSet::new();
+                if let Ok(references) = nyl_core::bindings::unit_references("", &unit.spec) {
+                    for reference in references {
+                        if reference.source.environment.as_deref() == Some(self.environment().as_str()) {
+                            if let Ok(name) = UnitName::new(reference.source.unit) {
+                                referenced.insert(name);
+                            }
+                        }
+                    }
+                }
+                if let Ok(entries) = crate::rules::references::depends_on(&unit.spec) {
+                    for entry in entries {
+                        if entry.environment() == Some(self.environment().as_str()) {
+                            if let Ok(name) = UnitName::new(entry.unit()) {
+                                referenced.insert(name);
+                            }
+                        }
+                    }
+                }
+                for producer in referenced.into_iter().filter(|name| desired.contains_key(name)) {
+                    dependents
+                        .entry(producer)
+                        .or_default()
+                        .push(format!("{environment}/{consumer}"));
+                }
+            }
+        }
+        Ok(dependents)
     }
 
     fn environment(&self) -> &EnvironmentName {
@@ -598,6 +676,18 @@ impl<'r, 'a> Session<'r, 'a> {
             &mut || self.base().ids.uid(),
         );
         let mut errors = desired.errors.clone();
+        for name in self.request.approvals.units.keys() {
+            if !desired.units.contains_key(name)
+                && !desired.held.contains_key(name)
+                && !snapshot.desired.contains_key(name)
+            {
+                errors.push(Finding::new(
+                    Code::ApprovalInvalid,
+                    format!("--approve {name} names no unit in this environment"),
+                    "name an existing unit",
+                ));
+            }
+        }
         if let Some(named) = &self.request.units {
             let known = |unit: &UnitName| desired.units.contains_key(unit) || desired.held.contains_key(unit);
             for unit in named.iter().filter(|unit| !known(unit)) {
@@ -635,16 +725,42 @@ impl<'r, 'a> Session<'r, 'a> {
         })
     }
 
-    /// Resolve every unit in dependency order against `evidence`. Held
-    /// units resolve as `held` stores them: consumers read their receipts,
-    /// and their rendering is resolved only in the shadow, for
-    /// `hold.pending`. Fenced units stay blocked without an execution key.
-    fn resolve(
-        &self,
+    /// Cache producer snapshots once; a preflight-failed selected producer supplies no evidence.
+    fn read_environments(&self, prepared: &Prepared) -> Vec<Finding> {
+        let mut errors = Vec::new();
+        for unit in prepared.desired.units.values() {
+            for environment in crate::rules::multi_environment::dependencies(&unit.spec) {
+                if environment == *self.environment() || self.environments.borrow().contains_key(&environment) {
+                    continue;
+                }
+                if self.request.unavailable.contains(&environment) {
+                    self.environments
+                        .borrow_mut()
+                        .insert(environment, EnvironmentSnapshot::default());
+                    continue;
+                }
+                if let Some(finding) = self.request.environment_errors.get(&environment) {
+                    errors.push(finding.clone());
+                    continue;
+                }
+                if let Some(location) = self.request.environments.get(&environment) {
+                    match self.base().store.snapshot(location) {
+                        Ok(snapshot) => {
+                            self.environments.borrow_mut().insert(environment, snapshot);
+                        }
+                        Err(error) => errors.push(store_error(&environment, &error)),
+                    }
+                }
+            }
+        }
+        errors
+    }
+
+    /// Include held producers, preserving their frozen documents and marker declarations.
+    fn resolution_units(
         prepared: &Prepared,
-        evidence: &Evidence<'_>,
         held: &BTreeMap<UnitName, DesiredUnit>,
-    ) -> Resolved {
+    ) -> BTreeMap<UnitName, DesiredUnit> {
         let mut units = prepared.desired.units.clone();
         units.extend(held.iter().map(|(name, unit)| {
             // A held unit without an incarnation (a marker included) declares
@@ -660,10 +776,30 @@ impl<'r, 'a> Session<'r, 'a> {
             };
             (name.clone(), declared)
         }));
+        units
+    }
+
+    /// Resolve every unit in dependency order against `evidence`. Held
+    /// units resolve as `held` stores them: consumers read their receipts,
+    /// and their rendering is resolved only in the shadow, for
+    /// `hold.pending`. Fenced units stay blocked without an execution key.
+    #[allow(clippy::too_many_lines)] // One dependency-ordered pass computes held shadows and executable documents.
+    fn resolve(
+        &self,
+        prepared: &Prepared,
+        evidence: &Evidence<'_>,
+        held: &BTreeMap<UnitName, DesiredUnit>,
+    ) -> Resolved {
+        let external_errors = self.read_environments(prepared);
+        let external = self.environments.borrow();
+        let mut units = Self::resolution_units(prepared, held);
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
         let mut shadow = BTreeMap::new();
         for name in &prepared.order {
+            if !external_errors.is_empty() {
+                errors.insert(name.clone(), external_errors.clone());
+            }
             let (mut unit, in_shadow) = if held.contains_key(name) {
                 match prepared.desired.held.get(name).and_then(|held| held.rendered.as_ref()) {
                     Some(rendered) => (rendered.clone(), true),
@@ -677,6 +813,7 @@ impl<'r, 'a> Session<'r, 'a> {
             };
             let resolution = {
                 let view = ReferenceView {
+                    environments: &external,
                     environment: self.environment(),
                     desired: &units,
                     observed: evidence.observed,
@@ -688,6 +825,22 @@ impl<'r, 'a> Session<'r, 'a> {
                 };
                 resolve_unit(&view, &unit)
             };
+            let mut resolution = resolution;
+            let planned_reasons = crate::rules::multi_environment::blocked_references(
+                &unit.spec,
+                &self.request.planned,
+                &self.request.unavailable,
+            );
+            if !planned_reasons.is_empty() {
+                if let Readiness::Blocked { reasons } = &mut resolution.readiness {
+                    reasons.extend(planned_reasons);
+                } else {
+                    resolution.readiness = Readiness::Blocked {
+                        reasons: planned_reasons,
+                    };
+                }
+                resolution.resolved_spec = None;
+            }
             unit.provenance = resolution.provenance;
             unit.readiness = resolution.readiness;
             if !resolution.errors.is_empty() && !in_shadow {
@@ -918,6 +1071,43 @@ pub(crate) fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value)
     env
 }
 
+/// Resolve explicit credentials for a driver call, never for fingerprinting.
+/// A missing admitted variable fails before tools start; error messages name
+/// keys only, never values or provider error payloads.
+pub(crate) fn execution_env(context: &RunContext<'_>, spec: &Value) -> Result<BTreeMap<String, String>, String> {
+    let mut env = admitted_env(context.process_env, spec);
+    for name in spec
+        .pointer("/env/passthrough")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !context.process_env.contains_key(name) {
+            return Err(format!("credentials: admitted variable {name:?} is missing"));
+        }
+    }
+    if let Some(secrets) = spec.pointer("/env/secrets").and_then(Value::as_object) {
+        for (name, key) in secrets {
+            let key = key
+                .as_str()
+                .ok_or_else(|| format!("credentials: invalid secret key for {name:?}"))?;
+            let value = context
+                .secrets
+                .and_then(|provider| provider.get(key).ok())
+                .ok_or_else(|| format!("credentials: secret {key:?} for {name:?} is unavailable"))?;
+            env.insert(
+                name.clone(),
+                match value {
+                    Value::String(value) => value,
+                    value => value.to_string(),
+                },
+            );
+        }
+    }
+    Ok(env)
+}
+
 /// The directory of `nyl.toml` inside a worktree, from its worktree-rooted form.
 pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
     let relative = project_dir.trim_matches('/');
@@ -1089,6 +1279,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         named: None,
         attempted: &attempted,
         local: request.local.as_ref().map(|local| &local.approve),
+        approvals: None,
         observations: &snapshot.observations,
         drift_repair: drift::drift_repair(&prepared.rendered.environment),
         // `nyl plan` has no `--reapply`.
@@ -1103,9 +1294,9 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         .map(|(name, _)| name)
         .chain(
             skipped
-                .into_iter()
+                .iter()
                 .filter(|(_, skip)| matches!(skip, Skipped::Drifted | Skipped::RepairApproval))
-                .map(|(name, _)| name),
+                .map(|(name, _)| name.clone()),
         )
         .collect();
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
@@ -1119,7 +1310,9 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
         entry.message = condition_message(unit, current);
         entry.blocked_by = blocked_by(unit);
-        entry.state = Some(if drifted.contains(name) {
+        entry.state = Some(if skipped.get(name) == Some(&Skipped::ManualApproval) {
+            UnitState::AwaitingApproval
+        } else if drifted.contains(name) {
             UnitState::Drifted
         } else if ready.contains(name) {
             UnitState::Ready
@@ -1128,7 +1321,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         } else {
             unit_state(unit, same_incarnation(unit, current), false)
         });
-        if ready.contains(name) {
+        if ready.contains(name) || entry.state == Some(UnitState::AwaitingApproval) {
             if let Some(commit) = resolved.commits.get(name) {
                 plan_unit(
                     session,
@@ -1190,6 +1383,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         }
     }
     let options = TeardownOptions {
+        approvals: Some(&request.approvals),
         allow_teardown: request.lifecycle.allow_teardown,
         allow_dependents: request.lifecycle.allow_dependents,
         allow_incomplete: request.lifecycle.allow_incomplete,
@@ -1255,6 +1449,7 @@ fn plan_teardown(
         TeardownTarget::All => None,
     };
     let options = TeardownOptions {
+        approvals: Some(&request.approvals),
         allow_teardown: true,
         allow_dependents: request.lifecycle.allow_dependents,
         allow_incomplete: request.lifecycle.allow_incomplete,
@@ -1318,7 +1513,9 @@ fn plan_leaving(
     }
     let attempted = BTreeSet::new();
     let waiting = BTreeSet::new();
-    let plan = crate::rules::teardown::plan(&crate::rules::teardown::TeardownInputs {
+    let external = session.external_dependents(&life.desired);
+    let mut plan = crate::rules::teardown::plan(&crate::rules::teardown::TeardownInputs {
+        external_dependents: external.as_ref().unwrap_or(&BTreeMap::new()),
         environment,
         desired: &life.desired,
         observed,
@@ -1329,6 +1526,11 @@ fn plan_leaving(
         readiness: &readiness,
         drops: &life.releases,
     });
+    if let Err(finding) = external {
+        report.errors.push(finding);
+        plan.ready.clear();
+        plan.wave.clear();
+    }
     for name in &plan.ready {
         let unit = &life.desired[name];
         let mut entry = UnitReport::new(unit.unit.kind.clone());
@@ -1367,6 +1569,16 @@ fn plan_leaving(
                 "check that the tombstones' resources no longer need it",
             ));
         }
+        if let Some(units) = plan.external_overrides.get(name) {
+            entry.warnings.push(Finding::new(
+                Code::TeardownHasDependents,
+                format!(
+                    "unit {name} is referenced by {}; --allow-dependents tears it down anyway",
+                    units.join(", ")
+                ),
+                "check that those consumers no longer need it",
+            ));
+        }
         report.units.insert(name.clone(), entry);
     }
     for (name, pending) in &plan.pending {
@@ -1385,7 +1597,10 @@ fn plan_leaving(
         entry.state = Some(unit_state(unit, same_incarnation(unit, observed.get(name)), false));
         entry.teardown_readiness = readiness_state.get(name).cloned();
         // What `--allow-teardown` would destroy.
-        if *pending == crate::rules::teardown::Pending::NeedsAllowTeardown {
+        if matches!(
+            pending,
+            crate::rules::teardown::Pending::NeedsAllowTeardown | crate::rules::teardown::Pending::AwaitingApproval
+        ) {
             if let Some(commit) = source.or(unit.source_revision.as_ref()) {
                 plan_unit(
                     session,
@@ -1444,6 +1659,14 @@ fn plan_unit(
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;
     }
+    let env = match execution_env(context, &unit.spec) {
+        Ok(env) => env,
+        Err(message) => {
+            entry.plan_error = Some(message);
+            let _ = std::fs::remove_dir_all(&directory);
+            return;
+        }
+    };
     let now = context.base.clock.now();
     let execution = ExecutionContext {
         unit: UnitAddress::new(session.environment().clone(), name.clone()),
@@ -1451,7 +1674,7 @@ fn plan_unit(
         project_dir: project_path(&worktree, project_dir),
         worktree,
         temp_dir,
-        env: admitted_env(context.process_env, &unit.spec),
+        env,
         approved_digest: None,
         deadline: unit_timeout(unit).after(now),
         now,
@@ -1968,6 +2191,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 self.report.errors.extend(resolved.errors.values().flatten().cloned());
                 return Ending::Release;
             }
+            if first {
+                *session.approval_keys.borrow_mut() = Some(
+                    resolved
+                        .units
+                        .iter()
+                        .map(|(name, unit)| (name.clone(), unit.execution_key.clone()))
+                        .collect(),
+                );
+            }
             first = false;
             // A returning tombstone adopts its receipt while its execution
             // key is unchanged (Q3); otherwise it runs as an ordinary change.
@@ -2001,6 +2233,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 continue;
             }
             let selectable = selection_view(&resolved, &held_view);
+            let approvals = session.approvals(&resolved.units);
             let candidates = Candidates {
                 desired: &selectable,
                 observed: &observed,
@@ -2011,6 +2244,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .local
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
+                approvals: request.approvals.identity.as_ref().map(|_| &approvals),
                 observations: &snapshot.observations,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
@@ -2019,9 +2253,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             // `--fail-fast` starts no unit after the first approval wait,
             // including one decided at selection.
             if request.fail_fast && life.stopped.is_none() {
-                let approval = skipped
-                    .iter()
-                    .find(|(_, why)| matches!(why, Skipped::RepairApproval | Skipped::LocalApproval));
+                let approval = skipped.iter().find(|(_, why)| {
+                    matches!(
+                        why,
+                        Skipped::RepairApproval | Skipped::LocalApproval | Skipped::ManualApproval
+                    )
+                });
                 if let Some((name, _)) = approval {
                     life.stopped = Some(name.clone());
                     break (resolved, skipped);
@@ -2203,6 +2440,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 source: None,
                 runs: &runs,
                 options: TeardownOptions {
+                    approvals: Some(&request.approvals),
                     allow_teardown: request.lifecycle.allow_teardown,
                     allow_dependents: request.lifecycle.allow_dependents,
                     allow_incomplete: request.lifecycle.allow_incomplete,
@@ -2257,6 +2495,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let named = |name: &UnitName| request.units.as_ref().is_none_or(|named| named.contains(name));
         let not_started = if life.stopped.is_some() {
             let selectable = selection_view(&resolved, &held_view);
+            let approvals = session.approvals(&resolved.units);
             let (ready, _) = select(&Candidates {
                 desired: &selectable,
                 observed: &observed,
@@ -2270,6 +2509,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 observations: &snapshot.observations,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
+                approvals: request.approvals.identity.as_ref().map(|_| &approvals),
             });
             ready.into_iter().collect()
         } else {
@@ -2287,6 +2527,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             entry.blocked_by = blocked_by(unit);
             if let Some(execution) = executions.get(name) {
                 entry.result = Some(execution.result.clone());
+                entry.change_digest.clone_from(&execution.change_digest);
+                entry.approval.clone_from(&execution.approval);
                 entry.message.clone_from(&execution.message);
                 entry.warnings.clone_from(&execution.warnings);
             } else if let Some(result) = imported_result(&taking, unit, current) {
@@ -2505,6 +2747,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             source: source.as_ref(),
             runs: &runs,
             options: TeardownOptions {
+                approvals: Some(&request.approvals),
                 allow_teardown: true,
                 allow_dependents: request.lifecycle.allow_dependents,
                 allow_incomplete: request.lifecycle.allow_incomplete,
@@ -3099,15 +3342,26 @@ fn local_approvals(
     resolved: &Resolved,
     batch: &[UnitName],
 ) -> BTreeMap<UnitName, ApprovalRecord> {
-    let Some(local) = &session.request.local else {
-        return BTreeMap::new();
-    };
-    crate::rules::selection::local_approvals(
-        &local.approve,
-        session.context.commit_identity,
-        session.context.drivers,
-        batch.iter().map(|name| &resolved.units[name]),
-    )
+    let mut records = session
+        .request
+        .local
+        .as_ref()
+        .map(|local| {
+            crate::rules::selection::local_approvals(
+                &local.approve,
+                session.context.commit_identity,
+                session.context.drivers,
+                batch.iter().map(|name| &resolved.units[name]),
+            )
+        })
+        .unwrap_or_default();
+    records.extend(
+        session
+            .approvals(&resolved.units)
+            .into_iter()
+            .filter(|(name, _)| batch.contains(name)),
+    );
+    records
 }
 
 /// The result of a unit this run did not execute.
@@ -3126,7 +3380,7 @@ fn unexecuted_result(
     // this run does not ("Drift").
     match skipped {
         Some(Skipped::Drifted) => return UnitResult::Drifted,
-        Some(Skipped::RepairApproval) => return UnitResult::AwaitingApproval,
+        Some(Skipped::RepairApproval | Skipped::ManualApproval) => return UnitResult::AwaitingApproval,
         _ => {}
     }
     if receipt_is_current(unit, observed) {

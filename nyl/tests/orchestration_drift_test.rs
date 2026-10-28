@@ -160,7 +160,7 @@ fn unit<'a>(report: &'a Value, name: &str) -> &'a Value {
 /// `drifted` (exit 2); `reconcile` executes the idempotent unit (summary
 /// `driftRepaired`) and reports the other `awaiting-approval` (exit 2)
 /// while the run goes on; the next reconcile writes nothing for the
-/// repaired unit; a `--local --approve` run repairs the other with the
+/// repaired unit; a `--approve` run repairs the other with the
 /// local approval record.
 #[test]
 fn test_reconcile_repairs_converge_units_and_awaits_approval_for_others() {
@@ -179,9 +179,7 @@ fn test_reconcile_repairs_converge_units_and_awaits_approval_for_others() {
         verified.stderr
     );
     assert!(
-        verified
-            .stderr
-            .contains("run `nyl reconcile -e dev --local --approve job`, or wait for remote approvals"),
+        verified.stderr.contains("run `nyl reconcile -e dev --approve job`"),
         "{}",
         verified.stderr
     );

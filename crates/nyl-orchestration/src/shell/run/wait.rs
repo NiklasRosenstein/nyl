@@ -318,6 +318,7 @@ mod tests {
             tools: &Unused,
             workspace: Path::new("unused"),
             process_env: &process_env,
+            secrets: None,
             commit_identity: None,
             observer,
             prompt,

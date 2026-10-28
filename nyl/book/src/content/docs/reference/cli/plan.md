@@ -65,11 +65,18 @@ renders nothing, so it works when source no longer declares the units.
 
 `plan` reads state with read access only and needs no commit identity.
 
+Select several environments with repeated `-e`, with `-l stage=production`, or
+with `-g <group>`. They run in dependency order with one report section per
+environment. See [Multi-environment runs](/nyl/orchestration/runs/#multi-environment-runs)
+for qualified unit options and independent state transactions.
+
 ## Options
 
 | Option | Meaning |
 | --- | --- |
-| `-e`, `--environment <name>` | The environment to plan. Required. |
+| `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
+| `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
+| `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--unit <name>`, `--units <a>,<b>` | Report only these units. Resolution still covers the whole environment, and the leaving section is never filtered. |
 | `--source <rev>` | Plan at this revision or commit instead of the Environment's source. With `--teardown`, preview the teardowns with that revision's files instead of each unit's recorded `sourceRevision`. |
 | `--teardown` | Preview `nyl teardown` of the `--unit` units, or of every unit with `--all`, from the documents in state. |

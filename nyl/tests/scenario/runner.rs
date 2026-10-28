@@ -24,7 +24,7 @@ use nyl::cli::Cli;
 use nyl::orchestration::run::{CommandOutcome, Wiring};
 use nyl_core::orchestration::driver::{DriverOperation, DriverSet};
 use nyl_core::orchestration::ids::UnitName;
-use nyl_core::orchestration::ports::CommitIdentity;
+use nyl_core::orchestration::ports::{Clock, CommitIdentity};
 use nyl_core::orchestration::state::{DesiredUnit, FailureCategory, ObservedUnit};
 use nyl_core::orchestration::time::Duration;
 use nyl_drivers::fake::{Script, Scripted};
@@ -144,6 +144,7 @@ struct Shared {
     faults: FaultSlot,
     author: CommitIdentity,
     process_env: BTreeMap<String, String>,
+    tier: u8,
 }
 
 impl Shared {
@@ -167,6 +168,16 @@ impl Shared {
 
 /// Run every step of `loaded`, returning the first failed check.
 pub fn run(loaded: &Loaded) -> Result<(), String> {
+    run_tier(loaded, 1)
+}
+
+/// Run the same scenario and assertions through separate binary processes.
+#[cfg(feature = "tier2")]
+pub fn run_binary(loaded: &Loaded) -> Result<(), String> {
+    run_tier(loaded, 2)
+}
+
+fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
     let start = chrono::DateTime::parse_from_rfc3339(START)
         .expect("start time")
         .to_utc();
@@ -186,6 +197,7 @@ pub fn run(loaded: &Loaded) -> Result<(), String> {
         faults: FaultSlot::default(),
         author: AUTHOR.parse().expect("identity"),
         process_env,
+        tier,
     };
     std::thread::scope(|scope| {
         let mut state = RunState {
@@ -249,7 +261,11 @@ struct RunState<'s, 'scope, 'l> {
 impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
     fn step(&mut self, scope: &'scope Scope<'scope, '_>, loaded: &'l Loaded, step: &'l Step) -> Result<(), String> {
         let shared = self.shared;
-        match step.kind()? {
+        let kind = step.kind()?;
+        if shared.tier == 2 && (step.tier == Some(1) || kind.tier_one_only() || step.pause.is_some()) {
+            return Ok(());
+        }
+        match kind {
             StepKind::Commit => self
                 .world
                 .commit(step.commit.as_ref().expect("kind"), &loaded.directory),
@@ -318,8 +334,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 let args = step.nyl.as_ref().expect("kind");
                 let branch = step.at.as_deref().unwrap_or("main");
                 let before = self.before(args, step.expect.as_ref());
-                let wiring = shared.wiring(&shared.faults);
-                let outcome = invoke(self.world, &wiring, args, branch)?;
+                let outcome = self.invoke(args, branch)?;
                 self.check(step, step, outcome, &before)?;
             }
             StepKind::Resume => {
@@ -569,6 +584,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
 
     /// One sequential in-process invocation, without faults beyond the slot.
     fn invoke(&self, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
+        if self.shared.tier == 2 {
+            return invoke_binary(self.shared, args, branch);
+        }
         let wiring = self.shared.wiring(&self.shared.faults);
         invoke(self.world, &wiring, args, branch)
     }
@@ -1038,4 +1056,42 @@ fn names(list: Option<&Value>) -> BTreeSet<String> {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect()
+}
+
+/// A fresh CI checkout, isolated process environment, and the same injected
+/// time as tier 1. M3 uses the test kinds until real drivers arrive in M4/M5.
+fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
+    let checkout = shared.world.fresh_clone(branch);
+    super::world::git(&checkout, &["config", "user.name", "Scenario"]);
+    super::world::git(&checkout, &["config", "user.email", "scenario@example.invalid"]);
+    let home = checkout.with_extension("home");
+    std::fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+    let mut command = super::nyl_binary(&checkout, &home, &[]);
+    command
+        .env_clear()
+        .envs(&shared.process_env)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("NO_COLOR", "1")
+        .env("NYL_TEST_NOW", shared.clock.now().to_rfc3339())
+        .args(args);
+    if !args.iter().any(|arg| arg == "-o" || arg == "--output") {
+        command.args(["--output", "json"]);
+    }
+    let output = command.output().map_err(|error| format!("run nyl: {error}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    let stderr = String::from_utf8(output.stderr).map_err(|error| error.to_string())?;
+    let report = serde_json::from_str(&stdout).map_err(|error| {
+        format!(
+            "nyl {} did not print JSON: {error}; stdout:\n{stdout}\nstderr:\n{stderr}",
+            args.join(" ")
+        )
+    })?;
+    Ok(CommandOutcome {
+        exit: output.status.code().unwrap_or(1).try_into().unwrap_or(1),
+        report,
+        stdout,
+        stderr,
+    })
 }

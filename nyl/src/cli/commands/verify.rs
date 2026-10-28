@@ -29,15 +29,26 @@ use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop}
 use crate::Result;
 
 /// Verify an environment's current receipts.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct VerifyArgs {
     /// The environment to verify.
-    #[arg(short = 'e', long = "environment")]
-    pub environment: String,
+    #[arg(short = 'e', long = "environment", required_unless_present_any = ["labels", "group"], conflicts_with_all = ["labels", "group"])]
+    pub environment: Vec<String>,
+
+    /// Select environments whose literal labels match key=value pairs.
+    #[arg(short = 'l', long, conflicts_with_all = ["environment", "group"])]
+    pub labels: Option<String>,
+
+    /// Select members of this EnvironmentGroup.
+    #[arg(short = 'g', long, conflicts_with_all = ["environment", "labels"])]
+    pub group: Option<String>,
 
     /// Verify only these units (repeatable, or comma-separated with --units).
     #[arg(long = "unit", alias = "units", value_delimiter = ',')]
     pub units: Vec<String>,
+
+    #[arg(skip)]
+    pub unit_filter: bool,
 
     /// Wait up to this long for another run's lease, such as 10m.
     #[arg(long)]
@@ -58,15 +69,46 @@ pub struct VerifyArgs {
 
 /// Run the command in-process with `wiring`.
 pub fn run(args: &VerifyArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    Ok(verify(args, wiring)
-        .unwrap_or_else(|stop| stopped(ReportKind::VerifyReport, &args.environment, args.output, stop)))
+    use crate::orchestration::multi_environment::{dispatch, select};
+    Ok(dispatch(
+        ReportKind::VerifyReport,
+        args.output,
+        select(
+            &args.path,
+            &args.environment,
+            args.labels.as_deref(),
+            args.group.as_deref(),
+            false,
+            None,
+            wiring.drivers,
+        ),
+        |environment, selected, _planned, _unavailable| {
+            let mut args = args.clone();
+            args.environment = vec![environment.to_owned()];
+            args.unit_filter = !args.units.is_empty();
+            let mut prepare = || -> std::result::Result<_, Stop> {
+                args.units = nyl_orchestration::rules::multi_environment::units(
+                    "--unit",
+                    &args.units,
+                    environment,
+                    selected,
+                    selected.len() > 1,
+                )?;
+                verify(&args, wiring)
+            };
+            (
+                prepare().unwrap_or_else(|stop| stopped(ReportKind::VerifyReport, environment, args.output, stop)),
+                std::collections::BTreeSet::default(),
+            )
+        },
+    ))
 }
 
 fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
-    let session = Session::open(&args.path, &args.environment)?;
+    let session = Session::open(&args.path, &args.environment[0])?;
     // Verify writes observations, so it needs a commit identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
-    let request = session.request(&RunOptions {
+    let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: DEFAULT_CONCURRENCY,
         source: None,
@@ -79,6 +121,9 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         fail_fast: false,
         reason: None,
     })?;
+    if args.unit_filter && args.units.is_empty() {
+        request.units = Some(std::collections::BTreeSet::default());
+    }
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),

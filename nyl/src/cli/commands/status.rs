@@ -19,11 +19,19 @@ use crate::orchestration::session::{outcome, stopped, Session, Stop};
 use crate::Result;
 
 /// Show an environment's state.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
     /// The environment to show.
-    #[arg(short = 'e', long = "environment")]
-    pub environment: String,
+    #[arg(short = 'e', long = "environment", required_unless_present_any = ["labels", "group"], conflicts_with_all = ["labels", "group"])]
+    pub environment: Vec<String>,
+
+    /// Select environments whose literal labels match key=value pairs.
+    #[arg(short = 'l', long, conflicts_with_all = ["environment", "group"])]
+    pub labels: Option<String>,
+
+    /// Select members of this EnvironmentGroup.
+    #[arg(short = 'g', long, conflicts_with_all = ["environment", "labels"])]
+    pub group: Option<String>,
 
     /// Show this clone's local view of the state, including --local runs.
     #[arg(long)]
@@ -40,12 +48,33 @@ pub struct StatusArgs {
 
 /// Run the command in-process with `wiring`.
 pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    Ok(status(args, wiring)
-        .unwrap_or_else(|stop| stopped(ReportKind::StatusReport, &args.environment, args.output, stop)))
+    use crate::orchestration::multi_environment::{dispatch, select};
+    Ok(dispatch(
+        ReportKind::StatusReport,
+        args.output,
+        select(
+            &args.path,
+            &args.environment,
+            args.labels.as_deref(),
+            args.group.as_deref(),
+            false,
+            None,
+            wiring.drivers,
+        ),
+        |environment, _selected, _planned, _unavailable| {
+            let mut args = args.clone();
+            args.environment = vec![environment.to_owned()];
+            let prepare = || -> std::result::Result<_, Stop> { status(&args, wiring) };
+            (
+                prepare().unwrap_or_else(|stop| stopped(ReportKind::StatusReport, environment, args.output, stop)),
+                std::collections::BTreeSet::default(),
+            )
+        },
+    ))
 }
 
 fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
-    let session = Session::open(&args.path, &args.environment)?;
+    let session = Session::open(&args.path, &args.environment[0])?;
     // Status only reads: a read-only store, no commit identity, no lease.
     let store = session.store(None)?;
     // `--local`: the clone's local view, through the store a `--local` run uses.

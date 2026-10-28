@@ -189,6 +189,7 @@ pub fn get_value(
     let resolve = |desired: &BTreeMap<UnitName, DesiredUnit>| {
         resolve_reference(
             &ReferenceView {
+                environments: &BTreeMap::new(),
                 environment,
                 desired,
                 observed: &snapshot.observed,

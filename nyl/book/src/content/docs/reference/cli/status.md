@@ -64,11 +64,18 @@ transitions and is 3 behind the remote". The warning does not change the exit
 code. `--local` shows the local view instead: the state as the clone's
 branches hold it, including `nyl reconcile --local` runs.
 
+Select several environments with repeated `-e`, with `-l stage=production`, or
+with `-g <group>`. They run in dependency order with one report section per
+environment. See [Multi-environment runs](/nyl/orchestration/runs/#multi-environment-runs)
+for qualified unit options and independent state transactions.
+
 ## Options
 
 | Option | Meaning |
 | --- | --- |
-| `-e`, `--environment <name>` | The environment to show. Required. |
+| `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
+| `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
+| `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--local` | Show this clone's local view of the state, including `--local` runs. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote, whose local branches already are the state. |
 | `-o`, `--output <table\|json>` | A table, or the typed `StatusReport`. Default `table`. |
 | `[PATH]` | The project directory or a path beneath it. Default `.`. |

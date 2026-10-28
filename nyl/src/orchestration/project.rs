@@ -135,10 +135,16 @@ pub fn open_store(
         Some(author) => GitStateStore::new(&resolved.git_dir, auth, author),
         None => GitStateStore::read_only(&resolved.git_dir, auth),
     };
-    Ok(match &resolved.endpoint {
-        Some(endpoint) => store.with_endpoint(resolved.location.repository.clone(), endpoint.clone()),
-        None => store,
-    })
+    let mut store = store;
+    for environment in declared(inventory).0 {
+        let Ok(other) = resolve_environment(inventory, &environment.metadata.name) else {
+            continue;
+        };
+        if let Some(endpoint) = other.endpoint {
+            store = store.with_endpoint(other.location.repository, endpoint);
+        }
+    }
+    Ok(store)
 }
 
 /// The fix of a missing or invalid commit identity.

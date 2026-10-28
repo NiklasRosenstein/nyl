@@ -293,7 +293,7 @@ fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
 }
 
 /// The local-state options through the binary, in one workstation clone:
-/// `--approve` needs `--local`, `reconcile --local` leaves remote state
+/// `reconcile --local` leaves remote state
 /// alone, `status` and `get` take `--local`, `state reset --local
 /// --discard-all` and `state restore` reach their operations. What those
 /// operations do is `orchestration_local_test`'s.
@@ -310,10 +310,6 @@ fn test_local_state_commands_through_the_binary() {
     std::fs::create_dir_all(&home).unwrap();
     let read = |args: &[&str]| bare_nyl(&checkout, &home, args);
 
-    nyl(&checkout, &["reconcile", "-e", "dev", "--approve", "network"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--local"));
     nyl(&checkout, &["reconcile", "-e", "dev", "--local"])
         .assert()
         .success()

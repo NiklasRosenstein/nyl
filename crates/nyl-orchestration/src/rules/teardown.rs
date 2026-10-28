@@ -43,6 +43,8 @@ use super::references::depends_on;
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(clippy::struct_excessive_bools)] // Independent command-line switches.
 pub struct TeardownOptions<'a> {
+    /// Invocation approvals; absent in read-only previews.
+    pub approvals: Option<&'a super::approval::Approvals>,
     /// `--allow-teardown`: omission and kind-change teardowns proceed.
     pub allow_teardown: bool,
     /// `--allow-dependents`: a unit a retained tombstone cites is torn down anyway.
@@ -60,6 +62,8 @@ pub struct TeardownOptions<'a> {
 
 /// What deciding a run's teardowns reads.
 pub struct TeardownInputs<'a> {
+    /// Declared environments whose stored desired units reference each producer.
+    pub external_dependents: &'a BTreeMap<UnitName, Vec<String>>,
     pub environment: &'a EnvironmentName,
     /// Every desired document after this run's lifecycle changes: deleting,
     /// held, retained, and active units.
@@ -85,6 +89,8 @@ pub struct TeardownInputs<'a> {
 /// Why a deleting unit is not torn down in this wave.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
+    /// Units of other environments still reference this producer.
+    ExternalDependents { units: Vec<String> },
     /// Omission or kind change without `--allow-teardown`.
     NeedsAllowTeardown,
     /// Retained tombstones cite it, without `--allow-dependents`.
@@ -107,9 +113,8 @@ pub enum Pending {
     NotNamed,
     /// Already torn down or tried in this run.
     AlreadyAttempted,
-    /// The unit declares `approval: manual`; teardown approvals (`nyl
-    /// teardown --approve`, destroy-plan digests) arrive with M3 part 6, so
-    /// until then it waits (exit 2, open question Q50).
+    /// The unit declares `approval: manual` and lacks a matching invocation
+    /// approval (including a destroy-plan digest when required).
     AwaitingApproval,
 }
 
@@ -126,6 +131,8 @@ pub struct TeardownPlan {
     /// Units torn down although retained tombstones cite them
     /// (`--allow-dependents`), recorded in the transition commit.
     pub overrides: BTreeMap<UnitName, Vec<UnitName>>,
+    /// External consumers bypassed by --allow-dependents, recorded in the transition.
+    pub external_overrides: BTreeMap<UnitName, Vec<String>>,
 }
 
 /// Decide which leaving units to tear down, retain, release, or drop now.
@@ -212,6 +219,14 @@ pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
         plan.pending.insert(name.clone(), Pending::Dependents { units });
     }
     plan.overrides.retain(|name, _| plan.ready.contains(name));
+    if inputs.options.allow_dependents {
+        plan.external_overrides = inputs
+            .external_dependents
+            .iter()
+            .filter(|(name, _)| plan.ready.contains(name))
+            .map(|(name, units)| (name.clone(), units.clone()))
+            .collect();
+    }
     plan
 }
 
@@ -269,6 +284,11 @@ fn gate(
     if inputs.attempted.contains(name) {
         return Some(Pending::AlreadyAttempted);
     }
+    if !options.allow_dependents {
+        if let Some(units) = inputs.external_dependents.get(name).filter(|units| !units.is_empty()) {
+            return Some(Pending::ExternalDependents { units: units.clone() });
+        }
+    }
     let condition = same_incarnation(unit, inputs.observed.get(name)).and_then(|observed| observed.condition.as_ref());
     // Retentions, releases, and drops run nothing: only their dependents
     // gate them, and an `uncertain` condition, whose evidence a retention or
@@ -307,7 +327,13 @@ fn gate(
     }
     let manual = serde_json::from_value::<CommonUnitFields>(unit.spec.clone())
         .is_ok_and(|common| common.approval.mode == ApprovalMode::Manual);
-    if manual {
+    if manual
+        && !options.approvals.is_some_and(|approvals| {
+            let units = BTreeMap::from([(name.clone(), unit.clone())]);
+            let keys = BTreeMap::from([(name.clone(), unit.execution_key.clone())]);
+            approvals.records(&keys, &units).contains_key(name)
+        })
+    {
         return Some(Pending::AwaitingApproval);
     }
     if !options.allow_incomplete {
@@ -383,6 +409,7 @@ pub fn dependencies(units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitNam
 pub fn finding(environment: &EnvironmentName, unit: &UnitName, pending: &Pending) -> Option<Finding> {
     let list = |units: &[UnitName]| units.iter().map(UnitName::as_str).collect::<Vec<_>>().join(", ");
     Some(match pending {
+        Pending::ExternalDependents { units } => Finding::new(Code::TeardownHasDependents, format!("unit {unit} of {environment} is referenced by {}", units.join(", ")), "remove the consumers’ references first, or pass --allow-dependents to tear it down anyway"),
         Pending::NeedsAllowTeardown => Finding::new(
             Code::TeardownPending,
             format!("unit {unit} of {environment} left the ownership set; its teardown waits for --allow-teardown"),
@@ -405,12 +432,10 @@ pub fn finding(environment: &EnvironmentName, unit: &UnitName, pending: &Pending
         Pending::AwaitingApproval => Finding::new(
             Code::TeardownPending,
             format!(
-                "unit {unit} of {environment} declares approval: manual; its teardown waits, since teardown approvals \
-                 are not supported yet"
+                "unit {unit} of {environment} declares approval: manual; its teardown awaits a matching approval"
             ),
             format!(
-                "tear its resources down by hand and drop it with `nyl state forget -e {environment} --unit {unit}`, \
-                 or keep it until teardown approvals arrive"
+                "approve it with `nyl teardown -e {environment} --unit {unit} --approve {unit}`, adding its destroy-plan digest when required"
             ),
         ),
         Pending::HasDependents { tombstones } => Finding::new(
@@ -503,6 +528,7 @@ mod tests {
     }
 
     struct Case {
+        external: BTreeMap<UnitName, Vec<String>>,
         desired: BTreeMap<UnitName, DesiredUnit>,
         options: TeardownOptions<'static>,
         waiting: BTreeSet<UnitName>,
@@ -512,6 +538,7 @@ mod tests {
     impl Case {
         fn new(units: Vec<DesiredUnit>) -> Self {
             Self {
+                external: BTreeMap::new(),
                 desired: map(units),
                 options: TeardownOptions {
                     allow_teardown: true,
@@ -524,6 +551,7 @@ mod tests {
 
         fn plan(&self) -> TeardownPlan {
             plan(&TeardownInputs {
+                external_dependents: &self.external,
                 environment: &env(),
                 desired: &self.desired,
                 observed: &BTreeMap::new(),
@@ -535,6 +563,26 @@ mod tests {
                 drops: &self.drops,
             })
         }
+    }
+
+    #[test]
+    fn test_external_dependents_gate_the_reverse_dependency_chain_and_record_override() {
+        let mut case = Case::new(vec![
+            teardown("network", json!({"dependsOn": ["account"]})),
+            teardown("account", json!({})),
+        ]);
+        case.external.insert(name("network"), vec!["services/api".to_owned()]);
+        let blocked = case.plan();
+        assert!(blocked.wave.is_empty());
+        assert!(matches!(
+            blocked.pending[&name("network")],
+            Pending::ExternalDependents { .. }
+        ));
+        assert!(matches!(blocked.pending[&name("account")], Pending::Dependents { .. }));
+        case.options.allow_dependents = true;
+        let allowed = case.plan();
+        assert_eq!(allowed.wave, [name("network")]);
+        assert_eq!(allowed.external_overrides[&name("network")], ["services/api"]);
     }
 
     fn names(units: &[&str]) -> Vec<UnitName> {
@@ -732,6 +780,7 @@ mod tests {
         let case = Case::new(vec![image]);
         let observed = BTreeMap::from([(name("image"), observed)]);
         let plan = plan(&TeardownInputs {
+            external_dependents: &BTreeMap::new(),
             environment: &env(),
             desired: &case.desired,
             observed: &observed,

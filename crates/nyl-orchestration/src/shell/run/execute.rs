@@ -24,13 +24,15 @@
 use super::*;
 use crate::rules::transitions::{self, Applied, Event};
 use nyl_core::orchestration::driver::{Inspection, RecoveryPolicy};
-use nyl_core::orchestration::state::ApprovalRecord;
+use nyl_core::orchestration::state::{ApprovalRecord, FailureCategory};
 
 /// One finished execution.
 pub(super) struct Execution {
     pub(super) name: UnitName,
     pub(super) result: UnitResult,
     pub(super) message: Option<String>,
+    pub(super) change_digest: Option<nyl_core::orchestration::ids::ChangeDigest>,
+    pub(super) approval: Option<ApprovalRecord>,
     pub(super) warnings: Vec<Finding>,
     pub(super) errors: Vec<Finding>,
     /// What the run ref records; `None` when nothing is recorded, such as
@@ -142,6 +144,8 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         name: name.clone(),
         result: UnitResult::Current,
         message: None,
+        change_digest: None,
+        approval: job.approval.clone(),
         warnings: Vec::new(),
         errors: Vec::new(),
         checkpoint: None,
@@ -190,6 +194,37 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         current.and_then(|observed| observed.condition.as_ref()),
         Some(Condition::Uncertain { .. })
     );
+    let env = match execution_env(context, &unit.spec) {
+        Ok(env) => env,
+        Err(message) => {
+            if uncertain {
+                // Missing credentials cannot settle an earlier uncertain effect.
+                before_effects(&mut execution, message);
+            } else {
+                execution.result = UnitResult::Failed {
+                    category: FailureCategory::Credentials,
+                    retryable: true,
+                };
+                execution.message = Some(message.clone());
+                let event = Event::Failed {
+                    since: context.base.clock.now(),
+                    run: shared.run.clone(),
+                    category: FailureCategory::Credentials,
+                    retryable: true,
+                    message,
+                };
+                if let Ok(Applied::Changed(observed)) = transitions::apply_to(unit, current, event) {
+                    execution.checkpoint = Some(Checkpoint {
+                        desired: unit.clone(),
+                        observed: *observed,
+                        artifacts: job.previous_artifacts,
+                    });
+                }
+            }
+            let _ = std::fs::remove_dir_all(&job.directory);
+            return execution;
+        }
+    };
     let started = context.base.clock.now();
     let call = |operation: DriverOperation, now: Timestamp| ExecutionContext {
         unit: UnitAddress::new(shared.environment.clone(), name.clone()),
@@ -197,8 +232,8 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         project_dir: project_path(&worktree, shared.project_dir),
         worktree: worktree.clone(),
         temp_dir: temp_dir.clone(),
-        env: admitted_env(context.process_env, &unit.spec),
-        approved_digest: None,
+        env: env.clone(),
+        approved_digest: job.approval.as_ref().and_then(|approval| approval.digest.clone()),
         deadline: unit_timeout(unit).after(now),
         now,
         observed: job.observed,
@@ -298,7 +333,8 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 },
             }
         }
-        Outcome::AwaitingApproval { .. } => {
+        Outcome::AwaitingApproval { digest } => {
+            execution.change_digest = Some(digest);
             execution.result = UnitResult::AwaitingApproval;
             return execution;
         }

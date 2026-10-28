@@ -623,6 +623,13 @@ pub enum ApplicationsObservation {
     Failed(String),
 }
 
+/// Reads a named project secret at execution, never during key calculation.
+/// Errors must not contain secret values. Strings remain strings; other
+/// values are serialized to compact JSON by the shell.
+pub trait SecretProvider: Send + Sync {
+    fn get(&self, key: &str) -> Result<Value, String>;
+}
+
 /// Reads Argo CD for teardown waits and health evidence.
 pub trait ArgoObserver: Send + Sync {
     fn workload_applications(&self, target: &str) -> ApplicationsObservation;

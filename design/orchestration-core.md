@@ -1598,10 +1598,8 @@ spec:
 - Teardown of a manual unit needs approval the same way; for `bind: plan` the
   digest is that of the destroy plan. `nyl plan` covers `deleting` units with
   teardown intent and prints their destroy-plan digest, and `nyl teardown`
-  accepts `--approve` like `reconcile`. Implementation status (M3): teardown
-  approvals arrive with remote approvals in part 6; until then a manual
-  unit's teardown is never started, it is reported `awaiting-approval`, and
-  the run exits 2.
+  accepts `--approve` like `reconcile`. Without a matching approval it is
+  reported `awaiting-approval`, and the run exits 2.
 - The approved digest reaches the driver through `ExecutionContext`, and the
   driver compares it with the plan it is about to apply. A mismatch returns
   `Outcome::AwaitingApproval` with the new digest: no effects, the unit waits,
@@ -1643,8 +1641,9 @@ honestly how it learned who did.
   local run records the Git user.
 - A lookup hook covers CI systems without a built-in lookup: `[approval]
   lookup = ["./ci/approvers.sh"]` in `nyl.toml` names a command that Nyl runs
-  with the run context (environment, units, digests) in environment variables
-  and that prints `{"by": [...], "source": "...", "url": "..."}`. Nyl records
+  with `NYL_ENVIRONMENT`, `NYL_APPROVAL_UNITS` (a JSON array of explicitly
+  approved names), and `NYL_APPROVAL_DIGESTS` (a JSON object of names to
+  digests or null) in environment variables and that prints `{"by": [...], "source": "...", "url": "..."}`. Nyl records
   the result as `verified`, naming the hook. The hook is optional, and it is
   trusted as much as the project's CI configuration, where the approval gate
   itself is defined. A failing or invalid hook fails the invocation before any
@@ -2006,9 +2005,8 @@ commit; without it, reconcile never verifies.
   an operator.
 - **Units that do not converge.** Under `driftRepair: converge`, a drifted
   unit that is not safe to re-run is reported `awaiting-approval` (exit 2)
-  while the rest of the run continues. In a `--local` run, `--approve <unit>`
-  executes it, recorded with the `local` approval identity; remote approvals
-  arrive in part 6.
+  while the rest of the run continues. `--approve <unit>` executes it,
+  recording the invocation's approval identity.
 - **`driftRepair: manual`** turns automatic repair off for an environment,
   such as production where every repair is reviewed: reconcile repairs no
   drift by itself, and drifted units stay `drifted` (exit 2) until a forced
@@ -2020,8 +2018,8 @@ commit; without it, reconcile never verifies.
   transition commit under `reapplied`. `--reapply` is a flag that requires
   `--unit` and `--reason`; the names go through the ordinary `--unit`
   validation. A named unit whose recovery policy is not `converge` follows
-  the approval rule above: `awaiting-approval` in a remote run, executed with
-  `--approve` in a `--local` run. It never fails the whole run. `nyl plan`
+  the approval rule above: `awaiting-approval` without a matching invocation
+  approval, executed with `--approve`. It never fails the whole run. `nyl plan`
   has no `--reapply`.
 - **Verification warnings.** `nyl verify` reports each drifted unit with
   `NYL-VERIFY-DRIFT`, whose fix says, per unit, what the next reconcile does:
@@ -2239,8 +2237,8 @@ lifecycle:
     [Instances](#instances)).
   - `--fail-fast` stops the teardown after the first failure, uncertain
     outcome, or approval wait (see [Execution](#execution)).
-  - A unit that needs manual approval is reported `awaiting-approval`, exit 2;
-    teardown approvals arrive in part 6.
+  - A unit that needs manual approval is reported `awaiting-approval`, exit 2,
+    until the invocation supplies a matching approval.
 - **Holds freeze a unit.** `nyl hold -e <env> --unit <u> [--reason <text>]`
   makes runs change nothing about the unit, whatever state it is in, without
   touching its resources. A held unit never progresses. `nyl hold` writes the
@@ -2487,11 +2485,11 @@ experiments from a workstation:
   <u>` after the change is committed (`NYL-LOCAL-RUN-UNRECORDED`). Units
   whose recovery policy is not `converge` run locally only when named with
   `--approve <unit>`; others report `awaiting-approval`, exit 2, like any
-  approval wait. Until remote approvals arrive, `--approve` is accepted only
-  with `--local`. The executed unit's receipt and the local transition
+  approval wait. The executed unit's receipt and the local transition
   commit's summary record `approval: {by: [<commit identity>], identity:
-  local, source: local, digest: null, reviewed: false}`, and without a commit
-  identity nothing is approved.
+  local, source: local, digest: null, reviewed: false}` by default; explicit
+  identities and configured lookups follow the common approval rules. Without
+  a commit identity nothing is approved.
 - `nyl state reset -e <env> --local` drops the local transitions and follows
   the remote again, once the remote has recorded the change or the local
   effects were undone. It lists the units whose local receipts the remote

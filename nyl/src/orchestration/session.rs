@@ -2,7 +2,7 @@
 //! its environment, building the shell's request and context, and rendering
 //! the one typed [`RunReport`] as a table or JSON with its exit category.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -170,6 +170,7 @@ impl Session {
         let renderer = self.renderer();
         let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
         let base = self.context(store, wiring, identity.map(ToString::to_string));
+        let secrets = crate::orchestration::secrets::ProjectSecrets::new(&self.inventory.project_root);
         let context = RunContext {
             base: &base,
             sources: &sources,
@@ -178,6 +179,7 @@ impl Session {
             tools: wiring.tools,
             workspace: workspace.path(),
             process_env: &wiring.process_env,
+            secrets: Some(&secrets),
             commit_identity: identity,
             observer: wiring.observer,
             prompt: wiring.prompt,
@@ -221,7 +223,26 @@ impl Session {
         } else {
             Some(unit_names("--unit", options.units)?)
         };
+        let mut environments = BTreeMap::new();
+        let mut environment_errors = BTreeMap::new();
+        for environment in declared(&self.inventory).0 {
+            match resolve_environment(&self.inventory, &environment.metadata.name) {
+                Ok(resolved) => {
+                    environments.insert(resolved.name, resolved.location);
+                }
+                Err(finding) => {
+                    if let Ok(name) = environment.name() {
+                        environment_errors.insert(name, finding);
+                    }
+                }
+            }
+        }
         Ok(RunRequest {
+            planned: BTreeMap::new(),
+            approvals: nyl_orchestration::rules::approval::Approvals::default(),
+            environments,
+            environment_errors,
+            unavailable: BTreeSet::new(),
             environment: self.resolved.name.clone(),
             entry: self.entry()?,
             location: self.resolved.location.clone(),

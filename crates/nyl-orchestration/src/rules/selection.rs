@@ -23,7 +23,7 @@
 //!   is `drifted`, or `--reapply` names it. Under `driftRepair: manual` a
 //!   drifted unit that is not reapplied stays [`Skipped::Drifted`]. A
 //!   candidate whose execution recovery policy is `converge` is selected;
-//!   any other needs an approval: `--approve` in a `--local` run, else it is
+//!   any other needs a matching invocation approval; otherwise it is
 //!   [`Skipped::RepairApproval`] (`awaiting-approval`) and the run goes on.
 //!   Contract: [Drift](../../../../design/orchestration-core.md#drift).
 
@@ -57,6 +57,8 @@ pub struct Candidates<'a> {
     /// approval ([`Skipped::LocalApproval`]). `None` for an ordinary run.
     /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
     pub local: Option<&'a BTreeSet<UnitName>>,
+    /// Matching invocation approvals; when present these supersede legacy local names.
+    pub approvals: Option<&'a BTreeMap<UnitName, ApprovalRecord>>,
     /// The latest observations per unit and type (`nyl verify`'s drift
     /// observations select drifted units again). Contract:
     /// [Drift](../../../../design/orchestration-core.md#drift).
@@ -66,7 +68,7 @@ pub struct Candidates<'a> {
     /// `nyl reconcile --unit <u>… --reapply`: the named units, to execute
     /// again although their receipt is current; empty without `--reapply`.
     /// A named unit whose recovery policy is not `converge` awaits approval
-    /// instead (`--approve` in a `--local` run).
+    /// instead (without a matching invocation approval).
     pub reapply: &'a BTreeSet<UnitName>,
 }
 
@@ -94,6 +96,8 @@ pub enum Skipped {
     /// without `--approve`). Reported as `awaiting-approval`; the rest of
     /// the run continues.
     RepairApproval,
+    /// The unit has no matching manual approval.
+    ManualApproval,
 }
 
 /// The ready units, by name, and why each other unit is skipped.
@@ -153,11 +157,14 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
                 if !citations_current(candidates, desired) {
                     return Err(Skipped::Blocked);
                 }
-                // Re-running a unit that does not converge needs an approval:
-                // `--approve` in a `--local` run; remote approvals do not
-                // exist yet, so a remote run leaves it awaiting approval.
+                // Re-running a unit that does not converge needs a matching approval.
                 let converges = execution_recovery(candidates.drivers, desired) == Some(RecoveryPolicy::Converge);
-                let approved = candidates.local.is_some_and(|approved| approved.contains(name));
+                let approved = approved(candidates, name);
+                if super::approval::policy(desired).mode == nyl_core::resources::units::ApprovalMode::Manual
+                    && !approved
+                {
+                    return Err(Skipped::ManualApproval);
+                }
                 return if converges || approved {
                     Ok(())
                 } else {
@@ -169,13 +176,28 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
     if !citations_current(candidates, desired) {
         return Err(Skipped::Blocked);
     }
+    if super::approval::policy(desired).mode == nyl_core::resources::units::ApprovalMode::Manual
+        && !approved(candidates, name)
+    {
+        return Err(Skipped::ManualApproval);
+    }
     if let Some(approved) = candidates.local {
-        if execution_recovery(candidates.drivers, desired) != Some(RecoveryPolicy::Converge) && !approved.contains(name)
+        if execution_recovery(candidates.drivers, desired) != Some(RecoveryPolicy::Converge)
+            && !candidates
+                .approvals
+                .map_or_else(|| approved.contains(name), |records| records.contains_key(name))
         {
             return Err(Skipped::LocalApproval);
         }
     }
     Ok(())
+}
+
+fn approved(candidates: &Candidates<'_>, name: &UnitName) -> bool {
+    candidates.approvals.map_or_else(
+        || candidates.local.is_some_and(|approved| approved.contains(name)),
+        |records| records.contains_key(name),
+    )
 }
 
 /// The units of `approve` (a `--local` run's `--approve`) that a
@@ -288,6 +310,7 @@ mod tests {
         drivers: DriverSet,
         attempted: BTreeSet<UnitName>,
         local: Option<BTreeSet<UnitName>>,
+        approvals: Option<BTreeMap<UnitName, ApprovalRecord>>,
         observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
         drift_repair: DriftRepair,
         reapply: BTreeSet<UnitName>,
@@ -303,6 +326,7 @@ mod tests {
                 drivers,
                 attempted: BTreeSet::new(),
                 local: None,
+                approvals: None,
                 observations: BTreeMap::new(),
                 drift_repair: DriftRepair::default(),
                 reapply: BTreeSet::new(),
@@ -345,6 +369,7 @@ mod tests {
                 named,
                 attempted: &self.attempted,
                 local: self.local.as_ref(),
+                approvals: self.approvals.as_ref(),
                 observations: &self.observations,
                 drift_repair: self.drift_repair,
                 reapply: &self.reapply,
@@ -620,5 +645,15 @@ mod tests {
         );
         world.local = Some(BTreeSet::from([name("manual")]));
         assert_eq!(world.select(Some(&named)).0, [name("converge"), name("manual")]);
+    }
+    #[test]
+    fn test_bound_invocation_approvals_supersede_local_names() {
+        let mut world = World::new();
+        world.add("manual", json!({"approval":"manual"}));
+        world.local = Some(BTreeSet::from([name("manual")]));
+        world.approvals = Some(BTreeMap::new());
+        let (ready, skipped) = world.select(None);
+        assert!(ready.is_empty());
+        assert_eq!(skipped[&name("manual")], Skipped::ManualApproval);
     }
 }

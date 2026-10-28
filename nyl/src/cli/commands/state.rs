@@ -125,6 +125,8 @@ pub enum StateCommand {
     /// with --teardown, tear every unit down first.
     Delete {
         #[command(flatten)]
+        approval: crate::orchestration::approval::ApprovalArgs,
+        #[command(flatten)]
         common: Common,
         /// Run `nyl teardown --all` first and continue to the deletion in the same command.
         #[arg(long)]
@@ -196,6 +198,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             })
         }
         StateCommand::Delete {
+            approval,
             common,
             teardown,
             allow_dependents,
@@ -207,6 +210,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             *teardown,
             (*allow_dependents, *allow_incomplete),
             source.as_deref(),
+            approval,
         ),
         StateCommand::Restore { common, to } => {
             let to = CommitId::new(to.trim().to_ascii_lowercase()).map_err(|error| {
@@ -403,6 +407,7 @@ fn run_delete(
     teardown: bool,
     (allow_dependents, allow_incomplete): (bool, bool),
     source: Option<&str>,
+    approval: &crate::orchestration::approval::ApprovalArgs,
 ) -> Result<CommandOutcome> {
     // `teardown --all` holds what stays in the ownership set.
     let lifecycle = LifecycleOptions {
@@ -419,11 +424,13 @@ fn run_delete(
         },
         lifecycle,
         source,
+        Some(approval),
         |context, request| nyl_orchestration::shell::teardown::state_delete(context, request, teardown),
     )
 }
 
 /// Run a state operation that needs source access and the shared run context.
+#[allow(clippy::too_many_arguments)] // Shared state command wiring, with optional invocation approvals.
 pub(crate) fn run_lifecycle(
     common: &Common,
     wiring: &Wiring<'_>,
@@ -431,6 +438,7 @@ pub(crate) fn run_lifecycle(
     mode: RunMode,
     lifecycle: LifecycleOptions,
     source: Option<&str>,
+    approval: Option<&crate::orchestration::approval::ApprovalArgs>,
     operation: impl FnOnce(
         &nyl_orchestration::shell::run::RunContext<'_>,
         &nyl_orchestration::shell::run::RunRequest,
@@ -452,7 +460,7 @@ pub(crate) fn run_lifecycle(
         Ok(identity) => identity,
         Err(finding) => return Ok(refused(finding)),
     };
-    let request = match session.request(&RunOptions {
+    let mut request = match session.request(&RunOptions {
         units: &[],
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
         source,
@@ -468,6 +476,12 @@ pub(crate) fn run_lifecycle(
         Ok(request) => request,
         Err(finding) => return Ok(refused(finding)),
     };
+    if let Some(approval) = approval {
+        request.approvals = match approval.resolve(&session, wiring, &identity, None) {
+            Ok(approvals) => approvals,
+            Err(finding) => return Ok(refused(finding)),
+        };
+    }
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),

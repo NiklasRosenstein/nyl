@@ -1,0 +1,56 @@
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: network
+  labels: {dev: 'true'}
+spec:
+  source: {path: ../infra/network}
+  backend: {path: '{{ values.backendDir }}/{{ environment.name }}-network.tfstate'}
+  outputs:
+    vpcId: {type: string}
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: database
+  labels: {dev: 'true'}
+spec:
+  source: {path: ../infra/database}
+  backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
+  variables:
+    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+  outputs:
+    host: {type: string}
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: web-image
+  labels: {dev: 'true'}
+spec:
+  context: {path: ../services/web}
+  repository: '%REGISTRY%/web'
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {dev: 'true'}
+spec:
+  target: '{{ values.target }}'
+  mode: publish
+  teardownWait: {strategy: manual}
+  timeout: 10m
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: seed
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'mkdir -p "$SCENARIO_TMP"; echo seeded >> "$SCENARIO_TMP/seeded"']
+  env:
+    passthrough: [SCENARIO_TMP]
