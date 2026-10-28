@@ -189,6 +189,27 @@
         }
       ]
     },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Literal labels used for organization and target selection.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "InlineGitRepository": {
       "additionalProperties": false,
       "properties": {
@@ -284,7 +305,7 @@
     },
     "TerraformSpec": {
       "additionalProperties": false,
-      "description": "Infrastructure managed by Terraform or OpenTofu, retaining native state and locking.\n\n## When needed\n\nFor an infrastructure configuration whose outputs feed other units.\n\n## If omitted\n\nNyl does not execute an infrastructure tool or manage its state.",
+      "description": "Infrastructure managed by Terraform or OpenTofu, retaining native state and locking.",
       "properties": {
         "approval": {
           "$ref": "#/$defs/ApprovalPolicy",
@@ -433,31 +454,10 @@
         "source"
       ],
       "type": "object"
-    },
-    "UnitMetadata": {
-      "additionalProperties": false,
-      "description": "A unit's identity and selection labels. Both are literal.",
-      "properties": {
-        "labels": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Literal labels that Environment `unitSelector`s match.",
-          "type": "object"
-        },
-        "name": {
-          "description": "The unit's identity for references, receipts, leases, and deletion; unique per environment across all unit kinds.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "A Terraform or OpenTofu infrastructure unit, preserving native state and locks.\n\n## When needed\n\nWhen infrastructure outputs feed other units or releases.\n\n## If omitted\n\nNyl does not execute a Terraform-compatible tool for this configuration.",
+  "description": "A Terraform or OpenTofu infrastructure unit, preserving native state and locks.",
   "examples": [
     {
       "apiVersion": "units.gitops.nyl/v1",
@@ -496,8 +496,8 @@
       "type": "string"
     },
     "metadata": {
-      "$ref": "#/$defs/UnitMetadata",
-      "description": "Unit name, labels, and annotations used for environment selection."
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Literal unit name and labels used for environment selection."
     },
     "spec": {
       "$ref": "#/$defs/TerraformSpec",
