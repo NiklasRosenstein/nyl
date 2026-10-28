@@ -268,6 +268,7 @@ mod tests {
 
         fn with<T>(&self, attempted: &BTreeSet<UnitName>, f: impl FnOnce(&Candidates<'_>) -> T) -> T {
             f(&Candidates {
+                approvals: None,
                 desired: &self.desired,
                 observed: &self.observed,
                 drivers: &self.drivers,

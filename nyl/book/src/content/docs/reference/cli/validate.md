@@ -25,7 +25,7 @@ nyl validate [path] [--strict]
    of every placed target
 9. A complete target compilation for every configured DeploymentTarget
 10. Each Environment's units, with the checks `nyl plan` and `nyl reconcile`
-    run before reading state: specs, `env.secrets`, overlapping resources,
+    run before reading state: specs, overlapping resources,
     `dependsOn` and references to unknown units, cycles, references to
     undeclared or sensitive outputs, and evidence requirements
 

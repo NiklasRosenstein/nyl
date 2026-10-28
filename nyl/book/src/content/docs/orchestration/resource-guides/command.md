@@ -73,7 +73,7 @@ A step starts from an empty environment. Nyl sets only:
 | `NYL_OPERATION` | `reconcile`, `verify`, `teardown`, or `fingerprint`. |
 
 The variables named in `env.passthrough` are copied from the runner's
-environment when they are set there. Every other variable of the process that
+environment. A missing declared variable stops the unit before it runs. Every other variable of the process that
 runs Nyl stays out. The names in `env.passthrough` enter the execution key,
 but their values do not, so a changed value does not run the command again.
 
@@ -82,10 +82,22 @@ command runs with the runner's permissions.
 
 ### Secrets
 
-`env.secrets` is not supported yet: Nyl rejects a unit that declares it with
-`NYL-UNIT-SECRETS-UNSUPPORTED`. Pass
-credentials the runner already has through `env.passthrough` until secret
-admission arrives.
+Map environment variable names to keys in the project's secrets provider:
+
+```yaml
+env:
+  passthrough: [AWS_REGION]
+  secrets:
+    DB_PASSWORD: database-password
+```
+
+String secrets pass through unchanged; structured values use compact JSON.
+Secrets are available to execution, planning, verification, and teardown,
+never to fingerprinting. Missing keys stop the call before a tool starts.
+Transcripts mask their values, and state records only the declared names and
+keys. Rotating a secret does not change the execution key. The provider is the
+same one used by project templates; currently the built-in null provider
+stores secrets in memory only.
 
 ## Outputs
 

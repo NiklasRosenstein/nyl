@@ -9,7 +9,7 @@
 //! `units:` block and headline, and the exit category. So what people read,
 //! what CI parses, and what the commit records cannot disagree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::Change;
@@ -50,6 +50,29 @@ impl RunReport {
             kind,
             environments: Vec::new(),
         }
+    }
+
+    /// Producer units whose plan cannot be treated as existing current evidence.
+    /// Multi-environment planning uses this typed result rather than preview values.
+    pub fn planned_changes(&self) -> BTreeMap<EnvironmentName, std::collections::BTreeSet<UnitName>> {
+        if self.kind != ReportKind::PlanReport {
+            return BTreeMap::new();
+        }
+        self.environments
+            .iter()
+            .map(|environment| {
+                (
+                    environment.name.clone(),
+                    environment
+                        .units
+                        .iter()
+                        .filter(|(_, unit)| unit.changes_evidence())
+                        .map(|(name, _)| name.clone())
+                        .chain(environment.unreported_changes.iter().cloned())
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     /// The invocation's exit category: the most severe of its environments'.
@@ -147,6 +170,9 @@ pub struct EnvironmentRunReport {
     /// Units leaving the ownership set; never filtered by `--unit`.
     pub leaving: Vec<LeavingUnit>,
     pub units: BTreeMap<UnitName, UnitReport>,
+    /// Changed desired units omitted by the plan’s output filter still invalidate consumer evidence.
+    #[serde(skip)]
+    pub(crate) unreported_changes: BTreeSet<UnitName>,
     /// Units whose result a leftover run checkpointed and this run imported:
     /// the transition summary's `imported`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -181,6 +207,7 @@ impl EnvironmentRunReport {
             source_commit: None,
             leaving: Vec::new(),
             units: BTreeMap::new(),
+            unreported_changes: BTreeSet::new(),
             imported: Vec::new(),
             recovered: Vec::new(),
             drift_repaired: Vec::new(),
@@ -221,7 +248,7 @@ impl EnvironmentRunReport {
             .filter_map(|(name, unit)| unit.result.as_ref().map(|result| (name, result)))
             .collect();
         let headline = headline(results.iter().map(|(_, result)| result.name()), &HEADLINE_RESULTS);
-        TransitionSummary {
+        let mut summary = TransitionSummary {
             operation,
             environment: self.name.clone(),
             headline,
@@ -240,7 +267,15 @@ impl EnvironmentRunReport {
             drift_repaired: self.drift_repaired.clone(),
             reapplied: None,
             details: BTreeMap::new(),
+        };
+        for (name, unit) in &self.units {
+            if let (Some(approval), Some(serde_json::Value::Object(entry))) =
+                (&unit.approval, summary.units.get_mut(name))
+            {
+                entry.insert("approval".to_owned(), serde_json::json!(approval));
+            }
         }
+        summary
     }
 }
 
@@ -393,6 +428,9 @@ pub struct UnitReport {
     pub changes: Option<Change>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_digest: Option<ChangeDigest>,
+    /// Approval used for this execution, including teardown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<nyl_core::orchestration::state::ApprovalRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -455,6 +493,12 @@ pub enum TeardownReadiness {
 }
 
 impl UnitReport {
+    /// Whether a plan must withhold this unit's current receipt from consumers.
+    pub(crate) fn changes_evidence(&self) -> bool {
+        self.state
+            .is_some_and(|state| !matches!(state, UnitState::Current | UnitState::Held | UnitState::Retained))
+    }
+
     pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
@@ -463,6 +507,7 @@ impl UnitReport {
             receipt: None,
             changes: None,
             change_digest: None,
+            approval: None,
             summary: None,
             blocked_by: Vec::new(),
             plan_error: None,

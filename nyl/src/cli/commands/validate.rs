@@ -193,7 +193,7 @@ fn slash_path(path: &Path) -> String {
 /// Render every Environment's units from the worktree and run the state-free
 /// unit checks `nyl plan` and `nyl reconcile` run
 /// ([`nyl_orchestration::rules::desired::check_units`]), with the drivers
-/// they use: specs, `env.secrets`, ownership scopes, unknown dependencies,
+/// they use: specs, ownership scopes, unknown dependencies,
 /// cycles, and references to undeclared or sensitive outputs.
 fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Result<()> {
     use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
@@ -205,15 +205,23 @@ fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Res
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
     let (environments, _) = crate::orchestration::project::declared(inventory);
     let mut issues = Vec::new();
+    let mut rendered_sources = std::collections::BTreeMap::new();
     for environment in &environments {
         let name =
             EnvironmentName::new(&environment.metadata.name).map_err(|error| NylError::config(error.to_string()))?;
         let source = renderer
             .render(&inventory.worktree_root, &name, &commit)
             .map_err(|error| NylError::config(error.to_string()))?;
+        rendered_sources.insert(name.clone(), source.clone());
         for finding in nyl_orchestration::rules::desired::check_units(&source, &wiring.drivers) {
             issues.push(format!("{name}: {finding}"));
         }
+    }
+    for finding in nyl_orchestration::rules::desired::check_ownership(&rendered_sources, &wiring.drivers) {
+        issues.push(finding.to_string());
+    }
+    if let Err(finding) = nyl_orchestration::rules::multi_environment::validate_sources(&rendered_sources) {
+        issues.push(finding.to_string());
     }
     if issues.is_empty() {
         Ok(())

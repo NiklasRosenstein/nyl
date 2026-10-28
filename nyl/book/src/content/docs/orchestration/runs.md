@@ -12,11 +12,9 @@ performs it, and [`nyl status`](/nyl/reference/cli/status/) and
 read the result.
 
 :::note
-Runs cover one environment at a time and the [Command](/nyl/orchestration/resource-guides/command/)
-unit kind today, with [recovery](/nyl/orchestration/recovery/) from runs that
-died, drift repair, and [deletion and holds](/nyl/orchestration/deletion/).
-Remote approvals and runs over several environments follow in the last part
-of milestone M3.
+Runs support the [Command](/nyl/orchestration/resource-guides/command/) unit
+kind, multi-environment dependencies, approvals, [recovery](/nyl/orchestration/recovery/)
+from runs that died, drift repair, and [deletion and holds](/nyl/orchestration/deletion/).
 :::
 
 ## Units
@@ -62,7 +60,7 @@ Common fields every kind shares:
 | `outputs` | The outputs the unit declares, each with a `type` and optionally `sensitive: true`. |
 | `dependsOn` | Units that must have a current receipt first, for ordering without a data reference. |
 | `timeout` | The deadline of one execution, at most `7d`. |
-| `env` | `passthrough`, the names of runner variables the unit may read. `secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until secret admission arrives. |
+| `env` | `passthrough`, the names of runner variables the unit may read, and `secrets`, mapping variable names to project secret keys. Missing credentials stop the unit before execution. |
 
 ## References between units
 
@@ -279,3 +277,102 @@ and `get`, need no identity.
 - [Environments and state](/nyl/orchestration/environments-and-state/)
 - [Using Command](/nyl/orchestration/resource-guides/command/)
 - [Environment](/nyl/reference/resources/gitops.nyl/v1/environment/)
+
+## Approvals
+
+A unit with `approval: manual` executes only with an invocation approval.
+`--approve <unit>` authorizes its initial desired execution key; if references
+resolve to a different key later in the run, the unit waits for a new approval.
+An initially blocked unit cannot be approved for a key that does not yet exist.
+A unit excluded by `--unit` cannot be approved.
+
+For a kind that reports change digests, `approval: {mode: manual, bind: plan}`
+accepts `--approve <unit>=sha256:…`. The driver recomputes the plan before
+effects and waits with the new digest if it changed. The same rule covers
+destroy plans. Without a digest, the approval is recorded as unreviewed;
+`requireDigest: true` refuses it. `--approve-all` approves candidates without
+reviewed digests, so those requiring a digest still wait.
+
+Receipts and transition summaries record approvers, their source, the digest,
+and whether it was reviewed. `--approved-by alice,bob --approval-source <url>`
+records `identity: asserted`. A workstation run otherwise records the Git user
+as `local`. In CI, a configured lookup or GitHub lookup records `verified`;
+without a lookup or token Nyl records the CI run source with no approver. These
+are audit identities: the CI gate controls who can authorize the invocation.
+
+Configure other CI systems with an optional hook:
+
+```toml
+[approval]
+lookup = ["./ci/approvers.sh"]
+```
+
+The hook runs in the project directory with `NYL_ENVIRONMENT`,
+`NYL_APPROVAL_UNITS` (a JSON array of explicitly approved names), and
+`NYL_APPROVAL_DIGESTS` (a JSON object mapping names to digests or null). It
+prints `{"by": ["alice"], "source": "production gate", "url": "https://ci.example/run/1"}`.
+Nyl records the command and result as `verified`. An invalid response, failure,
+cancellation, or 30-second timeout stops the invocation before unit effects
+with `NYL-APPROVAL-INVALID`. Explicit identity flags take precedence over lookups.
+
+In GitHub Actions, `GITHUB_TOKEN` (or `GH_TOKEN`) with Actions read permission
+allows Nyl to query the run review history. It records approved reviewers for
+the GitHub environment whose name matches the Nyl environment. The token
+remains in the lookup adapter and is never automatically admitted to unit tools.
+
+## Multi-environment runs
+
+`plan`, `reconcile`, `status`, and `verify` accept repeated `-e`, a label
+selector with `-l`, or an EnvironmentGroup with `-g`:
+
+```bash
+nyl reconcile -e infra -e services
+nyl plan -l stage=production -o json
+nyl verify -g production
+nyl reconcile -e infra -e services --unit infra/network --unit services/api
+```
+
+Environments run in dependency order, producers first, with ties by name.
+Each environment resolves its own source, takes its own lease when writing,
+and writes its own transition commit. Every selected environment runs even
+when an earlier one fails or waits. The invocation exits with the most severe
+category across its environment report sections.
+
+A cross-environment reference uses the producer's declared environment:
+
+```yaml
+values:
+  networkId:
+    fromUnit: {environment: infra, unit: network, output: id}
+```
+
+`dependsOn` also accepts `{environment: infra, unit: network}`. The producer
+must select and enable the unit, and its receipt must be current. A run reads
+each producer's state once, without its lease; provenance records that
+producer's observed commit. A consumer run before its producer has a receipt
+waits. In one invocation, consumers read the receipts that preceding producer
+runs just wrote. References outside the selection read existing state.
+Environment dependency cycles fail validation.
+
+If a selected producer fails or waits, including when its lease is busy,
+consumers wait instead of using its old receipts. Independent units still run.
+
+Planning reads current receipts rather than preview outputs. If a preceding
+producer plan changes a referenced unit, the consumer plan waits and names
+that producer's planned change, even when `--unit` hides it from the producer's
+report. A producer cannot be torn down while other
+environments' stored desired units reference it unless `--allow-dependents`
+permits that action.
+
+In a selection containing several environments, unit options must name their
+environment: `--unit services/api` and `--approve services/api=<digest>`.
+Unqualified names and names outside the selection fail. `--allow-teardown`
+and `--allow-dependents` apply to all selected environments; `--source` takes
+exactly one environment. Deliberate actions such as `teardown`, `hold`,
+`recover`, and `state` commands continue to take one environment.
+
+Stored incarnations protect their resource ownership until removed, including
+held units and units awaiting teardown whose source no longer declares them.
+If an environment's state cannot be read, environments
+that claim native resources are refused until access returns; independent
+units without resource claims can still run.

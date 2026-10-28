@@ -231,3 +231,8 @@ and warning carries a stable code and its fix. SIGINT or SIGTERM during
 Every command that writes
 remote state, except `state restore`, exits 1 with `NYL-STATE-LOCAL-TIP` when
 a state ref's tip is a pushed local transition.
+
+When `state delete --teardown` encounters manual units, it accepts the same
+[approval flags](/nyl/reference/cli/reconcile/#options) as `reconcile`, including
+`--approve-all`. Units requiring a reviewed destroy digest still need an
+explicit `--approve <unit>=<digest>`.

@@ -32,6 +32,9 @@ use crate::Result;
 #[allow(clippy::struct_excessive_bools)] // Independent command-line switches.
 #[command(group(clap::ArgGroup::new("target").required(true).args(["units", "all"])))]
 pub struct TeardownArgs {
+    /// Manual teardown approvals and their audit identity.
+    #[command(flatten)]
+    pub approval: crate::orchestration::approval::ApprovalArgs,
     /// The environment.
     #[arg(short = 'e', long = "environment")]
     pub environment: String,
@@ -113,7 +116,7 @@ fn target(args: &TeardownArgs) -> std::result::Result<TeardownTarget, Stop> {
 fn teardown(args: &TeardownArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment)?;
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
-    let request = session.request(&RunOptions {
+    let mut request = session.request(&RunOptions {
         // The units are the mode's target; a teardown run selects nothing else.
         units: &[],
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
@@ -133,6 +136,12 @@ fn teardown(args: &TeardownArgs, wiring: &Wiring<'_>) -> std::result::Result<Com
         fail_fast: args.fail_fast,
         reason: args.reason.as_deref(),
     })?;
+    let selected = if args.all {
+        None
+    } else {
+        Some(unit_names("--unit", &args.units)?)
+    };
+    request.approvals = args.approval.resolve(&session, wiring, &identity, selected.as_ref())?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),

@@ -43,7 +43,7 @@ pub fn extract(
     let mut edges = Vec::new();
     for (consumer, unit) in units {
         depends_on_edges(environment, consumer, unit, units, &mut edges, &mut findings);
-        reference_edges(consumer, unit, units, &mut edges, &mut findings);
+        reference_edges(environment, consumer, unit, units, &mut edges, &mut findings);
     }
     edges.sort_by(|a, b| (&a.consumer, &a.producer, &a.source).cmp(&(&b.consumer, &b.producer, &b.source)));
     edges.dedup();
@@ -112,15 +112,8 @@ fn depends_on_edges(
             ));
             continue;
         }
-        if let Some(other) = entry.environment() {
-            findings.push(Finding::new(
-                Code::DependencyUnknown,
-                format!(
-                    "unit {consumer}: spec.dependsOn[{index}] names unit {:?} of environment {other:?}; cross-environment dependencies are not supported yet",
-                    entry.unit()
-                ),
-                "depend on a unit of the same environment",
-            ));
+        if entry.environment().is_some_and(|other| other != environment.as_str()) {
+            // Cross-environment edges order environments, not this environment's units.
             continue;
         }
         let producer = match UnitName::new(entry.unit()) {
@@ -150,6 +143,7 @@ fn depends_on_edges(
 }
 
 fn reference_edges(
+    environment: &EnvironmentName,
     consumer: &UnitName,
     unit: &DesiredUnit,
     units: &BTreeMap<UnitName, DesiredUnit>,
@@ -178,15 +172,11 @@ fn reference_edges(
             ));
             continue;
         }
-        if let Some(other) = &source.environment {
-            findings.push(Finding::new(
-                Code::ReferenceInvalid,
-                format!(
-                    "unit {consumer}: the reference at {:?} reads unit {:?} of environment {other:?}; cross-environment references are not supported yet",
-                    reference.pointer, source.unit
-                ),
-                "reference a unit of the same environment",
-            ));
+        if source
+            .environment
+            .as_deref()
+            .is_some_and(|other| other != environment.as_str())
+        {
             continue;
         }
         let producer = match UnitName::new(source.unit.as_str()) {
@@ -464,14 +454,9 @@ mod tests {
         )])
         .unwrap_err();
         let codes = findings.iter().map(|finding| finding.code).collect::<Vec<_>>();
-        assert_eq!(
-            codes,
-            [Code::DependencyUnknown, Code::DependencyUnknown, Code::ReferenceInvalid],
-            "{findings:?}"
-        );
+        assert_eq!(codes, [Code::DependencyUnknown, Code::ReferenceInvalid], "{findings:?}");
         assert!(findings[0].message.contains("\"missing\""));
-        assert!(findings[1].message.contains("cross-environment"));
-        assert!(findings[2].message.contains("\"/y\""), "{}", findings[2].message);
+        assert!(findings[1].message.contains("\"/y\""), "{}", findings[2].message);
     }
 
     /// Catches a reference to an output its producer does not declare, or

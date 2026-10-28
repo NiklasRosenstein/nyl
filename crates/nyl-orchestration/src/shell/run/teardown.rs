@@ -57,6 +57,7 @@ pub(super) struct Details {
     pub(super) retained: Vec<UnitName>,
     pub(super) released: BTreeMap<UnitName, Option<String>>,
     pub(super) allow_dependents: BTreeMap<UnitName, Vec<UnitName>>,
+    pub(super) external_dependents: BTreeMap<UnitName, Vec<String>>,
     pub(super) confirmed_removal: BTreeMap<UnitName, Value>,
     pub(super) incomplete: BTreeMap<UnitName, Vec<String>>,
     pub(super) teardown_requested: Vec<UnitName>,
@@ -74,6 +75,9 @@ impl Details {
         }
         if !self.allow_dependents.is_empty() {
             details.insert("allowDependents".to_owned(), json!(self.allow_dependents));
+        }
+        if !self.external_dependents.is_empty() {
+            details.insert("allowExternalDependents".to_owned(), json!(self.external_dependents));
         }
         if !self.confirmed_removal.is_empty() {
             details.insert("confirmedRemoval".to_owned(), json!(self.confirmed_removal));
@@ -250,6 +254,7 @@ fn completion_detail(completion: &WaitCompletion) -> Value {
 fn pending_reason(pending: &Pending) -> String {
     let list = |units: &[UnitName]| units.iter().map(UnitName::as_str).collect::<Vec<_>>().join(", ");
     match pending {
+        Pending::ExternalDependents { units } => format!("other environments reference it: {}", units.join(", ")),
         Pending::NeedsAllowTeardown => "its teardown needs --allow-teardown".to_owned(),
         Pending::HasDependents { tombstones } => format!("retained tombstones cite it: {}", list(tombstones)),
         Pending::Dependents { units } => format!("waits for its deleting dependents: {}", list(units)),
@@ -272,6 +277,7 @@ struct Job<'j> {
     slot: usize,
     directory: PathBuf,
     completion: Option<WaitCompletion>,
+    approved_digest: Option<nyl_core::orchestration::ids::ChangeDigest>,
 }
 
 /// One teardown call's result.
@@ -332,6 +338,11 @@ impl Reconcile<'_, '_, '_> {
             // Run one batch, then read holds and plan again from its outcomes.
             let concurrency = self.session.request.concurrency.max(1);
             let batch: Vec<_> = plan.wave.into_iter().take(concurrency).collect();
+            for name in &batch {
+                if let Some(units) = plan.external_overrides.get(name) {
+                    life.details.external_dependents.insert(name.clone(), units.clone());
+                }
+            }
             let (instant, teardowns): (Vec<_>, Vec<_>) = batch.into_iter().partition(|name| {
                 life.releases.contains(name)
                     || matches!(&life.desired[name].lifecycle, Lifecycle::Deleting { deletion }
@@ -400,7 +411,9 @@ impl Reconcile<'_, '_, '_> {
         inputs: &LeaveInputs<'_>,
         observed: &BTreeMap<UnitName, ObservedUnit>,
     ) -> teardown_rules::TeardownPlan {
-        teardown_rules::plan(&TeardownInputs {
+        let external = self.session.external_dependents(&life.desired);
+        let mut plan = teardown_rules::plan(&TeardownInputs {
+            external_dependents: external.as_ref().unwrap_or(&BTreeMap::new()),
             environment: self.environment(),
             desired: &life.desired,
             observed,
@@ -410,7 +423,19 @@ impl Reconcile<'_, '_, '_> {
             waiting: &life.waiting,
             readiness: &life.readiness,
             drops: &life.releases,
-        })
+        });
+        if let Err(finding) = external {
+            for name in plan.ready.drain(..) {
+                plan.pending.insert(
+                    name,
+                    Pending::Readiness {
+                        findings: vec![finding.clone()],
+                    },
+                );
+            }
+            plan.wave.clear();
+        }
+        plan
     }
 
     /// The readiness preflight of every deleting teardown unit, once.
@@ -550,6 +575,7 @@ impl Reconcile<'_, '_, '_> {
                         slot,
                         directory: session.execution_directory(name),
                         completion: None,
+                        approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
                     })
                     .collect();
                 run_jobs(context, &session.slots, &environment, inputs.project_dir, jobs)
@@ -618,6 +644,16 @@ impl Reconcile<'_, '_, '_> {
         if let Some(message) = &call.unavailable {
             self.source_missing(life, name, unit, message);
             return Ok(false);
+        }
+        let approved = self.session.request.approvals.records(
+            &BTreeMap::from([(name.clone(), unit.execution_key.clone())]),
+            &BTreeMap::from([(name.clone(), unit.clone())]),
+        );
+        if let Some(approval) = approved.get(name) {
+            life.results
+                .entry(name.clone())
+                .or_insert_with(|| UnitReport::new(kind.clone()))
+                .approval = Some(approval.clone());
         }
         let outcome = match call.outcome {
             Ok(Supported::Supported(outcome)) => outcome,
@@ -702,8 +738,8 @@ impl Reconcile<'_, '_, '_> {
                     }
                     return Ok(false);
                 }
-                Outcome::AwaitingApproval { .. } => {
-                    life.result(name, &kind, UnitResult::AwaitingApproval);
+                Outcome::AwaitingApproval { digest } => {
+                    life.result(name, &kind, UnitResult::AwaitingApproval).change_digest = Some(digest);
                     self.fail_fast(life, name);
                     return Ok(false);
                 }
@@ -936,6 +972,7 @@ impl Reconcile<'_, '_, '_> {
                 slot: 0,
                 directory: session.execution_directory(name),
                 completion: Some(completion),
+                approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
             }],
         );
         for call in results {
@@ -1126,6 +1163,25 @@ fn call(
             };
         }
     };
+    let env = match execution_env(context, &job.unit.spec) {
+        Ok(env) => env,
+        Err(message) => {
+            let _ = std::fs::remove_dir_all(&job.directory);
+            let outcome = if matches!(
+                job.observed.and_then(|observed| observed.condition.as_ref()),
+                Some(Condition::Uncertain { .. })
+            ) {
+                Err(DriverError::before_effects(message))
+            } else {
+                Ok(Supported::Supported(Outcome::Failed {
+                    category: nyl_core::orchestration::state::FailureCategory::Credentials,
+                    retryable: true,
+                    message,
+                }))
+            };
+            return finish(outcome, false);
+        }
+    };
     let _ = context.base.faults.at(FaultPoint::Executing, Some(&name));
     let execution = ExecutionContext {
         unit: UnitAddress::new(environment.clone(), name.clone()),
@@ -1133,8 +1189,8 @@ fn call(
         project_dir: project_path(&worktree, project_dir),
         worktree,
         temp_dir,
-        env: admitted_env(context.process_env, &job.unit.spec),
-        approved_digest: None,
+        env,
+        approved_digest: job.approved_digest,
         deadline,
         now,
         observed: job.observed,

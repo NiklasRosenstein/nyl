@@ -7,8 +7,8 @@ results in its state. See [Runs](/nyl/orchestration/runs/) for how a run
 chooses its source commit, resolves references, and decides what executes.
 
 :::note
-Orchestration is being built in milestone M3. `reconcile` runs one
-environment's [Command](/nyl/orchestration/resource-guides/command/) units,
+Orchestration is being built in milestone M3. `reconcile` runs selected
+environments'  [Command](/nyl/orchestration/resource-guides/command/) units,
 takes over from runs that died, repairs drift, and deletes units that left
 the environment; remote approvals and runs over several environments follow.
 :::
@@ -169,17 +169,24 @@ number, as a forced kill would; the next run takes over as after a crash. A
 signal while `--wait-lease` waits for another run's lease also exits 4 with
 `NYL-RUN-CANCELLED`, having written nothing.
 
+Select several environments with repeated `-e`, with `-l stage=production`, or
+with `-g <group>`. They run in dependency order with one report section per
+environment. See [Multi-environment runs](/nyl/orchestration/runs/#multi-environment-runs)
+for qualified unit options and independent state transactions.
+
 ## Options
 
 | Option | Meaning |
 | --- | --- |
-| `-e`, `--environment <name>` | The environment to reconcile. Required. |
+| `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
+| `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
+| `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--unit <name>`, `--units <a>,<b>` | Execute only these units, and do no lifecycle work. Resolution still covers the whole environment, and a named unit whose dependency has no current receipt stays blocked. An unknown name exits 1 with `NYL-UNIT-UNKNOWN`. |
 | `--allow-teardown` | Start the teardown of units that left the ownership set, or changed their kind, under `deletionPolicy: Teardown`. Without it they stay `pending-teardown`, exit 2. |
 | `--allow-dependents` | Tear down a unit although retained tombstones cite it; the transition commit records the override under `allowDependents`. |
 | `--allow-incomplete` | Start a publication's teardown although its target's settings do not let it complete, and end its teardown wait without a claim of removal; the commit records what may remain under `incomplete`. |
 | `--leaving` | Do only the lifecycle work of units outside the ownership set. Conflicts with `--unit`. |
-| `--reapply` | Execute the units named by `--unit` although their receipts are current, such as to repair drift under `driftRepair: manual`. Requires `--unit` and `--reason`; recorded under `reapplied`. A named unit that is not safe to re-run awaits approval, or runs with `--approve` in a `--local` run. |
+| `--reapply` | Execute the units named by `--unit` although their receipts are current, such as to repair drift under `driftRepair: manual`. Requires `--unit` and `--reason`; recorded under `reapplied`. A named unit that is not safe to re-run awaits approval, or runs with a matching `--approve`. |
 | `--reason <text>` | Why, for `--reapply`; recorded with the `Nyl-Reason` trailer. |
 | `--fail-fast` | Start no further unit after the first failure, uncertain outcome, or approval wait. Units not started report `blocked`, and the run warns with `NYL-RUN-STOPPED`. |
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
@@ -187,7 +194,9 @@ signal while `--wait-lease` waits for another run's lease also exits 4 with
 | `--wait-lease <duration>` | Wait up to this long, such as `10m`, while another run holds the lease, instead of exiting 2 with `NYL-LEASE-HELD`. |
 | `--local` | Run next to remote state without publishing it: continue from this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs) and commit there, marked `Nyl-Local: true`. Warns `NYL-LOCAL-RUN-UNRECORDED` for every unit it executes. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote or with full `refs/…` state refs, and with `NYL-LOCAL-RUN-LEFTOVERS` while remote state has dead runs to take over. |
 | `--local-lease` | With `--local`, take this clone's own lease instead of the remote one, accepting that CI may run at the same time. |
-| `--approve <unit>` | With `--local`, execute this unit although its recovery policy is not `converge`, including a drifted unit or one named by `--reapply`. Its receipt and the local transition commit record `approval: {by: [<commit identity>], identity: local, source: local, digest: null, reviewed: false}`. Repeatable or comma-separated. Other such units wait as `awaiting-approval`, exit 2. Only `--local` accepts it until remote approvals arrive. |
+| `--approve <unit>[=<digest>]` | Approve a manual unit, a drift repair that is not safe to repeat, or a non-converging unit in a local run. Repeatable or comma-separated. A desired-bound approval covers its initial execution key; a plan-bound digest covers the reviewed changes. Excluded units are an error. See [Approvals](/nyl/orchestration/runs/#approvals). |
+| `--approve-all` | Approve every candidate without a reviewed digest; policies with `requireDigest: true` still wait. Explicit digests override this for named units. |
+| `--approved-by <name>`, `--approval-source <source>` | Assert approver identities and their source. Names are repeatable or comma-separated; recorded as `asserted`. Without these flags Nyl uses a configured lookup, CI context, or the Git user. |
 | `--author "Name <email>"` | The author of the state commits. Default: Git's `user.name` and `user.email`. |
 | `-o`, `--output <table\|json>` | A table of units, or the typed `ReconcileReport`. Default `table`. |
 | `[PATH]` | The project directory or a path beneath it. Default `.`. |

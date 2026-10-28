@@ -167,10 +167,20 @@ where
     check_release_history_limit(limit).map_err(serde::de::Error::custom)
 }
 
+/// Optional CI approver lookup.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApprovalSettings {
+    /// Command and arguments printing approvers as JSON before any effects.
+    pub lookup: Vec<String>,
+}
+
 /// Root structure of `nyl.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
+    /// Optional CI approver lookup for manual executions.
+    pub approval: ApprovalSettings,
     pub project: ProjectSettings,
 
     /// Release history retention for `nyl apply` and `nyl release rollback`.

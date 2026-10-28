@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "ApprovalSettings": {
+      "additionalProperties": false,
+      "description": "Optional CI approver lookup.",
+      "properties": {
+        "lookup": {
+          "default": [],
+          "description": "Command and arguments printing approvers as JSON before any effects.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "BuiltinSchemas": {
       "description": "Built-in schema download and vendoring policy.",
       "oneOf": [
@@ -328,6 +343,13 @@
   "additionalProperties": false,
   "description": "Root structure of `nyl.toml`.",
   "properties": {
+    "approval": {
+      "$ref": "#/$defs/ApprovalSettings",
+      "default": {
+        "lookup": []
+      },
+      "description": "Optional CI approver lookup for manual executions."
+    },
     "capture": {
       "$ref": "#/$defs/CaptureSettings",
       "default": {

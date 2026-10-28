@@ -32,7 +32,7 @@
 //!   nothing, although the observed tip and the run ID differ.
 //! - The artifact digest is [`ArtifactDocument::digest`], the one function
 //!   receipts are written and checked with.
-//! - Cross-environment references (`environment:`) are rejected until M6.
+//! - Cross-environment references use one immutable snapshot per declared producer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,6 +48,8 @@ use super::freshness::receipt_is_current;
 
 /// What references resolve against.
 pub struct ReferenceView<'a> {
+    /// Snapshots of declared producer environments, read once for this run.
+    pub environments: &'a BTreeMap<EnvironmentName, nyl_core::orchestration::ports::EnvironmentSnapshot>,
     pub environment: &'a EnvironmentName,
     /// Desired documents of the ownership set as this resolution sees them:
     /// producers already resolved in this pass carry their new execution keys.
@@ -94,25 +96,26 @@ fn producer<'v>(view: &'v ReferenceView<'_>, unit: &str) -> Result<(&'v UnitName
 }
 
 /// The producer's declared outputs, from its rendered spec.
-fn declared_outputs(producer: &DesiredUnit) -> Result<BTreeMap<String, OutputDeclaration>, String> {
-    match producer.spec.get("outputs") {
+fn declared_outputs(name: &UnitName, spec: &Value) -> Result<BTreeMap<String, OutputDeclaration>, String> {
+    match spec.get("outputs") {
         None | Some(Value::Null) => Ok(BTreeMap::new()),
         Some(outputs) => serde_json::from_value(outputs.clone())
-            .map_err(|error| format!("unit {} declares invalid outputs: {error}", producer.unit.name)),
+            .map_err(|error| format!("unit {name} declares invalid outputs: {error}")),
     }
 }
 
 /// Resolve one reference. `Err` is a resolution error, reported with
 /// [`Code::ReferenceInvalid`](nyl_core::orchestration::codes::Code::ReferenceInvalid).
 pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> Result<ReferenceValue, String> {
-    if let Some(environment) = &source.environment {
-        return Err(format!(
-            "references unit {:?} of environment {environment:?}; cross-environment references are not supported yet",
-            source.unit
-        ));
-    }
     if let Some(error) = unsupported_evidence(source) {
         return Err(error);
+    }
+    if let Some(environment) = source
+        .environment
+        .as_deref()
+        .filter(|environment| *environment != view.environment.as_str())
+    {
+        return resolve_external(view, source, environment);
     }
     let (name, desired) = producer(view, &source.unit)?;
     // Static checks against the producer's declaration come first, so an
@@ -168,6 +171,61 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
     })
 }
 
+/// Resolve against the producer's immutable state snapshot; never its lease or checkpoints.
+fn resolve_external(
+    view: &ReferenceView<'_>,
+    source: &UnitInputSource,
+    environment: &str,
+) -> Result<ReferenceValue, String> {
+    let name = EnvironmentName::new(environment).map_err(|error| error.to_string())?;
+    let snapshot = view
+        .environments
+        .get(&name)
+        .ok_or_else(|| format!("references undeclared environment {environment:?}"))?;
+    // Source validation checks membership; a newly declared producer may have no desired state yet.
+    if !snapshot
+        .desired
+        .contains_key(&UnitName::new(&source.unit).map_err(|error| error.to_string())?)
+    {
+        return Ok(ReferenceValue::Blocked {
+            unit: UnitName::new(&source.unit).map_err(|error| error.to_string())?,
+            reason: format!("{environment}/{} has no current receipt", source.unit),
+        });
+    }
+    if let Ok(unit) = UnitName::new(&source.unit) {
+        if snapshot.desired.get(&unit).is_some_and(|unit| {
+            matches!(
+                unit.lifecycle,
+                nyl_core::orchestration::state::Lifecycle::Deleting { .. }
+                    | nyl_core::orchestration::state::Lifecycle::Retained { .. }
+            )
+        }) {
+            return Err(format!(
+                "references unit {environment}/{unit}, which is outside the ownership set"
+            ));
+        }
+    }
+    let external = ReferenceView {
+        environments: view.environments,
+        environment: &name,
+        desired: &snapshot.desired,
+        observed: &snapshot.observed,
+        artifacts: &snapshot.artifacts,
+        observed_commit: snapshot.tips.observed.as_ref(),
+        run: None,
+        produced_in_run: &BTreeSet::new(),
+        previous: &snapshot.desired,
+    };
+    let mut source = source.clone();
+    source.environment = None;
+    let mut result = resolve_reference(&external, &source)?;
+    match &mut result {
+        ReferenceValue::Value { provenance, .. } => provenance.environment = Some(name),
+        ReferenceValue::Blocked { reason, .. } => *reason = format!("{environment}/{reason}"),
+    }
+    Ok(result)
+}
+
 /// The state-free checks of a reference against its producer's rendered
 /// spec: exactly one of `output` and `artifact`, `kind` only on artifact
 /// references, and an output that the producer declares as non-sensitive.
@@ -179,6 +237,15 @@ pub(crate) fn check_declaration(
     producer: &DesiredUnit,
     source: &UnitInputSource,
 ) -> Result<Option<OutputDeclaration>, String> {
+    check_spec_declaration(name, &producer.spec, source)
+}
+
+/// Validate a reference against a rendered producer spec, before state exists.
+pub fn check_spec_declaration(
+    name: &UnitName,
+    spec: &Value,
+    source: &UnitInputSource,
+) -> Result<Option<OutputDeclaration>, String> {
     match (&source.output, &source.artifact) {
         (Some(output), None) => {
             if let Some(kind) = &source.kind {
@@ -186,7 +253,7 @@ pub(crate) fn check_declaration(
                     "asserts kind {kind:?} for output {output:?} of unit {name}; kind applies to artifact references only"
                 ));
             }
-            let outputs = declared_outputs(producer)?;
+            let outputs = declared_outputs(name, spec)?;
             let Some(declaration) = outputs.get(output) else {
                 return Err(format!(
                     "reads output {output:?}, which unit {name} does not declare; declared outputs: {}",
@@ -431,11 +498,44 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
             continue;
         }
         if let Some(environment) = entry.environment() {
-            errors.push(format!(
-                "{field} names unit {:?} of environment {environment:?}; cross-environment dependencies are not supported yet",
-                entry.unit()
-            ));
-            continue;
+            if environment != view.environment.as_str() {
+                let snapshot = EnvironmentName::new(environment)
+                    .ok()
+                    .and_then(|name| view.environments.get(&name));
+                match snapshot {
+                    Some(snapshot) if snapshot.desired.is_empty() => reasons.push(BlockedReason {
+                        pointer: format!("/dependsOn/{index}"),
+                        reason: format!("{environment}/{} has no current receipt", entry.unit()),
+                    }),
+                    Some(snapshot) => match UnitName::new(entry.unit())
+                        .ok()
+                        .and_then(|name| snapshot.desired.get_key_value(&name))
+                    {
+                        Some((name, desired))
+                            if matches!(
+                                desired.lifecycle,
+                                nyl_core::orchestration::state::Lifecycle::Deleting { .. }
+                                    | nyl_core::orchestration::state::Lifecycle::Retained { .. }
+                            ) =>
+                        {
+                            errors.push(format!(
+                                "{field} references unit {environment}/{name} outside the ownership set"
+                            ));
+                        }
+                        Some((name, desired)) if receipt_is_current(desired, snapshot.observed.get(name)) => {}
+                        Some((name, _)) => reasons.push(BlockedReason {
+                            pointer: format!("/dependsOn/{index}"),
+                            reason: format!("{environment}/{}", no_current_receipt(name)),
+                        }),
+                        None => reasons.push(BlockedReason {
+                            pointer: format!("/dependsOn/{index}"),
+                            reason: format!("{environment}/{} has no current receipt", entry.unit()),
+                        }),
+                    },
+                    None => errors.push(format!("{field} references undeclared environment {environment:?}")),
+                }
+                continue;
+            }
         }
         match producer(view, entry.unit()) {
             Ok((name, desired)) => {
@@ -460,6 +560,7 @@ mod tests {
     use super::*;
 
     struct World {
+        environments: BTreeMap<EnvironmentName, nyl_core::orchestration::ports::EnvironmentSnapshot>,
         desired: BTreeMap<UnitName, DesiredUnit>,
         observed: BTreeMap<UnitName, ObservedUnit>,
         artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
@@ -482,6 +583,7 @@ mod tests {
                 json!({"repository": "registry.example.com/web", "tags": ["a", "b"]}),
             );
             let mut world = Self {
+                environments: BTreeMap::new(),
                 desired: BTreeMap::new(),
                 observed: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
@@ -519,6 +621,7 @@ mod tests {
 
         fn view(&self) -> ReferenceView<'_> {
             ReferenceView {
+                environments: &self.environments,
                 environment: &self.environment,
                 desired: &self.desired,
                 observed: &self.observed,
@@ -537,6 +640,39 @@ mod tests {
 
     fn consumer(variables: &Value) -> DesiredUnit {
         desired("database", "Command", json!({"variables": variables}), "database")
+    }
+
+    #[test]
+    fn test_cross_environment_reference_cites_producer_snapshot_and_blocks_stale_evidence() {
+        let producer = World::new();
+        let mut consumer = World::new();
+        let environment = EnvironmentName::new("infra").unwrap();
+        let mut snapshot = nyl_core::orchestration::ports::EnvironmentSnapshot {
+            desired: producer.desired.clone(),
+            observed: producer.observed.clone(),
+            artifacts: producer.artifacts.clone(),
+            ..nyl_core::orchestration::ports::EnvironmentSnapshot::default()
+        };
+        snapshot.tips.observed = Some(producer.observed_commit.clone());
+        consumer.environments.insert(environment.clone(), snapshot);
+        let reference = json!({"environment": "infra", "unit": "network", "output": "vpcId"});
+        let ReferenceValue::Value { value, provenance } = consumer.resolve(reference.clone()).unwrap() else {
+            panic!("the producer has a current receipt")
+        };
+        assert_eq!(value, json!("vpc-0abc123"));
+        assert_eq!(provenance.environment, Some(environment.clone()));
+        assert_eq!(provenance.observed_commit, Some(producer.observed_commit));
+        assert!(provenance.run.is_none());
+        consumer.environments.get_mut(&environment).unwrap().observed.clear();
+        assert!(matches!(
+            consumer.resolve(reference.clone()).unwrap(),
+            ReferenceValue::Blocked { .. }
+        ));
+        consumer.environments.get_mut(&environment).unwrap().desired.clear();
+        assert!(matches!(
+            consumer.resolve(reference).unwrap(),
+            ReferenceValue::Blocked { .. }
+        ));
     }
 
     #[test]
@@ -654,7 +790,7 @@ mod tests {
         let cross = world
             .resolve(json!({"environment": "infra", "unit": "network", "output": "vpcId"}))
             .unwrap_err();
-        assert!(cross.contains("cross-environment"), "{cross}");
+        assert!(cross.contains("undeclared environment"), "{cross}");
     }
 
     #[test]

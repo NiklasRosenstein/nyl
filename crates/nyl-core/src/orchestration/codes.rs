@@ -30,6 +30,8 @@ macro_rules! codes {
 }
 
 codes! {
+    /// An approval or approver lookup is invalid; no effects start.
+    ApprovalInvalid => "NYL-APPROVAL-INVALID",
     /// Another run holds the environment's lease.
     LeaseHeld => "NYL-LEASE-HELD",
     /// The run's lease was taken over or deleted; it pushed nothing.

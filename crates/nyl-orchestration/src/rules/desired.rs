@@ -42,15 +42,12 @@
 //!   [`Desired::units`] and are kept in [`Desired::held`], with this run's
 //!   rendering so the run can record what source would change
 //!   ([`hold_pending`]).
-//! - M3 restriction: a unit's `env.secrets` is rejected with
-//!   [`Code::UnitSecretsUnsupported`](nyl_core::orchestration::codes::Code::UnitSecretsUnsupported);
-//!   secrets providers for units arrive in a later milestone.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{Driver, DriverSet, OwnershipScope};
-use nyl_core::orchestration::ids::{CommitId, Uid, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, RenderedSource, RenderedUnit};
 use nyl_core::orchestration::state::{
     BlockedReason, DeletionIntent, DeletionReason, DesiredUnit, DesiredUnitKind, EnvironmentRecord,
@@ -334,6 +331,70 @@ pub fn ownership_set(source: &RenderedSource) -> BTreeMap<&UnitName, &RenderedUn
         .collect()
 }
 
+/// Reject overlapping native resources across all declared environments,
+/// using the same scope rules as a single environment's desired documents.
+/// Contract: [Identity](../../../../design/orchestration-core.md#identity).
+pub fn check_ownership(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers: &DriverSet) -> Vec<Finding> {
+    check_ownership_with_snapshots(sources, &BTreeMap::new(), drivers)
+}
+
+/// Stored incarnations keep their claims until removed, alongside their
+/// current source claims. Both belong to the same qualified unit owner.
+pub fn check_ownership_with_snapshots(
+    sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    snapshots: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
+    drivers: &DriverSet,
+) -> Vec<Finding> {
+    let mut scopes = Vec::new();
+    for (environment, source) in sources {
+        for (name, unit) in ownership_set(source) {
+            let Some(driver) = drivers.get(&unit.envelope.api_version, &unit.envelope.kind) else {
+                continue;
+            };
+            for scope in driver.ownership_scopes(environment, unit.spec.as_ref().expect("ownership set")) {
+                scopes.push((scope, format!("{environment}/{name}")));
+            }
+        }
+    }
+    for (environment, snapshot) in snapshots {
+        for (name, unit) in &snapshot.desired {
+            if unit.unit.uid.is_none() {
+                continue;
+            }
+            let Some(driver) = drivers.get(&unit.unit.api_version, &unit.unit.kind) else {
+                continue;
+            };
+            for scope in driver.ownership_scopes(environment, unit.resolved_spec.as_ref().unwrap_or(&unit.spec)) {
+                scopes.push((scope, format!("{environment}/{name}")));
+            }
+        }
+    }
+    overlaps(&scopes)
+}
+
+/// Environments whose source units claim native resources. Without another
+/// environment's stored claims, these cannot prove disjoint ownership.
+pub fn scope_owners(
+    sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    drivers: &DriverSet,
+) -> BTreeSet<EnvironmentName> {
+    sources
+        .iter()
+        .filter(|(environment, source)| {
+            ownership_set(source).values().any(|unit| {
+                drivers
+                    .get(&unit.envelope.api_version, &unit.envelope.kind)
+                    .is_some_and(|driver| {
+                        !driver
+                            .ownership_scopes(environment, unit.spec.as_ref().expect("ownership set"))
+                            .is_empty()
+                    })
+            })
+        })
+        .map(|(environment, _)| environment.clone())
+        .collect()
+}
+
 /// `enabled` as the rendered spec says it; absent means true.
 fn is_enabled(spec: &Value) -> bool {
     spec.get("enabled").and_then(Value::as_bool) != Some(false)
@@ -572,7 +633,7 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
 /// The state-free checks of one environment's rendered units, which
 /// `plan`, `reconcile`, and `nyl validate` share: every unit's kind has a
 /// driver and its spec passes the driver's and the common fields'
-/// validation, `env.secrets` is rejected, ownership scopes do not overlap,
+/// validation, ownership scopes do not overlap,
 /// and the dependency graph ([`super::graph::extract`]) has no unknown unit,
 /// cycle, undeclared or sensitive output reference, or unsupported evidence
 /// requirement. `plan` and `reconcile` reach the same checks through
@@ -639,7 +700,6 @@ fn leaving_units(inputs: &DesireInputs<'_>, set: &BTreeMap<&UnitName, &RenderedU
 /// Why a unit's spec is not accepted.
 enum UnitError {
     Invalid(String),
-    Secrets(Vec<String>),
 }
 
 impl UnitError {
@@ -650,27 +710,25 @@ impl UnitError {
                 format!("unit {name} ({source_path}): {message}"),
                 "correct the unit's spec so that it matches its kind's schema",
             ),
-            Self::Secrets(variables) => Finding::new(
-                Code::UnitSecretsUnsupported,
-                format!(
-                    "unit {name} ({source_path}) reads env.secrets ({}), which units cannot use yet",
-                    variables.join(", ")
-                ),
-                "remove env.secrets; secrets providers for units arrive in a later milestone",
-            ),
         }
     }
 }
 
-/// The driver's validation, the common fields' validation, and the M3
-/// rejection of `env.secrets`.
+/// The driver's validation and the common fields' validation.
 fn validate_unit(driver: &dyn Driver, api_version: &str, kind: &str, spec: &Value) -> Result<(), UnitError> {
     let invalid = |error: &dyn std::fmt::Display| UnitError::Invalid(error.to_string());
     driver.validate_spec(spec).map_err(UnitError::Invalid)?;
-    let common = if is_builtin_unit_api_version(api_version) && kind == KIND_COMMAND {
+    let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
+    if common.approval.bind == nyl_core::resources::units::ApprovalBind::Plan
+        && !driver.capabilities(spec).change_digest
+    {
+        return Err(UnitError::Invalid(
+            "approval bind: plan requires a kind that reports change digests".to_owned(),
+        ));
+    }
+    if is_builtin_unit_api_version(api_version) && kind == KIND_COMMAND {
         let command: CommandSpec = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
         command.validate().map_err(|error| invalid(&error))?;
-        command.common
     } else {
         let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
         let support = KindSupport {
@@ -679,16 +737,12 @@ fn validate_unit(driver: &dyn Driver, api_version: &str, kind: &str, spec: &Valu
             teardown: driver.capabilities(spec).teardown,
         };
         common.validate(support).map_err(|error| invalid(&error))?;
-        common
-    };
-    if !common.env.secrets.is_empty() {
-        return Err(UnitError::Secrets(common.env.secrets.into_keys().collect()));
     }
     Ok(())
 }
 
 /// One finding for every pair of units whose ownership scopes overlap.
-fn overlaps(scopes: &[(OwnershipScope, UnitName)]) -> Vec<Finding> {
+fn overlaps<N: Ord + std::fmt::Display>(scopes: &[(OwnershipScope, N)]) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut reported = BTreeSet::new();
     for (index, (scope, unit)) in scopes.iter().enumerate() {
@@ -999,6 +1053,120 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    /// The same unit name in two environments must not overwrite or prune
+    /// the other environment's publication. Deselected units claim nothing.
+    #[test]
+    fn test_cross_environment_ownership_names_both_addresses() {
+        let dev = source(vec![(
+            "publish",
+            rendered("Publication", true, Some(json!({"prefix": "dev"}))),
+        )]);
+        let mut prod = source(vec![
+            (
+                "publish",
+                rendered("Publication", true, Some(json!({"prefix": "dev/web"}))),
+            ),
+            (
+                "ignored",
+                rendered("Publication", false, Some(json!({"prefix": "dev"}))),
+            ),
+        ]);
+        let prod_name = EnvironmentName::new("prod").unwrap();
+        prod.environment.metadata.name = prod_name.to_string();
+        let mut sources = BTreeMap::from([(EnvironmentName::new("dev").unwrap(), dev), (prod_name.clone(), prod)]);
+        let findings = check_ownership(&sources, &drivers());
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].code, Code::UnitOwnershipOverlap);
+        assert!(findings[0].message.contains("dev/publish") && findings[0].message.contains("prod/publish"));
+        sources
+            .get_mut(&prod_name)
+            .unwrap()
+            .units
+            .get_mut(&name("publish"))
+            .unwrap()
+            .spec = Some(json!({"prefix": "prod"}));
+        assert!(check_ownership(&sources, &drivers()).is_empty());
+    }
+
+    #[test]
+    fn test_unavailable_source_retains_stored_ownership_claims() {
+        let dev = source(vec![(
+            "publish",
+            rendered("Publication", true, Some(json!({"prefix": "apps"}))),
+        )]);
+        let sources = BTreeMap::from([(EnvironmentName::new("dev").unwrap(), dev)]);
+        let prod = EnvironmentName::new("prod").unwrap();
+        let mut snapshots = BTreeMap::from([(
+            prod.clone(),
+            snapshot_of(vec![stored("old", "Publication", 1, json!({"prefix": "apps/prod"}))]),
+        )]);
+        let findings = check_ownership_with_snapshots(&sources, &snapshots, &drivers());
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("dev/publish") && findings[0].message.contains("prod/old"));
+        snapshots
+            .get_mut(&prod)
+            .unwrap()
+            .desired
+            .get_mut(&name("old"))
+            .unwrap()
+            .spec = json!({"prefix": "separate"});
+        assert!(check_ownership_with_snapshots(&sources, &snapshots, &drivers()).is_empty());
+        assert_eq!(
+            scope_owners(&sources, &drivers()),
+            BTreeSet::from([EnvironmentName::new("dev").unwrap()])
+        );
+        let job = source(vec![("job", rendered(KIND_COMMAND, true, Some(command(json!({})))))]);
+        assert!(scope_owners(
+            &BTreeMap::from([(EnvironmentName::new("dev").unwrap(), job)]),
+            &drivers()
+        )
+        .is_empty());
+    }
+
+    /// Moving a held unit in source does not release its old resource claim,
+    /// and its old and new claims do not conflict with its own address.
+    #[test]
+    fn test_stored_and_rendered_claims_share_one_owner_until_incarnation_ends() {
+        let dev = EnvironmentName::new("dev").unwrap();
+        let prod = EnvironmentName::new("prod").unwrap();
+        let mut sources = BTreeMap::from([
+            (
+                dev.clone(),
+                source(vec![(
+                    "publish",
+                    rendered("Publication", true, Some(json!({"prefix": "new"}))),
+                )]),
+            ),
+            (prod.clone(), source(vec![])),
+        ]);
+        let mut existing = stored("publish", "Publication", 1, json!({"prefix": "old"}));
+        existing.lifecycle = Lifecycle::Held {
+            hold: serde_json::from_value(
+                json!({"by": "operator", "since": "2026-01-01T00:00:00Z", "reason": "incident"}),
+            )
+            .unwrap(),
+            deletion: None,
+        };
+        let mut snapshots = BTreeMap::from([(dev.clone(), snapshot_of(vec![existing]))]);
+        assert!(check_ownership_with_snapshots(&sources, &snapshots, &drivers()).is_empty());
+        sources.get_mut(&prod).unwrap().units.insert(
+            name("publish"),
+            rendered("Publication", true, Some(json!({"prefix": "old/web"}))),
+        );
+        let findings = check_ownership_with_snapshots(&sources, &snapshots, &drivers());
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("dev/publish") && findings[0].message.contains("prod/publish"));
+        snapshots
+            .get_mut(&dev)
+            .unwrap()
+            .desired
+            .get_mut(&name("publish"))
+            .unwrap()
+            .unit
+            .uid = None;
+        assert!(check_ownership_with_snapshots(&sources, &snapshots, &drivers()).is_empty());
     }
 
     /// Catches leaving units being dropped silently or reported with the
@@ -1340,28 +1508,16 @@ mod tests {
         assert!(!pending.deletion);
     }
 
-    /// Catches a unit reading secrets the shell cannot provide yet, and
-    /// unknown kinds or invalid specs reaching execution.
+    /// Catches unknown kinds or invalid specs reaching execution.
     #[test]
     fn test_invalid_units_stop_the_run_with_their_codes() {
         let source = source(vec![
-            (
-                "secret",
-                rendered(
-                    KIND_COMMAND,
-                    true,
-                    Some(command(json!({"env": {"secrets": {"TOKEN": "api-token"}}}))),
-                ),
-            ),
             ("unknown", rendered("Mystery", true, Some(json!({})))),
             ("broken", rendered("Publication", true, Some(json!({"broken": 1})))),
             ("argv", rendered(KIND_COMMAND, true, Some(json!({"command": []})))),
         ]);
         let desired = run_desire(&source, &EnvironmentSnapshot::default());
         let codes: BTreeMap<Code, &Finding> = desired.errors.iter().map(|error| (error.code, error)).collect();
-        let secrets = codes[&Code::UnitSecretsUnsupported];
-        assert!(secrets.message.contains("TOKEN"), "{}", secrets.message);
-        assert!(secrets.fix.contains("remove env.secrets"));
         assert!(codes.contains_key(&Code::UnitKindUnknown));
         assert_eq!(
             desired

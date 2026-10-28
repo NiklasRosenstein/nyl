@@ -60,9 +60,9 @@ unit's recovery policy, and the `NYL-VERIFY-DRIFT` fix names it per unit:
 | `driftRepair` | Recovery policy | Fix |
 | --- | --- | --- |
 | `converge` (default) | `converge` | the next `nyl reconcile -e <env>` repairs it by executing the unit again |
-| `converge` | `inspect` or `manual` | it awaits approval: run `nyl reconcile -e <env> --local --approve <unit>`, or wait for remote approvals |
+| `converge` | `inspect` or `manual` | it awaits approval: run `nyl reconcile -e <env> --approve <unit>` |
 | `manual` | `converge` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text>` |
-| `manual` | `inspect` or `manual` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text> --local --approve <unit>` |
+| `manual` | `inspect` or `manual` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text> --approve <unit>` |
 
 A repair writes a new receipt and drops the unit's drift observation in the
 same commit; verify again to observe the new receipt. See
@@ -74,11 +74,18 @@ the lease, and exits 4 with `NYL-RUN-CANCELLED`. A signal while
 `--wait-lease` waits does the same, having written nothing. A second signal
 ends the process at once.
 
+Select several environments with repeated `-e`, with `-l stage=production`, or
+with `-g <group>`. They run in dependency order with one report section per
+environment. See [Multi-environment runs](/nyl/orchestration/runs/#multi-environment-runs)
+for qualified unit options and independent state transactions.
+
 ## Options
 
 | Option | Meaning |
 | --- | --- |
-| `-e`, `--environment <name>` | The environment to verify. Required. |
+| `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
+| `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
+| `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--unit <name>`, `--units <a>,<b>` | Verify only these units. A name the environment's state does not hold exits 1 with `NYL-UNIT-UNKNOWN`. |
 | `--wait-lease <duration>` | Wait up to this long, such as `10m`, while another run holds the lease. |
 | `--author "Name <email>"` | The author of the state commit. Default: Git's `user.name` and `user.email`. |

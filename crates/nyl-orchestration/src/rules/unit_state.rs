@@ -80,6 +80,8 @@ pub fn unit_state(desired: &DesiredUnit, observed: Option<&ObservedUnit>, runnin
     }
     if receipt_is_current(desired, observed) {
         UnitState::Current
+    } else if super::approval::policy(desired).mode == nyl_core::resources::units::ApprovalMode::Manual {
+        UnitState::AwaitingApproval
     } else {
         UnitState::Ready
     }

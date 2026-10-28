@@ -17,15 +17,27 @@ use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop}
 use crate::Result;
 
 /// Plan an environment's run.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Independent command-line switches.
 pub struct PlanArgs {
     /// The environment to plan.
-    #[arg(short = 'e', long = "environment")]
-    pub environment: String,
+    #[arg(short = 'e', long = "environment", required_unless_present_any = ["labels", "group"], conflicts_with_all = ["labels", "group"])]
+    pub environment: Vec<String>,
+
+    /// Select environments whose literal labels match key=value pairs.
+    #[arg(short = 'l', long, conflicts_with_all = ["environment", "group"])]
+    pub labels: Option<String>,
+
+    /// Select members of this EnvironmentGroup.
+    #[arg(short = 'g', long, conflicts_with_all = ["environment", "labels"])]
+    pub group: Option<String>,
 
     /// Report only these units; the leaving section is never filtered.
     #[arg(long = "unit", alias = "units", value_delimiter = ',')]
     pub units: Vec<String>,
+
+    #[arg(skip)]
+    pub unit_filter: bool,
 
     /// Render units at this revision or commit instead of the Environment's source.
     #[arg(long)]
@@ -71,7 +83,7 @@ fn teardown_mode(args: &PlanArgs) -> std::result::Result<nyl_orchestration::shel
             "plan --teardown names no unit to preview tearing down",
             format!(
                 "name the units with `nyl plan -e {} --teardown --unit <u>`, or preview tearing down every unit with --all",
-                args.environment
+                args.environment[0]
             ),
         )));
     }
@@ -82,12 +94,61 @@ fn teardown_mode(args: &PlanArgs) -> std::result::Result<nyl_orchestration::shel
 
 /// Run the command in-process with `wiring`.
 pub fn run(args: &PlanArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
-    Ok(plan(args, wiring).unwrap_or_else(|stop| stopped(ReportKind::PlanReport, &args.environment, args.output, stop)))
+    use crate::orchestration::multi_environment::{dispatch, select};
+    Ok(dispatch(
+        ReportKind::PlanReport,
+        args.output,
+        select(
+            &args.path,
+            &args.environment,
+            args.labels.as_deref(),
+            args.group.as_deref(),
+            !args.teardown,
+            args.source.as_deref(),
+            wiring.drivers,
+        ),
+        |environment, selected, planned, unavailable| {
+            let mut args = args.clone();
+            args.environment = vec![environment.to_owned()];
+            args.unit_filter = !args.units.is_empty();
+            let mut prepare = || -> std::result::Result<_, Stop> {
+                args.units = nyl_orchestration::rules::multi_environment::units(
+                    "--unit",
+                    &args.units,
+                    environment,
+                    selected,
+                    selected.len() > 1,
+                )?;
+                crate::orchestration::multi_environment::single_source(args.source.as_deref(), selected)?;
+                plan(&args, wiring, planned, unavailable)
+            };
+            prepare().unwrap_or_else(|stop| {
+                (
+                    stopped(ReportKind::PlanReport, environment, args.output, stop),
+                    std::collections::BTreeSet::default(),
+                )
+            })
+        },
+    ))
 }
 
-fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
-    let session = Session::open(&args.path, &args.environment)?;
-    let request = session.request(&RunOptions {
+fn plan(
+    args: &PlanArgs,
+    wiring: &Wiring<'_>,
+    planned: &std::collections::BTreeMap<
+        nyl_core::orchestration::ids::EnvironmentName,
+        std::collections::BTreeSet<nyl_core::orchestration::ids::UnitName>,
+    >,
+    unavailable: &std::collections::BTreeSet<nyl_core::orchestration::ids::EnvironmentName>,
+) -> std::result::Result<
+    (
+        CommandOutcome,
+        std::collections::BTreeSet<nyl_core::orchestration::ids::UnitName>,
+    ),
+    Stop,
+> {
+    let session = Session::open(&args.path, &args.environment[0])?;
+    let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
         source: args.source.as_deref(),
@@ -100,8 +161,13 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         fail_fast: false,
         reason: None,
     })?;
+    request.unavailable.clone_from(unavailable);
+    request.planned = planned.clone();
     // A plan writes nothing, so it reads through a read-only store and needs
     // no commit identity.
+    if args.unit_filter && args.units.is_empty() {
+        request.units = Some(std::collections::BTreeSet::default());
+    }
     let store = session.store(None)?;
     let report = session.run(wiring, &store, None, &request, nyl_orchestration::shell::run::plan)?;
     let mut exit = report.exit();
@@ -112,5 +178,9 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
     if args.fail_on_leaving && leaving {
         exit = exit.most_severe(ExitCategory::Error);
     }
-    Ok(outcome(&report, args.output, exit.code()))
+    let changes = report
+        .planned_changes()
+        .remove(&session.resolved.name)
+        .unwrap_or_default();
+    Ok((outcome(&report, args.output, exit.code()), changes))
 }

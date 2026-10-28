@@ -27,8 +27,8 @@ path = "src/lib.rs"
 test-clock = []
 # Registers the fake kinds that stand in for built-in kinds a milestone lacks.
 test-kinds = ["nyl-drivers/test-kinds"]
-# Scenario tests through the real binary with the real tools; a missing tool fails them.
-tier2 = []
+# Scenario tests through the real binary; M3 uses fakes for future native kinds.
+tier2 = ["test-clock", "test-kinds"]
 
 [dependencies]
 nyl-core = { workspace = true }

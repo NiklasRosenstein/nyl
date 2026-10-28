@@ -48,7 +48,7 @@ use nyl_core::orchestration::time::{Duration, Timestamp};
 use super::lease::{self, HeldLease};
 use super::run::slots::Slots;
 use super::run::{
-    admitted_env, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
+    execution_env, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
     RunRequest,
 };
 use super::{store_error, Settings};
@@ -418,13 +418,20 @@ fn verify_unit(
     let now = context.base.clock.now();
     let timeout = unit_timeout(unit);
     let deadline = unit_deadline(&context.base.settings, now, timeout, job.lease_deadline);
+    let env = match execution_env(context, &unit.spec) {
+        Ok(env) => env,
+        Err(message) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return failed(message);
+        }
+    };
     let ctx = ExecutionContext {
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Verify,
         project_dir: project_path(&worktree, project_dir),
         worktree,
         temp_dir: temp_dir.clone(),
-        env: admitted_env(context.process_env, &unit.spec),
+        env,
         approved_digest: None,
         deadline,
         now,

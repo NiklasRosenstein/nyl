@@ -46,6 +46,53 @@ fn test_reached_scenarios_pass_in_tier_one() {
     assert!(failures.is_empty(), "failed scenarios:\n{}", failures.join("\n\n"));
 }
 
+/// Enabling tier 2 runs every reached two-tier scenario through the real
+/// executable. A failed process or unmet assertion fails instead of skipping.
+#[cfg(feature = "tier2")]
+#[test]
+fn test_reached_scenarios_pass_in_tier_two() {
+    let (loaded, problems) = scenario::load_all();
+    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
+    let runnable = loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.milestone <= REACHED && loaded.scenario.tiers.contains(&2))
+        .collect::<Vec<_>>();
+    assert!(!runnable.is_empty(), "no scenario runs in tier 2");
+    let failures = std::thread::scope(|scope| {
+        let handles = runnable
+            .iter()
+            .map(|loaded| scope.spawn(|| scenario::runner::run_binary(loaded)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()))
+                    .err()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        failures.is_empty(),
+        "failed binary scenarios:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// A tier-1-only command must not create state for the binary path, and a
+/// wrong expected binary exit must fail the scenario instead of being skipped.
+#[cfg(feature = "tier2")]
+#[test]
+fn test_tier_two_filters_steps_and_checks_process_exits() {
+    let text = "contract: design/reference-scenarios.md#tiers\nmilestone: M3\nproject: ../_project\nsteps:\n  - nyl: [state, init, -e, dev]\n    tier: 1\n    exit: 0\n  - nyl: [reconcile, -e, dev]\n    exit: 1\n";
+    let loaded = inline_scenario("inline/binary-filter", text);
+    scenario::runner::run_binary(&loaded).unwrap();
+    let wrong = inline_scenario("inline/binary-exit", &text.replace("exit: 1", "exit: 0"));
+    let error = scenario::runner::run_binary(&wrong).unwrap_err();
+    assert!(error.contains("exit 1 instead of 0"), "{error}");
+}
+
 #[test]
 fn test_deploy_globs_match_by_segment() {
     use scenario::runner::glob_matches;

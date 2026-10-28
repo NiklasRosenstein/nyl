@@ -75,16 +75,16 @@ fn test_validate_rejects_a_placed_target_whose_unit_reference_is_undeclared() {
 }
 
 /// Catches `nyl validate` accepting units that `nyl plan` and `nyl reconcile`
-/// reject: they share the state-free unit checks, so a unit reading
-/// `env.secrets`, a dependency cycle, and a reference to an output its
+/// reject: they share the state-free unit checks, so an invalid credential
+/// declaration, a dependency cycle, and a reference to an output its
 /// producer does not declare each fail validation with the run's code.
 #[test]
 fn test_validate_runs_the_unit_checks_plan_runs() {
     let world = World::new(&project());
     let cases = [
         (
-            "kind: Command\nmetadata:\n  name: seed\n  labels: {dev: 'true'}\nspec:\n  command: [./seed.sh]\n  env:\n    secrets: {TOKEN: api-token}\n",
-            "NYL-UNIT-SECRETS-UNSUPPORTED",
+            "kind: Command\nmetadata:\n  name: seed\n  labels: {dev: 'true'}\nspec:\n  command: [./seed.sh]\n  env:\n    secrets: {BAD-NAME: api-token}\n",
+            "NYL-UNIT-INVALID",
         ),
         (
             "kind: Command\nmetadata:\n  name: a\n  labels: {dev: 'true'}\nspec:\n  command: [./a.sh]\n  dependsOn: [b]\n---\napiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: b\n  labels: {dev: 'true'}\nspec:\n  command: [./b.sh]\n  dependsOn: [a]\n",

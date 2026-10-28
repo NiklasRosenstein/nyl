@@ -86,6 +86,7 @@ pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         RunMode::Recover { unit },
         LifecycleOptions::default(),
         None,
+        None,
         recover_environment,
     )
 }

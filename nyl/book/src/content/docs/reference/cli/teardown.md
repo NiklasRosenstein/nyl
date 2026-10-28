@@ -61,9 +61,12 @@ desired: 9814c8340010cbe310ccd53887148ff5930e5ff7
 observed: 1313296c5fff4adec9bc761c42af4c666d67673b
 ```
 
-A unit that needs a manual approval is reported `awaiting-approval` and is
-not torn down; `nyl teardown --approve` arrives with remote approvals in the
-last part of M3.
+A unit that needs a manual approval is reported `awaiting-approval` until
+`--approve <unit>[=<digest>]` authorizes it. For `bind: plan`, obtain the
+destroy digest with `nyl plan -e <env> --teardown --unit <unit> -o json`.
+The [approval flags](/nyl/reference/cli/reconcile/#options) also work here:
+`--approve-all`, `--approved-by`, and `--approval-source`. Approval does not
+confirm workload removal; `--confirm-removed` is a separate claim.
 
 A named unit the state does not hold exits 1 with `NYL-UNIT-UNKNOWN`.
 

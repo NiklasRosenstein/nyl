@@ -270,8 +270,8 @@ like a changed unit, it is work for the next reconcile.
   The new receipt removes the drift observation in the same commit, so the
   unit is not repaired again until `verify` finds new drift.
 - A drifted unit that is not safe to re-run is reported `awaiting-approval`
-  (exit 2) while the rest of the run continues. A `--local` run executes it
-  with `--approve <unit>`; remote approvals arrive in a later part of M3.
+  (exit 2) while the rest of the run continues. A matching
+  `--approve <unit>` executes it and records the approval's identity.
 - `driftRepair: manual`, on the Environment or its EnvironmentGroup, turns
   automatic repair off: drifted units stay `drifted` until a forced run.
 - `nyl reconcile -e <env> --unit <u> --reapply --reason <text>` executes the

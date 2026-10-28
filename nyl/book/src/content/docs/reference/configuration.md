@@ -190,3 +190,10 @@ nyl schema config
 
 The published project schema is available at
 [`reference/schemas/nyl.schema.json`](/nyl/reference/schemas/nyl.schema.json).
+
+## Approval identity lookup
+
+`[approval] lookup = ["./ci/approvers.sh"]` optionally names a command and
+arguments that return CI approvers as JSON. It runs before unit effects, with
+a 30-second timeout. See [Approvals](/nyl/orchestration/runs/#approvals) for
+its context variables, response format, identity precedence, and GitHub lookup.

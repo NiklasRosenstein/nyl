@@ -581,32 +581,32 @@ pub fn check_unit_bindings(
         for (input, binding) in bindings {
             let Some(source) = &binding.from_unit else { continue };
             let field = format!("spec.releaseInputs.{release:?}.{input}.fromUnit");
-            if let Some(other) = source
-                .environment
-                .as_deref()
-                .filter(|other| *other != environment.as_str())
-            {
-                issues.push(format!(
-                    "{field} names Environment {other}, but the target belongs to Environment {environment}; \
-                     references to another environment's units are not supported yet"
-                ));
-                continue;
-            }
+            let producer_environment = source.environment.as_deref().unwrap_or(environment.as_str());
+            let external;
+            let producer_units = if producer_environment == environment.as_str() {
+                &rendered
+            } else {
+                let name =
+                    EnvironmentName::new(producer_environment).map_err(|error| NylError::config(error.to_string()))?;
+                let producer = resolve_effective_environment(inventory, &name)?;
+                external = render_environment_units(inventory, &units, &producer)?;
+                &external
+            };
             let unit = &source.unit;
             let declared = UnitName::new(unit).ok().filter(|name| units.contains_key(name));
             let Some(name) = declared else {
                 issues.push(format!("{field} names unit {unit}, which is not declared"));
                 continue;
             };
-            let Some(spec) = rendered.get(&name) else {
+            let Some(spec) = producer_units.get(&name) else {
                 issues.push(format!(
-                    "{field} names unit {unit}, which Environment {environment} does not select"
+                    "{field} names unit {unit}, which Environment {producer_environment} does not select"
                 ));
                 continue;
             };
             let Some(spec) = spec.as_ref().filter(|spec| spec_enabled(spec)) else {
                 issues.push(format!(
-                    "{field} names unit {unit}, which is not enabled in Environment {environment}"
+                    "{field} names unit {unit}, which is not enabled in Environment {producer_environment}"
                 ));
                 continue;
             };
@@ -1034,6 +1034,29 @@ spec:
                  select",
             ]
         );
+    }
+
+    #[test]
+    fn test_check_unit_bindings_reads_selected_outputs_of_a_declared_foreign_environment() {
+        let platform = format!("{}\n---\napiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {{name: infra}}\nspec:\n  unitSelector:\n    matchLabels: {{infra: 'true'}}\n", PLATFORM.replace("unit: database, output: host", "environment: infra, unit: database, output: host"));
+        let units = UNITS.replacen("labels: {dev: 'true'}", "labels: {infra: 'true'}", 1);
+        let worktree = project(&[
+            ("platform.yaml", &platform),
+            ("units.yaml", &units),
+            ("image.yaml", IMAGE),
+        ]);
+        let environment = EnvironmentName::new("dev").unwrap();
+        assert!(check_unit_bindings(&inventory(&worktree), "dev", &environment)
+            .unwrap()
+            .is_empty());
+        fs::write(
+            worktree.path().join("nyl/platform.yaml"),
+            platform.replace("output: host", "output: password"),
+        )
+        .unwrap();
+        let issues = check_unit_bindings(&inventory(&worktree), "dev", &environment).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("sensitive and cannot be referenced"), "{issues:?}");
     }
 
     #[test]
