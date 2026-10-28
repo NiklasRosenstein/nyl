@@ -27,7 +27,7 @@ pub const KIND_APPLICATION_GROUP: &str = "ApplicationGroup";
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitOpsResourceMetadata {
-    /// Project-local identity. Must be a Kubernetes DNS subdomain and remain static during discovery.
+    /// Project-local identity, validated by the resource kind; remains static during discovery.
     pub name: String,
     /// Literal labels used for organization and target selection.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

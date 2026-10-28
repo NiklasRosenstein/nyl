@@ -59,7 +59,9 @@ impl World {
 
     /// The URL of `project.git`, `%PROJECT_URL%`.
     pub fn project_url(&self) -> String {
-        format!("file://{}", self.root.path().join("project.git").display())
+        reqwest::Url::from_file_path(self.bare())
+            .expect("the test repository has an absolute path")
+            .to_string()
     }
 
     pub fn bare(&self) -> PathBuf {
