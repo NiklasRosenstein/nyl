@@ -130,9 +130,9 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
-            "observed-unit.v2.yaml",
+            "observed-unit.v1.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v2", "kind": "ObservedUnit", "unit": identity("database", "OpenTofu"),
+                "apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": identity("database", "OpenTofu"),
                 "receipt": receipt(),
                 "desired": {
                     "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("database", "OpenTofu"),
@@ -148,9 +148,9 @@ fn samples() -> Vec<(&'static str, Value)> {
         (
             // A publication's two-phase teardown waiting after phase 1: the
             // receipt and its desired copy stay until the teardown completes.
-            "observed-unit-waiting.v2.yaml",
+            "observed-unit-waiting.v1.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v2", "kind": "ObservedUnit", "unit": identity("kubernetes", "KubernetesPublication"),
+                "apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": identity("kubernetes", "KubernetesPublication"),
                 "receipt": {"executionKey": KEY, "behaviorVersion": 1, "run": RUN,
                             "startedAt": "2026-09-24T10:00:00Z", "finishedAt": "2026-09-24T10:01:00Z"},
                 "desired": {
@@ -236,14 +236,14 @@ fn samples() -> Vec<(&'static str, Value)> {
     ];
     let mut repaired = samples
         .iter()
-        .find(|(name, _)| *name == "observed-unit.v2.yaml")
+        .find(|(name, _)| *name == "observed-unit.v1.yaml")
         .unwrap()
         .1
         .clone();
     repaired["operatorModified"] = json!({"by":"operator","at":"2026-10-28T00:00:00Z","reason":"restore native state","status":{"status":"exited","code":0}});
     repaired["acceptedEmptyState"] =
         json!({"terraformBackend":{"backend":r#"{"path":"/state/dev.tfstate"}"#,"workspace":"default"}});
-    samples.push(("observed-unit-repaired.v2.yaml", repaired));
+    samples.push(("observed-unit-repaired.v1.yaml", repaired));
     samples
 }
 
@@ -309,18 +309,13 @@ fn test_readers_reject_unknown_format_versions_and_kinds() {
 }
 
 #[test]
-fn test_observed_v1_migrates_to_v2_without_changing_evidence() {
-    for name in ["observed-unit", "observed-unit-waiting"] {
-        let old = std::fs::read_to_string(golden_dir().join(format!("{name}.v1.yaml"))).unwrap();
-        let document: ObservedUnit = serde_saphyr::from_str(&old).unwrap();
-        assert!(document.operator_modified.is_none() && document.accepted_empty_state.is_none());
-        let migrated = serde_saphyr::to_string(&document).unwrap();
-        assert_eq!(
-            migrated,
-            std::fs::read_to_string(golden_dir().join(format!("{name}.v2.yaml"))).unwrap()
-        );
+fn test_observed_v1_preserves_evidence_and_rejects_unknown_versions() {
+    for name in ["observed-unit", "observed-unit-waiting", "observed-unit-repaired"] {
+        let original = std::fs::read_to_string(golden_dir().join(format!("{name}.v1.yaml"))).unwrap();
+        let document: ObservedUnit = serde_saphyr::from_str(&original).unwrap();
+        assert_eq!(serde_saphyr::to_string(&document).unwrap(), original);
         let mut unknown = serde_json::to_value(document).unwrap();
-        unknown["apiVersion"] = json!("gitops.nyl/v3");
+        unknown["apiVersion"] = json!("gitops.nyl/v2");
         assert!(serde_json::from_value::<ObservedUnit>(unknown).is_err());
     }
 }

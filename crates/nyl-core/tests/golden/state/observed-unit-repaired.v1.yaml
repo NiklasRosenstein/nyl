@@ -1,4 +1,4 @@
-apiVersion: gitops.nyl/v2
+apiVersion: gitops.nyl/v1
 kind: ObservedUnit
 unit:
   environment: dev
@@ -62,3 +62,14 @@ desired:
   executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
   readiness:
     state: ready
+operatorModified:
+  by: operator
+  at: "2026-10-28T00:00:00Z"
+  reason: restore native state
+  status:
+    status: exited
+    code: 0
+acceptedEmptyState:
+  terraformBackend:
+    backend: "{\"path\":\"/state/dev.tfstate\"}"
+    workspace: default

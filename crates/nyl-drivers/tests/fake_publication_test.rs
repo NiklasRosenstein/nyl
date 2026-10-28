@@ -309,7 +309,7 @@ fn deleting(unit: DesiredUnit) -> DesiredUnit {
 /// The observed file of a unit whose teardown waits after `phase1`.
 fn waiting_on(unit: &DesiredUnit, phase1: &str) -> ObservedUnit {
     ObservedUnit {
-        api_version: nyl_core::orchestration::state::ObservedV2,
+        api_version: nyl_core::orchestration::state::StateV1,
         operator_modified: None,
         accepted_empty_state: None,
         kind: ObservedUnitKind,

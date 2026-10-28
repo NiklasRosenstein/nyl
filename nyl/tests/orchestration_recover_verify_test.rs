@@ -625,7 +625,7 @@ impl Driver for Recording {
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        options: &nyl_core::orchestration::driver::BuildOptions,
+        options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         self.inner.build(ctx, unit, options)
     }

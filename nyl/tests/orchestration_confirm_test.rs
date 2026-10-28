@@ -131,7 +131,7 @@ fn desired(unit: &str) -> DesiredUnit {
 /// The observed file of `unit`, waiting after phase 1 when `waiting`.
 fn observed(unit: &str, waiting: bool) -> ObservedUnit {
     ObservedUnit {
-        api_version: nyl_core::orchestration::state::ObservedV2,
+        api_version: nyl_core::orchestration::state::StateV1,
         operator_modified: None,
         accepted_empty_state: None,
         kind: ObservedUnitKind,

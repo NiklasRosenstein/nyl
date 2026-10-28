@@ -773,7 +773,7 @@ previews branch
   only when it does not exist yet, and otherwise warns when its own rendering
   would differ, so pull requests running different Nyl versions never
   overwrite each other. `nyl build` on the template renders it on demand, and
-  `--push` publishes it.
+  a driver argument such as `-- --push` publishes it.
 - Nothing is reconciled from state: Git holds the other targets' files, and
   a publish removes only files in the publishing target's index.
 - Nyl renders the shared catalog, so the readiness table checks its settings.
@@ -2077,8 +2077,8 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
   Nyl first writes an observed transition with the operator-modified marker,
   before the tool can change native state, then records the tool status in a
   second observed transition. A crash between them preserves the approval
-  fence. ObservedUnit v2 adds this marker and the exact native scope accepted
-  by a reasoned missing-state recovery; v1 observed files migrate on read.
+  fence. ObservedUnit records this marker and the exact native scope accepted
+  by a reasoned missing-state recovery.
 - **Afterwards.** The unit's receipt is marked `operator-modified`. While held,
   consumers keep resolving from it, as for any hold. After `resume`, the next
   execution of the unit needs explicit approval, whatever its `approval`
@@ -2605,7 +2605,7 @@ trait Driver {
 struct Capabilities {
     plan: bool, reconcile: bool, verify: bool, inspect: bool, teardown: bool,
     observe: bool,              // verify records observations, such as Argo CD health
-    build: Option<BuildPush>,   // None: no `nyl build`; Some(Safe | LoadOnly)
+    build: bool,               // supports `nyl build` with driver-owned arguments
     change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed
     exec: Option<ExecTerminal>, // None: no `nyl exec`; Some(Interactive | NonInteractive)
 }
@@ -2681,7 +2681,7 @@ enum Outcome {
 ### Direct builds
 
 A kind whose only effect is producing an artifact from source declares the
-`build` capability, and `nyl build <unit> [-e <env>]` runs it outside
+`build` capability, and `nyl build <unit> [-e <env>] [-- <driver-args>...]` runs it outside
 orchestration:
 
 - It calls the driver's `build` method, without a lease, a receipt, or
@@ -2693,10 +2693,12 @@ orchestration:
   resolve read-only against its current receipts, exactly as `nyl get output`
   does. Without `-e`, a spec that uses environment values or references fails
   with an error naming the reference and `-e`; there are no per-kind override
-  flags, so the command stays the same for every kind.
-- The capability declares whether publishing the artifact outside
-  orchestration is safe (`BuildPush::Safe`). `--push` is refused for a kind
-  that declares only `LoadOnly`, and names `reconcile` instead.
+  flags in the generic CLI. Arguments after `--` reach the driver unchanged;
+  each driver defines and validates its own build options.
+- The capability is a boolean declaring support for direct builds. The driver
+  owns publishing policy and validates its arguments. For example, the image
+  driver accepts `-- --push`; a kind that cannot safely publish outside
+  orchestration rejects such a request and names `reconcile` instead.
 - Kinds with external effects never declare `build`: a Terraform apply or a
   command without a receipt would leave state describing something else. Their
   direct forms are `nyl plan --unit` and `--local` runs.
@@ -2846,7 +2848,7 @@ spec:
 | `state restore` | Restore remote state to an earlier commit's content after local transitions were pushed by hand | One desired and one observed commit |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the transition commit that imports the broken run |
-| `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only with `--push` where the kind allows it |
+| `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only through driver arguments (for example `-- --push`) where the kind allows it |
 | `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or a pull request under `changeGate: pullRequest` |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release

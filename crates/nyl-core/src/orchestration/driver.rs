@@ -79,28 +79,13 @@ pub struct Capabilities {
     pub teardown: bool,
     /// `verify` records observations, such as Argo CD health.
     pub observe: bool,
-    /// `nyl build` support; `None` without it.
-    pub build: Option<BuildPush>,
+    /// Whether the kind supports `nyl build`.
+    pub build: bool,
     /// `plan` reports a change digest, so `bind: plan` is allowed.
     #[serde(rename = "changeDigest")]
     pub change_digest: bool,
     /// `nyl exec` support; `None` without it.
     pub exec: Option<ExecTerminal>,
-}
-
-/// Options shared by direct artifact builds. Publishing safety is declared by the kind.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct BuildOptions {
-    pub push: bool,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-/// Whether publishing a direct build's artifact outside orchestration is safe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum BuildPush {
-    Safe,
-    LoadOnly,
 }
 
 /// Whether an operator tool takes the terminal.
@@ -557,9 +542,9 @@ pub trait Driver: Send + Sync {
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        options: &BuildOptions,
+        args: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        let _ = (ctx, unit, options);
+        let _ = (ctx, unit, args);
         Ok(Supported::Unsupported)
     }
     /// `nyl exec`; unsupported by default.

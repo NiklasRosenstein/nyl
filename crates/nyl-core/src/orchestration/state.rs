@@ -94,37 +94,6 @@ document_kind!(LeaseKind, "Lease");
 document_kind!(RunKind, "Run");
 document_kind!(SignalKind, "Signal");
 
-/// Observed units migrate v1 on read and write v2, which records operator repairs
-/// and explicit acceptance of an empty native state backend.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct ObservedV2;
-
-impl Serialize for ObservedV2 {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str("gitops.nyl/v2")
-    }
-}
-
-impl<'de> Deserialize<'de> for ObservedV2 {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        match String::deserialize(deserializer)?.as_str() {
-            "gitops.nyl/v1" | "gitops.nyl/v2" => Ok(Self),
-            version => Err(serde::de::Error::custom(format!(
-                "unsupported observed state format {version:?}; upgrade Nyl"
-            ))),
-        }
-    }
-}
-
-impl JsonSchema for ObservedV2 {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "ObservedV2".into()
-    }
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"const": "gitops.nyl/v2"})
-    }
-}
-
 /// Where an environment's state lives, as `state.yaml` records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -570,7 +539,7 @@ pub struct BlockedReason {
 #[serde(deny_unknown_fields)]
 pub struct ObservedUnit {
     #[serde(rename = "apiVersion")]
-    pub api_version: ObservedV2,
+    pub api_version: StateV1,
     pub kind: ObservedUnitKind,
     pub unit: UnitIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1043,26 +1012,11 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         schema["title"] = serde_json::Value::String(title.to_owned());
         schema
     }
-    let observed = schema::<ObservedUnit>("ObservedUnit");
-    let mut legacy_observed = observed.clone();
-    legacy_observed["properties"]["apiVersion"] = serde_json::json!({"$ref":"#/$defs/StateV1"});
-    for field in ["operatorModified", "acceptedEmptyState"] {
-        legacy_observed["properties"]
-            .as_object_mut()
-            .expect("observed properties")
-            .remove(field);
-    }
-    for definition in ["ObservedV2", "OperatorModification", "ExecStatus", "OwnershipScope"] {
-        legacy_observed["$defs"]
-            .as_object_mut()
-            .expect("observed definitions")
-            .remove(definition);
-    }
-    let mut schemas: BTreeMap<_, _> = [
+    let schemas: BTreeMap<_, _> = [
         ("state-record", schema::<StateRecord>("StateRecord")),
         ("environment-record", schema::<EnvironmentRecord>("EnvironmentRecord")),
         ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
-        ("observed-unit", legacy_observed),
+        ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
         ("artifact", schema::<ArtifactDocument>("Artifact")),
         ("observation", schema::<Observation>("Observation")),
         ("attestation", schema::<Attestation>("Attestation")),
@@ -1073,6 +1027,5 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
     .into_iter()
     .map(|(slug, schema)| (format!("{API_VERSION_GITOPS}/state/{slug}.schema.json"), schema))
     .collect();
-    schemas.insert("gitops.nyl/v2/state/observed-unit.schema.json".to_owned(), observed);
     schemas
 }

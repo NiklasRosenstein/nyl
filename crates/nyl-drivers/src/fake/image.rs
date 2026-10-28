@@ -5,9 +5,9 @@ use std::ffi::OsString;
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
-    BuildPush, Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, Verification,
+    Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection,
+    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
+    Verification,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, Receipt};
@@ -85,7 +85,7 @@ impl Driver for FakeImage {
             plan: true,
             reconcile: true,
             verify: true,
-            build: Some(BuildPush::Safe),
+            build: true,
             ..Capabilities::default()
         }
     }
@@ -208,18 +208,14 @@ impl Driver for FakeImage {
         &self,
         _ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        options: &nyl_core::orchestration::driver::BuildOptions,
+        _args: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         let spec = resolved_spec(unit)?;
-        let key = unit
-            .execution_key
-            .as_ref()
-            .ok_or_else(|| DriverError::before_effects("a direct build has an execution key"))?;
-        let mut artifact = Self::artifact(unit, key, spec)?;
-        let mut tags = spec.get("tags").and_then(Value::as_array).cloned().unwrap_or_default();
-        tags.extend(options.tags.iter().cloned().map(Value::String));
-        artifact.spec["tags"] = Value::Array(tags);
-        Ok(Supported::Supported(vec![artifact]))
+        let key = ExecutionKey::from_digest_of(
+            &nyl_core::digest::canonical_json_bytes(spec)
+                .map_err(|error| DriverError::before_effects(error.to_string()))?,
+        );
+        Ok(Supported::Supported(vec![Self::artifact(unit, &key, spec)?]))
     }
 
     fn exec(

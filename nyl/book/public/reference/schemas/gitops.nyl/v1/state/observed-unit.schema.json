@@ -352,6 +352,45 @@
       "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
       "type": "string"
     },
+    "ExecStatus": {
+      "description": "How an operator's tool ended.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "status": {
+              "const": "exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "signal": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "status": {
+              "const": "signaled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "signal"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ExecutionKey": {
       "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
       "type": "string"
@@ -513,6 +552,125 @@
     },
     "ObservedUnitKind": {
       "const": "ObservedUnit"
+    },
+    "OperatorModification": {
+      "additionalProperties": false,
+      "description": "A native operator call is fenced before it starts and records its result afterwards.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "by": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent if the runner stopped before recording the tool's exit."
+        }
+      },
+      "required": [
+        "by",
+        "at"
+      ],
+      "type": "object"
+    },
+    "OwnershipScope": {
+      "description": "A typed claim on native resources, checked for overlap across units.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A Terraform or OpenTofu backend: its canonical configuration and key, and workspace.",
+          "properties": {
+            "terraformBackend": {
+              "properties": {
+                "backend": {
+                  "type": "string"
+                },
+                "workspace": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "backend",
+                "workspace"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "terraformBackend"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An OCI repository and the tag prefix one environment moves.",
+          "properties": {
+            "ociRepository": {
+              "properties": {
+                "repository": {
+                  "type": "string"
+                },
+                "tag_prefix": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repository",
+                "tag_prefix"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ociRepository"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A publication repository, revision, and path prefix.",
+          "properties": {
+            "publication": {
+              "properties": {
+                "path_prefix": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "revision": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repository",
+                "revision",
+                "path_prefix"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "publication"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "PromotionProvenance": {
       "additionalProperties": false,
@@ -876,6 +1034,17 @@
   "additionalProperties": false,
   "description": "`observed/units/<unit>.yaml`: the latest receipt and condition.",
   "properties": {
+    "acceptedEmptyState": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OwnershipScope"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A reasoned recovery accepted an empty backend for exactly this scope."
+    },
     "apiVersion": {
       "$ref": "#/$defs/StateV1"
     },
@@ -903,6 +1072,17 @@
     },
     "kind": {
       "$ref": "#/$defs/ObservedUnitKind"
+    },
+    "operatorModified": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OperatorModification"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A native repair requires an explicit approval before the next execution."
     },
     "receipt": {
       "anyOf": [

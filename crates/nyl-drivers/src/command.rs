@@ -704,7 +704,7 @@ impl Driver for CommandDriver {
         &self,
         _ctx: &ExecutionContext<'_>,
         _unit: &DesiredUnit,
-        _options: &nyl_core::orchestration::driver::BuildOptions,
+        _options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         Ok(Supported::Unsupported)
     }
