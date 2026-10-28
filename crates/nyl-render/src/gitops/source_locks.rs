@@ -110,9 +110,7 @@ pub fn collect_source_locks(
                 };
                 let source = &source.git;
                 group_found = true;
-                let repository = inventory
-                    .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
-                    .0;
+                let repository = inventory.resolve_git_source(source)?.0;
                 locks.push(SourceLock {
                     owner: LockOwner::ApplicationGroup {
                         name: resource.metadata.name.clone(),
@@ -135,9 +133,7 @@ pub fn collect_source_locks(
                         let Some(source) = binding.from_git.as_ref().map(|source| &source.git) else {
                             continue;
                         };
-                        let repository = inventory
-                            .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
-                            .0;
+                        let repository = inventory.resolve_git_source(source)?.0;
                         locks.push(SourceLock {
                             owner: LockOwner::ReleaseInput {
                                 target: resource.metadata.name.clone(),
@@ -278,10 +274,7 @@ fn collect_git_source(
     }
     let local = !source.is_remote();
     let repository_url = if source.is_remote() {
-        inventory
-            .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
-            .0
-            .repo_url
+        inventory.resolve_git_source(&source)?.0.repo_url
     } else {
         inventory.worktree_root.to_string_lossy().into_owned()
     };

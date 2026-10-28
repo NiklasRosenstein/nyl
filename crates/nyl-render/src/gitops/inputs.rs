@@ -966,41 +966,41 @@ fn resolve_git(
     sources: &InputSources<'_>,
 ) -> std::result::Result<ResolvedInput, String> {
     let (repository, repository_source) = match (&source.git.repository, &source.git.repository_ref) {
-        (Some(repository), _) => (repository.clone(), None),
+        (Some(repository), _) => (repository.repo_url.clone(), None),
         (None, Some(reference)) => {
             let (repository, path) =
                 (sources.repositories)(reference).map_err(|error| format!("{field}.fromGit.repositoryRef: {error}"))?;
-            (repository, Some(path))
+            (repository.repo_url, Some(path))
         }
         (None, None) => unreachable!("validated fromGit names a repository"),
     };
     let (commit, path) = (source.commit(), source.path());
     let bytes = sources
         .git
-        .read_blob(&repository.repo_url, commit, path)
+        .read_blob(&repository, commit, path)
         .map_err(|error| match error {
             NylError::Git(_) => format!(
                 "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
                 path,
                 commit,
-                crate::util::sanitize_url(&repository.repo_url),
-                crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
+                crate::util::sanitize_url(&repository),
+                crate::util::redact_url_credentials(&error.to_string(), &repository)
             ),
             // Vendor policy errors carry their own fix.
             NylError::Config(message) => format!(
                 "{field}.fromGit: {}",
-                crate::util::redact_url_credentials(&message, &repository.repo_url)
+                crate::util::redact_url_credentials(&message, &repository)
             ),
             other => format!(
                 "{field}.fromGit: {}",
-                crate::util::redact_url_credentials(&other.to_string(), &repository.repo_url)
+                crate::util::redact_url_credentials(&other.to_string(), &repository)
             ),
         })?
         .ok_or_else(|| {
             format!(
                 "{field}.fromGit: commit {} of {} has no file {}",
                 commit,
-                crate::util::sanitize_url(&repository.repo_url),
+                crate::util::sanitize_url(&repository),
                 path
             )
         })?;
@@ -1009,7 +1009,7 @@ fn resolve_git(
     Ok(ResolvedInput {
         value,
         origin: InputOrigin::Git {
-            url: credential_free_url(&repository.repo_url),
+            url: credential_free_url(&repository),
             commit: commit.to_owned(),
             path: path.to_owned(),
             blob_digest: nyl_core::digest::sha256_hex(&bytes),

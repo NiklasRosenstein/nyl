@@ -88,11 +88,30 @@ impl GitOpsInventory {
         ProjectPaths::new(self.project_root.clone(), self.worktree_root.clone())
     }
 
+    /// Resolve read-only source coordinates, discarding a named repository's
+    /// publication destination because source checkouts never write to it.
+    pub fn resolve_git_source(
+        &self,
+        source: &crate::resources::GitSource,
+    ) -> Result<(crate::resources::ReadGitRepository, Option<PathBuf>)> {
+        source.validate_repository("source")?;
+        if let Some(repository) = &source.repository {
+            return Ok((repository.clone(), None));
+        }
+        let (repository, path) = self.resolve_git_repository(source.repository_ref.as_ref(), None)?;
+        Ok((
+            crate::resources::ReadGitRepository {
+                repo_url: repository.repo_url,
+            },
+            path,
+        ))
+    }
+
     /// The repository a `repositoryRef` or inline `repository` pair names,
     /// with the project-relative source file of the referenced GitRepository.
     ///
-    /// This is the one resolution of that pair for ApplicationGroup sources,
-    /// publications, `fromGit` bindings, and source-lock updates.
+    /// Publication and state destinations retain both read and write URLs.
+    /// Read sources use [`Self::resolve_git_source`] instead.
     pub fn resolve_git_repository(
         &self,
         reference: Option<&crate::resources::LocalReference>,
@@ -772,6 +791,40 @@ spec:
         let mut index = repository.index().unwrap();
         index.add_path(Path::new(path)).unwrap();
         index.write().unwrap();
+    }
+
+    #[test]
+    fn test_read_source_resolves_named_repository_without_its_publication_coordinates() {
+        let (temporary, _) = project();
+        fs::write(temporary.path().join("repository.yaml"), "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata: {name: shared}\nspec: {repoURL: 'https://example.invalid/read.git', publishURL: 'ssh://git@example.invalid/write.git'}\n").unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let reference = crate::resources::LocalReference {
+            name: "shared".to_owned(),
+        };
+        let source = crate::resources::GitSource {
+            repository_ref: Some(reference.clone()),
+            ..crate::resources::GitSource::default()
+        };
+        let (read, source_path) = inventory.resolve_git_source(&source).unwrap();
+        assert_eq!(
+            serde_json::to_value(read).unwrap(),
+            serde_json::json!({"repoURL": "https://example.invalid/read.git"})
+        );
+        assert_eq!(source_path.as_deref(), Some(Path::new("repository.yaml")));
+        let (write, _) = inventory.resolve_git_repository(Some(&reference), None).unwrap();
+        assert_eq!(
+            write.publish_url.as_deref(),
+            Some("ssh://git@example.invalid/write.git")
+        );
+        let invalid: crate::resources::GitSource = serde_json::from_value(serde_json::json!({
+            "repository": {"repoURL": "https://user:password@example.invalid/read.git"},
+        }))
+        .unwrap();
+        assert!(inventory
+            .resolve_git_source(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("user information"));
     }
 
     #[test]

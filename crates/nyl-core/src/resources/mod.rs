@@ -23,7 +23,7 @@ pub use component::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind,
     ComponentKindParsed, ComponentValueImportOptions, NylComponent,
 };
-pub use git_source::GitSource;
+pub use git_source::{GitSource, ReadGitRepository};
 pub use gitops::*;
 pub use helmchart::{ChartRef, HelmChart, HelmChartSpec, ObjectMetadata};
 pub use kyverno::{
