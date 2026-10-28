@@ -107,8 +107,9 @@ file. `--check` reports drift without writing.
 
 ## Update source locks
 
-Resolve the revisions of remote ApplicationGroup sources and `fromGit` Release
-input bindings, and update their full commit locks:
+Resolve remote ApplicationGroup sources, `fromGit` Release inputs, Environment
+sources, and native unit sources (including named image contexts), and update
+their full commit locks:
 
 ```bash
 nyl update source-locks
@@ -123,7 +124,11 @@ filters choose which locks move, never where: each lock's destination depends
 only on the lock, so a filtered update agrees with an unfiltered `--check`.
 Every lock moves to the head of its revision. Each repository is fetched once
 per run. Locks are edited in place by their
-position, so write `fromGit` bindings in block style.
+position, so write source locks and `fromGit` bindings in block style. Unit
+source locks require literal repository coordinates, revisions, and commits;
+unfiltered updates include them, while group and target filters select only
+the named control resources. A revision without a commit follows its tip and
+has no lock to refresh.
 
 Mutable revisions must refresh successfully before a lock is reported current
 or updated. Immutable commit rendering can use an existing local cache.

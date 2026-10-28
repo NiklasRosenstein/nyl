@@ -88,6 +88,14 @@ pub struct Capabilities {
     pub exec: Option<ExecTerminal>,
 }
 
+/// Options shared by direct artifact builds. Publishing safety is declared by the kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BuildOptions {
+    pub push: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
 /// Whether publishing a direct build's artifact outside orchestration is safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum BuildPush {
@@ -187,6 +195,9 @@ pub struct AttestationOutcome {
 #[serde(tag = "outcome", rename_all = "kebab-case")]
 pub enum Outcome {
     Succeeded {
+        /// Native tool versions recorded in the receipt, independent of key material.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        versions: BTreeMap<String, String>,
         /// Every non-sensitive output the tool reported, declared or not. Nyl
         /// validates them against the declarations, warns about undeclared ones
         /// (`NYL-OUTPUT-UNDECLARED`), and records only declared ones.
@@ -288,6 +299,12 @@ pub struct ToolInvocation {
     pub env: BTreeMap<String, String>,
     /// Bytes on stdin; none closes it.
     pub stdin: Option<Vec<u8>>,
+    /// Capture stdout for structured parsing without copying it to the transcript.
+    pub private_stdout: bool,
+    /// Forward operator-tool stdout directly, independently of terminal interactivity.
+    pub forward_stdout: bool,
+    /// Give an operator tool the terminal; callers enable this only on a terminal.
+    pub interactive: bool,
     /// How long the tool may run: the driver computes it as the context's
     /// `deadline - now`, so no runner reads a clock to decide it. At expiry
     /// the runner sends SIGTERM to the process group and SIGKILL 30 seconds
@@ -307,19 +324,17 @@ pub enum ToolExit {
     Exited {
         code: i32,
         stdout: Vec<u8>,
+        /// Raw diagnostics for driver classification, bounded to 1 MiB; transcripts remain masked.
+        stderr: Vec<u8>,
     },
     /// The tool died from a signal it was not sent by Nyl.
-    Signaled {
-        signal: i32,
-    },
+    Signaled { signal: i32 },
     /// The deadline passed; the process group was terminated.
     DeadlineExceeded,
     /// The run is being cancelled; the process group was terminated.
     Cancelled,
     /// The program could not be started, such as a missing binary.
-    NotStarted {
-        reason: String,
-    },
+    NotStarted { reason: String },
 }
 
 /// Runs a driver's external tools. Implemented on Nyl's side: each tool runs
@@ -330,11 +345,20 @@ pub trait ToolRunner: Send + Sync {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit>;
 }
 
+/// A source field's independent checkout and authored path root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRoot {
+    pub worktree: PathBuf,
+    pub project_dir: PathBuf,
+}
+
 /// What one driver call may use.
 pub struct ExecutionContext<'a> {
+    /// Checkouts by Git source field JSON Pointer; fields may name different repositories and commits.
+    pub source_roots: BTreeMap<String, SourceRoot>,
     pub unit: UnitAddress,
     pub operation: DriverOperation,
-    /// A detached checkout of the effective source revision, owned by this execution.
+    /// The main checkout at the environment source commit S; source fields use source_roots.
     pub worktree: PathBuf,
     /// The directory containing `nyl.toml` inside `worktree`.
     pub project_dir: PathBuf,
@@ -342,6 +366,10 @@ pub struct ExecutionContext<'a> {
     pub temp_dir: PathBuf,
     /// Admitted variables and secrets, by name; masking of secret values is the runner's.
     pub env: BTreeMap<String, String>,
+    /// Explicit credential-helper keys, resolved only for this driver call.
+    pub secrets: BTreeMap<String, String>,
+    /// Whether an operator call may inherit the terminal.
+    pub interactive: bool,
     /// The approved change digest of a `bind: plan` unit.
     pub approved_digest: Option<ChangeDigest>,
     pub deadline: Timestamp,
@@ -350,6 +378,8 @@ pub struct ExecutionContext<'a> {
     pub now: Timestamp,
     /// The unit's observed file, holding its last receipt.
     pub observed: Option<&'a ObservedUnit>,
+    /// Artifact documents belonging to the observed receipt.
+    pub artifacts: BTreeMap<String, ArtifactDocument>,
     pub tools: &'a dyn ToolRunner,
     /// Who authors commits a driver writes, such as a publication's commit:
     /// the identity the command line resolved for state commits, with
@@ -409,10 +439,10 @@ pub struct TeardownSettings {
 
 /// What resolution provides to compute execution-key inputs.
 pub struct ResolutionContext<'a> {
+    /// The same source checkouts execution uses, keyed by Git source field JSON Pointer.
+    pub source_roots: BTreeMap<String, SourceRoot>,
     pub environment: EnvironmentName,
-    /// A Git worktree of the unit's effective commit: the commit resolution
-    /// writes into its Git source fields (S for a unit without `revision`).
-    /// Execution-key inputs are read from these bytes.
+    /// The main checkout at S. Read each source field's bytes from source_roots.
     pub worktree: PathBuf,
     /// The directory containing `nyl.toml` inside `worktree`.
     pub project_dir: PathBuf,
@@ -483,6 +513,12 @@ pub trait Driver: Send + Sync {
         let _ = spec;
         Vec::new()
     }
+    /// Complete paths and globs this kind reads, in worktree-rooted form.
+    /// None requires a full checkout; declared paths permit sparse checkouts.
+    fn checkout_paths(&self, spec: &Value) -> Option<Vec<String>> {
+        let _ = spec;
+        None
+    }
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs>;
 
     /// Plan an execution; for a `deleting` unit with teardown intent, its teardown, whose digest approvals bind.
@@ -521,9 +557,9 @@ pub trait Driver: Send + Sync {
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        push: bool,
+        options: &BuildOptions,
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        let _ = (ctx, unit, push);
+        let _ = (ctx, unit, options);
         Ok(Supported::Unsupported)
     }
     /// `nyl exec`; unsupported by default.

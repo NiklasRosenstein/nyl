@@ -910,6 +910,7 @@ mod tests {
 
     fn source(units: Vec<(&str, RenderedUnit)>) -> RenderedSource {
         RenderedSource {
+            repositories: BTreeMap::new(),
             source_commit: commit('a'),
             project_dir: "/nyl".to_owned(),
             environment: serde_json::from_value(json!({

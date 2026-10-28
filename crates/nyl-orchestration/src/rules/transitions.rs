@@ -31,8 +31,8 @@
 
 use nyl_core::orchestration::ids::RunId;
 use nyl_core::orchestration::state::{
-    Condition, DesiredUnit, FailureCategory, ObservedUnit, ObservedUnitKind, Receipt, StateV1, TeardownWaiting,
-    UnitIdentity,
+    Condition, DesiredUnit, FailureCategory, ObservedUnit, ObservedUnitKind, OperatorModification, Receipt,
+    TeardownWaiting, UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 
@@ -65,6 +65,12 @@ pub enum Event {
     Imported { checkpointed: ObservedUnit },
     /// `nyl recover --retry`.
     RecoverRetry,
+    /// A held native tool may have changed effects outside reconciliation.
+    OperatorModified { modification: OperatorModification },
+    /// Recovery accepted an empty native backend for one recorded ownership scope.
+    AcceptEmptyState {
+        scope: nyl_core::orchestration::driver::OwnershipScope,
+    },
     /// `nyl recover --accept <run>`, with the receipt that run checkpointed.
     RecoverAccept { receipt: Receipt },
     /// A two-phase teardown published its first phase and waits under its
@@ -110,6 +116,7 @@ fn transition(
     produced_for: Option<&DesiredUnit>,
 ) -> Result<Applied, Refusal> {
     let receipt = current.and_then(|observed| observed.receipt.clone());
+    let succeeded = matches!(&event, Event::Succeeded { .. });
     let condition = current.and_then(|observed| observed.condition.as_ref());
     let existing_copy = || current.and_then(|observed| observed.desired.clone());
     let existing_wait = || current.and_then(|observed| observed.waiting.clone());
@@ -124,7 +131,17 @@ fn transition(
                     desired: Option<Box<DesiredUnit>>,
                     waiting: Option<TeardownWaiting>| {
         Applied::Changed(Box::new(ObservedUnit {
-            api_version: StateV1,
+            api_version: nyl_core::orchestration::state::ObservedV2,
+            operator_modified: if succeeded {
+                None
+            } else {
+                current.and_then(|observed| observed.operator_modified.clone())
+            },
+            accepted_empty_state: if succeeded {
+                None
+            } else {
+                current.and_then(|observed| observed.accepted_empty_state.clone())
+            },
             kind: ObservedUnitKind,
             unit: unit.clone(),
             // A document without a receipt has no copy.
@@ -179,6 +196,22 @@ fn transition(
             ),
         },
         Event::RecoverRetry => document(receipt, None, existing_copy(), existing_wait()),
+        Event::OperatorModified { modification } => {
+            let mut changed = match document(receipt, condition.cloned(), existing_copy(), existing_wait()) {
+                Applied::Changed(changed) => changed,
+                Applied::Evidence => unreachable!("document changes observed state"),
+            };
+            changed.operator_modified = Some(modification);
+            Applied::Changed(changed)
+        }
+        Event::AcceptEmptyState { scope } => {
+            let mut changed = match document(receipt, condition.cloned(), existing_copy(), existing_wait()) {
+                Applied::Changed(changed) => changed,
+                Applied::Evidence => unreachable!("document changes observed state"),
+            };
+            changed.accepted_empty_state = Some(scope);
+            Applied::Changed(changed)
+        }
         Event::Waiting { waiting } => document(receipt, condition.cloned(), existing_copy(), Some(waiting)),
     })
 }
@@ -323,7 +356,9 @@ mod tests {
     fn document(receipt_key: Option<char>, condition: u8) -> ObservedUnit {
         let since: Timestamp = "2026-09-24T11:00:00Z".parse().unwrap();
         ObservedUnit {
-            api_version: StateV1,
+            api_version: nyl_core::orchestration::state::ObservedV2,
+            operator_modified: None,
+            accepted_empty_state: None,
             kind: ObservedUnitKind,
             unit: identity(),
             receipt: receipt_key.map(receipt),

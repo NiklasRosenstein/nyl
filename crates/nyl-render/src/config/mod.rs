@@ -175,10 +175,20 @@ pub struct ApprovalSettings {
     pub lookup: Vec<String>,
 }
 
+/// Defaults for native unit kinds. Unit declarations override these settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UnitDefaults {
+    /// Exact Terraform/OpenTofu version when the unit does not specify one.
+    pub version: Option<String>,
+}
+
 /// Root structure of `nyl.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
+    /// Per-kind native tool defaults, such as [units.OpenTofu].
+    pub units: BTreeMap<String, UnitDefaults>,
     /// Optional CI approver lookup for manual executions.
     pub approval: ApprovalSettings,
     pub project: ProjectSettings,

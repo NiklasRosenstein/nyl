@@ -251,6 +251,7 @@ impl Driver for FakeInfra {
                 .map_err(|error| DriverError::after_effects(format!("cannot write {}: {error}", path.display())))?;
         }
         Ok(Supported::Supported(Outcome::Succeeded {
+            versions: std::collections::BTreeMap::new(),
             outputs,
             artifacts: Vec::new(),
             attestations: Vec::new(),
@@ -321,6 +322,7 @@ impl Driver for FakeInfra {
             }
         }
         Ok(Supported::Supported(Outcome::Succeeded {
+            versions: std::collections::BTreeMap::new(),
             outputs: json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
@@ -331,7 +333,7 @@ impl Driver for FakeInfra {
         &self,
         _ctx: &ExecutionContext<'_>,
         _unit: &DesiredUnit,
-        _push: bool,
+        _options: &nyl_core::orchestration::driver::BuildOptions,
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         Ok(Supported::Unsupported)
     }

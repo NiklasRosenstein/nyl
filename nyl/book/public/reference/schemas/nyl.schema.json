@@ -280,6 +280,21 @@
         }
       ]
     },
+    "UnitDefaults": {
+      "additionalProperties": false,
+      "description": "Defaults for native unit kinds. Unit declarations override these settings.",
+      "properties": {
+        "version": {
+          "default": null,
+          "description": "Exact Terraform/OpenTofu version when the unit does not specify one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ValidationSettings": {
       "additionalProperties": false,
       "description": "Project-wide validation policy. Named validator sections select implementations.",
@@ -394,6 +409,14 @@
         "history_limit": 5
       },
       "description": "Release history retention for `nyl apply` and `nyl release rollback`."
+    },
+    "units": {
+      "additionalProperties": {
+        "$ref": "#/$defs/UnitDefaults"
+      },
+      "default": {},
+      "description": "Per-kind native tool defaults, such as [units.OpenTofu].",
+      "type": "object"
     },
     "validation": {
       "$ref": "#/$defs/ValidationSettings",

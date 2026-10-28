@@ -130,6 +130,21 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         return Err(Skipped::Blocked);
     }
     let observed = candidates.observed.get(name);
+    let modified = same_incarnation(desired, observed).is_some_and(|observed| observed.operator_modified.is_some());
+    if modified {
+        let digest_required = candidates
+            .drivers
+            .get(&desired.unit.api_version, &desired.unit.kind)
+            .is_some_and(|driver| {
+                driver
+                    .capabilities(desired.resolved_spec.as_ref().unwrap_or(&desired.spec))
+                    .change_digest
+            });
+        let approval = candidates.approvals.and_then(|approvals| approvals.get(name));
+        if approval.is_none() || (digest_required && approval.is_some_and(|approval| approval.digest.is_none())) {
+            return Err(Skipped::ManualApproval);
+        }
+    }
     // A condition of an earlier incarnation does not apply to this one.
     let condition = same_incarnation(desired, observed).and_then(|observed| observed.condition.as_ref());
     match condition {
@@ -145,7 +160,7 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         }
         Some(Condition::Failed { retryable: false, .. }) => return Err(Skipped::FailedNonRetryable),
         Some(Condition::Failed { retryable: true, .. }) | None => {
-            if receipt_is_current(desired, observed) {
+            if receipt_is_current(desired, observed) && !modified {
                 // Current: a candidate again only for drift repair or
                 // `--reapply`, by the drift rule.
                 let Some(repair) = drift::repair(candidates, name, desired, observed) else {
@@ -655,5 +670,36 @@ mod tests {
         let (ready, skipped) = world.select(None);
         assert!(ready.is_empty());
         assert_eq!(skipped[&name("manual")], Skipped::ManualApproval);
+    }
+
+    #[test]
+    fn test_operator_repair_requires_approval_even_with_an_unchanged_key() {
+        let mut world = World::new();
+        world.current("repaired", json!({"idempotent":true}));
+        world.observed.get_mut(&name("repaired")).unwrap().operator_modified =
+            Some(nyl_core::orchestration::state::OperatorModification {
+                request: nyl_core::orchestration::state::Request {
+                    by: "operator".to_owned(),
+                    at: "2026-10-28T00:00:00Z".parse().unwrap(),
+                    reason: Some("repair".to_owned()),
+                },
+                status: None,
+            });
+        assert_eq!(world.select(None).1[&name("repaired")], Skipped::ManualApproval);
+        assert!(!receipt_is_current(
+            &world.desired[&name("repaired")],
+            world.observed.get(&name("repaired"))
+        ));
+        world.approvals = Some(BTreeMap::from([(
+            name("repaired"),
+            ApprovalRecord {
+                by: vec!["operator".to_owned()],
+                identity: ApprovalIdentity::Local,
+                source: Some("local".to_owned()),
+                digest: None,
+                reviewed: false,
+            },
+        )]));
+        assert_eq!(world.select(None).0, [name("repaired")]);
     }
 }

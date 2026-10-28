@@ -8,11 +8,14 @@ pub mod inspect;
 pub mod lease;
 pub mod lifecycle;
 pub mod local;
+pub mod operator;
 pub mod recover;
 pub mod run;
 pub mod signal;
+pub mod sources;
 pub mod state;
 pub mod teardown;
+pub mod tools;
 pub mod verify;
 
 use std::collections::BTreeMap;

@@ -71,6 +71,10 @@ impl World {
     ) -> ExecutionContext<'a> {
         let now = fixed_now();
         ExecutionContext {
+            source_roots: std::collections::BTreeMap::default(),
+            secrets: std::collections::BTreeMap::default(),
+            artifacts: std::collections::BTreeMap::default(),
+            interactive: false,
             unit: "dev/seed".parse::<UnitAddress>().unwrap(),
             operation: DriverOperation::Reconcile,
             worktree: self.worktree(),
@@ -91,6 +95,7 @@ impl World {
     fn resolution<'a>(&self, tools: &'a ProcessRunner) -> ResolutionContext<'a> {
         let now = fixed_now();
         ResolutionContext {
+            source_roots: std::collections::BTreeMap::default(),
             environment: EnvironmentName::new("dev").unwrap(),
             worktree: self.worktree(),
             project_dir: self.project(),

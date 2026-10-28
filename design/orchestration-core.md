@@ -2074,6 +2074,11 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
   that differ from the desired document, with values only where they are not
   sensitive, and the snapshot's digest with the paths that differ from that
   commit. It never records file contents, secrets, or tool output.
+  Nyl first writes an observed transition with the operator-modified marker,
+  before the tool can change native state, then records the tool status in a
+  second observed transition. A crash between them preserves the approval
+  fence. ObservedUnit v2 adds this marker and the exact native scope accepted
+  by a reasoned missing-state recovery; v1 observed files migrate on read.
 - **Afterwards.** The unit's receipt is marked `operator-modified`. While held,
   consumers keep resolving from it, as for any hold. After `resume`, the next
   execution of the unit needs explicit approval, whatever its `approval`

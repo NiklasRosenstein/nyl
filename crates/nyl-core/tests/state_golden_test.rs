@@ -56,7 +56,7 @@ fn receipt() -> Value {
 
 /// One sample per golden file: its file name, and the document as JSON.
 fn samples() -> Vec<(&'static str, Value)> {
-    vec![
+    let mut samples = vec![
         (
             "state-record.v1.yaml",
             json!({
@@ -130,9 +130,9 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
-            "observed-unit.v1.yaml",
+            "observed-unit.v2.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": identity("database", "OpenTofu"),
+                "apiVersion": "gitops.nyl/v2", "kind": "ObservedUnit", "unit": identity("database", "OpenTofu"),
                 "receipt": receipt(),
                 "desired": {
                     "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("database", "OpenTofu"),
@@ -148,9 +148,9 @@ fn samples() -> Vec<(&'static str, Value)> {
         (
             // A publication's two-phase teardown waiting after phase 1: the
             // receipt and its desired copy stay until the teardown completes.
-            "observed-unit-waiting.v1.yaml",
+            "observed-unit-waiting.v2.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": identity("kubernetes", "KubernetesPublication"),
+                "apiVersion": "gitops.nyl/v2", "kind": "ObservedUnit", "unit": identity("kubernetes", "KubernetesPublication"),
                 "receipt": {"executionKey": KEY, "behaviorVersion": 1, "run": RUN,
                             "startedAt": "2026-09-24T10:00:00Z", "finishedAt": "2026-09-24T10:01:00Z"},
                 "desired": {
@@ -233,7 +233,18 @@ fn samples() -> Vec<(&'static str, Value)> {
                 "at": "2026-09-24T12:30:00Z", "from": "alice@workstation"
             }),
         ),
-    ]
+    ];
+    let mut repaired = samples
+        .iter()
+        .find(|(name, _)| *name == "observed-unit.v2.yaml")
+        .unwrap()
+        .1
+        .clone();
+    repaired["operatorModified"] = json!({"by":"operator","at":"2026-10-28T00:00:00Z","reason":"restore native state","status":{"status":"exited","code":0}});
+    repaired["acceptedEmptyState"] =
+        json!({"terraformBackend":{"backend":r#"{"path":"/state/dev.tfstate"}"#,"workspace":"default"}});
+    samples.push(("observed-unit-repaired.v2.yaml", repaired));
+    samples
 }
 
 fn golden_dir() -> PathBuf {
@@ -295,6 +306,23 @@ fn test_readers_reject_unknown_format_versions_and_kinds() {
     lease["apiVersion"] = json!("gitops.nyl/v1");
     lease["kind"] = json!("Run");
     assert!(serde_json::from_value::<Lease>(lease).is_err());
+}
+
+#[test]
+fn test_observed_v1_migrates_to_v2_without_changing_evidence() {
+    for name in ["observed-unit", "observed-unit-waiting"] {
+        let old = std::fs::read_to_string(golden_dir().join(format!("{name}.v1.yaml"))).unwrap();
+        let document: ObservedUnit = serde_saphyr::from_str(&old).unwrap();
+        assert!(document.operator_modified.is_none() && document.accepted_empty_state.is_none());
+        let migrated = serde_saphyr::to_string(&document).unwrap();
+        assert_eq!(
+            migrated,
+            std::fs::read_to_string(golden_dir().join(format!("{name}.v2.yaml"))).unwrap()
+        );
+        let mut unknown = serde_json::to_value(document).unwrap();
+        unknown["apiVersion"] = json!("gitops.nyl/v3");
+        assert!(serde_json::from_value::<ObservedUnit>(unknown).is_err());
+    }
 }
 
 #[test]

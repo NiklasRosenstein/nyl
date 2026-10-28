@@ -35,6 +35,10 @@ const POLL_INTERVAL: StdDuration = StdDuration::from_millis(10);
 
 /// What replaces a masked value in the transcript.
 const MASK: &str = "***";
+const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
+
+#[cfg(unix)]
+mod terminal;
 
 /// Where transcripts go: this process's stderr, or a buffer in tests.
 type Sink = Option<Arc<Mutex<Vec<u8>>>>;
@@ -111,6 +115,7 @@ fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
 }
 
 impl ToolRunner for ProcessRunner {
+    #[allow(clippy::too_many_lines)] // One subprocess lifetime owns its streams, terminal, cancellation, deadline, and captured result.
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
         let mut masked = invocation
             .masked
@@ -123,6 +128,14 @@ impl ToolRunner for ProcessRunner {
         masked.dedup();
         let masked = Arc::new(masked);
         let timeout = invocation.timeout;
+        if invocation.private_stdout && (invocation.interactive || invocation.forward_stdout) {
+            return Err(DriverError::before_effects(
+                "private tool stdout cannot also be forwarded to the terminal",
+            ));
+        }
+        #[cfg(unix)]
+        let mut foreground = terminal::Foreground::prepare(invocation.interactive)
+            .map_err(|error| DriverError::before_effects(format!("cannot prepare operator terminal: {error}")))?;
 
         let mut command = Command::new(&invocation.program);
         command
@@ -130,13 +143,23 @@ impl ToolRunner for ProcessRunner {
             .current_dir(&invocation.working_dir)
             .env_clear()
             .envs(&invocation.env)
-            .stdin(if invocation.stdin.is_some() {
+            .stdin(if invocation.interactive {
+                Stdio::inherit()
+            } else if invocation.stdin.is_some() {
                 Stdio::piped()
             } else {
                 Stdio::null()
             })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(if invocation.interactive || invocation.forward_stdout {
+                Stdio::inherit()
+            } else {
+                Stdio::piped()
+            })
+            .stderr(if invocation.interactive {
+                Stdio::inherit()
+            } else {
+                Stdio::piped()
+            });
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -155,6 +178,16 @@ impl ToolRunner for ProcessRunner {
                 })
             }
         };
+        #[cfg(unix)]
+        if let Some(foreground) = foreground.as_mut() {
+            if let Err(error) = foreground.activate(child.id()) {
+                kill_tool(&mut child);
+                let _ = child.wait();
+                return Err(DriverError::after_effects(format!(
+                    "cannot give operator tool the foreground terminal: {error}"
+                )));
+            }
+        }
         let start = Instant::now();
         let deadline = timeout.map(|timeout| start + timeout);
 
@@ -167,8 +200,15 @@ impl ToolRunner for ProcessRunner {
         let (done, finished) = mpsc::channel::<()>();
         let stdout = child.stdout.take().map(|pipe| {
             let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
+            let private = invocation.private_stdout;
             thread::spawn(move || {
-                let captured = transcribe(pipe, &masked, &sink, true);
+                let captured = if private {
+                    let mut captured = Vec::new();
+                    let _ = BufReader::new(pipe).read_to_end(&mut captured);
+                    captured
+                } else {
+                    transcribe(pipe, &masked, &sink, usize::MAX)
+                };
                 let _ = done.send(());
                 captured
             })
@@ -176,8 +216,9 @@ impl ToolRunner for ProcessRunner {
         let stderr = child.stderr.take().map(|pipe| {
             let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
             thread::spawn(move || {
-                transcribe(pipe, &masked, &sink, false);
+                let captured = transcribe(pipe, &masked, &sink, MAX_DIAGNOSTIC_BYTES);
                 let _ = done.send(());
+                captured
             })
         });
         drop(done);
@@ -215,10 +256,10 @@ impl ToolRunner for ProcessRunner {
         let captured = stdout
             .map(|reader| reader.join().unwrap_or_default())
             .unwrap_or_default();
-        if let Some(reader) = stderr {
-            let _ = reader.join();
-        }
-        Ok(exit_of(status, captured))
+        let diagnostics = stderr
+            .map(|reader| reader.join().unwrap_or_default())
+            .unwrap_or_default();
+        Ok(exit_of(status, captured, diagnostics))
     }
 }
 
@@ -376,20 +417,25 @@ fn wait_error(error: std::io::Error) -> DriverError {
 }
 
 #[cfg(unix)]
-fn exit_of(status: ExitStatus, stdout: Vec<u8>) -> ToolExit {
+fn exit_of(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> ToolExit {
     use std::os::unix::process::ExitStatusExt;
     match (status.code(), status.signal()) {
-        (Some(code), _) => ToolExit::Exited { code, stdout },
+        (Some(code), _) => ToolExit::Exited { code, stdout, stderr },
         (None, Some(signal)) => ToolExit::Signaled { signal },
-        (None, None) => ToolExit::Exited { code: -1, stdout },
+        (None, None) => ToolExit::Exited {
+            code: -1,
+            stdout,
+            stderr,
+        },
     }
 }
 
 #[cfg(not(unix))]
-fn exit_of(status: ExitStatus, stdout: Vec<u8>) -> ToolExit {
+fn exit_of(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> ToolExit {
     ToolExit::Exited {
         code: status.code().unwrap_or(-1),
         stdout,
+        stderr,
     }
 }
 
@@ -446,8 +492,8 @@ fn group_alive(child: &Child) -> bool {
 }
 
 /// Copy a tool's output, line by line and masked, to the transcript; return
-/// the raw bytes when `capture` is set.
-fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture: bool) -> Vec<u8> {
+/// raw bytes up to the capture limit while the full transcript continues.
+fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture_limit: usize) -> Vec<u8> {
     let mut reader = BufReader::new(pipe);
     let mut captured = Vec::new();
     let mut line = Vec::new();
@@ -456,9 +502,8 @@ fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture: bool) ->
         match reader.read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                if capture {
-                    captured.extend_from_slice(&line);
-                }
+                let remaining = capture_limit.saturating_sub(captured.len());
+                captured.extend_from_slice(&line[..line.len().min(remaining)]);
                 let text = mask(&String::from_utf8_lossy(&line), masked);
                 match sink {
                     Some(buffer) => buffer
@@ -501,6 +546,9 @@ mod tests {
             env: BTreeMap::new(),
             stdin: None,
             timeout: None,
+            private_stdout: false,
+            forward_stdout: false,
+            interactive: false,
             masked: Vec::new(),
         }
     }
@@ -541,6 +589,9 @@ mod tests {
                 env: BTreeMap::new(),
                 stdin: None,
                 timeout: None,
+                private_stdout: false,
+                forward_stdout: false,
+                interactive: false,
                 masked: Vec::new(),
             })
             .unwrap();
@@ -562,11 +613,24 @@ mod tests {
             exit,
             ToolExit::Exited {
                 code: 3,
-                stdout: b"out\n".to_vec()
+                stdout: b"out\n".to_vec(),
+                stderr: b"err\n".to_vec()
             }
         );
         let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
         assert!(transcript.contains("out") && transcript.contains("err"), "{transcript}");
+    }
+
+    #[test]
+    fn test_private_stdout_is_captured_without_entering_the_transcript() {
+        let (runner, transcript) = quiet();
+        let mut invocation = sh("printf 'undeclared-sensitive-output'; printf 'diagnostic' >&2");
+        invocation.private_stdout = true;
+        let ToolExit::Exited { code: 0, stdout, .. } = runner.run(invocation).unwrap() else {
+            panic!("tool did not complete");
+        };
+        assert_eq!(stdout, b"undeclared-sensitive-output");
+        assert_eq!(*transcript.lock().unwrap(), b"diagnostic");
     }
 
     #[test]
@@ -579,7 +643,8 @@ mod tests {
             exit,
             ToolExit::Exited {
                 code: 0,
-                stdout: b"piped".to_vec()
+                stdout: b"piped".to_vec(),
+                stderr: Vec::new()
             }
         );
     }
@@ -589,7 +654,7 @@ mod tests {
         let (runner, _) = quiet();
         let mut invocation = sh("/usr/bin/env");
         invocation.env = BTreeMap::from([("ONLY".to_owned(), "this".to_owned())]);
-        let ToolExit::Exited { code: 0, stdout } = runner.run(invocation).unwrap() else {
+        let ToolExit::Exited { code: 0, stdout, .. } = runner.run(invocation).unwrap() else {
             panic!("env runs");
         };
         let mut lines = String::from_utf8(stdout)
@@ -751,5 +816,28 @@ mod tests {
         let mut invocation = sh("");
         invocation.program = PathBuf::from("/nonexistent/tool");
         assert!(matches!(runner.run(invocation).unwrap(), ToolExit::NotStarted { .. }));
+    }
+    #[test]
+    fn test_private_stdout_refuses_forwarding_before_starting_a_tool() {
+        let (runner, transcript) = quiet();
+        let mut invocation = sh("printf 'sensitive JSON'");
+        invocation.private_stdout = true;
+        invocation.forward_stdout = true;
+        let error = runner.run(invocation).unwrap_err();
+        assert!(!error.effects_possible());
+        assert!(transcript.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn test_stderr_capture_is_bounded_without_truncating_the_transcript() {
+        let bytes = b"diagnostic\n".repeat(MAX_DIAGNOSTIC_BYTES / 10 + 100);
+        let transcript = Arc::new(Mutex::new(Vec::new()));
+        let captured = transcribe(
+            std::io::Cursor::new(&bytes),
+            &[],
+            &Some(transcript.clone()),
+            MAX_DIAGNOSTIC_BYTES,
+        );
+        assert_eq!(captured.len(), MAX_DIAGNOSTIC_BYTES);
+        assert_eq!(*transcript.lock().unwrap(), bytes);
     }
 }

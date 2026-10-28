@@ -29,6 +29,38 @@ impl Slots {
         }
     }
 
+    /// Main and independent source-field worktrees of one unit in a slot.
+    pub(crate) fn checkout_unit(
+        &self,
+        sources: &dyn SourceResolver,
+        slot: usize,
+        commit: &CommitId,
+        driver: &dyn nyl_core::orchestration::driver::Driver,
+        spec: &serde_json::Value,
+        project_dir: &str,
+    ) -> Result<
+        (
+            PathBuf,
+            std::collections::BTreeMap<String, nyl_core::orchestration::driver::SourceRoot>,
+        ),
+        String,
+    > {
+        let worktree = self.directory.join(format!("slot-{slot}"));
+        let paths = crate::shell::sources::checkout_paths(driver, spec, project_dir, &SourceRepository::This);
+        sources
+            .reset_worktree_with_paths(&SourceRepository::This, commit, &worktree, paths.as_deref())
+            .map_err(|error| format!("cannot check out commit {commit}: {error}"))?;
+        let roots = crate::shell::sources::prepare_source_roots(
+            sources,
+            driver,
+            spec,
+            commit,
+            project_dir,
+            &self.directory.join(format!("slot-{slot}-sources")),
+        )?;
+        Ok((worktree, roots))
+    }
+
     /// The worktree of `slot`, reset to `commit`.
     pub(crate) fn checkout(
         &self,

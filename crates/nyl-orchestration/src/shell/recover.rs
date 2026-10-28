@@ -99,13 +99,14 @@ pub fn recover_environment(context: &RunContext<'_>, request: &RunRequest) -> St
     };
     if unimported_break(&coordination).is_none() {
         return match unit {
-            Some(recover_unit) => recover(
+            Some(recover_unit) => recover_with_drivers(
                 base,
                 environment,
                 location,
                 &recover_unit.unit,
                 &recover_unit.action,
                 &requested,
+                Some(context.drivers),
             ),
             None => report.refused(nothing_to_import(environment)),
         };
@@ -316,6 +317,7 @@ pub(crate) fn summarize(summary: &mut TransitionSummary, action: Option<(UnitNam
 /// leftover and evidence run refs the import read, so `--accept` finds the
 /// checkpoint; an accepted checkpoint becomes the receipt, carrying the
 /// copy of `desired` it was produced for. A refusal is the finding.
+#[allow(clippy::too_many_arguments)] // Recovery result, evidence, and explicit native authorization.
 pub(crate) fn after_import(
     environment: &EnvironmentName,
     recover: &RecoverUnit,
@@ -323,14 +325,24 @@ pub(crate) fn after_import(
     observed: &mut BTreeMap<UnitName, ObservedUnit>,
     artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
     runs: &[RunState],
+    authorization: (&nyl_core::orchestration::driver::DriverSet, Option<&str>),
 ) -> Result<Value, Finding> {
-    let recovery = decide(
+    let mut recovery = decide(
         environment,
         &recover.unit,
         desired,
         observed.get(&recover.unit),
         &recover.action,
         runs,
+    )?;
+    authorize_empty_state(
+        environment,
+        desired,
+        observed.get(&recover.unit),
+        &recover.action,
+        authorization.1,
+        Some(authorization.0),
+        &mut recovery.observed,
     )?;
     if let Some(set) = recovery.artifacts {
         if set.is_empty() {
@@ -343,6 +355,55 @@ pub(crate) fn after_import(
     Ok(action_entry(&recover.action))
 }
 
+#[allow(clippy::too_many_arguments)] // Both import and ordinary recovery share the same authorization.
+fn authorize_empty_state(
+    environment: &EnvironmentName,
+    desired: Option<&DesiredUnit>,
+    observed: Option<&ObservedUnit>,
+    action: &RecoverAction,
+    reason: Option<&str>,
+    drivers: Option<&nyl_core::orchestration::driver::DriverSet>,
+    recovered: &mut ObservedUnit,
+) -> Result<(), Finding> {
+    if !matches!(action, RecoverAction::Retry)
+        || !matches!(observed.and_then(|observed| observed.condition.as_ref()), Some(Condition::Failed { message, .. }) if message.contains("NYL-TOFU-STATE-MISSING"))
+    {
+        return Ok(());
+    }
+    if reason.is_none_or(|reason| reason.trim().is_empty()) {
+        return Err(Finding::new(
+            Code::ExecInvalid,
+            "accepting an empty native state requires a reason",
+            "pass --reason after verifying the backend location",
+        ));
+    }
+    let desired =
+        desired.ok_or_else(|| Finding::new(Code::UnitUnknown, "native unit is missing", "select a recorded unit"))?;
+    let scope = drivers
+        .and_then(|drivers| drivers.get(&desired.unit.api_version, &desired.unit.kind))
+        .and_then(|driver| {
+            driver
+                .ownership_scopes(environment, desired.resolved_spec.as_ref().unwrap_or(&desired.spec))
+                .into_iter()
+                .next()
+        })
+        .ok_or_else(|| {
+            Finding::new(
+                Code::ExecInvalid,
+                "cannot identify the native state scope",
+                "use the unit's registered driver to accept the empty state",
+            )
+        })?;
+    if let Ok(crate::rules::transitions::Applied::Changed(changed)) = crate::rules::transitions::apply_to(
+        desired,
+        Some(recovered),
+        crate::rules::transitions::Event::AcceptEmptyState { scope },
+    ) {
+        *recovered = *changed;
+    }
+    Ok(())
+}
+
 /// `nyl recover`.
 pub fn recover(
     context: &Context<'_>,
@@ -351,6 +412,19 @@ pub fn recover(
     unit: &UnitName,
     action: &RecoverAction,
     requested: &Requested,
+) -> StateOperationReport {
+    recover_with_drivers(context, environment, location, unit, action, requested, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_with_drivers(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    unit: &UnitName,
+    action: &RecoverAction,
+    requested: &Requested,
+    drivers: Option<&nyl_core::orchestration::driver::DriverSet>,
 ) -> StateOperationReport {
     with_lease(
         context,
@@ -389,7 +463,16 @@ pub fn recover(
                 "evidence".to_owned(),
                 serde_json::to_value(evidence(unit, desired, &runs)).expect("evidence serializes"),
             );
-            let recovery = decide(environment, unit, desired, observed, action, &runs)?;
+            let mut recovery = decide(environment, unit, desired, observed, action, &runs)?;
+            authorize_empty_state(
+                environment,
+                desired,
+                observed,
+                action,
+                requested.reason.as_deref(),
+                drivers,
+                &mut recovery.observed,
+            )?;
 
             let mut changes = TransitionChanges {
                 observed: BTreeMap::from([(unit.clone(), Some(recovery.observed.clone()))]),
@@ -431,4 +514,58 @@ pub fn recover(
             Ok(())
         },
     )
+}
+
+#[cfg(test)]
+mod native_recovery_tests {
+    use super::*;
+    use crate::rules::fixtures;
+    use nyl_core::orchestration::driver::{Driver, DriverSet};
+    use nyl_core::orchestration::state::FailureCategory;
+
+    #[test]
+    fn test_imported_missing_state_retry_requires_reason_and_records_exact_scope() {
+        let desired = fixtures::desired("infra", "Publication", json!({"prefix":"backend"}), "key");
+        let mut failed = fixtures::observed("infra", "Publication", None);
+        failed.condition = Some(Condition::Failed {
+            since: "2026-10-28T00:00:00Z".parse().unwrap(),
+            run: fixtures::run(fixtures::RUN_1),
+            category: FailureCategory::Ownership,
+            retryable: false,
+            message: "NYL-TOFU-STATE-MISSING: backend is empty".to_owned(),
+        });
+        let mut drivers = DriverSet::new();
+        let driver = fixtures::TestDriver { kind: "Publication" };
+        let scope = driver.ownership_scopes(&fixtures::env(), &desired.spec)[0].clone();
+        drivers.register(std::sync::Arc::new(driver));
+        let recover = RecoverUnit {
+            unit: fixtures::name("infra"),
+            action: RecoverAction::Retry,
+        };
+        let mut observed = BTreeMap::from([(recover.unit.clone(), failed.clone())]);
+        let mut artifacts = BTreeMap::new();
+        assert!(after_import(
+            &fixtures::env(),
+            &recover,
+            Some(&desired),
+            &mut observed,
+            &mut artifacts,
+            &[],
+            (&drivers, None)
+        )
+        .is_err());
+        assert_eq!(observed[&recover.unit], failed);
+        after_import(
+            &fixtures::env(),
+            &recover,
+            Some(&desired),
+            &mut observed,
+            &mut artifacts,
+            &[],
+            (&drivers, Some("verified empty backend")),
+        )
+        .unwrap();
+        assert!(observed[&recover.unit].condition.is_none());
+        assert_eq!(observed[&recover.unit].accepted_empty_state, Some(scope));
+    }
 }

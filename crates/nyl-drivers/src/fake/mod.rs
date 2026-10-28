@@ -186,7 +186,12 @@ fn source_files(
     field: &str,
 ) -> DriverResult<BTreeMap<String, String>> {
     let path = required_str(spec, pointer)?;
-    let paths = crate::command::roots(&ctx.worktree, &ctx.project_dir)?;
+    let source_field = pointer.strip_suffix("/path").unwrap_or(pointer);
+    let root = ctx.source_roots.get(source_field);
+    let paths = crate::command::roots(
+        root.map_or(&ctx.worktree, |root| &root.worktree),
+        root.map_or(&ctx.project_dir, |root| &root.project_dir),
+    )?;
     let directory = paths
         .resolve(field, path)
         .map_err(|error| DriverError::before_effects(error.to_string()))?;
@@ -247,6 +252,10 @@ mod tests {
 
     fn context<'a>(directory: &TempDir, tools: &'a NoTools, approved: Option<ChangeDigestArg>) -> ExecutionContext<'a> {
         ExecutionContext {
+            source_roots: std::collections::BTreeMap::default(),
+            secrets: std::collections::BTreeMap::default(),
+            artifacts: std::collections::BTreeMap::default(),
+            interactive: false,
             unit: "dev/database".parse::<UnitAddress>().unwrap(),
             operation: DriverOperation::Reconcile,
             worktree: directory.path().to_path_buf(),

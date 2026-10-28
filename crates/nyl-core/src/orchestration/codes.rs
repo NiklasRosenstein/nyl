@@ -30,6 +30,14 @@ macro_rules! codes {
 }
 
 codes! {
+    /// Native repair requires a held incarnation.
+    ExecNotHeld => "NYL-EXEC-NOT-HELD",
+    /// The unit's driver cannot run an operator tool.
+    ExecUnsupported => "NYL-EXEC-UNSUPPORTED",
+    /// The repair spec claims another unit's resources.
+    ExecScopeConflict => "NYL-EXEC-SCOPE-CONFLICT",
+    /// The repair's spec, source, credentials, or arguments are unavailable.
+    ExecInvalid => "NYL-EXEC-INVALID",
     /// An approval or approver lookup is invalid; no effects start.
     ApprovalInvalid => "NYL-APPROVAL-INVALID",
     /// Another run holds the environment's lease.

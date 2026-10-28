@@ -270,6 +270,15 @@ impl GitSourceResolver {
 
     /// Create a detached checkout of `oid` at the missing or empty `path`.
     fn create_checkout(source: &Repository, oid: Oid, path: &Path) -> SourceResult<()> {
+        Self::create_checkout_with_paths(source, oid, path, None)
+    }
+
+    fn create_checkout_with_paths(
+        source: &Repository,
+        oid: Oid,
+        path: &Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
         let objects = Self::objects_dir(source)?;
         let created = Repository::init(path)
             .map_err(|cause| git_error(&format!("cannot create worktree {}", path.display()), &cause))?;
@@ -283,6 +292,68 @@ impl GitSourceResolver {
         checkout
             .set_head_detached(oid)
             .map_err(|cause| git_error(&format!("cannot detach the worktree at {oid}"), &cause))?;
+        if let Some(paths) = paths {
+            let tree = checkout
+                .find_commit(oid)
+                .and_then(|commit| commit.tree())
+                .map_err(|cause| git_error("cannot read sparse source tree", &cause))?;
+            let mut patterns = Vec::new();
+            for path in paths {
+                let path = path.trim_start_matches('/');
+                if path.split('/').any(|part| part == "..")
+                    || path
+                        .chars()
+                        .any(|character| character.is_control() || character == char::from(92))
+                {
+                    return Err(error("sparse checkout paths must stay inside the worktree"));
+                }
+                if path.is_empty() {
+                    patterns.push("/*".to_owned());
+                    continue;
+                }
+                let entry = tree.get_path(Path::new(path)).ok();
+                let directory = entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.kind() == Some(ObjectType::Tree));
+                // Existing tree paths are literals; only unmatched paths are authored globs.
+                let path = if entry.is_some() {
+                    path.chars().fold(String::new(), |mut escaped, character| {
+                        if matches!(character, '*' | '?' | '[' | ' ') {
+                            escaped.push(char::from(92));
+                        }
+                        escaped.push(character);
+                        escaped
+                    })
+                } else {
+                    path.to_owned()
+                };
+                patterns.push(format!(
+                    "/{path}{}",
+                    if directory && !path.ends_with('/') { "/" } else { "" }
+                ));
+            }
+            let sparse = checkout.path().join("info/sparse-checkout");
+            std::fs::create_dir_all(sparse.parent().expect("sparse path parent"))
+                .and_then(|()| std::fs::write(&sparse, format!("{}\n", patterns.join("\n"))))
+                .map_err(|cause| error(format!("cannot write sparse checkout paths: {cause}")))?;
+            checkout
+                .config()
+                .and_then(|mut config| config.set_bool("core.sparseCheckout", true))
+                .map_err(|cause| git_error("cannot configure sparse checkout", &cause))?;
+            let output = nyl_git::repository_command(checkout.path())
+                .arg("--work-tree")
+                .arg(path)
+                .args(["-c", "core.sparseCheckoutCone=false", "read-tree", "-mu", "HEAD"])
+                .output()
+                .map_err(|cause| error(format!("cannot start sparse checkout: {cause}")))?;
+            if !output.status.success() {
+                return Err(error(format!(
+                    "cannot check out sparse source: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            return Ok(());
+        }
         checkout
             .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
             .map_err(|cause| git_error(&format!("cannot check out {oid}"), &cause))?;
@@ -613,6 +684,45 @@ impl SourceResolver for GitSourceResolver {
         // changed file mode: start over from a fresh checkout.
         Self::remove_worktree(path)?;
         Self::create_checkout(&source, oid, path)
+    }
+
+    fn worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        if !is_missing_or_empty(path)? {
+            return Err(error(format!("worktree path {} is not empty", path.display())));
+        }
+        Self::create_checkout_with_paths(&source, oid, path, paths)
+    }
+
+    fn reset_worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let Some(paths) = paths else {
+            return self.reset_worktree(repository, commit, path);
+        };
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        if !is_missing_or_empty(path)? {
+            if !Self::made_here(&source, path)? {
+                return Err(error(format!(
+                    "worktree path {} is not a checkout Nyl made",
+                    path.display()
+                )));
+            }
+            // Rebuild the sparse index and discard every previous unit's files;
+            // the objects remain borrowed, so no repository objects are copied.
+            Self::remove_worktree(path)?;
+        }
+        Self::create_checkout_with_paths(&source, oid, path, Some(paths))
     }
 
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {

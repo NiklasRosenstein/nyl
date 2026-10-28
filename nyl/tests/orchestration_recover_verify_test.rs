@@ -625,9 +625,9 @@ impl Driver for Recording {
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        push: bool,
+        options: &nyl_core::orchestration::driver::BuildOptions,
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        self.inner.build(ctx, unit, push)
+        self.inner.build(ctx, unit, options)
     }
     fn exec(
         &self,

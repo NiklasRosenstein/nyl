@@ -113,13 +113,24 @@ uncommitted changes never reach a run.
 - An unreachable commit fails the run with `NYL-SOURCE-UNREACHABLE`, naming
   the commit and the refs searched.
 
-A Command unit runs from S. Kinds that build from Git name their files in
-source fields with an optional `revision` and `commit`, which default to S. A
-`revision` resolves to a commit during the run, and the unit's desired
-document records that commit, so every execution can be reproduced from
-state. All source fields of one unit must resolve to the same commit, its
-effective commit; conflicting pins are rejected. Source fields naming another
-repository are not supported yet.
+A Command unit runs from S. Each unit source field can name its own `revision`
+and `commit`, in this
+repository or a declared `GitRepository` (or inline `repository`). A remote
+source requires `revision`; its paths are relative to that checkout's root.
+Local source paths stay relative to the directory containing `nyl.toml`, or
+worktree-rooted with `/`. Named image contexts may therefore read different
+commits and repositories in one build. Resolution records each field's commit
+and normalized path, and reads the same bytes when fingerprinting, planning,
+executing, verifying, and tearing down.
+
+Image and infrastructure drivers declare the paths they read. Their private
+checkouts contain those paths, including declared local modules and variable
+files, plus this repository's configuration directory (`nyl.toml` alone when
+it sits at the repository root). Unrelated repository files
+are not checked out. Command units retain a full checkout because their
+`files` list determines freshness without restricting everything the command
+may read. Changing a source commit alone does not re-run a unit when its
+recorded input bytes are unchanged.
 
 ## Execution keys and receipts
 

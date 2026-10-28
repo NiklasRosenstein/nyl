@@ -175,6 +175,7 @@ impl Driver for FakeImage {
             .ok_or_else(|| DriverError::before_effects("an executing unit has an execution key"))?;
         let artifact = Self::artifact(unit, key, resolved_spec(unit)?)?;
         Ok(Supported::Supported(Outcome::Succeeded {
+            versions: std::collections::BTreeMap::new(),
             outputs: json!({}),
             artifacts: vec![artifact],
             attestations: Vec::new(),
@@ -207,14 +208,18 @@ impl Driver for FakeImage {
         &self,
         _ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        _push: bool,
+        options: &nyl_core::orchestration::driver::BuildOptions,
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         let spec = resolved_spec(unit)?;
-        let key = ExecutionKey::from_digest_of(
-            &nyl_core::digest::canonical_json_bytes(spec)
-                .map_err(|error| DriverError::before_effects(error.to_string()))?,
-        );
-        Ok(Supported::Supported(vec![Self::artifact(unit, &key, spec)?]))
+        let key = unit
+            .execution_key
+            .as_ref()
+            .ok_or_else(|| DriverError::before_effects("a direct build has an execution key"))?;
+        let mut artifact = Self::artifact(unit, key, spec)?;
+        let mut tags = spec.get("tags").and_then(Value::as_array).cloned().unwrap_or_default();
+        tags.extend(options.tags.iter().cloned().map(Value::String));
+        artifact.spec["tags"] = Value::Array(tags);
+        Ok(Supported::Supported(vec![artifact]))
     }
 
     fn exec(

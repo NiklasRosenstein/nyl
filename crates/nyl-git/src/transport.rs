@@ -218,7 +218,7 @@ fn porcelain_rejections(stdout: &str) -> Vec<Rejection> {
 }
 
 fn local_ref(git_dir: &Path, reference: &str) -> Result<Option<String>> {
-    let mut command = base_command(git_dir);
+    let mut command = repository_command(git_dir);
     let output = command
         .args(["rev-parse", "--verify", "--quiet", reference])
         .output()
@@ -230,7 +230,7 @@ fn local_ref(git_dir: &Path, reference: &str) -> Result<Option<String>> {
 }
 
 fn run_local(git_dir: &Path, args: &[&str]) -> Result<()> {
-    let output = base_command(git_dir)
+    let output = repository_command(git_dir)
         .args(args)
         .output()
         .map_err(|error| GitError::Command(format!("failed to run git: {error}")))?;
@@ -253,7 +253,8 @@ fn run(git_dir: &Path, url: &str, operation: &str, args: &[&str], auth: &GitAuth
     Ok(stdout)
 }
 
-pub(super) fn base_command(git_dir: &Path) -> Command {
+/// Build a Git command bound to this repository, ignoring inherited repository selectors.
+pub fn repository_command(git_dir: &Path) -> Command {
     // A hooks directory that never exists: the user's hooks, such as a
     // global `core.hooksPath` pre-push hook, must not judge Nyl's own
     // fetches and pushes.
@@ -290,7 +291,7 @@ pub(super) fn base_command(git_dir: &Path) -> Command {
 
 /// Run `git` with the credentials for `url`, returning stdout, stderr, and success.
 fn command(git_dir: &Path, url: &str, args: &[&str], auth: &GitAuth) -> Result<(String, String, bool)> {
-    let mut command = base_command(git_dir);
+    let mut command = repository_command(git_dir);
     let _applied = auth.apply(url, &mut command)?;
     command.args(args);
     tracing::trace!("Running git {} for {}", args.first().unwrap_or(&""), sanitize_url(url));

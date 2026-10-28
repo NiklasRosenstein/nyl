@@ -110,7 +110,9 @@ pub fn receipt(seed: &str, outputs: Value, artifacts: Vec<ArtifactDigest>) -> Re
 
 pub fn observed(unit: &str, kind: &str, receipt: Option<Receipt>) -> ObservedUnit {
     ObservedUnit {
-        api_version: StateV1,
+        api_version: nyl_core::orchestration::state::ObservedV2,
+        operator_modified: None,
+        accepted_empty_state: None,
         kind: ObservedUnitKind,
         unit: identity(unit, kind),
         receipt,
