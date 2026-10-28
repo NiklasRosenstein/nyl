@@ -122,6 +122,10 @@ hold local transitions or are behind the remote, <code dir="auto">status</code> 
 transitions and is 3 behind the remote”. The warning does not change the exit
 code. <code dir="auto">--local</code> shows the local view instead: the state as the clone’s
 branches hold it, including <code dir="auto">nyl reconcile --local</code> runs.</p>
+<p>Select several environments with repeated <code dir="auto">-e</code>, with <code dir="auto">-l stage=production</code>, or
+with <code dir="auto">-g &#x3C;group></code>. They run in dependency order with one report section per
+environment. See <a href="/nyl/orchestration/runs/#multi-environment-runs">Multi-environment runs</a>
+for qualified unit options and independent state transactions.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="options">Options</h2><a class="sl-anchor-link" href="#options"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Options”</span></a></div>
 
 
@@ -148,7 +152,15 @@ branches hold it, including <code dir="auto">nyl reconcile --local</code> runs.<
 
 
 
-<table><thead><tr><th>Option</th><th>Meaning</th></tr></thead><tbody><tr><td><code dir="auto">-e</code>, <code dir="auto">--environment &#x3C;name></code></td><td>The environment to show. Required.</td></tr><tr><td><code dir="auto">--local</code></td><td>Show this clone’s local view of the state, including <code dir="auto">--local</code> runs. Exits 1 with <code dir="auto">NYL-LOCAL-RUN-UNSUPPORTED</code> for state without a remote, whose local branches already are the state.</td></tr><tr><td><code dir="auto">-o</code>, <code dir="auto">--output &#x3C;table|json></code></td><td>A table, or the typed <code dir="auto">StatusReport</code>. Default <code dir="auto">table</code>.</td></tr><tr><td><code dir="auto">[PATH]</code></td><td>The project directory or a path beneath it. Default <code dir="auto">.</code>.</td></tr></tbody></table>
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Option</th><th>Meaning</th></tr></thead><tbody><tr><td><code dir="auto">-e</code>, <code dir="auto">--environment &#x3C;name></code></td><td>Select named environments; repeatable. Use exactly one of <code dir="auto">-e</code>, <code dir="auto">-l</code>, or <code dir="auto">-g</code>.</td></tr><tr><td><code dir="auto">-l</code>, <code dir="auto">--labels &#x3C;key=value></code></td><td>Select declared environments by literal labels; comma-separated pairs use AND.</td></tr><tr><td><code dir="auto">-g</code>, <code dir="auto">--group &#x3C;name></code></td><td>Select the members of an EnvironmentGroup.</td></tr><tr><td><code dir="auto">--local</code></td><td>Show this clone’s local view of the state, including <code dir="auto">--local</code> runs. Exits 1 with <code dir="auto">NYL-LOCAL-RUN-UNSUPPORTED</code> for state without a remote, whose local branches already are the state.</td></tr><tr><td><code dir="auto">-o</code>, <code dir="auto">--output &#x3C;table|json></code></td><td>A table, or the typed <code dir="auto">StatusReport</code>. Default <code dir="auto">table</code>.</td></tr><tr><td><code dir="auto">[PATH]</code></td><td>The project directory or a path beneath it. Default <code dir="auto">.</code>.</td></tr></tbody></table>
 <div class="sl-heading-wrapper level-h2"><h2 id="exit-codes">Exit codes</h2><a class="sl-anchor-link" href="#exit-codes"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Exit codes”</span></a></div>
 
 
