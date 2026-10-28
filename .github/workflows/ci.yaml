@@ -107,6 +107,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force "$env:DEV_DRIVE/tmp", "$env:DEV_DRIVE/target" | Out-Null
           New-Item -ItemType Junction -Path target -Target "$env:DEV_DRIVE/target" | Out-Null
+          $miseTemp = Join-Path $env:LOCALAPPDATA "Temp"
+          New-Item -ItemType Directory -Force $miseTemp | Out-Null
+          "NYL_MISE_TMP=$miseTemp" >> $env:GITHUB_ENV
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.98.1
@@ -121,6 +124,10 @@ jobs:
 
       - name: Install pinned Helm and kubeconform
         uses: jdx/mise-action@v3
+        # mise installs with a rename; its temporary files must share the Windows install volume.
+        env:
+          TMP: ${{ env.NYL_MISE_TMP || runner.temp }}
+          TEMP: ${{ env.NYL_MISE_TMP || runner.temp }}
         with:
           install_args: helm kubeconform
 
