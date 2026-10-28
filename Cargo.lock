@@ -1988,12 +1988,14 @@ dependencies = [
 name = "nyl-drivers"
 version = "0.5.9"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "glob",
  "hex",
  "libc",
  "nyl-core",
  "nyl-render",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

@@ -208,14 +208,19 @@ impl Driver for FakeImage {
         &self,
         _ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        _args: &[OsString],
+        args: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
+        let options = crate::oci_image::ImageBuildArgs::parse(args)?;
         let spec = resolved_spec(unit)?;
-        let key = ExecutionKey::from_digest_of(
-            &nyl_core::digest::canonical_json_bytes(spec)
-                .map_err(|error| DriverError::before_effects(error.to_string()))?,
-        );
-        Ok(Supported::Supported(vec![Self::artifact(unit, &key, spec)?]))
+        let key = unit
+            .execution_key
+            .as_ref()
+            .ok_or_else(|| DriverError::before_effects("a direct build has an execution key"))?;
+        let mut artifact = Self::artifact(unit, key, spec)?;
+        let mut tags = spec.get("tags").and_then(Value::as_array).cloned().unwrap_or_default();
+        tags.extend(options.tags.iter().cloned().map(Value::String));
+        artifact.spec["tags"] = Value::Array(tags);
+        Ok(Supported::Supported(vec![artifact]))
     }
 
     fn exec(

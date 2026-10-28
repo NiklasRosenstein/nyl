@@ -189,6 +189,7 @@ export default defineConfig({
                   "reference/cli/publish-tree",
                   "reference/cli/comment",
                   "reference/cli/plan",
+                  "reference/cli/build",
                   "reference/cli/reconcile",
                   "reference/cli/status",
                   "reference/cli/verify",

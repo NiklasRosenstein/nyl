@@ -26,3 +26,5 @@ pub mod vendor;
 pub mod verify;
 
 pub mod capture;
+
+pub mod build;

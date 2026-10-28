@@ -8,6 +8,7 @@ mod git_source;
 mod gitops;
 mod helmchart;
 mod kyverno;
+pub mod oci_image;
 mod path_glob;
 mod release;
 pub mod release_inputs;

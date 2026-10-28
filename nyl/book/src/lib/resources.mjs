@@ -11,6 +11,7 @@ export const groupLabels = {
   'k8s.gitops.nyl/v1': 'Kubernetes GitOps',
   'k8s.nyl/v1': 'Kubernetes rendering',
   'components.k8s.nyl/v1': 'Kubernetes components',
+  'units.gitops.nyl/v1': 'Orchestration units',
 };
 export function summary(schema) { return schema.description.split(/\n\s*\n/)[0]; }
 /** Resource-level usage sections authored in Rust doc comments and carried by the schema description. */
@@ -49,7 +50,7 @@ export const resourceSections = [
     id: 'orchestration',
     label: 'Orchestration Resources',
     route: '/reference/resources/orchestration/',
-    apiVersions: [],
+    apiVersions: ['units.gitops.nyl/v1'],
     include: ['Environment', 'EnvironmentGroup'],
   },
 ];

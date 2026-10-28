@@ -11,10 +11,11 @@ use nyl_core::orchestration::driver::DriverSet;
 
 use crate::command::CommandDriver;
 
-/// The built-in kinds of this milestone: `Command`.
+/// Native command, image, and infrastructure drivers.
 pub fn builtin() -> DriverSet {
     let mut drivers = DriverSet::new();
     drivers.register(Arc::new(CommandDriver));
+    drivers.register(Arc::new(crate::oci_image::OciImageDriver));
     drivers
 }
 
@@ -61,6 +62,6 @@ mod tests {
         assert_eq!(kind("OciImage"), Some("FakeImage"));
         assert_eq!(kind("OpenTofu"), Some("FakeInfra"));
         assert_eq!(kind("KubernetesPublication"), Some("FakePublication"));
-        assert!(builtin().get("units.gitops.nyl/v1", "OciImage").is_none());
+        assert!(builtin().get("units.gitops.nyl/v1", "OciImage").is_some());
     }
 }
