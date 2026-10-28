@@ -14,7 +14,7 @@ kyverno = "1.19.2"
 sops = "3.13.3"
 helm = "4.3.1"
 kubectl = "1.37.1"
-node = "22"
+node = "24"
 
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
