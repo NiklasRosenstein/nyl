@@ -189,6 +189,27 @@
         }
       ]
     },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Literal labels used for organization and target selection.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "GitSource": {
       "description": "A directory or file in a Git repository: this repository when no\nrepository is named, otherwise a remote one, optionally pinned to a commit.",
       "properties": {
@@ -533,31 +554,10 @@
         "passwordSecret"
       ],
       "type": "object"
-    },
-    "UnitMetadata": {
-      "additionalProperties": false,
-      "description": "A unit's identity and selection labels. Both are literal.",
-      "properties": {
-        "labels": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Literal labels that Environment `unitSelector`s match.",
-          "type": "object"
-        },
-        "name": {
-          "description": "The unit's identity for references, receipts, leases, and deletion; unique per environment across all unit kinds.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Builds and pushes an immutable container image with Docker Buildx.\n\nConsumers read the `image` ContainerImage artifact by digest. Registry\ncredentials come only from the declared `registryAuth` keys or `env`.\n\n## When needed\n\nWhen a deployment or another image build consumes an image built from this source.\n\n## If omitted\n\nNo image is built; consumers may use a separately published digest.",
+  "description": "Builds and pushes an immutable container image with Docker Buildx.\n\nConsumers read the `image` ContainerImage artifact by digest. Registry\ncredentials come only from the declared `registryAuth` keys or `env`.",
   "examples": [
     {
       "apiVersion": "units.gitops.nyl/v1",
@@ -588,8 +588,8 @@
       "type": "string"
     },
     "metadata": {
-      "$ref": "#/$defs/UnitMetadata",
-      "description": "Unit name, labels, and annotations used for environment selection."
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Literal unit name and labels used for environment selection."
     },
     "spec": {
       "$ref": "#/$defs/OciImageSpec",
