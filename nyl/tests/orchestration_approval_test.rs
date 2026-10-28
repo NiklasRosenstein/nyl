@@ -14,12 +14,13 @@ fn result(report: &Value, unit: &str) -> String {
 
 #[test]
 fn test_remote_manual_approval_records_asserted_identity_and_teardown_approval() {
-    let effects = TempDir::new().unwrap();
+    let effects = tempfile::Builder::new().prefix("approval effects ").tempdir().unwrap();
     let marker = effects.path().join("effect");
+    let marker_path = marker.display().to_string().replace('\\', "/");
     let unit = command(
         "job",
-        &format!("touch {}", marker.display()),
-        &format!("  approval: manual\n  teardown: [sh, -c, 'rm {}']\n", marker.display()),
+        &format!("touch \"{marker_path}\""),
+        &format!("  approval: manual\n  teardown: [sh, -c, 'rm \"{marker_path}\"']\n"),
     );
     let project = project(&[NYL_TOML, ("nyl/environment.yaml", ENVIRONMENT), ("nyl/job.yaml", &unit)]);
     let shell = Harness::new(project.path(), true);
@@ -143,9 +144,10 @@ fn test_reviewed_apply_and_destroy_digests_fence_effects() {
 
 #[test]
 fn test_failed_approval_lookup_prevents_effects() {
-    let marker = TempDir::new().unwrap();
+    let marker = tempfile::Builder::new().prefix("approval effects ").tempdir().unwrap();
     let path = marker.path().join("effect");
-    let unit = command("job", &format!("touch {}", path.display()), "  approval: manual\n");
+    let marker_path = path.display().to_string().replace('\\', "/");
+    let unit = command("job", &format!("touch \"{marker_path}\""), "  approval: manual\n");
     let project = project(&[
         ("nyl/nyl.toml", "[approval]\nlookup = ['sh', '-c', 'echo invalid']\n"),
         ("nyl/environment.yaml", ENVIRONMENT),
