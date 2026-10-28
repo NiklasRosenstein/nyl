@@ -73,12 +73,12 @@ A missing backend state for a unit with a receipt fails with
 `NYL-TOFU-STATE-MISSING`, instead of recreating resources. Restore it, or use
 `nyl recover --retry --reason` to accept an intentionally empty state for that
 ownership scope. A native state lock error is non-retryable; Nyl never breaks
-native locks automatically. Use the held-unit repair workflow
+native locks automatically. Use the [held-unit repair workflow](/nyl/reference/cli/exec/)
 for inspection, import, and recovery. The first execution after operator repair
 requires approval of its newly generated plan.
 
 Changing a unit between `Terraform` and `OpenTofu` is a kind change, so the
 ordinary deletion policy and teardown gate apply. For migration without
 destruction, first reconcile `deletionPolicy: Retain`, change the kind, and
-follow the native state migration and repair workflow
+follow the native state migration and [repair workflow](/nyl/reference/cli/exec/)
 before resuming.

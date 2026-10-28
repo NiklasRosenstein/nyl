@@ -182,6 +182,20 @@ fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
         .expect("start time")
         .to_utc();
     let script = Script::new();
+    #[cfg(feature = "tier2")]
+    let registry = if tier == 2 {
+        Some(super::native::Registry::new()?)
+    } else {
+        None
+    };
+    #[cfg(feature = "tier2")]
+    let world = World::with_registry(
+        &loaded.directory.join(&loaded.scenario.project),
+        registry
+            .as_ref()
+            .map_or(super::world::FAKE_REGISTRY, |registry| registry.address.as_str()),
+    );
+    #[cfg(not(feature = "tier2"))]
     let world = World::new(&loaded.directory.join(&loaded.scenario.project));
     // Command units admit `SCENARIO_TMP` through `env.passthrough` to reach
     // the files `file` steps change outside Nyl.
@@ -1059,7 +1073,8 @@ fn names(list: Option<&Value>) -> BTreeSet<String> {
 }
 
 /// A fresh CI checkout, isolated process environment, and the same injected
-/// time as tier 1. M3 uses the test kinds until real drivers arrive in M4/M5.
+/// time as tier 1. Image and infrastructure drivers are real; publication
+/// remains fake until M5.
 fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
     let checkout = shared.world.fresh_clone(branch);
     super::world::git(&checkout, &["config", "user.name", "Scenario"]);

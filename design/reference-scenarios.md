@@ -48,8 +48,9 @@ The same scenario files run in two tiers. M3's executable platform slice is
 `nyl/tests/scenarios/reference/platform/scenario.yaml`: dependency waves,
 output inspection, no-op repetition, isolated source changes, selector mistakes
 and restoration, and decommissioning through a manually confirmed publication
-teardown that preserves an operator-owned file. Native drivers, preview
-templates, and promotion references join it in their owning milestones.
+teardown that preserves an operator-owned file. M4 runs its image and
+infrastructure units with the real tools in tier 2. Preview templates and
+promotion references join it in their owning milestones.
 
 Run the harness from the repository root:
 
@@ -58,8 +59,9 @@ cargo test -p nyl --test scenario_harness_test
 cargo test -p nyl --features tier2 --test scenario_harness_test
 ```
 
-Tier 2 enables `test-clock` and, while M3 needs them, `test-kinds`. It runs
-each command as a separate binary process in a fresh checkout with its own
+Tier 2 enables `test-clock` and the test publication driver. Image and
+infrastructure units use the real native drivers; tier 1 keeps its scripted
+fakes. Tier 2 runs each command as a separate binary process in a fresh checkout with its own
 home and explicit Git identity, passes time and admitted variables to that
 child only, and checks the same reports, state commits, and publication trees
 as tier 1. Scripted drivers, fault injection, pauses, and steps marked
@@ -73,14 +75,17 @@ The tiers are:
   gone, or cannot be read. Drivers are the real ones where they exist and fakes
   otherwise, see [Fake kinds](#fake-kinds).
 - **Tier 2, the real tools.** The same steps run the real `nyl` binary as
-  separate processes. M3 uses the fake image, infrastructure, and publication
-  drivers; from M4 the real `tofu` and `docker buildx` run against the local
-  registry. Tier 2 scenarios compile only with the `tier2` Cargo feature; from
-  M4 a missing `tofu`, `docker buildx`, or registry fails the test instead
-  of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
-  tools installed (OpenTofu through mise, Docker with buildx, and `registry:2`
-  as a service container) runs `cargo test --features tier2` and is required
-  for merging from M4 on. Tests never read environment variables to decide
+  separate processes. The real `tofu` and `docker buildx` run against each
+  scenario's own `registry:2` container on an ephemeral loopback port. The
+  publication driver remains fake until M5. Tier 2 scenarios compile only with
+  the `tier2` Cargo feature; a missing `tofu`, `docker buildx`, or registry
+  fails the test instead of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
+  tools installed (OpenTofu 1.13.2, Terraform 1.9.8, Docker with Buildx, and
+  `registry:2` pulled before the tests) runs the native driver tests and
+  `cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test`, and is required
+  for merging from M4 on. The normal operating-system matrix runs
+  `--features nyl/test-clock,nyl/test-kinds` without native tools, while lint
+  still compiles all features. Tests never read environment variables to decide
   whether to run.
 
 ### Fake kinds

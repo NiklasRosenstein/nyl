@@ -55,9 +55,11 @@ pub fn shared_project() -> PathBuf {
 /// The process environment tools see: this process's `PATH`, as the tier-1
 /// runner passes it.
 pub fn process_env() -> BTreeMap<String, String> {
-    std::env::var("PATH")
+    let mut values = std::env::var("PATH")
         .map(|path| BTreeMap::from([("PATH".to_owned(), path)]))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    values.extend(super::docker_selectors());
+    values
 }
 
 /// `dev`'s state location in the world's `project.git`.

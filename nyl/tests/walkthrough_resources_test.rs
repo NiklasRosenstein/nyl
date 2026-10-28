@@ -17,11 +17,9 @@ const NYL_API_VERSIONS: [&str; 3] = ["gitops.nyl/v1", "k8s.gitops.nyl/v1", "unit
 
 /// Kinds of later milestones that have no Rust type yet. Remove a kind from
 /// this list when its type lands, so its walkthrough documents are checked.
-const FUTURE_KINDS: [(&str, &str); 4] = [
+const FUTURE_KINDS: [(&str, &str); 2] = [
     ("gitops.nyl/v1", "PromotionPath"),
     ("units.gitops.nyl/v1", "KubernetesPublication"),
-    ("units.gitops.nyl/v1", "OciImage"),
-    ("units.gitops.nyl/v1", "OpenTofu"),
 ];
 
 #[test]
@@ -38,7 +36,9 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
             continue;
         }
         let relative = path.strip_prefix(&root).unwrap().display().to_string();
-        let text = std::fs::read_to_string(path).unwrap();
+        let text = std::fs::read_to_string(path)
+            .unwrap()
+            .replace("['%DOCKER_PASSTHROUGH%']", "[]");
         let documents = serde_saphyr::from_multiple::<Value>(&text)
             .unwrap_or_else(|error| panic!("{relative} is not valid YAML: {error}"));
         for document in documents {
@@ -59,6 +59,14 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
                     .and_then(|environment| environment.validate().map_err(|error| error.to_string()))
             } else if api_version == "units.gitops.nyl/v1" && kind == KIND_COMMAND {
                 parse_command(&document)
+            } else if api_version == "units.gitops.nyl/v1" && kind == "OciImage" {
+                serde_json::from_value::<nyl::resources::oci_image::OciImage>(document.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|unit| unit.spec.validate().map_err(|error| error.to_string()))
+            } else if api_version == "units.gitops.nyl/v1" && matches!(kind.as_str(), "OpenTofu" | "Terraform") {
+                serde_json::from_value::<nyl::resources::terraform::TerraformUnit>(document.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|unit| unit.spec.validate().map_err(|error| error.to_string()))
             } else if Release::is_release(&document) {
                 Release::from_value(&document)
                     .map(|_| ())

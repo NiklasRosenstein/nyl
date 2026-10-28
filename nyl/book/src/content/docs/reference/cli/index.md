@@ -35,6 +35,7 @@ closely related pair.
   - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
   - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result
+  - [`exec`](/nyl/reference/cli/exec/) - Run a held unit's native tool with recorded repair context
   - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, restore, and delete an environment's state; break a lost lease
 
 ## Global Options

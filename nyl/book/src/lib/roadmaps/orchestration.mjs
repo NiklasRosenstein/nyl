@@ -9,13 +9,13 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M3 is complete. Continue with M4: real container-image and infrastructure drivers, using the shared orchestration, approval, and recovery contracts.',
+    intro: 'M4 is complete. Continue with M5: Kubernetes publications that consume image digests and infrastructure outputs.',
     steps: [
-      { text: 'Implement OciImage with docker buildx, digest artifacts, credential admission, and direct builds through nyl build.', done: false },
-      { text: 'Implement Terraform and OpenTofu over one driver, including native plans, approval digests, output references, verification, and teardown.', done: false },
-      { text: 'Extend the two-tier reference scenarios to real tools, and add sparse source worktrees and held-unit exec support.', done: false },
+      { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: false },
+      { text: 'Add publication observation, attestations, direct builds, and teardown ownership fences.', done: false },
+      { text: 'Add preview environment templates, expiry, limits, and end-to-end reference scenarios.', done: false },
     ],
-    outro: 'KubernetesPublication remains represented by FakePublication until its real driver arrives in M5. Promotion paths follow in M6.',
+    outro: 'Promotion paths follow in M6.',
   },
   stages: [
     {
@@ -84,15 +84,16 @@ export const orchestrationRoadmap = {
       title: 'Container image and Terraform units',
       summary: 'Container image builds and Terraform or OpenTofu configurations as units.',
       needs: ['M3'],
+      done: true,
       exitCriterion: 'A network configuration\'s outputs feed a dependent configuration; an image build records a digest; unchanged inputs plan no change; the M4 part of the reference scenarios passes with the real tools in the required `tier2` CI job.',
       items: [
-        { text: 'Add the `OciImage` kind over `docker buildx`, recording digest references and a `ContainerImage` artifact, with the `registryAuth` helper and named build contexts.', done: false },
-        { text: 'Add `nyl build` for kinds with the `build` capability, starting with `OciImage`: builds from the current worktree, `--load` or `--push`, no state.', done: false },
-        { text: 'Add the `Terraform` and `OpenTofu` kinds over one implementation, with native state and locking, declared output admission, change digests, plan approval (`bind: plan`), verification, and teardown.', done: false },
-        { text: 'Support a local-module Terraform configuration pinned to a source commit and path.', done: false },
-        { text: 'Demonstrate Terraform-to-Terraform output references.', done: false },
-        { text: 'Check out only what a unit reads when its kind declares its inputs: `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their source paths and the `nyl.toml` directory, so their cost in a large monorepo follows the unit, not the repository. A Command unit can read anything in the repository, so it keeps a full worktree unless it declares the paths it reads.', done: false },
-        { text: 'Add the `exec` driver capability and `nyl exec` for held units, with the deployed or `--worktree` spec and source snapshot, ownership-scope checks, recorded spec differences, approval of the first execution afterwards, and refusal exit 125; implement it for OpenTofu and Terraform, with their missing-state guard.', done: false },
+        { text: 'Add the `OciImage` kind over `docker buildx`, recording digest references and a `ContainerImage` artifact, with the `registryAuth` helper and named build contexts.', done: true },
+        { text: 'Add `nyl build` for kinds with the `build` capability, starting with `OciImage`: builds from the current worktree, forwards driver options after `--`, and writes no state.', done: true },
+        { text: 'Add the `Terraform` and `OpenTofu` kinds over one implementation, with native state and locking, declared output admission, change digests, plan approval (`bind: plan`), verification, and teardown.', done: true },
+        { text: 'Support a local-module Terraform configuration pinned to a source commit and path.', done: true },
+        { text: 'Demonstrate Terraform-to-Terraform output references.', done: true },
+        { text: 'Check out only what a unit reads when its kind declares its inputs: `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their source paths and the `nyl.toml` directory, so their cost in a large monorepo follows the unit, not the repository. A Command unit can read anything in the repository, so it keeps a full worktree unless it declares the paths it reads.', done: true },
+        { text: 'Add the `exec` driver capability and `nyl exec` for held units, with the deployed or `--worktree` spec and source snapshot, ownership-scope checks, recorded spec differences, approval of the first execution afterwards, and refusal exit 125; implement it for OpenTofu and Terraform, with their missing-state guard.', done: true },
       ],
     },
     {

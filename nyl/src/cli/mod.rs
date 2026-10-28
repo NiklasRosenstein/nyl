@@ -45,6 +45,8 @@ pub struct Cli {
 enum Commands {
     /// Build a unit artifact without orchestration state writes
     Build(commands::build::BuildArgs),
+    /// Run the native operator tool of a held unit
+    Exec(commands::exec::ExecArgs),
     /// Maintain sticky pull request and merge request comments
     Comment(commands::comment::CommentArgs),
 
@@ -147,7 +149,8 @@ impl Cli {
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
             Commands::Vendor(args) => commands::vendor::execute(args).await,
-            Commands::Build(_)
+            Commands::Exec(_)
+            | Commands::Build(_)
             | Commands::Get(_)
             | Commands::State(_)
             | Commands::Lease(_)
@@ -206,7 +209,8 @@ impl Cli {
     fn cancels_on_signal(&self) -> bool {
         matches!(
             self.command,
-            Commands::Build(_)
+            Commands::Exec(_)
+                | Commands::Build(_)
                 | Commands::Reconcile(_)
                 | Commands::Verify(_)
                 | Commands::Recover(_)
@@ -229,6 +233,7 @@ impl Cli {
     ) -> Result<crate::orchestration::run::CommandOutcome> {
         let result = match self.command {
             Commands::Build(args) => commands::build::run(&args, wiring),
+            Commands::Exec(args) => commands::exec::run(&args, wiring),
             Commands::Plan(args) => commands::plan::run(&args, wiring),
             Commands::Reconcile(args) => commands::reconcile::run(&args, wiring),
             Commands::Status(args) => commands::status::run(&args, wiring),

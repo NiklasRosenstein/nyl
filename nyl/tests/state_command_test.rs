@@ -300,6 +300,11 @@ fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
 #[cfg(feature = "test-kinds")]
 #[test]
 fn test_local_state_commands_through_the_binary() {
+    #[cfg(feature = "tier2")]
+    let registry = scenario::native::Registry::new().unwrap();
+    #[cfg(feature = "tier2")]
+    let world = World::with_registry(&project(), &registry.address);
+    #[cfg(not(feature = "tier2"))]
     let world = World::new(&project());
     let checkout = world.fresh_clone("main");
     nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();

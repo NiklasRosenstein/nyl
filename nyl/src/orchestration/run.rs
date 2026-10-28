@@ -89,7 +89,9 @@ impl ProcessWiring {
     /// [`Self::new`], cancelled when `cancellation` is set: the process
     /// runner forwards its signal to every running tool's process group.
     pub fn cancelled_by(cancellation: Cancellation) -> Self {
-        #[cfg(feature = "test-kinds")]
+        #[cfg(feature = "tier2")]
+        let drivers = nyl_drivers::registry::with_fake_publication(&nyl_drivers::fake::Script::new());
+        #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
         let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
         #[cfg(not(feature = "test-kinds"))]
         let drivers = nyl_drivers::registry::builtin();

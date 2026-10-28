@@ -21,7 +21,7 @@ spec:
   variables:
     vpc_id: {fromUnit: {unit: network, output: vpcId}}
   outputs:
-    host: {type: string}
+    connection: {type: object}
   timeout: 60m
 ---
 apiVersion: units.gitops.nyl/v1
@@ -30,6 +30,7 @@ metadata:
   name: web-image
   labels: {dev: 'true'}
 spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
   context: {path: ../services/web}
   repository: '%REGISTRY%/web'
   timeout: 60m

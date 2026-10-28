@@ -2,6 +2,10 @@
 title: 'Recovery'
 ---
 
+Native state repairs use [`nyl exec`](/nyl/reference/cli/exec/) while the unit
+is held. The repair is recorded before the tool starts, and the first execution
+after resume requires explicit approval of the resulting plan.
+
 Runs die: a CI job is killed, a runner loses its network, or someone cancels a
 pipeline. Orchestration never loses a result it recorded and never guesses one
 it did not. This page explains how the next run takes over from a run that

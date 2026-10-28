@@ -21,6 +21,18 @@ pub fn builtin() -> DriverSet {
     drivers
 }
 
+/// Native M4 drivers with the publication adapter awaiting M5.
+#[cfg(any(test, feature = "test-kinds"))]
+pub fn with_fake_publication(script: &crate::fake::Script) -> DriverSet {
+    let mut drivers = builtin();
+    drivers.register_as(
+        nyl_core::constants::API_VERSION_UNITS,
+        "KubernetesPublication",
+        Arc::new(crate::fake::FakePublication::new(script.clone())),
+    );
+    drivers
+}
+
 /// The built-in kinds plus the fakes standing in for the kinds this
 /// milestone lacks (`OciImage`, `OpenTofu`, `Terraform`,
 /// `KubernetesPublication`), all sharing one `script`.
