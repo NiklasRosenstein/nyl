@@ -9,7 +9,7 @@
 //! `units:` block and headline, and the exit category. So what people read,
 //! what CI parses, and what the commit records cannot disagree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::Change;
@@ -66,12 +66,9 @@ impl RunReport {
                     environment
                         .units
                         .iter()
-                        .filter(|(_, unit)| {
-                            unit.state.is_some_and(|state| {
-                                !matches!(state, UnitState::Current | UnitState::Held | UnitState::Retained)
-                            })
-                        })
+                        .filter(|(_, unit)| unit.changes_evidence())
                         .map(|(name, _)| name.clone())
+                        .chain(environment.unreported_changes.iter().cloned())
                         .collect(),
                 )
             })
@@ -173,6 +170,9 @@ pub struct EnvironmentRunReport {
     /// Units leaving the ownership set; never filtered by `--unit`.
     pub leaving: Vec<LeavingUnit>,
     pub units: BTreeMap<UnitName, UnitReport>,
+    /// Changed desired units omitted by the plan’s output filter still invalidate consumer evidence.
+    #[serde(skip)]
+    pub(crate) unreported_changes: BTreeSet<UnitName>,
     /// Units whose result a leftover run checkpointed and this run imported:
     /// the transition summary's `imported`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -207,6 +207,7 @@ impl EnvironmentRunReport {
             source_commit: None,
             leaving: Vec::new(),
             units: BTreeMap::new(),
+            unreported_changes: BTreeSet::new(),
             imported: Vec::new(),
             recovered: Vec::new(),
             drift_repaired: Vec::new(),
@@ -492,6 +493,12 @@ pub enum TeardownReadiness {
 }
 
 impl UnitReport {
+    /// Whether a plan must withhold this unit's current receipt from consumers.
+    pub(crate) fn changes_evidence(&self) -> bool {
+        self.state
+            .is_some_and(|state| !matches!(state, UnitState::Current | UnitState::Held | UnitState::Retained))
+    }
+
     pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),

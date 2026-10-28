@@ -1301,9 +1301,6 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         .collect();
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
-        if request.units.as_ref().is_some_and(|named| !named.contains(name)) {
-            continue;
-        }
         let current = observed.get(name);
         let mut entry = UnitReport::new(unit.unit.kind.clone());
         entry.receipt = Some(receipt_state(Some(unit), current));
@@ -1321,6 +1318,12 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         } else {
             unit_state(unit, same_incarnation(unit, current), false)
         });
+        if request.units.as_ref().is_some_and(|named| !named.contains(name)) {
+            if entry.changes_evidence() {
+                report.unreported_changes.insert(name.clone());
+            }
+            continue;
+        }
         if ready.contains(name) || entry.state == Some(UnitState::AwaitingApproval) {
             if let Some(commit) = resolved.commits.get(name) {
                 plan_unit(

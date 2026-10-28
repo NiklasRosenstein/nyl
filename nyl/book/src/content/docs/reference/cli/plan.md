@@ -70,6 +70,10 @@ with `-g <group>`. They run in dependency order with one report section per
 environment. See [Multi-environment runs](/nyl/orchestration/runs/#multi-environment-runs)
 for qualified unit options and independent state transactions.
 
+`--unit` filters the report while resolution still covers every desired unit.
+A changed producer outside that filter still blocks a selected consumer in
+another environment until its new receipt exists.
+
 ## Options
 
 | Option | Meaning |

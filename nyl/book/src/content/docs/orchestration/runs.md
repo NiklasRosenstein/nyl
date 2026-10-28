@@ -354,9 +354,13 @@ waits. In one invocation, consumers read the receipts that preceding producer
 runs just wrote. References outside the selection read existing state.
 Environment dependency cycles fail validation.
 
+If a selected producer fails or waits, including when its lease is busy,
+consumers wait instead of using its old receipts. Independent units still run.
+
 Planning reads current receipts rather than preview outputs. If a preceding
 producer plan changes a referenced unit, the consumer plan waits and names
-that producer's planned change. A producer cannot be torn down while other
+that producer's planned change, even when `--unit` hides it from the producer's
+report. A producer cannot be torn down while other
 environments' stored desired units reference it unless `--allow-dependents`
 permits that action.
 
@@ -367,7 +371,8 @@ and `--allow-dependents` apply to all selected environments; `--source` takes
 exactly one environment. Deliberate actions such as `teardown`, `hold`,
 `recover`, and `state` commands continue to take one environment.
 
-If an environment’s source is unavailable, its recorded state still protects
-its resource ownership. If neither source nor state can be read, environments
+Stored incarnations protect their resource ownership until removed, including
+held units and units awaiting teardown whose source no longer declares them.
+If an environment's state cannot be read, environments
 that claim native resources are refused until access returns; independent
 units without resource claims can still run.

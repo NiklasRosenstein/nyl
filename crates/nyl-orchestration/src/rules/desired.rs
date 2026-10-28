@@ -338,7 +338,8 @@ pub fn check_ownership(sources: &BTreeMap<EnvironmentName, RenderedSource>, driv
     check_ownership_with_snapshots(sources, &BTreeMap::new(), drivers)
 }
 
-/// Stored incarnations keep their claims while their source is unavailable.
+/// Stored incarnations keep their claims until removed, alongside their
+/// current source claims. Both belong to the same qualified unit owner.
 pub fn check_ownership_with_snapshots(
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     snapshots: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
@@ -371,8 +372,8 @@ pub fn check_ownership_with_snapshots(
     overlaps(&scopes)
 }
 
-/// Environments whose source units claim native resources. Without a failed
-/// environment's source or state, these cannot prove disjoint ownership.
+/// Environments whose source units claim native resources. Without another
+/// environment's stored claims, these cannot prove disjoint ownership.
 pub fn scope_owners(
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     drivers: &DriverSet,
@@ -1122,6 +1123,50 @@ mod tests {
             &drivers()
         )
         .is_empty());
+    }
+
+    /// Moving a held unit in source does not release its old resource claim,
+    /// and its old and new claims do not conflict with its own address.
+    #[test]
+    fn test_stored_and_rendered_claims_share_one_owner_until_incarnation_ends() {
+        let dev = EnvironmentName::new("dev").unwrap();
+        let prod = EnvironmentName::new("prod").unwrap();
+        let mut sources = BTreeMap::from([
+            (
+                dev.clone(),
+                source(vec![(
+                    "publish",
+                    rendered("Publication", true, Some(json!({"prefix": "new"}))),
+                )]),
+            ),
+            (prod.clone(), source(vec![])),
+        ]);
+        let mut existing = stored("publish", "Publication", 1, json!({"prefix": "old"}));
+        existing.lifecycle = Lifecycle::Held {
+            hold: serde_json::from_value(
+                json!({"by": "operator", "since": "2026-01-01T00:00:00Z", "reason": "incident"}),
+            )
+            .unwrap(),
+            deletion: None,
+        };
+        let mut snapshots = BTreeMap::from([(dev.clone(), snapshot_of(vec![existing]))]);
+        assert!(check_ownership_with_snapshots(&sources, &snapshots, &drivers()).is_empty());
+        sources.get_mut(&prod).unwrap().units.insert(
+            name("publish"),
+            rendered("Publication", true, Some(json!({"prefix": "old/web"}))),
+        );
+        let findings = check_ownership_with_snapshots(&sources, &snapshots, &drivers());
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("dev/publish") && findings[0].message.contains("prod/publish"));
+        snapshots
+            .get_mut(&dev)
+            .unwrap()
+            .desired
+            .get_mut(&name("publish"))
+            .unwrap()
+            .unit
+            .uid = None;
+        assert!(check_ownership_with_snapshots(&sources, &snapshots, &drivers()).is_empty());
     }
 
     /// Catches leaving units being dropped silently or reported with the

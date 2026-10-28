@@ -188,3 +188,52 @@ fn test_an_unavailable_selected_source_reports_its_error_and_independent_environ
     assert_eq!(section(&run, "solo")["units"]["solo"]["result"], "executed");
     assert_eq!(run.report["environments"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn test_busy_producer_blocks_old_receipts_but_independent_consumer_units_execute() {
+    use nyl_core::orchestration::ids::{EnvironmentName, RunId};
+    use nyl_core::orchestration::ports::Clock;
+    use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, StateV1};
+
+    let harness = Harness::new();
+    assert_eq!(harness.invoke(&["reconcile", "-g", "testing"]).exit, 0);
+    let independent = CONSUMER.replace("name: app", "name: independent").replace(
+        "  values:\n    network: {fromUnit: {environment: infra, unit: network, output: id}}\n",
+        "",
+    );
+    harness.shell.world.commit_files(
+        "main",
+        "change producer and consumer, add independent work",
+        &[
+            ("nyl/network.yaml", &PRODUCER.replace("vpc-one", "vpc-two")),
+            ("nyl/consumer.yaml", &CONSUMER.replace("'true'", "'echo updated'")),
+            ("nyl/independent.yaml", &independent),
+        ],
+    );
+    let session = nyl::orchestration::session::Session::open(harness.shell.store_clone.as_ref().unwrap(), "infra")
+        .ok()
+        .expect("open infra session");
+    let environment = EnvironmentName::new("infra").unwrap();
+    let now = harness.shell.clock.now();
+    let lease = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: RunId::new("00000000-0000-7000-9000-0000000000fe").unwrap(),
+        runner: "another runner".to_owned(),
+        operation: Operation::Reconcile,
+        units: vec![],
+        taken_at: now,
+        deadline: now + chrono::Duration::minutes(30),
+        broken: None,
+    };
+    harness
+        .shell
+        .store
+        .take_lease(&session.resolved.location, &environment, &lease, None)
+        .unwrap();
+    let run = harness.invoke(&["reconcile", "-g", "testing", "-o", "json"]);
+    assert_eq!(run.exit, 2, "{}", run.stderr);
+    assert!(run.stderr.contains("NYL-LEASE-HELD"), "{}", run.stderr);
+    assert_eq!(section(&run, "app")["units"]["app"]["result"], "blocked");
+    assert_eq!(section(&run, "app")["units"]["independent"]["result"], "executed");
+}

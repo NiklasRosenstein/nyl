@@ -116,8 +116,8 @@ pub fn select(
     })
 }
 
-/// Failed source reads keep their stored claims. If source and state are both
-/// unavailable, only environments without native resource claims may execute.
+/// Stored incarnations keep their resource claims until they leave state,
+/// including when source changes or stops selecting a held or deleting unit.
 fn ownership_preflight(
     inventory: &GitOpsInventory,
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
@@ -126,8 +126,10 @@ fn ownership_preflight(
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
     let mut unknown = Vec::new();
-    for name in errors.keys() {
-        let name = EnvironmentName::new(name).expect("declared name");
+    for environment in declared(inventory).0 {
+        let name = environment
+            .name()
+            .map_err(|error| crate::NylError::config(error.to_string()))?;
         match snapshot(inventory, &name) {
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
@@ -144,7 +146,16 @@ fn ownership_preflight(
     }
     if !unknown.is_empty() {
         for owner in nyl_orchestration::rules::desired::scope_owners(sources, drivers) {
-            errors.entry(owner.to_string()).or_insert_with(|| Finding::new(Code::StateUnavailable, format!("cannot check resource ownership against environments {}: neither source nor state is available", unknown.join(", ")), "restore access before running units that claim native resources"));
+            errors.entry(owner.to_string()).or_insert_with(|| {
+                Finding::new(
+                    Code::StateUnavailable,
+                    format!(
+                        "cannot check stored resource ownership claims of environments {}: state is unavailable",
+                        unknown.join(", ")
+                    ),
+                    "restore access before running units that claim native resources",
+                )
+            });
         }
     }
     Ok(())
@@ -338,12 +349,12 @@ pub fn dispatch(
         _ => 0,
     };
     let selected = &selection.names;
-    let unavailable = selection
+    let mut unavailable = selection
         .errors
         .keys()
         .filter(|name| selected.contains(name))
         .filter_map(|name| EnvironmentName::new(name).ok())
-        .collect();
+        .collect::<BTreeSet<_>>();
     let mut planned = BTreeMap::new();
     for environment in selected {
         let (outcome, changes) = match selection.errors.get(environment) {
@@ -353,6 +364,9 @@ pub fn dispatch(
             ),
             None => operation(environment, selected, &planned, &unavailable),
         };
+        if kind == ReportKind::ReconcileReport && outcome.exit != 0 {
+            unavailable.insert(EnvironmentName::new(environment).expect("selection validated the name"));
+        }
         if kind == ReportKind::PlanReport {
             planned.insert(
                 EnvironmentName::new(environment).expect("selection validated the name"),

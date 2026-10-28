@@ -247,7 +247,7 @@ pub fn validate_available_sources(
     Ok(ordered)
 }
 
-/// Inputs wait for selected producers whose preflight failed, or whose preceding
+/// Inputs wait for selected producers whose run failed or is waiting, or whose preceding
 /// plan would change the referenced unit. Preview outputs never become inputs.
 pub fn blocked_references(
     spec: &Value,
@@ -265,7 +265,7 @@ pub fn blocked_references(
             return;
         };
         let reason = if unavailable.contains(&environment) {
-            format!("{environment}/{unit} waits because its producer environment failed preflight")
+            format!("{environment}/{unit} waits because its producer environment failed or is waiting")
         } else if planned.get(&environment).is_some_and(|units| units.contains(&unit)) {
             format!("{environment}/{unit} has a planned change; waiting for its new receipt")
         } else {
