@@ -146,7 +146,40 @@ jobs:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: core.fsync
           GIT_CONFIG_VALUE_0: none
-        run: cargo test --workspace --all-features
+        run: |
+          cargo test --workspace --features nyl/test-clock,nyl/test-kinds
+          cargo test -p nyl --features tier2 --test scenario_harness_test
+
+  native-tools:
+    name: Native tools (M4)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.13.2
+          tofu_wrapper: false
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: Run required native driver and binary scenarios
+        run: |
+          cargo test -p nyl-drivers --features native-tests --test terraform_native_test
 
   build-linux-musl:
     name: Build Linux musl binaries

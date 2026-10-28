@@ -22,3 +22,4 @@ pub mod fake;
 pub mod oci_image;
 pub mod process;
 pub mod registry;
+pub mod terraform;

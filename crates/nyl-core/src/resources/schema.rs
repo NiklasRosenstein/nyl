@@ -40,11 +40,15 @@ pub enum ResourceKind {
     Component,
     #[value(name = "OciImage", alias = "oci-image")]
     OciImage,
+    #[value(name = "Terraform", alias = "terraform")]
+    Terraform,
+    #[value(name = "OpenTofu", alias = "open-tofu", alias = "tofu")]
+    OpenTofu,
 }
 
 impl ResourceKind {
     /// All supported schemas in catalog order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::GitRepository,
         Self::Environment,
         Self::EnvironmentGroup,
@@ -58,6 +62,8 @@ impl ResourceKind {
         Self::RemoteManifest,
         Self::Component,
         Self::OciImage,
+        Self::Terraform,
+        Self::OpenTofu,
     ];
 
     /// Public schema name (Component is an envelope, not a literal kind).
@@ -76,6 +82,8 @@ impl ResourceKind {
             Self::RemoteManifest => "RemoteManifest",
             Self::Component => "Component",
             Self::OciImage => "OciImage",
+            Self::Terraform => "Terraform",
+            Self::OpenTofu => "OpenTofu",
         }
     }
 
@@ -85,7 +93,7 @@ impl ResourceKind {
             Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
             Self::HelmChart | Self::RemoteManifest | Self::Cluster | Self::Release => API_VERSION,
             Self::Component => API_VERSION_COMPONENTS,
-            Self::OciImage => crate::constants::API_VERSION_UNITS,
+            Self::OciImage | Self::Terraform | Self::OpenTofu => crate::constants::API_VERSION_UNITS,
             _ => API_VERSION_K8S_GITOPS,
         }
     }
@@ -106,6 +114,8 @@ impl ResourceKind {
             Self::RemoteManifest => "remote-manifest",
             Self::Component => "component",
             Self::OciImage => "oci-image",
+            Self::Terraform => "terraform",
+            Self::OpenTofu => "open-tofu",
         }
     }
 
@@ -125,6 +135,7 @@ impl ResourceKind {
                 Self::RemoteManifest => json!(schema_for!(RemoteManifest)),
                 Self::Component => json!(schema_for!(NylComponent)),
                 Self::OciImage => json!(schema_for!(super::oci_image::OciImage)),
+                Self::Terraform | Self::OpenTofu => json!(schema_for!(super::terraform::TerraformUnit)),
                 _ => unreachable!("control resources handled above"),
             }
         };
@@ -292,6 +303,9 @@ pub fn resource_example(kind: ResourceKind) -> Value {
         ResourceKind::HelmChart => json!({"chart": {"name": "./charts/app"}, "values": {"replicaCount": 2}}),
         ResourceKind::RemoteManifest => json!({"url": "https://example.com/manifests/app.yaml"}),
         ResourceKind::Component => json!({"replicaCount": 2}),
+        ResourceKind::Terraform | ResourceKind::OpenTofu => {
+            json!({"source": {"path": "infra/network"}, "backend": {"bucket": "acme-state", "key": "production/network"}, "variables": {"region": "eu-west-1"}, "outputs": {"id": {"type": "string"}}})
+        }
     };
     let name = match kind {
         ResourceKind::GitRepository => "deploy",
@@ -463,6 +477,13 @@ mod tests {
                     }
                     ResourceKind::OciImage => {
                         serde_json::from_value::<super::super::oci_image::OciImage>(example)
+                            .unwrap()
+                            .spec
+                            .validate()
+                            .unwrap();
+                    }
+                    ResourceKind::Terraform | ResourceKind::OpenTofu => {
+                        serde_json::from_value::<super::super::terraform::TerraformUnit>(example)
                             .unwrap()
                             .spec
                             .validate()

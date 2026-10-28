@@ -12,6 +12,8 @@ publish.workspace = true
 # Registers the test-only fake kinds (`units.test.nyl/v1`) that stand in for
 # built-in kinds a milestone has not built yet.
 test-kinds = []
+# Real Terraform/OpenTofu acceptance tests; the native CI job installs both binaries.
+native-tests = []
 
 [dependencies]
 nyl-core = { workspace = true }

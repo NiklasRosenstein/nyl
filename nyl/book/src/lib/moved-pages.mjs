@@ -1,6 +1,7 @@
 // Pages that moved when the docs were split into header sections, old
 // route to new. Astro serves a redirect at each old route.
 export const movedPages = {
+  "/orchestration/resource-guides/open-tofu": "/orchestration/resource-guides/terraform/",
   "/reference/resources/k8s.gitops.nyl/v1/cluster": "/reference/resources/k8s.nyl/v1/cluster/",
   "/reference/resources/k8s.gitops.nyl/v1/release": "/reference/resources/k8s.nyl/v1/release/",
   "/commands/state": "/reference/cli/state/",

@@ -35,12 +35,12 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 [tasks.test]
 description = "Run Rust tests"
 dir = "nyl"
-run = "cargo test --workspace --all-features"
+run = "cargo test --workspace --features nyl/test-clock,nyl/test-kinds"
 
 [tasks.test-verbose]
 description = "Run Rust tests with output"
 dir = "nyl"
-run = "cargo test --workspace --all-features -- --nocapture"
+run = "cargo test --workspace --features nyl/test-clock,nyl/test-kinds -- --nocapture"
 
 [tasks.bench]
 description = "Run Rust benchmarks"
@@ -63,7 +63,7 @@ dir = "nyl"
 run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-  "cargo test --workspace --all-features",
+  "cargo test --workspace --features nyl/test-clock,nyl/test-kinds",
 ]
 
 [tasks.pre-commit]
@@ -118,3 +118,9 @@ run = "cargo clean"
 [tasks.test-renovate-matchers]
 description = "Validate Renovate custom regex matchers against fixtures"
 run = "bash scripts/test-renovate-matchers.sh"
+
+[tasks.test-native]
+description = "Run required native infrastructure acceptance tests"
+run = [
+  "cargo test -p nyl-drivers --features native-tests --test terraform_native_test",
+]

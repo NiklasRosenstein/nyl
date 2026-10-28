@@ -67,12 +67,15 @@ const orchestration: Node[] = [
   { label: 'Environment', x: 40, y: 170, link: true },
   { label: 'GitRepository', x: 400, y: 100, link: true },
   { label: 'OciImage', x: 40, y: 310, link: true },
+  { label: 'Terraform', note: 'or OpenTofu', x: 300, y: 310, link: true },
 ];
 const orchestrationEdges: Edge[] = [
   { from: [130, 74], to: [130, 168], label: 'selects by labels', at: [138, 125], anchor: 'start' },
   { from: [220, 52], to: [398, 114], label: 'default state repository', at: [300, 70], anchor: 'start' },
   { from: [220, 192], to: [398, 130], label: 'state.repositoryRef', at: [300, 182], anchor: 'start' },
   { from: [130, 214], to: [130, 308], label: 'unitSelector', at: [140, 265], anchor: 'start' },
+  { from: [220, 205], to: [390, 308], label: 'unitSelector', at: [300, 255] },
+  { from: [300, 332], to: [222, 332], label: 'fromUnit', at: [261, 324] },
 ];
 
 const diagrams = [
@@ -98,7 +101,7 @@ const diagrams = [
     edges: orchestrationEdges,
     viewBox: '0 0 760 380',
     claim:
-      'EnvironmentGroups supply defaults and state repositories. Environments select native image units by labels; units read one another’s declared outputs through fromUnit.',
+      'EnvironmentGroups supply defaults and state repositories. Environments select native image and infrastructure units by labels; infrastructure units consume image artifacts and units read declared outputs through fromUnit.',
   },
 ];
 const diagram = diagrams.find((candidate) => candidate.id === Astro.props.section);

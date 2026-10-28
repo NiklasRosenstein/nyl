@@ -58,7 +58,7 @@ export const resourceSections = [
 const guideDirectories = { kubernetes: 'kubernetes', 'rendered-gitops': 'rendered-gitops', orchestration: 'orchestration' };
 const guideOverrides = { Release: 'rendered-gitops', Cluster: 'rendered-gitops' };
 export function guideRoute(resource) {
-  return `/${guideOverrides[resource.name] ?? guideDirectories[sectionOf(resource).id]}/resource-guides/${resource.slug}/`;
+  return `/${guideOverrides[resource.name] ?? guideDirectories[sectionOf(resource).id]}/resource-guides/${resource.name === 'OpenTofu' ? 'terraform' : resource.slug}/`;
 }
 function inSection(section, resource) {
   if (section.include?.includes(resource.name)) return true;
