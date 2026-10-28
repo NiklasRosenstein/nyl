@@ -211,14 +211,10 @@ credentials come only from the declared <code>registryAuth</code> keys or <code>
 <p><strong>Optional</strong> · object or null</p>
 <p>Inline repository coordinates to read from. Mutually exclusive with <code>repositoryRef</code>.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.context.repository.publishURL"></a></p>
-<h3 id="speccontextrepositorypublishurl">spec.context.repository.publishURL</h3>
-<p><strong>Optional</strong> · string or null</p>
-<p>Optional Git write URL. Publication uses <code>repoURL</code> when omitted.</p>
 <p><a id="field-spec.context.repository.repoURL"></a></p>
 <h3 id="speccontextrepositoryrepourl">spec.context.repository.repoURL</h3>
 <p><strong>Required</strong> · string</p>
-<p>Credential-free Git read URL used by renderers and generated Applications.</p>
+<p>Git read URL. Source checkouts never publish to this repository.</p>
 <p><a id="field-spec.context.repositoryRef"></a></p>
 <h3 id="speccontextrepositoryref">spec.context.repositoryRef</h3>
 <p><strong>Optional</strong> · object or null</p>
@@ -267,14 +263,10 @@ repository is named, otherwise a remote one, optionally pinned to a commit.</p>
 <p><strong>Optional</strong> · object or null</p>
 <p>Inline repository coordinates to read from. Mutually exclusive with <code>repositoryRef</code>.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.contexts%5Bkey%5D%5BanyOf-2%5D.repository.publishURL"></a></p>
-<h3 id="speccontextskeyrepositorypublishurl">spec.contexts[key].repository.publishURL</h3>
-<p><strong>Optional</strong> · string or null</p>
-<p>Optional Git write URL. Publication uses <code>repoURL</code> when omitted.</p>
 <p><a id="field-spec.contexts%5Bkey%5D%5BanyOf-2%5D.repository.repoURL"></a></p>
 <h3 id="speccontextskeyrepositoryrepourl">spec.contexts[key].repository.repoURL</h3>
 <p><strong>Required</strong> · string</p>
-<p>Credential-free Git read URL used by renderers and generated Applications.</p>
+<p>Git read URL. Source checkouts never publish to this repository.</p>
 <p><a id="field-spec.contexts%5Bkey%5D%5BanyOf-2%5D.repositoryRef"></a></p>
 <h3 id="speccontextskeyrepositoryref">spec.contexts[key].repositoryRef</h3>
 <p><strong>Optional</strong> · object or null</p>

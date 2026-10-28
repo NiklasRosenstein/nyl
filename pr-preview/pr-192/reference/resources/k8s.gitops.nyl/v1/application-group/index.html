@@ -606,14 +606,10 @@ one generated workload Application.</p>
 <p><strong>Optional</strong> · object or null</p>
 <p>Inline repository coordinates to read from. Mutually exclusive with <code>repositoryRef</code>.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.source.repository.publishURL"></a></p>
-<h3 id="specsourcerepositorypublishurl">spec.source.repository.publishURL</h3>
-<p><strong>Optional</strong> · string or null</p>
-<p>Optional Git write URL. Publication uses <code>repoURL</code> when omitted.</p>
 <p><a id="field-spec.source.repository.repoURL"></a></p>
 <h3 id="specsourcerepositoryrepourl">spec.source.repository.repoURL</h3>
 <p><strong>Required</strong> · string</p>
-<p>Credential-free Git read URL used by renderers and generated Applications.</p>
+<p>Git read URL. Source checkouts never publish to this repository.</p>
 <p><a id="field-spec.source.repositoryRef"></a></p>
 <h3 id="specsourcerepositoryref">spec.source.repositoryRef</h3>
 <p><strong>Optional</strong> · object or null</p>
