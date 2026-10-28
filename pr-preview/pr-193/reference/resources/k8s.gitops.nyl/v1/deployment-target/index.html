@@ -385,14 +385,10 @@
 <p><strong>Optional</strong> · object or null</p>
 <p>Inline repository coordinates to read from. Mutually exclusive with <code>repositoryRef</code>.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repository.publishURL"></a></p>
-<h3 id="specreleaseinputskeykeyfromgitrepositorypublishurl">spec.releaseInputs[key][key].fromGit.repository.publishURL</h3>
-<p><strong>Optional</strong> · string or null</p>
-<p>Optional Git write URL. Publication uses <code>repoURL</code> when omitted.</p>
 <p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repository.repoURL"></a></p>
 <h3 id="specreleaseinputskeykeyfromgitrepositoryrepourl">spec.releaseInputs[key][key].fromGit.repository.repoURL</h3>
 <p><strong>Required</strong> · string</p>
-<p>Credential-free Git read URL used by renderers and generated Applications.</p>
+<p>Git read URL. Source checkouts never publish to this repository.</p>
 <p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repositoryRef"></a></p>
 <h3 id="specreleaseinputskeykeyfromgitrepositoryref">spec.releaseInputs[key][key].fromGit.repositoryRef</h3>
 <p><strong>Optional</strong> · object or null</p>

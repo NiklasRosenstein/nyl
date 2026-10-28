@@ -210,26 +210,6 @@
       ],
       "type": "object"
     },
-    "InlineGitRepository": {
-      "additionalProperties": false,
-      "properties": {
-        "publishURL": {
-          "description": "Optional Git write URL. Publication uses `repoURL` when omitted.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "repoURL": {
-          "description": "Credential-free Git read URL used by renderers and generated Applications.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "repoURL"
-      ],
-      "type": "object"
-    },
     "InputType": {
       "description": "Declared input type. Every type is a subset of JSON Schema.",
       "oneOf": [
@@ -300,6 +280,20 @@
       },
       "required": [
         "type"
+      ],
+      "type": "object"
+    },
+    "ReadGitRepository": {
+      "additionalProperties": false,
+      "description": "Credential-free coordinates for a repository that is only read.",
+      "properties": {
+        "repoURL": {
+          "description": "Git read URL. Source checkouts never publish to this repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
       ],
       "type": "object"
     },
@@ -380,7 +374,7 @@
             "repository": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/InlineGitRepository"
+                  "$ref": "#/$defs/ReadGitRepository"
                 },
                 {
                   "type": "null"
