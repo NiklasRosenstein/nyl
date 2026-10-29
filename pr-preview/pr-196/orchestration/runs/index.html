@@ -192,7 +192,8 @@ are preserved without following their targets; input paths cannot traverse
 symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
 rendering, and all execution waves use that immutable snapshot; subsequent edits
 belong to the next run. Explicitly pinned unit sources keep their declared
-commits. The flag requires exactly one named environment and conflicts with
+commits. Drivers may require committed source; <code dir="auto">--worktree</code> refuses those units.
+The flag requires exactly one named environment and conflicts with
 <code dir="auto">--source</code>, label selectors, and group selectors.</p>
 <p>State and run checkpoints archive the snapshot and its source ancestry, including
 Git-visible uncommitted files, in the configured state repository. Recovery and

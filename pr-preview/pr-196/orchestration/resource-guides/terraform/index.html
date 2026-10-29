@@ -116,8 +116,11 @@ approval rules.</p>
 <p>A missing backend state for a unit with a receipt fails with
 <code dir="auto">NYL-TOFU-STATE-MISSING</code>, instead of recreating resources. Restore it, or use
 <code dir="auto">nyl recover --retry --reason</code> to accept an intentionally empty state for that
-ownership scope. A native state lock error is non-retryable; Nyl never breaks
-native locks automatically. Use the <a href="/nyl/pr-preview/pr-196/reference/cli/exec/">held-unit repair workflow</a>
+ownership scope. The acknowledgement applies to the recorded unit incarnation,
+backend, and workspace, and expires after successful reconciliation. Changing any
+of those requires a fresh acknowledgement. A native state lock error is
+non-retryable; Nyl never breaks native locks automatically. Use the
+<a href="/nyl/pr-preview/pr-196/reference/cli/exec/">held-unit repair workflow</a>
 for inspection, import, and recovery. The first execution after operator repair
 requires approval of its newly generated plan.</p>
 <p>Changing a unit between <code dir="auto">Terraform</code> and <code dir="auto">OpenTofu</code> is a kind change, so the
