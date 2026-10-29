@@ -183,8 +183,13 @@ impl Driver for FakePublication {
         1
     }
 
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(10)
+    }
+
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
+            requires_committed_source: true,
             plan: true,
             reconcile: true,
             verify: true,

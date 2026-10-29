@@ -4,7 +4,7 @@
 //! one kind. The test fails when serialization changes or when a golden file
 //! no longer parses, so a format change is always deliberate: it adds a
 //! version, a migration, and a new golden file, and keeps the old one.
-//! (The v1 formats are unreleased while M3 is in progress; until the first
+//! (The v1 formats are unreleased; until the first
 //! release that writes them, v1 is amended in place and its golden files
 //! regenerated.)
 //!
@@ -241,8 +241,10 @@ fn samples() -> Vec<(&'static str, Value)> {
         .1
         .clone();
     repaired["operatorModified"] = json!({"by":"operator","at":"2026-10-28T00:00:00Z","reason":"restore native state","status":{"status":"exited","code":0}});
-    repaired["acceptedEmptyState"] =
-        json!({"terraformBackend":{"backend":r#"{"path":"/state/dev.tfstate"}"#,"workspace":"default"}});
+    repaired["retry"] = json!({"state":"acknowledged","context":{"version":1,"resource":"test-owned-context"},"request":{"by":"operator","at":"2026-10-28T00:00:00Z","reason":"verified the resource"}});
+    let mut required = repaired.clone();
+    required["retry"] = json!({"state":"required","context":{"version":1,"resource":"test-owned-context"}});
+    samples.push(("observed-unit-retry-required.v1.yaml", required));
     samples.push(("observed-unit-repaired.v1.yaml", repaired));
     samples
 }

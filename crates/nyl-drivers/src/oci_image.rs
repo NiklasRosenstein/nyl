@@ -494,6 +494,9 @@ impl Driver for OciImageDriver {
     fn behavior_version(&self) -> u32 {
         1
     }
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(60)
+    }
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
             plan: true,
@@ -520,12 +523,43 @@ impl Driver for OciImageDriver {
             })
             .map_err(|error| error.to_string())
     }
+    fn secret_refs(&self, spec: &Value) -> Result<Vec<String>, String> {
+        Ok(parse(spec)
+            .map_err(|error| error.to_string())?
+            .registry_auth
+            .into_values()
+            .flat_map(|auth| [auth.username_secret, auth.password_secret])
+            .collect())
+    }
+    fn credential_environment(&self, spec: &Value, process_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        if spec
+            .get("registryAuth")
+            .and_then(Value::as_object)
+            .is_none_or(serde_json::Map::is_empty)
+        {
+            return BTreeMap::new();
+        }
+        process_env
+            .get("DOCKER_CONFIG")
+            .cloned()
+            .or_else(|| {
+                process_env
+                    .get("HOME")
+                    .or_else(|| process_env.get("USERPROFILE"))
+                    .map(|home| Path::new(home).join(".docker").display().to_string())
+            })
+            .map(|path| ("DOCKER_CONFIG".to_owned(), path))
+            .into_iter()
+            .collect()
+    }
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.get("repository")
             .and_then(Value::as_str)
-            .map(|repository| OwnershipScope::OciRepository {
-                repository: repository.into(),
-                tag_prefix: format!("nyl-{environment}-"),
+            .map(|repository| OwnershipScope {
+                namespace: "oci-tags".to_owned(),
+                key: vec![repository.to_owned(), format!("nyl-{environment}-")],
+                path: vec![],
+                description: format!("OCI repository {repository} tags nyl-{environment}-*"),
             })
             .into_iter()
             .collect()
@@ -707,6 +741,30 @@ impl Driver for OciImageDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_registry_credential_policy_is_declared_by_the_image_driver() {
+        let spec = json!({"context":{"path":"/app"},"repository":"registry.invalid/team/web","registryAuth":{"registry.invalid":{"usernameSecret":"user","passwordSecret":"token"}}});
+        assert_eq!(OciImageDriver.secret_refs(&spec).unwrap(), ["user", "token"]);
+        let process = BTreeMap::from([
+            ("HOME".to_owned(), "/home/operator".to_owned()),
+            ("UNDECLARED".to_owned(), "private".to_owned()),
+        ]);
+        assert_eq!(
+            OciImageDriver.credential_environment(&spec, &process),
+            BTreeMap::from([(
+                "DOCKER_CONFIG".to_owned(),
+                Path::new("/home/operator").join(".docker").display().to_string()
+            )])
+        );
+        let mut explicit = process.clone();
+        explicit.insert("DOCKER_CONFIG".to_owned(), "/configured".to_owned());
+        assert_eq!(
+            OciImageDriver.credential_environment(&spec, &explicit)["DOCKER_CONFIG"],
+            "/configured"
+        );
+        assert!(OciImageDriver.credential_environment(&json!({}), &explicit).is_empty());
+    }
     use nyl_core::orchestration::driver::{DriverOperation, SourceRoot, ToolRunner};
     use nyl_core::orchestration::ids::{CommitId, ExecutionKey, UnitAddress, UnitName};
     use nyl_core::orchestration::state::{DesiredUnitKind, Lifecycle, Readiness, StateV1, UnitIdentity};

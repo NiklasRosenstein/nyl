@@ -133,7 +133,7 @@ fn observed(unit: &str, waiting: bool) -> ObservedUnit {
     ObservedUnit {
         api_version: nyl_core::orchestration::state::StateV1,
         operator_modified: None,
-        accepted_empty_state: None,
+        retry: None,
         kind: ObservedUnitKind,
         unit: desired(unit).unit,
         receipt: None,
