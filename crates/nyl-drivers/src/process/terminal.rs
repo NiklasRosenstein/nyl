@@ -159,7 +159,10 @@ mod tests {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                // ioctl's request type differs across Unix platforms.
+                #[allow(clippy::cast_lossless)]
+                let request = libc::TIOCSCTTY as _;
+                if libc::ioctl(0, request, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())

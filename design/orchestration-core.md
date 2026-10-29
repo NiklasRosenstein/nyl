@@ -1869,6 +1869,16 @@ executing, and the first run's results are reported as superseded.
 
 ### Recovery
 
+A driver can return `RetryRequired {category, message, context}`. It is recorded
+as a non-retryable failure with `retry: {state: required, context}` on the
+observed unit. Context is non-secret, driver-owned data; orchestration does not
+interpret it or diagnostic text. `recover --retry` requires a nonempty reason
+and records `retry: {state: acknowledged, context, request}` while clearing the
+condition. Ordinary recovery and recovery after importing a run use the same
+rule. The acknowledgement is bound to the observed unit incarnation; the
+driver validates its context against the resource it will operate on. A
+successful receipt consumes it; a failed attempt retains it.
+
 An uncertain condition means effects may or may not have happened. Each driver
 declares a recovery policy for execution and for teardown:
 
@@ -2577,6 +2587,11 @@ revisions, and locked `fromGit` bindings.
 
 ## Drivers
 
+Shared orchestration selects behavior through driver capabilities and generic
+contracts. Drivers own validation, timeout defaults, committed-source
+requirements, resource identity normalization, and retry context validation.
+The engine never branches on a concrete kind or vendor diagnostic code.
+
 Built-in drivers are Rust implementations behind one trait:
 
 ```rust
@@ -2584,10 +2599,13 @@ trait Driver {
     fn api_version(&self) -> &'static str; // units.gitops.nyl/v1 for built-ins
     fn kind(&self) -> &'static str;
     fn behavior_version(&self) -> u32;
+    fn default_timeout(&self) -> Duration; // used when the common timeout is omitted
     fn capabilities(&self, spec: &Spec) -> Capabilities;  // a Command tears down only with a `teardown` step
     fn recovery(&self, spec: &Spec) -> RecoveryPolicies;  // for execution and teardown; a Command converges only when idempotent
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
     fn validate_spec(&self, spec: &Spec) -> Result<()>;  // kind rules beyond the schema
+    fn secret_refs(&self, spec: &Spec) -> Result<Vec<String>>; // explicit driver credential provider keys
+    fn credential_environment(&self, spec: &Spec, process_env: &EnvironmentSnapshot) -> Environment; // pure admission from the supplied snapshot
     fn attestations(&self, spec: &ResolvedSpec) -> Vec<AttestationName>; // names it can produce for this spec
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &ResolvedSpec) -> Vec<OwnershipScope>; // see Identity; an image tag prefix names the environment
     fn execution_key_inputs(&self, ctx: &ResolutionContext, spec: &ResolvedSpec) -> Result<KeyInputs>; // selected files, excluded fields, fingerprint
@@ -2635,7 +2653,7 @@ enum Outcome {
 | `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
-| `OwnershipScope` | A typed claim, such as `{terraformBackend: <canonical backend config and key>, workspace}`, `{ociRepository, tagPrefix}`, or `{publication: {repository, revision, pathPrefix}}` |
+| `OwnershipScope` | A driver-defined namespace, canonical key components, normalized path segments, and display description. Equal namespace/key claims overlap when either path contains the other by segment. |
 
 - `Waiting` is how a two-phase teardown reports that phase 1 is published and
   its `teardownWait` has not completed: the unit stays `tearing-down`, the

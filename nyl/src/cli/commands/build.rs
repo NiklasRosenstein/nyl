@@ -48,14 +48,11 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     let temp = prepared.workspace.path().join("build");
     std::fs::create_dir_all(&temp)?;
     let provider = ProjectSecrets::new(&prepared.inventory.project_root);
-    let env = nyl_orchestration::shell::run::execution_environment(&wiring.process_env, Some(&provider), spec)
-        .map_err(NylError::config)?;
-    let secrets = nyl_orchestration::shell::run::registry_secrets(Some(&provider), spec).map_err(NylError::config)?;
+    let (env, secrets) =
+        nyl_orchestration::shell::run::driver_credentials(&wiring.process_env, Some(&provider), driver, spec)
+            .map_err(NylError::config)?;
     let now = wiring.clock.now();
-    let timeout = serde_json::from_value::<nyl_core::resources::units::CommonUnitFields>(spec.clone())
-        .ok()
-        .and_then(|common| common.timeout)
-        .unwrap_or(nyl_core::orchestration::time::Duration::from_secs(3600));
+    let timeout = nyl_orchestration::shell::run::unit_timeout(wiring.drivers, &prepared.unit);
     let deadline = timeout.after(now);
     let tools = nyl_orchestration::shell::tools::DeadlineRunner {
         tools: wiring.tools,

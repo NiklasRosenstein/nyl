@@ -72,7 +72,9 @@ approval rules.
 A missing backend state for a unit with a receipt fails with
 `NYL-TOFU-STATE-MISSING`, instead of recreating resources. Restore it, or use
 `nyl recover --retry --reason` to accept an intentionally empty state for that
-ownership scope. A native state lock error is non-retryable; Nyl never breaks
+ownership scope. The acknowledgement applies to the recorded unit incarnation,
+backend, and workspace, and expires after successful reconciliation. Changing any
+of those requires a fresh acknowledgement. A native state lock error is non-retryable; Nyl never breaks
 native locks automatically. Use the held-unit repair workflow
 for inspection, import, and recovery. The first execution after operator repair
 requires approval of its newly generated plan.

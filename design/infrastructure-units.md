@@ -268,7 +268,11 @@ A unit with a receipt whose backend now holds no state fails before planning
 with `NYL-TOFU-STATE-MISSING`, a non-retryable `ownership` failure, instead of
 planning to create everything again: a wrong `key`, a lost bucket, or a
 misconfigured backend looks exactly like that. `nyl recover --retry --reason`
-accepts the empty state for the current ownership scope when it is intended.
+acknowledges the driver's recorded retry context when the empty state is
+intended. The context binds the unit incarnation, canonical backend, and workspace;
+the driver rejects it for another scope, and a successful receipt consumes it.
+Terraform and OpenTofu emit the same ownership namespace so that both kinds
+conflict when they claim the same backend and workspace.
 
 ### Repair
 
