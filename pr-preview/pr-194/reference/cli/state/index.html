@@ -91,6 +91,13 @@ both ways forward. A state repository Nyl cannot reach or read exits 1 with
 state while a command runs, the command exits 1 with <code dir="auto">NYL-STATE-CONFLICT</code>; run
 it again. Commits of environments sharing the ref through <code dir="auto">path</code> never cause
 this: Nyl rebases past them.</p>
+<p>When the repository is an absolute local filesystem path or a local <code dir="auto">file://</code>
+URL, <code dir="auto">state init</code> also creates a missing bare Git repository and its parent
+directories. The read and write endpoints must name the same local path.
+Existing Git repositories are reused; an existing file or directory that is
+not a Git repository fails with <code dir="auto">NYL-STATE-UNAVAILABLE</code>. Remote repositories
+and separate read/write destinations must already exist. Other commands never
+create a repository.</p>
 <p><code dir="auto">--fresh</code> starts over deliberately: every unit becomes a new incarnation and
 executes again at the next reconcile. It is also the way to start over at a
 location whose state was deleted with <a href="#nyl-state-delete"><code dir="auto">nyl state delete</code></a>:

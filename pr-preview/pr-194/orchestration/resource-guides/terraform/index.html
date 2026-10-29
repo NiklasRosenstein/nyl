@@ -95,6 +95,9 @@ path rule; their contents enter the key and their order is preserved. Explicit
 such as an ECS task, a container-based Lambda function, or a Docker container.
 The infrastructure configuration declares how to use the image; <code dir="auto">fromUnit</code>
 supplies the built artifact reference and waits for its current receipt.</p>
+<p>The <a href="https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu">local Docker example</a>
+builds an <code dir="auto">OciImage</code>, pushes it to a local registry, and deploys it with
+OpenTofu’s Docker provider. It includes setup, verification, and teardown.</p>
 <p><code dir="auto">version</code> optionally requires an exact installed version. Set project defaults
 under <code dir="auto">[units.Terraform]</code> or <code dir="auto">[units.OpenTofu]</code>; an explicit unit version wins.
 Without a pin, changing the installed tool does not force execution. Receipts
