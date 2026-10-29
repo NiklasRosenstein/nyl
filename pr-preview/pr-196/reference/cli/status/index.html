@@ -116,12 +116,21 @@ imports them. Until then <code dir="auto">status</code> reports it with <code di
 shows the units it left uncertain as <code dir="auto">uncertain</code>; a run that recorded every
 unit only warns. A run whose lease expired or was broken before it finished
 is reported with <code dir="auto">NYL-LEASE-LOST</code>; the fix names <code dir="auto">nyl reconcile</code>, and <code dir="auto">nyl recover -e &#x3C;env></code>, which imports the run without executing anything.</p>
+<p>The table is separated from its indented source and commit provenance by a blank
+line. Diagnostics follow separately, with a code, message and suggested fix in
+each block.</p>
 <p>When this clone’s <a href="/nyl/pr-preview/pr-196/orchestration/environments-and-state/#local-runs">local state branches</a>
-hold local transitions or are behind the remote, <code dir="auto">status</code> warns with
-<code dir="auto">NYL-STATE-LOCAL-DIVERGED</code>, such as “local state of dev has 2 local
-transitions and is 3 behind the remote”. The warning does not change the exit
-code. <code dir="auto">--local</code> shows the local view instead: the state as the clone’s
-branches hold it, including <code dir="auto">nyl reconcile --local</code> runs.</p>
+diverge from the configured state repository, <code dir="auto">status</code> warns with
+<code dir="auto">NYL-STATE-LOCAL-DIVERGED</code>. Ahead/behind counts are Git commits, including retained
+source ancestry; they do not count unit executions. The larger count across the
+desired and observed refs is shown for each direction. A configured local bare
+repository is still a separate state repository for this comparison.</p>
+<p>The table shows the configured state repository unless <code dir="auto">--local</code> is given.
+<code dir="auto">--local</code> shows this clone’s branches, including <code dir="auto">nyl reconcile --local</code> runs;
+<code dir="auto">--worktree</code> selects source inputs and does not select local state. The warning
+does not change the exit code. Inspect the local view before using
+<a href="/nyl/pr-preview/pr-196/reference/cli/state/#nyl-state-reset"><code dir="auto">nyl state reset --local</code></a>, which can
+discard local receipts.</p>
 <p>Select several environments with repeated <code dir="auto">-e</code>, with <code dir="auto">-l stage=production</code>, or
 with <code dir="auto">-g &#x3C;group></code>. They run in dependency order with one report section per
 environment. See <a href="/nyl/pr-preview/pr-196/orchestration/runs/#multi-environment-runs">Multi-environment runs</a>
