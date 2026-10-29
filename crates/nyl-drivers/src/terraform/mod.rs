@@ -16,7 +16,9 @@ use nyl_core::orchestration::driver::{
     Supported, ToolExit, ToolInvocation, Verification,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
-use nyl_core::orchestration::state::{DesiredUnit, Drift, FailureCategory, Lifecycle, Receipt};
+use nyl_core::orchestration::state::{
+    DesiredUnit, Drift, FailureCategory, Lifecycle, Receipt, RetryAcknowledgement, UnitIdentity,
+};
 use nyl_core::resources::terraform::TerraformSpec;
 use nyl_render::util::project_path::ProjectPaths;
 use serde_json::{json, Value};
@@ -142,10 +144,13 @@ pub fn ownership(spec: &TerraformSpec) -> OwnershipScope {
             Value::String(normalized_path(Path::new(path)).to_string_lossy().into_owned()),
         )]);
     }
-    OwnershipScope::TerraformBackend {
-        backend: String::from_utf8(nyl_core::digest::canonical_json_bytes(&backend).expect("backend serializes"))
-            .expect("JSON is UTF-8"),
-        workspace: workspace.to_owned(),
+    let backend = String::from_utf8(nyl_core::digest::canonical_json_bytes(&backend).expect("backend serializes"))
+        .expect("JSON is UTF-8");
+    OwnershipScope {
+        namespace: "terraform-state".to_owned(),
+        key: vec![backend.clone(), workspace.to_owned()],
+        path: vec![],
+        description: format!("backend {backend} workspace {workspace}"),
     }
 }
 
@@ -183,6 +188,9 @@ impl Driver for TerraformDriver {
     }
     fn behavior_version(&self) -> u32 {
         1
+    }
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(60)
     }
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
@@ -259,7 +267,7 @@ impl Driver for TerraformDriver {
     }
     fn plan(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {
         let result = (|| {
-            let native = Native::new(self, ctx, resolved(unit)?)?;
+            let native = Native::new(self, ctx, resolved(unit)?, &unit.unit)?;
             native.initialize()?;
             native.require_state()?;
             let (_, report) = native.plan(matches!(unit.lifecycle, Lifecycle::Deleting { .. }), false)?;
@@ -277,7 +285,7 @@ impl Driver for TerraformDriver {
         _receipt: &Receipt,
     ) -> DriverResult<Supported<Verification>> {
         let result = (|| {
-            let native = Native::new(self, ctx, resolved(unit)?)?;
+            let native = Native::new(self, ctx, resolved(unit)?, &unit.unit)?;
             native.initialize()?;
             native.require_state()?;
             let (changed, report) = native.plan(false, false)?;
@@ -305,7 +313,7 @@ impl Driver for TerraformDriver {
         args: &[OsString],
     ) -> DriverResult<Supported<ExecStatus>> {
         let result = (|| {
-            let native = Native::new(self, ctx, resolved(unit)?)?;
+            let native = Native::new(self, ctx, resolved(unit)?, &unit.unit)?;
             native.initialize()?;
             // A repair may restore missing state; it deliberately bypasses only that guard.
             match native.run(args.to_vec(), false)? {
@@ -320,7 +328,7 @@ impl Driver for TerraformDriver {
 
 impl TerraformDriver {
     fn execute(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit, destroy: bool) -> Result<Outcome, Fault> {
-        let native = Native::new(self, ctx, resolved(unit)?)?;
+        let native = Native::new(self, ctx, resolved(unit)?, &unit.unit)?;
         let version = native.initialize()?;
         native.require_state()?;
         let (changed, report) = native.plan(destroy, true)?;
@@ -365,6 +373,7 @@ struct Fault {
     retryable: bool,
     message: String,
     uncertain: bool,
+    retry_context: Option<Value>,
 }
 
 impl Fault {
@@ -374,11 +383,18 @@ impl Fault {
             retryable: false,
             message: message.into(),
             uncertain: false,
+            retry_context: None,
         }
     }
     fn outcome(self) -> Outcome {
         if self.uncertain {
             Outcome::Uncertain { reason: self.message }
+        } else if let Some(context) = self.retry_context {
+            Outcome::RetryRequired {
+                category: self.category,
+                message: self.message,
+                context,
+            }
         } else {
             Outcome::Failed {
                 category: self.category,
@@ -393,6 +409,7 @@ struct Native<'a, 'c> {
     driver: &'a TerraformDriver,
     ctx: &'a ExecutionContext<'c>,
     spec: TerraformSpec,
+    identity: &'a UnitIdentity,
     paths: ProjectPaths,
     module: PathBuf,
     directory: PathBuf,
@@ -424,7 +441,12 @@ fn known_secrets<'a>(values: impl Iterator<Item = &'a String>) -> Vec<String> {
 }
 
 impl<'a, 'c> Native<'a, 'c> {
-    fn new(driver: &'a TerraformDriver, ctx: &'a ExecutionContext<'c>, spec: TerraformSpec) -> Result<Self, Fault> {
+    fn new(
+        driver: &'a TerraformDriver,
+        ctx: &'a ExecutionContext<'c>,
+        spec: TerraformSpec,
+        identity: &'a UnitIdentity,
+    ) -> Result<Self, Fault> {
         let root = ctx.source_roots.get("/source");
         let paths = source_paths(
             root.map_or(&ctx.worktree, |root| &root.worktree),
@@ -459,6 +481,7 @@ impl<'a, 'c> Native<'a, 'c> {
             driver,
             ctx,
             spec,
+            identity,
             paths,
             module,
             directory,
@@ -492,6 +515,7 @@ impl<'a, 'c> Native<'a, 'c> {
                 retryable: true,
                 message: error.to_string(),
                 uncertain: error.effects_possible(),
+                retry_context: None,
             })
     }
     fn checked(&self, args: Vec<OsString>, effects: bool) -> Result<Vec<u8>, Fault> {
@@ -524,6 +548,7 @@ impl<'a, 'c> Native<'a, 'c> {
                     self.spec.version.as_deref().unwrap()
                 ),
                 uncertain: false,
+                retry_context: None,
             });
         }
         let lock = self.module.join(".terraform.lock.hcl");
@@ -604,16 +629,26 @@ impl<'a, 'c> Native<'a, 'c> {
         Ok(())
     }
 
+    fn retry_context(&self) -> Value {
+        json!({"version":1,"unit":self.identity,"scope":ownership(&self.spec).key})
+    }
+
     fn require_state(&self) -> Result<(), Fault> {
-        let Some(observed) = self.ctx.observed.filter(|observed| observed.receipt.is_some()) else {
+        let Some(observed) = self
+            .ctx
+            .observed
+            .filter(|observed| &observed.unit == self.identity && observed.receipt.is_some())
+        else {
             return Ok(());
         };
-        if observed.accepted_empty_state.as_ref() == Some(&ownership(&self.spec)) {
+        let context = self.retry_context();
+        if matches!(&observed.retry, Some(RetryAcknowledgement::Acknowledged { context: acknowledged, request }) if acknowledged == &context && request.reason.as_ref().is_some_and(|reason| !reason.trim().is_empty()))
+        {
             return Ok(());
         }
         let state = self.json(&["show", "-json"])?;
         if state.get("values").is_none_or(Value::is_null) {
-            return Err(Fault { category: FailureCategory::Ownership, retryable: false, message: "NYL-TOFU-STATE-MISSING: this unit has a receipt but its backend has no state; restore state or accept the empty ownership scope with recover --retry --reason".to_owned(), uncertain: false });
+            return Err(Fault { category:FailureCategory::Ownership, retryable:false, message:"NYL-TOFU-STATE-MISSING: this unit has a receipt but its backend has no state; restore state or accept the empty ownership scope with recover --retry --reason".to_owned(), uncertain:false, retry_context:Some(context) });
         }
         Ok(())
     }
@@ -716,6 +751,7 @@ impl<'a, 'c> Native<'a, 'c> {
             retryable: false,
             message,
             uncertain: false,
+            retry_context: None,
         })?;
         let report = plan::report(&json, changed, destroy, &self.secrets).map_err(Fault::configuration)?;
         Ok((changed, report))
@@ -797,6 +833,7 @@ impl<'a, 'c> Native<'a, 'c> {
             retryable,
             message,
             uncertain,
+            retry_context: None,
         }
     }
 }
@@ -831,6 +868,7 @@ fn rejected(message: String) -> Fault {
         retryable: false,
         message,
         uncertain: false,
+        retry_context: None,
     }
 }
 

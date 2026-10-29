@@ -205,7 +205,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         current.and_then(|observed| observed.condition.as_ref()),
         Some(Condition::Uncertain { .. })
     );
-    let (env, secrets) = match execution_credentials(context, &unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &unit.spec) {
         Ok(env) => env,
         Err(message) => {
             if uncertain {
@@ -238,9 +238,9 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     };
     let started = context.base.clock.now();
     let deadline = shared.lease_deadline.map_or_else(
-        || unit_timeout(unit).after(started),
+        || unit_timeout(context.drivers, unit).after(started),
         |lease| {
-            unit_timeout(unit)
+            unit_timeout(context.drivers, unit)
                 .after(started)
                 .min(crate::shell::lease::bound(&context.base.settings, lease))
         },
@@ -374,6 +374,24 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             execution.change_digest = Some(digest);
             execution.result = UnitResult::AwaitingApproval;
             return execution;
+        }
+        Outcome::RetryRequired {
+            category,
+            message,
+            context,
+        } => {
+            execution.result = UnitResult::Failed {
+                category,
+                retryable: false,
+            };
+            execution.message = Some(message.clone());
+            Event::RetryRequired {
+                since: finished,
+                run: shared.run.clone(),
+                category,
+                message,
+                context,
+            }
         }
         Outcome::Failed {
             category,

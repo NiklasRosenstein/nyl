@@ -115,6 +115,8 @@ codes! {
     /// A run checkpointed a unit after the unit was marked uncertain; it is evidence for `nyl recover --accept`.
     RunLateCheckpoint => "NYL-RUN-LATE-CHECKPOINT",
     /// `nyl recover` names a unit that has no condition to clear.
+    /// A driver requested an acknowledgement with a nonempty reason before retry.
+    RecoverReasonRequired => "NYL-RECOVER-REASON-REQUIRED",
     RecoverNothing => "NYL-RECOVER-NOTHING",
     /// `nyl recover --accept <run>` names a run without a checkpoint of the unit.
     RecoverCheckpointMissing => "NYL-RECOVER-CHECKPOINT-MISSING",

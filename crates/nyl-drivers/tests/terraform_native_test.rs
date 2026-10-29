@@ -96,7 +96,7 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
         panic!("native reconcile unsupported")
     };
     assert!(
-        matches!(missing, Outcome::Failed { category: FailureCategory::Ownership, retryable: false, message } if message.starts_with("NYL-TOFU-STATE-MISSING"))
+        matches!(missing, Outcome::RetryRequired { category: FailureCategory::Ownership, message, .. } if message.starts_with("NYL-TOFU-STATE-MISSING"))
     );
 }
 

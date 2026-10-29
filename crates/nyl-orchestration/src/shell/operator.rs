@@ -63,7 +63,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
             ),
         );
     };
-    let timeout = options.timeout.unwrap_or_else(|| unit_timeout(stored));
+    let timeout = options.timeout.unwrap_or_else(|| unit_timeout(context.drivers, stored));
     let base = Context {
         store: context.base.store,
         clock: context.base.clock,
@@ -136,7 +136,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 })?;
             let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
             driver.validate_spec(spec).map_err(invalid)?;
-            let (env, secrets) = execution_credentials(context, spec).map_err(invalid)?;
+            let (env, secrets) = execution_credentials(context, driver, spec).map_err(invalid)?;
             let mut claims = BTreeMap::new();
             if let Some(finding) = request.environment_errors.values().next() {
                 return Err(finding.clone());
