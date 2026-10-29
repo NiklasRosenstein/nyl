@@ -70,7 +70,7 @@ pub struct StateArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum StateCommand {
-    /// Create state at the environment's configured location.
+    /// Create state at the configured location, initializing a missing local repository as bare.
     Init {
         #[command(flatten)]
         common: Common,

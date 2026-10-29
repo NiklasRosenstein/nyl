@@ -179,6 +179,10 @@ pub fn init(
     fresh: bool,
     requested: &Requested,
 ) -> StateOperationReport {
+    if let Err(error) = context.store.prepare_init(location) {
+        return StateOperationReport::new(environment.clone(), Operation::StateInit.as_str())
+            .refused(store_error(environment, &error));
+    }
     with_lease(
         context,
         environment,

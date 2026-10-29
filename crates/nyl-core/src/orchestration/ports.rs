@@ -298,6 +298,14 @@ pub struct LocalDivergence {
 /// fenced by the run's lease, so a run whose lease was taken over can never
 /// overwrite state.
 pub trait StateStore: Send + Sync {
+    /// Prepare the backing repository for explicit state initialization, before
+    /// taking its lease. Git stores create a missing local bare repository;
+    /// stores without separately provisioned storage need no preparation.
+    /// Contract: [Initialization and moves](../../../../design/orchestration-core.md#initialization-and-moves).
+    fn prepare_init(&self, _location: &StateLocation) -> StateResult<()> {
+        Ok(())
+    }
+
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 

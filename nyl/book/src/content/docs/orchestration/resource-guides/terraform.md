@@ -51,6 +51,10 @@ such as an ECS task, a container-based Lambda function, or a Docker container.
 The infrastructure configuration declares how to use the image; `fromUnit`
 supplies the built artifact reference and waits for its current receipt.
 
+The [local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu)
+builds an `OciImage`, pushes it to a local registry, and deploys it with
+OpenTofu's Docker provider. It includes setup, verification, and teardown.
+
 `version` optionally requires an exact installed version. Set project defaults
 under `[units.Terraform]` or `[units.OpenTofu]`; an explicit unit version wins.
 Without a pin, changing the installed tool does not force execution. Receipts

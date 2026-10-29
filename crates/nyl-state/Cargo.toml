@@ -15,6 +15,7 @@ nyl-git = { workspace = true }
 git2 = { workspace = true }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -40,6 +40,16 @@ fn author() -> CommitAuthor {
     }
 }
 
+#[test]
+fn test_read_only_git_store_cannot_create_backing_storage() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("state.git");
+    let store = GitStateStore::read_only(root.path(), GitAuth::none());
+    let location = location(&path.display().to_string(), "desired", "observed", "");
+    assert!(store.prepare_init(&location).is_err());
+    assert!(!path.exists());
+}
+
 const RUN_A: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";
 const RUN_B: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
 const UID: &str = "0192f0c4-8d0a-7c3e-9a51-000000000001";

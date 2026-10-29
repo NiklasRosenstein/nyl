@@ -34,6 +34,14 @@ state while a command runs, the command exits 1 with `NYL-STATE-CONFLICT`; run
 it again. Commits of environments sharing the ref through `path` never cause
 this: Nyl rebases past them.
 
+When the repository is an absolute local filesystem path or a local `file://`
+URL, `state init` also creates a missing bare Git repository and its parent
+directories. The read and write endpoints must name the same local path.
+Existing Git repositories are reused; an existing file or directory that is
+not a Git repository fails with `NYL-STATE-UNAVAILABLE`. Remote repositories
+and separate read/write destinations must already exist. Other commands never
+create a repository.
+
 `--fresh` starts over deliberately: every unit becomes a new incarnation and
 executes again at the next reconcile. It is also the way to start over at a
 location whose state was deleted with [`nyl state delete`](#nyl-state-delete):

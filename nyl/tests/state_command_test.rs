@@ -73,6 +73,46 @@ fn test_state_init_writes_state_once_to_the_configured_repository() {
         .stdout(predicate::str::contains("\"outcome\": \"unchanged\""));
 }
 
+/// Initialization provisions local backing storage before taking its lease.
+/// Contract: design/orchestration-core.md#initialization-and-moves.
+#[test]
+fn test_state_init_creates_a_missing_local_repository_and_is_idempotent() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let state_path = world.scenario_tmp().join("local state").join("state.git");
+    let url = reqwest::Url::from_file_path(&state_path).unwrap().to_string();
+    std::fs::write(
+        checkout.join("nyl/local.yaml"),
+        format!(
+            "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {{name: local}}\nspec:\n  state:\n    repository:\n      repoURL: {url}\n"
+        ),
+    )
+    .unwrap();
+
+    // Other state operations must not provision a missing repository.
+    nyl(&checkout, &["state", "forget", "-e", "local", "--unit", "network"])
+        .assert()
+        .code(1);
+    assert!(!state_path.exists());
+
+    nyl(&checkout, &["state", "init", "-e", "local"]).assert().success();
+    assert!(git2::Repository::open(&state_path).unwrap().is_bare());
+    for side in ["desired", "observed"] {
+        assert!(git_output(
+            &state_path,
+            &["show", &format!("refs/heads/nyl/local/{side}:state.yaml")]
+        )
+        .contains("environment: local"));
+    }
+    let before = git_output(&state_path, &["for-each-ref", "refs/heads/nyl/"]);
+    nyl(&checkout, &["state", "init", "-e", "local", "-o", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"outcome\": \"unchanged\""));
+    assert_eq!(git_output(&state_path, &["for-each-ref", "refs/heads/nyl/"]), before);
+    assert!(git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/"]).is_empty());
+}
+
 /// State commits need an identity: `--author`, else the clone's Git
 /// configuration. Without either, a writing command refuses with a code
 /// whose fix names both, instead of committing as an invented identity.

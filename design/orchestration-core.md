@@ -2371,6 +2371,13 @@ initialization, move, or fresh start, each as its own event.
 - The first run for an environment requires `nyl state init -e <env>`, which
   writes `state.yaml` at the configured location. `reconcile` never creates
   state implicitly.
+- `state init` creates a missing local backing repository as bare, including
+  its parent directories, before taking the lease. Automatic creation accepts
+  absolute filesystem paths and local `file://` URLs whose read and write
+  endpoints name the same path. Existing entries must already be Git
+  repositories; initialization never converts an ordinary directory into one.
+  Remote repositories and separate read/write destinations must be provisioned
+  externally. Other operations never create a backing repository.
 - When an Environment's `state` points to a location without `state.yaml`,
   `reconcile` refuses and names both ways forward:
   - `nyl state move -e <env> --from <repository> [--desired-ref …]
