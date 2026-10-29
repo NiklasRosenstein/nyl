@@ -187,8 +187,9 @@ recorded input bytes are unchanged.</p>
 <p>For local development, reconcile uncommitted declarations and input files with:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">reconcile</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-e</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">dev</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--worktree</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl reconcile -e dev --worktree"><div></div></button></div></figure></div>
 <p>Nyl snapshots Git-visible tracked and untracked files once, preserving deletions
-and executable modes. Ignored untracked files are excluded and symlinks are
-rejected. HEAD and the staging index stay untouched. Discovery, preflight,
+and executable modes. Ignored untracked files are excluded. Internal symlinks
+are preserved without following their targets; input paths cannot traverse
+symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
 rendering, and all execution waves use that immutable snapshot; subsequent edits
 belong to the next run. Explicitly pinned unit sources keep their declared
 commits. The flag requires exactly one named environment and conflicts with
@@ -200,7 +201,9 @@ are gone. Choose a local state repository for disposable experiments, as in the
 <a href="https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu">local Docker example</a>.
 <code dir="auto">--local</code> independently keeps state transitions on the clone’s local branches.</p>
 <p><code dir="auto">NYL-SOURCE-WORKTREE</code>, the transition’s <code dir="auto">worktreeSource</code> summary, and the reserved
-<code dir="auto">refs/nyl-worktrees/</code> source revision identify the run’s provenance. Snapshots
+<code dir="auto">refs/nyl-worktrees/</code> source revision identify the run’s provenance. Those refs
+cache snapshots locally; the state history retains the archived inputs. Nyl does
+not automatically garbage collect snapshots or compact that history. Snapshots
 cannot publish Kubernetes trees or count as clean committed-source promotion
 evidence. Commit changes and reconcile without the flag for that evidence.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="execution-keys-and-receipts">Execution keys and receipts</h2><a class="sl-anchor-link" href="#execution-keys-and-receipts"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Execution keys and receipts”</span></a></div>
