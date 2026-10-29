@@ -50,6 +50,8 @@ pub struct ProcessRunner {
     pub(crate) kill_grace: StdDuration,
     /// A buffer that receives the transcript instead of stderr, for tests.
     pub(crate) transcript: Sink,
+    /// Unit address for each public transcript line.
+    unit: Option<nyl_core::orchestration::ids::UnitAddress>,
     /// The run's cancellation: 0 while it runs, else the signal (such as
     /// SIGINT or SIGTERM) that cancelled it, which the runner forwards to
     /// every running tool's process group, with SIGKILL after the grace.
@@ -61,6 +63,7 @@ impl Default for ProcessRunner {
         Self {
             kill_grace: KILL_GRACE,
             transcript: None,
+            unit: None,
             cancel: None,
         }
     }
@@ -115,6 +118,16 @@ fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
 }
 
 impl ToolRunner for ProcessRunner {
+    fn run_for_unit(
+        &self,
+        invocation: ToolInvocation,
+        unit: &nyl_core::orchestration::ids::UnitAddress,
+    ) -> DriverResult<ToolExit> {
+        let mut runner = self.clone();
+        runner.unit = Some(unit.clone());
+        runner.run(invocation)
+    }
+
     #[allow(clippy::too_many_lines)] // One subprocess lifetime owns its streams, terminal, cancellation, deadline, and captured result.
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
         let mut masked = invocation
@@ -201,22 +214,24 @@ impl ToolRunner for ProcessRunner {
         let stdout = child.stdout.take().map(|pipe| {
             let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
             let private = invocation.private_stdout;
+            let unit = self.unit.clone();
             thread::spawn(move || {
                 let captured = if private {
                     let mut captured = Vec::new();
                     let _ = BufReader::new(pipe).read_to_end(&mut captured);
                     captured
                 } else {
-                    transcribe(pipe, &masked, &sink, usize::MAX)
+                    transcribe_for_unit(pipe, &masked, &sink, usize::MAX, unit.as_ref())
                 };
                 let _ = done.send(());
                 captured
             })
         });
         let stderr = child.stderr.take().map(|pipe| {
+            let unit = self.unit.clone();
             let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
             thread::spawn(move || {
-                let captured = transcribe(pipe, &masked, &sink, MAX_DIAGNOSTIC_BYTES);
+                let captured = transcribe_for_unit(pipe, &masked, &sink, MAX_DIAGNOSTIC_BYTES, unit.as_ref());
                 let _ = done.send(());
                 captured
             })
@@ -493,7 +508,18 @@ fn group_alive(child: &Child) -> bool {
 
 /// Copy a tool's output, line by line and masked, to the transcript; return
 /// raw bytes up to the capture limit while the full transcript continues.
+#[cfg(test)]
 fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture_limit: usize) -> Vec<u8> {
+    transcribe_for_unit(pipe, masked, sink, capture_limit, None)
+}
+
+fn transcribe_for_unit(
+    pipe: impl Read,
+    masked: &[String],
+    sink: &Sink,
+    capture_limit: usize,
+    unit: Option<&nyl_core::orchestration::ids::UnitAddress>,
+) -> Vec<u8> {
     let mut reader = BufReader::new(pipe);
     let mut captured = Vec::new();
     let mut line = Vec::new();
@@ -505,6 +531,11 @@ fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture_limit: us
                 let remaining = capture_limit.saturating_sub(captured.len());
                 captured.extend_from_slice(&line[..line.len().min(remaining)]);
                 let text = mask(&String::from_utf8_lossy(&line), masked);
+                let text = if let Some(unit) = unit {
+                    format!("[{unit}] {text}{}", if text.ends_with('\n') { "" } else { "\n" })
+                } else {
+                    text
+                };
                 match sink {
                     Some(buffer) => buffer
                         .lock()
@@ -619,6 +650,32 @@ mod tests {
         );
         let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
         assert!(transcript.contains("out") && transcript.contains("err"), "{transcript}");
+    }
+
+    #[test]
+    fn test_unit_labels_and_masking_leave_parser_bytes_and_private_stdout_unchanged() {
+        use nyl_core::orchestration::ids::UnitAddress;
+        let unit: UnitAddress = "dev/web".parse().unwrap();
+        let (runner, transcript) = quiet();
+        let mut invocation = sh("printf 'secret\nsecond'; printf 'diagnostic-secret' >&2");
+        invocation.masked = vec!["secret".to_owned()];
+        let exit = runner.run_for_unit(invocation.clone(), &unit).unwrap();
+        assert_eq!(
+            exit,
+            ToolExit::Exited {
+                code: 0,
+                stdout: b"secret\nsecond".to_vec(),
+                stderr: b"diagnostic-secret".to_vec()
+            }
+        );
+        let text = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("[dev/web] ***\n"), "{text}");
+        assert!(text.contains("[dev/web] second\n"), "{text}");
+        assert!(text.contains("[dev/web] diagnostic-***\n"), "{text}");
+        transcript.lock().unwrap().clear();
+        invocation.private_stdout = true;
+        assert_eq!(runner.run_for_unit(invocation, &unit).unwrap(), exit);
+        assert_eq!(*transcript.lock().unwrap(), b"[dev/web] diagnostic-***\n");
     }
 
     #[test]

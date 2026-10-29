@@ -49,6 +49,8 @@ pub struct Wiring<'a> {
     /// brings a real one (an `observe` wait without one is uncertain).
     /// Tests pass a `FakeObserver`.
     pub observer: Option<&'a dyn ArgoObserver>,
+    /// Live unit events, delivered on stderr by production wiring.
+    pub progress: Option<&'a dyn nyl_core::orchestration::progress::ProgressObserver>,
 }
 
 /// How one orchestration command ended, without printing or exiting.
@@ -170,6 +172,7 @@ impl<'a> Wiring<'a> {
             cancellation: owned.cancellation.clone(),
             prompt: owned.prompt.as_ref().map(|prompt| prompt as &dyn OperatorPrompt),
             observer: None,
+            progress: Some(&TerminalProgress),
         })
     }
 
@@ -215,6 +218,52 @@ fn unicode_env(
     vars.into_iter()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect()
+}
+
+/// Line-oriented live progress; stdout remains available for structured reports.
+pub struct TerminalProgress;
+
+impl nyl_core::orchestration::progress::ProgressObserver for TerminalProgress {
+    fn observe(&self, progress: &nyl_core::orchestration::progress::UnitProgress) {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{}", progress_line(progress));
+    }
+}
+
+fn progress_line(progress: &nyl_core::orchestration::progress::UnitProgress) -> String {
+    use nyl_core::orchestration::progress::UnitPhase;
+    match &progress.phase {
+        UnitPhase::Started { .. } => format!(
+            "[{}] starting {} ({})",
+            progress.unit,
+            progress.kind,
+            progress.operation.as_str()
+        ),
+        UnitPhase::Finished {
+            started,
+            at,
+            result,
+            message,
+        } => {
+            let seconds = (*at - *started).to_std().unwrap_or_default().as_secs_f64();
+            let reason = message.as_deref().or(match result {
+                nyl_core::orchestration::progress::UnitResult::Blocked { reason }
+                | nyl_core::orchestration::progress::UnitResult::Uncertain { reason } => Some(reason.as_str()),
+                _ => None,
+            });
+            let reason = reason
+                .and_then(|text| text.lines().next())
+                .map(|text| text.chars().take(240).collect::<String>());
+            format!(
+                "[{}] {} in {seconds:.1}s{}",
+                progress.unit,
+                result.name(),
+                reason
+                    .filter(|text| !text.is_empty())
+                    .map_or_else(String::new, |text| format!(": {text}"))
+            )
+        }
+    }
 }
 
 #[cfg(test)]

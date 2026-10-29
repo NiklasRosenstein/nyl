@@ -23,6 +23,14 @@ impl SecretProvider for Secrets {
 }
 
 fn reconcile(harness: &Harness, secrets: Option<&dyn SecretProvider>) -> RunReport {
+    reconcile_with_progress(harness, secrets, None)
+}
+
+fn reconcile_with_progress(
+    harness: &Harness,
+    secrets: Option<&dyn SecretProvider>,
+    progress: Option<&dyn nyl_core::orchestration::progress::ProgressObserver>,
+) -> RunReport {
     let job = harness.job(&[], Cancellation::default());
     let base = harness.context();
     let tools = ProcessRunner::new();
@@ -37,6 +45,7 @@ fn reconcile(harness: &Harness, secrets: Option<&dyn SecretProvider>) -> RunRepo
         secrets,
         commit_identity: Some(&harness.identity),
         observer: None,
+        progress,
         prompt: None,
     };
     run::reconcile(&context, &job.request)
@@ -81,7 +90,24 @@ fn test_missing_secret_stops_before_execution_and_never_records_provider_errors(
     let project = credentials_project();
     let harness = Harness::new(project.path(), false);
     harness.init();
-    let report = reconcile(&harness, None);
+    #[derive(Default)]
+    struct Events(std::sync::Mutex<Vec<nyl_core::orchestration::progress::UnitProgress>>);
+    impl nyl_core::orchestration::progress::ProgressObserver for Events {
+        fn observe(&self, progress: &nyl_core::orchestration::progress::UnitProgress) {
+            self.0.lock().unwrap().push(progress.clone());
+        }
+    }
+    let events = Events::default();
+    let report = reconcile_with_progress(&harness, None, Some(&events));
+    let recorded = events.0.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    let nyl_core::orchestration::progress::UnitPhase::Finished { result, message, .. } = &recorded[1].phase else {
+        panic!("missing final credential failure event")
+    };
+    let entry = &report.environments[0].units[&unit("check")];
+    assert_eq!(Some(result), entry.result.as_ref());
+    assert_eq!(message, &entry.message);
+    drop(recorded);
     assert_eq!(report.exit().code(), 3, "{report:#?}");
     let snapshot = harness.store.snapshot(&harness.location).unwrap();
     assert!(snapshot

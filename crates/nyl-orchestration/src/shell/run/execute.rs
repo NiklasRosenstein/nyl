@@ -100,7 +100,13 @@ pub(super) fn execute_batch(
             .into_iter()
             .map(|job| {
                 let shared = &shared;
-                scope.spawn(move || execute(shared, job))
+                let progress = crate::shell::progress::Progress::for_unit(
+                    shared.context,
+                    shared.environment,
+                    job.unit,
+                    Operation::Reconcile,
+                );
+                scope.spawn(move || execute(shared, job, progress))
             })
             .collect();
         handles.into_iter().map(join).collect()
@@ -137,8 +143,14 @@ enum Inspected {
 }
 
 /// Execute one unit in a worktree of its effective commit and map its outcome.
-#[allow(clippy::too_many_lines)] // One execution in order: worktree, inspection, driver call, fault point, and the outcome's record.
-fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
+fn execute(shared: &Shared<'_>, job: Job<'_>, progress: crate::shell::progress::Progress<'_>) -> Execution {
+    let execution = execute_unit(shared, job);
+    progress.finish(&execution.result, execution.message.as_deref());
+    execution
+}
+
+#[allow(clippy::too_many_lines)] // One execution in order: setup, inspection, driver call, and outcome mapping.
+fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     let context = shared.context;
     let unit = job.unit;
     let name = unit.unit.name.clone();
@@ -245,8 +257,12 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 .min(crate::shell::lease::bound(&context.base.settings, lease))
         },
     );
-    let budget = crate::shell::tools::DeadlineRunner {
+    let tools = crate::shell::tools::UnitRunner {
         tools: context.tools,
+        unit: UnitAddress::new(shared.environment.clone(), name.clone()),
+    };
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: &tools,
         clock: context.base.clock,
         deadline,
     };

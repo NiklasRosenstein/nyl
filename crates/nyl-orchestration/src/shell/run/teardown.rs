@@ -286,6 +286,7 @@ struct Call {
     outcome: DriverResult<Supported<Outcome>>,
     deadline: Timestamp,
     finished: Timestamp,
+    progress: nyl_core::orchestration::progress::UnitProgress,
     killed: bool,
     /// The unit's files could not be checked out: nothing ran.
     unavailable: Option<String>,
@@ -338,6 +339,7 @@ impl Reconcile<'_, '_, '_> {
             // Run one batch, then read holds and plan again from its outcomes.
             let concurrency = self.session.request.concurrency.max(1);
             let batch: Vec<_> = plan.wave.into_iter().take(concurrency).collect();
+            self.report.order_units(batch.iter().cloned());
             for name in &batch {
                 if let Some(units) = plan.external_overrides.get(name) {
                     life.details.external_dependents.insert(name.clone(), units.clone());
@@ -629,8 +631,33 @@ impl Reconcile<'_, '_, '_> {
 
     /// Record one teardown outcome; `true` when the unit now waits under its
     /// `teardownWait`.
-    #[allow(clippy::too_many_lines)] // One outcome table: success, failure, uncertainty, wait, release.
     fn settle(
+        &mut self,
+        life: &mut Life,
+        unit: &DesiredUnit,
+        call: Call,
+        observed: &mut BTreeMap<UnitName, ObservedUnit>,
+        artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    ) -> Result<bool, Ending> {
+        let progress = call.progress.clone();
+        let finished = call.finished;
+        let ending = self.settle_unit(life, unit, call, observed, artifacts);
+        if let Some(entry) = life.results.get(&unit.unit.name) {
+            if let Some(result) = &entry.result {
+                crate::shell::progress::Progress::finish_event(
+                    self.context(),
+                    progress,
+                    finished,
+                    result,
+                    entry.message.as_deref(),
+                );
+            }
+        }
+        ending
+    }
+
+    #[allow(clippy::too_many_lines)] // One outcome table: success, failure, uncertainty, wait, release.
+    fn settle_unit(
         &mut self,
         life: &mut Life,
         unit: &DesiredUnit,
@@ -1115,7 +1142,12 @@ fn run_jobs(
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
             .into_iter()
-            .map(|job| scope.spawn(move || call(context, slots, environment, project_dir, job)))
+            .map(|job| {
+                let progress =
+                    crate::shell::progress::Progress::for_unit(context, environment, job.unit, Operation::Teardown)
+                        .into_event();
+                scope.spawn(move || call(context, slots, environment, project_dir, job, &progress))
+            })
             .collect();
         handles.into_iter().map(join).collect()
     })
@@ -1128,6 +1160,7 @@ fn call(
     environment: &EnvironmentName,
     project_dir: &str,
     job: Job<'_>,
+    progress: &nyl_core::orchestration::progress::UnitProgress,
 ) -> Call {
     let name = job.unit.unit.name.clone();
     let now = context.base.clock.now();
@@ -1137,6 +1170,7 @@ fn call(
         outcome,
         deadline,
         finished: context.base.clock.now(),
+        progress: progress.clone(),
         killed,
         unavailable: None,
     };
@@ -1192,8 +1226,12 @@ fn call(
         }
     };
     let _ = context.base.faults.at(FaultPoint::Executing, Some(&name));
-    let budget = crate::shell::tools::DeadlineRunner {
+    let tools = crate::shell::tools::UnitRunner {
         tools: context.tools,
+        unit: UnitAddress::new(environment.clone(), name.clone()),
+    };
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: &tools,
         clock: context.base.clock,
         deadline,
     };

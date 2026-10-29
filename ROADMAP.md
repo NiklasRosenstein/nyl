@@ -612,6 +612,11 @@ as long as its state history is retained; automatic cleanup is not implemented.
 Worktree reconciliation selects one environment. Units with explicit source pins
 keep those revisions, and Kubernetes publication requires committed source.
 
+Unit progress and labelled tool output stream on stderr. Summaries follow dispatch
+order, with dependency order for units that did not run and consumers first for
+teardown. JSON reports retain a keyed units map and provide the summary order
+separately.
+
 Orchestration commands are top-level, because it is all GitOps. The
 [orchestration core contract](design/orchestration-core.md#commands) specifies
 their effects, options, and exit categories; a rename changes the contract:

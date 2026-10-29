@@ -212,6 +212,7 @@ impl Harness {
             cancellation,
             prompt: None,
             observer: None,
+            progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         super::runner::invoke_in(&self.world, &wiring, &args, "main", "").unwrap()
@@ -321,6 +322,7 @@ impl Harness {
             secrets: None,
             commit_identity: identity.then_some(&self.identity),
             observer: None,
+            progress: None,
             prompt: None,
         };
         operation(&context, &job.request)

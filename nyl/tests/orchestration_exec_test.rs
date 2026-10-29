@@ -106,6 +106,7 @@ fn exec(harness: &Harness, checkout: &std::path::Path, worktree: bool) -> Comman
         cancellation: Cancellation::default(),
         prompt: None,
         observer: None,
+        progress: None,
     };
     let mut args = vec![
         "nyl".to_owned(),

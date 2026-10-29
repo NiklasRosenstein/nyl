@@ -328,6 +328,12 @@ pub enum ToolExit {
 /// grace period, SIGKILL.
 pub trait ToolRunner: Send + Sync {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit>;
+
+    /// Run a unit's tool with its address attached to the public transcript.
+    /// Captured stdout/stderr retain the tool's original bytes.
+    fn run_for_unit(&self, invocation: ToolInvocation, _unit: &UnitAddress) -> DriverResult<ToolExit> {
+        self.run(invocation)
+    }
 }
 
 /// A source field's independent checkout and authored path root.

@@ -41,48 +41,9 @@ that left the ownership set and of teardowns an operator requested with
 [Deletion and holds](/nyl/orchestration/deletion/) describes. A unit with
 `deletionPolicy: Teardown` that left source waits for `--allow-teardown`:
 
-```console
-$ nyl reconcile -e dev
-Units leaving the ownership set of dev (1):
-  teardown, needs --allow-teardown:   scratch (removed)
-  dropped from state, resources kept: (none)
-  retained as tombstones:             (none)
-
-UNIT     KIND     RESULT            DETAIL
-cache    Command  current
-config   Command  current
-extra    Command  executed
-scratch  Command  pending-teardown
-seed     Command  current
-worker   Command  current
-run: 01a17ac1-4c6f-7d70-8d17-67644811eab7
-source: ea88fa3d6330a476c69ac698edbedab8cc5b7be7
-desired: 81117d9f1baa8fa2c8db45139c3cf486b8d3879e
-observed: 7b18f7fa52729b27399b285f1ed76dbdfdf29fdb
-warning NYL-PLAN-UNITS-LEAVING: 1 unit(s) leave the ownership set of dev: scratch (removed)
-  fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
-warning NYL-TEARDOWN-PENDING (scratch): unit scratch of dev left the ownership set; its teardown waits for --allow-teardown
-  fix: pass --allow-teardown to nyl reconcile to tear it down, restore it in source to keep it, or let it go without a teardown with `nyl state forget -e dev --unit scratch`
-$ nyl reconcile -e dev --allow-teardown
-removed scratch
-Units leaving the ownership set of dev (1):
-  teardown, needs --allow-teardown:   scratch (removed)
-  dropped from state, resources kept: (none)
-  retained as tombstones:             (none)
-
-UNIT     KIND     RESULT   DETAIL
-cache    Command  current
-config   Command  current
-extra    Command  current
-scratch  Command  removed
-seed     Command  current
-worker   Command  current
-run: 01a17ac1-4e91-77be-904d-da53c4fd269f
-source: ea88fa3d6330a476c69ac698edbedab8cc5b7be7
-desired: 182633b7ab899fc7c2f0c836644fa10bcc6e5409
-observed: 02dac2dc31d29972006a5583de6f4e32365e0782
-warning NYL-PLAN-UNITS-LEAVING: 1 unit(s) leave the ownership set of dev: scratch (removed)
-  fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
+```bash
+nyl reconcile -e dev
+nyl reconcile -e dev --allow-teardown
 ```
 
 `--allow-teardown` gates only the start of a teardown caused by a change to
@@ -101,18 +62,6 @@ re-run is `awaiting-approval` while the rest of the run continues; a
 drifted units stay `drifted` until `--reapply` names them. See
 [Repairing drift](/nyl/orchestration/recovery/#repairing-drift).
 
-```console
-$ nyl reconcile -e dev
-UNIT    KIND     RESULT             DETAIL
-cache   Command  current
-config  Command  executed
-extra   Command  current
-seed    Command  awaiting-approval
-worker  Command  current
-run: 01a17ac1-5904-7e98-993d-d452167aa129
-source: ea88fa3d6330a476c69ac698edbedab8cc5b7be7
-observed: e9030d4534b190e1a82161dc15d0c0f29e6c90b2
-```
 
 ## Stopping at the first failure
 
@@ -124,19 +73,16 @@ run still checkpoints them and writes its transition commit:
 
 ```console
 $ nyl reconcile -e dev --fail-fast --concurrency 1
-connection refused
+[dev/broken] starting Command (reconcile)
+[dev/broken] connection refused
+[dev/broken] failed in 0.0s: command exited with code 1
 UNIT    KIND     RESULT   DETAIL
 broken  Command  failed   command exited with code 1
-cache   Command  current
-config  Command  current
-extra   Command  current
-report  Command  blocked  --fail-fast stopped the run after broken
-seed    Command  current
-worker  Command  current
-run: 01a17ac1-5cb2-7c73-8a5b-46bb04b9cf5c
-source: 1af28df1e4f0db7bdab23402106123ce1592a47c
-desired: c30d18d44b74895ae0dd147201ad18762d36d26d
-observed: 0b2fd370c62ab5c01bc9199954bdcfe9b17eca44
+report  Command  blocked  /dependsOn/0 waits for broken (no-current-receipt)
+run: 01a18581-e81a-76b7-b92e-dde094292715
+source: 31d0b75f7f54f720a76847c6dacf768371f0ca63
+desired: 4b5fd9df85d0db0c82181710bc9b457a582a8e22
+observed: 63b784cd15c55e8337adf1379c2bc6e09e69e611
 warning NYL-RUN-STOPPED: --fail-fast stopped the run of dev after unit broken: it started no further unit
   fix: fix broken, then run again; without --fail-fast a run continues with every unit that does not depend on it
 ```
@@ -210,8 +156,16 @@ The table lists each unit with its result: `executed`, `current`,
 units leaving the ownership set prints the leaving section first, as
 [`nyl plan`](/nyl/reference/cli/plan/) does. `-o json` prints the same
 report as JSON on stdout, with `result` per unit as in the transition commit
-summary; diagnostics go to stderr. Every error and warning carries a stable
-code and its fix.
+summary. Each environment's `unitOrder` lists the table order while `units`
+remains a map keyed by name. The table lists dispatched units first in dispatch
+order, then units that did not run in dependency order; teardown uses consumers
+first. Names break ties within a parallel wave.
+
+Unit start and end messages stream to stderr with the environment/unit address,
+result, elapsed time, and a short failure reason. Public tool output also carries
+that address on every line; captured outputs retain their original bytes.
+`-o json` keeps stdout exclusively for the report. Every error and warning carries
+a stable code and its fix.
 
 ## Exit codes
 

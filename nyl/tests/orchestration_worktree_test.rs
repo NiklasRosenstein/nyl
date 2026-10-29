@@ -46,7 +46,7 @@ fn test_worktree_reconciles_untracked_units_and_retains_source_for_fresh_clone_t
 kind: Command
 metadata: {name: producer}
 spec:
-  command: [sh, -c, 'cat input.json > "$NYL_OUTPUTS"']
+  command: [sh, -c, 'printf ''building\n''; cat input.json > "$NYL_OUTPUTS"']
   teardown: [sh, -c, 'test "$(cat input.json)" = ''{"value":"working"}''']
   idempotent: true
   files: [input.json]
@@ -67,10 +67,18 @@ spec:
         .assert()
         .success()
         .get_output()
-        .stdout
         .clone();
+    let stderr = String::from_utf8(first.stderr).unwrap();
+    assert!(
+        stderr.contains("[local/producer] starting Command (reconcile)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[local/producer] building"), "{stderr}");
+    assert!(stderr.find("[local/producer] executed in").unwrap() < stderr.find("[local/consumer] starting").unwrap());
+    let first = first.stdout;
     let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
     let environment = &first["environments"][0];
+    assert_eq!(environment["unitOrder"], serde_json::json!(["producer", "consumer"]));
     assert_eq!(environment["units"]["producer"]["result"], "executed");
     assert_eq!(environment["units"]["consumer"]["result"], "executed");
     assert_eq!(git_output(&checkout, &["rev-parse", "HEAD"]), head);
@@ -81,6 +89,10 @@ spec:
         .stdout
         .clone();
     let again: serde_json::Value = serde_json::from_slice(&again).unwrap();
+    assert_eq!(
+        again["environments"][0]["unitOrder"],
+        serde_json::json!(["producer", "consumer"])
+    );
     assert_eq!(again["environments"][0]["sourceCommit"], environment["sourceCommit"]);
     assert_eq!(again["environments"][0]["units"]["producer"]["result"], "current");
     assert_eq!(again["environments"][0]["units"]["consumer"]["result"], "current");
@@ -124,12 +136,20 @@ spec:
         );
         assert!(history[0].message.contains("Nyl-Operation: state-move"));
     }
-    nyl(
+    let teardown = nyl(
         &fresh,
         &["teardown", "-e", "local", "--all", "--reason", "finished worktree test"],
     )
     .assert()
-    .success();
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let teardown = String::from_utf8(teardown).unwrap();
+    assert!(
+        teardown.find("consumer").unwrap() < teardown.find("producer").unwrap(),
+        "{teardown}"
+    );
 }
 
 // These checks exercise source resolution without invoking a native image builder.

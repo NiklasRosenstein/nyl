@@ -163,6 +163,19 @@ not automatically garbage collect snapshots or compact that history. Snapshots
 cannot publish Kubernetes trees or count as clean committed-source promotion
 evidence. Commit changes and reconcile without the flag for that evidence.
 
+## Following execution
+
+Reconcile prints a start and end message for every dispatched unit. End messages
+include the result and elapsed time, with a short reason when the unit fails.
+Tool output is labelled with the environment/unit address, so concurrent units
+remain distinguishable. Progress and tool transcripts go to stderr; JSON reports
+stay on stdout.
+
+The final summary follows dispatch order, with names breaking ties in a parallel
+wave. Units that did not run follow in dependency order, and teardown lists
+consumers before their producers. JSON reports provide this order in `unitOrder`
+alongside the `units` map.
+
 ## Execution keys and receipts
 
 Each execution records a **receipt** in the observed state: the execution key

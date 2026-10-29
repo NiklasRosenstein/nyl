@@ -109,6 +109,8 @@ pub struct RunContext<'a> {
     pub renderer: &'a dyn SourceRenderer,
     pub drivers: &'a DriverSet,
     pub tools: &'a dyn ToolRunner,
+    /// Live unit events; absent for callers that only consume the final report.
+    pub progress: Option<&'a dyn nyl_core::orchestration::progress::ProgressObserver>,
     /// A directory this invocation owns: pinned worktrees and per-execution
     /// temp dirs are created beneath it.
     pub workspace: &'a Path,
@@ -1405,6 +1407,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             return;
         }
     };
+    report.order_units(prepared.order.iter().cloned());
     report.source_commit = Some(prepared.source_commit.clone());
     report.leaving.clone_from(&prepared.desired.leaving);
     if !report.leaving.is_empty() {
@@ -2506,6 +2509,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
                 created.extend(new.into_iter().map(|unit| unit.unit.name));
                 let approvals = local_approvals(session, &resolved, &batch);
+                self.report.order_units(batch.iter().cloned());
                 let results = execute_batch(
                     session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, snapshot, &approvals,
                 );
@@ -2822,6 +2826,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
+        self.report.order_units(
+            prepared
+                .order
+                .iter()
+                .filter(|name| self.report.units.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         let mut summary = self.report.transition_summary(request.mode.operation());
         if let RunMode::Recover { .. } = &request.mode {
             // A recover executes nothing: its summary lists what it imported
@@ -2989,6 +3001,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
         if request.cancellation.is_cancelled() {
             return self.cancelled();
+        }
+        if let Ok(graph) = extract(&environment, &request.entry_commit, &stored) {
+            self.report.order_units(
+                crate::rules::graph::teardown_order(&graph)
+                    .into_iter()
+                    .filter(|name| self.report.units.contains_key(name))
+                    .collect::<Vec<_>>(),
+            );
         }
         let mut summary = self.report.transition_summary(request.mode.operation());
         life.details.insert_into(&mut summary.details);

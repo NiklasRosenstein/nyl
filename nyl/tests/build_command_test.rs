@@ -35,6 +35,7 @@ fn test_direct_build_uses_dirty_snapshot_and_source_override_without_state() {
         cancellation: Cancellation::default(),
         prompt: None,
         observer: None,
+        progress: None,
     };
     let before = git_output(
         &harness.world.bare(),
@@ -128,6 +129,7 @@ fn test_direct_build_refuses_a_locked_commit_outside_protected_and_source_refs()
         cancellation: Cancellation::default(),
         prompt: None,
         observer: None,
+        progress: None,
     };
     let error = direct::prepare(&clone, "image", None, None, &wiring)
         .err()

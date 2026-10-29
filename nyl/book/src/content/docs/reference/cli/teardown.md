@@ -52,13 +52,15 @@ transition commit per state ref with the operation `teardown` and the
   teardown applies the hold.
 
 ```console
-$ nyl teardown -e dev --unit worker --hold --reason rotate the worker
-removed worker
+$ nyl teardown -e dev --unit worker --hold --reason "rotate the worker"
+[dev/worker] starting Command (teardown)
+[dev/worker] removed worker
+[dev/worker] removed in 0.0s
 UNIT    KIND     RESULT   DETAIL
 worker  Command  removed
-run: 01a17ac1-500c-78e8-b8fb-c969e048c5e9
-desired: 9814c8340010cbe310ccd53887148ff5930e5ff7
-observed: 1313296c5fff4adec9bc761c42af4c666d67673b
+run: 01a18581-0ea6-7282-9a50-7efce0a0c17e
+desired: 6eeccb9e675d2e8c6ae5cd1fcda3944afa50c191
+observed: f438cd48245c94da2a00a27bcb711dc4258914e0
 ```
 
 A unit that needs a manual approval is reported `awaiting-approval` until

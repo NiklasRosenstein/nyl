@@ -86,6 +86,7 @@ impl Harness {
             cancellation: Cancellation::default(),
             prompt: None,
             observer: None,
+            progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         invoke_in(&self.world, &wiring, &args, "main", directory).unwrap()

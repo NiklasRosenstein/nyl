@@ -209,6 +209,7 @@ impl Session {
             secrets: Some(&secrets),
             commit_identity: identity,
             observer: wiring.observer,
+            progress: wiring.progress,
             prompt: wiring.prompt,
         };
         Ok(operation(&context, request))
@@ -455,8 +456,7 @@ fn table(report: &RunReport) -> String {
             text.push('\n');
         }
         let rows = environment
-            .units
-            .iter()
+            .ordered_units()
             .map(|(name, unit)| unit_row(report.kind, name, unit))
             .collect::<Vec<_>>();
         let headers: &[&str] = match report.kind {

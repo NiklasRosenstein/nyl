@@ -1477,6 +1477,15 @@ Nyl-Version: 0.7.0
 
 ## Execution
 
+The shell emits typed start and end events for dispatched units, using the
+injected clock and the same normalized result and message as the unit report.
+The CLI prints them on stderr, including the unit address, elapsed time, and
+short failure reason. Public native-tool transcript lines carry the unit address
+after secret masking; captured bytes and private stdout remain unchanged. Reports
+keep a keyed `units` map and a `unitOrder` list: dispatch order first, then
+undispatched units in dependency order, or consumers first for teardown. Names
+break ties within a wave. Machine reports alone go to stdout.
+
 The optional [CI execution adapter](ci-execution.md) exposes the same dependency
 graph as separate jobs. Its first backend invokes ordinary unit-scoped operations:
 each job is a separate run, acquires the environment lease, and revalidates
