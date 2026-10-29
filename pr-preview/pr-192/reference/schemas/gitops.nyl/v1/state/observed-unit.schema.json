@@ -588,90 +588,6 @@
       ],
       "type": "object"
     },
-    "OwnershipScope": {
-      "description": "A typed claim on native resources, checked for overlap across units.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "A Terraform or OpenTofu backend: its canonical configuration and key, and workspace.",
-          "properties": {
-            "terraformBackend": {
-              "properties": {
-                "backend": {
-                  "type": "string"
-                },
-                "workspace": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "backend",
-                "workspace"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "terraformBackend"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "An OCI repository and the tag prefix one environment moves.",
-          "properties": {
-            "ociRepository": {
-              "properties": {
-                "repository": {
-                  "type": "string"
-                },
-                "tag_prefix": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "repository",
-                "tag_prefix"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "ociRepository"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A publication repository, revision, and path prefix.",
-          "properties": {
-            "publication": {
-              "properties": {
-                "path_prefix": {
-                  "type": "string"
-                },
-                "repository": {
-                  "type": "string"
-                },
-                "revision": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "repository",
-                "revision",
-                "path_prefix"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "publication"
-          ],
-          "type": "object"
-        }
-      ]
-    },
     "PromotionProvenance": {
       "additionalProperties": false,
       "description": "A value read from a PromotionRecord.",
@@ -892,6 +808,45 @@
       ],
       "type": "object"
     },
+    "RetryAcknowledgement": {
+      "description": "Driver-owned retry context and the operator's acknowledgement.\nContext contains no secrets and is interpreted only by the emitting driver.\nA successful receipt consumes the acknowledgement.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context": true,
+            "state": {
+              "const": "required",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "context"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context": true,
+            "request": {
+              "$ref": "#/$defs/Request"
+            },
+            "state": {
+              "const": "acknowledged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "context",
+            "request"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RunId": {
       "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
       "type": "string"
@@ -1034,17 +989,6 @@
   "additionalProperties": false,
   "description": "`observed/units/<unit>.yaml`: the latest receipt and condition.",
   "properties": {
-    "acceptedEmptyState": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/OwnershipScope"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "A reasoned recovery accepted an empty backend for exactly this scope."
-    },
     "apiVersion": {
       "$ref": "#/$defs/StateV1"
     },
@@ -1093,6 +1037,17 @@
           "type": "null"
         }
       ]
+    },
+    "retry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RetryAcknowledgement"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A driver-requested retry acknowledgement, bound to this unit incarnation."
     },
     "unit": {
       "$ref": "#/$defs/UnitIdentity"
