@@ -1,0 +1,509 @@
+{
+  "$defs": {
+    "ApprovalBind": {
+      "enum": [
+        "desired",
+        "plan"
+      ],
+      "type": "string"
+    },
+    "ApprovalMode": {
+      "enum": [
+        "auto",
+        "manual"
+      ],
+      "type": "string"
+    },
+    "ApprovalPolicy": {
+      "anyOf": [
+        {
+          "enum": [
+            "auto",
+            "manual"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "When a unit's executions need an invocation's approval.\n\nWritten as `auto` (the default), `manual` (short for\n`{mode: manual, bind: desired}`), or `{mode, bind, requireDigest}`.",
+          "properties": {
+            "bind": {
+              "$ref": "#/$defs/ApprovalBind",
+              "description": "What an approval authorizes: one execution of the `desired` document, or the changes a reviewed `plan` showed."
+            },
+            "mode": {
+              "$ref": "#/$defs/ApprovalMode",
+              "description": "`auto` executes without approval; `manual` waits for `--approve`."
+            },
+            "requireDigest": {
+              "description": "Refuse approvals without a change digest, for `bind: plan`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode",
+            "bind"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "`auto` (default), `manual` (short for {mode: manual, bind: desired}), or {mode, bind, requireDigest}."
+    },
+    "AttestationDeclaration": {
+      "additionalProperties": false,
+      "description": "One attestation a unit's receipts can carry.",
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttestationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`external` for an attestation only `nyl attest` supplies; omitted for one the kind produces itself."
+        },
+        "name": {
+          "description": "Attestation name, such as `healthy`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "AttestationSource": {
+      "enum": [
+        "external"
+      ],
+      "type": "string"
+    },
+    "DeletionPolicy": {
+      "description": "What happens to a unit's resources when it leaves the ownership set.",
+      "oneOf": [
+        {
+          "const": "Teardown",
+          "description": "Tear the resources down, after `--allow-teardown`.",
+          "type": "string"
+        },
+        {
+          "const": "Retain",
+          "description": "Leave the resources in place.",
+          "type": "string"
+        }
+      ]
+    },
+    "DependsOn": {
+      "anyOf": [
+        {
+          "description": "A unit of the same environment.",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/DependsOnEntry",
+          "description": "A unit, optionally of another declared environment, with required evidence."
+        }
+      ],
+      "description": "A unit that must have a current receipt before this one runs: a name, or\nan entry naming another declared environment or stronger evidence."
+    },
+    "DependsOnEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "attestations": {
+          "description": "The producer's attestations to require, instead of all it declares.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "description": "Another declared environment; default this one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required evidence: `published` (a current receipt, the default) or `attested`."
+        },
+        "unit": {
+          "description": "The producing unit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit"
+      ],
+      "type": "object"
+    },
+    "Duration": {
+      "description": "A duration such as `90s`, `30m`, `1h30m`, or `7d`.",
+      "examples": [
+        "30m"
+      ],
+      "pattern": "^(?=.)([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?$",
+      "type": "string"
+    },
+    "EnvAdmission": {
+      "additionalProperties": false,
+      "description": "Variables admitted into a unit's tool environment. Values are never part\nof the execution key; only names are.",
+      "properties": {
+        "passthrough": {
+          "description": "Names of runner environment variables copied as they are.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Variables read from the project's secrets provider, by variable name and secret key. An object or array secret is passed as compact JSON.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "Evidence": {
+      "description": "Evidence a consumer requires from its producer.",
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "A current receipt.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "A current receipt whose required attestations pass.",
+          "type": "string"
+        }
+      ]
+    },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Literal labels used for organization and target selection.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "InputType": {
+      "description": "Declared input type. Every type is a subset of JSON Schema.",
+      "oneOf": [
+        {
+          "const": "string",
+          "description": "A JSON string.",
+          "type": "string"
+        },
+        {
+          "const": "integer",
+          "description": "A JSON integer; numbers with a fractional part are rejected.",
+          "type": "string"
+        },
+        {
+          "const": "number",
+          "description": "Any JSON number.",
+          "type": "string"
+        },
+        {
+          "const": "boolean",
+          "description": "`true` or `false`.",
+          "type": "string"
+        },
+        {
+          "const": "object",
+          "description": "A JSON object. Only the top-level type is checked.",
+          "type": "string"
+        },
+        {
+          "const": "array",
+          "description": "A JSON array. Only the top-level type is checked.",
+          "type": "string"
+        }
+      ]
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Project-local name of the referenced resource; its kind and API group are determined by the containing field.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "OutputDeclaration": {
+      "additionalProperties": false,
+      "description": "One declared output: a type from the Release input type set.",
+      "properties": {
+        "description": {
+          "description": "Documentation, surfaced in inspection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sensitive": {
+          "description": "Validated but never persisted, and never referenceable.",
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/$defs/InputType",
+          "description": "Value type: `string`, `integer`, `number`, `boolean`, `object`, or `array`."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "ReadGitRepository": {
+      "additionalProperties": false,
+      "description": "Credential-free coordinates for a repository that is only read.",
+      "properties": {
+        "repoURL": {
+          "description": "Git read URL. Source checkouts never publish to this repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
+    },
+    "TerraformSpec": {
+      "additionalProperties": false,
+      "description": "Infrastructure managed by Terraform or OpenTofu, retaining native state and locking.",
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/ApprovalPolicy",
+          "description": "Whether executions need an invocation's approval."
+        },
+        "attestations": {
+          "description": "Attestations of the unit's receipts: names its kind produces itself, or entries with `from: external` that only `nyl attest` supplies.",
+          "items": {
+            "$ref": "#/$defs/AttestationDeclaration"
+          },
+          "type": "array"
+        },
+        "backend": {
+          "additionalProperties": true,
+          "description": "Backend configuration passed to init through a private temporary file. Credentials belong in env, never here.",
+          "type": "object"
+        },
+        "deletionPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What happens to the unit's resources when it leaves the ownership set. Default `Teardown` where the kind supports teardown, else `Retain`."
+        },
+        "dependsOn": {
+          "description": "Units that must have a current receipt first, for ordering without a data reference.",
+          "items": {
+            "$ref": "#/$defs/DependsOn"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "description": "Evaluated after rendering; `false` leaves the environment's ownership set, which deletes the unit under its `deletionPolicy`.",
+          "type": "boolean"
+        },
+        "env": {
+          "$ref": "#/$defs/EnvAdmission",
+          "description": "Variables and secrets admitted into the unit's otherwise empty tool environment."
+        },
+        "files": {
+          "description": "Files entering the execution key, relative to the source project's nyl.toml or worktree-rooted. Defaults to source.path/**, excluding .terraform.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputDeclaration"
+          },
+          "description": "Declared outputs, for kinds that let units declare them. Only declared outputs are recorded.",
+          "type": "object"
+        },
+        "source": {
+          "description": "Configuration directory at the effective source revision. Relative local modules use the same checkout.",
+          "properties": {
+            "commit": {
+              "description": "Full 40-character lowercase commit ID that is read, refreshed by `nyl update source-locks`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "Path in the repository. In this repository it follows the local path rule: relative to the directory containing `nyl.toml`, may begin with `..` segments, or starts with `/` to name a path from the Git worktree root, and never leaves the worktree. In a remote repository it is relative to the checkout root, with an optional leading `/`.",
+              "type": "string"
+            },
+            "repository": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReadGitRepository"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inline repository coordinates to read from. Mutually exclusive with `repositoryRef`."
+            },
+            "repositoryRef": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LocalReference"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Project-local `gitops.nyl/v1` GitRepository to read from. Mutually exclusive with inline `repository`."
+            },
+            "revision": {
+              "description": "Human-readable branch or tag that `nyl update source-locks` resolves.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deadline for one execution, teardown, or verification, at most `7d`. Default per kind."
+        },
+        "varFiles": {
+          "description": "Native variable files, evaluated in order before explicit variables.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "variables": {
+          "additionalProperties": true,
+          "description": "Native input variables; fromUnit references may appear at any depth.",
+          "type": "object"
+        },
+        "version": {
+          "description": "Exact required native tool version. Without it, the installed version is audited but does not trigger execution.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace": {
+          "description": "Terraform workspace, defaulting to the native default workspace.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A Terraform or OpenTofu infrastructure unit, preserving native state and locks.",
+  "examples": [
+    {
+      "apiVersion": "units.gitops.nyl/v1",
+      "kind": "Terraform",
+      "metadata": {
+        "name": "workloads"
+      },
+      "spec": {
+        "backend": {
+          "bucket": "acme-state",
+          "key": "production/network"
+        },
+        "outputs": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "path": "infra/network"
+        },
+        "variables": {
+          "region": "eu-west-1"
+        }
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "units.gitops.nyl/v1",
+      "description": "The built-in unit API version, `units.gitops.nyl/v1`.",
+      "type": "string"
+    },
+    "kind": {
+      "const": "Terraform",
+      "description": "`Terraform` or `OpenTofu`, selecting the native executable.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Literal unit name and labels used for environment selection."
+    },
+    "spec": {
+      "$ref": "#/$defs/TerraformSpec",
+      "description": "Pinned configuration, native backend, variables, outputs, and common policy."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "Terraform",
+  "type": "object"
+}
