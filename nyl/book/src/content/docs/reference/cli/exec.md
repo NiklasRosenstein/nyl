@@ -18,8 +18,8 @@ nyl reconcile -e dev --unit database --approve database=sha256:…
 Without `--worktree`, the tool uses the deployed desired spec and its pinned
 source files. With it, Nyl renders the current checkout, resolves references
 from current receipts, and copies Git-visible files into a private snapshot.
-Uncommitted and untracked files are included; ignored files and symlinks are
-excluded or refused. Explicit source pins continue to read their pinned trees.
+Uncommitted and untracked files are included; ignored files are excluded. Internal
+symlinks are copied without following their targets; input paths cannot traverse symlinks. Explicit source pins continue to read their pinned trees.
 The native tool cannot write into the operator's checkout.
 
 The unit must be held and its kind must support `exec`. Nyl takes the

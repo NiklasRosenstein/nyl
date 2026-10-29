@@ -630,7 +630,11 @@ pub trait SourceResolver: Send + Sync {
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
 }
 
-/// Ref namespace for immutable worktree snapshots, keyed by base commit and tree.
+/// Local source-cache refs for worktree snapshots, keyed by base commit and tree.
+/// State and run commits retain the snapshot as a parent in the configured state
+/// repository before effects start. These cache refs are not pushed there.
+/// Snapshots remain reachable while their cache refs or state history retain them;
+/// automatic snapshot garbage collection is not implemented.
 pub const WORKTREE_SNAPSHOT_PREFIX: &str = "refs/nyl-worktrees/";
 
 /// Commit trailer distinguishing snapshots from committed-source release evidence.

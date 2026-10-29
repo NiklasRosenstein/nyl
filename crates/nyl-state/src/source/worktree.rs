@@ -55,7 +55,7 @@ pub fn is_snapshot(commit: &git2::Commit<'_>) -> bool {
 }
 
 /// Inspect a snapshot input without traversing symlinks in any path component.
-/// Missing inputs represent deletions; every existing leaf must be an ordinary file.
+/// Missing inputs represent deletions; leaves may be files or symbolic links.
 pub fn snapshot_file_metadata(root: &std::path::Path, relative: &str) -> SourceResult<Option<std::fs::Metadata>> {
     use std::path::Component;
     let mut path = root.to_path_buf();
@@ -73,18 +73,18 @@ pub fn snapshot_file_metadata(root: &std::path::Path, relative: &str) -> SourceR
             Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(cause) => return Err(error(format!("cannot inspect {relative}: {cause}"))),
         };
-        if metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() && index + 1 != components.len() {
             return Err(error(format!(
                 "worktree snapshots cannot traverse symlinks: {}",
                 path.display()
             )));
         }
         if index + 1 == components.len() {
-            return if metadata.is_file() {
+            return if metadata.is_file() || metadata.file_type().is_symlink() {
                 Ok(Some(metadata))
             } else {
                 Err(error(format!(
-                    "worktree snapshots require ordinary files; {relative} is not one"
+                    "worktree snapshot input {relative} is neither a file nor a symbolic link"
                 )))
             };
         }
@@ -93,6 +93,32 @@ pub fn snapshot_file_metadata(root: &std::path::Path, relative: &str) -> SourceR
         }
     }
     Err(error("empty worktree snapshot path"))
+}
+
+/// Read file bytes or a symbolic link's target without following it.
+/// Link targets must stay within the worktree, including dangling targets.
+pub fn snapshot_file_contents(
+    root: &std::path::Path,
+    relative: &str,
+    metadata: &std::fs::Metadata,
+) -> SourceResult<Vec<u8>> {
+    let path = root.join(relative);
+    if metadata.file_type().is_symlink() {
+        let target =
+            std::fs::read_link(&path).map_err(|cause| error(format!("cannot read link {relative}: {cause}")))?;
+        let target = target
+            .to_str()
+            .ok_or_else(|| error(format!("symbolic link {relative} has a non-UTF-8 target")))?;
+        let directory = relative.rsplit_once('/').map_or("", |(parent, _)| parent);
+        if super::escapes(directory, target) {
+            return Err(error(format!(
+                "symbolic link {relative} points outside the tree: {target:?}"
+            )));
+        }
+        Ok(target.as_bytes().to_vec())
+    } else {
+        std::fs::read(path).map_err(|cause| error(format!("cannot read {relative}: {cause}")))
+    }
 }
 
 pub(super) fn capture(
@@ -108,11 +134,10 @@ pub(super) fn capture(
     let (files, changed) = visible_files(repository)?;
     let mut index = Index::new().map_err(|cause| git_error("cannot create snapshot index", &cause))?;
     for relative in files {
-        let path = root.join(&relative);
         let Some(metadata) = snapshot_file_metadata(root, &relative)? else {
             continue;
         };
-        let bytes = std::fs::read(&path).map_err(|cause| error(format!("cannot read {relative}: {cause}")))?;
+        let bytes = snapshot_file_contents(root, &relative, &metadata)?;
         let id = repository
             .blob(&bytes)
             .map_err(|cause| git_error("cannot store snapshot file", &cause))?;
@@ -137,7 +162,11 @@ pub(super) fn capture(
                 mtime: IndexTime::new(0, 0),
                 dev: 0,
                 ino: 0,
-                mode,
+                mode: if metadata.file_type().is_symlink() {
+                    0o120_000
+                } else {
+                    mode
+                },
                 uid: 0,
                 gid: 0,
                 file_size: u32::try_from(metadata.len()).unwrap_or(u32::MAX),
@@ -293,9 +322,29 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_snapshot_refuses_git_visible_symlinks() {
+    fn test_snapshot_preserves_internal_and_dangling_links_without_reading_targets() {
         let (root, repository, base) = project();
         std::os::unix::fs::symlink("input", root.path().join("link")).unwrap();
+        std::fs::create_dir(root.path().join(".github")).unwrap();
+        std::os::unix::fs::symlink("../CLAUDE.md", root.path().join(".github/copilot-instructions.md")).unwrap();
+        let snapshot = capture(
+            &repository,
+            &base,
+            &"Test <test@example.invalid>".parse().unwrap(),
+            "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
+        )
+        .unwrap();
+        let commit = repository
+            .find_commit(Oid::from_str(snapshot.commit.as_str()).unwrap())
+            .unwrap();
+        let tree = commit.tree().unwrap();
+        for (name, target) in [("link", "input"), (".github/copilot-instructions.md", "../CLAUDE.md")] {
+            let entry = tree.get_path(std::path::Path::new(name)).unwrap();
+            assert_eq!(entry.filemode(), 0o120_000);
+            assert_eq!(repository.find_blob(entry.id()).unwrap().content(), target.as_bytes());
+        }
+        std::os::unix::fs::symlink("../outside", root.path().join("escape")).unwrap();
         assert!(capture(
             &repository,
             &base,

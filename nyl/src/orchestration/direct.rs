@@ -308,13 +308,15 @@ pub fn snapshot_entry(prepared: &mut DirectUnit) -> Result<()> {
     std::fs::create_dir_all(&destination)?;
     let mut digests = BTreeMap::new();
     for relative in files {
-        let source = original.join(&relative);
         let Some(metadata) =
             nyl_state::source::worktree::snapshot_file_metadata(&original, &relative).map_err(config)?
         else {
             continue;
         };
-        let mut bytes = std::fs::read(&source)?;
+        let contents =
+            nyl_state::source::worktree::snapshot_file_contents(&original, &relative, &metadata).map_err(config)?;
+        let mut bytes = contents.clone();
+        bytes.push(u8::from(metadata.file_type().is_symlink()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -325,8 +327,16 @@ pub fn snapshot_entry(prepared: &mut DirectUnit) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(source, &target)?;
-        std::fs::set_permissions(target, metadata.permissions())?;
+        if metadata.file_type().is_symlink() {
+            let link = std::str::from_utf8(&contents).map_err(config)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(link, &target)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(link, &target)?;
+        } else {
+            std::fs::write(&target, contents)?;
+            std::fs::set_permissions(target, metadata.permissions())?;
+        }
     }
     prepared.snapshot_digest =
         nyl_core::digest::sha256_prefixed(&nyl_core::digest::canonical_json_bytes(&digests).map_err(config)?);

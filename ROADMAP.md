@@ -600,17 +600,17 @@ GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
 comment keys and authenticated account ownership require no orchestration state
 or Nyl project configuration.
 
-An explicit `reconcile --worktree` selects one immutable snapshot of Git-visible
-working files for local development, independent of where state is written.
-Discovery, preflight, rendering, keys, and execution consume that same snapshot.
-State transitions and pre-effect run checkpoints retain its commit as an
-additional parent, so state moves and fresh-clone recovery preserve the exact
-inputs. State history follows first parents up to the snapshot boundary. The snapshot's
-reserved source revision and commit marker distinguish it from committed-source
-release evidence. Kubernetes publication requires committed source; explicit
-unit source pins retain their own revisions. M3's source and state path and M4's
-native tools share this behavior; multi-environment worktree selection remains
-outside the initial single-environment interface.
+`nyl reconcile -e <environment> --worktree` runs uncommitted changes, including
+Git-visible untracked files. Nyl captures the files once so discovery, planning,
+and execution all use the same inputs. The snapshot preserves internal symlinks
+without following them; declared input paths still cannot traverse symlinks.
+The run saves its snapshot in the configured state repository before executing
+units, so another clone can recover or tear down the exact deployment. `--local`
+keeps that state in the local clone instead. Snapshot history remains available
+as long as its state history is retained; automatic cleanup is not implemented.
+
+Worktree reconciliation selects one environment. Units with explicit source pins
+keep those revisions, and Kubernetes publication requires committed source.
 
 Orchestration commands are top-level, because it is all GitOps. The
 [orchestration core contract](design/orchestration-core.md#commands) specifies

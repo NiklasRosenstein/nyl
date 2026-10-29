@@ -79,6 +79,14 @@ impl Driver for OperatorDriver {
             .lock()
             .unwrap()
             .push(std::fs::read_to_string(ctx.project_dir.join("repair-input")).unwrap());
+        #[cfg(unix)]
+        if let Ok(metadata) = ctx.worktree.join(".github/copilot-instructions.md").symlink_metadata() {
+            assert!(metadata.file_type().is_symlink());
+            assert_eq!(
+                std::fs::read_link(ctx.worktree.join(".github/copilot-instructions.md")).unwrap(),
+                std::path::Path::new("../CLAUDE.md")
+            );
+        }
         std::fs::write(ctx.project_dir.join("operator-created"), "private execution tree").unwrap();
         Ok(Supported::Supported(ExecStatus::Exited { code: 17 }))
     }
@@ -140,6 +148,11 @@ fn test_exec_is_generic_requires_hold_and_snapshots_dirty_files_before_repair() 
     assert_eq!(harness.invoke(&["hold", "-e", "dev", "--unit", "job"]).exit, 0);
     assert_eq!(exec(&harness, &checkout, false).exit, 17);
     std::fs::write(checkout.join("nyl/repair-input"), "uncommitted").unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(checkout.join(".github")).unwrap();
+        std::os::unix::fs::symlink("../CLAUDE.md", checkout.join(".github/copilot-instructions.md")).unwrap();
+    }
     assert_eq!(exec(&harness, &checkout, true).exit, 17);
     assert_eq!(*seen.lock().unwrap(), ["committed", "uncommitted"]);
     assert!(!checkout.join("nyl/operator-created").exists());

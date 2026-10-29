@@ -240,7 +240,8 @@ spec:
   an override, and a fleet reconcile rejects it.
 - `reconcile -e <env> --worktree` snapshots Git-visible tracked and untracked
   working files once, with deletions and executable modes. It leaves HEAD and
-  the user's index untouched, rejects symlinks, and excludes ignored untracked
+  the user's index untouched, preserves internal symbolic links without following
+  them, rejects traversal through symlinked directories, and excludes ignored untracked
   files. Exactly one named environment is required; `--source`, label selectors,
   and group selectors conflict with this mode. The snapshot overrides the
   Environment's source selection and ordinary run-source reachability only;

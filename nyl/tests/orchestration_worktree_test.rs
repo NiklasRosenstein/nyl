@@ -32,6 +32,11 @@ fn test_worktree_reconciles_untracked_units_and_retains_source_for_fresh_clone_t
     let fixture = project();
     let world = World::new(fixture.path());
     let checkout = world.fresh_clone("main");
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(checkout.join(".github")).unwrap();
+        std::os::unix::fs::symlink("../CLAUDE.md", checkout.join(".github/copilot-instructions.md")).unwrap();
+    }
     let head = git_output(&checkout, &["rev-parse", "HEAD"]);
     nyl(&checkout, &["state", "init", "-e", "local"]).assert().success();
     std::fs::write(checkout.join("input.json"), r#"{"value":"working"}"#).unwrap();

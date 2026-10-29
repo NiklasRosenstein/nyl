@@ -141,8 +141,9 @@ nyl reconcile -e dev --worktree
 ```
 
 Nyl snapshots Git-visible tracked and untracked files once, preserving deletions
-and executable modes. Ignored untracked files are excluded and symlinks are
-rejected. HEAD and the staging index stay untouched. Discovery, preflight,
+and executable modes. Ignored untracked files are excluded. Internal symlinks
+are preserved without following their targets; input paths cannot traverse
+symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
 rendering, and all execution waves use that immutable snapshot; subsequent edits
 belong to the next run. Explicitly pinned unit sources keep their declared
 commits. The flag requires exactly one named environment and conflicts with
@@ -156,7 +157,9 @@ are gone. Choose a local state repository for disposable experiments, as in the
 `--local` independently keeps state transitions on the clone's local branches.
 
 `NYL-SOURCE-WORKTREE`, the transition's `worktreeSource` summary, and the reserved
-`refs/nyl-worktrees/` source revision identify the run's provenance. Snapshots
+`refs/nyl-worktrees/` source revision identify the run's provenance. Those refs
+cache snapshots locally; the state history retains the archived inputs. Nyl does
+not automatically garbage collect snapshots or compact that history. Snapshots
 cannot publish Kubernetes trees or count as clean committed-source promotion
 evidence. Commit changes and reconcile without the flag for that evidence.
 

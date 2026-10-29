@@ -133,7 +133,7 @@ impl Session {
             Finding::new(
                 Code::SourceUnavailable,
                 error,
-                "restore access to state and use ordinary Git-visible files for --worktree",
+                "check state access and worktree paths; symlink targets must stay inside the repository",
             )
             .into()
         })
