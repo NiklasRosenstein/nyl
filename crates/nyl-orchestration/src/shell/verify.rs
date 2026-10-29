@@ -114,7 +114,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
     }
 
     let run = base.ids.run_id();
-    let longest = longest_timeout(verified.iter().map(|name| &snapshot.desired[*name]));
+    let longest = longest_timeout(context.drivers, verified.iter().map(|name| &snapshot.desired[*name]));
     let mut held = match lease::acquire(
         base,
         location,
@@ -252,7 +252,7 @@ fn verify_units(
             outcome = Err(cancelled(&request.environment, signal));
             break;
         }
-        let longest = longest_timeout(batch.iter().map(|name| &snapshot.desired[*name]));
+        let longest = longest_timeout(context.drivers, batch.iter().map(|name| &snapshot.desired[*name]));
         // Move the lease's deadline to cover the batch about to start.
         let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
         if let Err(error) = lease::update(context.base, held, held.lease.units.clone(), deadline) {
@@ -416,9 +416,9 @@ fn verify_unit(
         Err(message) => return failed(message),
     };
     let now = context.base.clock.now();
-    let timeout = unit_timeout(unit);
+    let timeout = unit_timeout(context.drivers, unit);
     let deadline = unit_deadline(&context.base.settings, now, timeout, job.lease_deadline);
-    let (env, secrets) = match execution_credentials(context, &unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &unit.spec) {
         Ok(env) => env,
         Err(message) => {
             let _ = std::fs::remove_dir_all(&temp_dir);

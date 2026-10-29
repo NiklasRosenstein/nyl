@@ -69,7 +69,12 @@ operatorModified:
   status:
     status: exited
     code: 0
-acceptedEmptyState:
-  terraformBackend:
-    backend: "{\"path\":\"/state/dev.tfstate\"}"
-    workspace: default
+retry:
+  state: acknowledged
+  context:
+    resource: test-owned-context
+    version: 1
+  request:
+    by: operator
+    at: "2026-10-28T00:00:00Z"
+    reason: verified the resource

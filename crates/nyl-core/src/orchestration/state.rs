@@ -563,9 +563,19 @@ pub struct ObservedUnit {
     /// A native repair requires an explicit approval before the next execution.
     #[serde(rename = "operatorModified", default, skip_serializing_if = "Option::is_none")]
     pub operator_modified: Option<OperatorModification>,
-    /// A reasoned recovery accepted an empty backend for exactly this scope.
-    #[serde(rename = "acceptedEmptyState", default, skip_serializing_if = "Option::is_none")]
-    pub accepted_empty_state: Option<super::driver::OwnershipScope>,
+    /// A driver-requested retry acknowledgement, bound to this unit incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryAcknowledgement>,
+}
+
+/// Driver-owned retry context and the operator's acknowledgement.
+/// Context contains no secrets and is interpreted only by the emitting driver.
+/// A successful receipt consumes the acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum RetryAcknowledgement {
+    Required { context: Value },
+    Acknowledged { context: Value, request: Request },
 }
 
 /// A native operator call is fenced before it starts and records its result afterwards.

@@ -44,6 +44,9 @@ pub const API_VERSION_TEST_UNITS: &str = "units.test.nyl/v1";
 /// A scripted result for a fake's next call of one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scripted {
+    RetryRequired {
+        context: Value,
+    },
     Failed {
         category: FailureCategory,
         retryable: bool,
@@ -114,7 +117,7 @@ impl Script {
             Some(Scripted::Uncertain) => Some(Drift::Unknown {
                 reason: "scripted unknown verify".to_owned(),
             }),
-            Some(Scripted::Failed { .. }) => {
+            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. }) => {
                 return Err(DriverError::before_effects("scripted verify failure"));
             }
         })
@@ -130,6 +133,11 @@ impl Script {
             Some(Scripted::Succeeded { outputs }) => ScriptedOutcome::Run { outputs },
             Some(Scripted::Uncertain) => ScriptedOutcome::Return(Outcome::Uncertain {
                 reason: format!("scripted uncertain {}", operation.as_str()),
+            }),
+            Some(Scripted::RetryRequired { context }) => ScriptedOutcome::Return(Outcome::RetryRequired {
+                category: FailureCategory::Ownership,
+                message: "scripted retry acknowledgement".to_owned(),
+                context,
             }),
             Some(Scripted::Failed { category, retryable }) => ScriptedOutcome::Return(Outcome::Failed {
                 category,

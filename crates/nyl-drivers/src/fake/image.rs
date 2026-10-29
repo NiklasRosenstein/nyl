@@ -80,6 +80,10 @@ impl Driver for FakeImage {
         1
     }
 
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(60)
+    }
+
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
             plan: true,
@@ -132,9 +136,11 @@ impl Driver for FakeImage {
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.get("repository")
             .and_then(Value::as_str)
-            .map(|repository| OwnershipScope::OciRepository {
-                repository: repository.to_owned(),
-                tag_prefix: format!("nyl-{environment}-"),
+            .map(|repository| OwnershipScope {
+                namespace: "oci-tags".to_owned(),
+                key: vec![repository.to_owned(), format!("nyl-{environment}-")],
+                path: vec![],
+                description: format!("OCI repository {repository} tags nyl-{environment}-*"),
             })
             .into_iter()
             .collect()
