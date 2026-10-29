@@ -168,9 +168,23 @@ evidence. Commit changes and reconcile without the flag for that evidence.
 
 Reconcile prints a start and end message for every dispatched unit. End messages
 include the result and elapsed time, with a short reason when the unit fails.
-Tool output is labelled with the environment/unit address, so concurrent units
-remain distinguishable. Progress and tool transcripts go to stderr; JSON reports
-stay on stdout.
+Public tool output streams live, indented and labelled with the environment/unit
+address, so concurrent units remain distinguishable. Terraform and OpenTofu show
+their readable init, plan and apply output; structured version, plan inspection
+and output-value JSON stays private. Admitted secrets are masked before display
+or logging. Progress and tool transcripts go to stderr; JSON reports stay on stdout.
+
+Use `--quiet-unit-output` to hide tool output while keeping unit start/end
+messages. `--unit-log-dir DIR` also appends the masked transcript to
+`DIR/<environment>/<unit>.log`; combine the flags to write files without showing
+tool output. These files contain public tool output, never private structured
+stdout. Log files append across invocations, and new files have private
+permissions on Unix. Logs are local files and are not stored in Nyl state.
+
+```bash
+nyl reconcile -e dev --unit-log-dir /tmp/nyl-logs
+nyl reconcile -e dev --quiet-unit-output --unit-log-dir /tmp/nyl-logs
+```
 
 The final summary follows dispatch order, with names breaking ties in a parallel
 wave. Units that did not run follow in dependency order, and teardown lists

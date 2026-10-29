@@ -58,9 +58,10 @@ $ nyl teardown -e dev --unit worker --hold --reason "rotate the worker"
 [dev/worker] removed in 0.0s
 UNIT    KIND     RESULT   DETAIL
 worker  Command  removed
-run: 01a18581-0ea6-7282-9a50-7efce0a0c17e
-desired: 6eeccb9e675d2e8c6ae5cd1fcda3944afa50c191
-observed: f438cd48245c94da2a00a27bcb711dc4258914e0
+
+  run:      01a18581-0ea6-7282-9a50-7efce0a0c17e
+  desired:  6eeccb9e675d2e8c6ae5cd1fcda3944afa50c191
+  observed: f438cd48245c94da2a00a27bcb711dc4258914e0
 ```
 
 A unit that needs a manual approval is reported `awaiting-approval` until
@@ -83,9 +84,12 @@ the unit `held` with a pending teardown. After `nyl resume`, the next
 $ nyl teardown -e dev --unit config --reason replace config
 UNIT    KIND     RESULT  DETAIL
 config  Command  held
-run: 01a17ac9-068c-7804-b8ec-12a293ec3f77
-desired: c61ce895d31795f4dd681bc8fb50101a1f4ea7b8
-warning NYL-UNIT-HELD (config): unit config of dev is held; the hold keeps a pending teardown from applying
+
+  run:      01a17ac9-068c-7804-b8ec-12a293ec3f77
+  desired:  c61ce895d31795f4dd681bc8fb50101a1f4ea7b8
+
+warning NYL-UNIT-HELD (config)
+  unit config of dev is held; the hold keeps a pending teardown from applying
   fix: lift the hold with `nyl resume -e dev --unit config` and the next reconcile or teardown carries it out
 ```
 

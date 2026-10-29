@@ -68,6 +68,11 @@ digest with the saved plan before applying. With `requireDigest: false`, explici
 unreviewed approval is also supported. Repair after `nyl exec` requires a reviewed
 digest. No-change plans skip apply.
 
+Readable init, plan and apply output streams through the masked unit transcript.
+Native sensitivity annotations redact values in that readable output. See
+[Following execution](/nyl/orchestration/runs/#following-execution) to hide it or
+save masked logs to local files.
+
 Only declared, correctly typed, non-sensitive outputs are recorded. A native
 output marked sensitive must be declared sensitive; Nyl checks this before
 apply. Teardown creates and applies a native destroy plan using the same

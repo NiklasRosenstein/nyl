@@ -165,6 +165,8 @@ requires `--allow-teardown`.
 5. `output -json`. Each declared output must exist and match its type.
    Undeclared outputs are ignored, whether sensitive or not.
 
+The driver streams readable `init`, `plan` and `apply` output through the masked
+transcript. Native sensitivity annotations redact values in that readable output.
 The driver parses `show -json` and `output -json` in memory; their stdout never
 reaches the transcript, because it contains every sensitive value, including
 undeclared sensitive outputs. Only declared, non-sensitive outputs are kept.

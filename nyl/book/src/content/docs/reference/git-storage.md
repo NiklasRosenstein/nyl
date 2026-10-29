@@ -119,7 +119,8 @@ dea88c9f5d771d6d36ce713136a4994999523ba5 commit	refs/nyl/dev/runs/01a1732a-a59c-
 $ git show refs/nyl/dev/runs/01a1732a-a59c-760b-aebe-f293aff659d9:run.yaml
 apiVersion: gitops.nyl/v1
 kind: Run
-run: 01a1732a-a59c-760b-aebe-f293aff659d9
+
+  run:      01a1732a-a59c-760b-aebe-f293aff659d9
 runner: unknown@localhost
 operation: reconcile
 sourceCommit: 829c3b4f2faa421fc9498168330f1e92df8772a5

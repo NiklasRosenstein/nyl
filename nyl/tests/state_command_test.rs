@@ -95,7 +95,12 @@ fn test_state_init_creates_a_missing_local_repository_and_is_idempotent() {
         .code(1);
     assert!(!state_path.exists());
 
-    nyl(&checkout, &["state", "init", "-e", "local"]).assert().success();
+    nyl(&checkout, &["state", "init", "-e", "local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "location: {url} (nyl/local/desired and nyl/local/observed, coordination refs/nyl/)"
+        )));
     assert!(git2::Repository::open(&state_path).unwrap().is_bare());
     for side in ["desired", "observed"] {
         assert!(git_output(
@@ -108,7 +113,8 @@ fn test_state_init_creates_a_missing_local_repository_and_is_idempotent() {
     nyl(&checkout, &["state", "init", "-e", "local", "-o", "json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"outcome\": \"unchanged\""));
+        .stdout(predicate::str::contains("\"outcome\": \"unchanged\""))
+        .stdout(predicate::str::contains(format!("\"location\": \"{url} (")));
     assert_eq!(git_output(&state_path, &["for-each-ref", "refs/heads/nyl/"]), before);
     assert!(git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/"]).is_empty());
 }

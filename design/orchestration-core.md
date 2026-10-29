@@ -1480,8 +1480,10 @@ Nyl-Version: 0.7.0
 The shell emits typed start and end events for dispatched units, using the
 injected clock and the same normalized result and message as the unit report.
 The CLI prints them on stderr, including the unit address, elapsed time, and
-short failure reason. Public native-tool transcript lines carry the unit address
-after secret masking; captured bytes and private stdout remain unchanged. Reports
+short failure reason. Public native-tool transcript lines are indented and carry
+the unit address after secret masking. `--quiet-unit-output` hides those lines
+without hiding lifecycle events; `--unit-log-dir` independently appends masked
+lines to local per-unit files. Captured bytes and private stdout remain unchanged. Reports
 keep a keyed `units` map and a `unitOrder` list: dispatch order first, then
 undispatched units in dependency order, or consumers first for teardown. Names
 break ties within a wave. Machine reports alone go to stdout.
@@ -2734,8 +2736,9 @@ enum Outcome {
   teardown ended this way, or by the tool dying from a signal, is `uncertain`,
   because effects may have happened; a plan or verification ended this way
   fails with category `timeout`.
-- Transcripts are masked as they are written, stored on the runner only for
-  the invocation, and printed on stderr; state records no transcript.
+- Transcripts are masked as they are written and printed on stderr unless
+  explicitly suppressed. Optional local log files contain the same masked public
+  lines, never private stdout. State records no transcript.
 - Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
   reported, never silently skipped.
 

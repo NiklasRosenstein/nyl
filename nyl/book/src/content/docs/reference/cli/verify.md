@@ -47,8 +47,11 @@ unit is verified, so its report lists no units:
 ```console
 $ nyl verify -e dev
 dev: no units
-run: 01a17ac1-6115-73be-9b83-6ec5c43ada42
-error NYL-LEASE-BROKEN: the lease of dev was broken and its run 01a17ac1-5ed7-770a-9da3-a4fe0b96a2a1 has not been imported yet
+
+  run:      01a17ac1-6115-73be-9b83-6ec5c43ada42
+
+error NYL-LEASE-BROKEN
+  the lease of dev was broken and its run 01a17ac1-5ed7-770a-9da3-a4fe0b96a2a1 has not been imported yet
   fix: run `nyl recover -e dev` to import it (a `nyl reconcile` or `nyl teardown` of dev imports it too), then run this command again
 ```
 

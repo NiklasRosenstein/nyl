@@ -39,6 +39,14 @@ pub struct Cli {
     /// When to use colored output
     #[arg(long, value_enum, default_value = "auto", global = true)]
     pub color: ColorChoice,
+
+    /// Hide public unit tool output; unit start/end messages still appear.
+    #[arg(long, global = true)]
+    pub quiet_unit_output: bool,
+
+    /// Append masked unit tool output to DIR/<environment>/<unit>.log.
+    #[arg(long, value_name = "DIR", global = true)]
+    pub unit_log_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -174,7 +182,10 @@ impl Cli {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let worker = std::thread::spawn(move || {
                     let outcome = (|| -> Result<crate::orchestration::run::CommandOutcome> {
-                        let owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        let mut owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        owned.tools = owned
+                            .tools
+                            .unit_output(self.quiet_unit_output, self.unit_log_dir.clone());
                         let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
                         self.execute_in_process(&wiring)
                     })();

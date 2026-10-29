@@ -118,7 +118,7 @@ pub fn rejected(log: &[LogEntry]) -> Vec<CommitId> {
         .collect()
 }
 
-/// `1 local transition`, `2 local transitions`.
+/// `1 commit`, `2 commits`.
 fn count(number: usize, noun: &str) -> String {
     if number == 1 {
         format!("1 {noun}")
@@ -130,7 +130,7 @@ fn count(number: usize, noun: &str) -> String {
 /// The warning for diverged local branches; `None` when they follow the remote.
 ///
 /// The counts are the larger of the two refs', since a transition writes at
-/// most one commit per ref.
+/// most one commit per ref. Git ancestry includes retained source commits.
 pub fn divergence_warning(environment: &EnvironmentName, divergence: &LocalDivergence) -> Option<Finding> {
     let sides = [divergence.desired, divergence.observed];
     let ahead = sides.iter().flatten().map(|side| side.ahead).max().unwrap_or(0);
@@ -138,13 +138,16 @@ pub fn divergence_warning(environment: &EnvironmentName, divergence: &LocalDiver
     let message = match (ahead, behind) {
         (0, 0) => return None,
         (ahead, 0) => format!(
-            "local state of {environment} has {} the remote does not record",
-            count(ahead, "local transition")
+            "state branches of {environment} in this clone are {} ahead of the configured state repository",
+            count(ahead, "commit")
         ),
-        (0, behind) => format!("local state of {environment} is {behind} behind the remote"),
+        (0, behind) => format!(
+            "state branches of {environment} in this clone are {} behind the configured state repository",
+            count(behind, "commit")
+        ),
         (ahead, behind) => format!(
-            "local state of {environment} has {} and is {behind} behind the remote",
-            count(ahead, "local transition")
+            "state branches of {environment} in this clone are {} ahead of and {} behind the configured state repository",
+            count(ahead, "commit"), count(behind, "commit")
         ),
     };
     let fix = if ahead == 0 {
@@ -598,7 +601,7 @@ mod tests {
         assert_eq!(warning.code, Code::StateLocalDiverged);
         assert_eq!(
             warning.message,
-            "local state of dev has 2 local transitions and is 3 behind the remote"
+            "state branches of dev in this clone are 2 commits ahead of and 3 commits behind the configured state repository"
         );
         assert!(
             warning.fix.contains("nyl state reset -e dev --local"),
@@ -615,7 +618,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ahead.message,
-            "local state of dev has 1 local transition the remote does not record"
+            "state branches of dev in this clone are 1 commit ahead of the configured state repository"
         );
     }
 

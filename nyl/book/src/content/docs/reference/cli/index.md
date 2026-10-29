@@ -40,6 +40,11 @@ closely related pair.
 
 ## Global Options
 
+`--quiet-unit-output` hides public tool output from orchestration units while
+keeping their start/end messages. `--unit-log-dir DIR` appends masked unit logs
+to files, independently of console output. See
+[Following execution](/nyl/orchestration/runs/#following-execution) for usage.
+
 ### `--verbose` / `-v`
 
 Enable verbose logging for debugging.

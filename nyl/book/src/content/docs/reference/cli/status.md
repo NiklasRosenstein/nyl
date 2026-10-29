@@ -57,12 +57,23 @@ unit only warns. A run whose lease expired or was broken before it finished
 is reported with `NYL-LEASE-LOST`; the fix names `nyl reconcile`, and `nyl
 recover -e <env>`, which imports the run without executing anything.
 
+The table is separated from its indented source and commit provenance by a blank
+line. Diagnostics follow separately, with a code, message and suggested fix in
+each block.
+
 When this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs)
-hold local transitions or are behind the remote, `status` warns with
-`NYL-STATE-LOCAL-DIVERGED`, such as "local state of dev has 2 local
-transitions and is 3 behind the remote". The warning does not change the exit
-code. `--local` shows the local view instead: the state as the clone's
-branches hold it, including `nyl reconcile --local` runs.
+diverge from the configured state repository, `status` warns with
+`NYL-STATE-LOCAL-DIVERGED`. Ahead/behind counts are Git commits, including retained
+source ancestry; they do not count unit executions. The larger count across the
+desired and observed refs is shown for each direction. A configured local bare
+repository is still a separate state repository for this comparison.
+
+The table shows the configured state repository unless `--local` is given.
+`--local` shows this clone's branches, including `nyl reconcile --local` runs;
+`--worktree` selects source inputs and does not select local state. The warning
+does not change the exit code. Inspect the local view before using
+[`nyl state reset --local`](/nyl/reference/cli/state/#nyl-state-reset), which can
+discard local receipts.
 
 Select several environments with repeated `-e`, with `-l stage=production`, or
 with `-g <group>`. They run in dependency order with one report section per

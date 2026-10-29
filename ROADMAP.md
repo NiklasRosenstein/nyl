@@ -620,7 +620,9 @@ as long as its state history is retained; automatic cleanup is not implemented.
 Worktree reconciliation selects one environment. Units with explicit source pins
 keep those revisions, and Kubernetes publication requires committed source.
 
-Unit progress and labelled tool output stream on stderr. Summaries follow dispatch
+Unit progress and labelled tool output stream on stderr. Public tool lines are
+indented; explicit output options can hide them or append masked per-unit logs
+to local files. Summaries follow dispatch
 order, with dependency order for units that did not run and consumers first for
 teardown. JSON reports retain a keyed units map and provide the summary order
 separately.

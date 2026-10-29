@@ -190,6 +190,7 @@ pub fn init(
         location,
         requested,
         |held, report| {
+            report.details.insert("location".to_owned(), json!(describe(location)));
             let snapshot = read(context, location, environment)?;
             let event = StateEvent::StateInitialized {
                 at: held.lease.taken_at,

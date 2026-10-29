@@ -42,6 +42,10 @@ not a Git repository fails with `NYL-STATE-UNAVAILABLE`. Remote repositories
 and separate read/write destinations must already exist. Other commands never
 create a repository.
 
+The report prints the resolved repository, desired and observed refs, state path
+when configured, and coordination prefix, including when state already exists.
+JSON output includes this description in `details.location`.
+
 `--fresh` starts over deliberately: every unit becomes a new incarnation and
 executes again at the next reconcile. It is also the way to start over at a
 location whose state was deleted with [`nyl state delete`](#nyl-state-delete):
@@ -134,13 +138,10 @@ state-delete dev: done
   removed: ["migrate"]
 $ nyl status -e dev
 dev: no units
-error NYL-STATE-DELETED: the state of dev was deleted with `nyl state delete`
+
+error NYL-STATE-DELETED
+  the state of dev was deleted with `nyl state delete`
   fix: remove the Environment dev from source to decommission it, or start it over with `nyl state init -e dev --fresh`
-$ nyl state init -e dev --fresh --reason "start over"
-state-init dev: done
-  desired: fc0c49c407eff5f6b2c4e92fea5f530e287aacfa
-  observed: e04a73265608a6e3775bbdb42a975e3d58be4578
-  fresh: every unit becomes a new incarnation and executes again at the next reconcile
 ```
 
 ## `nyl state reset`

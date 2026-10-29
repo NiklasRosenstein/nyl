@@ -65,13 +65,18 @@ Units leaving the ownership set of dev (2):
 UNIT    KIND     RESULT            DETAIL
 cache   Command  pending-teardown
 worker  Command  retained
-run: 01a17a82-ac26-7de8-923e-533f84f9cfae
-source: a16f93e6a1b69c767af8a3f37c84e6f102c20858
-desired: fe129b91809ec6961f7b32453bc6fcc2239200cb
-observed: 6b48875629cd176dc861c5a779a0562466174463
-warning NYL-PLAN-UNITS-LEAVING: 2 unit(s) leave the ownership set of dev: cache (removed), worker (removed)
+
+  run:      01a17a82-ac26-7de8-923e-533f84f9cfae
+  source:   a16f93e6a1b69c767af8a3f37c84e6f102c20858
+  desired:  fe129b91809ec6961f7b32453bc6fcc2239200cb
+  observed: 6b48875629cd176dc861c5a779a0562466174463
+
+warning NYL-PLAN-UNITS-LEAVING
+  2 unit(s) leave the ownership set of dev: cache (removed), worker (removed)
   fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
-warning NYL-TEARDOWN-PENDING (cache): unit cache of dev left the ownership set; its teardown waits for --allow-teardown
+
+warning NYL-TEARDOWN-PENDING (cache)
+  unit cache of dev left the ownership set; its teardown waits for --allow-teardown
   fix: pass --allow-teardown to nyl reconcile to tear it down, restore it in source to keep it, or let it go without a teardown with `nyl state forget -e dev --unit cache`
 ```
 
@@ -113,11 +118,14 @@ Units leaving the ownership set of dev (1):
 UNIT    KIND     RESULT    DETAIL
 cache   Command  removed
 worker  Command  retained
-run: 01a17a82-ae30-7f9b-a80a-cd3d9d972431
-source: a16f93e6a1b69c767af8a3f37c84e6f102c20858
-desired: 8baf76b5b32791f571720e1c49d39a5c8c721c7c
-observed: d06d598d244736f6e75ad24cb86688643990ca95
-warning NYL-PLAN-UNITS-LEAVING: 1 unit(s) leave the ownership set of dev: cache (removed)
+
+  run:      01a17a82-ae30-7f9b-a80a-cd3d9d972431
+  source:   a16f93e6a1b69c767af8a3f37c84e6f102c20858
+  desired:  8baf76b5b32791f571720e1c49d39a5c8c721c7c
+  observed: d06d598d244736f6e75ad24cb86688643990ca95
+
+warning NYL-PLAN-UNITS-LEAVING
+  1 unit(s) leave the ownership set of dev: cache (removed)
   fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
 ```
 
@@ -137,10 +145,11 @@ $ nyl reconcile -e dev
 UNIT    KIND     RESULT    DETAIL
 cache   Command  executed
 worker  Command  current
-run: 01a17a82-b014-7cfa-a9de-b8fdecc75ea5
-source: 2ad296eaa4add7a001d5a62229d25ec3d55ada63
-desired: a87cceab5ea1807e3c4c2c0f3d3fe33ea7ce5f0e
-observed: aee94e95faa5fcf4e6076c42ad64a4e66ffe324e
+
+  run:      01a17a82-b014-7cfa-a9de-b8fdecc75ea5
+  source:   2ad296eaa4add7a001d5a62229d25ec3d55ada63
+  desired:  a87cceab5ea1807e3c4c2c0f3d3fe33ea7ce5f0e
+  observed: aee94e95faa5fcf4e6076c42ad64a4e66ffe324e
 ```
 
 [`nyl state forget`](/nyl/reference/cli/state/) drops a tombstone or a

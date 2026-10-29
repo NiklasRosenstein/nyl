@@ -74,16 +74,19 @@ run still checkpoints them and writes its transition commit:
 ```console
 $ nyl reconcile -e dev --fail-fast --concurrency 1
 [dev/broken] starting Command (reconcile)
-[dev/broken] connection refused
+  [dev/broken] connection refused
 [dev/broken] failed in 0.0s: command exited with code 1
 UNIT    KIND     RESULT   DETAIL
 broken  Command  failed   command exited with code 1
 report  Command  blocked  /dependsOn/0 waits for broken (no-current-receipt)
-run: 01a18581-e81a-76b7-b92e-dde094292715
-source: 31d0b75f7f54f720a76847c6dacf768371f0ca63
-desired: 4b5fd9df85d0db0c82181710bc9b457a582a8e22
-observed: 63b784cd15c55e8337adf1379c2bc6e09e69e611
-warning NYL-RUN-STOPPED: --fail-fast stopped the run of dev after unit broken: it started no further unit
+
+  run:      01a18581-e81a-76b7-b92e-dde094292715
+  source:   31d0b75f7f54f720a76847c6dacf768371f0ca63
+  desired:  4b5fd9df85d0db0c82181710bc9b457a582a8e22
+  observed: 63b784cd15c55e8337adf1379c2bc6e09e69e611
+
+warning NYL-RUN-STOPPED
+  --fail-fast stopped the run of dev after unit broken: it started no further unit
   fix: fix broken, then run again; without --fail-fast a run continues with every unit that does not depend on it
 ```
 
@@ -162,8 +165,11 @@ order, then units that did not run in dependency order; teardown uses consumers
 first. Names break ties within a parallel wave.
 
 Unit start and end messages stream to stderr with the environment/unit address,
-result, elapsed time, and a short failure reason. Public tool output also carries
-that address on every line; captured outputs retain their original bytes.
+result, elapsed time, and a short failure reason. Public tool output is indented
+and carries that address on every line; captured outputs retain their original
+bytes. [Execution output controls](/nyl/orchestration/runs/#following-execution)
+can hide tool output (`--quiet-unit-output`), append masked unit logs to files
+(`--unit-log-dir DIR`), or do both.
 `-o json` keeps stdout exclusively for the report. Every error and warning carries
 a stable code and its fix.
 

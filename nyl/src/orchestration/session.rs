@@ -385,11 +385,15 @@ pub fn outcome(report: &RunReport, output: RunOutput, exit: u8) -> CommandOutcom
         RunOutput::Json => pretty_json(&json),
         RunOutput::Table => table(report),
     };
+    let mut stderr = diagnostics(report);
+    if matches!(output, RunOutput::Table) && !stdout.is_empty() && !stderr.is_empty() {
+        stderr.insert(0, '\n');
+    }
     CommandOutcome {
         exit,
         report: json,
         stdout,
-        stderr: diagnostics(report),
+        stderr,
     }
 }
 
@@ -473,14 +477,17 @@ fn table(report: &RunReport) -> String {
         } else {
             let _ = writeln!(text, "{}", render_table(headers, &rows));
         }
+        if environment.run.is_some() || environment.source_commit.is_some() || !environment.commits.is_empty() {
+            text.push('\n');
+        }
         if let Some(run) = &environment.run {
-            let _ = writeln!(text, "run: {run}");
+            let _ = writeln!(text, "  run:      {run}");
         }
         if let Some(source) = &environment.source_commit {
-            let _ = writeln!(text, "source: {source}");
+            let _ = writeln!(text, "  source:   {source}");
         }
         for (side, commit) in &environment.commits {
-            let _ = writeln!(text, "{side}: {commit}");
+            let _ = writeln!(text, "  {label:<9} {commit}", label = format!("{side}:"));
         }
     }
     text
@@ -600,10 +607,13 @@ fn diagnostics(report: &RunReport) -> String {
 
 /// Print one finding with its code and fix.
 pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, finding: &Finding) {
+    if !text.is_empty() {
+        text.push('\n');
+    }
     let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
     let _ = writeln!(
         text,
-        "{level} {}{unit}: {}\n  fix: {}",
+        "{level} {}{unit}\n  {}\n  fix: {}",
         finding.code, finding.message, finding.fix
     );
 }
@@ -619,6 +629,15 @@ mod tests {
     fn test_outcome_renders_table_and_json_from_one_report() {
         let mut report = RunReport::new(ReportKind::ReconcileReport);
         let mut environment = EnvironmentRunReport::new(EnvironmentName::new("dev").unwrap());
+        environment.source_commit = Some(CommitId::new("a".repeat(40)).unwrap());
+        environment.warnings.push(Finding::new(
+            Code::StateLocalDiverged,
+            "state branches differ",
+            "inspect --local",
+        ));
+        environment
+            .warnings
+            .push(Finding::new(Code::DriverError, "unit failed", "retry"));
         environment.units.insert(
             UnitName::new("web").unwrap(),
             UnitReport {
@@ -632,6 +651,8 @@ mod tests {
         report.environments.push(environment);
         let table = outcome(&report, RunOutput::Table, 2);
         assert_eq!(table.exit, 2);
+        assert!(table.stdout.contains("\n\n  source:   "), "{}", table.stdout);
+        assert_eq!(table.stderr, "\nwarning NYL-STATE-LOCAL-DIVERGED\n  state branches differ\n  fix: inspect --local\n\nwarning NYL-DRIVER-ERROR\n  unit failed\n  fix: retry\n");
         assert!(table.stdout.contains("web"), "{}", table.stdout);
         assert!(table.stdout.contains("blocked"), "{}", table.stdout);
         assert!(

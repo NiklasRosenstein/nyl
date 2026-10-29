@@ -11,6 +11,62 @@ use nyl_orchestration::run_report::EnvironmentRunReport;
 use nyl_orchestration::shell::run::{self, Cancellation, RunContext, RunMode, TeardownTarget};
 use scenario::shell::{command, project, Harness, ENVIRONMENT, NYL_TOML};
 
+#[cfg(unix)]
+#[test]
+fn test_cli_unit_output_streams_or_logs_while_json_and_progress_stay_separate() {
+    let unit = command(
+        "logged",
+        "printf from-tool; printf diagnostic >&2",
+        "  idempotent: true\n",
+    );
+    let fixture = project(&[
+        NYL_TOML,
+        ("nyl/environment.yaml", ENVIRONMENT),
+        ("nyl/unit.yaml", &unit),
+    ]);
+    let world = scenario::world::World::new(fixture.path());
+    let checkout = world.fresh_clone("main");
+    let logs = tempfile::TempDir::new().unwrap();
+    let invoke = |args: &[&str]| {
+        assert_cmd::Command::from_std(scenario::nyl_as_author(&checkout, args))
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .success()
+            .get_output()
+            .clone()
+    };
+    invoke(&["state", "init", "-e", "dev"]);
+    for quiet in [false, true] {
+        let mut args = vec![
+            "reconcile",
+            "-e",
+            "dev",
+            "-o",
+            "json",
+            "--unit",
+            "logged",
+            "--reapply",
+            "--reason",
+            "check output",
+            "--unit-log-dir",
+            logs.path().to_str().unwrap(),
+        ];
+        if quiet {
+            args.push("--quiet-unit-output");
+        }
+        let output = invoke(&args);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["environments"][0]["units"]["logged"]["result"], "executed");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("[dev/logged] starting Command"), "{stderr}");
+        assert!(stderr.contains("[dev/logged] executed in"), "{stderr}");
+        assert_eq!(stderr.contains("  [dev/logged] from-tool\n"), !quiet, "{stderr}");
+    }
+    let log = std::fs::read_to_string(logs.path().join("dev/logged.log")).unwrap();
+    assert_eq!(log.matches("  [dev/logged] from-tool\n").count(), 2, "{log}");
+    assert_eq!(log.matches("  [dev/logged] diagnostic\n").count(), 2, "{log}");
+}
+
 struct Events {
     events: Mutex<Vec<UnitProgress>>,
     fast_finished: PathBuf,
