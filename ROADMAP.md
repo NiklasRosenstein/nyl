@@ -75,6 +75,14 @@ exact values proven in one environment to the next.
 - **Pinned evidence.** Every value that reaches an effect is traceable to an
   exact source commit, state revision, or recorded unit result.
 
+Native tool policy belongs to drivers. The engine coordinates generic ownership
+claims, driver-declared defaults and source requirements, and reasoned retry
+acknowledgements. Drivers canonicalize resource identities and validate their
+own non-secret retry context; shared orchestration and state storage do not
+interpret tool names, backend details, or diagnostic messages. M4 supplies and
+exercises this boundary for image and infrastructure drivers; M5 uses the same
+contract for publication.
+
 ### Initial scope
 
 - Declared, typed Release inputs bound to static values, project files, pinned

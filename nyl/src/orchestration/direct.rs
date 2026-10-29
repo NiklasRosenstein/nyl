@@ -261,12 +261,9 @@ pub fn prepare(
     if let Some(env) = key_spec.get_mut("env").and_then(serde_json::Value::as_object_mut) {
         env.remove("secrets");
     }
-    if let Some(object) = key_spec.as_object_mut() {
-        object.remove("registryAuth");
-    }
     let env =
         nyl_orchestration::shell::run::execution_environment(&wiring.process_env, None, &key_spec).map_err(config)?;
-    let deadline = nyl_core::orchestration::time::Duration::from_secs(3600).after(now);
+    let deadline = nyl_orchestration::shell::run::unit_timeout(wiring.drivers, &prepared.unit).after(now);
     let tools = nyl_orchestration::shell::tools::DeadlineRunner {
         tools: wiring.tools,
         clock: wiring.clock.as_ref(),

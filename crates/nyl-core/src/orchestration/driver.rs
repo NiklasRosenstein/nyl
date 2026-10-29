@@ -86,6 +86,9 @@ pub struct Capabilities {
     pub change_digest: bool,
     /// `nyl exec` support; `None` without it.
     pub exec: Option<ExecTerminal>,
+    /// This kind requires committed inputs rather than a worktree snapshot.
+    #[serde(default, rename = "requiresCommittedSource")]
+    pub requires_committed_source: bool,
 }
 
 /// Whether an operator tool takes the terminal.
@@ -114,20 +117,26 @@ pub struct RecoveryPolicies {
     pub teardown: RecoveryPolicy,
 }
 
-/// A typed claim on native resources, checked for overlap across units.
+/// A driver's claim on a resource identity and a subtree beneath it.
+/// Equal namespaces and keys overlap when either path contains the other.
+/// Drivers canonicalize keys and path segments; descriptions are display-only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub enum OwnershipScope {
-    /// A Terraform or OpenTofu backend: its canonical configuration and key, and workspace.
-    TerraformBackend { backend: String, workspace: String },
-    /// An OCI repository and the tag prefix one environment moves.
-    OciRepository { repository: String, tag_prefix: String },
-    /// A publication repository, revision, and path prefix.
-    Publication {
-        repository: String,
-        revision: String,
-        path_prefix: String,
-    },
+pub struct OwnershipScope {
+    pub namespace: String,
+    pub key: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+    pub description: String,
+}
+
+impl OwnershipScope {
+    /// Whether these claims intersect, independently of their display text.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.namespace == other.namespace
+            && self.key == other.key
+            && (self.path.starts_with(&other.path) || other.path.starts_with(&self.path))
+    }
 }
 
 /// What resolution needs from a driver to compute an execution key.
@@ -208,6 +217,13 @@ pub enum Outcome {
         category: FailureCategory,
         retryable: bool,
         message: String,
+    },
+    /// A failure requiring an operator's reason before retry. The context is
+    /// non-secret driver-owned data, recorded and returned without interpretation.
+    RetryRequired {
+        category: FailureCategory,
+        message: String,
+        context: Value,
     },
     /// Effects may or may not have happened.
     Uncertain { reason: String },
@@ -467,6 +483,10 @@ pub trait Driver: Send + Sync {
     fn kind(&self) -> &'static str;
     /// Bumped only when execution semantics change in a way that requires re-execution.
     fn behavior_version(&self) -> u32;
+    /// The execution timeout when the common `timeout` field is omitted.
+    fn default_timeout(&self) -> super::time::Duration {
+        super::time::Duration::from_mins(30)
+    }
     /// Capabilities for a spec: a Command can tear down only with a `teardown` step.
     fn capabilities(&self, spec: &Value) -> Capabilities;
     /// Recovery policies for a spec: a Command converges only with `idempotent: true`.
@@ -475,6 +495,19 @@ pub trait Driver: Send + Sync {
     fn spec_schema(&self) -> schemars::Schema;
     /// Parse and validate a rendered spec, references still as expressions.
     fn validate_spec(&self, spec: &Value) -> std::result::Result<(), String>;
+    /// Provider keys explicitly declared by this spec for driver credentials.
+    fn secret_refs(&self, _spec: &Value) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    /// Additional environment admitted by the driver's explicit credential declaration.
+    /// The snapshot is supplied by the shell; this method performs no process reads.
+    fn credential_environment(
+        &self,
+        _spec: &Value,
+        _process_env: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
     /// Attestation names the kind can produce for a spec; none by default.
     fn attestations(&self, spec: &Value) -> Vec<String> {
         let _ = spec;
@@ -601,5 +634,34 @@ impl DriverSet {
 impl std::fmt::Debug for DriverSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_list().entries(self.drivers.keys()).finish()
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn test_claims_compare_namespaces_keys_and_path_segments_independently_of_descriptions() {
+        let parent = OwnershipScope {
+            namespace: "test-tree".to_owned(),
+            key: vec!["resource".to_owned()],
+            path: vec!["app".to_owned()],
+            description: "parent".to_owned(),
+        };
+        let mut child = parent.clone();
+        child.path.push("web".to_owned());
+        child.description = "child".to_owned();
+        assert!(parent.overlaps(&child) && child.overlaps(&parent));
+        child.path = vec!["application".to_owned()];
+        assert!(!parent.overlaps(&child));
+        child.path = parent.path.clone();
+        child.key.push("other".to_owned());
+        assert!(!parent.overlaps(&child));
+        child.key = parent.key.clone();
+        child.namespace = "other".to_owned();
+        assert!(!parent.overlaps(&child));
+        child.namespace = parent.namespace.clone();
+        child.path.clear();
+        assert!(parent.overlaps(&child));
     }
 }

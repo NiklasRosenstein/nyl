@@ -223,3 +223,24 @@ fn test_local_worktree_run_does_not_publish_its_snapshot_to_the_state_repository
         .find_commit(commit)
         .is_err());
 }
+
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_worktree_source_policy_comes_from_the_driver_for_any_kind() {
+    use scenario::shell::{project as test_project, Harness, ENVIRONMENT, NYL_TOML};
+    let fixture = test_project(&[NYL_TOML,("nyl/environment.yaml", ENVIRONMENT),("nyl/publisher.yaml", "apiVersion: units.gitops.nyl/v1\nkind: OtherPublisher\nmetadata: {name: publisher, labels: {dev: 'true'}}\nspec: {target: unused, mode: publish}\n")]);
+    let mut harness = Harness::new(fixture.path(), true);
+    harness.drivers.register_as(
+        "units.gitops.nyl/v1",
+        "OtherPublisher",
+        std::sync::Arc::new(nyl_drivers::fake::FakePublication::default()),
+    );
+    harness.init();
+    let report = harness.invoke(&["reconcile", "-e", "dev", "--worktree"]);
+    assert_eq!(report.exit, 1, "{}", report.stderr);
+    assert!(
+        report.stderr.contains("unit publisher requires committed source"),
+        "{}",
+        report.stderr
+    );
+}

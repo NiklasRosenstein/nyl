@@ -31,8 +31,8 @@
 
 use nyl_core::orchestration::ids::RunId;
 use nyl_core::orchestration::state::{
-    Condition, DesiredUnit, FailureCategory, ObservedUnit, ObservedUnitKind, OperatorModification, Receipt,
-    TeardownWaiting, UnitIdentity,
+    Condition, DesiredUnit, FailureCategory, ObservedUnit, ObservedUnitKind, OperatorModification, Receipt, Request,
+    RetryAcknowledgement, TeardownWaiting, UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 
@@ -67,10 +67,16 @@ pub enum Event {
     RecoverRetry,
     /// A held native tool may have changed effects outside reconciliation.
     OperatorModified { modification: OperatorModification },
-    /// Recovery accepted an empty native backend for one recorded ownership scope.
-    AcceptEmptyState {
-        scope: nyl_core::orchestration::driver::OwnershipScope,
+    /// A driver requires a reasoned acknowledgement before retrying.
+    RetryRequired {
+        since: Timestamp,
+        run: RunId,
+        category: FailureCategory,
+        message: String,
+        context: serde_json::Value,
     },
+    /// The operator acknowledges the recorded driver context for this incarnation.
+    AcknowledgeRetry { request: Request },
     /// `nyl recover --accept <run>`, with the receipt that run checkpointed.
     RecoverAccept { receipt: Receipt },
     /// A two-phase teardown published its first phase and waits under its
@@ -109,12 +115,14 @@ pub fn apply(unit: &UnitIdentity, current: Option<&ObservedUnit>, event: Event) 
     transition(unit, current, event, None)
 }
 
+#[allow(clippy::too_many_lines)] // One transition table keeps receipts, conditions, and retry acknowledgements consistent.
 fn transition(
     unit: &UnitIdentity,
     current: Option<&ObservedUnit>,
     event: Event,
     produced_for: Option<&DesiredUnit>,
 ) -> Result<Applied, Refusal> {
+    let current = current.filter(|observed| &observed.unit == unit);
     let receipt = current.and_then(|observed| observed.receipt.clone());
     let succeeded = matches!(&event, Event::Succeeded { .. });
     let condition = current.and_then(|observed| observed.condition.as_ref());
@@ -125,6 +133,28 @@ fn transition(
         produced_for
             .map(|desired| Box::new(desired.clone()))
             .or_else(existing_copy)
+    };
+    let retry = match &event {
+        Event::Imported { checkpointed } if !matches!(condition, Some(Condition::Uncertain { .. })) => {
+            checkpointed.retry.clone()
+        }
+        Event::Succeeded { .. } | Event::RecoverAccept { .. } => None,
+        Event::RetryRequired { context, .. } => Some(RetryAcknowledgement::Required {
+            context: context.clone(),
+        }),
+        Event::AcknowledgeRetry { request } => {
+            let Some(RetryAcknowledgement::Required { context }) = current.and_then(|unit| unit.retry.as_ref()) else {
+                return Err(Refusal::NothingToRecover);
+            };
+            Some(RetryAcknowledgement::Acknowledged {
+                context: context.clone(),
+                request: request.clone(),
+            })
+        }
+        Event::Failed { .. } | Event::Uncertain { .. } => current
+            .and_then(|unit| unit.retry.clone())
+            .filter(|retry| matches!(retry, RetryAcknowledgement::Acknowledged { .. })),
+        _ => current.and_then(|unit| unit.retry.clone()),
     };
     let document = |receipt: Option<Receipt>,
                     condition: Option<Condition>,
@@ -137,11 +167,7 @@ fn transition(
             } else {
                 current.and_then(|observed| observed.operator_modified.clone())
             },
-            accepted_empty_state: if succeeded {
-                None
-            } else {
-                current.and_then(|observed| observed.accepted_empty_state.clone())
-            },
+            retry: retry.clone(),
             kind: ObservedUnitKind,
             unit: unit.clone(),
             // A document without a receipt has no copy.
@@ -204,20 +230,112 @@ fn transition(
             changed.operator_modified = Some(modification);
             Applied::Changed(changed)
         }
-        Event::AcceptEmptyState { scope } => {
-            let mut changed = match document(receipt, condition.cloned(), existing_copy(), existing_wait()) {
-                Applied::Changed(changed) => changed,
-                Applied::Evidence => unreachable!("document changes observed state"),
-            };
-            changed.accepted_empty_state = Some(scope);
-            Applied::Changed(changed)
-        }
+        Event::RetryRequired {
+            since,
+            run,
+            category,
+            message,
+            ..
+        } => document(
+            receipt,
+            Some(Condition::Failed {
+                since,
+                run,
+                category,
+                retryable: false,
+                message,
+            }),
+            existing_copy(),
+            existing_wait(),
+        ),
+        Event::AcknowledgeRetry { .. } => document(receipt, condition.cloned(), existing_copy(), existing_wait()),
         Event::Waiting { waiting } => document(receipt, condition.cloned(), existing_copy(), Some(waiting)),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_retry_acknowledgement_survives_failure_and_is_consumed_by_success() {
+        let desired = fixtures::desired("service", "TestUnit", serde_json::json!({}), "key");
+        let failed = apply_to(
+            &desired,
+            None,
+            Event::RetryRequired {
+                since: "2026-10-28T00:00:00Z".parse().unwrap(),
+                run: fixtures::run(fixtures::RUN_1),
+                category: FailureCategory::Ownership,
+                message: "diagnostic".to_owned(),
+                context: serde_json::json!({"opaque":"context"}),
+            },
+        )
+        .unwrap();
+        let Applied::Changed(failed) = failed else {
+            panic!("missing failure")
+        };
+        let Applied::Changed(imported) = apply_to(
+            &desired,
+            None,
+            Event::Imported {
+                checkpointed: *failed.clone(),
+            },
+        )
+        .unwrap() else {
+            panic!("missing import")
+        };
+        assert_eq!(imported.retry, failed.retry);
+        let request = Request {
+            by: "operator".to_owned(),
+            at: "2026-10-28T00:00:00Z".parse().unwrap(),
+            reason: Some("verified".to_owned()),
+        };
+        let Applied::Changed(accepted) =
+            apply_to(&desired, Some(&failed), Event::AcknowledgeRetry { request }).unwrap()
+        else {
+            panic!("missing acknowledgement")
+        };
+        let Applied::Changed(retried) = apply_to(
+            &desired,
+            Some(&accepted),
+            Event::Failed {
+                since: "2026-10-28T00:00:00Z".parse().unwrap(),
+                run: fixtures::run(fixtures::RUN_1),
+                category: FailureCategory::ToolError,
+                retryable: true,
+                message: "transient failure".to_owned(),
+            },
+        )
+        .unwrap() else {
+            panic!("missing failure")
+        };
+        assert_eq!(retried.retry, accepted.retry);
+        let mut another_incarnation = desired.clone();
+        another_incarnation.unit.uid = Some(fixtures::uid_numbered(42));
+        let Applied::Changed(other) = apply_to(
+            &another_incarnation,
+            Some(&accepted),
+            Event::Uncertain {
+                since: "2026-10-28T00:00:00Z".parse().unwrap(),
+                run: fixtures::run(fixtures::RUN_1),
+                reason: "interrupted new incarnation".to_owned(),
+            },
+        )
+        .unwrap() else {
+            panic!("missing new incarnation")
+        };
+        assert!(other.retry.is_none());
+        let Applied::Changed(succeeded) = apply_to(
+            &desired,
+            Some(&accepted),
+            Event::Succeeded {
+                receipt: fixtures::receipt("key", serde_json::json!({}), vec![]),
+            },
+        )
+        .unwrap() else {
+            panic!("missing receipt")
+        };
+        assert!(succeeded.retry.is_none());
+    }
     use serde_json::json;
 
     use super::*;
@@ -358,7 +476,7 @@ mod tests {
         ObservedUnit {
             api_version: nyl_core::orchestration::state::StateV1,
             operator_modified: None,
-            accepted_empty_state: None,
+            retry: None,
             kind: ObservedUnitKind,
             unit: identity(),
             receipt: receipt_key.map(receipt),

@@ -260,29 +260,56 @@ fn test_missing_state_requires_explicit_acceptance_for_the_same_scope() {
     let driver = TerraformDriver::opentofu();
     let mut context = world.context(&tool);
     context.observed = Some(&observed);
-    assert!(
-        matches!(outcome(&driver, &context, &desired), Outcome::Failed { category: FailureCategory::Ownership, retryable: false, message } if message.starts_with("NYL-TOFU-STATE-MISSING"))
-    );
+    let Outcome::RetryRequired {
+        category,
+        message,
+        context: retry_context,
+    } = outcome(&driver, &context, &desired)
+    else {
+        panic!("missing retry requirement")
+    };
+    assert_eq!(category, FailureCategory::Ownership);
+    assert!(message.starts_with("NYL-TOFU-STATE-MISSING"));
     assert_eq!(tool.count("plan"), 0);
     drop(context);
-    observed.accepted_empty_state = driver
-        .ownership_scopes(&EnvironmentName::new("dev").unwrap(), &desired.spec)
-        .into_iter()
-        .next();
+    observed.retry = Some(nyl_core::orchestration::state::RetryAcknowledgement::Acknowledged {
+        context: retry_context.clone(),
+        request: nyl_core::orchestration::state::Request {
+            by: "operator".to_owned(),
+            at: "2026-10-28T12:00:00Z".parse().unwrap(),
+            reason: Some("verified the backend".to_owned()),
+        },
+    });
     let mut context = world.context(&tool);
     context.observed = Some(&observed);
     assert!(matches!(
         outcome(&driver, &context, &desired),
         Outcome::Succeeded { .. }
     ));
-    let changed_scope = unit(json!({"backend": {"bucket": "other", "key": "dev/test"}}));
+    let changed_scope = unit(json!({"backend":{"bucket":"other","key":"dev/test"}}));
     assert!(matches!(
         outcome(&driver, &context, &changed_scope),
-        Outcome::Failed {
+        Outcome::RetryRequired {
             category: FailureCategory::Ownership,
             ..
         }
     ));
+    let changed_workspace = unit(json!({"workspace":"other"}));
+    assert!(matches!(
+        outcome(&driver, &context, &changed_workspace),
+        Outcome::RetryRequired { .. }
+    ));
+    drop(context);
+    let mut other_unit = desired.clone();
+    other_unit.unit.uid = Some("00000000-0000-7000-8000-000000000099".parse().unwrap());
+    observed.unit = other_unit.unit.clone();
+    let mut context = world.context(&tool);
+    context.observed = Some(&observed);
+    assert!(matches!(
+        outcome(&driver, &context, &other_unit),
+        Outcome::RetryRequired { .. }
+    ));
+    assert_eq!(tool.count("plan"), 1, "only the acknowledged scope is planned");
 }
 
 #[test]
@@ -467,4 +494,19 @@ fn test_structured_provider_secret_leaves_are_masked_and_rotation_preserves_dige
         assert!(call.masked.contains(&password.to_owned()));
     }
     assert_eq!(digests[0], digests[1]);
+}
+
+#[test]
+fn test_native_kinds_share_resource_identity_and_driver_defaults() {
+    let spec = unit(json!({})).spec;
+    let environment = EnvironmentName::new("dev").unwrap();
+    let tofu = TerraformDriver::opentofu();
+    let terraform = TerraformDriver::terraform();
+    let left = tofu.ownership_scopes(&environment, &spec);
+    let right = terraform.ownership_scopes(&environment, &spec);
+    assert!(left[0].overlaps(&right[0]));
+    assert_eq!(
+        tofu.default_timeout(),
+        nyl_core::orchestration::time::Duration::from_mins(60)
+    );
 }

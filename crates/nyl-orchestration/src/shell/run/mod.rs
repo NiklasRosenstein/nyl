@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{
-    DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, ResolutionContext, Supported, ToolRunner,
+    Driver, DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, ResolutionContext, Supported, ToolRunner,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
@@ -755,17 +755,27 @@ impl<'r, 'a> Session<'r, 'a> {
             &mut || self.base().ids.uid(),
         );
         let mut errors = desired.errors.clone();
-        if request.choice().is_worktree()
-            && rendered.units.values().any(|unit| {
-                unit.selected
-                    && unit.envelope.kind == "KubernetesPublication"
-                    && unit
-                        .spec
-                        .as_ref()
-                        .is_some_and(|spec| spec.get("enabled").and_then(Value::as_bool) != Some(false))
-            })
-        {
-            errors.push(source_unavailable("worktree snapshots cannot publish Kubernetes trees; commit the source and reconcile without --worktree"));
+        if request.choice().is_worktree() {
+            for (name, unit) in &rendered.units {
+                let Some(spec) = unit
+                    .spec
+                    .as_ref()
+                    .filter(|spec| spec.get("enabled").and_then(Value::as_bool) != Some(false))
+                else {
+                    continue;
+                };
+                if unit.selected
+                    && self
+                        .context
+                        .drivers
+                        .get(&unit.envelope.api_version, &unit.envelope.kind)
+                        .is_some_and(|driver| driver.capabilities(spec).requires_committed_source)
+                {
+                    errors.push(source_unavailable(&format!(
+                        "unit {name} requires committed source; commit the source and reconcile without --worktree"
+                    )));
+                }
+            }
         }
         for name in self.request.approvals.units.keys() {
             if !desired.units.contains_key(name)
@@ -1191,21 +1201,6 @@ pub fn execution_environment(
     spec: &Value,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut env = admitted_env(process_env, spec);
-    if spec
-        .get("registryAuth")
-        .and_then(Value::as_object)
-        .is_some_and(|auth| !auth.is_empty())
-    {
-        let config = process_env.get("DOCKER_CONFIG").cloned().or_else(|| {
-            process_env
-                .get("HOME")
-                .or_else(|| process_env.get("USERPROFILE"))
-                .map(|home| Path::new(home).join(".docker").display().to_string())
-        });
-        if let Some(config) = config {
-            env.insert("DOCKER_CONFIG".to_owned(), config);
-        }
-    }
     for name in spec
         .pointer("/env/passthrough")
         .and_then(Value::as_array)
@@ -1237,45 +1232,37 @@ pub fn execution_environment(
     Ok(env)
 }
 
-/// Resolve only keys explicitly named by the registry credential helper.
-pub fn registry_secrets(
+/// Resolve common and driver-declared credentials without interpreting private spec fields.
+#[allow(clippy::type_complexity)] // Environment values and driver provider-key values have distinct consumers.
+pub fn driver_credentials(
+    process_env: &BTreeMap<String, String>,
     provider: Option<&dyn nyl_core::orchestration::ports::SecretProvider>,
-    spec: &Value,
-) -> Result<BTreeMap<String, String>, String> {
-    let mut secrets = BTreeMap::new();
-    for auth in spec
-        .get("registryAuth")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|auth| auth.values())
-    {
-        for field in ["usernameSecret", "passwordSecret"] {
-            let key = auth
-                .get(field)
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("credentials: registryAuth requires {field}"))?;
-            if secrets.contains_key(key) {
-                continue;
-            }
-            let value = provider
-                .and_then(|provider| provider.get(key).ok())
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .ok_or_else(|| format!("credentials: registry secret {key:?} is unavailable or not a string"))?;
-            secrets.insert(key.to_owned(), value);
-        }
-    }
-    Ok(secrets)
-}
-
-#[allow(clippy::type_complexity)] // Keep admitted environment and helper credentials distinct.
-pub(crate) fn execution_credentials(
-    context: &RunContext<'_>,
+    driver: &dyn Driver,
     spec: &Value,
 ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String> {
-    Ok((
-        execution_environment(context.process_env, context.secrets, spec)?,
-        registry_secrets(context.secrets, spec)?,
-    ))
+    let mut env = driver.credential_environment(spec, process_env);
+    env.extend(execution_environment(process_env, provider, spec)?);
+    let mut secrets = BTreeMap::new();
+    for key in driver.secret_refs(spec)? {
+        if secrets.contains_key(&key) {
+            continue;
+        }
+        let value = provider
+            .and_then(|provider| provider.get(&key).ok())
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| format!("credentials: driver secret {key:?} is unavailable or not a string"))?;
+        secrets.insert(key, value);
+    }
+    Ok((env, secrets))
+}
+
+#[allow(clippy::type_complexity)] // Keep common environment and driver credentials distinct.
+pub(crate) fn execution_credentials(
+    context: &RunContext<'_>,
+    driver: &dyn Driver,
+    spec: &Value,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String> {
+    driver_credentials(context.process_env, context.secrets, driver, spec)
 }
 
 /// The directory of `nyl.toml` inside a worktree, from its worktree-rooted form.
@@ -1289,12 +1276,12 @@ pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
 }
 
 /// The longest timeout of `units`, which a phase running them needs.
-pub(crate) fn longest_timeout<'u>(units: impl Iterator<Item = &'u DesiredUnit>) -> Duration {
-    units.map(unit_timeout).max().unwrap_or_default()
+pub(crate) fn longest_timeout<'u>(drivers: &DriverSet, units: impl Iterator<Item = &'u DesiredUnit>) -> Duration {
+    units.map(|unit| unit_timeout(drivers, unit)).max().unwrap_or_default()
 }
 
 /// A unit's `timeout`, else its kind's default from the contract's Defaults.
-pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
+pub fn unit_timeout(drivers: &DriverSet, unit: &DesiredUnit) -> Duration {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     if let Some(timeout) = spec
         .get("timeout")
@@ -1302,11 +1289,9 @@ pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
     {
         return timeout;
     }
-    match unit.unit.kind.as_str() {
-        "Terraform" | "OpenTofu" | "OciImage" => Duration::from_mins(60),
-        "KubernetesPublication" => Duration::from_mins(10),
-        _ => Duration::from_mins(30),
-    }
+    drivers
+        .get(&unit.unit.api_version, &unit.unit.kind)
+        .map_or_else(|| Duration::from_mins(30), Driver::default_timeout)
 }
 
 /// The declared outputs of a unit's spec.
@@ -1838,7 +1823,7 @@ fn plan_unit(
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;
     }
-    let (env, secrets) = match execution_credentials(context, &unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &unit.spec) {
         Ok(env) => env,
         Err(message) => {
             entry.plan_error = Some(message);
@@ -1850,7 +1835,7 @@ fn plan_unit(
     let budget = crate::shell::tools::DeadlineRunner {
         tools: context.tools,
         clock: context.base.clock,
-        deadline: unit_timeout(unit).after(now),
+        deadline: unit_timeout(context.drivers, unit).after(now),
     };
     let execution = ExecutionContext {
         secrets,
@@ -1864,7 +1849,7 @@ fn plan_unit(
         temp_dir,
         env,
         approved_digest: None,
-        deadline: unit_timeout(unit).after(now),
+        deadline: unit_timeout(context.drivers, unit).after(now),
         now,
         observed,
         tools: &budget,
@@ -1985,7 +1970,7 @@ fn adopt_tombstones(
                 ObservedUnit {
                     api_version: nyl_core::orchestration::state::StateV1,
                     operator_modified: None,
-                    accepted_empty_state: None,
+                    retry: None,
                     kind: nyl_core::orchestration::state::ObservedUnitKind,
                     unit: unit.unit.clone(),
                     receipt: Some(receipt),
@@ -2490,7 +2475,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     break;
                 }
                 let now = context.base.clock.now();
-                let longest = longest_timeout(batch.iter().map(|unit| &resolved.units[unit]));
+                let longest = longest_timeout(context.drivers, batch.iter().map(|unit| &resolved.units[unit]));
                 // Units whose uid this run generated go on the run ref before
                 // they start, so a run taking over adopts them.
                 let new: Vec<DesiredUnit> = batch
@@ -2633,7 +2618,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 &mut observed,
                 &mut artifacts,
                 &runs,
-                (context.drivers, request.reason.as_deref()),
+                &nyl_core::orchestration::state::Request {
+                    by: context.base.requested_by.clone(),
+                    at: context.base.clock.now(),
+                    reason: request.reason.clone(),
+                },
             ) {
                 Ok(entry) => recover_entry = Some((recover.unit.clone(), entry)),
                 Err(finding) => {
@@ -3664,6 +3653,54 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_timeout_uses_the_registered_driver_and_explicit_override() {
+        let mut drivers = DriverSet::new();
+        drivers.register(std::sync::Arc::new(crate::rules::fixtures::TestDriver {
+            kind: "OtherUnit",
+        }));
+        let mut unit = crate::rules::fixtures::desired("service", "OtherUnit", json!({}), "key");
+        assert_eq!(unit_timeout(&drivers, &unit), Duration::from_mins(17));
+        unit.resolved_spec = Some(json!({"timeout":"9s"}));
+        assert_eq!(unit_timeout(&drivers, &unit), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn test_driver_credentials_admit_only_declared_inputs_and_hide_provider_errors() {
+        struct Provider;
+        impl nyl_core::orchestration::ports::SecretProvider for Provider {
+            fn get(&self, key: &str) -> Result<Value, String> {
+                if key == "token" {
+                    Ok(json!("secret-value"))
+                } else {
+                    Err("private provider payload".to_owned())
+                }
+            }
+        }
+        let driver = crate::rules::fixtures::TestDriver { kind: "OpaqueUnit" };
+        let process = BTreeMap::from([
+            ("EXPLICIT".to_owned(), "location".to_owned()),
+            ("UNDECLARED".to_owned(), "hidden".to_owned()),
+        ]);
+        let spec = json!({"secretRefs":["token"],"credentialVariable":"EXPLICIT"});
+        let (env, secrets) = driver_credentials(&process, Some(&Provider), &driver, &spec).unwrap();
+        assert_eq!(env, BTreeMap::from([("EXPLICIT".to_owned(), "location".to_owned())]));
+        assert_eq!(
+            secrets,
+            BTreeMap::from([("token".to_owned(), "secret-value".to_owned())])
+        );
+        let mut explicit = spec.clone();
+        explicit["env"] = json!({"secrets":{"EXPLICIT":"token"}});
+        let (env, _) = driver_credentials(&process, Some(&Provider), &driver, &explicit).unwrap();
+        assert_eq!(env["EXPLICIT"], "secret-value");
+        let error =
+            driver_credentials(&process, Some(&Provider), &driver, &json!({"secretRefs":["missing"]})).unwrap_err();
+        assert_eq!(
+            error,
+            "credentials: driver secret \"missing\" is unavailable or not a string"
+        );
+    }
 
     fn environment(spec: &Value) -> Environment {
         serde_json::from_value(json!({

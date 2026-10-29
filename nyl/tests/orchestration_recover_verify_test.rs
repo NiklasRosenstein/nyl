@@ -1314,3 +1314,53 @@ fn test_recover_on_a_held_uncertain_unit() {
         accepted.stderr
     );
 }
+
+#[test]
+fn test_reasoned_retry_is_generic_and_consumed_by_success() {
+    use nyl_core::orchestration::state::RetryAcknowledgement;
+    let harness = Harness::new();
+    harness.init();
+    let context = serde_json::json!({"version":1,"resource":"test-owned-context"});
+    harness.script.push(
+        unit("network"),
+        DriverOperation::Reconcile,
+        &Scripted::RetryRequired {
+            context: context.clone(),
+        },
+        1,
+    );
+    let failed = harness.reconcile(&[]);
+    assert_eq!(failed.exit, 3);
+    assert_eq!(
+        harness.snapshot().observed[&unit("network")].retry,
+        Some(RetryAcknowledgement::Required {
+            context: context.clone()
+        })
+    );
+    let refused = harness.invoke(&["recover", "-e", "dev", "--unit", "network", "--retry"]);
+    assert_eq!(refused.exit, 1, "{}", refused.stderr);
+    assert!(refused.stderr.contains("NYL-RECOVER-REASON-REQUIRED"));
+    let accepted = harness.invoke(&[
+        "recover",
+        "-e",
+        "dev",
+        "--unit",
+        "network",
+        "--retry",
+        "--reason",
+        "verified the resource",
+    ]);
+    assert_eq!(accepted.exit, 0, "{}", accepted.stderr);
+    let snapshot = harness.snapshot();
+    let Some(RetryAcknowledgement::Acknowledged {
+        context: actual,
+        request,
+    }) = &snapshot.observed[&unit("network")].retry
+    else {
+        panic!("missing acknowledgement")
+    };
+    assert_eq!(actual, &context);
+    assert_eq!(request.reason.as_deref(), Some("verified the resource"));
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    assert!(harness.snapshot().observed[&unit("network")].retry.is_none());
+}

@@ -146,7 +146,8 @@ are preserved without following their targets; input paths cannot traverse
 symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
 rendering, and all execution waves use that immutable snapshot; subsequent edits
 belong to the next run. Explicitly pinned unit sources keep their declared
-commits. The flag requires exactly one named environment and conflicts with
+commits. Drivers may require committed source; `--worktree` refuses those units.
+The flag requires exactly one named environment and conflicts with
 `--source`, label selectors, and group selectors.
 
 State and run checkpoints archive the snapshot and its source ancestry, including

@@ -147,6 +147,10 @@ impl Driver for FakeInfra {
         1
     }
 
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(60)
+    }
+
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
             plan: true,
@@ -201,9 +205,11 @@ impl Driver for FakeInfra {
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.pointer("/backend/path")
             .and_then(Value::as_str)
-            .map(|path| OwnershipScope::TerraformBackend {
-                backend: json!({"local": {"path": path}}).to_string(),
-                workspace: "default".to_owned(),
+            .map(|path| OwnershipScope {
+                namespace: "terraform-state".to_owned(),
+                key: vec![json!({"local": {"path": path}}).to_string(), "default".to_owned()],
+                path: vec![],
+                description: format!("backend {path} workspace default"),
             })
             .into_iter()
             .collect()
@@ -293,7 +299,9 @@ impl Driver for FakeInfra {
                 artifacts: Vec::new(),
             },
             // A drift verdict scripts `verify`, never `inspect`.
-            Some(Scripted::Failed { .. } | Scripted::Drifted) => Inspection::NotApplied,
+            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Drifted) => {
+                Inspection::NotApplied
+            }
             Some(Scripted::Uncertain) => Inspection::Unknown {
                 reason: "scripted unknown inspect".to_owned(),
             },
