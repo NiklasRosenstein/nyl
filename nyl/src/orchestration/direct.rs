@@ -303,43 +303,17 @@ pub fn prepare(
 pub fn snapshot_entry(prepared: &mut DirectUnit) -> Result<()> {
     let original = prepared.worktree.clone();
     let repository = git2::Repository::discover(&original).map_err(config)?;
-    let index = repository.index().map_err(config)?;
-    let mut files = index
-        .iter()
-        .map(|entry| String::from_utf8(entry.path).map_err(config))
-        .collect::<Result<BTreeSet<_>>>()?;
-    let mut options = git2::StatusOptions::new();
-    options
-        .include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(false);
-    let statuses = repository.statuses(Some(&mut options)).map_err(config)?;
-    let mut changed = Vec::new();
-    for entry in statuses.iter() {
-        {
-            let path = entry.path().map_err(config)?;
-            files.insert(path.to_owned());
-            changed.push(path.to_owned());
-        }
-    }
+    let (files, changed) = nyl_state::source::worktree::visible_files(&repository).map_err(config)?;
     let destination = prepared.workspace.path().join("worktree-snapshot");
     std::fs::create_dir_all(&destination)?;
     let mut digests = BTreeMap::new();
     for relative in files {
-        if relative.split('/').any(|part| part == ".git" || part == "..") {
-            return Err(config("unsafe Git worktree snapshot path"));
-        }
         let source = original.join(&relative);
-        let metadata = match std::fs::symlink_metadata(&source) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+        let Some(metadata) =
+            nyl_state::source::worktree::snapshot_file_metadata(&original, &relative).map_err(config)?
+        else {
+            continue;
         };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(config(format!(
-                "worktree snapshot requires ordinary files; {relative} is a symlink or unsupported entry"
-            )));
-        }
         let mut bytes = std::fs::read(&source)?;
         #[cfg(unix)]
         {

@@ -62,6 +62,10 @@ pub struct ReconcileArgs {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// Reconcile an immutable snapshot of Git-visible working files, including uncommitted changes.
+    #[arg(long, conflicts_with_all = ["source", "labels", "group"])]
+    pub worktree: bool,
+
     /// Wait up to this long for another run's lease, such as 10m.
     #[arg(long)]
     pub wait_lease: Option<Duration>,
@@ -129,6 +133,36 @@ pub struct ReconcileArgs {
 /// Run the command in-process with `wiring`.
 pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     use crate::orchestration::multi_environment::{dispatch, select};
+    let snapshot = if args.worktree {
+        let capture = || -> std::result::Result<_, Stop> {
+            if args.environment.len() != 1 {
+                return Err(nyl_core::orchestration::codes::Finding::new(
+                    nyl_core::orchestration::codes::Code::SourceUnavailable,
+                    "--worktree requires exactly one explicitly named environment",
+                    "use -e <environment> without a label or group selector",
+                )
+                .into());
+            }
+            Session::open(&args.path, &args.environment[0])?.snapshot_worktree(wiring, args.author.as_deref())
+        };
+        match capture() {
+            Ok(snapshot) => Some(snapshot),
+            Err(stop) => {
+                return Ok(stopped(
+                    ReportKind::ReconcileReport,
+                    args.environment.first().map_or("local", String::as_str),
+                    args.output,
+                    stop,
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let preflight_source = snapshot
+        .as_ref()
+        .map(|source| source.commit.as_str())
+        .or(args.source.as_deref());
     Ok(dispatch(
         ReportKind::ReconcileReport,
         args.output,
@@ -138,7 +172,7 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
             args.labels.as_deref(),
             args.group.as_deref(),
             true,
-            args.source.as_deref(),
+            preflight_source,
             wiring.drivers,
         ),
         |environment, selected, _planned, unavailable| {
@@ -161,7 +195,7 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
                     selected.len() > 1,
                 )?;
                 crate::orchestration::multi_environment::single_source(args.source.as_deref(), selected)?;
-                reconcile(&args, wiring, unavailable)
+                reconcile(&args, wiring, unavailable, snapshot.as_ref())
             };
             (
                 prepare().unwrap_or_else(|stop| stopped(ReportKind::ReconcileReport, environment, args.output, stop)),
@@ -175,6 +209,7 @@ fn reconcile(
     args: &ReconcileArgs,
     wiring: &Wiring<'_>,
     unavailable: &std::collections::BTreeSet<nyl_core::orchestration::ids::EnvironmentName>,
+    snapshot: Option<&nyl_core::orchestration::ports::WorktreeSnapshot>,
 ) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment[0])?;
     // Reconcile writes state, so it alone of the run commands needs an identity.
@@ -217,6 +252,7 @@ fn reconcile(
         request.units = Some(std::collections::BTreeSet::default());
     }
     request.unavailable.clone_from(unavailable);
+    request.worktree_source = snapshot.cloned();
     request.approvals = args
         .approval
         .resolve(&session, wiring, &identity, request.units.as_ref())?;

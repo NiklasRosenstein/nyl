@@ -38,6 +38,8 @@ use nyl_core::orchestration::ids::CommitId;
 use nyl_core::orchestration::ports::{SourceError, SourceRepository, SourceResolver, SourceResult};
 use nyl_git::GitAuth;
 
+pub mod worktree;
+
 /// The ref prefix under which repositories named by URL are fetched.
 const SOURCES_NAMESPACE: &str = "refs/nyl-sources";
 
@@ -589,6 +591,25 @@ fn escapes(directory: &str, target: &str) -> bool {
 }
 
 impl SourceResolver for GitSourceResolver {
+    fn snapshot_worktree(
+        &self,
+        base: &CommitId,
+        identity: &nyl_core::orchestration::ports::CommitIdentity,
+        now: nyl_core::orchestration::time::Timestamp,
+        previous: Option<&CommitId>,
+    ) -> SourceResult<nyl_core::orchestration::ports::WorktreeSnapshot> {
+        let repository = self.open()?;
+        worktree::capture(&repository, base, identity, now, previous)
+    }
+
+    fn is_worktree_snapshot(&self, commit: &CommitId) -> SourceResult<bool> {
+        let repository = self.open()?;
+        let commit = repository
+            .find_commit(Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?)
+            .map_err(|cause| git_error("cannot inspect source commit", &cause))?;
+        Ok(worktree::is_snapshot(&commit))
+    }
+
     fn resolve_revision(&self, repository: &SourceRepository, revision: &str) -> SourceResult<CommitId> {
         let repo = self.open()?;
         self.ensure_fetched(&repo, repository)?;

@@ -20,6 +20,23 @@ pub struct WorktreeSourceState {
     pub dirty: bool,
 }
 
+/// Require committed-source provenance for publication. A Git commit containing
+/// a worktree snapshot remains development input even after checkout or fetch.
+pub fn require_publication_source(project_root: &Path, commit: &str) -> Result<()> {
+    let repository = Repository::discover(project_root)
+        .map_err(|error| NylError::config(format!("Cannot inspect publication source: {error}")))?;
+    let source = repository
+        .find_commit(git2::Oid::from_str(commit).map_err(|error| NylError::config(error.to_string()))?)
+        .map_err(|error| NylError::config(error.to_string()))?;
+    if source
+        .message()
+        .is_ok_and(nyl_core::orchestration::ports::is_worktree_snapshot_message)
+    {
+        return Err(NylError::config("NYL-SOURCE-WORKTREE: worktree snapshots cannot be published as committed source; commit the changes and publish that revision"));
+    }
+    Ok(())
+}
+
 /// Source commit and dirty state of the worktree containing `project_root`.
 /// Untracked `carried` files are outputs of this run, so they never make the
 /// worktree dirty, and neither does the project's `.nyl/cache`.
@@ -170,6 +187,25 @@ mod tests {
     use super::*;
     use git2::{IndexAddOption, Signature};
     use tempfile::TempDir;
+
+    #[test]
+    fn test_publication_requires_committed_source_even_for_a_clean_snapshot_checkout() {
+        let (directory, repository) = committed_worktree();
+        let head = repository.head().unwrap().peel_to_commit().unwrap();
+        require_publication_source(directory.path(), &head.id().to_string()).unwrap();
+        let signature = Signature::now("Test", "test@example.invalid").unwrap();
+        let snapshot = repository
+            .commit(
+                None,
+                &signature,
+                &signature,
+                nyl_core::orchestration::ports::WORKTREE_SNAPSHOT_MARKER,
+                &head.tree().unwrap(),
+                &[&head],
+            )
+            .unwrap();
+        assert!(require_publication_source(directory.path(), &snapshot.to_string()).is_err());
+    }
 
     fn committed_worktree() -> (TempDir, Repository) {
         let directory = TempDir::new().unwrap();

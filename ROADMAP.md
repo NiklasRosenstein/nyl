@@ -600,6 +600,18 @@ GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
 comment keys and authenticated account ownership require no orchestration state
 or Nyl project configuration.
 
+An explicit `reconcile --worktree` selects one immutable snapshot of Git-visible
+working files for local development, independent of where state is written.
+Discovery, preflight, rendering, keys, and execution consume that same snapshot.
+State transitions and pre-effect run checkpoints retain its commit as an
+additional parent, so state moves and fresh-clone recovery preserve the exact
+inputs. State history follows first parents up to the snapshot boundary. The snapshot's
+reserved source revision and commit marker distinguish it from committed-source
+release evidence. Kubernetes publication requires committed source; explicit
+unit source pins retain their own revisions. M3's source and state path and M4's
+native tools share this behavior; multi-environment worktree selection remains
+outside the initial single-environment interface.
+
 Orchestration commands are top-level, because it is all GitOps. The
 [orchestration core contract](design/orchestration-core.md#commands) specifies
 their effects, options, and exit categories; a rename changes the contract:

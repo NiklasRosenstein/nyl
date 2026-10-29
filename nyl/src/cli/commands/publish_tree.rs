@@ -157,6 +157,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             "publish-tree requires the source worktree to have a committed revision",
         ));
     };
+    crate::gitops::provenance::require_publication_source(&inventory.project_root, &source_commit)?;
     if dirty && args.source.require_clean {
         let summary = crate::gitops::provenance::dirty_worktree_summary(&inventory.project_root, &carried)?;
         return Err(NylError::config(format!(

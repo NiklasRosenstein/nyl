@@ -12,6 +12,27 @@ use serde_json::Value;
 
 use crate::rules::sources::{git_source, source_checkouts};
 
+/// Capture one source for preflight and execution, reusing retained state evidence
+/// when its tree is identical. No process environment or user index is modified.
+pub fn snapshot_worktree(
+    store: &dyn nyl_core::orchestration::ports::StateStore,
+    sources: &dyn SourceResolver,
+    location: &nyl_core::orchestration::state::StateLocation,
+    base: &CommitId,
+    identity: &nyl_core::orchestration::ports::CommitIdentity,
+    clock: &dyn nyl_core::orchestration::ports::Clock,
+) -> Result<nyl_core::orchestration::ports::WorktreeSnapshot, String> {
+    let previous = store.snapshot(location).map_err(|error| error.to_string())?;
+    sources
+        .snapshot_worktree(
+            base,
+            identity,
+            clock.now(),
+            previous.environment.as_ref().map(|record| &record.source_commit),
+        )
+        .map_err(|error| error.to_string())
+}
+
 /// Declared inputs plus the local configuration directory. Remote source
 /// checkouts have no local configuration directory to include.
 pub fn checkout_paths(

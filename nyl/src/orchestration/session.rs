@@ -112,6 +112,33 @@ impl Session {
         Ok(GitSourceResolver::new(&self.resolved.git_dir, auth))
     }
 
+    /// Wire explicit working-file capture through the shared source shell.
+    pub fn snapshot_worktree(
+        &self,
+        wiring: &Wiring<'_>,
+        author: Option<&str>,
+    ) -> Result<nyl_core::orchestration::ports::WorktreeSnapshot, Stop> {
+        let identity = wiring.commit_identity(&self.resolved.git_dir, author)?;
+        let store = self.store(None)?;
+        let sources = self.sources()?;
+        nyl_orchestration::shell::sources::snapshot_worktree(
+            &store,
+            &sources,
+            &self.resolved.location,
+            &self.entry_commit()?,
+            &identity,
+            wiring.clock.as_ref(),
+        )
+        .map_err(|error| {
+            Finding::new(
+                Code::SourceUnavailable,
+                error,
+                "restore access to state and use ordinary Git-visible files for --worktree",
+            )
+            .into()
+        })
+    }
+
     /// The renderer of the environment's units at a source commit.
     pub fn renderer(&self) -> UnitSourceRenderer {
         UnitSourceRenderer::new(self.entry_project_dir()).with_previous_paths(self.previous_paths())
@@ -251,6 +278,7 @@ impl Session {
             units,
             concurrency: options.concurrency.max(1),
             source_override: options.source.map(str::to_owned),
+            worktree_source: None,
             wait: options.wait,
             local: options.local.clone(),
             cancellation: options.cancellation.clone(),

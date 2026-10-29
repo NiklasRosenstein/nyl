@@ -20,6 +20,7 @@ nyl reconcile -e prod --source 3e7b9c1 --author "Release Bot <release@example.co
 nyl reconcile -e dev -o json
 nyl reconcile -e dev --wait-lease 30m
 nyl reconcile -e dev --local --approve migrate
+nyl reconcile -e dev --worktree
 nyl reconcile -e dev --allow-teardown
 nyl reconcile -e dev --leaving --allow-teardown
 nyl reconcile -e dev --unit config --reapply --reason "rotate credentials"
@@ -190,6 +191,7 @@ for qualified unit options and independent state transactions.
 | `--fail-fast` | Start no further unit after the first failure, uncertain outcome, or approval wait. Units not started report `blocked`, and the run warns with `NYL-RUN-STOPPED`. |
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
 | `--source <rev>` | Render units at this revision or commit instead of the Environment's source, for this run only. It must pass the same [reachability checks](/nyl/orchestration/runs/#source-commit), and the transition commit marks it as an override. |
+| `--worktree` | Snapshot Git-visible working files, including uncommitted and untracked files, and reconcile exactly one named environment from them. Conflicts with `--source`, `-l`, and `-g`. State publication follows the configured repository or `--local`. See [worktree inputs](/nyl/orchestration/runs/#worktree-inputs). |
 | `--wait-lease <duration>` | Wait up to this long, such as `10m`, while another run holds the lease, instead of exiting 2 with `NYL-LEASE-HELD`. |
 | `--local` | Run next to remote state without publishing it: continue from this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs) and commit there, marked `Nyl-Local: true`. Warns `NYL-LOCAL-RUN-UNRECORDED` for every unit it executes. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote or with full `refs/…` state refs, and with `NYL-LOCAL-RUN-LEFTOVERS` while remote state has dead runs to take over. |
 | `--local-lease` | With `--local`, take this clone's own lease instead of the remote one, accepting that CI may run at the same time. |
@@ -230,6 +232,7 @@ Besides the codes above, a reconcile reports:
 
 | Code | Meaning and fix |
 | --- | --- |
+| `NYL-SOURCE-WORKTREE` | The run uses an immutable working-file snapshot retained in state history. Commit changes and run without `--worktree` for committed-source evidence. |
 | `NYL-UNIT-UNCERTAIN` | A unit may have had effects without a recorded result. Check what it did; a converging unit runs again in the next reconcile, others need [`nyl recover`](/nyl/reference/cli/recover/). |
 | `NYL-RUN-SUPERSEDED` | A dead run checkpointed a unit with an execution key the new resolution no longer has. Its effects are real, so the unit becomes `uncertain` when the result recorded effects. |
 | `NYL-RUN-LATE-CHECKPOINT` | A run whose lease was broken checkpointed a unit after it was marked `uncertain`. The checkpoint stays as evidence; adopt it with `nyl recover --accept <run>` or run the unit again with `--retry`. |

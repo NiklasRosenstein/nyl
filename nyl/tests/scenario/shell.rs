@@ -271,6 +271,7 @@ impl Harness {
             sources,
             renderer,
             request: RunRequest {
+                worktree_source: None,
                 unavailable: BTreeSet::new(),
                 environment_errors: BTreeMap::new(),
                 planned: BTreeMap::new(),

@@ -257,6 +257,8 @@ pub struct RunRequest {
     pub approvals: crate::rules::approval::Approvals,
     /// `--source <rev>`.
     pub source_override: Option<String>,
+    /// An explicit working-file snapshot; state publication is unchanged.
+    pub worktree_source: Option<nyl_core::orchestration::ports::WorktreeSnapshot>,
     /// `--wait-lease`.
     pub wait: Option<Duration>,
     /// `--local`: the run continues from the clone's local state branches
@@ -633,11 +635,21 @@ impl<'r, 'a> Session<'r, 'a> {
     ) -> Result<BTreeMap<(SourceRepository, String), CommitId>, Finding> {
         let mut revisions = BTreeMap::new();
         for lock in locks {
-            if let Some(commit) = &lock.commit {
+            let commit = if let Some(commit) = &lock.commit {
                 self.check_source_pin(&lock.repository, commit, &lock.revision)?;
+                commit.clone()
             } else {
                 let commit = self.resolve_source_revision(&lock.repository, &lock.revision)?;
-                revisions.insert((lock.repository.clone(), lock.revision.clone()), commit);
+                revisions.insert((lock.repository.clone(), lock.revision.clone()), commit.clone());
+                commit
+            };
+            if self
+                .context
+                .sources
+                .is_worktree_snapshot(&commit)
+                .map_err(|error| source_unavailable(&error.to_string()))?
+            {
+                return Err(source_unavailable("explicit unit source revisions cannot select worktree snapshots; pin committed source or use an unpinned local path with --worktree"));
             }
         }
         Ok(revisions)
@@ -667,6 +679,20 @@ impl<'r, 'a> Session<'r, 'a> {
     /// reachability. An Environment `source.revision`+`commit` lock is also
     /// checked against [`pin_refs`].
     fn source_commit(&self) -> Result<(SourceRequest, CommitId), Finding> {
+        if let Some(snapshot) = &self.request.worktree_source {
+            if self.request.source_override.is_some() {
+                return Err(source_unavailable("--worktree and --source are mutually exclusive"));
+            }
+            if !self
+                .context
+                .sources
+                .is_worktree_snapshot(&snapshot.commit)
+                .map_err(|error| source_unavailable(&error.to_string()))?
+            {
+                return Err(source_unavailable("the worktree source is not an archived snapshot"));
+            }
+            return Ok((SourceRequest::Worktree(snapshot.clone()), snapshot.commit.clone()));
+        }
         let entry = &self.request.entry;
         if let Some(finding) = unsupported_source(entry) {
             return Err(finding);
@@ -677,6 +703,7 @@ impl<'r, 'a> Session<'r, 'a> {
             self.request.source_override.as_deref(),
         );
         let commit = match &request {
+            SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
             SourceRequest::Entry(commit) => commit.clone(),
             SourceRequest::Revision(revision) | SourceRequest::Override(revision) => self.resolve_revision(revision)?,
             SourceRequest::Commit { revision, commit } => {
@@ -684,6 +711,16 @@ impl<'r, 'a> Session<'r, 'a> {
                 commit.clone()
             }
         };
+        if self
+            .context
+            .sources
+            .is_worktree_snapshot(&commit)
+            .map_err(|error| source_unavailable(&error.to_string()))?
+        {
+            return Err(source_unavailable(
+                "a worktree snapshot requires --worktree; select committed source for an ordinary run",
+            ));
+        }
         if entry.spec.allow_unprotected_source != Some(true) {
             let default = self.default_branch()?;
             if let Some(refs) = run_source_refs(entry, &default) {
@@ -716,6 +753,18 @@ impl<'r, 'a> Session<'r, 'a> {
             &mut || self.base().ids.uid(),
         );
         let mut errors = desired.errors.clone();
+        if request.choice().is_worktree()
+            && rendered.units.values().any(|unit| {
+                unit.selected
+                    && unit.envelope.kind == "KubernetesPublication"
+                    && unit
+                        .spec
+                        .as_ref()
+                        .is_some_and(|spec| spec.get("enabled").and_then(Value::as_bool) != Some(false))
+            })
+        {
+            errors.push(source_unavailable("worktree snapshots cannot publish Kubernetes trees; commit the source and reconcile without --worktree"));
+        }
         for name in self.request.approvals.units.keys() {
             if !desired.units.contains_key(name)
                 && !desired.held.contains_key(name)
@@ -2235,6 +2284,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let source_commit = prepared.source_commit.clone();
         self.report.source_commit = Some(source_commit.clone());
         self.record.source_commit = Some(source_commit.clone());
+        if let Some(snapshot) = &request.worktree_source {
+            let storage = if request.local.is_some() {
+                "this clone's local state history"
+            } else {
+                "the configured state repository"
+            };
+            self.report.warnings.push(Finding::new(
+                Code::SourceWorktree,
+                format!("running immutable worktree snapshot {} based on {}; Git-visible working files are retained in {storage}", snapshot.commit, snapshot.base),
+                "commit source changes and reconcile without --worktree for committed-source evidence",
+            ));
+        }
         self.report.leaving.clone_from(&prepared.desired.leaving);
         if !self.report.leaving.is_empty() {
             let warning = leaving_warning(&environment, &self.report.leaving);
@@ -3074,6 +3135,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
         if let Some(revision) = &request.source_override {
             summary.details.insert("sourceOverride".to_owned(), json!(revision));
+        }
+        if let Some(snapshot) = &request.worktree_source {
+            summary.details.insert(
+                "worktreeSource".to_owned(),
+                json!({"base": snapshot.base, "commit": snapshot.commit, "revision": snapshot.revision}),
+            );
         }
         let trailers = Trailers {
             source_commit,

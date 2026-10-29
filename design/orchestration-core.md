@@ -187,7 +187,7 @@ spec:
 
 ### Source
 
-Every run of an environment works in one worktree at one source commit S:
+Every run of an environment works in one worktree at one immutable source commit S:
 discovery, the Environment's own fields, targets, units, Releases, `fromFile`,
 are all read there, and nothing else in the entry worktree is read again. The
 one exception is a `carryFileFromWorktree` file for a `fromPublication` binding: it exists only
@@ -238,6 +238,32 @@ spec:
   every run does, and the next run uses the environment's source again. It
   must satisfy the same reachability rules, the transition commit marks it as
   an override, and a fleet reconcile rejects it.
+- `reconcile -e <env> --worktree` snapshots Git-visible tracked and untracked
+  working files once, with deletions and executable modes. It leaves HEAD and
+  the user's index untouched, rejects symlinks, and excludes ignored untracked
+  files. Exactly one named environment is required; `--source`, label selectors,
+  and group selectors conflict with this mode. The snapshot overrides the
+  Environment's source selection and ordinary run-source reachability only;
+  explicitly pinned unit source fields retain their own revisions and checks.
+  Discovery, ownership preflight, rendering, execution keys, and every execution
+  consume this snapshot, even if working files change during the run.
+- Worktree snapshots are synthetic commits based on HEAD, under local refs
+  `refs/nyl-worktrees/<base>/<tree>`, with a `Nyl-Worktree-Snapshot: true`
+  trailer. Identical snapshots reuse the retained commit. Persisted
+  `sourceChosenBy` uses `by: override` and that reserved revision; the transition
+  summary records `worktreeSource`, and `NYL-SOURCE-WORKTREE` explains the source
+  and retention. They cannot establish clean promotion evidence or publish
+  Kubernetes trees, including through `publish-tree` after checkout. An ordinary
+  run cannot select a snapshot through `--source`.
+- Before effects, the run commit retains the snapshot as an additional parent.
+  State transition and retired evidence commits retain referenced snapshots
+  likewise. State history follows first parents and stops before a source
+  snapshot, including on fresh refs populated by a copy-based move. State and coordination
+  fetches and state moves therefore preserve inputs for recovery and teardown
+  from a fresh clone. This archives Git-visible uncommitted files and their source
+  ancestry in the chosen state repository. `--local` keeps them on this clone's
+  state branches instead; it remains independent of source selection. These
+  provenance forms use the existing v1 state documents.
 - With `admission: required` (M8), the current
   [deployment admission](ci-execution.md#deployment-admission) chooses S for
   state-writing runs: admission resolves the environment's source by the rules

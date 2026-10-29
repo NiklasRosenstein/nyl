@@ -86,6 +86,16 @@ default, fast-forwarded to the remote and never pushed:
   drops local commits, and [`nyl state restore`](/nyl/reference/cli/state/#nyl-state-restore)
   repairs a remote whose tip is a `Nyl-Local` commit pushed by hand.
 
+### Worktree snapshots
+
+[`reconcile --worktree`](/nyl/orchestration/runs/#worktree-inputs) creates local
+source refs `refs/nyl-worktrees/<base>/<tree>` without changing HEAD or the
+staging index. They reuse identical snapshots. The snapshot and its source
+ancestry are retained as parents of state and pre-effect run commits, so state
+moves and fresh-clone recovery preserve the inputs. State history inspection
+stops at the snapshot boundary. With `--local`, snapshot history stays in this
+clone; otherwise it is published to the configured state repository.
+
 ## Coordination refs
 
 Refs under `coordinationRefPrefix`, in the state repository, coordinate runs.

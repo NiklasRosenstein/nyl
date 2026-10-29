@@ -132,6 +132,34 @@ are not checked out. Command units retain a full checkout because their
 may read. Changing a source commit alone does not re-run a unit when its
 recorded input bytes are unchanged.
 
+## Worktree inputs
+
+For local development, reconcile uncommitted declarations and input files with:
+
+```bash
+nyl reconcile -e dev --worktree
+```
+
+Nyl snapshots Git-visible tracked and untracked files once, preserving deletions
+and executable modes. Ignored untracked files are excluded and symlinks are
+rejected. HEAD and the staging index stay untouched. Discovery, preflight,
+rendering, and all execution waves use that immutable snapshot; subsequent edits
+belong to the next run. Explicitly pinned unit sources keep their declared
+commits. The flag requires exactly one named environment and conflicts with
+`--source`, label selectors, and group selectors.
+
+State and run checkpoints archive the snapshot and its source ancestry, including
+Git-visible uncommitted files, in the configured state repository. Recovery and
+teardown can retrieve those inputs from another clone after the working files
+are gone. Choose a local state repository for disposable experiments, as in the
+[local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu).
+`--local` independently keeps state transitions on the clone's local branches.
+
+`NYL-SOURCE-WORKTREE`, the transition's `worktreeSource` summary, and the reserved
+`refs/nyl-worktrees/` source revision identify the run's provenance. Snapshots
+cannot publish Kubernetes trees or count as clean committed-source promotion
+evidence. Commit changes and reconcile without the flag for that evidence.
+
 ## Execution keys and receipts
 
 Each execution records a **receipt** in the observed state: the execution key

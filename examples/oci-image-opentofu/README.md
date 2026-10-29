@@ -19,8 +19,7 @@ and OpenTofu state in `/tmp/nyl-oci-image-opentofu/terraform.tfstate`.
 state there instead of to the source checkout's `origin`. Keep both stores
 until teardown; choose durable paths in `environment.yaml` to keep the demo.
 
-Reconciliation reads committed source. Commit changes to the example before
-running it. From the Nyl repository root, in one shell:
+From the Nyl repository root, in one shell:
 
 ```bash
 cd examples/oci-image-opentofu
@@ -30,7 +29,7 @@ docker run -d --name nyl-example-registry -p 127.0.0.1:5000:5000 registry:3
 
 nyl validate
 nyl state init -e local
-nyl reconcile -e local
+nyl reconcile -e local --worktree
 curl --fail http://127.0.0.1:8080
 nyl verify -e local
 ```
@@ -38,8 +37,9 @@ nyl verify -e local
 The exports let both tools use your selected Docker daemon and give Buildx
 access to your Docker configuration.
 
-Edit `web/index.html`, commit it, and run `nyl reconcile -e local` again to
-rebuild and replace the container. An unchanged run executes neither unit.
+Edit `web/index.html` and rerun `nyl reconcile -e local --worktree` to rebuild
+and replace the container. The flag snapshots uncommitted files; state retains
+them for recovery and teardown. An unchanged run executes neither unit.
 
 ## Clean up
 
