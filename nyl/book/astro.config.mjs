@@ -134,6 +134,7 @@ export default defineConfig({
             icon: "code-branch",
             items: [
               "kubernetes-gitops",
+              "kubernetes-gitops/rendered-manifest-pattern",
               {
                 label: "Concepts",
                 items: [

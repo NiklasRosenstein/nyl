@@ -45,7 +45,7 @@ exact manifests a change produces.
 Use this layer when Kubernetes workloads are deployed through GitOps and you
 want what is deployed to be reviewable, reproducible YAML.
 
-Start with the [rendered manifest pattern](/nyl/kubernetes-gitops/).
+Start with the [rendered manifest pattern](/nyl/kubernetes-gitops/rendered-manifest-pattern/).
 
 ## Orchestration
 

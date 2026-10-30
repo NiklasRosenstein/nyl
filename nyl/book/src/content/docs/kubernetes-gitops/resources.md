@@ -43,5 +43,5 @@ Kind-specific JSON schemas are available from the
 [Nyl Resource Schemas](/nyl/reference/editor-schemas/). Scaffolded resources include the
 appropriate YAML language-server schema URL.
 
-See the [Rendered Manifest Pattern](/nyl/kubernetes-gitops/)
+See the [Rendered Manifest Pattern](/nyl/kubernetes-gitops/rendered-manifest-pattern/)
 for the operational workflow.
