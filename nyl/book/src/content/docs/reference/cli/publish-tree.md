@@ -50,3 +50,45 @@ documents the configuration model.
 
 See the [options shared by the tree commands](/nyl/reference/cli/render-tree/#options-shared-by-the-tree-commands) for target selection, caching, secret inputs, progress,
 and validation.
+
+## Partial publication
+
+Publish selected ApplicationGroups or individual Releases:
+
+```bash
+nyl publish-tree --target production --application-group payments
+nyl publish-tree --target production --release payments/api
+nyl publish-tree --target production --release payments/api --release payments/worker --dry-run
+```
+
+Both selectors are repeatable and combine by union. Release names must be
+`<applicationGroup>/<release>` and require a literal Release `metadata.name`,
+so selection does not evaluate other Release templates. Without selectors Nyl
+publishes the full target.
+
+Nyl renders the selection and reads the remaining manifests from a verified,
+pinned destination commit. Whole-tree ownership, Namespace, CRD, project, and
+configured manifest validation checks use the combined candidate. Unselected
+Release templates and inputs are not evaluated; static project discovery and
+control-resource validity still apply. The summary identifies the baseline,
+rendered/retained/removed Release counts, and changes to shared catalog artifacts.
+
+Selecting a group replaces its published membership and can remove Releases.
+Selecting one Release requires it to exist and preserves every other Release.
+Retained workloads and Applications keep their bytes and original provenance.
+When an update requires changing a retained owner or shared carried state,
+select the affected consumers too. Shared generated projects may change to admit
+the combined candidate's namespaces and resource kinds.
+
+Run one full publication before using partial publication on an older tree.
+Partial publication requires version 3 ownership metadata and refuses missing or
+externally modified indexed files. Target-wide configuration changes require a
+full publication; group configuration changes require selecting the whole group.
+A destination update during rendering fails publication; rerun to render against
+the new baseline. `--dry-run` prepares the complete candidate without pushing.
+
+Partial trees can contain several source revisions. Their index records source
+and input digests per Release, without copying input values or defaults. The
+publication commit's source trailer describes this
+operation, not every retained Release. A partial publication does not establish
+that the whole target matches that source revision.

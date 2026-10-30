@@ -131,8 +131,8 @@ impl Cli {
         match self.command {
             Commands::Comment(args) => commands::comment::execute(args).await,
             Commands::Render(args) => commands::render::execute(args).await,
-            Commands::RenderTree(args) => commands::render_tree::execute(args).await,
-            Commands::PublishTree(args) => commands::publish_tree::execute(args).await,
+            Commands::RenderTree(args) => Box::pin(commands::render_tree::execute(args)).await,
+            Commands::PublishTree(args) => Box::pin(commands::publish_tree::execute(args)).await,
             Commands::Create(args) => commands::create::execute(args),
             Commands::Capture(args) => commands::capture::execute(args).await,
             Commands::Update(args) => commands::update::execute(args),

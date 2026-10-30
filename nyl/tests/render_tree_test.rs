@@ -6840,3 +6840,440 @@ fn component_value_import_changes_invalidate_cached_tree_renders() {
     let recontracted = render_tree();
     assert!(!recontracted.contains("scheduling.example.com/pool"), "{recontracted}");
 }
+
+fn scoped_publish(fixture: &TempDir, selectors: &[&str]) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production"])
+        .args(selectors)
+        .assert()
+}
+
+fn add_partial_worker(fixture: &TempDir) {
+    fs::write(fixture.path().join("applications/workloads/worker.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: worker, namespace: worker}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: worker, namespace: worker}\ndata: {version: old}\n").unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Add worker");
+}
+
+fn publication_files(destination: &TempDir) -> BTreeMap<PathBuf, Vec<u8>> {
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    let mut files = BTreeMap::new();
+    commit
+        .tree()
+        .unwrap()
+        .walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob) {
+                files.insert(
+                    PathBuf::from(format!("{root}{}", entry.name().unwrap())),
+                    repository.find_blob(entry.id()).unwrap().content().to_vec(),
+                );
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .unwrap();
+    files
+}
+
+fn change_partial_api(fixture: &TempDir) {
+    let path = fixture.path().join("applications/workloads/api.yaml");
+    let source = fs::read_to_string(&path)
+        .unwrap()
+        .replace("'{{ values.environment }}'", "updated");
+    fs::write(path, source).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Update api");
+}
+
+#[test]
+fn partial_publication_retains_bytes_and_provenance_without_rendering_other_releases() {
+    let (fixture, destination, _, _) = publication_fixture();
+    add_partial_worker(&fixture);
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    // An unselected Release with a failing template must not be evaluated,
+    // including during the dirty worktree's clean-HEAD comparison.
+    let worker = fixture.path().join("applications/workloads/worker.yaml");
+    fs::write(
+        &worker,
+        fs::read_to_string(&worker)
+            .unwrap()
+            .replace("old", "'{{ missing.required }}'"),
+    )
+    .unwrap();
+    change_partial_api(&fixture);
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .success()
+        .stdout(predicate::str::contains("1 rendered, 1 retained"));
+    let after = publication_files(&destination);
+    for (path, bytes) in &before {
+        if path.starts_with("production/workloads/worker") {
+            assert_eq!(after.get(path), Some(bytes));
+        }
+    }
+    assert!(published_api_manifests(&destination).contains("updated"));
+    let old: serde_json::Value = serde_json::from_slice(&before[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+    let new: serde_json::Value = serde_json::from_slice(&after[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+    assert_eq!(new["version"], 3);
+    assert_eq!(new["sourceCommit"], serde_json::Value::Null);
+    assert_eq!(
+        new["compilation"]["releases"]["workloads/worker"],
+        old["compilation"]["releases"]["workloads/worker"]
+    );
+    assert_ne!(
+        new["compilation"]["releases"]["workloads/api"]["sourceCommit"],
+        old["compilation"]["releases"]["workloads/api"]["sourceCommit"]
+    );
+    let commit = published_commit(&Repository::open_bare(destination.path()).unwrap(), "deploy/production").id();
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .success()
+        .stdout(predicate::str::contains("already published"));
+    assert_eq!(
+        published_commit(&Repository::open_bare(destination.path()).unwrap(), "deploy/production").id(),
+        commit
+    );
+}
+
+#[test]
+fn partial_group_publication_removes_only_selected_membership() {
+    let (fixture, destination, _, _) = publication_fixture();
+    add_partial_worker(&fixture);
+    publish_production(&fixture).success();
+    fs::remove_file(fixture.path().join("applications/workloads/worker.yaml")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Remove worker");
+    scoped_publish(&fixture, &["--release", "workloads/worker"])
+        .failure()
+        .stderr(predicate::str::contains("removal requires"));
+    scoped_publish(&fixture, &["--application-group", "workloads"])
+        .success()
+        .stdout(predicate::str::contains("1 removed"));
+    assert!(!publication_files(&destination)
+        .keys()
+        .any(|path| path.starts_with("production/workloads/worker")));
+}
+
+#[test]
+fn partial_publication_rejects_conflicts_with_retained_resources() {
+    let (fixture, _destination, _seed, _) = publication_fixture();
+    add_partial_worker(&fixture);
+    publish_production(&fixture).success();
+    let path = fixture.path().join("applications/workloads/api.yaml");
+    fs::write(&path, "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: api, namespace: api}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: worker, namespace: worker}\n").unwrap();
+    let source = fs::read_to_string(&path).unwrap().replace(
+        "metadata: {name: api, namespace: api}",
+        "metadata: {name: api, namespace: worker}",
+    );
+    fs::write(path, source).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Conflict with worker");
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("owned by more than one").or(predicate::str::contains("sharedNamespaces")));
+}
+
+#[test]
+fn partial_publication_requires_a_seeded_verified_baseline() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("full target first"));
+    publish_production(&fixture).success();
+    let files = publication_files(&destination);
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&files[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+    legacy["version"] = 2.into();
+    legacy.as_object_mut().unwrap().remove("compilation");
+    push_publication_state(
+        &seed,
+        "production/_nyl/index.json",
+        &serde_json::to_string(&legacy).unwrap(),
+    );
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("legacy ownership index"));
+    // Even byte-identical manifests must perform the full index migration.
+    publish_production(&fixture).success();
+    scoped_publish(&fixture, &["--release", "workloads/api"]).success();
+    let path = publication_files(&destination)
+        .keys()
+        .find(|path| path.starts_with("production/workloads/api/configmap"))
+        .unwrap()
+        .clone();
+    push_publication_state(&seed, path.to_str().unwrap(), "tampered\n");
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("modified outside Nyl"));
+}
+
+#[test]
+fn partial_publication_dry_run_and_unknown_selectors_leave_destination_unchanged() {
+    let (fixture, destination, _, _) = publication_fixture();
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    scoped_publish(&fixture, &["--application-group", "missing"])
+        .failure()
+        .stderr(predicate::str::contains("Unknown ApplicationGroup"));
+    scoped_publish(&fixture, &["--release", "workloads/missing"])
+        .failure()
+        .stderr(predicate::str::contains("Unknown Release"));
+    change_partial_api(&fixture);
+    scoped_publish(&fixture, &["--release", "workloads/api", "--dry-run"])
+        .success()
+        .stdout(predicate::str::contains("without pushing"));
+    assert_eq!(publication_files(&destination), before);
+}
+
+#[test]
+fn partial_publication_uses_retained_crd_scope_for_generated_projects() {
+    let (fixture, destination, _, _) = publication_fixture();
+    let group = fixture.path().join("config/application-groups/workloads.yaml");
+    fs::write(
+        &group,
+        fs::read_to_string(&group)
+            .unwrap()
+            .replace("  projectRef: workloads\n", ""),
+    )
+    .unwrap();
+    let cluster = fixture.path().join("config/clusters/prod-eu-1.yaml");
+    fs::write(
+        &cluster,
+        fs::read_to_string(&cluster).unwrap().replace(
+            "      - core/Namespace",
+            "      - core/Namespace\n      - apiextensions.k8s.io/CustomResourceDefinition",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/crds.yaml"),
+        r#"apiVersion: k8s.nyl/v1
+kind: Release
+metadata: {name: crds, namespace: platform}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: widgets.example.com}
+spec:
+  group: example.com
+  scope: Namespaced
+  names: {kind: Widget, plural: widgets}
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema: {type: object}
+"#,
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Publish CRD contract");
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    let api = fixture.path().join("applications/workloads/api.yaml");
+    fs::write(
+        &api,
+        format!(
+            "{}---\napiVersion: example.com/v1\nkind: Widget\nmetadata: {{name: selected, namespace: api}}\n",
+            fs::read_to_string(&api).unwrap()
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Use retained CRD");
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .success()
+        .stdout(predicate::str::contains("Shared artifact:"));
+    let after = publication_files(&destination);
+    for (path, bytes) in &before {
+        if path.starts_with("production/workloads/crds") {
+            assert_eq!(after.get(path), Some(bytes));
+        }
+    }
+    let project = after
+        .iter()
+        .find(|(path, _)| path.starts_with("production/_nyl/catalog/appproject.argoproj.io"))
+        .unwrap()
+        .1;
+    assert!(String::from_utf8_lossy(project).contains("Widget"));
+}
+
+#[test]
+fn partial_publication_rejects_shared_carried_state_updates_until_consumers_are_selected() {
+    let (fixture, destination, _, _) = publication_fixture();
+    let source = "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n";
+    with_publication_binding(&fixture, source);
+    let api = fs::read_to_string(fixture.path().join("applications/workloads/api.yaml")).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/worker.yaml"),
+        api.replace("name: api", "name: worker")
+            .replace("namespace: api", "namespace: worker"),
+    )
+    .unwrap();
+    let target = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target,
+        format!(
+            "{}    workloads/worker:\n      image:\n        fromPublication:\n{source}",
+            fs::read_to_string(&target).unwrap()
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Share carried state");
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    let carried = fixture.path().join("build/images.json");
+    fs::write(&carried, r#"{"api":"old"}"#).unwrap();
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    fs::write(&carried, r#"{"api":"new"}"#).unwrap();
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("retained Release workloads/worker"));
+    assert_eq!(publication_files(&destination), before);
+    scoped_publish(
+        &fixture,
+        &["--release", "workloads/api", "--release", "workloads/worker"],
+    )
+    .success();
+    assert!(published_api_manifests(&destination).contains("image: new"));
+}
+
+#[test]
+fn partial_group_publication_preserves_other_groups_with_unavailable_sources() {
+    let (fixture, destination, _, _) = publication_fixture();
+    fs::write(fixture.path().join("config/application-groups/extras.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: extras\n  labels: {environment: production}\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd\n").unwrap();
+    fs::create_dir_all(fixture.path().join("applications/extras")).unwrap();
+    fs::write(
+        fixture.path().join("applications/extras/extra.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: extra, namespace: extra}\n",
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Add extra group");
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    fs::remove_dir_all(fixture.path().join("applications/extras")).unwrap();
+    change_partial_api(&fixture);
+    scoped_publish(&fixture, &["--application-group", "workloads"]).success();
+    let after = publication_files(&destination);
+    for (path, bytes) in before {
+        if path.starts_with("production/extras") {
+            assert_eq!(after.get(&path), Some(&bytes));
+        }
+    }
+}
+
+#[test]
+fn partial_publication_shared_api_refuses_a_destination_move_without_publication_inputs() {
+    use nyl::gitops::publication::{prepare_target_publication, render_target, PublicationAuthor, TargetRender};
+    use nyl::gitops::tree::partial::PublicationSelection;
+    let (fixture, destination, seed, _) = publication_fixture();
+    publish_production(&fixture).success();
+    change_partial_api(&fixture);
+    let rendered = render_target(&TargetRender {
+        worktree: fixture.path(),
+        project_dir: fixture.path(),
+        target: "production",
+        selection: PublicationSelection {
+            releases: ["workloads/api".to_owned()].into(),
+            ..Default::default()
+        },
+        publication_base: None,
+        inputs: &BTreeMap::new(),
+        cache_dir: None,
+    })
+    .unwrap();
+    let concurrent = push_publication_state(&seed, "production/unowned.txt", "concurrent\n");
+    let author = PublicationAuthor {
+        identity: nyl_core::orchestration::ports::CommitIdentity {
+            name: "Test".to_owned(),
+            email: "test@example.invalid".to_owned(),
+        },
+        time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+    };
+    let error = prepare_target_publication(&rendered, fixture.path(), "Scoped update", &author, &|_| None)
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("another writer pushed while rendering"),
+        "{error}"
+    );
+    assert_eq!(
+        published_commit(&Repository::open_bare(destination.path()).unwrap(), "deploy/production").id(),
+        concurrent
+    );
+}
+
+#[test]
+fn partial_publication_requires_full_target_for_shared_control_changes() {
+    let (fixture, destination, _, _) = publication_fixture();
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    let target = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target,
+        fs::read_to_string(&target).unwrap().replace(
+            "    environment: production\n  publication:",
+            "    environment: changed\n  publication:",
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Change target values");
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("Target-wide configuration changed"));
+    assert_eq!(publication_files(&destination), before);
+}
+
+#[test]
+fn partial_index_format_roundtrips_versioned_golden_and_legacy_envelope() {
+    use nyl::gitops::reconcile::parse_index;
+    use nyl::gitops::tree::partial::PublicationSnapshot;
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/partial-publication/index-v3.json")).unwrap();
+    let index = parse_index(&serde_json::to_vec(&golden).unwrap(), "index-v3.json").unwrap();
+    assert_eq!(serde_json::to_value(&index).unwrap(), golden);
+    let metadata: PublicationSnapshot = serde_json::from_value(index.compilation.unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(metadata).unwrap(), golden["compilation"]);
+    let mut legacy = golden;
+    legacy["version"] = 2.into();
+    legacy.as_object_mut().unwrap().remove("compilation");
+    let index = parse_index(&serde_json::to_vec(&legacy).unwrap(), "index-v2.json").unwrap();
+    assert_eq!(serde_json::to_value(index).unwrap(), legacy);
+}
+
+#[test]
+fn partial_publication_metadata_keeps_input_evidence_without_unused_private_values() {
+    let (fixture, destination, _, _) = publication_fixture();
+    let release = fixture.path().join("applications/workloads/api.yaml");
+    fs::write(
+        &release,
+        fs::read_to_string(&release).unwrap().replacen(
+            "  namespace: api\n---",
+            "  namespace: api\nspec:\n  inputs:\n    unused: {type: string, default: do-not-publish-default}\n---",
+            1,
+        ),
+    )
+    .unwrap();
+    let target = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target,
+        format!(
+            "{}  releaseInputs:\n    workloads/api:\n      unused: {{value: do-not-publish-inline}}\n",
+            fs::read_to_string(&target).unwrap()
+        ),
+    )
+    .unwrap();
+    commit_all(
+        &Repository::open(fixture.path()).unwrap(),
+        "Declare private unused input",
+    );
+    publish_production(&fixture).success();
+    change_partial_api(&fixture);
+    scoped_publish(&fixture, &["--release", "workloads/api"]).success();
+    let files = publication_files(&destination);
+    let bytes = &files[&PathBuf::from("production/_nyl/index.json")];
+    let index = String::from_utf8(bytes.clone()).unwrap();
+    assert!(!index.contains("do-not-publish-default"));
+    assert!(!index.contains("do-not-publish-inline"));
+    let index: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    assert!(index["compilation"]["releases"]["workloads/api"]["inputs"]
+        .get("@input/workloads/api/unused")
+        .is_some());
+}

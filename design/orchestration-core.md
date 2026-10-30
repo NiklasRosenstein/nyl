@@ -532,9 +532,9 @@ spec:
 - The ownership index of every tree the unit publishes records the owning
   environment and unit uid next to the existing target, cluster, and
   publication identity. These are new index fields, so orchestrated
-  publications write index format version 3 with a migration from version 2;
-  trees published without orchestration keep version 2 and stay
-  byte-identical. Publish and teardown refuse a prefix whose index names
+  publications write index format version 4 with migrations from versions 2
+  and 3; non-orchestrated publications use version 3 for per-Release ownership
+  and mixed provenance (see [partial publication](partial-publication.md)). Publish and teardown refuse a prefix whose index names
   another environment's or another incarnation's unit while that incarnation
   still exists in its environment's state, active, deleting, or retained. A
   target moves between environments once the old environment's incarnation is
@@ -619,7 +619,7 @@ both phases through Git on the real publication path
 `nyl_render::gitops::publication`), records the phase 1 commit as the wait's
 `phase1Commit`, and removes in phase 2 exactly the files of its own
 `_nyl/index.json`. The fake Argo CD observer (`FakeObserver`) stands in for
-`observe` in tests. Publication target ownership (ownership index v3) ships
+`observe` in tests. Publication target ownership (ownership index v4) ships
 with the `KubernetesPublication` driver in M5; until then a teardown removes
 only the files its own index records.
 

@@ -28,11 +28,15 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession, CATALOG_DIRECTORY,
 };
 
-const TARGET_CACHE_ACTION: &str = "target-provenance-v4";
+pub mod partial;
+
+const TARGET_CACHE_ACTION: &str = "target-provenance-v5";
 
 /// Inputs admitted while compiling a rendered deployment tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TreeRenderOptions {
+    /// Explicit replacement authority; empty means the complete target.
+    pub selection: partial::PublicationSelection,
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
     pub allow_secret_inputs: bool,
@@ -61,6 +65,11 @@ pub struct TreeRenderOptions {
 /// Pure output of compiling one target. Paths are relative to the target prefix.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CompiledTargetTree {
+    /// Portable publication metadata for retaining unselected Releases.
+    #[serde(default)]
+    pub publication_snapshot: Option<partial::PublicationSnapshot>,
+    #[serde(default)]
+    pub publication_report: partial::PublicationReport,
     pub target: DeploymentTarget,
     pub cluster: Cluster,
     pub repository_name: Option<String>,
@@ -175,17 +184,21 @@ struct ManagedNamespaceOwner {
     annotations: BTreeMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingWorkload {
     group: ApplicationGroup,
     release: crate::resources::Release,
+    #[serde(skip)]
     manifests: Vec<Value>,
+    #[serde(skip)]
     manifest_provenance: HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
+    #[serde(skip)]
     release_provenance: Option<crate::render::Provenance>,
     destination_namespace: String,
     argocd_project_name: String,
     release_directory: PathBuf,
     application_name: String,
+    input_paths: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,10 +508,68 @@ async fn compile_target_tree_recording(
     }
     .with_cache(cache.cloned())
     .with_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
+    let selection = options.selection.clone();
+    selection.validate()?;
+    let control_digest = partial::control_digest(inventory, &target, &cluster, &argocd, &repository)?;
+    let baseline_reader = super::inputs::CachedGitBlobSource::new(
+        None,
+        &inventory.project_root,
+        &inventory.project_config,
+        cache.cloned(),
+    );
+    let partial_base = if selection.is_full() {
+        None
+    } else {
+        let url = repository.publish_url.as_deref().unwrap_or(&repository.repo_url);
+        let branch = &target.spec.publication.revision;
+        let prefix = target.publication_path_prefix();
+        Some(match &options.publication_base {
+            Some(base) if base.is_for(url, branch, prefix) => base.clone(),
+            _ => super::inputs::PublicationBase::resolve(
+                &baseline_reader,
+                url,
+                branch,
+                prefix,
+                options.publication_read,
+            )?,
+        })
+    };
+    let baseline = partial_base
+        .as_ref()
+        .map(|base| {
+            partial::load_baseline(
+                &baseline_reader,
+                base,
+                &target,
+                &cluster,
+                repository_name.as_deref().unwrap_or(&repository.repo_url),
+            )
+        })
+        .transpose()?;
+    if baseline
+        .as_ref()
+        .is_some_and(|base| base.snapshot.control_digest != control_digest)
+    {
+        return Err(NylError::config(
+            "Target-wide configuration changed; publish the full target first",
+        ));
+    }
     let mut git_manager = None;
 
     let (groups, disabled_groups) = selected_groups(inventory, &target, &central_session)?;
 
+    let known_groups = groups
+        .iter()
+        .map(|(_, group)| group.metadata.name.clone())
+        .chain(disabled_groups.iter().cloned())
+        .chain(baseline.iter().flat_map(|base| base.snapshot.groups.keys().cloned()))
+        .collect::<BTreeSet<_>>();
+    for name in &selection.application_groups {
+        if !known_groups.contains(name) {
+            return Err(NylError::config(format!("Unknown ApplicationGroup selector {name:?}")));
+        }
+    }
+    let mut group_digests = BTreeMap::new();
     let mut prepared_groups = Vec::new();
     for (group_resource_path, group) in groups {
         let project = resolve_effective_group_project(
@@ -509,14 +580,49 @@ async fn compile_target_tree_recording(
             &cluster,
             &argocd.resource,
         )?;
-        let mut source = resolve_group_source(
-            inventory,
-            &group_resource_path,
-            &group,
-            &target,
-            &mut git_manager,
-            cache,
-        )?;
+        let group_digest = partial::group_digest(&group, &project)?;
+        if let Some(base) = &baseline {
+            if !selection.application_groups.contains(&group.metadata.name)
+                && base.snapshot.groups.get(&group.metadata.name) != Some(&group_digest)
+            {
+                return Err(NylError::config(format!(
+                    "ApplicationGroup {:?} configuration changed; select the entire group or publish the full target",
+                    group.metadata.name
+                )));
+            }
+        }
+        group_digests.insert(group.metadata.name.clone(), group_digest);
+        let mut source = if selection.touches_group(&group.metadata.name) {
+            resolve_group_source(
+                inventory,
+                &group_resource_path,
+                &group,
+                &target,
+                &mut git_manager,
+                cache,
+            )?
+        } else {
+            ResolvedGroupSource {
+                root: inventory.project_root.clone(),
+                provenance_root: PathBuf::new(),
+                candidate_files: Vec::new(),
+                files: Vec::new(),
+                renderer_mode: RendererConfigMode::Central,
+                source_session: None,
+                remote: false,
+                provenance_inputs: Vec::new(),
+                repository: None,
+            }
+        };
+        if !selection.is_full() {
+            source.files.retain(|file| {
+                selection.application_groups.contains(&group.metadata.name)
+                    || file
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| selection.includes(&group.metadata.name, name))
+            });
+        }
         if let Some(session) = &mut source.source_session {
             session.set_cache(cache.cloned());
             session.set_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
@@ -529,6 +635,28 @@ async fn compile_target_tree_recording(
         });
     }
 
+    if let Some(base) = &baseline {
+        for name in base.snapshot.groups.keys() {
+            if !group_digests.contains_key(name) && !selection.application_groups.contains(name) {
+                return Err(NylError::config(format!("Retained ApplicationGroup {name:?} is missing or disabled; select the group or publish the full target")));
+            }
+        }
+    }
+    for key in &selection.releases {
+        let key = ReleaseKey::parse(key)?;
+        if !prepared_groups.iter().any(|group| {
+            group.group.metadata.name == key.group
+                && group
+                    .source
+                    .files
+                    .iter()
+                    .any(|file| file.name.as_ref() == Some(&key.release))
+        }) {
+            return Err(NylError::config(format!(
+                "Unknown Release selector {key}; removal requires selecting its ApplicationGroup"
+            )));
+        }
+    }
     // Boxed: it holds the lazy artifact resolver across the compile's awaits.
     let git_blobs = Box::new(super::inputs::CachedGitBlobSource::new(
         git_manager.take(),
@@ -536,7 +664,9 @@ async fn compile_target_tree_recording(
         &inventory.project_config,
         cache.cloned(),
     ));
-    let publication_base = if target
+    let publication_base = if partial_base.is_some() {
+        partial_base
+    } else if target
         .spec
         .release_inputs
         .iter()
@@ -574,9 +704,16 @@ async fn compile_target_tree_recording(
             .as_ref()
             .is_none_or(|passed| publication_base.as_ref() == Some(passed))
     });
+    let mut input_target = target.clone();
+    if !selection.is_full() {
+        input_target
+            .spec
+            .release_inputs
+            .retain(|key, _| ReleaseKey::parse(key).is_ok_and(|key| selection.includes(&key.group, &key.release)));
+    }
     let release_inputs = resolve_prepared_release_inputs(
         inventory,
-        &target,
+        &input_target,
         &prepared_groups,
         &disabled_groups,
         git_blobs.as_ref(),
@@ -586,7 +723,7 @@ async fn compile_target_tree_recording(
     )?;
 
     let target_cache_inputs = TargetCacheInputs {
-        options,
+        options: options.clone(),
         target: &target,
         target_source_path: &target_discovered.source_path,
         cluster: &cluster,
@@ -609,7 +746,11 @@ async fn compile_target_tree_recording(
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
     observer.started(progress_total);
-    if let Some(mut compiled) = load_cached_target(cache, cache_probe.as_ref())? {
+    if let Some(mut compiled) = if selection.is_full() {
+        load_cached_target(cache, cache_probe.as_ref())?
+    } else {
+        None
+    } {
         compiled.publication_base = publication_base;
         observer.finished();
         // A hit's probe holds exactly the stored record's inputs, re-read.
@@ -627,7 +768,10 @@ async fn compile_target_tree_recording(
             probe.recorder = base;
         }
     }
-    let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
+    if let (Some(base), Some(probe)) = (&baseline, &mut cache_probe) {
+        probe.recorder.record_value("publication-baseline", &base.index)?;
+    }
+    let mut target_cacheable = selection.is_full() && cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
     let mut target_cache_bypass_reasons = BTreeSet::new();
     let mut files = BTreeMap::new();
     let mut inputs = BTreeSet::from([
@@ -654,7 +798,11 @@ async fn compile_target_tree_recording(
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
     let mut application_owners = BTreeMap::<(String, String), ApplicationOwner>::new();
-    let mut pending_workloads = Vec::new();
+    let mut pending_workloads = baseline
+        .as_ref()
+        .map(|base| base.retained_workloads(&selection))
+        .transpose()?
+        .unwrap_or_default();
     let mut namespace_scope_errors = Vec::new();
     let mut release_count = 0;
     let mut progress_completed = 0;
@@ -713,6 +861,19 @@ async fn compile_target_tree_recording(
                     source_path: input_path.clone(),
                 },
             );
+            let mut workload_inputs = BTreeSet::from([input_path.clone(), group_resource_path.clone()]);
+            if let Some(name) = &source_file.name {
+                if let Some(resolved) = release_inputs.releases.get(&ReleaseKey {
+                    group: group.metadata.name.clone(),
+                    release: name.clone(),
+                }) {
+                    for input in resolved.inputs.values() {
+                        if let super::inputs::InputOrigin::File(path) = &input.origin {
+                            workload_inputs.insert(inventory.paths().key(path).unwrap_or_else(|| path.clone()));
+                        }
+                    }
+                }
+            }
             inputs.insert(input_path);
             let provenance_root = &source.provenance_root;
             let worktree_root = (!source.remote).then_some(inventory.worktree_root.as_path());
@@ -767,6 +928,7 @@ async fn compile_target_tree_recording(
                 } else {
                     project_paths.key(bundle_input).unwrap_or_else(|| bundle_input.clone())
                 };
+                workload_inputs.insert(input_path.clone());
                 inputs.insert(input_path);
             }
             let Some(release) = rendered.release.take() else {
@@ -809,9 +971,23 @@ async fn compile_target_tree_recording(
                 argocd_project_name: argocd_project_name.clone(),
                 release_directory,
                 application_name,
+                input_paths: workload_inputs,
             });
         }
-        warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
+        if selection.is_full() || selection.application_groups.contains(&group.metadata.name) {
+            warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
+        }
+    }
+
+    for key in &selection.releases {
+        if !pending_workloads
+            .iter()
+            .any(|workload| format!("{}/{}", workload.group.metadata.name, workload.release.metadata.name) == *key)
+        {
+            return Err(NylError::config(format!(
+                "Selected Release {key} did not render; select its ApplicationGroup for removal"
+            )));
+        }
     }
 
     if !namespace_scope_errors.is_empty() {
@@ -853,6 +1029,7 @@ async fn compile_target_tree_recording(
         .map(|workload| workload.release_directory.clone())
         .collect::<Vec<_>>();
 
+    let snapshot_workloads = pending_workloads.clone();
     for workload in pending_workloads {
         for manifest in &workload.manifests {
             let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
@@ -961,7 +1138,87 @@ async fn compile_target_tree_recording(
         insert_file(&mut files, Path::new(CATALOG_DIRECTORY).join(relative), bytes)?;
     }
 
-    let state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
+    let mut state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
+    let mut committed_state_paths = release_inputs
+        .committed_state_paths()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<BTreeSet<_>>();
+    let mut publication_snapshot = partial::PublicationSnapshot {
+        version: 1,
+        control_digest,
+        groups: group_digests,
+        releases: BTreeMap::new(),
+        bindings: input_target
+            .spec
+            .release_inputs
+            .iter()
+            .filter_map(|(key, bindings)| {
+                let sources = bindings
+                    .values()
+                    .filter_map(|binding| binding.from_publication.clone())
+                    .collect::<Vec<_>>();
+                (!sources.is_empty()).then(|| (key.clone(), sources))
+            })
+            .collect(),
+    };
+    if let Some(base) = &baseline {
+        base.verify_retention(&selection, &mut files)?;
+        for (key, bindings) in &base.snapshot.bindings {
+            let release = ReleaseKey::parse(key)?;
+            if selection.includes(&release.group, &release.release) {
+                continue;
+            }
+            publication_snapshot.bindings.insert(key.clone(), bindings.clone());
+            for source in bindings {
+                let path = PathBuf::from(&source.path);
+                if let Some(bytes) = state_files.get(&path) {
+                    if base.files.get(&path) != Some(bytes) {
+                        return Err(NylError::config(format!(
+                            "Shared state {:?} would change for retained Release {key}; select it as well",
+                            source.path
+                        )));
+                    }
+                }
+                if source.carry_file_from_worktree.is_some() {
+                    let bytes = base.files.get(&path).ok_or_else(|| {
+                        NylError::config("Retained carried state is missing; publish the full target")
+                    })?;
+                    state_files.insert(path, bytes.clone());
+                } else {
+                    committed_state_paths.insert(path);
+                }
+            }
+        }
+    }
+    for workload in &snapshot_workloads {
+        let key = format!("{}/{}", workload.group.metadata.name, workload.release.metadata.name);
+        let retained = baseline
+            .as_ref()
+            .and_then(|base| base.snapshot.releases.get(&key))
+            .filter(|_| !selection.includes(&workload.group.metadata.name, &workload.release.metadata.name));
+        publication_snapshot.releases.insert(
+            key,
+            retained
+                .cloned()
+                .unwrap_or_else(|| partial::snapshot_release(workload, &files)),
+        );
+    }
+    publication_snapshot
+        .bindings
+        .retain(|key, _| publication_snapshot.releases.contains_key(key));
+    // Retained bytes are part of the candidate, including their original input evidence.
+    let mut input_digests = input_digests;
+    if let Some(base) = &baseline {
+        for (key, digest) in &base.index.inputs {
+            if let Some(release_input) = key.strip_prefix(super::inputs::INDEX_INPUT_PREFIX) {
+                let parts = release_input.split('/').collect::<Vec<_>>();
+                if parts.len() >= 3 && !selection.includes(parts[0], parts[1]) {
+                    input_digests.insert(key.clone(), digest.clone());
+                }
+            }
+        }
+    }
 
     let provenance = files
         .iter()
@@ -987,7 +1244,16 @@ async fn compile_target_tree_recording(
             Ok((path.clone(), frames))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let publication_report = partial::report(
+        &selection,
+        baseline.as_ref(),
+        publication_base.as_ref(),
+        &publication_snapshot,
+        &files,
+    );
     let compiled = CompiledTargetTree {
+        publication_report,
+        publication_snapshot: Some(publication_snapshot),
         target,
         cluster,
         repository_name,
@@ -997,11 +1263,7 @@ async fn compile_target_tree_recording(
         inputs,
         input_digests,
         state_files,
-        committed_state_paths: release_inputs
-            .committed_state_paths()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect(),
+        committed_state_paths,
         publication_base,
     };
     let dependencies = cache_probe.as_ref().filter(|_| record).map(|probe| TargetDependencies {
