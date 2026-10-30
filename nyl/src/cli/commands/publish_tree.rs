@@ -539,7 +539,14 @@ fn publication_current_commit(
         .repository_name
         .as_deref()
         .unwrap_or(&compiled.repository.repo_url);
-    if index.compilation.is_none()
+    let published_snapshot = index.compilation.as_ref().and_then(|value| {
+        <crate::gitops::tree::partial::PublicationSnapshot as serde::Deserialize>::deserialize(value).ok()
+    });
+    let same_policy = published_snapshot
+        .as_ref()
+        .zip(compiled.publication_snapshot.as_ref())
+        .is_some_and(|(published, current)| current.same_policy(published));
+    if !same_policy
         || index.target != compiled.target.metadata.name
         || index.cluster != compiled.cluster.metadata.name
         || index.publication.repository != repository

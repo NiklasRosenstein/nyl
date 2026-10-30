@@ -75,6 +75,24 @@ pub struct PublicationSnapshot {
     pub bindings: BTreeMap<String, Vec<crate::resources::release_inputs::PublicationInputSource>>,
 }
 
+impl PublicationSnapshot {
+    /// Compare the policy and ownership needed for future partial compilations.
+    /// Identical artifacts may retain their original source and input evidence.
+    pub fn same_policy(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.control_digest == other.control_digest
+            && self.groups == other.groups
+            && self.bindings == other.bindings
+            && self.releases.len() == other.releases.len()
+            && self.releases.iter().all(|(key, release)| {
+                other
+                    .releases
+                    .get(key)
+                    .is_some_and(|other| release.workload == other.workload && release.files == other.files)
+            })
+    }
+}
+
 /// One Release's effective policy, ownership, and original provenance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -114,40 +132,54 @@ pub(super) fn control_digest(
     // ProjectConfig expands declared paths beneath the config file's directory.
     // Publish the policy's identity independently of the checkout location (or
     // a lexical alias such as macOS's /var and /private/var).
-    let mut config = inventory.project_config.config.clone();
-    if let Some(root) = inventory.project_config.file.as_deref().and_then(Path::parent) {
-        let portable = |path: &Path| {
-            PathBuf::from(
-                path.strip_prefix(root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            )
-        };
-        config.project.components_search_paths = config
-            .project
+    let config = &inventory.project_config;
+    let root = config.file.as_deref().and_then(Path::parent);
+    let portable = |path: &Path| {
+        PathBuf::from(
+            root.and_then(|root| path.strip_prefix(root).ok())
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    };
+    // Only rendering and admission policy belongs to a publication. Imperative
+    // release history, approvals, capture, editor, and credential settings do not.
+    let project = &config.config.project;
+    let renderer = (
+        project
             .components_search_paths
             .iter()
             .map(|path| portable(path))
-            .collect();
-        config.project.helm_chart_search_paths = config
-            .project
+            .collect::<Vec<_>>(),
+        project
             .helm_chart_search_paths
             .iter()
             .map(|path| portable(path))
-            .collect();
-        config.project.gitops_scaffold_path = portable(&config.project.gitops_scaffold_path);
-        if let Some(vendor) = &mut config.vendor {
-            vendor.path = portable(&vendor.path);
-        }
-    }
+            .collect::<Vec<_>>(),
+        &project.aliases,
+        project.strip_empty_metadata_labels,
+    );
+    let vendor = config
+        .config
+        .vendor
+        .as_ref()
+        .map(|vendor| (vendor.mode, portable(&vendor.path)));
     let mut target = target.clone();
     target.spec.release_inputs.clear();
     let mut cluster = cluster.clone();
     cluster.spec.live = None;
     let mut control_cluster = argocd.cluster.clone();
     control_cluster.spec.live = None;
-    digest(&(config, target, cluster, &argocd.resource, control_cluster, repository))
+    digest(&(
+        renderer,
+        vendor,
+        &config.config.validation,
+        target,
+        cluster,
+        &argocd.resource,
+        control_cluster,
+        repository,
+    ))
 }
 
 pub(super) fn group_digest(group: &ApplicationGroup, project: &EffectiveProject) -> Result<String> {

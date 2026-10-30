@@ -7290,3 +7290,153 @@ fn partial_publication_metadata_keeps_input_evidence_without_unused_private_valu
         .get("@input/workloads/api/unused")
         .is_some());
 }
+
+#[test]
+fn partial_publication_rejects_retained_state_inside_a_new_release() {
+    for carried in [false, true] {
+        for path in [
+            "workloads/worker/state.json",
+            "workloads/worker/configmap/worker/worker.yaml",
+        ] {
+            let (fixture, destination, seed, _) = publication_fixture();
+            let carry = if carried {
+                "          carryFileFromWorktree: build/images.json\n"
+            } else {
+                ""
+            };
+            with_publication_binding(
+                &fixture,
+                &format!("          path: {path}\n          pointer: /api\n{carry}"),
+            );
+            fs::write(fixture.path().join(".gitignore"), "build/\n.nyl/\n").unwrap();
+            commit_all(&Repository::open(fixture.path()).unwrap(), "Ignore generated state");
+            if carried {
+                fs::create_dir_all(fixture.path().join("build")).unwrap();
+                fs::write(fixture.path().join("build/images.json"), r#"{"api":"old"}"#).unwrap();
+            } else {
+                push_publication_state(&seed, &format!("production/{path}"), r#"{"api":"old"}"#);
+            }
+            publish_production(&fixture).success();
+            let before = publication_files(&destination);
+            add_partial_worker(&fixture);
+            scoped_publish(&fixture, &["--release", "workloads/worker"])
+                .failure()
+                .stderr(predicate::str::contains(
+                    "inside workload Release directory workloads/worker",
+                ));
+            assert_eq!(publication_files(&destination), before);
+        }
+    }
+}
+
+#[test]
+fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
+    use nyl::gitops::publication::{publish_target, render_target, PublicationAuthor, TargetRender};
+    let (fixture, destination, _, _) = publication_fixture();
+    fs::write(fixture.path().join(".gitignore"), ".nyl/\n").unwrap();
+    add_partial_worker(&fixture);
+    publish_production(&fixture).success();
+    let before = publication_files(&destination);
+    let commit = published_commit(&Repository::open_bare(destination.path()).unwrap(), "deploy/production").id();
+    fs::write(fixture.path().join("nyl.toml"), "[release]\nhistory_limit=10\n").unwrap();
+    commit_all(
+        &Repository::open(fixture.path()).unwrap(),
+        "Change imperative history retention",
+    );
+    publish_production(&fixture)
+        .success()
+        .stdout(predicate::str::contains("already published"));
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .success()
+        .stdout(predicate::str::contains("already published"));
+    assert_eq!(publication_files(&destination), before);
+
+    // The shared publication API also keeps the published generation when only
+    // imperative settings and the source revision change.
+    let rendered = render_target(&TargetRender {
+        worktree: fixture.path(),
+        project_dir: fixture.path(),
+        target: "production",
+        selection: Default::default(),
+        publication_base: None,
+        inputs: &BTreeMap::new(),
+        cache_dir: None,
+    })
+    .unwrap();
+    let author = PublicationAuthor {
+        identity: nyl_core::orchestration::ports::CommitIdentity {
+            name: "Test".to_owned(),
+            email: "test@example.invalid".to_owned(),
+        },
+        time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+    };
+    let published = publish_target(&rendered, fixture.path(), "History only", &author, &|_| None).unwrap();
+    assert_eq!(published.commit, commit.to_string());
+    assert_eq!(publication_files(&destination), before);
+
+    change_partial_api(&fixture);
+    scoped_publish(&fixture, &["--release", "workloads/api"]).success();
+    let after = publication_files(&destination);
+    for (path, bytes) in before {
+        if path.starts_with("production/workloads/worker") {
+            assert_eq!(after.get(&path), Some(&bytes));
+        }
+    }
+}
+
+#[test]
+fn publication_updates_policy_metadata_when_manifest_bytes_are_unchanged() {
+    for group_policy in [false, true] {
+        let (fixture, destination, _, _) = publication_fixture();
+        fs::write(fixture.path().join(".gitignore"), ".nyl/\n").unwrap();
+        commit_all(&Repository::open(fixture.path()).unwrap(), "Ignore local cache");
+        publish_production(&fixture).success();
+        let before = publication_files(&destination);
+        let original_index: serde_json::Value =
+            serde_json::from_slice(&before[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+        if group_policy {
+            let group = fixture.path().join("config/application-groups/workloads.yaml");
+            fs::write(
+                &group,
+                format!(
+                    "{}  releaseCustomization:\n    allowedSyncOptions: [CreateNamespace=true]\n",
+                    fs::read_to_string(&group).unwrap()
+                ),
+            )
+            .unwrap();
+        } else {
+            let target = fixture.path().join("config/targets/production.yaml");
+            fs::write(
+                &target,
+                fs::read_to_string(&target).unwrap().replace(
+                    "    environment: production\n  publication:",
+                    "    environment: production\n    unusedPolicy: changed\n  publication:",
+                ),
+            )
+            .unwrap();
+        }
+        commit_all(
+            &Repository::open(fixture.path()).unwrap(),
+            "Change rendering policy without changing artifacts",
+        );
+        scoped_publish(&fixture, &["--release", "workloads/api"]).failure();
+        if group_policy {
+            scoped_publish(&fixture, &["--application-group", "workloads"]).success();
+        } else {
+            publish_production(&fixture).success();
+        }
+        let after = publication_files(&destination);
+        let updated_index: serde_json::Value =
+            serde_json::from_slice(&after[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+        assert_ne!(original_index["compilation"], updated_index["compilation"]);
+        assert_eq!(original_index["files"], updated_index["files"]);
+        for (path, bytes) in before {
+            if path != std::path::Path::new("production/_nyl/index.json") {
+                assert_eq!(after.get(&path), Some(&bytes));
+            }
+        }
+        scoped_publish(&fixture, &["--release", "workloads/api"])
+            .success()
+            .stdout(predicate::str::contains("already published"));
+    }
+}

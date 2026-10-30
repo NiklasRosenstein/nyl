@@ -82,6 +82,9 @@ history_limit = 10
   and anything still live stay recorded.
 - `nyl apply --history-limit <N>` overrides the setting for one invocation.
 
+History retention applies to imperative `nyl apply` and `nyl release rollback`.
+It does not affect rendered GitOps trees or publication compatibility.
+
 ## Remote artifact vendoring
 
 Vendoring is a project-wide policy for remote inputs used by every Cluster and

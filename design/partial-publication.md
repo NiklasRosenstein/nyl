@@ -26,7 +26,10 @@ Retained workload files and Applications keep their bytes. A required ownership
 transfer that would change a retained workload fails with the Release to add to
 the selection. Generated shared artifacts may change from the candidate's full
 usage, and the typed compilation report lists those changes. Carried state that
-would change for a retained consumer is rejected. The same pinned baseline is
+would change for a retained consumer is rejected. Selected and retained state
+paths are checked together against every candidate Release directory and
+rendered file, so state cannot enter an Argo CD source or overwrite a manifest.
+The same pinned baseline is
 used for clean-HEAD verification and the eventual compare-and-swap publication;
 a changed destination requires rebuilding the candidate, never rebasing bytes.
 
@@ -46,10 +49,16 @@ Version 2 indexes remain readable and reconcilable. One full publication seeds
 the metadata before partial publication is possible. Missing files, hash
 mismatches, incompatible ownership, and unsupported metadata fail closed. A full
 publication upgrades even when its manifest bytes have not changed.
+Policy metadata changes are published even when manifest bytes stay identical;
+unchanged policy and artifacts retain their original provenance.
 
 A partial publication requires compatible target-wide control configuration:
 publication coordinates, effective Cluster contracts, Argo CD destination,
-target values and selection, and project settings. Project path settings are
+target values and selection, renderer search paths, aliases, label stripping,
+vendoring, and final validation policy. Imperative release history retention
+(`release.history_limit`), approval lookup, capture defaults, editor settings,
+credentials, and scaffolding/location hints are independent of publication
+compatibility. Renderer path settings are
 fingerprinted relative to the configuration directory so the same policy works
 in subsequent checkouts. Per-Release bindings are
 resolved only for selected Releases. Unselected group configuration, including

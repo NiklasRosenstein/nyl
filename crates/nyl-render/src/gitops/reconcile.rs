@@ -96,6 +96,23 @@ impl RenderIndex {
     fn same_owner(&self, other: &Self) -> bool {
         self.target == other.target && self.cluster == other.cluster && self.publication == other.publication
     }
+
+    fn same_compilation_policy(&self, other: &Self) -> bool {
+        use super::tree::partial::PublicationSnapshot;
+        match (&self.compilation, &other.compilation) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                match (
+                    PublicationSnapshot::deserialize(left),
+                    PublicationSnapshot::deserialize(right),
+                ) {
+                    (Ok(left), Ok(right)) => left.same_policy(&right),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The files a target owns: output-relative path to bytes, borrowed from the
@@ -154,10 +171,11 @@ pub fn reconcile_rendered_tree_with_options(
         if previous.same_owner(&next_index)
             && previous.inputs == next_index.inputs
             && previous.files == next_index.files
-            && previous.compilation == next_index.compilation
+            && previous.same_compilation_policy(&next_index)
         {
             next_index.source_commit.clone_from(&previous.source_commit);
             next_index.dirty = previous.dirty;
+            next_index.compilation.clone_from(&previous.compilation);
         }
     }
     let resumes_transaction = transaction

@@ -1067,8 +1067,23 @@ pub fn place_state_files(
     release_directories: &[PathBuf],
     files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
-    let carried = resolved.carried_files();
-    for path in resolved.state_paths.keys() {
+    validate_state_placement(&resolved.state_paths, release_directories, files)?;
+    Ok(resolved
+        .carried_files()
+        .into_iter()
+        .map(|(path, bytes)| (PathBuf::from(path), bytes))
+        .collect())
+}
+
+/// Validate every selected and retained state path against the complete candidate.
+/// Values indicate whether Nyl carries (and owns) the state file.
+/// See [`place_state_files`] for the placement contract.
+pub fn validate_state_placement(
+    state_paths: &BTreeMap<String, bool>,
+    release_directories: &[PathBuf],
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    for (path, carried) in state_paths {
         let relative = Path::new(path);
         if relative.starts_with("_nyl") {
             return Err(NylError::config(format!(
@@ -1084,26 +1099,15 @@ pub fn place_state_files(
                 directory.display()
             )));
         }
-    }
-    for path in resolved.committed_state_paths() {
-        if files.contains_key(Path::new(&path)) {
-            return Err(NylError::config(format!(
-                "fromPublication state file {path} is a file this target renders; a committed state file must not be owned by the target"
-            )));
+        if files.contains_key(relative) {
+            return Err(NylError::config(if *carried {
+                format!("Carried fromPublication state file {path} collides with a rendered file")
+            } else {
+                format!("fromPublication state file {path} is a file this target renders; a committed state file must not be owned by the target")
+            }));
         }
     }
-    let mut state = BTreeMap::new();
-    for (path, bytes) in carried {
-        let path = PathBuf::from(&path);
-        if files.contains_key(&path) {
-            return Err(NylError::config(format!(
-                "Carried fromPublication state file {} collides with a rendered file",
-                path.display()
-            )));
-        }
-        state.insert(path, bytes);
-    }
-    Ok(state)
+    Ok(())
 }
 
 /// Add the `@`-prefixed digests of resolved inputs to the project file hashes.

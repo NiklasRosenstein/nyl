@@ -84,6 +84,10 @@ Run one full publication before using partial publication on an older tree.
 Partial publication requires version 3 ownership metadata and refuses missing or
 externally modified indexed files. Target-wide configuration changes require a
 full publication; group configuration changes require selecting the whole group.
+These publications update policy metadata even when manifest bytes are unchanged.
+Imperative `[release] history_limit` does not affect publication compatibility.
+Selected and retained state files must remain outside every candidate Release
+directory and cannot overlap rendered files.
 A destination update during rendering fails publication; rerun to render against
 the new baseline. `--dry-run` prepares the complete candidate without pushing.
 

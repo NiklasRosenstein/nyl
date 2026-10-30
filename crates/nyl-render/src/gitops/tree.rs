@@ -30,7 +30,7 @@ use super::{
 
 pub mod partial;
 
-const TARGET_CACHE_ACTION: &str = "target-provenance-v5";
+const TARGET_CACHE_ACTION: &str = "target-provenance-v6";
 
 /// Inputs admitted while compiling a rendered deployment tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -184,7 +184,7 @@ struct ManagedNamespaceOwner {
     annotations: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PendingWorkload {
     group: ApplicationGroup,
     release: crate::resources::Release,
@@ -1139,6 +1139,7 @@ async fn compile_target_tree_recording(
     }
 
     let mut state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
+    let mut state_paths = release_inputs.state_paths.clone();
     let mut committed_state_paths = release_inputs
         .committed_state_paths()
         .into_iter()
@@ -1171,6 +1172,9 @@ async fn compile_target_tree_recording(
             }
             publication_snapshot.bindings.insert(key.clone(), bindings.clone());
             for source in bindings {
+                state_paths
+                    .entry(source.path.clone())
+                    .or_insert(source.carry_file_from_worktree.is_some());
                 let path = PathBuf::from(&source.path);
                 if let Some(bytes) = state_files.get(&path) {
                     if base.files.get(&path) != Some(bytes) {
@@ -1191,6 +1195,7 @@ async fn compile_target_tree_recording(
             }
         }
     }
+    super::inputs::validate_state_placement(&state_paths, &release_directories, &files)?;
     for workload in &snapshot_workloads {
         let key = format!("{}/{}", workload.group.metadata.name, workload.release.metadata.name);
         let retained = baseline
