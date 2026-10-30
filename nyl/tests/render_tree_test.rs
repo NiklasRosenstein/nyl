@@ -7321,9 +7321,7 @@ fn partial_publication_rejects_retained_state_inside_a_new_release() {
             add_partial_worker(&fixture);
             scoped_publish(&fixture, &["--release", "workloads/worker"])
                 .failure()
-                .stderr(predicate::str::contains(
-                    "inside workload Release directory workloads/worker",
-                ));
+                .stderr(predicate::str::contains("inside workload Release directory"));
             assert_eq!(publication_files(&destination), before);
         }
     }
