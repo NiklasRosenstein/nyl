@@ -108,9 +108,8 @@ only a current receipt counts. When the reference would not resolve, they
 print nothing and exit 1. <code dir="auto">--allow-stale</code> prints the latest receipt’s value
 with the warning <code dir="auto">NYL-REFERENCE-STALE</code> instead.</li>
 <li><code dir="auto">--state-revision &#x3C;commit></code> reads state as of an earlier state commit.</li>
-<li><code dir="auto">--local</code> reads this clone’s <a href="/nyl/pr-preview/pr-193/orchestration/environments-and-state/#local-runs">local state branches</a>,
-including <code dir="auto">nyl reconcile --local</code> runs, instead of the remote state. It
-cannot be combined with <code dir="auto">--state-revision</code>.</li>
+<li><code dir="auto">--local</code> reads the configured local state repository without contacting the
+remote. It cannot be combined with <code dir="auto">--state-revision</code>.</li>
 <li><code dir="auto">-o</code> selects <code dir="auto">table</code> (default), <code dir="auto">wide</code>, <code dir="auto">yaml</code>, <code dir="auto">json</code>, or <code dir="auto">name</code>.</li>
 </ul>
 <p>Every form takes the project directory, or a path beneath it, as its last
@@ -134,8 +133,10 @@ only on the lock, so a filtered update agrees with an unfiltered <code dir="auto
 Every lock moves to the head of its revision. Each repository is fetched once
 per run. Locks are edited in place by their
 position, so write source locks and <code dir="auto">fromGit</code> bindings in block style. Unit
-source locks require literal repository coordinates, revisions, and commits;
-unfiltered updates include them, while group and target filters select only
+source locks require literal repository coordinates, revisions, and commits.
+Nyl discovers source fields through each registered driver and warns when a unit
+cannot render without an environment; its locks are skipped. Unfiltered updates
+include renderable units, while group and target filters select only
 the named control resources. A revision without a commit follows its tip and
 has no lock to refresh.</p>
 <p>Mutable revisions must refresh successfully before a lock is reported current

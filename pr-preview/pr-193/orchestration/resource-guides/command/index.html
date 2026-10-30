@@ -277,8 +277,7 @@ inputs and environment as <code dir="auto">command</code>, without <code dir="au
 default <code dir="auto">driftRepair: converge</code>, drift found by <code dir="auto">nyl verify</code> makes an
 idempotent command execute again in the next reconcile, which lists it under
 <code dir="auto">driftRepaired</code>. A command without <code dir="auto">idempotent: true</code> is not safe to re-run:
-reconcile reports it <code dir="auto">awaiting-approval</code> instead, and
-<code dir="auto">nyl reconcile -e &#x3C;env> --local --approve &#x3C;unit></code> repairs it. See
+reconcile reports it <code dir="auto">awaiting-approval</code> instead. See
 <a href="/nyl/pr-preview/pr-193/orchestration/resource-guides/environment/#drift-repair">drift repair</a>. <code dir="auto">teardown</code>
 receives the stored <code dir="auto">values</code> under <code dir="auto">values</code> and the last receipt’s outputs
 under <code dir="auto">outputs</code> in <code dir="auto">NYL_INPUTS</code>; exit 0 completes the deletion.</p>
