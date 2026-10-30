@@ -1094,9 +1094,9 @@ pub fn validate_state_placement(
             .iter()
             .find(|directory| relative.starts_with(directory))
         {
+            let directory = directory.to_string_lossy().replace('\\', "/");
             return Err(NylError::config(format!(
-                "fromPublication state file {path} lies inside workload Release directory {}, which its Argo CD Application syncs; choose a path outside every Release directory",
-                directory.display()
+                "fromPublication state file {path} lies inside workload Release directory {directory}, which its Argo CD Application syncs; choose a path outside every Release directory",
             )));
         }
         if files.contains_key(relative) {
