@@ -105,3 +105,9 @@ id = "003b92f8-e5cc-4df4-88c5-6b969073eef4"
 type = "improvement"
 description = "`nyl validate` prints each warning once, with search paths relative to `nyl.toml`, and target compilation no longer logs the implicit ArgoCDInstance at INFO level on every run"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "83372d88-23ef-4706-8f71-ebd9f2eed971"
+type = "docs"
+description = "Redesign the documentation site around four layers (Kubernetes Rendering, Kubernetes GitOps, Orchestration, Domain modeling) and rename its routes to match: `/kubernetes/` is now `/kubernetes-rendering/`, `/rendered-gitops/` is now `/kubernetes-gitops/`, and `/domain-resources/` is now `/domain-modeling/`. The old routes do not redirect, and the rendered GitOps wording is now Kubernetes GitOps"
+author = "@NiklasRosenstein"

@@ -18,7 +18,7 @@ use crate::{NylError, Result};
 
 /// Documentation of the manual steps a publication move needs.
 pub(super) const PUBLICATION_MOVE_DOCS: &str =
-    "https://niklasrosenstein.github.io/nyl/rendered-gitops/workflow/move-publication/";
+    "https://niklasrosenstein.github.io/nyl/kubernetes-gitops/workflow/move-publication/";
 
 use report::{DiffMode, Report, ReportFormat, ReportOutput, StageState, TreeDiff};
 

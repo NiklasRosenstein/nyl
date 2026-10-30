@@ -3,7 +3,7 @@
 ## Purpose and use
 
 This roadmap frames Nyl's expansion from Kubernetes manifest generation and
-rendered GitOps into GitOps orchestration across infrastructure tools: container
+Kubernetes GitOps into GitOps orchestration across infrastructure tools: container
 image builds, Terraform/OpenTofu configurations, and Kubernetes manifests
 rendered from their outputs. It guides work across milestones; it is not a
 complete specification, a release schedule, or a commitment to every proposed
@@ -11,7 +11,7 @@ interface.
 
 Nyl implements the orchestration semantics natively, in Rust, as one tool with
 one state model. Every orchestration capability is additive: existing commands,
-resources, and rendered GitOps behavior keep their meaning, and a project that
+resources, and Kubernetes GitOps behavior keep their meaning, and a project that
 never declares an orchestration resource never needs to understand one.
 
 Key architectural departures require a focused second check against evidence and
@@ -23,7 +23,7 @@ working instructions.
 This file records direction. Progress, the next step, and each milestone's
 items and exit criterion are tracked in the documentation, on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/) and the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/), generated from
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/), generated from
 [`nyl/book/src/lib/roadmaps/`](nyl/book/src/lib/roadmaps/).
 
 ## Progress and next step
@@ -81,7 +81,7 @@ exact values proven in one environment to the next.
   external Git state, or state in the target's own publication branch.
 - Units with declared inputs, public outputs, and artifact descriptors; a
   constrained command unit; container image and Terraform units; a Kubernetes
-  publication unit over the existing rendered GitOps path.
+  publication unit over the existing Kubernetes GitOps path.
 - Dependency-aware execution with typed references to recorded outputs.
 - Unit identity, execution coordination, evidence freshness, and recovery.
 - Explicit promotion paths between environments with recorded lineage.
@@ -409,7 +409,7 @@ paths they own, and explicitly registered units consume them as a tool-neutral
 bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
 the [domain resources design](design/domain-resources.md), and its slices and
 progress are on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 Kubernetes Releases consume collections too, without orchestration, as
 described in the [Release catalog design](design/release-catalog.md). The
@@ -677,7 +677,7 @@ structured results.
 
 Each milestone's items and exit criterion are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/#milestones), with M9's slices
-on the [Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+on the [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 ## Open decisions
 
