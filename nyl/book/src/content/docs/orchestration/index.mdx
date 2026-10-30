@@ -5,8 +5,8 @@ title: 'Orchestration'
 import LinkCards from '../../../components/LinkCards.astro';
 
 :::caution[In development]
-Orchestration is in development in milestone M3. Environments, their state in
-Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
+Orchestration is in development. The orchestration core (milestone M3) has
+shipped: environments, their state in Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
 [Command](/nyl/orchestration/resource-guides/command/) units, one
 environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
 [`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs,
@@ -14,9 +14,10 @@ drift repair, and lifecycle work), and [`nyl status`](/nyl/reference/cli/status/
 recovery with [`nyl recover`](/nyl/reference/cli/recover/) and
 [`nyl verify`](/nyl/reference/cli/verify/), and deletion with
 [`nyl teardown`](/nyl/reference/cli/teardown/),
-[`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), and `nyl state
-delete` exist today. Remote approvals and runs over several environments
-follow. The [roadmap](/nyl/orchestration/roadmap/) tracks the milestones.
+[`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), `nyl state
+delete`, runs over several environments, and approvals. Container image and
+Terraform units (M4) come next. The [roadmap](/nyl/orchestration/roadmap/)
+tracks the milestones.
 :::
 
 Orchestration makes Nyl a Git-driven reconciler for whole environments. Units

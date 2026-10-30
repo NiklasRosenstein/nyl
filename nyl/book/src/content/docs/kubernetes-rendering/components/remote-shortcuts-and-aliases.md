@@ -72,7 +72,7 @@ Interpreted as:
 
 ## Aliases for Stable APIs
 
-Define stable domain resource types in `nyl.toml`:
+Define stable, project-specific resource kinds in `nyl.toml`:
 
 ```toml
 [project.aliases]

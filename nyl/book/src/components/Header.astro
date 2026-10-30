@@ -13,7 +13,11 @@ import { layerOf } from '../lib/layers.mjs';
 const { topics } = Astro.locals.starlightSidebarTopics;
 // Pages without a sidebar, such as the landing page, have no menu to hold the
 // tabs on narrow screens, so the tabs stay in the header and scroll.
-const { hasSidebar } = Astro.locals.starlightRoute;
+const { hasSidebar, id } = Astro.locals.starlightRoute;
+// The topics plugin marks no topic on pages without a sidebar; the landing page
+// belongs to Get started.
+const isLanding = !hasSidebar && (id === '' || id === 'index');
+const isCurrent = (topic: (typeof topics)[number]) => topic.isCurrent || (isLanding && topic.link.includes('/start/'));
 ---
 
 <div class="header">
@@ -26,7 +30,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
         topics.map((topic) => (
           <a
             href={topic.link}
-            aria-current={topic.isCurrent ? 'true' : undefined}
+            aria-current={isCurrent(topic) ? 'true' : undefined}
             data-tone={layerOf(topic.link)?.tone ?? 'teal'}
           >
             {topic.label}
