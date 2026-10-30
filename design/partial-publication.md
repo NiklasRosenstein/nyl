@@ -49,7 +49,9 @@ publication upgrades even when its manifest bytes have not changed.
 
 A partial publication requires compatible target-wide control configuration:
 publication coordinates, effective Cluster contracts, Argo CD destination,
-target values and selection, and project settings. Per-Release bindings are
+target values and selection, and project settings. Project path settings are
+fingerprinted relative to the configuration directory so the same policy works
+in subsequent checkouts. Per-Release bindings are
 resolved only for selected Releases. Unselected group configuration, including
 its effective AppProject declaration, must match the baseline. Group-wide
 changes require selecting the entire group; target-wide changes require a full

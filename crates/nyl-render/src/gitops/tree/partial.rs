@@ -107,20 +107,43 @@ pub(super) fn control_digest(
     argocd: &EffectiveArgoCDInstance,
     repository: &InlineGitRepository,
 ) -> Result<String> {
+    // ProjectConfig expands declared paths beneath the config file's directory.
+    // Publish the policy's identity independently of the checkout location (or
+    // a lexical alias such as macOS's /var and /private/var).
+    let mut config = inventory.project_config.config.clone();
+    if let Some(root) = inventory.project_config.file.as_deref().and_then(Path::parent) {
+        let portable = |path: &Path| {
+            PathBuf::from(
+                path.strip_prefix(root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            )
+        };
+        config.project.components_search_paths = config
+            .project
+            .components_search_paths
+            .iter()
+            .map(|path| portable(path))
+            .collect();
+        config.project.helm_chart_search_paths = config
+            .project
+            .helm_chart_search_paths
+            .iter()
+            .map(|path| portable(path))
+            .collect();
+        config.project.gitops_scaffold_path = portable(&config.project.gitops_scaffold_path);
+        if let Some(vendor) = &mut config.vendor {
+            vendor.path = portable(&vendor.path);
+        }
+    }
     let mut target = target.clone();
     target.spec.release_inputs.clear();
     let mut cluster = cluster.clone();
     cluster.spec.live = None;
     let mut control_cluster = argocd.cluster.clone();
     control_cluster.spec.live = None;
-    digest(&(
-        &inventory.project_config.config,
-        target,
-        cluster,
-        &argocd.resource,
-        control_cluster,
-        repository,
-    ))
+    digest(&(config, target, cluster, &argocd.resource, control_cluster, repository))
 }
 
 pub(super) fn group_digest(group: &ApplicationGroup, project: &EffectiveProject) -> Result<String> {

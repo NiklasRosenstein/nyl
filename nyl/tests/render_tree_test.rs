@@ -7165,10 +7165,14 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
     use nyl::gitops::tree::partial::PublicationSelection;
     let (fixture, destination, seed, _) = publication_fixture();
     publish_production(&fixture).success();
-    change_partial_api(&fixture);
+    // Publication metadata must work in a later checkout, including through
+    // the shared API whose lexical paths may differ from the CLI's cwd.
+    let checkout = TempDir::new().unwrap();
+    Repository::clone(fixture.path().to_str().unwrap(), checkout.path()).unwrap();
+    change_partial_api(&checkout);
     let rendered = render_target(&TargetRender {
-        worktree: fixture.path(),
-        project_dir: fixture.path(),
+        worktree: checkout.path(),
+        project_dir: checkout.path(),
         target: "production",
         selection: PublicationSelection {
             releases: ["workloads/api".to_owned()].into(),
@@ -7187,7 +7191,7 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
         },
         time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
     };
-    let error = prepare_target_publication(&rendered, fixture.path(), "Scoped update", &author, &|_| None)
+    let error = prepare_target_publication(&rendered, checkout.path(), "Scoped update", &author, &|_| None)
         .err()
         .unwrap();
     assert!(
@@ -7198,6 +7202,15 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
         published_commit(&Repository::open_bare(destination.path()).unwrap(), "deploy/production").id(),
         concurrent
     );
+    // Portability must not hide a real change in project-wide rendering policy.
+    fs::write(
+        checkout.path().join("nyl.toml"),
+        "[project]\ncomponents_search_paths=['other']\n",
+    )
+    .unwrap();
+    scoped_publish(&checkout, &["--release", "workloads/api"])
+        .failure()
+        .stderr(predicate::str::contains("Target-wide configuration changed"));
 }
 
 #[test]
