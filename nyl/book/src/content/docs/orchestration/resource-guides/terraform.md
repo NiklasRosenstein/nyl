@@ -62,7 +62,9 @@ Sensitive values and known credentials are masked before summaries and digests;
 native JSON never enters the transcript. `bind: plan` compares the reviewed
 digest with the saved plan before applying. With `requireDigest: false`, explicit
 unreviewed approval is also supported. Repair after `nyl exec` requires a reviewed
-digest. No-change plans skip apply.
+digest. No-change plans skip apply when the backend has a state object. Otherwise,
+Nyl applies the saved plan to persist the initial empty state before recording a
+receipt.
 
 Only declared, correctly typed, non-sensitive outputs are recorded. A native
 output marked sensitive must be declared sensitive; Nyl checks this before
