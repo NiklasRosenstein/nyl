@@ -21,7 +21,7 @@
 //! [`without_workload_applications`] gives phase 1's tree, published with
 //! [`prepare_target_publication`], and [`prepare_target_removal`] removes
 //! the index-owned files in phase 2. Trees published without orchestration
-//! keep index version 2 and stay byte-identical.
+//! use versioned indexes with portable Release ownership and provenance.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,10 @@ pub struct TargetRender<'a> {
     pub project_dir: &'a Path,
     /// The DeploymentTarget's name.
     pub target: &'a str,
+    /// Scoped replacement authority; empty selects the complete target.
+    pub selection: super::tree::partial::PublicationSelection,
+    /// Optional pinned destination base, shared with the caller's input snapshot.
+    pub publication_base: Option<PublicationBase>,
     /// Resolved values of the target's `fromUnit` (and later `fromPromotion`) bindings.
     pub inputs: &'a InputSnapshot,
     /// The render cache directory, from the invocation's workspace; `None`
@@ -101,6 +105,7 @@ pub struct PublicationDestination {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedTarget {
     pub destination: PublicationDestination,
+    pub report: super::tree::partial::PublicationReport,
     /// Files beneath the prefix, including `_nyl/index.json`, by path
     /// relative to the prefix.
     pub files: BTreeMap<PathBuf, Vec<u8>>,
@@ -169,6 +174,8 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         None => GitOpsCache::with_root(temporary.path(), CacheMode::Disabled)?,
     };
     let options = TreeRenderOptions {
+        selection: request.selection.clone(),
+        publication_base: request.publication_base.clone(),
         orchestrated_inputs: Some(OrchestratedInputs::Pinned(request.inputs.clone())),
         ..TreeRenderOptions::default()
     };
@@ -207,6 +214,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
 
     let revision = &compiled.target.spec.publication.revision;
     Ok(RenderedTarget {
+        report: compiled.publication_report.clone(),
         destination: PublicationDestination {
             repository: crate::util::sanitize_url(&compiled.repository.repo_url),
             push_url: compiled
@@ -288,7 +296,7 @@ pub fn target_render_index(
         .repository_name
         .clone()
         .unwrap_or_else(|| compiled.repository.repo_url.clone());
-    Ok(RenderIndex::new(
+    let mut index = RenderIndex::new(
         target_name.to_owned(),
         compiled.cluster.metadata.name.clone(),
         RenderIndexPublication {
@@ -296,10 +304,29 @@ pub fn target_render_index(
             revision: compiled.target.spec.publication.revision.clone(),
             path_prefix: compiled.target.publication_path_prefix().to_owned(),
         },
-        source_commit,
+        source_commit.clone(),
         source_dirty,
-        inputs,
-    ))
+        inputs.clone(),
+    );
+    if let Some(snapshot) = &compiled.publication_snapshot {
+        index.version = 3;
+        index.compilation = Some(super::tree::partial::stamp_snapshot(
+            snapshot,
+            source_commit.as_deref(),
+            source_dirty,
+            &inputs,
+        )?);
+        // Mixed trees have no single rendering source revision.
+        if !snapshot
+            .releases
+            .values()
+            .all(|release| release.source_commit.is_none())
+        {
+            index.source_commit = None;
+            index.dirty = source_dirty || snapshot.releases.values().any(|release| release.dirty);
+        }
+    }
+    Ok(index)
 }
 
 /// A published tree: the `PublishedTree` artifact's spec.
@@ -322,7 +349,7 @@ pub struct PublishedTree {
 /// passes a lookup over the execution's admitted environment, `publish-tree`
 /// one over the process environment. `author` is the commit's author and committer.
 ///
-/// Index v3 (owning environment and unit uid) is deferred to the
+/// Index v4 (owning environment and unit uid) is deferred to the
 /// KubernetesPublication driver (M5): the index is written as `publish-tree`
 /// writes it, so non-orchestrated output stays byte-identical.
 pub fn publish_target(
@@ -979,6 +1006,8 @@ spec:
 
     fn render(worktree: &Path, inputs: &InputSnapshot, cache_dir: Option<&Path>) -> Result<RenderedTarget> {
         render_target(&TargetRender {
+            selection: super::super::tree::partial::PublicationSelection::default(),
+            publication_base: None,
             worktree,
             project_dir: &worktree.join("nyl"),
             target: "dev",

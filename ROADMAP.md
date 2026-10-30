@@ -573,6 +573,17 @@ Reports retain completed results on operational failure and distinguish invalid
 resources from unchecked inputs; rendering caches retain the provenance needed
 for identical reports on cache hits.
 
+Scoped tree publication keeps one target-wide ownership boundary and
+compare-and-swap transaction. Selected groups or Releases replace only their
+published ownership; retained manifests supply complete-tree validation context.
+Versioned Release metadata preserves mixed source provenance. The shared render
+API exposes selection and the pinned publication base for orchestration callers;
+a scoped result cannot establish target-wide source freshness. See
+[partial publication](design/partial-publication.md). The KubernetesPublication
+driver continues to publish the full target. M5 adds environment and unit
+ownership in index version 4, migrating versions 2 and 3; scoped receipts and promotion
+coverage need an explicit caller contract before it adopts selection.
+
 `nyl.toml` may sit at the repository root or beside the configuration in
 `nyl/`, where Nyl finds it from the root. Local paths, such as ApplicationGroup
 sources, unit sources, and `fromFile`, share one resolver: relative to the

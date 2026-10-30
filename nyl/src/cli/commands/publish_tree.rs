@@ -35,6 +35,12 @@ pub struct PublishTreeArgs {
     /// DeploymentTarget to publish. Defaults to the sole configured target.
     #[arg(long)]
     pub target: Option<String>,
+    /// Replace these ApplicationGroups, retaining the rest of the published tree.
+    #[arg(long = "application-group")]
+    pub application_groups: Vec<String>,
+    /// Replace these group-qualified Releases (<applicationGroup>/<release>).
+    #[arg(long = "release")]
+    pub releases: Vec<String>,
     /// Commit message for a changed rendered tree.
     #[arg(long)]
     pub message: Option<String>,
@@ -167,6 +173,10 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let render_options = TreeRenderOptions {
+        selection: crate::gitops::tree::partial::PublicationSelection {
+            application_groups: args.application_groups.iter().cloned().collect(),
+            releases: args.releases.iter().cloned().collect(),
+        },
         allow_secret_inputs: args.source.allow_secret_inputs,
         ..TreeRenderOptions::default()
     };
@@ -216,6 +226,19 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         (&inventory, &compiled, dirty)
     };
     crate::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
+    if !compiled.publication_report.selection.is_full() {
+        let report = &compiled.publication_report;
+        println!(
+            "Partial publication at {}: {} rendered, {} retained, {} removed",
+            report.baseline_commit.as_deref().unwrap_or("none"),
+            report.rendered_releases.len(),
+            report.retained_releases.len(),
+            report.removed_releases.len()
+        );
+        for path in &report.changed_shared_files {
+            println!("  Shared artifact: {}", path.display());
+        }
+    }
     publish_compiled(
         &args,
         publication_inventory,
@@ -276,6 +299,7 @@ fn publish_compiled(
             target: target_name,
             cluster: &compiled.cluster.metadata.name,
         },
+        &compiled.publication_report,
     );
     let desired = compiled.owned_files();
     let prepared = prepare_publication(
@@ -515,7 +539,15 @@ fn publication_current_commit(
         .repository_name
         .as_deref()
         .unwrap_or(&compiled.repository.repo_url);
-    if index.target != compiled.target.metadata.name
+    let published_snapshot = index.compilation.as_ref().and_then(|value| {
+        <crate::gitops::tree::partial::PublicationSnapshot as serde::Deserialize>::deserialize(value).ok()
+    });
+    let same_policy = published_snapshot
+        .as_ref()
+        .zip(compiled.publication_snapshot.as_ref())
+        .is_some_and(|(published, current)| current.same_policy(published));
+    if !same_policy
+        || index.target != compiled.target.metadata.name
         || index.cluster != compiled.cluster.metadata.name
         || index.publication.repository != repository
         || index.publication.revision != compiled.target.spec.publication.revision
@@ -542,7 +574,11 @@ fn source_repository_url(repository: &Repository) -> Option<String> {
         .and_then(|remote| remote.url().ok().map(crate::util::sanitize_url))
 }
 
-fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<'_>) -> String {
+fn publication_commit_message(
+    subject: &str,
+    provenance: &PublicationProvenance<'_>,
+    report: &crate::gitops::tree::partial::PublicationReport,
+) -> String {
     let mut message = subject.trim_end().to_owned();
     message.push_str("\n\n");
     if let Some(source_repository) = provenance.source_repository {
@@ -554,6 +590,28 @@ fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<
     }
     writeln!(message, "Nyl-Deployment-Target: {}", provenance.target).expect("writing to a String cannot fail");
     write!(message, "Nyl-Cluster: {}", provenance.cluster).expect("writing to a String cannot fail");
+    if !report.selection.is_full() {
+        write!(
+            message,
+            "\nNyl-Publication-Base: {}\nNyl-Publication-Selection: {}",
+            report.baseline_commit.as_deref().unwrap_or("none"),
+            report
+                .selection
+                .application_groups
+                .iter()
+                .map(|group| format!("group:{group}"))
+                .chain(
+                    report
+                        .selection
+                        .releases
+                        .iter()
+                        .map(|release| format!("release:{release}"))
+                )
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .expect("writing to a String cannot fail");
+    }
     message
 }
 
@@ -632,6 +690,7 @@ mod tests {
                 target: "production",
                 cluster: "prod-eu-1",
             },
+            &crate::gitops::tree::partial::PublicationReport::default(),
         );
 
         assert_eq!(

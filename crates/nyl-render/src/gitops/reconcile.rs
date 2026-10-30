@@ -66,6 +66,9 @@ pub struct RenderIndex {
     pub dirty: bool,
     pub inputs: BTreeMap<String, String>,
     pub files: BTreeMap<String, String>,
+    /// Version 3 compilation metadata; absent in legacy version 2 indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compilation: Option<serde_json::Value>,
 }
 
 impl RenderIndex {
@@ -86,14 +89,29 @@ impl RenderIndex {
             dirty,
             inputs,
             files: BTreeMap::new(),
+            compilation: None,
         }
     }
 
     fn same_owner(&self, other: &Self) -> bool {
-        self.version == other.version
-            && self.target == other.target
-            && self.cluster == other.cluster
-            && self.publication == other.publication
+        self.target == other.target && self.cluster == other.cluster && self.publication == other.publication
+    }
+
+    fn same_compilation_policy(&self, other: &Self) -> bool {
+        use super::tree::partial::PublicationSnapshot;
+        match (&self.compilation, &other.compilation) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                match (
+                    PublicationSnapshot::deserialize(left),
+                    PublicationSnapshot::deserialize(right),
+                ) {
+                    (Ok(left), Ok(right)) => left.same_policy(&right),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 }
 
@@ -153,9 +171,11 @@ pub fn reconcile_rendered_tree_with_options(
         if previous.same_owner(&next_index)
             && previous.inputs == next_index.inputs
             && previous.files == next_index.files
+            && previous.same_compilation_policy(&next_index)
         {
             next_index.source_commit.clone_from(&previous.source_commit);
             next_index.dirty = previous.dirty;
+            next_index.compilation.clone_from(&previous.compilation);
         }
     }
     let resumes_transaction = transaction
@@ -375,11 +395,16 @@ fn load_index(path: &Path) -> Result<Option<RenderIndex>> {
 pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
     let index: RenderIndex = serde_json::from_slice(bytes)
         .map_err(|error| NylError::config(format!("Invalid rendered ownership index {origin}: {error}")))?;
-    if index.version != RENDER_INDEX_VERSION {
+    if !matches!(index.version, 2 | 3) {
         return Err(NylError::config(format!(
             "Unsupported rendered ownership index version {} in {origin}",
             index.version
         )));
+    }
+    if (index.version == 3) != index.compilation.is_some() {
+        return Err(NylError::config(
+            "Rendered index compilation metadata does not match its version",
+        ));
     }
     Ok(index)
 }

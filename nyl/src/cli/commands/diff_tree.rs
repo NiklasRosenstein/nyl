@@ -894,14 +894,7 @@ pub(super) fn read_rendered_tree(
         });
     }
     reject_published_symlink(root, &index_path)?;
-    let index: RenderIndex = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-    if index.version != crate::gitops::reconcile::RENDER_INDEX_VERSION {
-        return Err(NylError::config(format!(
-            "Published ownership index {} uses unsupported version {}",
-            index_path.display(),
-            index.version
-        )));
-    }
+    let index = crate::gitops::reconcile::parse_index(&std::fs::read(&index_path)?, &index_path.display().to_string())?;
     let mut files = BTreeMap::new();
     for (relative, expected_hash) in &index.files {
         crate::resources::validate_relative_path("published owned path", relative, false, false)?;
@@ -1151,6 +1144,8 @@ mod tests {
         }))
         .unwrap();
         let baseline = crate::gitops::CompiledTargetTree {
+            publication_snapshot: None,
+            publication_report: crate::gitops::tree::partial::PublicationReport::default(),
             provenance: BTreeMap::new(),
             target: target.clone(),
             cluster,
