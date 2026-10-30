@@ -111,6 +111,10 @@ const { hasSidebar } = Astro.locals.starlightRoute;
     .sections.no-sidebar {
       display: flex;
       overflow-x: auto;
+      /* Only sideways: the tabs' 1px overlap with the header edge would
+         otherwise make the strip scroll, and bounce, vertically too. */
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
       min-width: 0;
       flex: 1;
       scrollbar-width: none;
