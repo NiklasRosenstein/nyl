@@ -28,6 +28,7 @@ pub struct Selection {
 
 /// Resolve one of explicit names, an equality label selector, or a group,
 /// then order the selected environments by their rendered references.
+#[allow(clippy::too_many_arguments)] // Selection and state access options are independent.
 pub fn select(
     path: &Path,
     names: &[String],
@@ -35,6 +36,7 @@ pub fn select(
     group: Option<&str>,
     source_graph: bool,
     source_override: Option<&str>,
+    offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
 ) -> Result<Selection, Stop> {
     let inventory = discover_gitops_inventory(path, None)?;
@@ -71,6 +73,7 @@ pub fn select(
             &renderer,
             source_graph,
             source_override.filter(|_| selection.contains(name.as_str())),
+            offline,
         ) {
             Ok((dependencies, rendered)) => {
                 graph.insert(name.clone(), dependencies);
@@ -93,7 +96,7 @@ pub fn select(
         }
     }
     if source_graph {
-        ownership_preflight(&inventory, &rendered_sources, &mut errors, drivers)?;
+        ownership_preflight(&inventory, &rendered_sources, &mut errors, offline, drivers)?;
     }
     let ordered = if source_graph {
         nyl_orchestration::rules::multi_environment::validate_available_sources(
@@ -122,6 +125,7 @@ fn ownership_preflight(
     inventory: &GitOpsInventory,
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     errors: &mut BTreeMap<String, Finding>,
+    offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
@@ -130,7 +134,7 @@ fn ownership_preflight(
         let name = environment
             .name()
             .map_err(|error| crate::NylError::config(error.to_string()))?;
-        match snapshot(inventory, &name) {
+        match snapshot(inventory, &name, offline) {
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
             }
@@ -161,9 +165,9 @@ fn ownership_preflight(
     Ok(())
 }
 
-fn snapshot(inventory: &GitOpsInventory, name: &EnvironmentName) -> Result<EnvironmentSnapshot, Stop> {
+fn snapshot(inventory: &GitOpsInventory, name: &EnvironmentName, offline: bool) -> Result<EnvironmentSnapshot, Stop> {
     let resolved = super::project::resolve_environment(inventory, name.as_str())?;
-    let store = super::project::open_store(inventory, &resolved, None)?;
+    let store = super::project::open_store_mode(inventory, &resolved, None, offline)?;
     store.snapshot(&resolved.location).map_err(|error| {
         Finding::new(
             Code::StateUnavailable,
@@ -182,9 +186,10 @@ fn read_environment(
     renderer: &UnitSourceRenderer,
     source_graph: bool,
     source_override: Option<&str>,
+    offline: bool,
 ) -> Result<(BTreeSet<EnvironmentName>, Option<RenderedSource>), Stop> {
     if !source_graph {
-        let snapshot = snapshot(inventory, name)?;
+        let snapshot = snapshot(inventory, name, offline)?;
         return Ok((
             snapshot
                 .desired

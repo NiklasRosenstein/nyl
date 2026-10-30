@@ -312,17 +312,28 @@ impl Driver for TerraformDriver {
         unit: &DesiredUnit,
         args: &[OsString],
     ) -> DriverResult<Supported<ExecStatus>> {
-        let result = (|| {
-            let native = Native::new(self, ctx, resolved(unit)?, &unit.unit)?;
-            native.initialize()?;
-            // A repair may restore missing state; it deliberately bypasses only that guard.
-            match native.run(args.to_vec(), false)? {
-                ToolExit::Exited { code, .. } => Ok(Supported::Supported(ExecStatus::Exited { code })),
-                ToolExit::Signaled { signal } => Ok(Supported::Supported(ExecStatus::Signaled { signal })),
-                exit => Err(native.unsuccessful("operator command", exit, false)),
-            }
-        })();
-        result.map_err(|fault: Fault| DriverError::before_effects(fault.message))
+        let native = Native::new(
+            self,
+            ctx,
+            resolved(unit).map_err(|fault| DriverError::before_effects(fault.message))?,
+            &unit.unit,
+        )
+        .map_err(|fault| DriverError::before_effects(fault.message))?;
+        native
+            .initialize()
+            .map_err(|fault| DriverError::before_effects(fault.message))?;
+        // A repair may restore missing state; it deliberately bypasses only that guard.
+        let result = match native.run(args.to_vec(), false) {
+            Ok(ToolExit::Exited { code, .. }) => return Ok(Supported::Supported(ExecStatus::Exited { code })),
+            Ok(ToolExit::Signaled { signal }) => return Ok(Supported::Supported(ExecStatus::Signaled { signal })),
+            Ok(exit) => native.unsuccessful("operator command", exit, true),
+            Err(fault) => fault,
+        };
+        Err(if result.uncertain {
+            DriverError::after_effects(result.message)
+        } else {
+            DriverError::before_effects(result.message)
+        })
     }
 }
 
@@ -346,7 +357,7 @@ impl TerraformDriver {
                 digest: report.change_digest.expect("native digest"),
             });
         }
-        if changed {
+        if changed || !native.state_exists()? {
             native.checked(
                 vec![
                     "apply".into(),
@@ -559,7 +570,8 @@ impl<'a, 'c> Native<'a, 'c> {
         let backend_path = self.directory.join("backend.hcl");
         let mut backend = String::new();
         for (name, value) in &self.spec.backend {
-            writeln!(&mut backend, "{name} = {value}").expect("writing to a string succeeds");
+            let literal = value.to_string().replace("${", "$${").replace("%{", "%%{");
+            writeln!(&mut backend, "{name} = {literal}").expect("writing to a string succeeds");
         }
         private_file(&backend_path, backend.as_bytes())?;
         self.checked(
@@ -635,6 +647,19 @@ impl<'a, 'c> Native<'a, 'c> {
         json!({"version":1,"unit":self.identity,"scope":ownership(&self.spec).key})
     }
 
+    fn state_exists(&self) -> Result<bool, Fault> {
+        let bytes = self.checked(vec!["state".into(), "pull".into()], false, true)?;
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(false);
+        }
+        let state: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Fault::configuration("native tool returned invalid private state JSON"))?;
+        if !state.is_object() {
+            return Err(Fault::configuration("native tool returned invalid private state JSON"));
+        }
+        Ok(true)
+    }
+
     fn require_state(&self) -> Result<(), Fault> {
         let Some(observed) = self
             .ctx
@@ -648,8 +673,7 @@ impl<'a, 'c> Native<'a, 'c> {
         {
             return Ok(());
         }
-        let state = self.json(&["show", "-json"])?;
-        if state.get("values").is_none_or(Value::is_null) {
+        if !self.state_exists()? {
             return Err(Fault { category:FailureCategory::Ownership, retryable:false, message:"NYL-TOFU-STATE-MISSING: this unit has a receipt but its backend has no state; restore state or accept the empty ownership scope with recover --retry --reason".to_owned(), uncertain:false, retry_context:Some(context) });
         }
         Ok(())

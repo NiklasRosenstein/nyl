@@ -306,6 +306,13 @@ pub trait StateStore: Send + Sync {
         Ok(())
     }
 
+    /// Import and validate an explicitly identified worktree snapshot before a run uses it.
+    fn prepare_worktree_snapshot(&self, _location: &StateLocation, _commit: &CommitId) -> StateResult<()> {
+        Err(StateError::Unavailable(
+            "this state store cannot retain worktree snapshots".to_owned(),
+        ))
+    }
+
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 
@@ -625,6 +632,19 @@ pub trait SourceResolver: Send + Sync {
     ) -> SourceResult<()> {
         let _ = paths;
         self.reset_worktree(repository, commit, path)
+    }
+    /// Ensure a declared source path can be reconstructed in a private checkout.
+    /// With `recursive`, check descendants too; otherwise check the path itself
+    /// and its ancestors. Paths may contain glob patterns.
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let _ = (repository, commit, path, recursive);
+        Ok(())
     }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;

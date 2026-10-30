@@ -221,19 +221,22 @@ pub fn prepare(
         format!("/{project_relative}")
     };
     sources::pin_source_fields(&mut spec, &fields, &project_record, &commit, &revisions).map_err(config)?;
-    let mut roots = nyl_orchestration::shell::sources::prepare_source_roots(
+    let checkout_fields = checkout_source_fields(&fields, &unpinned, source.is_some());
+    let mut roots = nyl_orchestration::shell::sources::prepare_source_roots_for_fields(
         &resolver,
         driver,
         &spec,
         &commit,
         &project_record,
         &workspace.path().join("contexts"),
+        None,
+        &checkout_fields,
     )
     .map_err(config)?;
     if source.is_none() {
-        for pointer in unpinned {
+        for pointer in &unpinned {
             roots.insert(
-                pointer,
+                pointer.clone(),
                 SourceRoot {
                     worktree: inventory.worktree_root.clone(),
                     project_dir: inventory.project_root.clone(),
@@ -255,7 +258,23 @@ pub fn prepare(
         snapshot_digest: String::new(),
         audit: serde_json::Value::Null,
     };
-    snapshot_entry(&mut prepared)?;
+    let primary_remote = fields
+        .first()
+        .and_then(|field| sources::git_source(&spec, field).ok().flatten())
+        .is_some_and(|source| source.is_remote());
+    let mut validation_spec = spec.clone();
+    sources::root_local_paths(
+        &mut validation_spec,
+        &driver.local_path_fields(&spec),
+        if primary_remote { "/" } else { &project_record },
+    )
+    .map_err(config)?;
+    let local_inputs_in_worktree = source.is_none() && fields.first().is_none_or(|field| unpinned.contains(field));
+    if !local_inputs_in_worktree {
+        nyl_orchestration::shell::sources::validate_local_inputs(&resolver, driver, &validation_spec, &commit)
+            .map_err(config)?;
+    }
+    snapshot_entry(&mut prepared, driver, &validation_spec, local_inputs_in_worktree)?;
     let now = wiring.clock.now();
     let mut key_spec = spec.clone();
     if let Some(env) = key_spec.get_mut("env").and_then(serde_json::Value::as_object_mut) {
@@ -295,16 +314,104 @@ pub fn prepare(
     Ok(prepared)
 }
 
+fn checkout_source_fields(fields: &[String], unpinned: &BTreeSet<String>, explicit_source: bool) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|field| explicit_source || !unpinned.contains(*field))
+        .cloned()
+        .collect()
+}
+
+fn validate_worktree_input(required: &[(&str, bool)], path: &str, is_submodule: bool, contents: &[u8]) -> Result<()> {
+    let lfs = nyl_state::source::worktree::is_lfs_pointer(contents);
+    if !is_submodule && !lfs {
+        return Ok(());
+    }
+    for (input, recursive) in required {
+        if nyl_state::source::worktree::source_path_matches(input, path, *recursive, is_submodule).map_err(config)? {
+            let reason = if is_submodule {
+                format!("submodule {path}; vendor its contents into the source repository")
+            } else {
+                format!("Git LFS file {path}; hydrate it")
+            };
+            return Err(config(format!(
+                "source path {input} requires {reason} before running Nyl"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Copy Git-visible worktree files into invocation-owned storage before a native
 /// tool can write. Recorded metadata lets held execution explain spec differences.
-pub fn snapshot_entry(prepared: &mut DirectUnit) -> Result<()> {
+#[allow(clippy::too_many_lines)] // One snapshot owns input validation, copying, and provenance.
+pub fn snapshot_entry(
+    prepared: &mut DirectUnit,
+    driver: &dyn nyl_core::orchestration::driver::Driver,
+    validation_spec: &serde_json::Value,
+    local_inputs_in_worktree: bool,
+) -> Result<()> {
     let original = prepared.worktree.clone();
     let repository = git2::Repository::discover(&original).map_err(config)?;
     let (files, changed) = nyl_state::source::worktree::visible_files(&repository).map_err(config)?;
     let destination = prepared.workspace.path().join("worktree-snapshot");
     std::fs::create_dir_all(&destination)?;
     let mut digests = BTreeMap::new();
+    let index = repository.index().map_err(config)?;
+    let spec = prepared
+        .unit
+        .resolved_spec
+        .as_ref()
+        .ok_or_else(|| config("unit has no resolved specification"))?;
+    let mut required = Vec::new();
+    for field in driver.local_path_fields(validation_spec) {
+        if !local_inputs_in_worktree {
+            break;
+        }
+        if let Some(value) = validation_spec.pointer(&field.pointer) {
+            if let Some(path) = value.as_str() {
+                required.push((path, false));
+            }
+            if let Some(paths) = value.as_array() {
+                required.extend(
+                    paths
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|path| (path, false)),
+                );
+            }
+        }
+    }
+    let default_source_path = format!(
+        "/{}",
+        prepared
+            .project_dir
+            .strip_prefix(&original)
+            .map_err(config)?
+            .to_str()
+            .ok_or_else(|| config("project directory must be UTF-8"))?
+    );
+    for (field, root) in &prepared.source_roots {
+        if root.worktree == original {
+            let path = spec
+                .pointer(field)
+                .and_then(|source| source.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&default_source_path);
+            required.push((path, true));
+        }
+    }
+    for entry in index.iter().filter(|entry| entry.mode == 0o160_000) {
+        let link = std::str::from_utf8(&entry.path).map_err(config)?;
+        validate_worktree_input(&required, link, true, &[])?;
+    }
     for relative in files {
+        if index
+            .get_path(std::path::Path::new(&relative), 0)
+            .is_some_and(|entry| entry.mode == 0o160_000)
+        {
+            continue;
+        }
         let Some(metadata) =
             nyl_state::source::worktree::snapshot_file_metadata(&original, &relative).map_err(config)?
         else {
@@ -312,6 +419,9 @@ pub fn snapshot_entry(prepared: &mut DirectUnit) -> Result<()> {
         };
         let contents =
             nyl_state::source::worktree::snapshot_file_contents(&original, &relative, &metadata).map_err(config)?;
+        if !metadata.file_type().is_symlink() {
+            validate_worktree_input(&required, &relative, false, &contents)?;
+        }
         let mut bytes = contents.clone();
         bytes.push(u8::from(metadata.file_type().is_symlink()));
         #[cfg(unix)]
@@ -351,4 +461,46 @@ pub fn snapshot_entry(prepared: &mut DirectUnit) -> Result<()> {
     }
     prepared.worktree = destination;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nyl_core::orchestration::driver::LocalPathField;
+
+    #[test]
+    fn test_nested_project_inputs_reject_required_worktree_submodules_and_lfs_pointers() {
+        let mut spec = serde_json::json!({"files": ["*/entry.sh", "asset.bin"]});
+        let fields = vec![LocalPathField {
+            pointer: "/files".to_owned(),
+            defaults_to_project_dir: false,
+        }];
+        sources::root_local_paths(&mut spec, &fields, "/nyl").unwrap();
+        let required: Vec<_> = spec["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| (path.as_str().unwrap(), false))
+            .collect();
+        assert!(validate_worktree_input(&required, "other/module", true, &[]).is_ok());
+        assert!(validate_worktree_input(&required, "nyl/module", true, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("requires submodule nyl/module"));
+        let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:123\nsize 1\n";
+        assert!(validate_worktree_input(&required, "asset.bin", false, pointer).is_ok());
+        assert!(validate_worktree_input(&required, "nyl/asset.bin", false, pointer)
+            .unwrap_err()
+            .to_string()
+            .contains("requires Git LFS file nyl/asset.bin"));
+        assert!(validate_worktree_input(&required, "nyl/asset.bin", false, b"hydrated").is_ok());
+        let fields = vec!["/context".to_owned(), "/locked".to_owned()];
+        let unpinned = BTreeSet::from(["/context".to_owned()]);
+        assert_eq!(checkout_source_fields(&fields, &unpinned, false), ["/locked"]);
+        assert_eq!(checkout_source_fields(&fields, &unpinned, true), fields);
+        let default_source = [("/nyl", true)];
+        assert!(validate_worktree_input(&default_source, "nyl/untracked.bin", false, pointer).is_err());
+        assert!(validate_worktree_input(&default_source, "outside.bin", false, pointer).is_ok());
+        assert!(validate_worktree_input(&default_source, "nyl/untracked.bin", false, b"hydrated").is_ok());
+    }
 }

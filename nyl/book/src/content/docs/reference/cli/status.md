@@ -65,22 +65,8 @@ suggested fix in each block. Warning and error headings use color according to
 the global `--color auto|always|never` setting. Environment names are quoted,
 such as `environment 'local'`.
 
-When this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs)
-diverge from the configured state repository, `status` warns with
-`NYL-STATE-LOCAL-DIVERGED`. Ahead/behind counts are Git commits, including retained
-source ancestry; they do not count unit executions. The larger count across the
-desired and observed refs is shown for each direction. A configured local bare
-repository is still a separate state repository for this comparison.
-The clone preserves diverged branches, including when the state repository has
-an independent initialization history, so the warning does not imply that
-`reconcile --local` was used.
-
-The table shows the configured state repository unless `--local` is given.
-`--local` shows this clone's branches, including `nyl reconcile --local` runs;
-`--worktree` selects source inputs and does not select local state. The warning
-does not change the exit code. Inspect the local view before using
-[`nyl state reset --local`](/nyl/reference/cli/state/#nyl-state-reset), which can
-discard local receipts.
+The report identifies the configured state repository and its local path.
+`--local` reads that repository without contacting the remote.
 
 Select several environments with repeated `-e`, with `-l stage=production`, or
 with `-g <group>`. They run in dependency order with one report section per
@@ -94,7 +80,7 @@ for qualified unit options and independent state transactions.
 | `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
 | `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
 | `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
-| `--local` | Show this clone's local view of the state, including `--local` runs. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote, whose local branches already are the state. |
+| `--local` | Read the local state repository without contacting the remote. |
 | `-o`, `--output <table\|json>` | A table, or the typed `StatusReport`. Default `table`. |
 | `[PATH]` | The project directory or a path beneath it. Default `.`. |
 

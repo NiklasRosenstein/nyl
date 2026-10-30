@@ -19,8 +19,7 @@
 //!   run's refs stay for the next import.
 //! - **The way out** (Q40): where `recover` would otherwise refuse, because
 //!   `state.yaml` is missing (a broken `state init`), the state moved
-//!   (`NYL-STATE-MOVED`), or the remote tip is a `Nyl-Local` commit
-//!   (`NYL-STATE-LOCAL-TIP`), `recover -e` without `--unit` still takes the
+//!   (`NYL-STATE-MOVED`), `recover -e` without `--unit` still takes the
 //!   broken lease over, records the break with an unchanged commit where
 //!   that is allowed, and releases the lease, so `state init`, `state
 //!   move`, or `state restore` can proceed.
@@ -75,8 +74,8 @@ pub struct RecoverUnit {
 /// commit ([`after_import`]). It writes no run record: its one transition
 /// commit (import, `leaseBroken`, the optional action) is all it writes,
 /// and it consumes the broken run's refs as a takeover does; if it crashes,
-/// those refs stay for the next import. Where the state is missing, moved,
-/// or has a local tip, it clears the break without importing (see the
+/// those refs stay for the next import. Where the state is missing or moved,
+/// it clears the break without importing (see the
 /// module documentation). Otherwise it applies the action as [`recover`]
 /// does, and without `--unit` refuses with `NYL-RECOVER-NOTHING`. Contract:
 /// [Recovery](../../../../design/orchestration-core.md#recovery), "Importing a broken run".
@@ -136,14 +135,9 @@ fn nothing_to_import(environment: &EnvironmentName) -> Finding {
 }
 
 /// Whether `recover -e` clears a break where it would otherwise refuse
-/// (Q40): state missing, moved away, deleted by `nyl state delete`, or with
-/// a `Nyl-Local` remote tip, which only `state init` (`--fresh` for deleted
-/// state), `state move`, and `state restore` resolve.
+/// (Q40): state missing, moved away, or deleted by `nyl state delete`.
 fn way_out(finding: &Finding) -> bool {
-    matches!(
-        finding.code,
-        Code::StateMissing | Code::StateMoved | Code::StateLocalTip | Code::StateDeleted
-    )
+    matches!(finding.code, Code::StateMissing | Code::StateMoved | Code::StateDeleted)
 }
 
 /// Import the broken run through the run path and report it as a state
@@ -223,33 +217,27 @@ fn clear_break(
     };
     let mut report = report;
     let broken = held.broken.clone();
-    // Nyl commits only on a tip that passes the local-tip check, and there
-    // is nothing to commit onto without `state.yaml`.
-    let committed = if finding.code == Code::StateLocalTip {
-        Ok(())
-    } else {
-        read(context, location, environment).and_then(|snapshot| {
-            if snapshot.record.is_none() {
-                return Ok(());
-            }
-            let mut summary = summary(Operation::Recover, environment, "");
-            summarize(&mut summary, None);
-            let changes = TransitionChanges {
-                commit_unchanged: true,
-                ..TransitionChanges::default()
-            };
-            commit(
-                context,
-                location,
-                &mut held,
-                &snapshot,
-                summary,
-                changes,
-                requested,
-                &mut report,
-            )
-        })
-    };
+    let committed = read(context, location, environment).and_then(|snapshot| {
+        if snapshot.record.is_none() {
+            return Ok(());
+        }
+        let mut summary = summary(Operation::Recover, environment, "");
+        summarize(&mut summary, None);
+        let changes = TransitionChanges {
+            commit_unchanged: true,
+            ..TransitionChanges::default()
+        };
+        commit(
+            context,
+            location,
+            &mut held,
+            &snapshot,
+            summary,
+            changes,
+            requested,
+            &mut report,
+        )
+    });
     let landed = committed.is_ok();
     if let Err(error) = lease::release(context, &held, landed) {
         report.warnings.push(store_error(environment, &error));
@@ -365,8 +353,6 @@ pub fn recover(
         requested,
         |held, report| {
             let snapshot = read(context, location, environment)?;
-            // The state record matches the environment, and remote state
-            // carries no local tip.
             check_record(context.store, snapshot.record.as_ref(), environment, location)?;
             check_remote_tips(context.store, location, environment)?;
             let coordination = context

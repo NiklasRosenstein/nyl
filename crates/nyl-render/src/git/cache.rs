@@ -23,13 +23,14 @@ impl CacheLayout {
     /// Uses NYL_CACHE_DIR environment variable if set, otherwise falls back to
     /// `.nyl/cache/` in the current directory.
     pub fn new() -> Result<Self> {
-        let root = if let Ok(cache_dir) = std::env::var("NYL_CACHE_DIR") {
-            PathBuf::from(cache_dir)
-        } else {
-            std::env::current_dir()?.join(".nyl").join("cache")
-        };
+        Ok(Self::for_project(&std::env::current_dir()?))
+    }
 
-        Ok(Self { root })
+    /// Use the configured cache, or the project-local cache when unspecified.
+    pub fn for_project(project_root: &std::path::Path) -> Self {
+        let root =
+            std::env::var_os("NYL_CACHE_DIR").map_or_else(|| project_root.join(".nyl").join("cache"), PathBuf::from);
+        Self { root }
     }
 
     /// Create a cache layout with an explicit path
@@ -38,6 +39,13 @@ impl CacheLayout {
     /// race conditions between parallel tests.
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
         Self { root: path.into() }
+    }
+
+    /// Path to the local state object database for a repository identity.
+    pub fn state_repo_path(&self, identity: &str) -> PathBuf {
+        self.root
+            .join("state")
+            .join(format!("{}.git", nyl_core::digest::sha256_hex(identity.as_bytes())))
     }
 
     /// Get the path to the bare repository for a given URL

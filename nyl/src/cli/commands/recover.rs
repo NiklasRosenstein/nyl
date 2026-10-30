@@ -34,6 +34,10 @@ pub struct RecoverArgs {
     #[command(flatten)]
     pub common: Common,
 
+    /// Recover from the local state repository without contacting the remote.
+    #[arg(long)]
+    pub local: bool,
+
     /// The unit to recover; needs --retry or --accept. Without it, recover
     /// imports the run of a broken lease.
     #[arg(long, requires = "action")]
@@ -85,6 +89,7 @@ pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         Operation::Recover.as_str(),
         RunMode::Recover { unit },
         LifecycleOptions::default(),
+        args.local,
         None,
         None,
         recover_environment,

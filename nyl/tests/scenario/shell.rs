@@ -419,6 +419,9 @@ fn take_failure(left: &AtomicUsize) -> bool {
 }
 
 impl StateStore for FaultyStore {
+    fn prepare_worktree_snapshot(&self, location: &StateLocation, commit: &CommitId) -> StateResult<()> {
+        self.inner.prepare_worktree_snapshot(location, commit)
+    }
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         self.inner.snapshot(location)
     }

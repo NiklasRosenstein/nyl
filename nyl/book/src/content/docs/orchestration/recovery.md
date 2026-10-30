@@ -255,11 +255,9 @@ its transition commit lands, such as a reconcile that fails during
 resolution or is cancelled, puts the broken lease back when it releases, so
 the break stays in effect until an import is committed.
 
-When the state cannot be imported into, because `state.yaml` is missing
-after a broken `nyl state init`, the state moved away, or a remote tip is a
-`Nyl-Local` commit, `nyl recover -e <env>` still takes the broken lease over
-and releases it, so `nyl state init`, `nyl state move`, or `nyl state
-restore` can repair the state. See [`nyl recover`](/nyl/reference/cli/recover/#importing-a-broken-run).
+When state cannot be imported because it is missing or moved, `nyl recover`
+takes over and releases the broken lease so the state can be repaired. See
+[`nyl recover`](/nyl/reference/cli/recover/#importing-a-broken-run).
 
 ## Verifying receipts
 
@@ -296,15 +294,11 @@ like a changed unit, it is work for the next reconcile.
 `nyl verify`'s `NYL-VERIFY-DRIFT` warning says for each unit what the next
 reconcile does with it.
 
-## Recovery next to local runs
+## Recovery with local state
 
-A [`--local` run](/nyl/orchestration/environments-and-state/#local-runs)
-never takes over remote runs: while remote state holds dead runs, it exits 1
-with `NYL-LOCAL-RUN-LEFTOVERS`, and a remote `nyl reconcile` or `nyl recover
--e <env>` takes them over first. Under the remote lease, a `--local` run also
-refuses a broken remote lease with `NYL-LEASE-BROKEN` (exit 2), even when the
-broken holder left no run ref, because only an import records the break. A `--local` run executes a unit whose recovery policy is not
-`converge` only when named with `--approve <unit>`.
+`--local` uses the configured local repository without a remote lease. Local
+receipts and checkpoints remain available there for recovery. Online commands
+refuse to overwrite unpublished local work.
 
 ## See also
 
@@ -312,3 +306,7 @@ broken holder left no run ref, because only an import records the break. A `--lo
 - [Environments and state](/nyl/orchestration/environments-and-state/)
 - [Git storage](/nyl/reference/git-storage/)
 - [`nyl reconcile`](/nyl/reference/cli/reconcile/), [`nyl recover`](/nyl/reference/cli/recover/), [`nyl verify`](/nyl/reference/cli/verify/), [`nyl status`](/nyl/reference/cli/status/)
+
+When a held-unit `nyl exec` command cannot start, Nyl restores the unit's prior
+observed state. A command that may have started retains its operator-modified
+approval fence, including when it times out.

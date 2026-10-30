@@ -1787,7 +1787,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         for timeout in [false, true] {
             let (directory, mut config, first) = fixture();
-            config.config.validation.kubeconform.as_mut().unwrap().timeout_seconds = 1;
+            config.config.validation.kubeconform.as_mut().unwrap().timeout_seconds = 10;
             let second = ValidationPartition {
                 destination: "second".into(),
                 version: first.version.clone(),

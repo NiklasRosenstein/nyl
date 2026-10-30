@@ -107,10 +107,17 @@ impl Session {
         open_store(&self.inventory, &self.resolved, author)
     }
 
+    /// Open the state store without contacting remote repositories.
+    pub fn offline_store(&self, author: Option<CommitAuthor>) -> Result<GitStateStore, NylError> {
+        crate::orchestration::project::open_store_mode(&self.inventory, &self.resolved, author, true)
+    }
+
     /// Sources in the clone, through the project's Git credentials.
     pub fn sources(&self) -> Result<GitSourceResolver, NylError> {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
-        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth))
+        let state = self.store(None)?;
+        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
+            .with_snapshot_repository(state.repository_path(&self.resolved.location)))
     }
 
     /// Wire explicit working-file capture through the shared source shell.
@@ -118,9 +125,14 @@ impl Session {
         &self,
         wiring: &Wiring<'_>,
         author: Option<&str>,
+        local: bool,
     ) -> Result<nyl_core::orchestration::ports::WorktreeSnapshot, Stop> {
         let identity = wiring.commit_identity(&self.resolved.git_dir, author)?;
-        let store = self.store(None)?;
+        let store = if local {
+            self.offline_store(None)?
+        } else {
+            self.store(None)?
+        };
         let sources = self.sources()?;
         nyl_orchestration::shell::sources::snapshot_worktree(
             &store,
@@ -146,8 +158,7 @@ impl Session {
     }
 
     /// The shell context of one command, working through `store`: the
-    /// environment's state store, or a [`LocalStore`](nyl_orchestration::shell::local::LocalStore)
-    /// wrapping it for `--local`.
+    /// environment's configured state store.
     pub fn context<'a>(
         &self,
         store: &'a dyn StateStore,
@@ -226,26 +237,6 @@ impl Session {
             warnings.append(&mut environment.warnings);
             environment.warnings = warnings;
         }
-    }
-
-    /// The `--local` options of a run, after checking that the state has
-    /// a local view (`NYL-LOCAL-RUN-UNSUPPORTED` otherwise): remote state
-    /// whose refs are branches. `approve` are the `--approve` units.
-    pub fn local_run(
-        &self,
-        local_lease: bool,
-        approve: &[String],
-    ) -> Result<nyl_orchestration::shell::local::LocalRun, Finding> {
-        use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
-        nyl_orchestration::rules::local::view(&self.resolved.location)?;
-        Ok(LocalRun {
-            lease: if local_lease {
-                LeaseScope::Local
-            } else {
-                LeaseScope::Remote
-            },
-            approve: unit_names("--approve", approve)?,
-        })
     }
 
     /// The request of one `plan` or `reconcile`.
@@ -486,6 +477,12 @@ fn table(report: &RunReport) -> String {
         }
         if let Some(run) = &environment.run {
             let _ = writeln!(text, "  run:      {run}");
+        }
+        if let Some(repository) = &environment.state_repository {
+            let _ = writeln!(text, "state repository: {repository}");
+        }
+        if let Some(path) = &environment.state_local_path {
+            let _ = writeln!(text, "state local path: {path}");
         }
         if let Some(source) = &environment.source_commit {
             let _ = writeln!(text, "  source:   {source}");

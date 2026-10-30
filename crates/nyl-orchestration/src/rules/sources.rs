@@ -98,17 +98,23 @@ pub fn source_request(entry: &Environment, entry_commit: &CommitId, override_rev
     }
 }
 
-/// The finding for an Environment source this milestone cannot choose S
-/// from: `fromPromotion` (M6). `None` when [`source_request`] covers it.
+/// Refuse source forms the entry-repository resolver cannot represent.
 pub fn unsupported_source(entry: &Environment) -> Option<Finding> {
     let source = entry.spec.source.as_ref()?;
+    if source.git.is_remote() {
+        return Some(Finding::new(
+            Code::SourceUnavailable,
+            format!(
+                "Environment {} names a remote source repository, which is not supported yet",
+                entry.metadata.name
+            ),
+            "remove spec.source.repository and repositoryRef, and use a revision or commit from the entry repository",
+        ));
+    }
     source.from_promotion.as_ref()?;
     Some(Finding::new(
         Code::SourceUnavailable,
-        format!(
-            "Environment {} takes its source from a promotion, which is not supported yet",
-            entry.metadata.name
-        ),
+        format!("Environment {} takes its source from a promotion, which is not supported yet", entry.metadata.name),
         "set spec.source.revision (optionally with commit), or omit spec.source to run from the entry worktree's commit",
     ))
 }
@@ -552,6 +558,18 @@ mod tests {
         let promoted = environment(&json!({"source": {"fromPromotion": {"path": "dev-to-prod"}}}));
         assert_eq!(unsupported_source(&promoted).unwrap().code, Code::SourceUnavailable);
         assert!(unsupported_source(&environment(&json!({"source": {"revision": "main"}}))).is_none());
+    }
+
+    #[test]
+    fn test_remote_environment_source_is_not_resolved_from_entry_repository() {
+        for source in [
+            json!({"repositoryRef": {"name": "other"}, "revision": "main"}),
+            json!({"repository": {"repoURL": "https://example.com/other.git"}, "revision": "main"}),
+        ] {
+            let finding = unsupported_source(&environment(&json!({"source": source}))).unwrap();
+            assert_eq!(finding.code, Code::SourceUnavailable);
+            assert!(finding.fix.contains("entry repository"));
+        }
     }
 
     /// Catches `allowUnprotectedSource` leaking into pinned commits, which

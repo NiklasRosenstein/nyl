@@ -263,10 +263,7 @@ pub struct RunRequest {
     pub worktree_source: Option<nyl_core::orchestration::ports::WorktreeSnapshot>,
     /// `--wait-lease`.
     pub wait: Option<Duration>,
-    /// `--local`: the run continues from the clone's local state branches
-    /// and commits there with `Nyl-Local: true`; the command line passes a
-    /// [`super::local::LocalStore`] as the context's store. `None` for an
-    /// ordinary run. Contract: [Local runs](../../../../../design/orchestration-core.md#local-runs).
+    /// Optional execution approvals for a local run.
     pub local: Option<super::local::LocalRun>,
     /// Set by the command line's SIGINT/SIGTERM handler; never set by
     /// default. Contract: [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases), item 7.
@@ -1006,6 +1003,7 @@ impl<'r, 'a> Session<'r, 'a> {
 
     /// Pin the unit's Git source fields in `spec`, root its other local path
     /// fields at the worktree, check them out, and compute its execution key.
+    #[allow(clippy::too_many_lines)] // One resolution owns its source checks and execution-key inputs.
     fn key(
         &self,
         name: &UnitName,
@@ -1049,6 +1047,8 @@ impl<'r, 'a> Session<'r, 'a> {
         )
         .map_err(invalid)?;
         let commit = effective_commit(spec, &fields, source_commit).map_err(invalid)?;
+        crate::shell::sources::validate_local_inputs(self.context.sources, driver, spec, source_commit)
+            .map_err(invalid)?;
 
         let cached = self
             .keys
@@ -1067,6 +1067,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 source_commit,
                 project_dir,
                 &self.directory.join(format!("key-sources-{name}")),
+                Some((&worktree, &commit)),
             )
             .map_err(invalid)?;
             let now = self.base().clock.now();

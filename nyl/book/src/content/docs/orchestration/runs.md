@@ -147,15 +147,20 @@ symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
 rendering, and all execution waves use that immutable snapshot; subsequent edits
 belong to the next run. Explicitly pinned unit sources keep their declared
 commits. Drivers may require committed source; `--worktree` refuses those units.
-The flag requires exactly one named environment and conflicts with
-`--source`, label selectors, and group selectors.
+A source input that needs a submodule or a Git LFS pointer cannot be
+reconstructed from the snapshot; vendor those files as ordinary Git content.
+Direct worktree operations reject required LFS pointer files; hydrate local file
+inputs or vendor Git source files as ordinary Git content. The flag requires exactly one named environment and
+conflicts with `--source`, label selectors, and group selectors.
 
-State and run checkpoints archive the snapshot and its source ancestry, including
-Git-visible uncommitted files, in the configured state repository. Recovery and
+State and run checkpoints archive the snapshot, including Git-visible uncommitted
+files, in the configured state repository. The source base is recorded as provenance
+without retaining its ancestry. Recovery and
 teardown can retrieve those inputs from another clone after the working files
 are gone. Choose a local state repository for disposable experiments, as in the
 [local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu).
-`--local` independently keeps state transitions on the clone's local branches.
+`--local` independently uses the configured state repository's local copy without
+contacting the remote.
 
 `NYL-SOURCE-WORKTREE`, the transition's `worktreeSource` summary, and the reserved
 `refs/nyl-worktrees/` source revision identify the run's provenance. Those refs
@@ -179,7 +184,8 @@ messages. `--unit-log-dir DIR` also appends the masked transcript to
 `DIR/<environment>/<unit>.log`; combine the flags to write files without showing
 tool output. These files contain public tool output, never private structured
 stdout. Log files append across invocations, and new files have private
-permissions on Unix. Logs are local files and are not stored in Nyl state.
+permissions on Unix. `NYL-UNIT-LOG` warns when a log cannot be opened or written;
+the tool result remains authoritative. Logs are local files and are not stored in Nyl state.
 
 ```bash
 nyl reconcile -e dev --unit-log-dir /tmp/nyl-logs

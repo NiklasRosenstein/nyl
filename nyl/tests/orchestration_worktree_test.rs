@@ -200,7 +200,7 @@ fn test_worktree_requires_one_named_environment_and_conflicts_with_source() {
 }
 
 #[test]
-fn test_local_worktree_run_does_not_publish_its_snapshot_to_the_state_repository() {
+fn test_local_worktree_run_retains_its_snapshot_in_the_configured_local_repository() {
     let fixture = project();
     let world = World::new(fixture.path());
     let checkout = world.fresh_clone("main");
@@ -221,7 +221,7 @@ fn test_local_worktree_run_does_not_publish_its_snapshot_to_the_state_repository
     assert!(git2::Repository::open_bare(world.scenario_tmp().join("state.git"))
         .unwrap()
         .find_commit(commit)
-        .is_err());
+        .is_ok());
 }
 
 #[cfg(feature = "test-kinds")]

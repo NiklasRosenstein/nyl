@@ -80,6 +80,7 @@ pub fn run(args: &VerifyArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             args.group.as_deref(),
             false,
             None,
+            false,
             wiring.drivers,
         ),
         |environment, selected, _planned, _unavailable| {

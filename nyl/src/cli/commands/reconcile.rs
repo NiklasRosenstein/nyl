@@ -13,7 +13,6 @@ use nyl_core::orchestration::time::Duration;
 
 use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
-use nyl_orchestration::shell::local::LocalStore;
 use nyl_state::git::CommitAuthor;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
@@ -70,15 +69,9 @@ pub struct ReconcileArgs {
     #[arg(long)]
     pub wait_lease: Option<Duration>,
 
-    /// Run next to remote state without publishing it: continue from this
-    /// clone's local state branches and commit there, marked Nyl-Local.
+    /// Operate on the configured state repository without network access.
     #[arg(long)]
     pub local: bool,
-
-    /// With --local, take this clone's own lease instead of the remote one,
-    /// accepting that CI may run at the same time.
-    #[arg(long, requires = "local")]
-    pub local_lease: bool,
 
     /// Manual execution approvals and their audit identity.
     #[command(flatten)]
@@ -143,7 +136,11 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
                 )
                 .into());
             }
-            Session::open(&args.path, &args.environment[0])?.snapshot_worktree(wiring, args.author.as_deref())
+            Session::open(&args.path, &args.environment[0])?.snapshot_worktree(
+                wiring,
+                args.author.as_deref(),
+                args.local,
+            )
         };
         match capture() {
             Ok(snapshot) => Some(snapshot),
@@ -173,6 +170,7 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
             args.group.as_deref(),
             true,
             preflight_source,
+            args.local,
             wiring.drivers,
         ),
         |environment, selected, _planned, unavailable| {
@@ -214,27 +212,12 @@ fn reconcile(
     let session = Session::open(&args.path, &args.environment[0])?;
     // Reconcile writes state, so it alone of the run commands needs an identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
-    let local = if args.local {
-        Some(
-            session.local_run(
-                args.local_lease,
-                &args
-                    .approval
-                    .approve
-                    .iter()
-                    .map(|unit| unit.split('=').next().unwrap_or(unit).to_owned())
-                    .collect::<Vec<_>>(),
-            )?,
-        )
-    } else {
-        None
-    };
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: args.concurrency,
         source: args.source.as_deref(),
         wait: args.wait_lease,
-        local: local.clone(),
+        local: None,
         cancellation: wiring.cancellation.clone(),
         mode: nyl_orchestration::shell::run::RunMode::Reconcile,
         lifecycle: nyl_orchestration::shell::run::LifecycleOptions {
@@ -256,13 +239,16 @@ fn reconcile(
     request.approvals = args
         .approval
         .resolve(&session, wiring, &identity, request.units.as_ref())?;
-    let store = session.store(Some(CommitAuthor {
+    let author = Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
-    }))?;
-    // A `--local` run works on the clone's local branches through the same shell.
-    let local_store = local.map(|local| LocalStore::new(&store, local));
-    let state = local_store.as_ref().map_or(&store as &dyn StateStore, |local| local);
+    });
+    let store = if args.local {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
+    let state = &store as &dyn StateStore;
     let report = session.run(
         wiring,
         state,

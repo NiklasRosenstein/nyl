@@ -23,6 +23,7 @@ struct FakeTool {
     modules: Value,
     backend_metadata: Value,
     fail_plan: Option<String>,
+    operator_exit: Option<ToolExit>,
 }
 
 impl FakeTool {
@@ -38,6 +39,7 @@ impl FakeTool {
             modules: json!({"Modules": []}),
             backend_metadata: json!({"backend": {"type": "s3", "config": {"bucket": "test", "key": "dev/test"}}}),
             fail_plan: None,
+            operator_exit: None,
         }
     }
     fn count(&self, command: &str) -> usize {
@@ -53,6 +55,9 @@ impl FakeTool {
 impl ToolRunner for FakeTool {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
         let command = invocation.args[0].to_string_lossy().into_owned();
+        if command == "operator" {
+            return Ok(self.operator_exit.clone().unwrap());
+        }
         let mut code = 0;
         let mut stderr = Vec::new();
         let result = match command.as_str() {
@@ -83,6 +88,17 @@ impl ToolRunner for FakeTool {
                 json!(null)
             }
             "show" if invocation.args.len() > 2 => self.plan.lock().unwrap().clone(),
+            "state" => {
+                if self.state.is_null() {
+                    self.calls.lock().unwrap().push(invocation);
+                    return Ok(ToolExit::Exited {
+                        code: 0,
+                        stdout: Vec::new(),
+                        stderr,
+                    });
+                }
+                self.state.clone()
+            }
             "show" => self.state.clone(),
             "output" => self.output.clone(),
             "apply" => json!(null),
@@ -264,7 +280,7 @@ fn test_nochange_skips_apply_and_state_lock_failure_is_nonretryable() {
 fn test_missing_state_requires_explicit_acceptance_for_the_same_scope() {
     let world = World::new();
     let mut tool = FakeTool::new();
-    tool.state = json!({"format_version": "1.0"});
+    tool.state = Value::Null;
     let desired = unit(json!({}));
     let mut observed: ObservedUnit = serde_json::from_value(json!({"apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": desired.unit, "receipt": {"executionKey": desired.execution_key, "behaviorVersion": 1, "run": "00000000-0000-7000-8000-000000000002", "startedAt": "2026-10-28T12:00:00Z", "finishedAt": "2026-10-28T12:00:01Z"}, "condition": null})).unwrap();
     let driver = TerraformDriver::opentofu();
@@ -519,4 +535,23 @@ fn test_native_kinds_share_resource_identity_and_driver_defaults() {
         tofu.default_timeout(),
         nyl_core::orchestration::time::Duration::from_mins(60)
     );
+}
+
+#[test]
+fn test_exec_classifies_operator_start_and_timeout() {
+    let world = World::new();
+    let mut tool = FakeTool::new();
+    let driver = TerraformDriver::opentofu();
+    tool.operator_exit = Some(ToolExit::NotStarted {
+        reason: "missing".to_owned(),
+    });
+    let error = driver
+        .exec(&world.context(&tool), &unit(json!({})), &["operator".into()])
+        .unwrap_err();
+    assert!(!error.effects_possible());
+    tool.operator_exit = Some(ToolExit::DeadlineExceeded);
+    let error = driver
+        .exec(&world.context(&tool), &unit(json!({})), &["operator".into()])
+        .unwrap_err();
+    assert!(error.effects_possible());
 }

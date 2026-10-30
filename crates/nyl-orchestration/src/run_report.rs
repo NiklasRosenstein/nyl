@@ -165,6 +165,12 @@ pub struct EnvironmentRunReport {
     /// The run, for reconcile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunId>,
+    /// The configured state repository identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_repository: Option<String>,
+    /// The local state repository used by this command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_local_path: Option<String>,
     /// The source commit S the units were rendered at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
@@ -213,6 +219,8 @@ impl EnvironmentRunReport {
             run: None,
             source_commit: None,
             source_repository: None,
+            state_repository: None,
+            state_local_path: None,
             leaving: Vec::new(),
             units: BTreeMap::new(),
             unit_order: Vec::new(),

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, TransitionChanges};
+use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, StateSide, TransitionChanges};
 use nyl_core::orchestration::state::{
     Lease, LeaseKind, Lifecycle, Operation, Request, StateEvent, StateLocation, StateRecord, StateRecordKind, StateV1,
     TeardownProgress,
@@ -664,7 +664,19 @@ pub fn reset(
             let mut dropped = Vec::new();
             for side in sides(location) {
                 match context.store.log(&view, *side, TIP_HISTORY) {
-                    Ok(log) => extend_unique(&mut dropped, local_rule::rejected(&log)),
+                    Ok(log) => {
+                        let remote_tip = match side {
+                            StateSide::Desired => remote.tips.desired.as_ref(),
+                            StateSide::Observed => remote.tips.observed.as_ref(),
+                        };
+                        extend_unique(
+                            &mut dropped,
+                            log.into_iter()
+                                .take_while(|entry| Some(&entry.commit) != remote_tip)
+                                .map(|entry| entry.commit)
+                                .collect(),
+                        );
+                    }
                     // Without history the dropped commits are not listed.
                     Err(StateError::Unavailable(_)) => {}
                     Err(error) => return Err(store_error(environment, &error)),
@@ -688,8 +700,7 @@ const RESTORE_HISTORY: usize = 1000;
 /// `nyl state restore -e <env> --to <commit>`: one desired and one observed
 /// commit (operation `state-restore`, event `state-restored`) restoring the
 /// content of `to`, on top of the current tips, so protected branches need
-/// no force push; records the local transitions it rejects and never
-/// restores admission. Takes the lease. The other ref's commit is paired
+/// no force push; preserves current admission. Takes the lease. The other ref's commit is paired
 /// through the transition trailers ([`local_rule::restore_tips`]).
 ///
 /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
@@ -725,14 +736,7 @@ pub fn restore(
                 .snapshot_at(location, &tips)
                 .map_err(|error| store_error(environment, &error))?;
             let mut changes = local_rule::restore_changes(&snapshot, &target);
-            // Only the environment's own local transitions are rejected:
-            // others sharing the refs through `path` keep theirs.
-            let mut rejected = local_rule::rejected(&local_rule::environment_log(environment, desired_log));
-            extend_unique(
-                &mut rejected,
-                local_rule::rejected(&local_rule::environment_log(environment, observed_log)),
-            );
-            if changes.is_empty() && rejected.is_empty() {
+            if changes.is_empty() {
                 report.details.insert(
                     "note".to_owned(),
                     json!(format!("the state already holds the content of {to}")),
@@ -749,9 +753,7 @@ pub fn restore(
             changes.record = Some(record);
             let mut summary = summary(Operation::StateRestore, environment, "restored");
             summary.details.insert("to".to_owned(), json!(to));
-            summary.details.insert("rejected".to_owned(), json!(rejected));
             report.details.insert("to".to_owned(), json!(to));
-            report.details.insert("rejected".to_owned(), json!(rejected));
             commit(context, location, held, &snapshot, summary, changes, requested, report)
         },
     )

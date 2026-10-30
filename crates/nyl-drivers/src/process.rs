@@ -144,6 +144,7 @@ impl ToolRunner for ProcessRunner {
     ) -> DriverResult<ToolExit> {
         let mut runner = self.clone();
         runner.unit = Some(unit.clone());
+        runner.output.error = Arc::new(Mutex::new(None));
         if let Some(directory) = &self.output.directory {
             let open = || -> std::io::Result<std::fs::File> {
                 let directory = directory.join(unit.environment.as_str());
@@ -157,18 +158,20 @@ impl ToolRunner for ProcessRunner {
                 }
                 options.open(directory.join(format!("{}.log", unit.unit)))
             };
-            runner.output.file = Some(Arc::new(Mutex::new(open().map_err(|error| {
-                DriverError::before_effects(format!("cannot open unit log for {unit}: {error}"))
-            })?)));
+            match open() {
+                Ok(file) => runner.output.file = Some(Arc::new(Mutex::new(file))),
+                Err(error) => warn_log(
+                    &runner.transcript,
+                    &runner.output,
+                    format!("cannot open unit log for {unit}: {error}"),
+                ),
+            }
         }
         runner.run(invocation)
     }
 
     #[allow(clippy::too_many_lines)] // One subprocess lifetime owns its streams, terminal, cancellation, deadline, and captured result.
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
-        if let Some(error) = self.output.error.lock().unwrap().as_ref() {
-            return Err(DriverError::before_effects(error.clone()));
-        }
         let mut masked = invocation
             .masked
             .iter()
@@ -315,9 +318,6 @@ impl ToolRunner for ProcessRunner {
         let diagnostics = stderr
             .map(|reader| reader.join().unwrap_or_default())
             .unwrap_or_default();
-        if let Some(error) = self.output.error.lock().unwrap().as_ref() {
-            return Err(DriverError::after_effects(error.clone()));
-        }
         Ok(exit_of(status, captured, diagnostics))
     }
 }
@@ -557,6 +557,21 @@ fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture_limit: us
     transcribe_for_unit(pipe, masked, sink, capture_limit, None, &UnitOutput::default())
 }
 
+fn warn_log(sink: &Sink, output: &UnitOutput, message: String) {
+    let mut error = output.error.lock().unwrap();
+    if error.is_some() {
+        return;
+    }
+    let warning = format!("warning NYL-UNIT-LOG: {message}; check log directory permissions and free space\n");
+    *error = Some(message);
+    match sink {
+        Some(buffer) => buffer.lock().unwrap().extend_from_slice(warning.as_bytes()),
+        None => {
+            let _ = std::io::stderr().lock().write_all(warning.as_bytes());
+        }
+    }
+}
+
 fn transcribe_for_unit(
     pipe: impl Read,
     masked: &[String],
@@ -583,7 +598,14 @@ fn transcribe_for_unit(
                 };
                 if let Some(file) = &output.file {
                     if let Err(error) = file.lock().unwrap().write_all(text.as_bytes()) {
-                        *output.error.lock().unwrap() = Some(format!("cannot write unit log: {error}"));
+                        warn_log(
+                            sink,
+                            output,
+                            format!(
+                                "cannot write unit log for {}: {error}",
+                                unit.map_or_else(|| "tool".to_owned(), ToString::to_string)
+                            ),
+                        );
                     }
                 }
                 if unit.is_some() && output.quiet {
@@ -766,21 +788,47 @@ mod tests {
     }
 
     #[test]
-    fn test_unit_log_setup_failure_prevents_tool_execution() {
+    fn test_unit_log_setup_failure_warns_and_preserves_tool_exit() {
         let directory = tempfile::TempDir::new().unwrap();
         let logs = directory.path().join("logs");
         std::fs::write(&logs, "not a directory").unwrap();
-        let (runner, _) = quiet();
-        let runner = runner.unit_output(false, Some(logs));
-        let effect = directory.path().join("effect");
-        let error = runner
-            .run_for_unit(
-                sh(&format!("touch '{}'", effect.display())),
-                &"dev/web".parse().unwrap(),
-            )
-            .unwrap_err();
-        assert!(!error.effects_possible());
-        assert!(!effect.exists());
+        let (runner, transcript) = quiet();
+        let runner = runner.unit_output(true, Some(logs));
+        assert!(matches!(
+            runner.run_for_unit(sh("exit 7"), &"dev/web".parse().unwrap()).unwrap(),
+            ToolExit::Exited { code: 7, .. }
+        ));
+        assert!(String::from_utf8_lossy(&transcript.lock().unwrap()).contains("cannot open unit log"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_unit_log_write_failure_warns_without_affecting_later_unit() {
+        let logs = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(logs.path().join("dev")).unwrap();
+        let read_only = logs.path().join("read-only");
+        std::fs::write(&read_only, "").unwrap();
+        let (mut runner, transcript) = quiet();
+        runner.output.quiet = true;
+        runner.output.file = Some(Arc::new(Mutex::new(std::fs::File::open(read_only).unwrap())));
+        assert!(matches!(
+            runner
+                .run_for_unit(sh("echo hello; exit 7"), &"dev/web".parse().unwrap())
+                .unwrap(),
+            ToolExit::Exited { code: 7, .. }
+        ));
+        runner.output.file = None;
+        runner.output.directory = Some(logs.path().to_owned());
+        assert!(matches!(
+            runner
+                .run_for_unit(sh("echo later"), &"dev/other".parse().unwrap())
+                .unwrap(),
+            ToolExit::Exited { code: 0, .. }
+        ));
+        assert!(String::from_utf8_lossy(&transcript.lock().unwrap()).contains("cannot write unit log"));
+        assert!(std::fs::read_to_string(logs.path().join("dev/other.log"))
+            .unwrap()
+            .contains("later"));
     }
 
     #[test]

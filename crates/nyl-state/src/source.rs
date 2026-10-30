@@ -50,6 +50,7 @@ const SYMLINK_MODE: i32 = 0o120_000;
 /// fetched into it.
 pub struct GitSourceResolver {
     git_dir: PathBuf,
+    snapshot_git_dir: Option<PathBuf>,
     auth: GitAuth,
     /// Read URLs of repositories named by credential-free URL, as for
     /// [`crate::git::Endpoint`].
@@ -123,11 +124,19 @@ impl GitSourceResolver {
     pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth) -> Self {
         Self {
             git_dir: git_dir.into(),
+            snapshot_git_dir: None,
             auth,
             endpoints: BTreeMap::new(),
             fetched: Mutex::new(BTreeSet::new()),
             symlinks: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Read retained worktree snapshots from the state repository when absent from the source clone.
+    #[must_use]
+    pub fn with_snapshot_repository(mut self, git_dir: impl Into<PathBuf>) -> Self {
+        self.snapshot_git_dir = Some(git_dir.into());
+        self
     }
 
     /// Read the repository that sources name by `identity` from `url`.
@@ -152,6 +161,18 @@ impl GitSourceResolver {
     fn open(&self) -> SourceResult<Repository> {
         Repository::open(&self.git_dir)
             .map_err(|cause| git_error(&format!("cannot open repository {}", self.git_dir.display()), &cause))
+    }
+
+    fn snapshot_repository(&self, oid: Oid) -> Option<Repository> {
+        let repository = Repository::open(self.snapshot_git_dir.as_ref()?).ok()?;
+        if repository
+            .find_commit(oid)
+            .is_ok_and(|commit| worktree::is_snapshot(&commit))
+        {
+            Some(repository)
+        } else {
+            None
+        }
     }
 
     fn read_url<'a>(&'a self, identity: &'a str) -> &'a str {
@@ -235,8 +256,13 @@ impl GitSourceResolver {
     /// The entry clone and `commit`, fetched when missing, after checking
     /// its tree's symbolic links (once per tree and resolver).
     fn checked_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<(Repository, Oid)> {
-        let source = self.open()?;
+        let mut source = self.open()?;
         let oid = Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?;
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            if let Some(snapshot_source) = self.snapshot_repository(oid) {
+                source = snapshot_source;
+            }
+        }
         if !Self::commit_exists(&source, oid) {
             self.ensure_fetched(&source, repository)?;
             self.fetch_one(&source, repository, commit.as_str(), None);
@@ -603,9 +629,9 @@ impl SourceResolver for GitSourceResolver {
     }
 
     fn is_worktree_snapshot(&self, commit: &CommitId) -> SourceResult<bool> {
-        let repository = self.open()?;
+        let (repository, oid) = self.checked_commit(&SourceRepository::This, commit)?;
         let commit = repository
-            .find_commit(Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?)
+            .find_commit(oid)
             .map_err(|cause| git_error("cannot inspect source commit", &cause))?;
         Ok(worktree::is_snapshot(&commit))
     }
@@ -624,7 +650,9 @@ impl SourceResolver for GitSourceResolver {
             if !Self::commit_exists(&repo, oid) {
                 self.fetch_one(&repo, repository, revision, None);
             }
-            return if Self::commit_exists(&repo, oid) {
+            return if Self::commit_exists(&repo, oid)
+                || (*repository == SourceRepository::This && self.snapshot_repository(oid).is_some())
+            {
                 commit_id(oid)
             } else {
                 Err(missing())
@@ -744,6 +772,48 @@ impl SourceResolver for GitSourceResolver {
             Self::remove_worktree(path)?;
         }
         Self::create_checkout_with_paths(&source, oid, path, Some(paths))
+    }
+
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        let tree = source
+            .find_commit(oid)
+            .and_then(|commit| commit.tree())
+            .map_err(|cause| git_error("cannot inspect source tree", &cause))?;
+        let mut problem = None;
+        tree.walk(TreeWalkMode::PreOrder, |directory, entry| {
+            let Ok(name) = entry.name() else { return git2::TreeWalkResult::Ok; };
+            let name = format!("{directory}{name}");
+            let relevant = match worktree::source_path_matches(path, &name, recursive, entry.filemode() == 0o160_000) {
+                Ok(relevant) => relevant,
+                Err(cause) => { problem = Some(cause.to_string()); return git2::TreeWalkResult::Ok; }
+            };
+            if !relevant { return git2::TreeWalkResult::Ok; }
+            if entry.filemode() == 0o160_000 {
+                problem = Some(format!("source path {path} requires submodule {name}; vendor its contents into the source repository before running Nyl"));
+                return git2::TreeWalkResult::Ok;
+            }
+            if entry.kind() == Some(ObjectType::Blob) {
+                match source.find_blob(entry.id()) {
+                    Ok(blob) if worktree::is_lfs_pointer(blob.content()) => {
+                        problem = Some(format!("source path {path} requires Git LFS file {name}; provide the file as ordinary Git content before running Nyl"));
+                    }
+                    Err(cause) => problem = Some(format!("cannot inspect source input {name}: {cause}")),
+                    Ok(_) => {}
+                }
+            }
+            git2::TreeWalkResult::Ok
+        }).map_err(|cause| git_error("cannot inspect source inputs", &cause))?;
+        if let Some(problem) = problem {
+            return Err(error(problem));
+        }
+        Ok(())
     }
 
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {

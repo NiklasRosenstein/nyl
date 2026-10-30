@@ -19,6 +19,13 @@ use super::{error, git_error};
 /// Git-visible tracked and untracked paths, and paths whose working bytes changed.
 /// Deleted files remain candidates so callers can omit them from the snapshot.
 pub fn visible_files(repository: &Repository) -> SourceResult<(BTreeSet<String>, Vec<String>)> {
+    let (files, changed, _) = visible_files_status(repository)?;
+    Ok((files, changed))
+}
+
+fn visible_files_status(
+    repository: &Repository,
+) -> SourceResult<(BTreeSet<String>, Vec<String>, BTreeSet<std::path::PathBuf>)> {
     let index = repository
         .index()
         .map_err(|cause| git_error("cannot read source index", &cause))?;
@@ -26,25 +33,70 @@ pub fn visible_files(repository: &Repository) -> SourceResult<(BTreeSet<String>,
         .iter()
         .map(|entry| String::from_utf8(entry.path).map_err(|cause| error(cause.to_string())))
         .collect::<SourceResult<BTreeSet<_>>>()?;
-    let mut options = git2::StatusOptions::new();
-    options
-        .include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(false);
-    let statuses = repository
-        .statuses(Some(&mut options))
-        .map_err(|cause| git_error("cannot inspect working files", &cause))?;
+    let root = repository
+        .workdir()
+        .ok_or_else(|| error("worktree snapshots require a working checkout"))?;
+    let statuses = nyl_git::worktree_status(repository.path(), root)
+        .map_err(|cause| error(format!("cannot inspect working files: {cause}")))?;
     let mut changed = Vec::new();
-    for entry in statuses.iter() {
+    let mut working_changes = BTreeSet::new();
+    for entry in statuses {
         let path = entry
-            .path()
-            .map_err(|cause| git_error("invalid working-file path", &cause))?;
-        if entry.status().is_wt_new() {
+            .path
+            .to_str()
+            .ok_or_else(|| error("non-UTF-8 working-file path"))?;
+        if entry.untracked {
             files.insert(path.to_owned());
         }
         changed.push(path.to_owned());
+        if entry.untracked || entry.status[1] != b' ' {
+            working_changes.insert(entry.path);
+        }
     }
-    Ok((files, changed))
+    Ok((files, changed, working_changes))
+}
+
+/// Whether a worktree path is consumed by a declared path or glob.
+/// A directory matches when a glob can traverse it to reach an input.
+pub fn source_path_matches(path: &str, relative: &str, recursive: bool, directory: bool) -> SourceResult<bool> {
+    let path = path.trim_matches('/');
+    if path.contains(['*', '?', '[']) {
+        let matches = |pattern: &str, value: &str| -> SourceResult<bool> {
+            Ok(glob::Pattern::new(pattern)
+                .map_err(|cause| error(format!("invalid source path {path}: {cause}")))?
+                .matches_with(
+                    value,
+                    glob::MatchOptions {
+                        require_literal_separator: true,
+                        ..Default::default()
+                    },
+                ))
+        };
+        if !directory {
+            return matches(path, relative);
+        }
+        for (index, _) in path.match_indices('/') {
+            if matches(&path[..index], relative)? {
+                return Ok(true);
+            }
+        }
+        return if path.ends_with("**") {
+            matches(path, &format!("{relative}/input"))
+        } else {
+            Ok(false)
+        };
+    }
+    Ok((recursive && path.is_empty())
+        || relative == path
+        || (recursive && relative.starts_with(&format!("{path}/")))
+        || (directory && path.starts_with(&format!("{relative}/"))))
+}
+
+/// Whether bytes are a Git LFS pointer rather than hydrated file content.
+pub fn is_lfs_pointer(bytes: &[u8]) -> bool {
+    bytes
+        .strip_prefix(b"version https://git-lfs.github.com/spec/v1")
+        .is_some_and(|tail| tail.starts_with(b"\n") || tail.starts_with(b"\r\n"))
 }
 
 /// Whether a source commit declares worktree snapshot provenance.
@@ -121,6 +173,7 @@ pub fn snapshot_file_contents(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Capture owns one immutable tree and its retained commit.
 pub(super) fn capture(
     repository: &Repository,
     base: &CommitId,
@@ -131,16 +184,57 @@ pub(super) fn capture(
     let root = repository
         .workdir()
         .ok_or_else(|| error("worktree snapshots require a working checkout"))?;
-    let (files, changed) = visible_files(repository)?;
+    let (files, changed, working_changes) = visible_files_status(repository)?;
+    let source_index = repository
+        .index()
+        .map_err(|cause| git_error("cannot read source index", &cause))?;
+    let attributes_changed = changed
+        .iter()
+        .any(|path| path == ".gitattributes" || path.ends_with("/.gitattributes"));
     let mut index = Index::new().map_err(|cause| git_error("cannot create snapshot index", &cause))?;
     for relative in files {
+        let original = source_index.get_path(std::path::Path::new(&relative), 0);
+        if let Some(entry) = original.as_ref().filter(|entry| entry.mode == 0o160_000) {
+            index
+                .add(entry)
+                .map_err(|cause| git_error("cannot index submodule", &cause))?;
+            continue;
+        }
         let Some(metadata) = snapshot_file_metadata(root, &relative)? else {
             continue;
         };
-        let bytes = snapshot_file_contents(root, &relative, &metadata)?;
-        let id = repository
-            .blob(&bytes)
-            .map_err(|cause| git_error("cannot store snapshot file", &cause))?;
+        let id = if !attributes_changed
+            && !working_changes.contains(std::path::Path::new(&relative))
+            && !metadata.file_type().is_symlink()
+        {
+            original.as_ref().map(|entry| entry.id)
+        } else {
+            None
+        };
+        let id = match id {
+            Some(id) => id,
+            None if metadata.file_type().is_symlink() => {
+                let bytes = snapshot_file_contents(root, &relative, &metadata)?;
+                repository
+                    .blob(&bytes)
+                    .map_err(|cause| git_error("cannot store snapshot link", &cause))?
+            }
+            None => {
+                let output = nyl_git::repository_command(repository.path())
+                    .current_dir(root)
+                    .args(["hash-object", "-w", "--path", &relative, "--", &relative])
+                    .output()
+                    .map_err(|cause| error(format!("cannot run Git clean filters for {relative}: {cause}")))?;
+                if !output.status.success() {
+                    return Err(error(format!(
+                        "cannot clean {relative}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                Oid::from_str(String::from_utf8_lossy(&output.stdout).trim())
+                    .map_err(|cause| git_error("invalid cleaned blob", &cause))?
+            }
+        };
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt as _;
@@ -180,7 +274,6 @@ pub(super) fn capture(
     let tree = index
         .write_tree_to(repository)
         .map_err(|cause| git_error("cannot store snapshot tree", &cause))?;
-    let base_oid = Oid::from_str(base.as_str()).map_err(|cause| git_error("invalid snapshot base", &cause))?;
     let revision = format!("{WORKTREE_SNAPSHOT_PREFIX}{base}/{tree}");
     let candidates = repository
         .find_reference(&revision)
@@ -190,7 +283,13 @@ pub(super) fn capture(
         .chain(previous.and_then(|commit| Oid::from_str(commit.as_str()).ok()));
     for candidate in candidates {
         if let Ok(commit) = repository.find_commit(candidate) {
-            if is_snapshot(&commit) && commit.tree_id() == tree && commit.parent_id(0).ok() == Some(base_oid) {
+            if is_snapshot(&commit)
+                && commit.tree_id() == tree
+                && commit.parent_count() == 0
+                && commit
+                    .message()
+                    .is_ok_and(|message| message.lines().any(|line| line == format!("Nyl-Worktree-Base: {base}")))
+            {
                 repository
                     .reference(&revision, candidate, true, "retain worktree snapshot")
                     .map_err(|cause| git_error("cannot retain snapshot", &cause))?;
@@ -207,12 +306,9 @@ pub(super) fn capture(
     let tree = repository
         .find_tree(tree)
         .map_err(|cause| git_error("cannot open snapshot tree", &cause))?;
-    let parent = repository
-        .find_commit(base_oid)
-        .map_err(|cause| git_error("cannot open snapshot base", &cause))?;
     let message = format!("nyl: worktree source snapshot\n\n{WORKTREE_SNAPSHOT_MARKER}\nNyl-Worktree-Base: {base}\n\nChanged paths:\n{}\n", changed.join("\n"));
     let commit = repository
-        .commit(None, &signature, &signature, &message, &tree, &[&parent])
+        .commit(None, &signature, &signature, &message, &tree, &[])
         .map_err(|cause| git_error("cannot commit worktree snapshot", &cause))?;
     repository
         .reference(&revision, commit, true, "retain worktree snapshot")
@@ -227,6 +323,7 @@ pub(super) fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nyl_core::orchestration::ports::{SourceRepository, SourceResolver};
     use tempfile::TempDir;
 
     fn project() -> (TempDir, Repository, CommitId) {
@@ -296,6 +393,11 @@ mod tests {
         assert_eq!(repository.head().unwrap().target().unwrap().to_string(), base.as_str());
         assert_eq!(std::fs::read(repository.path().join("index")).unwrap(), original_index);
         assert!(is_snapshot(&commit));
+        assert_eq!(commit.parent_count(), 0);
+        assert!(commit
+            .message()
+            .unwrap()
+            .contains(&format!("Nyl-Worktree-Base: {base}")));
         assert_eq!(
             capture(&repository, &base, &identity, now + chrono::Duration::hours(1), None).unwrap(),
             snapshot
@@ -318,6 +420,96 @@ mod tests {
             capture(&repository, &base, &identity, now, None).unwrap().commit,
             snapshot.commit
         );
+    }
+
+    #[test]
+    fn test_source_globs_detect_submodules_they_can_traverse() {
+        assert!(source_path_matches("/nyl/*/entry.sh", "nyl/module", false, true).unwrap());
+        assert!(!source_path_matches("/nyl/*/entry.sh", "other/module", false, true).unwrap());
+        assert!(!source_path_matches("/nyl/*", "nyl/module", false, true).unwrap());
+        assert!(source_path_matches("/nyl/**", "nyl/module", false, true).unwrap());
+        assert!(source_path_matches("/nyl/*/entry.sh", "nyl/module/entry.sh", false, false).unwrap());
+        assert!(!source_path_matches("/nyl/*/entry.sh", "nyl/module/other", false, false).unwrap());
+    }
+
+    #[test]
+    fn test_snapshot_retains_gitlink_and_uses_git_clean_filter() {
+        let (root, repository, base) = project();
+        repository
+            .config()
+            .unwrap()
+            .set_str("filter.upper.clean", "tr a-z A-Z")
+            .unwrap();
+        std::fs::write(root.path().join(".gitattributes"), "input filter=upper\n").unwrap();
+        std::fs::write(root.path().join("input"), "new content").unwrap();
+        let mut index = repository.index().unwrap();
+        let mut entry = index.get_path(std::path::Path::new("deleted"), 0).unwrap();
+        entry.path = b"submodule".to_vec();
+        entry.mode = 0o160_000;
+        entry.id = Oid::from_str(base.as_str()).unwrap();
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+        std::fs::create_dir(root.path().join("submodule")).unwrap();
+        let snapshot = capture(
+            &repository,
+            &base,
+            &"Test <test@example.invalid>".parse().unwrap(),
+            "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
+        )
+        .unwrap();
+        let commit = repository
+            .find_commit(Oid::from_str(snapshot.commit.as_str()).unwrap())
+            .unwrap();
+        let tree = commit.tree().unwrap();
+        let submodule = tree.get_name("submodule").unwrap();
+        assert_eq!(submodule.filemode(), 0o160_000);
+        assert_eq!(submodule.id(), Oid::from_str(base.as_str()).unwrap());
+        assert_eq!(
+            repository
+                .find_blob(tree.get_name("input").unwrap().id())
+                .unwrap()
+                .content(),
+            b"NEW CONTENT"
+        );
+        let resolver = crate::source::GitSourceResolver::new(repository.path(), nyl_git::GitAuth::default());
+        assert!(resolver
+            .validate_source_path(&SourceRepository::This, &snapshot.commit, "/input", true)
+            .is_ok());
+        let error = resolver
+            .validate_source_path(&SourceRepository::This, &snapshot.commit, "/submodule", true)
+            .unwrap_err();
+        assert!(error.to_string().contains("requires submodule submodule"));
+    }
+
+    #[test]
+    fn test_source_path_rejects_required_lfs_pointer() {
+        assert!(is_lfs_pointer(
+            b"version https://git-lfs.github.com/spec/v1\r\noid sha256:123\r\n"
+        ));
+        let (root, repository, base) = project();
+        std::fs::write(
+            root.path().join("asset"),
+            "version https://git-lfs.github.com/spec/v1\noid sha256:123\nsize 1\n",
+        )
+        .unwrap();
+        let snapshot = capture(
+            &repository,
+            &base,
+            &"Test <test@example.invalid>".parse().unwrap(),
+            "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
+        )
+        .unwrap();
+        let resolver = crate::source::GitSourceResolver::new(repository.path(), nyl_git::GitAuth::default());
+        assert!(resolver
+            .validate_source_path(&SourceRepository::This, &snapshot.commit, "/input", true)
+            .is_ok());
+        assert!(resolver
+            .validate_source_path(&SourceRepository::This, &snapshot.commit, "/asset", true)
+            .unwrap_err()
+            .to_string()
+            .contains("requires Git LFS file asset"));
     }
 
     #[test]
