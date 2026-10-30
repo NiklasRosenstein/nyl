@@ -41,7 +41,11 @@ impl PublicationSelection {
             validate_path_segment("ApplicationGroup selector", name)?;
         }
         for key in &self.releases {
-            ReleaseKey::parse(key)?;
+            ReleaseKey::parse(key).map_err(|_| {
+                NylError::config(format!(
+                    "--release selector {key:?} must have the form <applicationGroup>/<release>"
+                ))
+            })?;
         }
         Ok(())
     }
