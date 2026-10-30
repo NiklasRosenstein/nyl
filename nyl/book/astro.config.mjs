@@ -47,6 +47,17 @@ export default defineConfig({
     starlight({
       title: "Nyl",
       description: "A fast Kubernetes manifest generator for rendered GitOps.",
+      head: [
+        { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" } },
+        { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" } },
+        {
+          tag: "link",
+          attrs: {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap",
+          },
+        },
+      ],
       expressiveCode: { plugins: [consoleOutput()] },
       social: [
         {
@@ -71,7 +82,7 @@ export default defineConfig({
           },
           {
             id: "kubernetes",
-            label: "Kubernetes",
+            label: "Kubernetes Rendering",
             link: "/kubernetes/pipeline/",
             icon: "puzzle",
             items: [
@@ -107,7 +118,7 @@ export default defineConfig({
           },
           {
             id: "rendered-gitops",
-            label: "Rendered GitOps",
+            label: "Kubernetes GitOps",
             link: "/rendered-gitops/",
             icon: "code-branch",
             items: [
@@ -157,12 +168,12 @@ export default defineConfig({
             ],
           },
           {
-            id: "domain-resources",
-            label: "Domain resources",
-            link: "/domain-resources/",
+            id: "domain-modeling",
+            label: "Domain modeling",
+            link: "/domain-modeling/",
             icon: "list-format",
             badge: { text: "Planned", variant: "note" },
-            items: ["domain-resources", "domain-resources/example", "domain-resources/roadmap"],
+            items: ["domain-modeling", "domain-modeling/example", "domain-modeling/roadmap"],
           },
           {
             id: "reference",

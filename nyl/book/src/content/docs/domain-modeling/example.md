@@ -6,7 +6,7 @@ description: 'A walkthrough of planned domain resources, from a type definition 
 :::note[Planned]
 This walkthrough shows the planned design; none of it runs yet. Field names
 and commands may change before the
-[slices on the roadmap](/nyl/domain-resources/roadmap/) ship.
+[slices on the roadmap](/nyl/domain-modeling/roadmap/) ship.
 :::
 
 A platform team manages AWS accounts for every product team. Each team

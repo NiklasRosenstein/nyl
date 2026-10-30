@@ -60,7 +60,7 @@ state](/nyl/orchestration/) exist today, and the
 [roadmap](/nyl/orchestration/roadmap/)
 describes the milestones that follow.
 
-## Declare domain resources
+## Model your domain
 
 Nyl is planned to let teams declare what they need, such as cloud accounts,
 repositories, or access grants, as typed YAML in the folders they own.
@@ -68,9 +68,9 @@ Schemas and policies decide what each folder may declare, and orchestration
 units owned by the platform implement the declarations with their native
 tools.
 
-Domain resources are planned for milestone M9. The [domain resources
-section](/nyl/domain-resources/) explains the case, and its
-[roadmap](/nyl/domain-resources/roadmap/) tracks progress.
+Domain modeling is planned for milestone M9. The [domain modeling
+section](/nyl/domain-modeling/) explains the case, and its
+[roadmap](/nyl/domain-modeling/roadmap/) tracks progress.
 
 ## What Nyl provides
 

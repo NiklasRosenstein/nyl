@@ -1,11 +1,178 @@
+/*
+ * The Nyl look: a dark, technical surface with a teal accent, a dotted
+ * texture that fades out below the header, and corner ticks on callouts.
+ * Each layer of the docs has a color: teal for the shipped layers, amber for
+ * Orchestration while it is in development, and grey for Domain modeling
+ * while it is planned. Light mode keeps the same structure on a pale ground.
+ */
+
 :root {
+  --sl-font: 'Inter', system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sl-nav-height: 4rem;
+  --sl-content-width: 46rem;
+  --nyl-layer-teal: #00856f;
+  --nyl-layer-amber: #9a6a00;
+  --nyl-layer-grey: #5c6670;
+  --nyl-dot: rgba(60, 80, 90, 0.18);
+  --nyl-wash-a: rgba(0, 133, 111, 0.1);
+  --nyl-wash-b: rgba(80, 100, 220, 0.07);
   --sl-color-accent-low: #d7f4ee;
   --sl-color-accent: #00856f;
   --sl-color-accent-high: #003d34;
 }
 
-:root[data-theme="dark"] {
-  --sl-color-accent-low: #063c35;
+:root[data-theme='dark'] {
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e6edf0;
+  --sl-color-gray-2: #c3cfd5;
+  --sl-color-gray-3: #93a4ad;
+  --sl-color-gray-4: #70838d;
+  --sl-color-gray-5: #26363f;
+  --sl-color-gray-6: #111b22;
+  --sl-color-black: #0b1217;
+  --sl-color-bg-nav: rgba(11, 18, 23, 0.7);
+  --sl-color-bg-sidebar: transparent;
+  --sl-color-bg-inline-code: #14202a;
+  --sl-color-hairline-light: #1f2c34;
+  --sl-color-hairline: #1f2c34;
+  --sl-color-hairline-shade: #1f2c34;
+  --sl-color-accent-low: #12302c;
   --sl-color-accent: #46d9bd;
   --sl-color-accent-high: #bdf4e9;
+  --nyl-layer-teal: #46d9bd;
+  --nyl-layer-amber: #e8b86b;
+  --nyl-layer-grey: #93a4ad;
+  --nyl-dot: rgba(147, 164, 173, 0.2);
+  --nyl-wash-a: rgba(70, 217, 189, 0.12);
+  --nyl-wash-b: rgba(96, 120, 255, 0.09);
+}
+
+/* The dotted texture and the faint wash behind the top of every page. */
+body {
+  position: relative;
+}
+body::before,
+body::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  pointer-events: none;
+  z-index: 0;
+}
+body::before {
+  height: 720px;
+  background-image: radial-gradient(var(--nyl-dot) 1px, transparent 1px);
+  background-size: 22px 22px;
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 30%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 30%, transparent 100%);
+}
+body::after {
+  height: 600px;
+  background:
+    radial-gradient(800px 380px at 10% -8%, var(--nyl-wash-a), transparent 62%),
+    radial-gradient(700px 380px at 95% 0%, var(--nyl-wash-b), transparent 62%);
+}
+.page {
+  position: relative;
+  z-index: 1;
+}
+
+/* The landing page brings its own headline instead of the page title. */
+.content-panel:has(#_top):has(~ .content-panel .landing),
+body:has(.landing) .content-panel:first-child {
+  display: none;
+}
+
+/* Headings: tighter tracking, and a hairline above each section. The rule
+   sits on the heading wrapper, which spans the column. */
+.sl-markdown-content h1,
+.sl-markdown-content h2 {
+  letter-spacing: -0.02em;
+}
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--sl-color-hairline);
+}
+
+/* The current page in the sidebar is a tinted row, not a solid block. */
+:root[data-theme='dark'] .sidebar-content a[aria-current='page'] {
+  background-color: var(--sl-color-accent-low);
+  color: var(--sl-color-accent);
+}
+
+/* Callouts: a full border with corner ticks in the callout's color. */
+.starlight-aside {
+  position: relative;
+  border: 1px solid var(--sl-color-asides-border);
+  border-inline-start-width: 1px;
+  border-radius: 0.625rem;
+  padding: 1.125rem 1.375rem;
+}
+.starlight-aside::before,
+.starlight-aside::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  opacity: 0.7;
+}
+.starlight-aside::before {
+  top: 8px;
+  right: 8px;
+  border-top: 1.5px solid var(--sl-color-asides-text-accent);
+  border-right: 1.5px solid var(--sl-color-asides-text-accent);
+}
+.starlight-aside::after {
+  bottom: 8px;
+  left: 8px;
+  border-bottom: 1.5px solid var(--sl-color-asides-text-accent);
+  border-left: 1.5px solid var(--sl-color-asides-text-accent);
+}
+:root[data-theme='dark'] .starlight-aside--note,
+:root[data-theme='dark'] .starlight-aside--tip {
+  --sl-color-asides-text-accent: #46d9bd;
+  --sl-color-asides-border: #1e4a42;
+  background-color: #0f2420;
+}
+:root[data-theme='dark'] .starlight-aside--caution {
+  --sl-color-asides-text-accent: #e8b86b;
+  --sl-color-asides-border: #5a4721;
+  background-color: #241d0e;
+}
+:root[data-theme='light'] .starlight-aside--note,
+:root[data-theme='light'] .starlight-aside--tip {
+  --sl-color-asides-text-accent: #00695a;
+  --sl-color-asides-border: #9bd3c9;
+  background-color: #e7f6f2;
+}
+:root[data-theme='light'] .starlight-aside--caution {
+  --sl-color-asides-text-accent: #8a5a00;
+  --sl-color-asides-border: #e5c98f;
+  background-color: #fbf1dc;
+}
+
+/* Code and tables */
+.expressive-code .frame {
+  border-radius: 0.625rem;
+}
+.sl-markdown-content table {
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 0.625rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+}
+.sl-markdown-content :is(th, td) {
+  padding: 0.75rem 1rem;
+}
+.sl-markdown-content thead th {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-gray-3);
+}
+
+/* Right-hand outline */
+starlight-toc nav > ul,
+mobile-starlight-toc nav > ul {
+  border-inline-start: 1px solid var(--sl-color-hairline);
 }

@@ -1,10 +1,10 @@
 ---
-title: 'Rendered GitOps Resources'
+title: 'Kubernetes GitOps Resources'
 sidebar:
   label: 'Resources'
 ---
 
-Rendered GitOps uses shared repository configuration in `gitops.nyl/v1` and
+Kubernetes GitOps uses shared repository configuration in `gitops.nyl/v1` and
 Kubernetes-specific configuration in `k8s.gitops.nyl/v1`. These resources are
 compiler inputs; they are not installed as Nyl custom resources in a cluster.
 

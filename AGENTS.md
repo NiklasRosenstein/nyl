@@ -546,7 +546,7 @@ The site is split into header sections, each with its own sidebar
 | Rendering and applying manifests directly | `kubernetes/` |
 | The rendered manifest pattern | `rendered-gitops/` |
 | Environments, state, orchestration, and its roadmap | `orchestration/` |
-| Domain resources and their roadmap | `domain-resources/` |
+| Domain modeling and its roadmap | `domain-modeling/` |
 | One page per command or closely related pair | `reference/cli/` |
 | `nyl.toml` and editor schemas | `reference/` |
 | Usage guide for a resource | the owning section's `resource-guides/` |
@@ -568,6 +568,11 @@ Mechanics that are easy to miss:
   section's diagram (`src/components/ResourceDiagram.astro`) when it references
   or is referenced by other resources there. A changed reference field updates
   that diagram.
+- The four layers (Kubernetes Rendering, Kubernetes GitOps, Orchestration, Domain
+  modeling) are listed once, in `src/lib/layers.mjs`. The header tabs, the
+  sidebar's layer rail, and the landing page read that list, so renaming or
+  reordering a layer updates it, `astro.config.mjs`, and the landing page's copy
+  (`src/components/Landing.astro`) together.
 - Regenerate schemas after changing a resource's Rust doc comments or fields.
 - A deprecation keeps the old form working, warns when the CLI reads it, and
   adds a row to `reference/deprecations.md`. Deprecated API versions live in

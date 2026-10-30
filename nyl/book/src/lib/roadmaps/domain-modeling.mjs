@@ -1,14 +1,14 @@
 // The roadmap of domain resource collections, milestone M9, rendered on the
-// Domain resources roadmap page and summarized as M9 on the Orchestration
+// Domain modeling roadmap page and summarized as M9 on the Orchestration
 // roadmap. Tick a deliverable in the change that ships it, and set `done` on a
 // slice only when all of it has shipped. The orchestration milestones it
 // builds on are the M-numbered needs of its slices.
 
-export const domainResourcesRoadmap = {
-  id: 'domain-resources',
+export const domainModelingRoadmap = {
+  id: 'domain-modeling',
   milestone: 'M9',
   title: 'Domain resource collections for units and Releases',
-  page: 'domain-resources/roadmap/',
+  page: 'domain-modeling/roadmap/',
   itemNoun: 'deliverables',
   exitCriterion:
     'Colocated team declarations feed independently registered units. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, and render identically with and without the cache. The guide runs end to end.',

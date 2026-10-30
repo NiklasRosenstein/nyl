@@ -1,13 +1,16 @@
 ---
 // The section's sidebar. On narrow screens, where the header has no room for
-// the section tabs, the sections are listed above it in the menu.
+// the section tabs, the sections are listed above it in the menu. On wide
+// screens a layer's pages start under the layer rail.
 import Default from '@astrojs/starlight/components/Sidebar.astro';
 import Topics from 'starlight-sidebar-topics/components/Sidebar.astro';
+import LayerRail from './LayerRail.astro';
 ---
 
 <div class="sections">
   <Topics />
 </div>
+<LayerRail />
 <Default><slot /></Default>
 
 <style>

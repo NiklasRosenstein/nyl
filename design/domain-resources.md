@@ -2,9 +2,9 @@
 
 **Status:** proposal for [#173](https://github.com/NiklasRosenstein/nyl/issues/173),
 milestone M9. Nothing here exists yet. Progress is tracked on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/)
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/)
 in the documentation, generated from
-[`nyl/book/src/lib/roadmaps/domain-resources.mjs`](../nyl/book/src/lib/roadmaps/domain-resources.mjs). It
+[`nyl/book/src/lib/roadmaps/domain-modeling.mjs`](../nyl/book/src/lib/roadmaps/domain-modeling.mjs). It
 extends the [orchestration core contract](orchestration-core.md) and the
 [infrastructure units](infrastructure-units.md) and changes neither: a project
 that declares no ResourceDefinition never sees any of it.

@@ -23,7 +23,7 @@ working instructions.
 This file records direction. Progress, the next step, and each milestone's
 items and exit criterion are tracked in the documentation, on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/) and the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/), generated from
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/), generated from
 [`nyl/book/src/lib/roadmaps/`](nyl/book/src/lib/roadmaps/).
 
 ## Progress and next step
@@ -409,7 +409,7 @@ paths they own, and explicitly registered units consume them as a tool-neutral
 bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
 the [domain resources design](design/domain-resources.md), and its slices and
 progress are on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 Kubernetes Releases consume collections too, without orchestration, as
 described in the [Release catalog design](design/release-catalog.md). The
@@ -677,7 +677,7 @@ structured results.
 
 Each milestone's items and exit criterion are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/#milestones), with M9's slices
-on the [Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+on the [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 ## Open decisions
 

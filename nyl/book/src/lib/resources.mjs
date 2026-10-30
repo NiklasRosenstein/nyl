@@ -32,14 +32,14 @@ export function resourceUsage(schema) {
 export const resourceSections = [
   {
     id: 'kubernetes',
-    label: 'Kubernetes Resources',
+    label: 'Kubernetes Rendering Resources',
     route: '/reference/resources/kubernetes/',
     apiVersions: ['k8s.nyl/v1', 'components.k8s.nyl/v1'],
     include: ['Release'],
   },
   {
     id: 'rendered-gitops',
-    label: 'Rendered GitOps Resources',
+    label: 'Kubernetes GitOps Resources',
     route: '/reference/resources/rendered-gitops/',
     apiVersions: ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'],
     exclude: ['Release', 'Environment', 'EnvironmentGroup'],

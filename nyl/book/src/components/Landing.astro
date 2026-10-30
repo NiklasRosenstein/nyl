@@ -1,0 +1,545 @@
+---
+// The landing page: the hero and the four layers as one pipeline. Layers
+// come from lib/layers.mjs, so their names, numbers, and status match the
+// header and the sidebar. Orchestration and Domain modeling carry the
+// roadmap's status.
+import { layers } from '../lib/layers.mjs';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const href = (path: string) => `${base}${path}`;
+
+const copy = {
+  kubernetes: {
+    link: '/kubernetes/pipeline/',
+    text: 'Helm charts and reusable components, rendered from one config.',
+    best: 'Testing, small teams, bootstrapping, break-glass.',
+    badge: 'START HERE',
+  },
+  'rendered-gitops': {
+    link: '/rendered-gitops/',
+    text: 'Rendered manifests committed to Git: full history, faster reconciliation.',
+    best: 'Argo CD and Flux users.',
+  },
+  orchestration: {
+    link: '/orchestration/',
+    text: 'GitOps reconciliation beyond Kubernetes.',
+    best: 'Systems that span more than Kubernetes.',
+  },
+  'domain-modeling': {
+    link: '/domain-modeling/',
+    text: 'A foundation for building your internal developer platform on the layers above.',
+    best: 'Platform teams building self-service for their developers.',
+  },
+} as Record<string, { link: string; text: string; best: string; badge?: string }>;
+
+const stages = layers.map((layer, index) => ({ layer, number: index + 1, ...copy[layer.id] }));
+const [rendering, gitops, orchestration, modeling] = stages;
+---
+
+<div class="landing">
+  <section class="hero">
+    <div class="intro">
+      <div class="eyebrow">[ DOCUMENTATION ]</div>
+      <h1>
+        Configuration in Git,<br />
+        <span class="gradient">turned into deployed systems.</span>
+      </h1>
+      <p class="lead">
+        Render Kubernetes manifests, publish them for Argo CD or Flux, and orchestrate beyond Kubernetes. Adopt one
+        layer at a time, from one config.
+      </p>
+      <div class="actions">
+        <a class="button primary" href={href('/start/getting-started/')}>Get started →</a>
+        <a class="button" href={href('/start/introduction/')}>Read the introduction</a>
+      </div>
+    </div>
+    <div class="terminal">
+      <div class="terminal-bar"><i></i><i></i><i></i><span>~/platform</span></div>
+      <pre><span class="dim">$ </span>nyl init platform --minimal
+<span class="dim">$ </span>cd platform
+<span class="dim">$ </span>nyl create component v1.example.io MyApp
+
+<span class="dim">platform/
+├── nyl.toml        project configuration
+├── components/     reusable components
+├── applications/   application sources
+└── config/         clusters, targets, repositories</span></pre>
+    </div>
+  </section>
+
+  <section class="layers">
+    <div class="layers-head">
+      <div>
+        <div class="kicker">FIND YOUR WAY</div>
+        <h2>Adopt it one layer at a time.</h2>
+      </div>
+      <p>Take what you need. If Kubernetes is all you deploy, you never need Orchestration.</p>
+    </div>
+
+    <div class="track">
+      <div class="rail" aria-hidden="true"></div>
+      <div class="cards">
+        {
+          [rendering, gitops, orchestration].map((stage) => (
+            <a class="stage" data-tone={stage.layer.tone} href={href(stage.link)}>
+              <span class="node">{stage.number}</span>
+              <div class="status">
+                {stage.badge && <span class="here">{stage.badge}</span>}
+                {stage.layer.status && <span class="pill">{stage.layer.status.toUpperCase()}</span>}
+              </div>
+              <div class="name">{stage.layer.name}</div>
+              <div class="text">{stage.text}</div>
+              <div class="best">
+                <div class="best-label">BEST FOR</div>
+                <div>{stage.best}</div>
+              </div>
+            </a>
+          ))
+        }
+        <a class="stage fourth" data-tone={modeling.layer.tone} href={href(modeling.link)}>
+          <span class="node">{modeling.number}</span>
+          <div class="status"><span class="pill">{modeling.layer.status?.toUpperCase()}</span></div>
+          <div class="name">{modeling.layer.name}</div>
+          <div class="text">{modeling.text}</div>
+          <div class="best">
+            <div class="best-label">BEST FOR</div>
+            <div>{modeling.best}</div>
+          </div>
+        </a>
+      </div>
+      <div class="drops" aria-hidden="true"><i></i><i></i><i></i></div>
+      <a class="stage bar" data-tone={modeling.layer.tone} href={href(modeling.link)}>
+        <span class="node">{modeling.number}</span>
+        <div class="bar-text">
+          <div class="bar-title">
+            <span class="name">{modeling.layer.name}</span>
+            <span class="pill">{modeling.layer.status?.toUpperCase()}</span>
+          </div>
+          <div class="text">{modeling.text}</div>
+        </div>
+        <div class="best">
+          <div class="best-label">BEST FOR</div>
+          <div>{modeling.best}</div>
+        </div>
+      </a>
+    </div>
+
+    <a class="reference" href={href('/reference/cli/')}>
+      <span>
+        <strong>Reference</strong>
+        Every command, resource, and <code>nyl.toml</code> setting.
+      </span>
+      <span class="open">Open reference →</span>
+    </a>
+  </section>
+</div>
+
+<style>
+  .landing {
+    --tone-teal: var(--nyl-layer-teal);
+    --tone-amber: var(--nyl-layer-amber);
+    --tone-grey: var(--nyl-layer-grey);
+    --surface: #0f181e;
+    --surface-top: #131f28;
+    --line: #26363f;
+    width: min(75rem, 100%);
+    margin-inline: auto;
+    font-family: var(--__sl-font);
+    color: var(--sl-color-gray-2);
+  }
+  :global(:root[data-theme='light']) .landing {
+    --surface: #ffffff;
+    --surface-top: #f2f8f7;
+    --line: #cfdcda;
+  }
+
+  a {
+    text-decoration: none;
+    color: inherit;
+  }
+
+  /* Hero */
+  .hero {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3.5rem;
+    align-items: center;
+    padding: 1rem 0 3.5rem;
+  }
+  .intro {
+    flex: 1 1 30rem;
+    min-width: 0;
+  }
+  .eyebrow {
+    font-family: var(--__sl-font-mono);
+    font-size: 0.8125rem;
+    letter-spacing: 0.04em;
+    color: var(--sl-color-accent);
+    margin-bottom: 1.25rem;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(2.25rem, 5vw, 3.25rem);
+    line-height: 1.06;
+    letter-spacing: -0.03em;
+    font-weight: 700;
+    color: var(--sl-color-white);
+  }
+  .gradient {
+    background: linear-gradient(90deg, var(--sl-color-accent), #6fc3e6);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .lead {
+    margin: 1.25rem 0 0;
+    max-width: 32.5rem;
+    font-size: 1.125rem;
+    line-height: 1.6;
+    color: var(--sl-color-gray-3);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 2rem;
+  }
+  .button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 3rem;
+    padding: 0 1.375rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--line);
+    font-weight: 500;
+    font-size: 0.9375rem;
+    color: var(--sl-color-white);
+  }
+  .button.primary {
+    background: var(--sl-color-accent);
+    border-color: var(--sl-color-accent);
+    color: var(--sl-color-black);
+    font-weight: 600;
+  }
+  :global(:root[data-theme='light']) .button.primary {
+    color: #ffffff;
+  }
+
+  /* Terminal */
+  .terminal {
+    flex: 1 1 27.5rem;
+    min-width: 0;
+    background: #0f181e;
+    border: 1px solid #26363f;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    box-shadow: 0 30px 80px -34px rgba(96, 120, 255, 0.28);
+  }
+  .terminal-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #1f2c34;
+    font-family: var(--__sl-font-mono);
+    font-size: 0.75rem;
+    color: #93a4ad;
+  }
+  .terminal-bar i {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #33454f;
+  }
+  .terminal-bar span {
+    margin-left: 0.5rem;
+  }
+  .terminal pre {
+    margin: 0;
+    padding: 1.25rem;
+    font-family: var(--__sl-font-mono);
+    font-size: 0.875rem;
+    line-height: 1.75;
+    color: #e6edf0;
+    white-space: pre-wrap;
+    background-image: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px);
+  }
+  .dim {
+    color: #93a4ad;
+  }
+
+  /* Layers */
+  .layers {
+    padding: 1.5rem 0 3rem;
+  }
+  .layers-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+  .kicker {
+    font-family: var(--__sl-font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    color: var(--sl-color-accent);
+  }
+  h2 {
+    margin: 0.5rem 0 0;
+    padding: 0;
+    border: 0;
+    font-size: 1.875rem;
+    letter-spacing: -0.02em;
+    color: var(--sl-color-white);
+  }
+  .layers-head p {
+    margin: 0;
+    max-width: 32.5rem;
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    color: var(--sl-color-gray-3);
+  }
+
+  .track {
+    position: relative;
+  }
+  .rail {
+    position: absolute;
+    left: 28px;
+    right: 28px;
+    top: 27px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--tone-teal) 0%, var(--tone-teal) 50%, var(--tone-amber) 50%, var(--tone-amber) 100%);
+  }
+  .cards {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15.625rem, 1fr));
+    gap: 1.25rem;
+  }
+
+  .stage {
+    --tone: var(--tone-teal);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 0 1.5rem 1.5rem;
+    background: linear-gradient(180deg, var(--surface-top) 0%, var(--surface) 60%);
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    transition: border-color 0.15s;
+  }
+  .stage[data-tone='amber'] {
+    --tone: var(--tone-amber);
+  }
+  .stage[data-tone='grey'] {
+    --tone: var(--tone-grey);
+    border-style: dashed;
+  }
+  .stage:hover {
+    border-color: var(--tone);
+  }
+  /* Corner ticks, top right and bottom left. */
+  .stage::before,
+  .stage::after {
+    content: '';
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    opacity: 0.7;
+  }
+  .stage::before {
+    top: 10px;
+    right: 10px;
+    border-top: 1.5px solid var(--sl-color-accent);
+    border-right: 1.5px solid var(--sl-color-accent);
+  }
+  .stage::after {
+    bottom: 10px;
+    left: 10px;
+    border-bottom: 1.5px solid var(--sl-color-accent);
+    border-left: 1.5px solid var(--sl-color-accent);
+  }
+
+  .node {
+    flex: 0 0 56px;
+    width: 56px;
+    height: 56px;
+    margin: -28px 0 1.25rem -0.5rem;
+    box-sizing: border-box;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--__sl-font-mono);
+    font-weight: 500;
+    font-size: 1.125rem;
+    background: var(--sl-color-bg);
+    color: var(--tone);
+    border: 2px solid var(--tone);
+  }
+  .stage[data-tone='teal'] .node {
+    background: var(--tone);
+    color: var(--sl-color-black);
+    border: 6px solid var(--sl-color-bg);
+  }
+  .stage[data-tone='teal']:not(:first-child) .node {
+    background: var(--sl-color-bg);
+    color: var(--tone);
+    border: 2px solid var(--tone);
+  }
+  .stage[data-tone='grey'] .node {
+    border-style: dashed;
+  }
+
+  .status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    height: 22px;
+    font-family: var(--__sl-font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.06em;
+  }
+  .here {
+    color: var(--tone);
+  }
+  .pill {
+    margin-left: auto;
+    padding: 2px 10px;
+    border: 1px solid color-mix(in srgb, var(--tone) 45%, transparent);
+    border-radius: 999px;
+    color: var(--tone);
+    font-family: var(--__sl-font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.06em;
+  }
+  .name {
+    margin-top: 0.375rem;
+    font-weight: 600;
+    font-size: 1.1875rem;
+    color: var(--sl-color-white);
+  }
+  .text {
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    color: var(--sl-color-gray-3);
+  }
+  .best {
+    margin-top: auto;
+    padding-top: 0.875rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--sl-color-gray-2);
+  }
+  .cards .best {
+    margin-top: auto;
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+  .cards .stage > .text {
+    margin-bottom: 1.25rem;
+  }
+  .best-label {
+    margin-bottom: 0.375rem;
+    font-family: var(--__sl-font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.06em;
+    color: var(--tone);
+  }
+
+  /* The fourth layer sits under the other three as the foundation, and is a
+     regular fourth card when the cards wrap to two per row. */
+  .fourth {
+    display: none;
+  }
+  .drops {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15.625rem, 1fr));
+    gap: 1.25rem;
+    height: 28px;
+  }
+  .drops i {
+    justify-self: center;
+    border-left: 2px dashed var(--line);
+  }
+  .bar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding: 1.5rem 1.75rem;
+  }
+  .bar .node {
+    margin: 0;
+    flex: 0 0 56px;
+  }
+  .bar-text {
+    flex: 1 1 22rem;
+  }
+  .bar-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .bar-title .name {
+    margin: 0;
+  }
+  .bar-title .pill {
+    margin: 0;
+  }
+  .bar .best {
+    margin: 0;
+    padding: 0;
+    flex: 0 1 18.75rem;
+  }
+  @media (max-width: 53.74rem) {
+    .fourth {
+      display: flex;
+    }
+    .bar,
+    .drops,
+    .rail {
+      display: none;
+    }
+  }
+
+  .reference {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    margin-top: 1.25rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    font-size: 0.875rem;
+    color: var(--sl-color-gray-3);
+    transition: border-color 0.15s;
+  }
+  .reference:hover {
+    border-color: var(--sl-color-accent);
+  }
+  .reference strong {
+    margin-right: 1.25rem;
+    font-size: 1.0625rem;
+    color: var(--sl-color-white);
+  }
+  .reference code {
+    font-family: var(--__sl-font-mono);
+    font-size: 0.8125rem;
+    color: var(--sl-color-accent);
+    background: none;
+  }
+  .open {
+    color: var(--sl-color-accent);
+    font-weight: 600;
+  }
+</style>

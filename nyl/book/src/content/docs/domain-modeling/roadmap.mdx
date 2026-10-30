@@ -4,9 +4,9 @@ description: 'Slices and progress of domain resource collections, milestone M9.'
 ---
 
 import Roadmap from '../../../components/Roadmap.astro';
-import { domainResourcesRoadmap } from '../../../lib/roadmaps/domain-resources.mjs';
+import { domainModelingRoadmap } from '../../../lib/roadmaps/domain-modeling.mjs';
 
-Domain resources ship as milestone M9 of the
+Domain modeling ships as milestone M9 of the
 [orchestration roadmap](/nyl/orchestration/roadmap/#m9),
 in slices that each deliver something usable. The first slice needs no
 orchestration at all. This page is where the milestone is tracked. The
@@ -15,15 +15,15 @@ holds the contract and its open decisions, and
 [issue #173](https://github.com/NiklasRosenstein/nyl/issues/173) holds the
 discussion.
 
-<Roadmap roadmap={domainResourcesRoadmap} part="exit" />
+<Roadmap roadmap={domainModelingRoadmap} part="exit" />
 
-<Roadmap roadmap={domainResourcesRoadmap} part="progress" />
+<Roadmap roadmap={domainModelingRoadmap} part="progress" />
 
 ## Prerequisites
 
 The slices build on these orchestration milestones.
 
-<Roadmap roadmap={domainResourcesRoadmap} part="prerequisites" />
+<Roadmap roadmap={domainModelingRoadmap} part="prerequisites" />
 
 ## Slices
 
@@ -31,4 +31,4 @@ A slice is in progress once one of its deliverables has shipped, and done
 when all of it has. The line between slices fills as the slice above it
 progresses.
 
-<Roadmap roadmap={domainResourcesRoadmap} part="stages" />
+<Roadmap roadmap={domainModelingRoadmap} part="stages" />

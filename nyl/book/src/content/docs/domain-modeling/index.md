@@ -1,16 +1,16 @@
 ---
-title: 'Domain resources'
+title: 'Domain modeling'
 description: 'Team-owned, typed declarations that orchestration units implement. Planned for milestone M9.'
 ---
 
 :::note[Planned]
-Domain resources are planned for milestone M9 and nothing in this section
-exists yet. The [roadmap](/nyl/domain-resources/roadmap/) tracks progress,
+Domain modeling is planned for milestone M9 and nothing in this section
+exists yet. The [roadmap](/nyl/domain-modeling/roadmap/) tracks progress,
 and the [design](https://github.com/NiklasRosenstein/nyl/blob/develop/design/domain-resources.md)
 holds the full contract.
 :::
 
-Domain resources let teams declare what they need, such as an AWS account, a
+Domain modeling lets teams declare what they need, such as an AWS account, a
 GitHub repository, or a Bao policy, as typed YAML in the folders they own. The
 platform implements those declarations with ordinary
 [orchestration](/nyl/orchestration/) units, and the native tools keep their
@@ -33,7 +33,7 @@ one for AWS, one for GitHub, and one for Bao. That causes three problems:
   sandbox accounts, only the platform declares production" live in reviewers'
   heads instead of in enforced policy.
 
-Domain resources organise the project by ownership and intent instead:
+Domain modeling organises the project by ownership and intent instead:
 
 ```text
 platform/
@@ -62,7 +62,7 @@ it needs:
 | [Kubernetes](/nyl/kubernetes/pipeline/) | Releases, Helm charts, components | Renders, diffs, and applies manifests |
 | [Rendered GitOps](/nyl/rendered-gitops/) | Clusters and deployment targets | Publishes reviewable manifests for a reconciler |
 | [Orchestration](/nyl/orchestration/) | Environments and units | Runs units in dependency order and records their evidence in Git |
-| Domain resources | Typed declarations in team folders | Validates them, admits them by policy, and feeds them to the units that implement them |
+| Domain modeling | Typed declarations in team folders | Validates them, admits them by policy, and feeds them to the units that implement them |
 
 The implementation layer stays as it is. A domain type needs no new driver: an
 OpenTofu, Terraform, or Command unit consumes the declarations like any other
@@ -120,6 +120,6 @@ describes it.
 
 ## Next steps
 
-- The [example](/nyl/domain-resources/example/) walks through team-owned AWS
+- The [example](/nyl/domain-modeling/example/) walks through team-owned AWS
   accounts from definition to removal.
-- The [roadmap](/nyl/domain-resources/roadmap/) shows what ships in which slice.
+- The [roadmap](/nyl/domain-modeling/roadmap/) shows what ships in which slice.
