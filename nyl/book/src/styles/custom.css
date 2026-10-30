@@ -24,28 +24,28 @@
 
 :root[data-theme='dark'] {
   --sl-color-white: #ffffff;
-  --sl-color-gray-1: #e6edf0;
-  --sl-color-gray-2: #c3cfd5;
-  --sl-color-gray-3: #93a4ad;
-  --sl-color-gray-4: #70838d;
-  --sl-color-gray-5: #26363f;
-  --sl-color-gray-6: #111b22;
-  --sl-color-black: #0b1217;
-  --sl-color-bg-nav: rgba(11, 18, 23, 0.7);
+  --sl-color-gray-1: #e8ecf0;
+  --sl-color-gray-2: #c4ccd4;
+  --sl-color-gray-3: #97a1ab;
+  --sl-color-gray-4: #738090;
+  --sl-color-gray-5: #2a323b;
+  --sl-color-gray-6: #141a21;
+  --sl-color-black: #0c1015;
+  --sl-color-bg-nav: rgba(12, 16, 21, 0.75);
   --sl-color-bg-sidebar: transparent;
-  --sl-color-bg-inline-code: #14202a;
-  --sl-color-hairline-light: #1f2c34;
-  --sl-color-hairline: #1f2c34;
-  --sl-color-hairline-shade: #1f2c34;
-  --sl-color-accent-low: #12302c;
+  --sl-color-bg-inline-code: #1a212a;
+  --sl-color-hairline-light: #1f262e;
+  --sl-color-hairline: #1f262e;
+  --sl-color-hairline-shade: #1f262e;
+  --sl-color-accent-low: #172327;
   --sl-color-accent: #46d9bd;
-  --sl-color-accent-high: #bdf4e9;
+  --sl-color-accent-high: #a8d9cf;
   --nyl-layer-teal: #46d9bd;
   --nyl-layer-amber: #e8b86b;
-  --nyl-layer-grey: #93a4ad;
-  --nyl-dot: rgba(147, 164, 173, 0.2);
-  --nyl-wash-a: rgba(70, 217, 189, 0.12);
-  --nyl-wash-b: rgba(96, 120, 255, 0.09);
+  --nyl-layer-grey: #97a1ab;
+  --nyl-dot: rgba(150, 160, 172, 0.16);
+  --nyl-wash-a: rgba(70, 217, 189, 0.05);
+  --nyl-wash-b: rgba(96, 120, 255, 0.05);
 }
 
 /* The dotted texture and the faint wash behind the top of every page. */
@@ -103,6 +103,9 @@ body:has(.landing) .content-panel:first-child {
 .site-title img {
   height: 1.625rem;
   width: auto;
+}
+.site-title {
+  color: var(--sl-color-white);
 }
 .sl-markdown-content h3 {
   font-size: 1.0625rem;
@@ -163,6 +166,9 @@ body:has(.landing) .content-panel:first-child {
 .sl-markdown-content :not(pre) > code {
   color: var(--sl-color-accent-high);
   border-radius: 0.25rem;
+}
+:root[data-theme='dark'] .sl-markdown-content :not(pre) > code {
+  color: var(--sl-color-gray-1);
 }
 .sl-markdown-content a code {
   text-decoration: none;
@@ -281,8 +287,8 @@ body:has(.landing)::before {
 :root[data-theme='dark'] .starlight-aside--note,
 :root[data-theme='dark'] .starlight-aside--tip {
   --sl-color-asides-text-accent: #46d9bd;
-  --sl-color-asides-border: #1e4a42;
-  background-color: #0f2420;
+  --sl-color-asides-border: #243f3c;
+  background-color: #10191c;
 }
 :root[data-theme='dark'] .starlight-aside--caution {
   --sl-color-asides-text-accent: #e8b86b;
