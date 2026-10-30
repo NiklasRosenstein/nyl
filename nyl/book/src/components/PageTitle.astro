@@ -1,22 +1,28 @@
 ---
-// The page title with a breadcrumb above it: the layer and the page, and the
-// layer's status when it is in development or planned. Pages outside the
-// layers (Get started, Reference) show only the title.
+// The page title with a breadcrumb above it: the section and the page, and a
+// layer's status when it is in development or planned. A section's landing
+// page shows the section once.
 import { layerOf } from '../lib/layers.mjs';
 
 const { title } = Astro.locals.starlightRoute.entry.data;
+const topic = Astro.locals.starlightSidebarTopics.topics.find((candidate) => candidate.isCurrent);
 const layer = layerOf(Astro.url.pathname);
+const isLanding = topic ? Astro.url.pathname.replace(/\/$/, '').endsWith(topic.link.replace(/\/$/, '')) : false;
 ---
 
 {
-  layer && (
+  topic && (
     <div class="crumbs">
-      <span>{layer.name}</span>
-      <span class="sep" aria-hidden="true">
-        /
-      </span>
-      <span class="current">{title}</span>
-      {layer.status && (
+      <span class={isLanding ? 'current' : undefined}>{topic.label}</span>
+      {!isLanding && (
+        <>
+          <span class="sep" aria-hidden="true">
+            /
+          </span>
+          <span class="current">{title}</span>
+        </>
+      )}
+      {layer?.status && (
         <span class="pill" data-tone={layer.tone}>
           {layer.status}
         </span>

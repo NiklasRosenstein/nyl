@@ -55,7 +55,7 @@ const [rendering, gitops, orchestration, modeling] = stages;
     </div>
     <div class="terminal">
       <div class="terminal-bar"><i></i><i></i><i></i><span>~/platform</span></div>
-      <pre><span class="dim">$ </span>nyl init platform --minimal
+      <pre tabindex="0" role="region" aria-label="Example: create a project"><span class="dim">$ </span>nyl init platform --minimal
 <span class="dim">$ </span>cd platform
 <span class="dim">$ </span>nyl create component v1.example.io MyApp
 
@@ -81,14 +81,20 @@ const [rendering, gitops, orchestration, modeling] = stages;
       <div class="cards">
         {
           [rendering, gitops, orchestration].map((stage) => (
-            <a class="stage" data-tone={stage.layer.tone} href={href(stage.link)}>
-              <span class="node">{stage.number}</span>
+            <a
+              class="stage"
+              data-tone={stage.layer.tone}
+              href={href(stage.link)}
+              aria-labelledby={`name-${stage.layer.id}`}
+              aria-describedby={`text-${stage.layer.id}`}
+            >
+              <span class="node" aria-hidden="true">{stage.number}</span>
               <div class="status">
                 {stage.badge && <span class="here">{stage.badge}</span>}
                 {stage.layer.status && <span class="pill">{stage.layer.status.toUpperCase()}</span>}
               </div>
-              <div class="name">{stage.layer.name}</div>
-              <div class="text">{stage.text}</div>
+              <div class="name" id={`name-${stage.layer.id}`}>{stage.layer.name}</div>
+              <div class="text" id={`text-${stage.layer.id}`}>{stage.text}</div>
               <div class="best">
                 <div class="best-label">BEST FOR</div>
                 <div>{stage.best}</div>
@@ -96,11 +102,17 @@ const [rendering, gitops, orchestration, modeling] = stages;
             </a>
           ))
         }
-        <a class="stage fourth" data-tone={modeling.layer.tone} href={href(modeling.link)}>
-          <span class="node">{modeling.number}</span>
+        <a
+          class="stage fourth"
+          data-tone={modeling.layer.tone}
+          href={href(modeling.link)}
+          aria-labelledby="name-fourth"
+          aria-describedby="text-fourth"
+        >
+          <span class="node" aria-hidden="true">{modeling.number}</span>
           <div class="status"><span class="pill">{modeling.layer.status?.toUpperCase()}</span></div>
-          <div class="name">{modeling.layer.name}</div>
-          <div class="text">{modeling.text}</div>
+          <div class="name" id="name-fourth">{modeling.layer.name}</div>
+          <div class="text" id="text-fourth">{modeling.text}</div>
           <div class="best">
             <div class="best-label">BEST FOR</div>
             <div>{modeling.best}</div>
@@ -108,14 +120,20 @@ const [rendering, gitops, orchestration, modeling] = stages;
         </a>
       </div>
       <div class="drops" aria-hidden="true"><i></i><i></i><i></i></div>
-      <a class="stage bar" data-tone={modeling.layer.tone} href={href(modeling.link)}>
-        <span class="node">{modeling.number}</span>
+      <a
+        class="stage bar"
+        data-tone={modeling.layer.tone}
+        href={href(modeling.link)}
+        aria-labelledby="name-bar"
+        aria-describedby="text-bar"
+      >
+        <span class="node" aria-hidden="true">{modeling.number}</span>
         <div class="bar-text">
           <div class="bar-title">
-            <span class="name">{modeling.layer.name}</span>
+            <span class="name" id="name-bar">{modeling.layer.name}</span>
             <span class="pill">{modeling.layer.status?.toUpperCase()}</span>
           </div>
-          <div class="text">{modeling.text}</div>
+          <div class="text" id="text-bar">{modeling.text}</div>
         </div>
         <div class="best">
           <div class="best-label">BEST FOR</div>
@@ -141,6 +159,8 @@ const [rendering, gitops, orchestration, modeling] = stages;
     --tone-grey: var(--nyl-layer-grey);
     --surface: #0f181e;
     --surface-top: #131f28;
+    --surface-hover: #182a35;
+    --surface-hover-bottom: #12202a;
     --line: #26363f;
     width: min(71rem, 100%);
     margin-inline: auto;
@@ -150,6 +170,8 @@ const [rendering, gitops, orchestration, modeling] = stages;
   :global(:root[data-theme='light']) .landing {
     --surface: #ffffff;
     --surface-top: #f2f8f7;
+    --surface-hover: #e8f3f1;
+    --surface-hover-bottom: #ffffff;
     --line: #cfdcda;
   }
 
@@ -184,6 +206,11 @@ const [rendering, gitops, orchestration, modeling] = stages;
     letter-spacing: -0.03em;
     font-weight: 700;
     color: var(--sl-color-white);
+  }
+  :global(:root[data-theme='light']) .gradient {
+    background: linear-gradient(90deg, #00735f, #1f7fa6);
+    -webkit-background-clip: text;
+    background-clip: text;
   }
   .gradient {
     background: linear-gradient(90deg, var(--sl-color-accent), #6fc3e6);
@@ -341,7 +368,8 @@ const [rendering, gitops, orchestration, modeling] = stages;
     border-style: dashed;
   }
   .stage:hover {
-    border-color: var(--tone);
+    border-color: var(--sl-color-accent);
+    background: linear-gradient(180deg, var(--surface-hover) 0%, var(--surface-hover-bottom) 60%);
   }
   /* Corner ticks, top right and bottom left. */
   .stage::before,
@@ -495,7 +523,15 @@ const [rendering, gitops, orchestration, modeling] = stages;
     padding: 0;
     flex: 0 1 18.75rem;
   }
+  .terminal pre:focus-visible {
+    outline: 2px solid var(--sl-color-accent);
+    outline-offset: -2px;
+  }
   @media (max-width: 53.74rem) {
+    .cards {
+      grid-template-columns: repeat(2, 1fr);
+      row-gap: 3.25rem;
+    }
     .fourth {
       display: flex;
     }
@@ -503,6 +539,11 @@ const [rendering, gitops, orchestration, modeling] = stages;
     .drops,
     .rail {
       display: none;
+    }
+  }
+  @media (max-width: 30rem) {
+    .cards {
+      grid-template-columns: 1fr;
     }
   }
 

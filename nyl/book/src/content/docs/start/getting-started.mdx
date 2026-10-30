@@ -3,6 +3,7 @@ title: 'Getting Started'
 ---
 
 import { Steps } from '@astrojs/starlight/components';
+import LinkCards from '../../../components/LinkCards.astro';
 
 This guide gets you from an empty GitOps source project to rendered Kubernetes manifests, then points you at the workflow that matches how you deploy.
 
@@ -127,6 +128,10 @@ This installs `nyl` to `~/.cargo/bin/nyl`.
 
 </Steps>
 
+:::tip
+Every command takes the same path over the configuration in Git, so what you render here is what CI renders.
+:::
+
 ## Project Structure
 
 ```
@@ -151,8 +156,15 @@ platform/
 └── charts/                   # Optional: additional Helm chart search path
 ```
 
-## Next Steps
+## Where to go next
 
-- Use the [rendered manifest pattern](/nyl/kubernetes-gitops/) when CI should produce plain YAML for ArgoCD, Flux, or another reconciler.
-- Use [CLI-first workflows](/nyl/kubernetes-rendering/cli-workflows/) for debugging, bootstrapping, testing, and direct cluster operations.
-- Read about [Configuration](/nyl/reference/configuration/) and the [Component System](/nyl/kubernetes-rendering/components/overview/).
+Take what you need. If Kubernetes is all you deploy, you never need Orchestration.
+
+<LinkCards
+  items={[
+    { title: 'Kubernetes GitOps', text: 'Publish plain YAML for Argo CD, Flux, or another reconciler.', href: '/kubernetes-gitops/' },
+    { title: 'CLI-First Workflows', text: 'Debugging, bootstrapping, testing, and direct cluster operations.', href: '/kubernetes-rendering/cli-workflows/' },
+    { title: 'Component System', text: 'Map Kubernetes-style resources to Helm charts.', href: '/kubernetes-rendering/components/overview/' },
+    { title: 'Configuration', text: 'Every `nyl.toml` setting.', href: '/reference/configuration/' },
+  ]}
+/>

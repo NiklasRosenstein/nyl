@@ -4,9 +4,18 @@ import starlight from "@astrojs/starlight";
 import starlightSidebarTopics from "starlight-sidebar-topics";
 import { consoleOutput } from "./src/lib/console-output.mjs";
 import { resourceSidebar } from "./src/lib/resources.mjs";
+import { layers } from "./src/lib/layers.mjs";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
 const authoredDocsBase = "/nyl";
+
+// A layer's tab label and status badge come from the one list of layers.
+const layer = (id) => layers.find((candidate) => candidate.id === id);
+const layerLabel = (id) => layer(id).name;
+const layerBadge = (id) => {
+  const { status, tone } = layer(id);
+  return status ? { text: status, variant: tone === "amber" ? "caution" : "default" } : undefined;
+};
 
 function rewriteNylLinks() {
   return (tree) => {
@@ -77,13 +86,13 @@ export default defineConfig({
           {
             id: "start",
             label: "Get started",
-            link: "/",
+            link: "/start/getting-started/",
             icon: "rocket",
             items: ["index", "start/introduction", "start/getting-started"],
           },
           {
             id: "kubernetes-rendering",
-            label: "Kubernetes Rendering",
+            label: layerLabel("kubernetes-rendering"),
             link: "/kubernetes-rendering/",
             icon: "puzzle",
             items: [
@@ -120,7 +129,7 @@ export default defineConfig({
           },
           {
             id: "kubernetes-gitops",
-            label: "Kubernetes GitOps",
+            label: layerLabel("kubernetes-gitops"),
             link: "/kubernetes-gitops/",
             icon: "code-branch",
             items: [
@@ -155,10 +164,10 @@ export default defineConfig({
           },
           {
             id: "orchestration",
-            label: "Orchestration",
+            label: layerLabel("orchestration"),
             link: "/orchestration/",
             icon: "setting",
-            badge: { text: "M3", variant: "caution" },
+            badge: layerBadge("orchestration"),
             items: [
               "orchestration",
               "orchestration/environments-and-state",
@@ -171,10 +180,10 @@ export default defineConfig({
           },
           {
             id: "domain-modeling",
-            label: "Domain modeling",
+            label: layerLabel("domain-modeling"),
             link: "/domain-modeling/",
             icon: "list-format",
-            badge: { text: "Planned", variant: "note" },
+            badge: layerBadge("domain-modeling"),
             items: ["domain-modeling", "domain-modeling/example", "domain-modeling/roadmap"],
           },
           {

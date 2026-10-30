@@ -26,7 +26,7 @@ const { hasSidebar } = Astro.locals.starlightRoute;
         topics.map((topic) => (
           <a
             href={topic.link}
-            aria-current={topic.isCurrent ? 'page' : undefined}
+            aria-current={topic.isCurrent ? 'true' : undefined}
             data-tone={layerOf(topic.link)?.tone ?? 'teal'}
           >
             {topic.label}
@@ -58,7 +58,8 @@ const { hasSidebar } = Astro.locals.starlightRoute;
     overflow: clip;
     padding: 0.25rem;
     margin: -0.25rem;
-    min-width: 0;
+    min-width: auto;
+    flex-shrink: 0;
   }
 
   .middle {
@@ -91,25 +92,34 @@ const { hasSidebar } = Astro.locals.starlightRoute;
     color: var(--sl-color-white);
   }
 
-  .sections a[aria-current='page'] {
+  .sections a[aria-current='true'] {
     color: var(--sl-color-white);
     border-bottom-color: var(--nyl-layer-teal);
   }
 
-  .sections a[data-tone='amber'][aria-current='page'] {
+  .sections a[data-tone='amber'][aria-current='true'] {
     border-bottom-color: var(--nyl-layer-amber);
   }
 
-  .sections a[data-tone='grey'][aria-current='page'] {
+  .sections a[data-tone='grey'][aria-current='true'] {
     border-bottom-color: var(--nyl-layer-grey);
   }
 
-  @media (max-width: 49.99rem) {
+  /* Where the tabs would not fit (or have no menu to move into), they stay in
+     the header and scroll, with a fade at the edge that hints at more. */
+  @media (max-width: 75.99rem) {
     .sections.no-sidebar {
       display: flex;
       overflow-x: auto;
-      max-width: 55vw;
+      min-width: 0;
+      flex: 1;
       scrollbar-width: none;
+      -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent);
+      mask-image: linear-gradient(90deg, #000 85%, transparent);
+    }
+    .middle:has(.no-sidebar) {
+      min-width: 0;
+      flex: 1;
     }
   }
 
@@ -125,11 +135,14 @@ const { hasSidebar } = Astro.locals.starlightRoute;
     border-inline-end: 1px solid var(--sl-color-gray-5);
   }
 
-  @media (min-width: 50rem) {
+  /* The tabs need about 75rem; narrower than that they live in the sidebar. */
+  @media (min-width: 76rem) {
     .sections {
       display: flex;
     }
+  }
 
+  @media (min-width: 50rem) {
     .header {
       display: grid;
       grid-template-columns: auto 1fr auto;

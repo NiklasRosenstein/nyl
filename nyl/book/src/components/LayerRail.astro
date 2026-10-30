@@ -6,7 +6,8 @@
 import { layerNumber, layerOf, layers } from '../lib/layers.mjs';
 
 const { topics } = Astro.locals.starlightSidebarTopics;
-const current = layerOf(topics.find((topic) => topic.isCurrent)?.link ?? '');
+const currentTopic = topics.find((topic) => topic.isCurrent);
+const current = layerOf(currentTopic?.link ?? '');
 const links = Object.fromEntries(
   topics.flatMap((topic) => {
     const layer = layerOf(topic.link);
@@ -22,7 +23,7 @@ const links = Object.fromEntries(
       <ol>
         {layers.map((layer) => (
           <li data-tone={layer.tone} data-current={layer === current ? '' : undefined}>
-            <a href={links[layer.id]} aria-current={layer === current ? 'page' : undefined}>
+            <a href={links[layer.id]} aria-current={layer === current ? 'true' : undefined}>
               <span class="node" aria-hidden="true">
                 {layerNumber(layer)}
               </span>
@@ -35,13 +36,18 @@ const links = Object.fromEntries(
     </nav>
   )
 }
+{
+  !current && currentTopic && Astro.locals.starlightRoute.hasSidebar && (
+    <div class="topic label">{currentTopic.label.toUpperCase()}</div>
+  )
+}
 
 <style>
   .rail {
     display: none;
   }
 
-  @media (min-width: 50rem) {
+  @media (min-width: 76rem) {
     .rail {
       display: block;
       margin-bottom: 0.75rem;
@@ -54,6 +60,17 @@ const links = Object.fromEntries(
     letter-spacing: 0.06em;
     color: var(--sl-color-gray-3);
     margin-bottom: 0.875rem;
+  }
+
+  .topic.label {
+    display: none;
+    margin-bottom: 0.5rem;
+  }
+
+  @media (min-width: 50rem) {
+    .topic.label {
+      display: block;
+    }
   }
 
   .label.after {
@@ -106,10 +123,9 @@ const links = Object.fromEntries(
     color: var(--sl-color-white);
   }
 
-  a[aria-current='page'] {
-    color: var(--sl-color-white) !important;
+  a[aria-current='true'] {
+    color: var(--sl-color-white);
     font-weight: 600;
-    background: none !important;
   }
 
   .node {

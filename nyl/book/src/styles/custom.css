@@ -11,8 +11,8 @@
   --sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
   --sl-nav-height: 4rem;
   --sl-content-width: 46rem;
-  --nyl-layer-teal: #00856f;
-  --nyl-layer-amber: #9a6a00;
+  --nyl-layer-teal: #00735f;
+  --nyl-layer-amber: #875c00;
   --nyl-layer-grey: #5c6670;
   --nyl-dot: rgba(60, 80, 90, 0.18);
   --nyl-wash-a: rgba(0, 133, 111, 0.1);
@@ -98,6 +98,12 @@ body:has(.landing) .content-panel:first-child {
 .sl-markdown-content h2 {
   font-size: 1.5625rem;
 }
+
+/* The logo mark is a small badge beside the name. */
+.site-title img {
+  height: 1.625rem;
+  width: auto;
+}
 .sl-markdown-content h3 {
   font-size: 1.0625rem;
   font-weight: 600;
@@ -119,12 +125,12 @@ body:has(.landing) .content-panel:first-child {
 }
 
 /* A layer in development takes amber for its current states. */
-:root:has(.sections a[data-tone='amber'][aria-current='page']) {
+:root:has(.sections a[data-tone='amber'][aria-current='true']) {
   --sl-color-accent-low: #2a2312;
   --sl-color-accent: var(--nyl-layer-amber);
   --sl-color-accent-high: #f4dcae;
 }
-:root[data-theme='light']:has(.sections a[data-tone='amber'][aria-current='page']) {
+:root[data-theme='light']:has(.sections a[data-tone='amber'][aria-current='true']) {
   --sl-color-accent-low: #fbf1dc;
   --sl-color-accent-high: #5c3d00;
 }
