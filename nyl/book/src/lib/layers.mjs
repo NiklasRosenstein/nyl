@@ -7,8 +7,8 @@
 /** @typedef {{id: string, name: string, route: string, tone: 'teal' | 'amber' | 'grey', status?: string}} Layer */
 /** @type {Layer[]} */
 export const layers = [
-  { id: 'kubernetes', name: 'Kubernetes Rendering', route: '/kubernetes/', tone: 'teal' },
-  { id: 'rendered-gitops', name: 'Kubernetes GitOps', route: '/rendered-gitops/', tone: 'teal' },
+  { id: 'kubernetes-rendering', name: 'Kubernetes Rendering', route: '/kubernetes-rendering/', tone: 'teal' },
+  { id: 'kubernetes-gitops', name: 'Kubernetes GitOps', route: '/kubernetes-gitops/', tone: 'teal' },
   { id: 'orchestration', name: 'Orchestration', route: '/orchestration/', tone: 'amber', status: 'In development' },
   { id: 'domain-modeling', name: 'Domain modeling', route: '/domain-modeling/', tone: 'grey', status: 'Planned' },
 ];

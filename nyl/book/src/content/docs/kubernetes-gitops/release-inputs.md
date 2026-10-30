@@ -226,7 +226,7 @@ commands accept no overrides: published output reproduces from committed
 source and the publication state. A Release rendered with overrides or
 `--defaults-only` is therefore not the published one, and the direct command
 settles it alone instead of taking it from the compiled target; see
-[The Release's Application](/nyl/kubernetes/pipeline/#the-releases-application).
+[The Release's Application](/nyl/kubernetes-rendering/pipeline/#the-releases-application).
 
 ## Provenance
 

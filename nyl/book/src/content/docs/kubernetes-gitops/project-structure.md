@@ -2,7 +2,7 @@
 title: 'Project Structure and Discovery'
 ---
 
-Rendered GitOps resources are discovered project-wide: in the directory
+Kubernetes GitOps resources are discovered project-wide: in the directory
 containing `nyl.toml` and beneath it. Tracked files and non-ignored untracked
 YAML files are eligible, so directory names are conventions rather than
 mandatory lookup paths. Release files may live anywhere in the Git worktree
@@ -122,9 +122,9 @@ nyl update source-locks --check
 Central renderer mode applies the platform project's `nyl.toml` and component
 configuration to the remote source. Remote renderer mode loads configuration
 from `spec.source.rendererConfig.projectPath` in the remote repository. See the
-[ApplicationGroup reference](/nyl/rendered-gitops/resource-guides/application-group/#source-selection)
+[ApplicationGroup reference](/nyl/kubernetes-gitops/resource-guides/application-group/#source-selection)
 for the complete source contract and the
-[security guide](/nyl/rendered-gitops/security/#remote-source-isolation)
+[security guide](/nyl/kubernetes-gitops/security/#remote-source-isolation)
 for its trust boundary.
 
 ## Discovery constraints
@@ -141,6 +141,6 @@ rendering.
 
 ## Next steps
 
-- [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
-- [Render and validate](/nyl/rendered-gitops/workflow/render/)
-- [Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)
+- [Targets and cluster variation](/nyl/kubernetes-gitops/targets-and-clusters/)
+- [Render and validate](/nyl/kubernetes-gitops/workflow/render/)
+- [Kubernetes GitOps resource reference](/nyl/kubernetes-gitops/resources/)

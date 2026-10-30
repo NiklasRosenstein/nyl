@@ -4,7 +4,7 @@ title: 'Rendered Layout'
 
 Nyl renders one [`DeploymentTarget`](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/)
 at a time into its configured publication prefix. This page describes the tree
-it writes there; the [workflow](/nyl/rendered-gitops/workflow/render/) pages
+it writes there; the [workflow](/nyl/kubernetes-gitops/workflow/render/) pages
 describe the commands that produce, compare, and publish it.
 
 ## Tree structure

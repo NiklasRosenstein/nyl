@@ -38,4 +38,4 @@ an inline repository are mutually exclusive.
 
 - [DeploymentTarget](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/)
 - [ApplicationGroup](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/)
-- [Trust and admission boundaries](/nyl/rendered-gitops/security/)
+- [Trust and admission boundaries](/nyl/kubernetes-gitops/security/)

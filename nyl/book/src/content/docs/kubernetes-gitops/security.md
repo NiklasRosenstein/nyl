@@ -83,7 +83,7 @@ deletion and orphaning are explicit alternatives. A dedicated Namespace owner
 uses the selected ApplicationGroup's project, destination, lifecycle, and
 metadata policy.
 
-See the [ApplicationGroup reference](/nyl/rendered-gitops/resource-guides/application-group/#sync-and-lifecycle-policy)
+See the [ApplicationGroup reference](/nyl/kubernetes-gitops/resource-guides/application-group/#sync-and-lifecycle-policy)
 for the exact controls and defaults.
 
 ## Remote source isolation

@@ -30,7 +30,7 @@ spec:
   environment: "{{ values.environment }}"
 ```
 
-A local component can instead declare [value imports](/nyl/kubernetes/components/value-imports/)
+A local component can instead declare [value imports](/nyl/kubernetes-rendering/components/value-imports/)
 that map selected target values to chart value defaults for every invocation.
 
 Example:
@@ -53,7 +53,7 @@ spec:
 
 See:
 
-- [Authoring Local Components](/nyl/kubernetes/components/authoring-local-components/)
-- [Resolution & Lookup Rules](/nyl/kubernetes/components/resolution-and-lookup/)
-- [Remote Shortcuts & Aliases](/nyl/kubernetes/components/remote-shortcuts-and-aliases/)
+- [Authoring Local Components](/nyl/kubernetes-rendering/components/authoring-local-components/)
+- [Resolution & Lookup Rules](/nyl/kubernetes-rendering/components/resolution-and-lookup/)
+- [Remote Shortcuts & Aliases](/nyl/kubernetes-rendering/components/remote-shortcuts-and-aliases/)
 - [Component resource reference](/nyl/reference/resources/components.k8s.nyl/v1/component/)

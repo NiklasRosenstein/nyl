@@ -46,4 +46,4 @@ Remote bases:
 - `oci://`
 - `git+`
 
-For complete shortcut examples and guidance, see [Remote Shortcuts & Aliases](/nyl/kubernetes/components/remote-shortcuts-and-aliases/).
+For complete shortcut examples and guidance, see [Remote Shortcuts & Aliases](/nyl/kubernetes-rendering/components/remote-shortcuts-and-aliases/).

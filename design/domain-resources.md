@@ -133,7 +133,7 @@ spec:
   owner: payments
 ```
 
-- Discovery uses the project-wide Git visibility rule that rendered GitOps
+- Discovery uses the project-wide Git visibility rule that Kubernetes GitOps
   resources follow. A document is a domain resource when its `apiVersion` and
   `kind` match a definition. Files that discovery already treats as Release
   files or ApplicationGroup sources are skipped, so a Kubernetes manifest is
@@ -160,7 +160,7 @@ identity, provenance, and parsed document, sorted by identity.
 
 Every catalog resource goes through three checks. Each check reads only S,
 so its result applies to every environment and can be cached under the
-[cache invariants](../AGENTS.md#rendered-gitops-cache-invariants).
+[cache invariants](../AGENTS.md#kubernetes-gitops-cache-invariants).
 
 1. **Schema.** The definition validates `spec`, then applies its defaults.
    Reference objects in `x-nyl-accepts-references` fields are skipped here.

@@ -68,28 +68,28 @@ Applications use ordinary Git directory sources with recursive discovery.
 
 ## Guides
 
-- [Project structure and discovery](/nyl/rendered-gitops/project-structure/)
+- [Project structure and discovery](/nyl/kubernetes-gitops/project-structure/)
   explains the conventional layout, colocated groups, and remote sources.
-- [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
+- [Targets and cluster variation](/nyl/kubernetes-gitops/targets-and-clusters/)
   covers multiple environments, clusters, publication models, values, and
   conditional rendering.
-- [Release inputs](/nyl/rendered-gitops/release-inputs/) declares the values a
+- [Release inputs](/nyl/kubernetes-gitops/release-inputs/) declares the values a
   Release takes and binds them per target.
-- [Rendered layout](/nyl/rendered-gitops/rendered-layout/) describes the
+- [Rendered layout](/nyl/kubernetes-gitops/rendered-layout/) describes the
   generated tree, its catalog, and the ownership index.
 - [Git storage](/nyl/reference/git-storage/) lists the repositories, branches,
   and path prefixes Nyl reads and publishes to, and when to use separate
   publication repositories.
 - The workflow pages follow a CI pipeline in order:
-  [render and validate](/nyl/rendered-gitops/workflow/render/),
-  [diff in pull requests](/nyl/rendered-gitops/workflow/diff/),
-  [publish from the protected branch](/nyl/rendered-gitops/workflow/publish/),
-  and [move a publication](/nyl/rendered-gitops/workflow/move-publication/).
-- [Trust and admission boundaries](/nyl/rendered-gitops/security/)
+  [render and validate](/nyl/kubernetes-gitops/workflow/render/),
+  [diff in pull requests](/nyl/kubernetes-gitops/workflow/diff/),
+  [publish from the protected branch](/nyl/kubernetes-gitops/workflow/publish/),
+  and [move a publication](/nyl/kubernetes-gitops/workflow/move-publication/).
+- [Trust and admission boundaries](/nyl/kubernetes-gitops/security/)
   identifies what Nyl validates and what the Git forge, Argo CD, and Kubernetes
   must enforce.
-- [Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)
+- [Kubernetes GitOps resource reference](/nyl/kubernetes-gitops/resources/)
   documents every configuration field by resource kind.
 
 For direct cluster operations and debugging, see
-[CLI-first workflows](/nyl/kubernetes/cli-workflows/).
+[CLI-first workflows](/nyl/kubernetes-rendering/cli-workflows/).

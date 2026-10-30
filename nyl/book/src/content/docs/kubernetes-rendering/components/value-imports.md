@@ -62,7 +62,7 @@ project keeps its imports.
 
 The platform declares the values once, in the Cluster or the DeploymentTarget.
 Nyl merges the two as described in
-[value overlays](/nyl/rendered-gitops/targets-and-clusters/#value-overlays):
+[value overlays](/nyl/kubernetes-gitops/targets-and-clusters/#value-overlays):
 
 ```yaml
 apiVersion: k8s.nyl/v1
@@ -187,7 +187,7 @@ ignored.
 
 Value imports provide defaults. An invocation can still override any imported
 value in `spec` or opt out of an import, so imports do not enforce platform
-policy; use [validation](/nyl/kubernetes/validation/manifest-validation/) or admission
+policy; use [validation](/nyl/kubernetes-rendering/validation/manifest-validation/) or admission
 control for rules that must hold. Imports also do not provision anything the
 values point to, such as storage buckets or credentials, and like all target
 values they are not a channel for secrets.
@@ -196,7 +196,7 @@ values they are not a channel for secrets.
 
 - Imports read only the effective `values` of the session's target. They cannot
   read `secrets`, `env`, files, live cluster state, or
-  [Release inputs](/nyl/rendered-gitops/release-inputs/), and a remote source
+  [Release inputs](/nyl/kubernetes-gitops/release-inputs/), and a remote source
   session sees no more than it already admits.
 - Contracts apply to local components, including components reached through
   `project.aliases`. Nyl does not read a contract from a remote chart shortcut

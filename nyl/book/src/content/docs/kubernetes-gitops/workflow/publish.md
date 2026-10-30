@@ -29,5 +29,5 @@ closed. Git credentials and protected-branch rules remain forge configuration.
 
 
 See [`publish-tree`](/nyl/reference/cli/publish-tree/) for all flags and the
-[security guide](/nyl/rendered-gitops/security/) for ownership and publication
+[security guide](/nyl/kubernetes-gitops/security/) for ownership and publication
 boundaries.

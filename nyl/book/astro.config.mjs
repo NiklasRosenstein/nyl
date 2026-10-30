@@ -3,8 +3,7 @@ import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import starlightSidebarTopics from "starlight-sidebar-topics";
 import { consoleOutput } from "./src/lib/console-output.mjs";
-import { movedPages } from "./src/lib/moved-pages.mjs";
-import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
+import { resourceSidebar } from "./src/lib/resources.mjs";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
 const authoredDocsBase = "/nyl";
@@ -37,16 +36,13 @@ function rewriteNylLinks() {
 export default defineConfig({
   site: "https://niklasrosenstein.github.io",
   base: basePath,
-  redirects: Object.fromEntries(
-    Object.entries({ ...resourceRedirects, ...movedPages }).map(([from, to]) => [from, `${basePath}${to}`]),
-  ),
   markdown: {
     processor: unified({ remarkPlugins: [rewriteNylLinks] }),
   },
   integrations: [
     starlight({
       title: "Nyl",
-      description: "A fast Kubernetes manifest generator for rendered GitOps.",
+      description: "Nyl turns configuration in Git into deployed systems.",
       head: [
         { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" } },
         { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" } },
@@ -81,74 +77,74 @@ export default defineConfig({
             items: ["index", "start/introduction", "start/getting-started"],
           },
           {
-            id: "kubernetes",
+            id: "kubernetes-rendering",
             label: "Kubernetes Rendering",
-            link: "/kubernetes/pipeline/",
+            link: "/kubernetes-rendering/pipeline/",
             icon: "puzzle",
             items: [
-              "kubernetes/pipeline",
+              "kubernetes-rendering/pipeline",
               {
                 label: "Concepts",
                 items: [
                   {
                     label: "Components",
                     items: [
-                      "kubernetes/components/overview",
-                      "kubernetes/components/authoring-local-components",
-                      "kubernetes/components/value-imports",
-                      "kubernetes/components/resolution-and-lookup",
-                      "kubernetes/components/remote-shortcuts-and-aliases",
-                      "kubernetes/components/troubleshooting",
+                      "kubernetes-rendering/components/overview",
+                      "kubernetes-rendering/components/authoring-local-components",
+                      "kubernetes-rendering/components/value-imports",
+                      "kubernetes-rendering/components/resolution-and-lookup",
+                      "kubernetes-rendering/components/remote-shortcuts-and-aliases",
+                      "kubernetes-rendering/components/troubleshooting",
                     ],
                   },
-                  "kubernetes/git-integration",
+                  "kubernetes-rendering/git-integration",
                 ],
               },
               {
                 label: "Workflow",
                 items: [
-                  "kubernetes/cli-workflows",
-                  "kubernetes/validation/manifest-validation",
-                  "kubernetes/validation/kyverno-policies",
-                  "kubernetes/renovate",
+                  "kubernetes-rendering/cli-workflows",
+                  "kubernetes-rendering/validation/manifest-validation",
+                  "kubernetes-rendering/validation/kyverno-policies",
+                  "kubernetes-rendering/renovate",
                 ],
               },
-              { label: "Resources", items: [{ autogenerate: { directory: "kubernetes/resource-guides" } }] },
+              { label: "Resources", items: [{ autogenerate: { directory: "kubernetes-rendering/resource-guides" } }] },
             ],
           },
           {
-            id: "rendered-gitops",
+            id: "kubernetes-gitops",
             label: "Kubernetes GitOps",
-            link: "/rendered-gitops/",
+            link: "/kubernetes-gitops/",
             icon: "code-branch",
             items: [
-              "rendered-gitops",
+              "kubernetes-gitops",
               {
                 label: "Concepts",
                 items: [
-                  "rendered-gitops/project-structure",
-                  "rendered-gitops/targets-and-clusters",
-                  "rendered-gitops/release-inputs",
-                  "rendered-gitops/rendered-layout",
+                  "kubernetes-gitops/project-structure",
+                  "kubernetes-gitops/targets-and-clusters",
+                  "kubernetes-gitops/release-inputs",
+                  "kubernetes-gitops/rendered-layout",
                 ],
               },
               {
                 label: "Workflow",
                 items: [
-                  "rendered-gitops/workflow/render",
-                  "rendered-gitops/workflow/diff",
-                  "rendered-gitops/workflow/publish",
-                  "rendered-gitops/workflow/move-publication",
+                  "kubernetes-gitops/workflow/render",
+                  "kubernetes-gitops/workflow/diff",
+                  "kubernetes-gitops/workflow/publish",
+                  "kubernetes-gitops/workflow/move-publication",
                 ],
               },
               {
                 label: "Resources",
                 items: [
-                  { slug: "rendered-gitops/resources", label: "Overview" },
-                  { autogenerate: { directory: "rendered-gitops/resource-guides" } },
+                  { slug: "kubernetes-gitops/resources", label: "Overview" },
+                  { autogenerate: { directory: "kubernetes-gitops/resource-guides" } },
                 ],
               },
-              "rendered-gitops/security",
+              "kubernetes-gitops/security",
             ],
           },
           {

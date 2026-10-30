@@ -63,7 +63,7 @@ spec:
 ## Inherit Platform Defaults
 
 A `nyl-component.yaml` next to `Chart.yaml` can declare
-[value imports](/nyl/kubernetes/components/value-imports/): selections of the
+[value imports](/nyl/kubernetes-rendering/components/value-imports/): selections of the
 effective Cluster and DeploymentTarget values that become chart value defaults.
 Invocations then supply only their own settings and overrides.
 

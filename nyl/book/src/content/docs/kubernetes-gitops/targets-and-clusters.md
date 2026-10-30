@@ -50,7 +50,7 @@ data:
   clusterName: '{{ cluster.metadata.name }}'
 ```
 
-Local components can declare [value imports](/nyl/kubernetes/components/value-imports/)
+Local components can declare [value imports](/nyl/kubernetes-rendering/components/value-imports/)
 to receive selected values as chart value defaults without templating them
 into every invocation.
 
@@ -103,4 +103,4 @@ change because they can alter rendered output. See the
 
 - [Cluster reference](/nyl/reference/resources/k8s.nyl/v1/cluster/)
 - [DeploymentTarget reference](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/)
-- [Render and validate](/nyl/rendered-gitops/workflow/render/)
+- [Render and validate](/nyl/kubernetes-gitops/workflow/render/)

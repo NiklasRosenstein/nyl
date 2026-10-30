@@ -30,8 +30,8 @@ Use this level to bootstrap a cluster, debug a change, drive a test cluster,
 or make a controlled manual change, with fast local feedback and no extra
 moving parts.
 
-Start with the [rendering pipeline](/nyl/kubernetes/pipeline/) and the
-[component system](/nyl/kubernetes/components/overview/).
+Start with the [rendering pipeline](/nyl/kubernetes-rendering/pipeline/) and the
+[component system](/nyl/kubernetes-rendering/components/overview/).
 
 ## Publish rendered manifests for GitOps
 
@@ -44,7 +44,7 @@ exact manifests a change produces.
 Use this level when Kubernetes workloads are deployed through GitOps and you
 want what is deployed to be reviewable, reproducible YAML.
 
-Start with the [rendered manifest pattern](/nyl/rendered-gitops/).
+Start with the [rendered manifest pattern](/nyl/kubernetes-gitops/).
 
 ## Orchestrate environments
 
@@ -52,7 +52,7 @@ Nyl also grows into a Git-driven reconciler for whole environments. Units such
 as commands, infrastructure configurations, container images, and Kubernetes
 publications run in dependency order, record their results in Git, and pass
 their outputs to the units that depend on them. Kubernetes is then one kind of
-unit, published through rendered GitOps, and an environment does not need
+unit, published through Kubernetes GitOps, and an environment does not need
 Kubernetes at all.
 
 Orchestration is in development: [environments and their

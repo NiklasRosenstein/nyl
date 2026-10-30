@@ -101,7 +101,7 @@ chart:
   name: charts/myapp
 ```
 
-See [Git Integration](/nyl/kubernetes/git-integration/) for more details on Git support.
+See [Git Integration](/nyl/kubernetes-rendering/git-integration/) for more details on Git support.
 
 ## Release Configuration
 
@@ -279,6 +279,6 @@ nyl render --target production app.yaml
 
 ## See Also
 
-- [Git Integration](/nyl/kubernetes/git-integration/) - Git repository management
+- [Git Integration](/nyl/kubernetes-rendering/git-integration/) - Git repository management
 - [Configuration](/nyl/reference/configuration/) - Search paths and settings
 - [Release](/nyl/reference/resources/k8s.nyl/v1/release/) - Release metadata

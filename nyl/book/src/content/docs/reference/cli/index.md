@@ -15,12 +15,12 @@ closely related pair.
 - **Project inputs**: inspect resources and pin what rendering reads.
   - [`get and update`](/nyl/reference/cli/project-resources/) - Inspect resources, capture cluster capabilities, and move source locks
   - [`vendor`](/nyl/reference/cli/vendor/) - Snapshot and verify remote renderer inputs
-- **Kubernetes**: act on a cluster directly, through the shared [rendering pipeline](/nyl/kubernetes/pipeline/).
+- **Kubernetes**: act on a cluster directly, through the shared [rendering pipeline](/nyl/kubernetes-rendering/pipeline/).
   - [`render`](/nyl/reference/cli/render/) - Render Kubernetes manifests
   - [`diff`](/nyl/reference/cli/diff/) - Show diff between rendered manifests and cluster state
   - [`apply`](/nyl/reference/cli/apply/) - Apply rendered manifests to the cluster
   - [`release`](/nyl/reference/cli/release/) - Inspect release history and roll back to a previous revision
-- **Rendered GitOps**: render, compare, and publish a deployment target's tree.
+- **Kubernetes GitOps**: render, compare, and publish a deployment target's tree.
   - [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
   - [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
   - [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap

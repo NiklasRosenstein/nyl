@@ -59,7 +59,7 @@ them to the entry file's deployment unit.
 
 ## Namespace scope
 
-For rendered GitOps, Nyl validates every explicit resource
+For Kubernetes GitOps, Nyl validates every explicit resource
 `metadata.namespace` and every rendered `Namespace.metadata.name`. The allowed
 set is the effective ApplicationGroup destination namespace plus
 `spec.additionalNamespaces`.
@@ -98,7 +98,7 @@ spec:
 ```
 
 Platform-owned source, destination, project, sync-policy, identity, and
-finalizer fields cannot be overridden in rendered GitOps. An ApplicationGroup
+finalizer fields cannot be overridden in Kubernetes GitOps. An ApplicationGroup
 may allow exact sync-option values through
 `spec.releaseCustomization.allowedSyncOptions`; a Release merges them with a
 `+syncOptions` key rather than replacing the group policy. Nyl replaces an
@@ -114,7 +114,7 @@ environment, from an inline value, a project file, locked Git state, or a state
 file in its own publication branch; an unbound input takes its declared
 default. A Release that declares inputs needs a literal `metadata.name` and a
 literal `spec.inputs`, so templating cannot change them. See
-[Release inputs](/nyl/rendered-gitops/release-inputs/).
+[Release inputs](/nyl/kubernetes-gitops/release-inputs/).
 
 ## Direct commands and release history
 

@@ -28,7 +28,7 @@ and name must remain static so Nyl can discover resources without evaluating
 templates.
 
 Files can live anywhere visible to Git discovery. The
-[recommended project structure](/nyl/rendered-gitops/project-structure/)
+[recommended project structure](/nyl/kubernetes-gitops/project-structure/)
 groups them under `config/` for readability.
 
 ## Validation and schemas
@@ -43,5 +43,5 @@ Kind-specific JSON schemas are available from the
 [Nyl Resource Schemas](/nyl/reference/editor-schemas/). Scaffolded resources include the
 appropriate YAML language-server schema URL.
 
-See the [Rendered Manifest Pattern](/nyl/rendered-gitops/)
+See the [Rendered Manifest Pattern](/nyl/kubernetes-gitops/)
 for the operational workflow.

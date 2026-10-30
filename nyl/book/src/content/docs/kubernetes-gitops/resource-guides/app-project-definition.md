@@ -18,7 +18,7 @@ ApplicationGroup references a project omitted for that target.
 
 Argo CD enforces the resulting AppProject policy at reconciliation time. Keep
 the definition under platform-owner review; see
-[Trust and admission boundaries](/nyl/rendered-gitops/security/).
+[Trust and admission boundaries](/nyl/kubernetes-gitops/security/).
 
 ## See also
 

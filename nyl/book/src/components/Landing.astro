@@ -9,14 +9,14 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const href = (path: string) => `${base}${path}`;
 
 const copy = {
-  kubernetes: {
-    link: '/kubernetes/pipeline/',
+  'kubernetes-rendering': {
+    link: '/kubernetes-rendering/pipeline/',
     text: 'Helm charts and reusable components, rendered from one config.',
     best: 'Testing, small teams, bootstrapping, break-glass.',
     badge: 'START HERE',
   },
-  'rendered-gitops': {
-    link: '/rendered-gitops/',
+  'kubernetes-gitops': {
+    link: '/kubernetes-gitops/',
     text: 'Rendered manifests committed to Git: full history, faster reconciliation.',
     best: 'Argo CD and Flux users.',
   },
@@ -261,7 +261,8 @@ const [rendering, gitops, orchestration, modeling] = stages;
     font-size: 0.875rem;
     line-height: 1.75;
     color: #e6edf0;
-    white-space: pre-wrap;
+    white-space: pre;
+    overflow-x: auto;
     background-image: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px);
   }
   .dim {

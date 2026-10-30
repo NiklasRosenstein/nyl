@@ -4,7 +4,7 @@ title: 'Render and Validate'
 
 Render a [`DeploymentTarget`](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/)
 into a checkout of its publication repository to inspect the
-[rendered layout](/nyl/rendered-gitops/rendered-layout/) before publishing it.
+[rendered layout](/nyl/kubernetes-gitops/rendered-layout/) before publishing it.
 
 ## Validate and render
 

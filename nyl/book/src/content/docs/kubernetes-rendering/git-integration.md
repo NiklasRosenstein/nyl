@@ -2,7 +2,7 @@
 title: 'Git Integration'
 ---
 
-Nyl resolves Git-backed Helm charts and rendered GitOps publication sources
+Nyl resolves Git-backed Helm charts and Kubernetes GitOps publication sources
 through a shared local cache.
 
 ## Cache directory

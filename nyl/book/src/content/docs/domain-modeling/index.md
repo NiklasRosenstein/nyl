@@ -59,8 +59,8 @@ it needs:
 
 | Layer | You declare | Nyl does |
 | --- | --- | --- |
-| [Kubernetes](/nyl/kubernetes/pipeline/) | Releases, Helm charts, components | Renders, diffs, and applies manifests |
-| [Rendered GitOps](/nyl/rendered-gitops/) | Clusters and deployment targets | Publishes reviewable manifests for a reconciler |
+| [Kubernetes](/nyl/kubernetes-rendering/pipeline/) | Releases, Helm charts, components | Renders, diffs, and applies manifests |
+| [Kubernetes GitOps](/nyl/kubernetes-gitops/) | Clusters and deployment targets | Publishes reviewable manifests for a reconciler |
 | [Orchestration](/nyl/orchestration/) | Environments and units | Runs units in dependency order and records their evidence in Git |
 | Domain modeling | Typed declarations in team folders | Validates them, admits them by policy, and feeds them to the units that implement them |
 
