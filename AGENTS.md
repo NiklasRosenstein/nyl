@@ -556,7 +556,7 @@ See `BENCHMARKS.md` for detailed performance analysis.
 ### Writing Documentation
 - Resource reference pages and catalog summaries are generated from Rust-derived
   JSON Schemas. Put purpose and field descriptions in Rust doc comments and
-  examples in schema annotations. Every resource's doc comment includes
+  examples in schema annotations. Every non-unit resource's doc comment includes
   `## When needed` and `## If omitted` sections; the catalog reads these sections
   from the schema description. Keep workflow narratives in the Astro guides.
   Regenerate schemas with `nyl schema all --output-dir nyl/book/public/reference/schemas`.

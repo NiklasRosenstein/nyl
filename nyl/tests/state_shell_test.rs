@@ -143,18 +143,6 @@ fn seed_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: ser
     commit_unit(world, location, unit, lifecycle, "nyl: reconcile dev\n");
 }
 
-/// A transition commit message of `run`, with the trailers every
-/// transition carries, and `Nyl-Local: true` for a local run's.
-fn transition_message(run: &RunId, local: bool) -> String {
-    let mut message = format!(
-        "nyl: reconcile dev\n\nunits: {{}}\n\nNyl-Operation: reconcile\nNyl-Run-Id: {run}\nNyl-Environment: dev\n"
-    );
-    if local {
-        message.push_str("Nyl-Local: true\n");
-    }
-    message
-}
-
 /// Put an active unit into state with one commit per ref carrying `message`.
 fn commit_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: serde_json::Value, message: &str) {
     let identity =
@@ -542,95 +530,25 @@ fn test_state_forget_drops_only_retained_or_pending_teardown_units() {
     }
 }
 
-/// Local transitions pushed to the remote state refs by hand stop every
-/// state-writing operation, naming the commit to restore; `state restore`
-/// writes forward commits with that commit's content, records the rejected
-/// local transitions and the `state-restored` event, and then changes
-/// nothing when run again.
+/// Historical content is restored in forward commits.
 #[test]
-fn test_state_restore_reverts_pushed_local_transitions_with_forward_commits() {
+fn test_state_restore_recovers_historical_content() {
     for world in worlds() {
         let context = world.context();
         let location = world.dev();
         state::init(&context, &dev(), &location, false, &requested());
-        let active = || json!({"state": "active"});
-        commit_unit(
-            &world,
-            &location,
-            "web",
-            active(),
-            &transition_message(&world.ids.run_id(), false),
+        let message = format!(
+            "nyl: reconcile dev\n\nNyl-Run-Id: {}\nNyl-Environment: dev\n",
+            world.ids.run_id()
         );
-        let restorable = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
-        commit_unit(
-            &world,
-            &location,
-            "extra",
-            active(),
-            &transition_message(&world.ids.run_id(), true),
-        );
-
-        let web = UnitName::new("web").unwrap();
-        let refused = state::forget(&context, &dev(), &location, &web, &requested());
-        assert_eq!(
-            refused.errors[0].code,
-            Code::StateLocalTip,
-            "{}: {refused:?}",
-            world.name
-        );
-        assert!(
-            refused.errors[0].fix.contains(&format!("--to {restorable}")),
-            "{}: {}",
-            world.name,
-            refused.errors[0].fix
-        );
-
-        let restored = state::restore(&context, &dev(), &location, &restorable, &requested());
-        assert_eq!(restored.outcome, Outcome::Done, "{}: {restored:?}", world.name);
-        assert_eq!(restored.commits.len(), 2, "{}: {restored:?}", world.name);
-        assert_eq!(
-            restored.details["rejected"].as_array().unwrap().len(),
-            2,
-            "{}",
-            world.name
-        );
+        commit_unit(&world, &location, "web", json!({"state": "active"}), &message);
+        let target = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
+        seed_unit(&world, &location, "extra", json!({"state": "active"}));
+        let report = state::restore(&context, &dev(), &location, &target, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
         let snapshot = world.store.snapshot(&location).unwrap();
-        fn units<T>(map: &BTreeMap<UnitName, T>) -> Vec<String> {
-            map.keys().map(ToString::to_string).collect()
-        }
-        assert_eq!(units(&snapshot.desired), vec!["web"], "{}", world.name);
-        assert_eq!(units(&snapshot.observed), vec!["web"], "{}", world.name);
-        assert!(matches!(
-            snapshot.record.as_ref().unwrap().events.last(),
-            Some(StateEvent::StateRestored { to, .. }) if *to == restorable
-        ));
-        if let Some(message) = world.tip_message("refs/heads/nyl/dev/observed") {
-            assert!(message.contains("Nyl-Operation: state-restore"), "{message}");
-        }
-        let again = state::restore(&context, &dev(), &location, &restorable, &requested());
-        assert_eq!(again.outcome, Outcome::Unchanged, "{}: {again:?}", world.name);
-        // Operations proceed again.
-        let forget = state::forget(&context, &dev(), &location, &web, &requested());
-        assert_eq!(forget.errors[0].code, Code::StateForgetRefused, "{}", world.name);
-    }
-}
-
-/// `state reset --local` changes only the clone's branches of remote
-/// state: it refuses state that lives on them, and changes nothing while
-/// they follow the remote.
-#[test]
-fn test_state_reset_needs_remote_state_and_changes_nothing_in_sync() {
-    for world in worlds() {
-        let context = world.context();
-        let location = world.dev();
-        state::init(&context, &dev(), &location, false, &requested());
-        let unchanged = state::reset(&context, &dev(), &location, None);
-        assert_eq!(unchanged.outcome, Outcome::Unchanged, "{}: {unchanged:?}", world.name);
-        let mut local = location.clone();
-        StateLocation::LOCAL_REPOSITORY.clone_into(&mut local.repository);
-        let refused = state::reset(&context, &dev(), &local, None);
-        assert_eq!(refused.errors[0].code, Code::StateResetUnsupported, "{}", world.name);
-        assert!(refused.errors[0].fix.contains("--from local"));
+        assert!(snapshot.desired.contains_key(&UnitName::new("web").unwrap()));
+        assert!(!snapshot.desired.contains_key(&UnitName::new("extra").unwrap()));
     }
 }
 

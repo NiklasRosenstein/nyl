@@ -129,8 +129,20 @@ impl Driver for FakeImage {
         Vec::new()
     }
 
-    fn source_fields(&self, _spec: &Value) -> Vec<String> {
-        vec!["/context".to_owned()]
+    fn source_fields(&self, spec: &Value) -> Vec<String> {
+        let mut fields = vec!["/context".to_owned()];
+        if let Some(contexts) = spec.get("contexts").and_then(Value::as_object) {
+            fields.extend(
+                contexts
+                    .keys()
+                    .map(|name| format!("/contexts/{}", name.replace('~', "~0").replace('/', "~1"))),
+            );
+        }
+        fields
+    }
+
+    fn checkout_paths(&self, _spec: &Value) -> Option<Vec<String>> {
+        Some(Vec::new())
     }
 
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {

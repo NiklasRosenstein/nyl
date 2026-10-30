@@ -194,6 +194,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                     revision,
                     &rendered.project_dir,
                     &directory.join("contexts"),
+                    Some((&worktree, revision)),
                 )
                 .map_err(invalid)?;
                 let project_dir = project_path(&worktree, &rendered.project_dir);
@@ -208,6 +209,9 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 },
                 status: None,
             };
+            let previous_observed = snapshot.observed.get(&options.unit).cloned();
+            let temp_dir = directory.join("tmp");
+            std::fs::create_dir_all(&temp_dir).map_err(|error| invalid(error.to_string()))?;
             let changed = match apply_to(
                 stored,
                 snapshot.observed.get(&options.unit),
@@ -264,8 +268,6 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 report,
             )?;
             snapshot = read(&base, &request.location, &request.environment)?;
-            let temp_dir = directory.join("tmp");
-            std::fs::create_dir_all(&temp_dir).map_err(|error| invalid(error.to_string()))?;
             let tools = super::tools::DeadlineRunner {
                 tools: context.tools,
                 clock: base.clock,
@@ -295,6 +297,24 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
             let status = match driver.exec(&execution, &unit, &options.arguments) {
                 Ok(Supported::Supported(status)) => status,
                 Ok(Supported::Unsupported) => return Err(invalid("driver refused its declared exec capability")),
+                Err(error) if !error.effects_possible() => {
+                    let mut failed = summary(Operation::Exec, &request.environment, "operator tool did not start");
+                    failed.details = audit.clone();
+                    commit(
+                        &base,
+                        &request.location,
+                        held,
+                        &snapshot,
+                        failed,
+                        TransitionChanges {
+                            observed: BTreeMap::from([(options.unit.clone(), previous_observed)]),
+                            ..Default::default()
+                        },
+                        &requested,
+                        report,
+                    )?;
+                    return Err(invalid(error.to_string()));
+                }
                 Err(error) => return Err(invalid(error.to_string())),
             };
             report.details.insert(

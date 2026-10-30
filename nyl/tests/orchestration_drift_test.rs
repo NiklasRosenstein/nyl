@@ -211,14 +211,16 @@ fn test_reconcile_repairs_converge_units_and_awaits_approval_for_others() {
     let reverified = harness.verify();
     assert_eq!(unit(&reverified.report, "api")["verification"], "clean");
 
-    let (local, clone) =
+    let (local, _clone) =
         harness.invoke_in_clone(&["reconcile", "-e", "dev", "--local", "--approve", "job", "-o", "json"]);
     assert_eq!(local.exit, 0, "{}", local.stderr);
     assert_eq!(unit(&local.report, "job")["result"], "executed");
     assert_eq!(harness.runs("job"), 2);
-    let local_message = git_output(&clone, &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"]);
+    let local_message = git_output(
+        &harness.shell.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+    );
     assert!(local_message.contains("driftRepaired: [job]"), "{local_message}");
-    assert!(local_message.contains(r#""identity":"local""#), "{local_message}");
 }
 
 /// Under `driftRepair: manual`, reconcile executes no drifted unit, even an

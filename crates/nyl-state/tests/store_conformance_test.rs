@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Committed, Divergence, LocalDivergence, StateError, StateSide, StateStore, StateTips, Transition,
-    TransitionChanges,
+    Checkpoint, Committed, StateError, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
     ApprovalIdentity, Attestation, DesiredUnit, Lease, LeaseKind, Observation, ObservationType, ObservedUnit,
@@ -861,14 +860,6 @@ fn test_lease_and_run_record_move_together_or_not_at_all() {
     }
 }
 
-/// The clone's local branches of a remote location's state refs.
-fn view(location: &StateLocation) -> StateLocation {
-    StateLocation {
-        repository: StateLocation::LOCAL_REPOSITORY.to_owned(),
-        ..location.clone()
-    }
-}
-
 fn seed_changes(name: &str) -> TransitionChanges {
     let (desired, observed) = unit(name);
     let unit = UnitName::new(name).unwrap();
@@ -913,324 +904,6 @@ fn test_log_returns_first_parent_history_newest_first_with_raw_messages() {
         let newest = store.log(&location, StateSide::Observed, 1).unwrap();
         assert_eq!(newest.len(), 1, "{}", subject.name);
         assert_eq!(Some(&newest[0].commit), committed.observed.as_ref(), "{}", subject.name);
-    }
-}
-
-/// A `--local` run commits to the clone's local branches only, fenced by
-/// the lease; the branches then diverge from remote state until
-/// `state reset --local` moves them back. Catches a local run pushing
-/// state, writing after losing its lease, a read silently moving a
-/// diverged local branch, and a reset that overwrites unseen local work.
-#[test]
-fn test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap() {
-    for subject in subjects() {
-        let store = subject.store.as_ref();
-        let location = separate(&subject);
-        let dev = environment("dev");
-        let first = initialized(store, &location, &dev);
-        let remote = store.snapshot(&location).unwrap().tips;
-        let mut local_transition = transition(seed_changes("seed"));
-        local_transition.message = "nyl: local\n\nNyl-Local: true\n".to_owned();
-
-        if subject.repository == StateLocation::LOCAL_REPOSITORY {
-            // The clone's own branches are the state: nothing to diverge from.
-            assert_eq!(
-                store.local_divergence(&location).unwrap(),
-                LocalDivergence::default(),
-                "{}",
-                subject.name
-            );
-            assert!(matches!(
-                store.reset_local(&location, &remote),
-                Err(StateError::Unavailable(_))
-            ));
-            assert!(matches!(
-                store.commit_local(
-                    &location,
-                    &dev,
-                    &remote,
-                    &local_transition,
-                    &location,
-                    &first.lease_version
-                ),
-                Err(StateError::Unavailable(_))
-            ));
-            continue;
-        }
-
-        let local = view(&location);
-        let even = Some(Divergence { ahead: 0, behind: 0 });
-        assert_eq!(
-            store.local_divergence(&location).unwrap(),
-            LocalDivergence {
-                desired: even,
-                observed: even
-            },
-            "{}",
-            subject.name
-        );
-        assert_eq!(
-            store.snapshot(&local).unwrap().tips,
-            remote,
-            "{}: reads follow remote state",
-            subject.name
-        );
-
-        let committed = store
-            .commit_local(
-                &location,
-                &dev,
-                &remote,
-                &local_transition,
-                &location,
-                &first.lease_version,
-            )
-            .unwrap();
-        assert!(committed.desired.is_some(), "{}", subject.name);
-        assert_eq!(
-            store.snapshot(&location).unwrap().tips,
-            remote,
-            "{}: remote state is never pushed",
-            subject.name
-        );
-        let local_tips = store.snapshot(&local).unwrap().tips;
-        assert_eq!(local_tips.desired, committed.desired, "{}", subject.name);
-        assert_eq!(
-            store.log(&local, StateSide::Desired, 1).unwrap()[0].message,
-            local_transition.message,
-            "{}",
-            subject.name
-        );
-        assert_eq!(
-            store.local_divergence(&location).unwrap().desired,
-            Some(Divergence { ahead: 1, behind: 0 }),
-            "{}",
-            subject.name
-        );
-
-        // Remote state moves on; reading it leaves the diverged branch alone.
-        let mut remote_transition = init(&location, "dev");
-        remote_transition.changes.record.as_mut().unwrap().template = Some("moved".to_owned());
-        let moved = store
-            .commit(&location, &dev, &remote, &remote_transition, &committed.lease_version)
-            .unwrap();
-        let remote = store.snapshot(&location).unwrap().tips;
-        assert_eq!(remote.desired, moved.desired, "{}", subject.name);
-        assert_eq!(
-            store.snapshot(&local).unwrap().tips,
-            local_tips,
-            "{}: a diverged local branch is never moved by a read",
-            subject.name
-        );
-        assert_eq!(
-            store.local_divergence(&location).unwrap().desired,
-            Some(Divergence { ahead: 1, behind: 1 }),
-            "{}",
-            subject.name
-        );
-
-        // A local run that lost its lease writes nothing.
-        let held = store.coordination(&location, &dev).unwrap().lease.unwrap().version;
-        let taken = store.take_lease(&location, &dev, &lease(RUN_B), Some(&held)).unwrap();
-        let mut late = transition(seed_changes("late"));
-        late.message = "nyl: late\n\nNyl-Local: true\n".to_owned();
-        assert!(
-            matches!(
-                store.commit_local(&location, &dev, &local_tips, &late, &location, &held),
-                Err(StateError::LeaseLost)
-            ),
-            "{}: a taken-over lease",
-            subject.name
-        );
-        store.delete_lease(&location, &dev).unwrap();
-        assert!(
-            matches!(
-                store.commit_local(&location, &dev, &local_tips, &late, &location, &taken),
-                Err(StateError::LeaseLost)
-            ),
-            "{}: a deleted lease",
-            subject.name
-        );
-        assert_eq!(store.snapshot(&local).unwrap().tips, local_tips, "{}", subject.name);
-
-        // The reset compares against the local tips the caller read.
-        assert!(
-            matches!(
-                store.reset_local(&location, &StateTips::default()),
-                Err(StateError::Conflict { .. })
-            ),
-            "{}: a stale expectation",
-            subject.name
-        );
-        assert!(matches!(
-            store.reset_local(&local, &local_tips),
-            Err(StateError::Unavailable(_))
-        ));
-        assert_eq!(store.snapshot(&local).unwrap().tips, local_tips, "{}", subject.name);
-        let reset = store.reset_local(&location, &local_tips).unwrap();
-        assert_eq!(reset, remote, "{}", subject.name);
-        assert_eq!(store.snapshot(&local).unwrap().tips, remote, "{}", subject.name);
-        assert_eq!(
-            store.local_divergence(&location).unwrap(),
-            LocalDivergence {
-                desired: even,
-                observed: even
-            },
-            "{}",
-            subject.name
-        );
-
-        // `--local-lease`: the clone's own lease fences the local commit.
-        let local_lease = store.take_lease(&local, &dev, &lease(RUN_A), None).unwrap();
-        let committed = store
-            .commit_local(&location, &dev, &reset, &late, &local, &local_lease)
-            .unwrap();
-        let held = store.coordination(&local, &dev).unwrap().lease.unwrap().version;
-        assert_eq!(held, committed.lease_version, "{}: the lease moved", subject.name);
-        assert_eq!(store.snapshot(&location).unwrap().tips, remote, "{}", subject.name);
-        assert!(store.coordination(&location, &dev).unwrap().lease.is_none());
-    }
-}
-
-/// The guards of the local writes, which each store implements on its own:
-/// catches a stale `base` moving the lease before it is refused, a full
-/// `refs/…` state ref (which has no local branch) being reset or committed
-/// to, and a reset leaving a local branch whose remote ref is gone.
-#[test]
-fn test_local_writes_refuse_a_stale_base_and_full_refs_and_drop_branches_without_remote() {
-    for subject in subjects() {
-        if subject.repository == StateLocation::LOCAL_REPOSITORY {
-            // Local writes are refused outright for this subject (see
-            // `test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap`).
-            continue;
-        }
-        let store = subject.store.as_ref();
-
-        // (a) A stale base is a conflict, and the lease does not move.
-        let dev_location = separate(&subject);
-        let dev_local = view(&dev_location);
-        let dev = environment("dev");
-        let first = initialized(store, &dev_location, &dev);
-        store.snapshot(&dev_location).unwrap();
-        let local_tips = store.snapshot(&dev_local).unwrap().tips;
-        assert!(local_tips.desired.is_some(), "{}", subject.name);
-        let mut local_transition = transition(seed_changes("seed"));
-        local_transition.message = "nyl: local\n\nNyl-Local: true\n".to_owned();
-        assert!(
-            matches!(
-                store.commit_local(
-                    &dev_location,
-                    &dev,
-                    &StateTips::default(),
-                    &local_transition,
-                    &dev_location,
-                    &first.lease_version
-                ),
-                Err(StateError::Conflict { .. })
-            ),
-            "{}: a base that is not the local tip",
-            subject.name
-        );
-        assert_eq!(
-            store.coordination(&dev_location, &dev).unwrap().lease.unwrap().version,
-            first.lease_version,
-            "{}: the lease moved before the stale base was refused",
-            subject.name
-        );
-        assert_eq!(store.snapshot(&dev_local).unwrap().tips, local_tips, "{}", subject.name);
-
-        // (b) A full `refs/…` state ref outside refs/heads/ has no local branch.
-        let full = location(&subject.repository, "refs/state/full/desired", "nyl/full/observed", "");
-        let full_env = environment("full");
-        let version = store.take_lease(&full, &full_env, &lease(RUN_A), None).unwrap();
-        let mut both_sides = init(&full, "full");
-        both_sides.changes = TransitionChanges {
-            record: both_sides.changes.record,
-            ..seed_changes("seed")
-        };
-        let committed = store
-            .commit(&full, &full_env, &StateTips::default(), &both_sides, &version)
-            .unwrap();
-        let remote = store.snapshot(&full).unwrap().tips;
-        assert!(remote.observed.is_some(), "{}", subject.name);
-        assert_eq!(
-            store.local_divergence(&full).unwrap(),
-            LocalDivergence {
-                desired: None,
-                observed: Some(Divergence { ahead: 0, behind: 0 }),
-            },
-            "{}",
-            subject.name
-        );
-        assert!(
-            matches!(store.reset_local(&full, &remote), Err(StateError::Unavailable(_))),
-            "{}: reset of a full ref",
-            subject.name
-        );
-        assert!(
-            matches!(
-                store.commit_local(
-                    &full,
-                    &full_env,
-                    &remote,
-                    &local_transition,
-                    &full,
-                    &committed.lease_version
-                ),
-                Err(StateError::Unavailable(_))
-            ),
-            "{}: local commit to a full ref",
-            subject.name
-        );
-        assert_eq!(
-            store.coordination(&full, &full_env).unwrap().lease.unwrap().version,
-            committed.lease_version,
-            "{}: a refused local commit moved the lease",
-            subject.name
-        );
-
-        // (c) A reset removes a local branch whose remote ref is missing.
-        let fresh = location(&subject.repository, "nyl/fresh/desired", "nyl/fresh/observed", "");
-        let fresh_local = view(&fresh);
-        let fresh_env = environment("fresh");
-        let version = store.take_lease(&fresh, &fresh_env, &lease(RUN_A), None).unwrap();
-        let committed = store
-            .commit_local(
-                &fresh,
-                &fresh_env,
-                &StateTips::default(),
-                &init(&fresh, "fresh"),
-                &fresh,
-                &version,
-            )
-            .unwrap();
-        let tips = store.snapshot(&fresh_local).unwrap().tips;
-        assert!(tips.desired.is_some(), "{}", subject.name);
-        assert_eq!(tips.desired, committed.desired, "{}", subject.name);
-        assert_eq!(
-            store.snapshot(&fresh).unwrap().tips,
-            StateTips::default(),
-            "{}: remote state was written",
-            subject.name
-        );
-        assert_eq!(
-            store.local_divergence(&fresh).unwrap(),
-            LocalDivergence::default(),
-            "{}: no divergence without a remote ref",
-            subject.name
-        );
-        assert_eq!(
-            store.reset_local(&fresh, &tips).unwrap(),
-            StateTips::default(),
-            "{}",
-            subject.name
-        );
-        assert_eq!(
-            store.snapshot(&fresh_local).unwrap().tips,
-            StateTips::default(),
-            "{}: the local branches survived the reset",
-            subject.name
-        );
     }
 }
 
@@ -1396,4 +1069,189 @@ fn test_hold_signals_round_trip_and_delete_signals_removes_them() {
         );
         store.delete_signals(&location, &dev, &run).unwrap();
     }
+}
+
+#[test]
+fn test_offline_state_preserves_unpublished_receipts() {
+    let remote_dir = TempDir::new().unwrap();
+    let remote = git2::Repository::init_bare(remote_dir.path()).unwrap();
+    let source_dir = TempDir::new().unwrap();
+    let source = git2::Repository::init(source_dir.path()).unwrap();
+    let cache_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(cache_dir.path()).unwrap();
+    let identity = format!("file://{}", remote_dir.path().display());
+    let location = location(&identity, "nyl/dev/desired", "nyl/dev/observed", "");
+    let dev = environment("dev");
+    let make_store =
+        || GitStateStore::new(source.path(), GitAuth::none(), author()).with_repository(&identity, cache_dir.path());
+    let online = make_store();
+    let first = initialized(&online, &location, &dev);
+    online.release_lease(&location, &dev, &first.lease_version).unwrap();
+    let remote_before = remote.refname_to_id("refs/heads/nyl/dev/desired").unwrap();
+    let offline = make_store().offline();
+    let tips = offline.snapshot(&location).unwrap().tips;
+    let version = offline.take_lease(&location, &dev, &lease(RUN_B), None).unwrap();
+    let committed = offline
+        .commit(&location, &dev, &tips, &transition(seed_changes("seed")), &version)
+        .unwrap();
+    offline
+        .release_lease(&location, &dev, &committed.lease_version)
+        .unwrap();
+    assert!(matches!(online.snapshot(&location), Err(StateError::Unavailable(_))));
+    assert_eq!(
+        remote.refname_to_id("refs/heads/nyl/dev/desired").unwrap(),
+        remote_before
+    );
+    assert_eq!(offline.snapshot(&location).unwrap().tips.desired, committed.desired);
+    let local_tips = offline.snapshot(&location).unwrap().tips;
+    let guarded = make_store().with_local_view(cache_dir.path()).allow_pending();
+    guarded.snapshot(&location).unwrap();
+    guarded.reset_local(&location, &local_tips).unwrap();
+    assert_eq!(
+        online.snapshot(&location).unwrap().tips.desired,
+        Some(remote_before.to_string().parse().unwrap())
+    );
+    assert!(source.find_reference("refs/heads/nyl/dev/desired").is_err());
+}
+
+#[test]
+fn test_guarded_reset_refuses_unpublished_coordination() {
+    let remote_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(remote_dir.path()).unwrap();
+    let source_dir = TempDir::new().unwrap();
+    let source = git2::Repository::init(source_dir.path()).unwrap();
+    let cache_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(cache_dir.path()).unwrap();
+    let identity = format!("file://{}", remote_dir.path().display());
+    let location = location(&identity, "nyl/dev/desired", "nyl/dev/observed", "");
+    let dev = environment("dev");
+    let make_store =
+        || GitStateStore::new(source.path(), GitAuth::none(), author()).with_repository(&identity, cache_dir.path());
+    let online = make_store();
+    let first = initialized(&online, &location, &dev);
+    online.release_lease(&location, &dev, &first.lease_version).unwrap();
+    let offline = make_store().offline();
+    offline.take_lease(&location, &dev, &lease(RUN_B), None).unwrap();
+    assert!(online.take_lease(&location, &dev, &lease(RUN_A), None).is_err());
+    assert!(git2::Repository::open_bare(remote_dir.path())
+        .unwrap()
+        .find_reference("refs/nyl/dev/lease")
+        .is_err());
+    let guarded = make_store().with_local_view(cache_dir.path()).allow_pending();
+    let error = guarded.snapshot(&location).unwrap_err();
+    assert!(error.to_string().contains("recover it with --local"));
+    assert!(offline.coordination(&location, &dev).unwrap().lease.is_some());
+}
+
+#[test]
+fn test_move_imports_history_between_local_state_repositories() {
+    let source_dir = TempDir::new().unwrap();
+    let source = git2::Repository::init_bare(source_dir.path()).unwrap();
+    let destination_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(destination_dir.path()).unwrap();
+    let project_dir = TempDir::new().unwrap();
+    let project = git2::Repository::init(project_dir.path()).unwrap();
+    let old_id = format!("file://{}", source_dir.path().display());
+    let new_id = format!("file://{}", destination_dir.path().display());
+    let store = GitStateStore::new(project.path(), GitAuth::none(), author())
+        .with_repository(&old_id, source_dir.path())
+        .with_direct_repository(&old_id)
+        .with_repository(&new_id, destination_dir.path())
+        .with_direct_repository(&new_id)
+        .strict_routing();
+    let old = location(&old_id, "nyl/dev/desired", "nyl/dev/observed", "");
+    let new = location(&new_id, "nyl/dev/desired", "nyl/dev/observed", "");
+    let first = initialized(&store, &old, &environment("dev"));
+    store.import_history(&old, &new).unwrap();
+    assert_eq!(store.snapshot(&new).unwrap().tips.desired, first.desired);
+    assert!(project.find_reference("refs/heads/nyl/dev/desired").is_err());
+    assert!(source.find_reference("refs/heads/nyl/dev/desired").is_ok());
+}
+
+#[test]
+fn test_historical_and_divergence_reads_do_not_mark_remote_advances_as_local_work() {
+    let remote_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(remote_dir.path()).unwrap();
+    let first_dir = TempDir::new().unwrap();
+    let second_dir = TempDir::new().unwrap();
+    let first_repo = git2::Repository::init(first_dir.path()).unwrap();
+    let second_repo = git2::Repository::init(second_dir.path()).unwrap();
+    let identity = format!("file://{}", remote_dir.path().display());
+    let location = location(&identity, "nyl/dev/desired", "nyl/dev/observed", "");
+    let dev = environment("dev");
+    let reader = GitStateStore::new(first_repo.path(), GitAuth::none(), author());
+    let writer = GitStateStore::new(second_repo.path(), GitAuth::none(), author());
+    let first = initialized(&reader, &location, &dev);
+    reader.release_lease(&location, &dev, &first.lease_version).unwrap();
+    let historical = reader.snapshot(&location).unwrap().tips;
+    let advance = |name: &str| {
+        let tips = writer.snapshot(&location).unwrap().tips;
+        let version = writer.take_lease(&location, &dev, &lease(RUN_B), None).unwrap();
+        let result = writer
+            .commit(&location, &dev, &tips, &transition(seed_changes(name)), &version)
+            .unwrap();
+        writer.release_lease(&location, &dev, &result.lease_version).unwrap();
+    };
+    advance("first");
+    reader.snapshot_at(&location, &historical).unwrap();
+    assert!(reader
+        .snapshot(&location)
+        .unwrap()
+        .desired
+        .contains_key(&UnitName::new("first").unwrap()));
+    advance("second");
+    reader.local_divergence(&location).unwrap();
+    assert!(reader
+        .snapshot(&location)
+        .unwrap()
+        .desired
+        .contains_key(&UnitName::new("second").unwrap()));
+}
+
+#[test]
+fn test_guarded_reset_preserves_other_environment_on_shared_refs() {
+    let remote_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(remote_dir.path()).unwrap();
+    let source_dir = TempDir::new().unwrap();
+    let source = git2::Repository::init(source_dir.path()).unwrap();
+    let cache_dir = TempDir::new().unwrap();
+    git2::Repository::init_bare(cache_dir.path()).unwrap();
+    let identity = format!("file://{}", remote_dir.path().display());
+    let make_store =
+        || GitStateStore::new(source.path(), GitAuth::none(), author()).with_repository(&identity, cache_dir.path());
+    let online = make_store();
+    let dev = environment("dev");
+    let other = environment("other");
+    let first = location(&identity, "nyl/shared/desired", "nyl/shared/observed", "dev");
+    let second = location(&identity, "nyl/shared/desired", "nyl/shared/observed", "other");
+    let initial = initialized(&online, &first, &dev);
+    online.release_lease(&first, &dev, &initial.lease_version).unwrap();
+    let tips = online.snapshot(&second).unwrap().tips;
+    let version = online.take_lease(&second, &other, &lease(RUN_B), None).unwrap();
+    let initialized_other = online
+        .commit(&second, &other, &tips, &init(&second, "other"), &version)
+        .unwrap();
+    online
+        .release_lease(&second, &other, &initialized_other.lease_version)
+        .unwrap();
+    let offline = make_store().offline();
+    let tips = offline.snapshot(&second).unwrap().tips;
+    let version = offline.take_lease(&second, &other, &lease(RUN_B), None).unwrap();
+    let changed = offline
+        .commit(&second, &other, &tips, &transition(seed_changes("seed")), &version)
+        .unwrap();
+    offline.release_lease(&second, &other, &changed.lease_version).unwrap();
+    let local_tips = offline.snapshot(&first).unwrap().tips;
+    let guarded = make_store().with_local_view(cache_dir.path()).allow_pending();
+    guarded.snapshot(&first).unwrap();
+    assert!(guarded
+        .reset_local(&first, &local_tips)
+        .unwrap_err()
+        .to_string()
+        .contains("outside dev"));
+    assert!(offline
+        .snapshot(&second)
+        .unwrap()
+        .observed
+        .contains_key(&UnitName::new("seed").unwrap()));
 }

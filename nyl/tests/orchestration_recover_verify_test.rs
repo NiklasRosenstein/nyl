@@ -539,6 +539,7 @@ struct Recorder {
     seen: Mutex<Vec<Seen>>,
     /// Cancelled by the first `verify` call, as a signal during it would.
     cancel: Mutex<Option<Cancellation>>,
+    exec_failure: Mutex<Option<bool>>,
 }
 
 /// A fake kind that records what its `verify` calls see and lets time pass
@@ -559,7 +560,9 @@ impl Driver for Recording {
         self.inner.behavior_version()
     }
     fn capabilities(&self, spec: &Value) -> Capabilities {
-        self.inner.capabilities(spec)
+        let mut capabilities = self.inner.capabilities(spec);
+        capabilities.exec = Some(nyl_core::orchestration::driver::ExecTerminal::NonInteractive);
+        capabilities
     }
     fn recovery(&self, spec: &Value) -> RecoveryPolicies {
         self.inner.recovery(spec)
@@ -635,7 +638,14 @@ impl Driver for Recording {
         unit: &DesiredUnit,
         args: &[OsString],
     ) -> DriverResult<Supported<ExecStatus>> {
-        self.inner.exec(ctx, unit, args)
+        let _ = (ctx, unit, args);
+        match *self.recorder.exec_failure.lock().unwrap() {
+            Some(true) => Err(nyl_core::orchestration::driver::DriverError::after_effects("started")),
+            Some(false) => Err(nyl_core::orchestration::driver::DriverError::before_effects(
+                "not started",
+            )),
+            None => Ok(Supported::Supported(ExecStatus::Exited { code: 0 })),
+        }
     }
 }
 
@@ -649,6 +659,7 @@ impl Harness {
             advance: Mutex::new(BTreeMap::new()),
             seen: Mutex::new(Vec::new()),
             cancel: Mutex::new(None),
+            exec_failure: Mutex::new(None),
         });
         let fakes: [(&str, Arc<dyn Driver>); 3] = [
             ("OpenTofu", Arc::new(FakeInfra::new(harness.script.clone()))),
@@ -1117,33 +1128,6 @@ fn test_recover_clears_the_break_on_deleted_state() {
     assert_eq!(fresh.exit, 0, "{}", fresh.stderr);
 }
 
-/// Q40: with a `Nyl-Local` commit at the remote tip, `recover -e dev`
-/// releases the broken lease without committing on that tip (Nyl commits
-/// only on tips that pass the local-tip check), so `state restore` can run.
-#[test]
-fn test_recover_clears_the_break_under_a_local_tip_without_committing() {
-    let harness = Harness::new();
-    harness.init();
-    assert_eq!(harness.reconcile(&[]).exit, 0);
-    let network = harness.snapshot().observed[&unit("network")].clone();
-    harness.stage(
-        TransitionChanges {
-            observed: BTreeMap::from([(unit("network"), Some(network))]),
-            commit_unchanged: true,
-            ..TransitionChanges::default()
-        },
-        "nyl: reconcile dev\n\nunits: {}\n\nNyl-Operation: reconcile\nNyl-Environment: dev\nNyl-Local: true\n",
-    );
-    harness.break_dead_holder(Operation::Reconcile);
-    let observed = harness.tip(OBSERVED);
-
-    let outcome = harness.invoke(&["recover", "-e", "dev", "-o", "json"]);
-    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
-    assert_eq!(outcome.report["warnings"][0]["code"], "NYL-STATE-LOCAL-TIP");
-    assert_eq!(harness.tip(OBSERVED), observed, "nothing is committed on a local tip");
-    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
-}
-
 /// Q56: a recover import records the units as they are: a unit that left
 /// the ownership set stays active until the next reconcile decides it.
 #[test]
@@ -1362,4 +1346,50 @@ fn test_reasoned_retry_is_generic_and_consumed_by_success() {
     assert_eq!(request.reason.as_deref(), Some("verified the resource"));
     assert_eq!(harness.reconcile(&[]).exit, 0);
     assert!(harness.snapshot().observed[&unit("network")].retry.is_none());
+}
+
+fn exec_repair(harness: &Harness) -> nyl_orchestration::report::StateOperationReport {
+    let job = harness.job(&[], Cancellation::default());
+    let base = harness.context();
+    let tools = ProcessRunner::new();
+    let context = nyl_orchestration::shell::run::RunContext {
+        base: &base,
+        sources: &job.sources,
+        renderer: &job.renderer,
+        drivers: &harness.drivers,
+        tools: &tools,
+        workspace: job.workspace.path(),
+        process_env: &harness.process_env,
+        secrets: None,
+        commit_identity: Some(&harness.identity),
+        observer: None,
+        prompt: None,
+    };
+    let options = nyl_orchestration::shell::operator::ExecOptions {
+        unit: unit("network"),
+        arguments: vec!["inspect".into()],
+        timeout: None,
+        interactive: false,
+        worktree: None,
+    };
+    nyl_orchestration::shell::operator::exec(&context, &job.request, &options)
+}
+
+#[test]
+fn test_operator_fence_restores_prior_observation_only_before_effects() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    assert_eq!(harness.invoke(&["hold", "-e", "dev", "--unit", "network"]).exit, 0);
+    assert_eq!(exec_repair(&harness).exit, 0);
+    let prior = harness.show(OBSERVED, "observed/units/network.yaml");
+    assert!(prior.contains("operatorModified"));
+    *recorder.exec_failure.lock().unwrap() = Some(false);
+    assert_eq!(exec_repair(&harness).exit, 125);
+    assert_eq!(harness.show(OBSERVED, "observed/units/network.yaml"), prior);
+    *recorder.exec_failure.lock().unwrap() = Some(true);
+    assert_eq!(exec_repair(&harness).exit, 125);
+    let after = harness.show(OBSERVED, "observed/units/network.yaml");
+    assert!(after.contains("operatorModified"));
+    assert_ne!(after, prior);
 }

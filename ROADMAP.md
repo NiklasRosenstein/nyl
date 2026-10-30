@@ -525,6 +525,15 @@ receipt proves success for particular inputs; it does not prove the system is
 still healthy or free of drift. Rollback publishes a new forward desired
 revision; it never rewinds a ref or observed history.
 
+Every state identity uses its own local Git repository: direct local paths
+are opened in place, a matching source checkout can be reused, and remote
+identities use a cache repository. Online operations fetch and publish under a
+remote lease. Offline operations use the same local repository without network
+access; their receipts and checkpoints remain there, and online operations
+refuse unpublished local work until it is recovered or explicitly discarded.
+This keeps the source checkout independent from state identity and preserves
+execution evidence across interrupted runs.
+
 The lifecycle contract must address:
 
 - Effects that succeed before receipt publication fails: inspect or resume
@@ -656,7 +665,7 @@ policy.
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason, or import the run of a broken lease without executing |
 | attest | Record an external attestation for a unit's current receipt or an environment's state |
 | state init / move / forget / delete | Create state, relocate it and retire the old location, drop a unit from state without touching its resources, or remove an environment's state after its units are torn down |
-| state reset / restore | Drop local transitions and follow the remote again, or restore remote state after local transitions were pushed by hand |
+| state reset / restore | Guarded discard of local receipts to follow remote state, or restore historical content in forward commits |
 | lease break | Declare a dead lease holder gone so the next run takes over at once |
 | build | Run a unit's `build` capability from the current worktree without writing state |
 

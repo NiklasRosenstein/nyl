@@ -228,6 +228,7 @@ pub fn prepare(
         &commit,
         &project_record,
         &workspace.path().join("contexts"),
+        None,
     )
     .map_err(config)?;
     if source.is_none() {
