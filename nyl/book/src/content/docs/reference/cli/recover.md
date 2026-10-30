@@ -60,7 +60,6 @@ break, so the command that repairs the state can run:
 | No `state.yaml`, such as after a broken `nyl state init` | Takes the lease over and releases it | `nyl state init` |
 | Moved away (`NYL-STATE-MOVED`) | Records the break in an unchanged commit and releases the lease | `nyl state move`, or point the Environment at the new location |
 | Deleted by `nyl state delete` (`NYL-STATE-DELETED`) | Records the break in an unchanged commit and releases the lease | `nyl state init --fresh`, or remove the Environment from source |
-| A `Nyl-Local` commit at a remote tip (`NYL-STATE-LOCAL-TIP`) | Releases the lease without committing on that tip | `nyl state restore` |
 
 It reports the state's finding as a warning. With `--unit`, `recover`
 refuses in these states with that finding instead.
@@ -107,6 +106,9 @@ that died without a transition commit is taken over by the next reconcile,
 which imports its checkpoints. After its commit, `recover` deletes the
 evidence refs, the checkpoints a takeover kept for `uncertain` units, that
 no unit still uncertain needs.
+
+Use `--local` to recover local run and checkpoint records without contacting
+the remote state repository.
 
 ## Options
 

@@ -61,9 +61,8 @@ fn test_state_init_writes_state_once_to_the_configured_repository() {
         ],
     );
     assert_eq!(signature, format!("{AUTHOR}|{AUTHOR}"));
-    // The lease is released and the clone's own state branches follow the remote.
+    // The configured file repository holds state and coordination is released.
     assert!(git_output(&world.bare(), &["for-each-ref", "refs/nyl/"]).is_empty());
-    assert!(!git_output(&checkout, &["rev-parse", "--verify", "nyl/dev/desired"]).is_empty());
 
     // From another job, state that exists stays as it is.
     let again = world.fresh_clone("main");
@@ -292,46 +291,126 @@ fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
     assert_eq!(tips(), before, "plan or status wrote state");
 }
 
-/// The local-state options through the binary, in one workstation clone:
-/// `reconcile --local` leaves remote state
-/// alone, `status` and `get` take `--local`, `state reset --local
-/// --discard-all` and `state restore` reach their operations. What those
-/// operations do is `orchestration_local_test`'s.
+#[cfg(feature = "test-kinds")]
+fn replace_state_repository(text: &str, repository: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    let state = "  state:\n    repositoryRef: {name: platform}";
+    assert!(
+        text.contains(state),
+        "the project declares the expected state repository"
+    );
+    text.replace(state, &format!("  state:\n    repository: {{repoURL: '{repository}'}}"))
+}
+
 #[cfg(feature = "test-kinds")]
 #[test]
-fn test_local_state_commands_through_the_binary() {
-    let world = World::new(&project());
-    let checkout = world.fresh_clone("main");
-    nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();
-    let remote = || git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/", "refs/nyl/"]);
-    let before = remote();
-    // Reading commands take no --author.
-    let home = world.scenario_tmp().join("reader-home");
-    std::fs::create_dir_all(&home).unwrap();
-    let read = |args: &[&str]| bare_nyl(&checkout, &home, args);
+fn test_state_fixture_replaces_repository_in_crlf_checkout() {
+    let text = "spec:\r\n  state:\r\n    repositoryRef: {name: platform}\r\n";
+    assert_eq!(
+        replace_state_repository(text, "file:///state.git"),
+        "spec:\n  state:\n    repository: {repoURL: 'file:///state.git'}\n"
+    );
+}
 
+#[cfg(feature = "test-kinds")]
+fn project_with_state(world: &World, repository: &str) -> std::path::PathBuf {
+    let checkout = world.fresh_clone("main");
+    let path = checkout.join("nyl/platform.yaml");
+    let text = replace_state_repository(&std::fs::read_to_string(path).unwrap(), repository);
+    world.commit_files("main", "Configure state repository", &[("nyl/platform.yaml", &text)]);
+    world.fresh_clone("main")
+}
+
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_foreign_file_state_uses_configured_repository_without_touching_source_refs() {
+    let world = World::new(&project());
+    let state_path = world.scenario_tmp().join("state.git");
+    git2::Repository::init_bare(&state_path).unwrap();
+    let state_url = reqwest::Url::from_file_path(&state_path).unwrap().to_string();
+    let checkout = project_with_state(&world, &state_url);
+    let head = git_output(&checkout, &["rev-parse", "HEAD"]);
+    git_output(&checkout, &["update-ref", "refs/heads/nyl/dev/desired", &head]);
+    nyl(&checkout, &["state", "init", "-e", "dev"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&state_url));
+    assert!(git_output(&state_path, &["show", "refs/heads/nyl/dev/desired:state.yaml"]).contains("StateRecord"));
     nyl(&checkout, &["reconcile", "-e", "dev", "--local"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("NYL-LOCAL-RUN-UNRECORDED"));
-    assert_eq!(remote(), before, "a --local run wrote remote state");
+        .success();
+    bare_nyl(
+        &checkout,
+        &checkout.with_extension("home"),
+        &["status", "-e", "dev", "--local"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(&state_url));
+    assert_eq!(
+        git_output(&checkout, &["rev-parse", "refs/heads/nyl/dev/desired"]),
+        head
+    );
+}
 
-    read(&["status", "-e", "dev", "--local"]).assert().success();
-    read(&["get", "units", "-e", "dev", "--local", "-o", "name"])
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_cached_remote_state_offline_and_guarded_reset() {
+    let world = World::new(&project());
+    let state_path = world.scenario_tmp().join("remote-state.git");
+    git2::Repository::init_bare(&state_path).unwrap();
+    let state_url = "https://state.invalid/state.git";
+    let checkout = project_with_state(&world, state_url);
+    let config = world.scenario_tmp().join("gitconfig");
+    let local_url = reqwest::Url::from_file_path(&state_path).unwrap().to_string();
+    std::fs::write(&config, format!("[url \"{local_url}\"]\n    insteadOf = {state_url}\n")).unwrap();
+    let cache = world.scenario_tmp().join("cache");
+    let command = |args: &[&str]| {
+        let home = checkout.with_extension("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut command = bare_nyl(&checkout, &home, args);
+        if args.first() != Some(&"status") {
+            command.args(["--author", AUTHOR]);
+        }
+        command.env("GIT_CONFIG_GLOBAL", &config).env("NYL_CACHE_DIR", &cache);
+        command
+    };
+    command(&["status", "-e", "dev", "--local"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("network"));
-    read(&["status", "-e", "dev"])
+        .failure()
+        .stderr(predicate::str::contains("run an online state command first"));
+    command(&["state", "init", "-e", "dev"]).assert().success();
+    let remote_before = git_output(&state_path, &["rev-parse", "refs/heads/nyl/dev/desired"]);
+    let offline_remote = world.scenario_tmp().join("offline-state.git");
+    std::fs::rename(&state_path, &offline_remote).unwrap();
+    command(&["reconcile", "-e", "dev", "--local"]).assert().success();
+    command(&["status", "-e", "dev", "--local"]).assert().success();
+    assert_eq!(
+        git_output(&offline_remote, &["rev-parse", "refs/heads/nyl/dev/desired"]),
+        remote_before
+    );
+    std::fs::rename(&offline_remote, &state_path).unwrap();
+    command(&["status", "-e", "dev"])
         .assert()
-        .stderr(predicate::str::contains("NYL-STATE-LOCAL-DIVERGED"));
-
-    nyl(&checkout, &["state", "reset", "-e", "dev", "--local", "--discard-all"])
+        .failure()
+        .stderr(predicate::str::contains("unpublished"));
+    let cache_repo = std::fs::read_dir(cache.join("state"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let local_tip = git_output(&cache_repo, &["rev-parse", "refs/heads/nyl/dev/desired"]);
+    let pending = "refs/nyl/dev/runs/0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
+    git_output(&cache_repo, &["update-ref", pending, &local_tip]);
+    command(&["state", "reset", "-e", "dev", "--local", "--discard-all"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("state-reset dev: done"));
-
-    nyl(&checkout, &["state", "restore", "-e", "dev", "--to", &"0".repeat(40)])
+        .failure()
+        .stderr(predicate::str::contains("recover it with --local"));
+    assert_eq!(git_output(&cache_repo, &["rev-parse", pending]), local_tip);
+    git_output(&cache_repo, &["update-ref", "-d", pending]);
+    command(&["state", "reset", "-e", "dev", "--local", "--discard-all"])
         .assert()
-        .code(1)
-        .stderr(predicate::str::contains("NYL-STATE-RESTORE-INVALID"));
+        .success();
+    command(&["status", "-e", "dev"]).assert().success();
 }

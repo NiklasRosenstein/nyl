@@ -175,8 +175,7 @@ inputs and environment as `command`, without `NYL_OUTPUTS`. Under the
 default `driftRepair: converge`, drift found by `nyl verify` makes an
 idempotent command execute again in the next reconcile, which lists it under
 `driftRepaired`. A command without `idempotent: true` is not safe to re-run:
-reconcile reports it `awaiting-approval` instead, and
-`nyl reconcile -e <env> --local --approve <unit>` repairs it. See
+reconcile reports it `awaiting-approval` instead. See
 [drift repair](/nyl/orchestration/resource-guides/environment/#drift-repair). `teardown`
 receives the stored `values` under `values` and the last receipt's outputs
 under `outputs` in `NYL_INPUTS`; exit 0 completes the deletion.
