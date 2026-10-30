@@ -230,7 +230,7 @@ fn test_local_run_commits_only_locally_and_reset_follows_the_remote_again() {
     assert!(remote_status.environments[0].units.is_empty(), "{remote_status:#?}");
     assert_eq!(
         remote_status.environments[0].warnings[0].message,
-        "state branches of dev in this clone are 1 commit ahead of the configured state repository"
+        "state branches for environment 'dev' in this clone are 1 commit ahead of the configured state repository"
     );
 
     // The remote moves: an ordinary run records the units there.
@@ -249,7 +249,7 @@ fn test_local_run_commits_only_locally_and_reset_follows_the_remote_again() {
         .unwrap_or_else(|| panic!("{status:#?}"));
     assert_eq!(
         diverged.message,
-        "state branches of dev in this clone are 1 commit ahead of and 1 commit behind the configured state repository"
+        "state branches for environment 'dev' in this clone are 1 commit ahead of and 1 commit behind the configured state repository"
     );
     assert_eq!(status.exit().code(), 0, "divergence is a warning");
 

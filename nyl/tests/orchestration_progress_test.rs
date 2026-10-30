@@ -56,6 +56,7 @@ fn test_cli_unit_output_streams_or_logs_while_json_and_progress_stay_separate() 
         }
         let output = invoke(&args);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["environments"][0]["sourceRepository"], world.project_url());
         assert_eq!(report["environments"][0]["units"]["logged"]["result"], "executed");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("[dev/logged] starting Command"), "{stderr}");
@@ -65,6 +66,22 @@ fn test_cli_unit_output_streams_or_logs_while_json_and_progress_stay_separate() 
     let log = std::fs::read_to_string(logs.path().join("dev/logged.log")).unwrap();
     assert_eq!(log.matches("  [dev/logged] from-tool\n").count(), 2, "{log}");
     assert_eq!(log.matches("  [dev/logged] diagnostic\n").count(), 2, "{log}");
+    let home = tempfile::TempDir::new().unwrap();
+    let status = assert_cmd::Command::from_std(scenario::nyl_binary(
+        &checkout,
+        home.path(),
+        &["status", "-e", "dev", "--color", "never"],
+    ))
+    .timeout(std::time::Duration::from_secs(60))
+    .assert()
+    .success()
+    .get_output()
+    .clone();
+    let status = String::from_utf8(status.stdout).unwrap();
+    assert!(
+        status.contains(&format!("\n            {}\n", world.project_url())),
+        "{status}"
+    );
 }
 
 struct Events {

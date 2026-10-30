@@ -138,15 +138,15 @@ pub fn divergence_warning(environment: &EnvironmentName, divergence: &LocalDiver
     let message = match (ahead, behind) {
         (0, 0) => return None,
         (ahead, 0) => format!(
-            "state branches of {environment} in this clone are {} ahead of the configured state repository",
+            "state branches for environment '{environment}' in this clone are {} ahead of the configured state repository",
             count(ahead, "commit")
         ),
         (0, behind) => format!(
-            "state branches of {environment} in this clone are {} behind the configured state repository",
+            "state branches for environment '{environment}' in this clone are {} behind the configured state repository",
             count(behind, "commit")
         ),
         (ahead, behind) => format!(
-            "state branches of {environment} in this clone are {} ahead of and {} behind the configured state repository",
+            "state branches for environment '{environment}' in this clone are {} ahead of and {} behind the configured state repository",
             count(ahead, "commit"), count(behind, "commit")
         ),
     };
@@ -154,7 +154,7 @@ pub fn divergence_warning(environment: &EnvironmentName, divergence: &LocalDiver
         format!("read the remote state, such as with `nyl status -e {environment}`, to fast-forward the local branches")
     } else {
         format!(
-            "`nyl status -e {environment} --local` shows the local view; once the remote records the change, follow it again with `nyl state reset -e {environment} --local`"
+            "inspect this clone with `nyl status -e {environment} --local`; after reviewing its receipts, use `nyl state reset -e {environment} --local` to follow the configured state repository"
         )
     };
     Some(Finding::new(Code::StateLocalDiverged, message, fix))
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(warning.code, Code::StateLocalDiverged);
         assert_eq!(
             warning.message,
-            "state branches of dev in this clone are 2 commits ahead of and 3 commits behind the configured state repository"
+            "state branches for environment 'dev' in this clone are 2 commits ahead of and 3 commits behind the configured state repository"
         );
         assert!(
             warning.fix.contains("nyl state reset -e dev --local"),
@@ -618,7 +618,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ahead.message,
-            "state branches of dev in this clone are 1 commit ahead of the configured state repository"
+            "state branches for environment 'dev' in this clone are 1 commit ahead of the configured state repository"
         );
     }
 

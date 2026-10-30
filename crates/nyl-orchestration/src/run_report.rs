@@ -168,6 +168,9 @@ pub struct EnvironmentRunReport {
     /// The source commit S the units were rendered at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
+    /// Credential-free origin URL, or local checkout path when it has no origin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_repository: Option<String>,
     /// Units leaving the ownership set; never filtered by `--unit`.
     pub leaving: Vec<LeavingUnit>,
     pub units: BTreeMap<UnitName, UnitReport>,
@@ -209,6 +212,7 @@ impl EnvironmentRunReport {
             complete: false,
             run: None,
             source_commit: None,
+            source_repository: None,
             leaving: Vec::new(),
             units: BTreeMap::new(),
             unit_order: Vec::new(),

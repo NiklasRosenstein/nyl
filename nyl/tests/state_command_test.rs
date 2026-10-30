@@ -32,6 +32,31 @@ fn nyl(checkout: &Path, args: &[&str]) -> Command {
 }
 
 #[test]
+fn test_source_repository_context_strips_credentials_and_falls_back_to_the_checkout() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    git_output(
+        &checkout,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://user:source-secret@example.com/source.git",
+        ],
+    );
+    let session = nyl::orchestration::session::Session::open(&checkout, "dev")
+        .unwrap_or_else(|_| panic!("project should resolve"));
+    assert_eq!(session.resolved.source_repository, "https://example.com/source.git");
+    git_output(&checkout, &["remote", "remove", "origin"]);
+    let session = nyl::orchestration::session::Session::open(&checkout, "dev")
+        .unwrap_or_else(|_| panic!("project should resolve"));
+    assert_eq!(
+        Path::new(&session.resolved.source_repository),
+        checkout.canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn test_state_init_writes_state_once_to_the_configured_repository() {
     let world = World::new(&project());
     let checkout = world.fresh_clone("main");
@@ -375,6 +400,9 @@ fn test_local_state_commands_through_the_binary() {
     read(&["status", "-e", "dev"])
         .assert()
         .stderr(predicate::str::contains("NYL-STATE-LOCAL-DIVERGED"));
+    read(&["status", "-e", "dev", "--color", "always"])
+        .assert()
+        .stderr(predicate::str::contains("\u{1b}["));
 
     nyl(&checkout, &["state", "reset", "-e", "dev", "--local", "--discard-all"])
         .assert()

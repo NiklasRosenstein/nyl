@@ -58,8 +58,12 @@ is reported with `NYL-LEASE-LOST`; the fix names `nyl reconcile`, and `nyl
 recover -e <env>`, which imports the run without executing anything.
 
 The table is separated from its indented source and commit provenance by a blank
-line. Diagnostics follow separately, with a code, message and suggested fix in
-each block.
+line. Beneath the source commit, the report shows the checkout's credential-free
+`origin` URL, or its local path when there is no origin. JSON exposes that context
+as `sourceRepository`. Diagnostics follow separately, with a code, message and
+suggested fix in each block. Warning and error headings use color according to
+the global `--color auto|always|never` setting. Environment names are quoted,
+such as `environment 'local'`.
 
 When this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs)
 diverge from the configured state repository, `status` warns with
@@ -67,6 +71,9 @@ diverge from the configured state repository, `status` warns with
 source ancestry; they do not count unit executions. The larger count across the
 desired and observed refs is shown for each direction. A configured local bare
 repository is still a separate state repository for this comparison.
+The clone preserves diverged branches, including when the state repository has
+an independent initialization history, so the warning does not imply that
+`reconcile --local` was used.
 
 The table shows the configured state repository unless `--local` is given.
 `--local` shows this clone's branches, including `nyl reconcile --local` runs;

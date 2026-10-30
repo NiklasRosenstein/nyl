@@ -2,6 +2,7 @@
 //! its environment, building the shell's request and context, and rendering
 //! the one typed [`RunReport`] as a table or JSON with its exit category.
 
+use colored::Colorize as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -177,7 +178,7 @@ impl Session {
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
         let mut report = self.run_with(wiring, store, identity, request, operation)?;
-        self.add_warnings(&mut report);
+        self.annotate_report(&mut report);
         Ok(report)
     }
 
@@ -215,9 +216,12 @@ impl Session {
         Ok(operation(&context, request))
     }
 
-    /// Add the warnings of resolving the environment to `report`.
-    pub fn add_warnings(&self, report: &mut RunReport) {
+    /// Add source repository context and environment-resolution warnings to the report.
+    pub fn annotate_report(&self, report: &mut RunReport) {
         for environment in &mut report.environments {
+            if environment.source_commit.is_some() {
+                environment.source_repository = Some(self.resolved.source_repository.clone());
+            }
             let mut warnings = self.resolved.warnings.clone();
             warnings.append(&mut environment.warnings);
             environment.warnings = warnings;
@@ -485,6 +489,9 @@ fn table(report: &RunReport) -> String {
         }
         if let Some(source) = &environment.source_commit {
             let _ = writeln!(text, "  source:   {source}");
+            if let Some(repository) = &environment.source_repository {
+                let _ = writeln!(text, "            {repository}");
+            }
         }
         for (side, commit) in &environment.commits {
             let _ = writeln!(text, "  {label:<9} {commit}", label = format!("{side}:"));
@@ -611,11 +618,13 @@ pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, fi
         text.push('\n');
     }
     let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
-    let _ = writeln!(
-        text,
-        "{level} {}{unit}\n  {}\n  fix: {}",
-        finding.code, finding.message, finding.fix
-    );
+    let heading = format!("{level} {}{unit}", finding.code);
+    let heading = match level {
+        "warning" => heading.yellow().bold().to_string(),
+        "error" => heading.red().bold().to_string(),
+        _ => heading,
+    };
+    let _ = writeln!(text, "{heading}\n  {}\n  fix: {}", finding.message, finding.fix);
 }
 
 #[cfg(test)]

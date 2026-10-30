@@ -91,7 +91,7 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         &session.resolved.location,
         Some(wiring.drivers),
     );
-    session.add_warnings(&mut report);
+    session.annotate_report(&mut report);
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }
