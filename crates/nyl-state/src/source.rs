@@ -746,6 +746,48 @@ impl SourceResolver for GitSourceResolver {
         Self::create_checkout_with_paths(&source, oid, path, Some(paths))
     }
 
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        let tree = source
+            .find_commit(oid)
+            .and_then(|commit| commit.tree())
+            .map_err(|cause| git_error("cannot inspect source tree", &cause))?;
+        let mut problem = None;
+        tree.walk(TreeWalkMode::PreOrder, |directory, entry| {
+            let Ok(name) = entry.name() else { return git2::TreeWalkResult::Ok; };
+            let name = format!("{directory}{name}");
+            let relevant = match worktree::source_path_matches(path, &name, recursive, entry.filemode() == 0o160_000) {
+                Ok(relevant) => relevant,
+                Err(cause) => { problem = Some(cause.to_string()); return git2::TreeWalkResult::Ok; }
+            };
+            if !relevant { return git2::TreeWalkResult::Ok; }
+            if entry.filemode() == 0o160_000 {
+                problem = Some(format!("source path {path} requires submodule {name}; vendor its contents into the source repository before running Nyl"));
+                return git2::TreeWalkResult::Ok;
+            }
+            if entry.kind() == Some(ObjectType::Blob) {
+                match source.find_blob(entry.id()) {
+                    Ok(blob) if worktree::is_lfs_pointer(blob.content()) => {
+                        problem = Some(format!("source path {path} requires Git LFS file {name}; provide the file as ordinary Git content before running Nyl"));
+                    }
+                    Err(cause) => problem = Some(format!("cannot inspect source input {name}: {cause}")),
+                    Ok(_) => {}
+                }
+            }
+            git2::TreeWalkResult::Ok
+        }).map_err(|cause| git_error("cannot inspect source inputs", &cause))?;
+        if let Some(problem) = problem {
+            return Err(error(problem));
+        }
+        Ok(())
+    }
+
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {
         let repo = self.open()?;
         match repository {

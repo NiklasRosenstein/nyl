@@ -248,7 +248,7 @@ spec:
   explicitly pinned unit source fields retain their own revisions and checks.
   Discovery, ownership preflight, rendering, execution keys, and every execution
   consume this snapshot, even if working files change during the run.
-- Worktree snapshots are synthetic commits based on HEAD, under local refs
+- Worktree snapshots are orphan synthetic commits recording HEAD as provenance, under local refs
   `refs/nyl-worktrees/<base>/<tree>`, with a `Nyl-Worktree-Snapshot: true`
   trailer. Identical snapshots reuse the retained commit. Persisted
   `sourceChosenBy` uses `by: override` and that reserved revision; the transition
@@ -261,8 +261,7 @@ spec:
   likewise. State history follows first parents and stops before a source
   snapshot, including on fresh refs populated by a copy-based move. State and coordination
   fetches and state moves therefore preserve inputs for recovery and teardown
-  from a fresh clone. This archives Git-visible uncommitted files and their source
-  ancestry in the chosen state repository. `--local` keeps them on this clone's
+  from a fresh clone. This archives Git-visible uncommitted files in the chosen state repository without source ancestry. `--local` keeps them on this clone's
   state branches instead; it remains independent of source selection. These
   provenance forms use the existing v1 state documents.
 - With `admission: required` (M8), the current
@@ -1483,7 +1482,8 @@ The CLI prints them on stderr, including the unit address, elapsed time, and
 short failure reason. Public native-tool transcript lines are indented and carry
 the unit address after secret masking. `--quiet-unit-output` hides those lines
 without hiding lifecycle events; `--unit-log-dir` independently appends masked
-lines to local per-unit files. Captured bytes and private stdout remain unchanged. Reports
+lines to local per-unit files. A log open or write failure emits `NYL-UNIT-LOG`
+and preserves the native tool result. Captured bytes and private stdout remain unchanged. Reports
 keep a keyed `units` map and a `unitOrder` list: dispatch order first, then
 undispatched units in dependency order, or consumers first for teardown. Names
 break ties within a wave. Machine reports alone go to stdout.

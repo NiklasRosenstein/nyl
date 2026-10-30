@@ -626,6 +626,19 @@ pub trait SourceResolver: Send + Sync {
         let _ = paths;
         self.reset_worktree(repository, commit, path)
     }
+    /// Ensure a declared source path can be reconstructed in a private checkout.
+    /// With `recursive`, check descendants too; otherwise check the path itself
+    /// and its ancestors. Paths may contain glob patterns.
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let _ = (repository, commit, path, recursive);
+        Ok(())
+    }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
 }
