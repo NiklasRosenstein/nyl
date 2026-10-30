@@ -259,10 +259,7 @@ pub struct RunRequest {
     pub source_override: Option<String>,
     /// `--wait-lease`.
     pub wait: Option<Duration>,
-    /// `--local`: the run continues from the clone's local state branches
-    /// and commits there with `Nyl-Local: true`; the command line passes a
-    /// [`super::local::LocalStore`] as the context's store. `None` for an
-    /// ordinary run. Contract: [Local runs](../../../../../design/orchestration-core.md#local-runs).
+    /// Optional execution approvals for a local run.
     pub local: Option<super::local::LocalRun>,
     /// Set by the command line's SIGINT/SIGTERM handler; never set by
     /// default. Contract: [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases), item 7.
@@ -1006,6 +1003,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 source_commit,
                 project_dir,
                 &self.directory.join(format!("key-sources-{name}")),
+                Some((&worktree, &commit)),
             )
             .map_err(invalid)?;
             let now = self.base().clock.now();

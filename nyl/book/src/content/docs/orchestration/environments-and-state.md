@@ -75,52 +75,20 @@ from the local branches. Move the state with
 it pushes the branches' history to the remote, records the move there, and
 leaves the local branches following the remote.
 
-**`nyl reconcile -e <env> --local`** runs orchestration next to remote state
-without publishing it, for experiments from a workstation. It continues from
-the local branches and commits there with a `Nyl-Local: true` trailer, never
-pushing state:
+**`nyl reconcile -e <env> --local`** runs against the configured state
+repository without fetching, pushing, or acquiring a remote lease. Local
+receipts and checkpoints remain in that repository. Another operator may run
+concurrently against remote state, so coordinate external effects separately.
 
-- It takes the remote lease, because the lease is coordination, not state: a
-  local run and a CI run of the same environment never execute at once. This
-  needs push access to the lease ref. The lease lists no units, since remote
-  runs do not notice local effects. `--local-lease` takes the clone's own
-  lease instead, for working without that access, and accepts that CI may run
-  at the same time.
-- Its effects are real, but remote runs do not notice them: a unit whose
-  remote receipt is current is not executed again. It warns with
-  `NYL-LOCAL-RUN-UNRECORDED` for every unit it executes and names the command
-  that records it remotely, `nyl reconcile -e <env> --unit <unit>` once the
-  change is committed.
-- Units whose recovery policy is not `converge` run locally only when named
-  with `--approve <unit>`; otherwise they wait as `awaiting-approval`.
-- It never imports remote run refs, so while remote state has runs to take
-  over (finished, past their deadline, or the holder of a broken lease) it
-  exits 1 with `NYL-LOCAL-RUN-LEFTOVERS` before taking the lease, leaving the
-  lease and any break as they were; a remote `nyl reconcile -e <env>` or
-  `nyl recover -e <env>` takes them over first. Under the remote lease, it
-  also refuses a broken remote lease whose holder left no run ref, with
-  `NYL-LEASE-BROKEN` (exit 2), since only an import records the break.
-- `nyl status` and `nyl get` with `--local` show the local view.
+A configured local path or `file://` URL opens that repository directly. When
+the configured state identity matches the source checkout, Nyl uses the
+checkout. Other remote identities use a dedicated bare repository in the
+project cache. `nyl status` and `nyl state init` report the identity and local
+path. If a cached repository is missing, run an online state command first.
 
-Once the remote moves, the local branches have diverged and Nyl stops
-fast-forwarding them. `nyl status -e <env>` warns with
-`NYL-STATE-LOCAL-DIVERGED`, such as "local state of dev has 2 local
-transitions and is 3 behind the remote".
-[`nyl state reset -e <env> --local`](/nyl/reference/cli/state/#nyl-state-reset)
-drops the local transitions and follows the remote again, once the remote has
-recorded the change or the local effects were undone. It lists the units whose
-local receipts the remote does not reflect and proceeds only with `--discard
-<unit>…` or `--discard-all`.
-
-Pushing local branches to the remote by hand puts `Nyl-Local` commits at its
-tips. Every run and state-writing command against that state then exits 1
-with `NYL-STATE-LOCAL-TIP`, naming the last commit without the trailer. When
-several environments share the state refs through `path`, each looks only at
-its own commits, those whose `Nyl-Environment` trailer names it, so one
-environment's pushed local commits refuse only that environment. Then
-[`nyl state restore -e <env> --to <commit>`](/nyl/reference/cli/state/#nyl-state-restore)
-writes forward commits restoring that commit's content, so protected branches
-need no force push.
+Online commands refuse when local state contains unpublished work; they never
+overwrite or merge those receipts and checkpoints silently. Inspect and
+recover the local work before continuing online.
 
 ## Git host compatibility
 

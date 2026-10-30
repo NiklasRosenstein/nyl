@@ -47,7 +47,7 @@ mod worktree;
 
 pub use error::{GitError, Result};
 
-use cache::CacheLayout;
+pub use cache::CacheLayout;
 use repository::BareRepository;
 pub use worktree::WorktreeManager;
 

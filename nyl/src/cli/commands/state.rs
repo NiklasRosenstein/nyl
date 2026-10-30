@@ -1,4 +1,4 @@
-//! `nyl state` and `nyl lease`: create, move, forget, reset, and restore
+//! `nyl state` and `nyl lease`: create, move, forget, and delete
 //! environment state, and declare a lease holder gone.
 
 use std::collections::BTreeSet;
@@ -107,11 +107,11 @@ pub enum StateCommand {
         #[arg(long)]
         unit: String,
     },
-    /// Drop this clone's local transitions and follow the remote state again.
+    /// Discard accepted local receipts and follow the configured remote state.
     Reset {
         #[command(flatten)]
         common: Common,
-        /// Reset the clone's local state branches (required: reset never changes remote state).
+        /// Reset local state (required: reset never changes remote state).
         #[arg(long, required = true)]
         local: bool,
         /// Forget the local receipts of these units, which the remote does not reflect (repeatable, or comma-separated).
@@ -143,8 +143,7 @@ pub enum StateCommand {
         #[arg(long, requires = "teardown")]
         source: Option<String>,
     },
-    /// Restore remote state to an earlier commit's content with forward commits,
-    /// after local transitions were pushed by hand.
+    /// Restore historical state content with forward commits.
     Restore {
         #[command(flatten)]
         common: Common,
@@ -167,6 +166,9 @@ pub enum LeaseCommand {
     Break {
         #[command(flatten)]
         common: Common,
+        /// Break the lease in the local state repository without contacting the remote.
+        #[arg(long)]
+        local: bool,
     },
 }
 
@@ -175,14 +177,14 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
     match &args.command {
         StateCommand::Init { common, fresh } => {
             let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
+            run(common, wiring, Operation::StateInit.as_str(), None, false, |ctx| {
                 state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested)
             })
         }
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
             let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateForget.as_str(), None, |ctx| {
+            run(common, wiring, Operation::StateForget.as_str(), None, false, |ctx| {
                 state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
             })
         }
@@ -193,7 +195,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             discard_all,
         } => {
             let discard = discard_option(discard, *discard_all)?;
-            run(common, wiring, "state-reset", None, |ctx| {
+            run(common, wiring, "state-reset", None, false, |ctx| {
                 state::reset(ctx.context, &ctx.environment, ctx.location, discard.as_ref())
             })
         }
@@ -219,7 +221,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 ))
             })?;
             let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateRestore.as_str(), None, |ctx| {
+            run(common, wiring, Operation::StateRestore.as_str(), None, false, |ctx| {
                 state::restore(ctx.context, &ctx.environment, ctx.location, &to, &requested)
             })
         }
@@ -285,7 +287,7 @@ fn run_move(
         .as_ref()
         .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
     let requested = requested(common, wiring);
-    run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
+    run(common, wiring, Operation::StateMove.as_str(), extra, false, |ctx| {
         let location = ctx.location;
         let mut old = location.clone();
         if let Some((repository, _)) = &from {
@@ -310,7 +312,7 @@ fn run_move(
 /// Run a `nyl lease` command in-process with `wiring`.
 pub fn run_lease(args: &LeaseArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
-        LeaseCommand::Break { common } => run(common, wiring, "lease-break", None, |ctx| {
+        LeaseCommand::Break { common, local } => run(common, wiring, "lease-break", None, *local, |ctx| {
             state::break_lease(ctx.context, &ctx.environment, ctx.location, common.reason.clone())
         }),
     }
@@ -358,6 +360,7 @@ pub(crate) fn run(
     wiring: &Wiring<'_>,
     operation_name: &'static str,
     extra_endpoint: Option<(String, Endpoint)>,
+    offline: bool,
     operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
 ) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
@@ -377,14 +380,48 @@ pub(crate) fn run(
         Ok(identity) => identity,
         Err(finding) => return Ok(refused(finding)),
     };
-    let mut store = session.store(Some(CommitAuthor {
+    let author = Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
-    }))?;
+    });
+    let mut store = if offline {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
+    if operation_name == "state-reset" {
+        let path = store.repository_path(&resolved.location);
+        store = store.with_local_view(path).allow_pending();
+    }
+    if operation_name == "state-init" {
+        let path = store.repository_path(&resolved.location);
+        let direct = resolved.endpoint.as_ref().is_some_and(|endpoint| {
+            endpoint.read.starts_with("file://")
+                || std::path::Path::new(&endpoint.read).is_absolute()
+                || std::path::Path::new(&endpoint.read).starts_with(".")
+        });
+        if direct && !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            git2::Repository::init_bare(&path).map_err(|error| {
+                NylError::config(format!(
+                    "cannot initialize state repository {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
     if let Some((repository, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.
         if repository != resolved.location.repository {
-            store = store.with_endpoint(repository, endpoint);
+            store = crate::orchestration::project::configure_repository(
+                &session.inventory,
+                resolved,
+                store,
+                &repository,
+                endpoint,
+            )?;
         }
     }
     let context = session.context(&store, wiring, Some(identity.to_string()));
@@ -393,6 +430,16 @@ pub(crate) fn run(
         environment: resolved.name.clone(),
         location: &resolved.location,
     });
+    if operation_name == "state-init" {
+        report.details.insert(
+            "stateRepository".to_owned(),
+            serde_json::json!(resolved.location.repository),
+        );
+        report.details.insert(
+            "stateLocalPath".to_owned(),
+            serde_json::json!(store.repository_path(&resolved.location).display().to_string()),
+        );
+    }
     let mut warnings = resolved.warnings.clone();
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
@@ -423,6 +470,7 @@ fn run_delete(
             target: TeardownTarget::All,
         },
         lifecycle,
+        false,
         source,
         Some(approval),
         |context, request| nyl_orchestration::shell::teardown::state_delete(context, request, teardown),
@@ -437,6 +485,7 @@ pub(crate) fn run_lifecycle(
     operation_name: &'static str,
     mode: RunMode,
     lifecycle: LifecycleOptions,
+    offline: bool,
     source: Option<&str>,
     approval: Option<&crate::orchestration::approval::ApprovalArgs>,
     operation: impl FnOnce(
@@ -482,10 +531,15 @@ pub(crate) fn run_lifecycle(
             Err(finding) => return Ok(refused(finding)),
         };
     }
-    let store = session.store(Some(CommitAuthor {
+    let author = Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
-    }))?;
+    });
+    let store = if offline {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
     let mut report = match session.run_with(wiring, &store, Some(&identity), &request, operation) {
         Ok(report) => report,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),

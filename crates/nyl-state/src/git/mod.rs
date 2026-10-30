@@ -53,6 +53,13 @@ pub struct GitStateStore {
     /// `None` for a read-only store: every write is refused.
     author: Option<CommitAuthor>,
     endpoints: BTreeMap<String, Endpoint>,
+    repositories: BTreeMap<String, PathBuf>,
+    local_view: Option<PathBuf>,
+    direct: std::collections::BTreeSet<String>,
+    offline: bool,
+    allow_pending: bool,
+    strict_routing: bool,
+    managed: std::collections::BTreeSet<PathBuf>,
 }
 
 /// Who authors and commits every commit this store writes, and when: transition commits,
@@ -95,6 +102,13 @@ impl GitStateStore {
             auth,
             author: Some(author),
             endpoints: BTreeMap::new(),
+            repositories: BTreeMap::new(),
+            local_view: None,
+            direct: std::collections::BTreeSet::new(),
+            offline: false,
+            allow_pending: false,
+            strict_routing: false,
+            managed: std::collections::BTreeSet::new(),
         }
     }
 
@@ -107,6 +121,13 @@ impl GitStateStore {
             auth,
             author: None,
             endpoints: BTreeMap::new(),
+            repositories: BTreeMap::new(),
+            local_view: None,
+            direct: std::collections::BTreeSet::new(),
+            offline: false,
+            allow_pending: false,
+            strict_routing: false,
+            managed: std::collections::BTreeSet::new(),
         }
     }
 
@@ -117,12 +138,97 @@ impl GitStateStore {
         self
     }
 
-    fn open(&self) -> StateResult<Repository> {
-        Repository::open(&self.git_dir).map_err(unavailable)
+    /// Use a local object database for a configured repository identity.
+    #[must_use]
+    pub fn with_repository(mut self, identity: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        self.repositories.insert(identity.into(), path.into());
+        self
+    }
+
+    /// Use this repository for the local view of the configured state.
+    #[must_use]
+    pub fn with_local_view(mut self, path: impl Into<PathBuf>) -> Self {
+        self.local_view = Some(path.into());
+        self
+    }
+
+    /// Refuse a location whose repository identity has no configured local database.
+    #[must_use]
+    pub fn strict_routing(mut self) -> Self {
+        self.strict_routing = true;
+        self
+    }
+
+    /// Initialize this cache repository on first online use.
+    #[must_use]
+    pub fn with_managed_repository(mut self, path: impl Into<PathBuf>) -> Self {
+        self.managed.insert(path.into());
+        self
+    }
+
+    /// Read remote state while preserving local receipts for a guarded reset.
+    #[must_use]
+    pub fn allow_pending(mut self) -> Self {
+        self.allow_pending = true;
+        self
+    }
+
+    /// Open a local repository directly instead of contacting an endpoint.
+    #[must_use]
+    pub fn with_direct_repository(mut self, identity: impl Into<String>) -> Self {
+        self.direct.insert(identity.into());
+        self
+    }
+
+    /// Operate solely on local refs.
+    #[must_use]
+    pub fn offline(mut self) -> Self {
+        self.offline = true;
+        self
+    }
+
+    /// Path to the local object database for a state location.
+    pub fn repository_path(&self, location: &StateLocation) -> PathBuf {
+        if location.is_local() {
+            self.local_view.as_ref().unwrap_or(&self.git_dir).clone()
+        } else {
+            self.repositories
+                .get(&location.repository)
+                .unwrap_or(&self.git_dir)
+                .clone()
+        }
+    }
+
+    fn open(&self, location: &StateLocation) -> StateResult<Repository> {
+        if self.strict_routing && !location.is_local() && !self.repositories.contains_key(&location.repository) {
+            return Err(StateError::Unavailable(format!(
+                "no local state repository is configured for {}",
+                location.repository
+            )));
+        }
+        let path = self.repository_path(location);
+        if self.managed.contains(&path) && !path.exists() {
+            if self.offline {
+                return Err(StateError::Unavailable(format!(
+                    "no local state repository for {} at {}; run an online state command first",
+                    location.repository,
+                    path.display()
+                )));
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(unavailable)?;
+            }
+            if let Err(error) = Repository::init_bare(&path) {
+                if Repository::open(&path).is_err() {
+                    return Err(unavailable(error));
+                }
+            }
+        }
+        Repository::open(path).map_err(unavailable)
     }
 
     fn refs<'a>(&'a self, repository: &'a Repository, location: &'a StateLocation) -> Refs<'a> {
-        if location.is_local() {
+        if location.is_local() || self.offline || self.direct.contains(&location.repository) {
             return Refs {
                 repository,
                 url: None,
@@ -137,6 +243,33 @@ impl GitStateStore {
             push_url: endpoint.and_then(|endpoint| endpoint.write.as_deref()),
             auth: &self.auth,
         }
+    }
+
+    fn import_source_snapshots(&self, repository: &Repository) -> StateResult<()> {
+        let source = Repository::open(&self.git_dir).map_err(unavailable)?;
+        if source.path() == repository.path() {
+            return Ok(());
+        }
+        let mut refs = source.references_glob("refs/nyl-worktrees/*").map_err(unavailable)?;
+        if refs.next().is_none() {
+            return Ok(());
+        }
+        let path = source.path().to_string_lossy();
+        nyl_git::fetch(
+            repository.path(),
+            &path,
+            &["+refs/nyl-worktrees/*:refs/nyl-source-snapshots/*"],
+            false,
+            &GitAuth::none(),
+        )
+        .map_err(unavailable)
+    }
+
+    fn check_pending(&self, location: &StateLocation) -> StateResult<()> {
+        if !self.offline && !self.allow_pending && !location.is_local() && !self.direct.contains(&location.repository) {
+            self.snapshot(location)?;
+        }
+        Ok(())
     }
 
     /// Rewrite a run ref with `run` as its record and `change` applied to
@@ -156,7 +289,9 @@ impl GitStateStore {
         change: impl Fn(&mut Files) -> StateResult<()>,
         lease: Option<(&Lease, Oid)>,
     ) -> StateResult<Option<Oid>> {
-        let repository = self.open()?;
+        self.check_pending(location)?;
+        let repository = self.open(location)?;
+        self.import_source_snapshots(&repository)?;
         let refs = self.refs(&repository, location);
         let name = run_ref(location, environment, &run.run);
         let lease_name = lease_ref(location, environment);
@@ -428,14 +563,26 @@ impl StateStore for GitStateStore {
     }
 
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let desired_name = StateLocation::full_name(&location.desired_ref);
         let observed_name = StateLocation::full_name(&location.observed_ref);
-        let heads = refs.heads(&[desired_name.clone(), observed_name.clone()])?;
-        refs.fetch(&heads, true)?;
-        for (name, oid) in &heads {
-            refs.fast_forward_local_branch(name, *oid)?;
+        let names = [
+            desired_name.clone(),
+            observed_name.clone(),
+            format!("{}*", location.coordination_ref_prefix),
+        ];
+        let heads = refs.heads(&names)?;
+        if self.allow_pending && refs.url.is_some() {
+            refs.check_local_coordination(&location.coordination_ref_prefix)?;
+            let state_heads = heads
+                .iter()
+                .filter(|(name, _)| *name == &desired_name || *name == &observed_name)
+                .map(|(name, oid)| (name.clone(), *oid))
+                .collect();
+            refs.fetch(&state_heads, false)?;
+        } else {
+            refs.sync_local(&names, &heads)?;
         }
         let desired_tip = heads.get(&desired_name).copied();
         let observed_tip = heads.get(&observed_name).copied();
@@ -460,7 +607,7 @@ impl StateStore for GitStateStore {
     /// Read the state as of `tips`, for `nyl get --state-revision`: the
     /// state refs' history is fetched, and each tip must be a commit of it.
     fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let names = [
             StateLocation::full_name(&location.desired_ref),
@@ -487,7 +634,8 @@ impl StateStore for GitStateStore {
     }
 
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {
-        let repository = self.open()?;
+        self.check_pending(location)?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let lease_name = lease_ref(location, environment);
         let prefix = format!("{}{environment}/", location.coordination_ref_prefix);
@@ -535,7 +683,8 @@ impl StateStore for GitStateStore {
         lease: &Lease,
         expected: Option<&str>,
     ) -> StateResult<String> {
-        let repository = self.open()?;
+        self.check_pending(location)?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let expected = expected.map(Oid::from_str).transpose().map_err(unavailable)?;
@@ -557,7 +706,8 @@ impl StateStore for GitStateStore {
         lease: &Lease,
         expected: &str,
     ) -> StateResult<String> {
-        let repository = self.open()?;
+        self.check_pending(location)?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let expected = Oid::from_str(expected).map_err(unavailable)?;
@@ -600,7 +750,7 @@ impl StateStore for GitStateStore {
         environment: &EnvironmentName,
         expected: &str,
     ) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let expected = Oid::from_str(expected).map_err(unavailable)?;
         refs.update(&[Update {
@@ -612,7 +762,7 @@ impl StateStore for GitStateStore {
     }
 
     fn delete_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let Some(current) = refs.heads(std::slice::from_ref(&name))?.get(&name).copied() else {
@@ -669,7 +819,7 @@ impl StateStore for GitStateStore {
         run: &RunId,
         expected: Option<&str>,
     ) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let run_name = run_ref(location, environment, run);
         let evidence_name = evidence_ref(location, environment, run);
@@ -720,7 +870,7 @@ impl StateStore for GitStateStore {
     }
 
     fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = evidence_ref(location, environment, run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
@@ -742,7 +892,7 @@ impl StateStore for GitStateStore {
         run: &RunId,
         expected: Option<&str>,
     ) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let names = [
             run_ref(location, environment, run),
@@ -773,7 +923,7 @@ impl StateStore for GitStateStore {
         environment: &EnvironmentName,
         run: &RunId,
     ) -> StateResult<Vec<Signal>> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = signal_ref(location, environment, run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
@@ -787,7 +937,7 @@ impl StateStore for GitStateStore {
     }
 
     fn send_signal(&self, location: &StateLocation, environment: &EnvironmentName, signal: &Signal) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = signal_ref(location, environment, &signal.run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
@@ -808,7 +958,7 @@ impl StateStore for GitStateStore {
     }
 
     fn delete_signals(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = signal_ref(location, environment, run);
         let heads = refs.heads(std::slice::from_ref(&name))?;
@@ -831,7 +981,9 @@ impl StateStore for GitStateStore {
         transition: &Transition,
         lease_version: &str,
     ) -> StateResult<Committed> {
-        let repository = self.open()?;
+        self.check_pending(location)?;
+        let repository = self.open(location)?;
+        self.import_source_snapshots(&repository)?;
         let author = self.author.as_ref();
         let refs = self.refs(&repository, location);
         let desired_name = StateLocation::full_name(&location.desired_ref);
@@ -892,8 +1044,19 @@ impl StateStore for GitStateStore {
     }
 
     fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
-        let repository = self.open()?;
-        let source = self.refs(&repository, from);
+        let repository = self.open(to)?;
+        let source_repository = if from.is_local() {
+            Repository::open(&self.git_dir).map_err(unavailable)?
+        } else {
+            self.open(from)?
+        };
+        let source_path = source_repository.path().to_string_lossy().into_owned();
+        let source = Refs {
+            repository: &repository,
+            url: (source_repository.path() != repository.path()).then_some(source_path.as_str()),
+            push_url: None,
+            auth: &self.auth,
+        };
         let target = self.refs(&repository, to);
         let pairs = [
             (
@@ -949,7 +1112,7 @@ impl StateStore for GitStateStore {
     /// it first when the clone has never fetched it; a local location reads
     /// the clone's branch.
     fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let name = StateLocation::full_name(location.state_ref(side));
         let mut tip = refs.local(&name);
@@ -971,7 +1134,7 @@ impl StateStore for GitStateStore {
         if location.is_local() {
             return Ok(LocalDivergence::default());
         }
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let names = [
             StateLocation::full_name(&location.desired_ref),
@@ -1003,12 +1166,16 @@ impl StateStore for GitStateStore {
                 "the state lives on the clone's own branches, which have no remote state to reset to".to_owned(),
             ));
         }
-        require_local_branches(location)?;
         if self.author.is_none() {
             return Err(StateError::Unavailable(tree::READ_ONLY.to_owned()));
         }
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
+        if refs.url.is_none() {
+            return Err(StateError::Unavailable(
+                "the configured state repository is local and has no remote state to reset to".to_owned(),
+            ));
+        }
         let desired_name = StateLocation::full_name(&location.desired_ref);
         let observed_name = StateLocation::full_name(&location.observed_ref);
         let heads = refs.heads(&[desired_name.clone(), observed_name.clone()])?;
@@ -1022,14 +1189,35 @@ impl StateStore for GitStateStore {
         } else if expected_observed != expected_desired {
             return Err(StateError::conflict(observed_name, expected_desired));
         }
-        // A compare-and-swap of both local branches in one transaction.
+        let prefix = tree::prefix(&location.path);
+        if !prefix.is_empty() {
+            for (name, current, new) in &moves {
+                let local = tree::read(&repository, *current)?;
+                let remote = tree::read(&repository, *new)?;
+                if local
+                    .keys()
+                    .chain(remote.keys())
+                    .any(|path| !path.starts_with(&prefix) && local.get(path) != remote.get(path))
+                {
+                    return Err(StateError::Unavailable(format!(
+                        "resetting {name} would change state outside {}; inspect the shared state before resetting",
+                        location.path
+                    )));
+                }
+            }
+        }
+        let baselines = moves
+            .iter()
+            .map(|(name, _, _)| (name.clone(), refs.baseline_oid(name)))
+            .collect::<BTreeMap<_, _>>();
         let mut transaction = repository.transaction().map_err(unavailable)?;
         for (name, _, _) in &moves {
             transaction.lock_ref(name).map_err(unavailable)?;
+            transaction.lock_ref(&refs.baseline(name)).map_err(unavailable)?;
         }
         for (name, expected, _) in &moves {
             let current = repository.refname_to_id(name).ok();
-            if current != *expected {
+            if current != *expected || refs.baseline_oid(name) != baselines[name] {
                 return Err(StateError::conflict(name.clone(), current));
             }
         }
@@ -1039,6 +1227,14 @@ impl StateStore for GitStateStore {
                     .set_target(name, *new, None, "nyl: reset local state")
                     .map_err(unavailable)?,
                 None if current.is_some() => transaction.remove(name).map_err(unavailable)?,
+                None => {}
+            }
+            let baseline = refs.baseline(name);
+            match new {
+                Some(new) => transaction
+                    .set_target(&baseline, *new, None, "nyl: acknowledge reset")
+                    .map_err(unavailable)?,
+                None if baselines[name].is_some() => transaction.remove(&baseline).map_err(unavailable)?,
                 None => {}
             }
         }
@@ -1064,7 +1260,7 @@ impl StateStore for GitStateStore {
             ));
         }
         require_local_branches(location)?;
-        let repository = self.open()?;
+        let repository = self.open(location)?;
         let author = self.author.as_ref();
         let local = Refs {
             repository: &repository,

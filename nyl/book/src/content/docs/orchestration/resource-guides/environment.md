@@ -43,7 +43,9 @@ existing state to the new location with `nyl state move`. See
 
 `spec.source` decides the commit each run renders units at: omitted, the
 commit of the worktree you run from; with `revision`, that ref's tip; with
-`revision` and `commit`, the pinned commit. Runs check that commit against
+`revision` and `commit`, the pinned commit. Revisions and commits come from the
+entry repository; remote Environment source repositories are not supported.
+Runs check that commit against
 `spec.protectedRefs`, by default the repository's default branch, and
 `allowUnprotectedSource: true` lets an environment such as dev run from any
 commit. An EnvironmentGroup supplies these fields when the Environment omits
@@ -59,7 +61,7 @@ what that reconcile does with it:
 
 | `driftRepair` | The next `nyl reconcile` |
 | --- | --- |
-| `converge` (default) | Executes drifted units whose recovery policy is `converge`, such as OpenTofu and idempotent Command units, and lists them under `driftRepaired` in its transition commit. A drifted unit that is not safe to re-run is reported `awaiting-approval` (exit 2) while the rest of the run continues; a local run executes it with `--local --approve <unit>`. |
+| `converge` (default) | Executes drifted units whose recovery policy is `converge`, such as OpenTofu and idempotent Command units, and lists them under `driftRepaired` in its transition commit. A drifted unit that is not safe to re-run is reported `awaiting-approval` (exit 2) while the rest of the run continues. |
 | `manual` | Executes no drifted unit by itself. The units stay `drifted` until `nyl reconcile -e <env> --unit <unit> --reapply --reason <text>` forces them. |
 
 ```yaml

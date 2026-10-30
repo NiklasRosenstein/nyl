@@ -21,7 +21,7 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownRea
 
 /// `nyl status -e <env>`, with a `NYL-STATE-LOCAL-DIVERGED` warning when
 /// the clone's local state branches diverged from the remote. Through a
-/// [`super::local::LocalStore`] (`--local`) it reports the local view.
+/// the offline store it reports local state.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
     status_with(context, environment, location, None)
 }

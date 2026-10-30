@@ -46,7 +46,7 @@ impl Slots {
         String,
     > {
         let worktree = self.directory.join(format!("slot-{slot}"));
-        let paths = crate::shell::sources::checkout_paths(driver, spec, project_dir, &SourceRepository::This);
+        let paths = crate::shell::sources::main_checkout_paths(driver, spec, commit, commit, project_dir)?;
         sources
             .reset_worktree_with_paths(&SourceRepository::This, commit, &worktree, paths.as_deref())
             .map_err(|error| format!("cannot check out commit {commit}: {error}"))?;
@@ -57,6 +57,7 @@ impl Slots {
             commit,
             project_dir,
             &self.directory.join(format!("slot-{slot}-sources")),
+            Some((&worktree, commit)),
         )?;
         Ok((worktree, roots))
     }

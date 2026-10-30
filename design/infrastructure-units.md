@@ -176,7 +176,9 @@ category `output-rejected`. A
 secret can therefore never be recorded by accident, and the check never leaves
 changes applied without a receipt.
 
-A plan with no changes skips `apply` and records the receipt directly. "No
+A plan with no changes skips `apply` when a state object exists. When the backend
+has no state object, Nyl applies the saved plan to persist the initial empty state
+before recording a receipt. "No
 changes" means the plan would change nothing at all, as `plan
 -detailed-exitcode` exit 0 reports: no resource changes, no outputs, and no
 `moved` or `import` operations.

@@ -12,7 +12,6 @@ use clap::Args;
 use super::reconcile::RunOutput;
 use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
-use nyl_orchestration::shell::local::LocalStore;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, Session, Stop};
@@ -59,6 +58,7 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             args.group.as_deref(),
             false,
             None,
+            args.local,
             wiring.drivers,
         ),
         |environment, _selected, _planned, _unavailable| {
@@ -75,15 +75,12 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 
 fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment[0])?;
-    // Status only reads: a read-only store, no commit identity, no lease.
-    let store = session.store(None)?;
-    // `--local`: the clone's local view, through the store a `--local` run uses.
-    let local_store = if args.local {
-        Some(LocalStore::new(&store, session.local_run(false, &[])?))
+    let store = if args.local {
+        session.offline_store(None)?
     } else {
-        None
+        session.store(None)?
     };
-    let state = local_store.as_ref().map_or(&store as &dyn StateStore, |local| local);
+    let state = &store as &dyn StateStore;
     let context = session.context(state, wiring, None);
     let mut report = nyl_orchestration::shell::inspect::status_with(
         &context,
@@ -91,6 +88,10 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         &session.resolved.location,
         Some(wiring.drivers),
     );
+    for environment in &mut report.environments {
+        environment.state_repository = Some(session.resolved.location.repository.clone());
+        environment.state_local_path = Some(store.repository_path(&session.resolved.location).display().to_string());
+    }
     session.add_warnings(&mut report);
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
