@@ -292,13 +292,31 @@ fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
 }
 
 #[cfg(feature = "test-kinds")]
+fn replace_state_repository(text: &str, repository: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    let state = "  state:\n    repositoryRef: {name: platform}";
+    assert!(
+        text.contains(state),
+        "the project declares the expected state repository"
+    );
+    text.replace(state, &format!("  state:\n    repository: {{repoURL: '{repository}'}}"))
+}
+
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_state_fixture_replaces_repository_in_crlf_checkout() {
+    let text = "spec:\r\n  state:\r\n    repositoryRef: {name: platform}\r\n";
+    assert_eq!(
+        replace_state_repository(text, "file:///state.git"),
+        "spec:\n  state:\n    repository: {repoURL: 'file:///state.git'}\n"
+    );
+}
+
+#[cfg(feature = "test-kinds")]
 fn project_with_state(world: &World, repository: &str) -> std::path::PathBuf {
     let checkout = world.fresh_clone("main");
     let path = checkout.join("nyl/platform.yaml");
-    let text = std::fs::read_to_string(path).unwrap().replace(
-        "  state:\n    repositoryRef: {name: platform}",
-        &format!("  state:\n    repository: {{repoURL: '{repository}'}}"),
-    );
+    let text = replace_state_repository(&std::fs::read_to_string(path).unwrap(), repository);
     world.commit_files("main", "Configure state repository", &[("nyl/platform.yaml", &text)]);
     world.fresh_clone("main")
 }
