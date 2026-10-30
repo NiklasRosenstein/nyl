@@ -1,6 +1,6 @@
 ---
 title: 'Example: team-owned AWS accounts'
-description: 'A walkthrough of planned domain resources, from a type definition to removing an access grant.'
+description: 'A walkthrough of planned domain modeling, from a type definition to removing an access grant.'
 ---
 
 :::note[Planned]

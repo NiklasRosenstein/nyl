@@ -161,7 +161,7 @@ export const orchestrationRoadmap = {
       ],
     },
     {
-      // Title and needs come from the domain resources roadmap.
+      // Title and needs come from the domain modeling roadmap.
       id: 'M9',
       summary: 'Team-owned, typed declarations that units implement and Releases read, the fourth layer of Nyl.',
       delegate: 'domain-modeling',

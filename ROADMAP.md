@@ -43,7 +43,7 @@ stable for references from issues and pull requests:
 | M6 | Promotion paths |
 | M7 | Continuous operation and scope decision |
 | M8 | Provider-neutral CI execution and first GitLab adapter |
-| M9 | Domain resource collections for units and Releases |
+| M9 | Domain modeling for units and Releases |
 
 ## Product direction
 
@@ -402,12 +402,12 @@ must be reachable from a protected ref or its lock's own branch; run source
 commits must be reachable too, unless an environment opts into unprotected
 sources.
 
-### Domain resource collections (M9, proposed)
+### Domain modeling (M9, proposed)
 
-Teams declare typed domain resources, such as AWS accounts or GitHub teams, in
+Teams declare typed resources, such as AWS accounts or GitHub teams, in
 paths they own, and explicitly registered units consume them as a tool-neutral
 bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
-the [domain resources design](design/domain-resources.md), and its slices and
+the [domain modeling design](design/domain-resources.md), and its slices and
 progress are on the
 [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
@@ -710,7 +710,7 @@ reasons to delay independent work.
   PromotionRecord, state selection, attestations, and observation for M5–M6
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
-- [Domain resource collections](design/domain-resources.md): the M9 proposal
+- [Domain modeling](design/domain-resources.md): the M9 proposal
   for team-owned declarations as unit inputs
 - [Release catalog](design/release-catalog.md): Releases as inventoried
   resources, label membership, and collections in rendering, part of M9

@@ -48,7 +48,7 @@ bug, and document a deliberate one where users choose it.
   permission.
 - Progress is tracked in the documentation, not in ROADMAP.md: the data
   modules in `nyl/book/src/lib/roadmaps/` render the Orchestration and Domain
-  resources roadmap pages. Tick an item in the change that ships it, keep the
+  modeling roadmap pages. Tick an item in the change that ships it, keep the
   next step accurate, and set a stage's `done` only when its exit criterion is
   met; a test rejects `done` while an item is unticked. Distinguish proposals
   from implemented capabilities, and preserve milestone identifiers for
@@ -126,6 +126,7 @@ published to crates.io; Nyl ships as release binaries and container images.
 - kubectl (for diff/apply commands)
 - Helm (for Helm chart rendering)
 - mise (recommended for task management)
+- Node.js 22.23.4 or newer (for the documentation site; Astro rejects older 22.x releases)
 
 ### Essential Commands
 

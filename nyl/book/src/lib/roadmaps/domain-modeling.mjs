@@ -1,4 +1,4 @@
-// The roadmap of domain resource collections, milestone M9, rendered on the
+// The roadmap of domain modeling, milestone M9, rendered on the
 // Domain modeling roadmap page and summarized as M9 on the Orchestration
 // roadmap. Tick a deliverable in the change that ships it, and set `done` on a
 // slice only when all of it has shipped. The orchestration milestones it
@@ -7,7 +7,7 @@
 export const domainModelingRoadmap = {
   id: 'domain-modeling',
   milestone: 'M9',
-  title: 'Domain resource collections for units and Releases',
+  title: 'Domain modeling for units and Releases',
   page: 'domain-modeling/roadmap/',
   itemNoun: 'deliverables',
   exitCriterion:
@@ -24,7 +24,7 @@ export const domainModelingRoadmap = {
       needs: ['M2'],
       items: [
         { text: '`ResourceDefinition` loaded only from the `[resources]` paths of `nyl.toml`', done: false },
-        { text: 'Discovery of literal domain resources with project-wide identity and Git provenance', done: false },
+        { text: 'Discovery of literal declarations with project-wide identity and Git provenance', done: false },
         { text: 'Schema validation with defaults, and `x-nyl-reference` checks', done: false },
         { text: '`nyl validate` covering definitions and declarations', done: false },
         { text: '`nyl get resources` and `nyl schema resources`', done: false },
@@ -134,7 +134,7 @@ export const domainModelingRoadmap = {
     {
       id: 'R10',
       title: 'Collections in Releases',
-      summary: 'Releases read domain resource collections as template data, without orchestration.',
+      summary: 'Releases read declaration collections as template data, without orchestration.',
       needs: ['R1', 'R3', 'R8'],
       items: [
         { text: 'The pure `nyl-collections` crate with membership, the reference closure, and bundle assembly, shared with R2', done: false },
