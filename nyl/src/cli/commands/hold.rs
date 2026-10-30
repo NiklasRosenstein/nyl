@@ -47,7 +47,7 @@ pub struct ResumeArgs {
 pub fn run_hold(args: &HoldArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     let unit = unit_name(&args.unit)?;
     let requested = requested(&args.common, wiring);
-    run(&args.common, wiring, Operation::Hold.as_str(), None, |ctx| {
+    run(&args.common, wiring, Operation::Hold.as_str(), None, false, |ctx| {
         lifecycle::hold(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
     })
 }
@@ -56,7 +56,7 @@ pub fn run_hold(args: &HoldArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
 pub fn run_resume(args: &ResumeArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     let unit = unit_name(&args.unit)?;
     let requested = requested(&args.common, wiring);
-    run(&args.common, wiring, Operation::Resume.as_str(), None, |ctx| {
+    run(&args.common, wiring, Operation::Resume.as_str(), None, false, |ctx| {
         lifecycle::resume(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
     })
 }

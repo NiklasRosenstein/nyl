@@ -96,8 +96,7 @@ A unit whose latest [drift observation](/nyl/reference/cli/verify/) is
 `drifted` runs again when its recovery policy is `converge` and the
 Environment's `driftRepair` is `converge`, the default, and the transition
 commit lists it under `driftRepaired`. A drifted unit that is not safe to
-re-run is `awaiting-approval` while the rest of the run continues; a
-`--local` run executes it with `--approve`. Under `driftRepair: manual`,
+re-run is `awaiting-approval` while the rest of the run continues. Under `driftRepair: manual`,
 drifted units stay `drifted` until `--reapply` names them. See
 [Repairing drift](/nyl/orchestration/recovery/#repairing-drift).
 
@@ -153,9 +152,7 @@ checkpoint with the unit's current execution key becomes its receipt
 the same run. The transition commit lists both under `imported` and
 `recovered`, and a broken lease once under `leaseBroken`. While a live run
 holds the lease or its run ref still carries a deadline, the run exits 2 with
-`NYL-LEASE-HELD`, unless `--wait-lease` waits for it. A `--local` run never
-takes a broken remote lease over: it exits 2 with `NYL-LEASE-BROKEN` and
-names `nyl recover -e <env>`.
+`NYL-LEASE-HELD`, unless `--wait-lease` waits for it.
 
 ## Cancellation
 
@@ -192,8 +189,7 @@ for qualified unit options and independent state transactions.
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
 | `--source <rev>` | Render units at this revision or commit instead of the Environment's source, for this run only. It must pass the same [reachability checks](/nyl/orchestration/runs/#source-commit), and the transition commit marks it as an override. |
 | `--wait-lease <duration>` | Wait up to this long, such as `10m`, while another run holds the lease, instead of exiting 2 with `NYL-LEASE-HELD`. |
-| `--local` | Run next to remote state without publishing it: continue from this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs) and commit there, marked `Nyl-Local: true`. Warns `NYL-LOCAL-RUN-UNRECORDED` for every unit it executes. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote or with full `refs/…` state refs, and with `NYL-LOCAL-RUN-LEFTOVERS` while remote state has dead runs to take over. |
-| `--local-lease` | With `--local`, take this clone's own lease instead of the remote one, accepting that CI may run at the same time. |
+| `--local` | Operate on the configured local state repository without fetching, pushing, or taking a remote lease. |
 | `--approve <unit>[=<digest>]` | Approve a manual unit, a drift repair that is not safe to repeat, or a non-converging unit in a local run. Repeatable or comma-separated. A desired-bound approval covers its initial execution key; a plan-bound digest covers the reviewed changes. Excluded units are an error. See [Approvals](/nyl/orchestration/runs/#approvals). |
 | `--approve-all` | Approve every candidate without a reviewed digest; policies with `requireDigest: true` still wait. Explicit digests override this for named units. |
 | `--approved-by <name>`, `--approval-source <source>` | Assert approver identities and their source. Names are repeatable or comma-separated; recorded as `asserted`. Without these flags Nyl uses a configured lookup, CI context, or the Git user. |
@@ -218,7 +214,7 @@ code and its fix.
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed (`removed`, `retained`, `released`). |
 | 1 | A configuration, resolution, or operational error, such as `NYL-STATE-MISSING`, `NYL-SOURCE-UNREACHABLE`, `NYL-UNIT-UNKNOWN`, or `NYL-COMMIT-IDENTITY-MISSING`. |
-| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`); or a `--local` run found a broken remote lease (`NYL-LEASE-BROKEN`). |
+| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`). |
 | 3 | At least one execution failed. |
 | 4 | At least one execution is uncertain, the run lost its lease (`NYL-LEASE-LOST`), or it was cancelled (`NYL-RUN-CANCELLED`). |
 
@@ -237,11 +233,6 @@ Besides the codes above, a reconcile reports:
 | `NYL-RUN-UNIMPORTED` | Reported by `nyl status`: a run ended without its transition commit, cancelled or after losing its lease, and the next reconcile imports its checkpoints. Units it left uncertain show as `uncertain` until then. |
 | `NYL-RUN-CANCELLED` | The run was cancelled by a signal. Run `nyl reconcile` again to take over its checkpoints. |
 | `NYL-LEASE-LOST` | Another invocation took over or deleted the lease. The run pushed nothing; the next run imports its checkpoints. |
-| `NYL-STATE-LOCAL-TIP` | A remote state ref's tip is a `Nyl-Local` commit pushed by hand. Repair it with [`nyl state restore`](/nyl/reference/cli/state/#nyl-state-restore). |
-| `NYL-LOCAL-RUN-UNRECORDED` | A `--local` run executed a unit that remote state does not know about. Record it with a remote `nyl reconcile -e <env> --unit <unit>` once the change is committed. |
-| `NYL-LOCAL-RUN-UNSUPPORTED` | `--local` needs remote state with state refs that are branches. |
-| `NYL-LOCAL-RUN-LEFTOVERS` | Remote state holds runs that died and were not taken over. Run `nyl reconcile -e <env>` without `--local` first. |
-| `NYL-LEASE-BROKEN` | A `--local` run found the remote lease broken and its run not imported. Run `nyl recover -e <env>` first. |
 | `NYL-RUN-STOPPED` | `--fail-fast` stopped the run after a unit failed, became uncertain, or waited for an approval. Fix that unit and run again. |
 | `NYL-UNIT-HELD` | A held unit keeps source changes or a teardown from applying. Lift the hold with `nyl resume`. |
 | `NYL-PLAN-UNITS-LEAVING` | Units leave the ownership set. Restore them in source or the `unitSelector` if they should stay. |

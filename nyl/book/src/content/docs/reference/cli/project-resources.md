@@ -82,9 +82,8 @@ nyl get units -e dev --local                  # this clone's local view
   print nothing and exit 1. `--allow-stale` prints the latest receipt's value
   with the warning `NYL-REFERENCE-STALE` instead.
 - `--state-revision <commit>` reads state as of an earlier state commit.
-- `--local` reads this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs),
-  including `nyl reconcile --local` runs, instead of the remote state. It
-  cannot be combined with `--state-revision`.
+- `--local` reads the configured local state repository without contacting the
+  remote. It cannot be combined with `--state-revision`.
 - `-o` selects `table` (default), `wide`, `yaml`, `json`, or `name`.
 
 Every form takes the project directory, or a path beneath it, as its last
@@ -125,8 +124,10 @@ only on the lock, so a filtered update agrees with an unfiltered `--check`.
 Every lock moves to the head of its revision. Each repository is fetched once
 per run. Locks are edited in place by their
 position, so write source locks and `fromGit` bindings in block style. Unit
-source locks require literal repository coordinates, revisions, and commits;
-unfiltered updates include them, while group and target filters select only
+source locks require literal repository coordinates, revisions, and commits.
+Nyl discovers source fields through each registered driver and warns when a unit
+cannot render without an environment; its locks are skipped. Unfiltered updates
+include renderable units, while group and target filters select only
 the named control resources. A revision without a commit follows its tip and
 has no lock to refresh.
 

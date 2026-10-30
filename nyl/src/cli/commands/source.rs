@@ -15,7 +15,20 @@ pub(crate) fn update_locks(
     check: bool,
 ) -> Result<()> {
     let inventory = discover_gitops_inventory(path, None)?;
-    let locks = collect_source_locks(&inventory, requested_group, requested_target)?;
+    #[cfg(feature = "test-kinds")]
+    let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
+    #[cfg(not(feature = "test-kinds"))]
+    let drivers = nyl_drivers::registry::builtin();
+    let locks = collect_source_locks(
+        &inventory,
+        requested_group,
+        requested_target,
+        &|api_version, kind, spec| {
+            drivers
+                .get(api_version, kind)
+                .map_or_else(Vec::new, |driver| driver.source_fields(spec))
+        },
+    )?;
     let mut manager = GitManager::new().map_err(NylError::Git)?;
     let resolutions = resolve_source_locks(locks, &mut manager)?;
     let mut stale = 0;

@@ -263,20 +263,13 @@ fn state_form(
         Err(Stop::Finding(finding)) => return Ok(refused(&finding)),
         Err(Stop::Error(error)) => return Err(error),
     };
-    let store = session.store(None)?;
-    let location = &session.resolved.location;
-    // `--local`: the clone's local view, through the store a `--local` run uses.
-    let local_store = if options.local {
-        match session.local_run(false, &[]) {
-            Ok(local) => Some(nyl_orchestration::shell::local::LocalStore::new(&store, local)),
-            Err(finding) => return Ok(refused(&finding)),
-        }
+    let store = if options.local {
+        session.offline_store(None)?
     } else {
-        None
+        session.store(None)?
     };
-    let state = local_store
-        .as_ref()
-        .map_or(&store as &dyn nyl_core::orchestration::ports::StateStore, |local| local);
+    let location = &session.resolved.location;
+    let state = &store as &dyn nyl_core::orchestration::ports::StateStore;
     let snapshot = match inspect::snapshot(state, location, None) {
         Ok(snapshot) => snapshot,
         Err(finding) => return Ok(refused(&finding)),
@@ -284,8 +277,8 @@ fn state_form(
     let snapshot = match &options.state_revision {
         None => snapshot,
         Some(revision) => {
-            let read = state_tips_at(&session.resolved.git_dir, &snapshot.tips, revision)
-                .and_then(|tips| inspect::snapshot(&store, location, Some(&tips)));
+            let read = state_tips_at(&store.repository_path(location), &snapshot.tips, revision)
+                .and_then(|tips| inspect::snapshot(state, location, Some(&tips)));
             match read {
                 Ok(snapshot) => snapshot,
                 Err(finding) => return Ok(refused(&finding)),

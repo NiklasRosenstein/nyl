@@ -105,6 +105,7 @@ pub fn run(args: &PlanArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             args.group.as_deref(),
             !args.teardown,
             args.source.as_deref(),
+            false,
             wiring.drivers,
         ),
         |environment, selected, planned, unavailable| {

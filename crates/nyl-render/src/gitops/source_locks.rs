@@ -82,6 +82,7 @@ pub fn collect_source_locks(
     inventory: &GitOpsInventory,
     group: Option<&str>,
     target: Option<&str>,
+    source_fields: &dyn Fn(&str, &str, &serde_json::Value) -> Vec<String>,
 ) -> Result<Vec<SourceLock>> {
     let groups_selected = group.is_some() || target.is_none();
     let targets_selected = target.is_some() || group.is_none();
@@ -155,7 +156,7 @@ pub fn collect_source_locks(
         }
     }
     if group.is_none() && target.is_none() {
-        collect_unit_locks(inventory, &mut locks)?;
+        collect_unit_locks(inventory, source_fields, &mut locks)?;
         collect_environment_locks(inventory, &mut locks)?;
     }
     if let Some(requested) = group.filter(|_| !group_found) {
@@ -172,50 +173,40 @@ pub fn collect_source_locks(
     Ok(locks)
 }
 
-fn collect_unit_locks(inventory: &GitOpsInventory, locks: &mut Vec<SourceLock>) -> Result<()> {
-    for unit in super::units::discover_units(inventory)?.into_values() {
-        if !matches!(unit.envelope.kind.as_str(), "OpenTofu" | "Terraform" | "OciImage") {
-            continue;
-        }
-        let document: serde_json::Value = serde_saphyr::from_str(&unit.raw_document).map_err(|error| {
-            NylError::config(format!(
-                "{} {} needs static source locks: {error}",
-                unit.envelope.kind, unit.envelope.metadata.name
-            ))
-        })?;
-        let mut fields = match unit.envelope.kind.as_str() {
-            "OpenTofu" | "Terraform" => vec![vec!["spec".to_owned(), "source".to_owned()]],
-            "OciImage" => vec![vec!["spec".to_owned(), "context".to_owned()]],
-            _ => Vec::new(),
-        };
-        if unit.envelope.kind == "OciImage" {
-            if let Some(contexts) = document
-                .pointer("/spec/contexts")
-                .and_then(serde_json::Value::as_object)
-            {
-                fields.extend(
-                    contexts
-                        .keys()
-                        .map(|name| vec!["spec".to_owned(), "contexts".to_owned(), name.clone()]),
+fn collect_unit_locks(
+    inventory: &GitOpsInventory,
+    source_fields: &dyn Fn(&str, &str, &serde_json::Value) -> Vec<String>,
+    locks: &mut Vec<SourceLock>,
+) -> Result<()> {
+    for (name, unit) in super::units::discover_units(inventory)? {
+        let spec = match super::units::render_direct_unit(inventory, &name, None) {
+            Ok((_, spec)) => spec,
+            Err(error) => {
+                tracing::warn!(
+                    "{}: cannot inspect source locks for {} {}: {error}; make the unit render without environment values or refresh its locks manually",
+                    nyl_core::orchestration::codes::Code::UnitInvalid,
+                    unit.envelope.kind,
+                    name
                 );
+                continue;
             }
-        }
-        for path in fields {
-            let value = path.iter().try_fold(&document, |value, key| value.get(key));
-            let Some(value) = value.filter(|value| value.get("commit").is_some()) else {
+        };
+        for pointer in source_fields(&unit.envelope.api_version, &unit.envelope.kind, &spec) {
+            let Some(value) = spec.pointer(&pointer).filter(|value| value.get("commit").is_some()) else {
                 continue;
             };
-            let source: crate::resources::GitSource = serde_json::from_value(value.clone()).map_err(|error| {
-                NylError::config(format!(
-                    "{} {} {}: {error}",
-                    unit.envelope.kind,
-                    unit.envelope.metadata.name,
-                    path.join(".")
-                ))
-            })?;
+            let source: crate::resources::GitSource = serde_json::from_value(value.clone())
+                .map_err(|error| NylError::config(format!("{} {} {pointer}: {error}", unit.envelope.kind, name)))?;
+            let mut path = vec!["spec".to_owned()];
+            path.extend(
+                pointer
+                    .trim_start_matches('/')
+                    .split('/')
+                    .map(|segment| segment.replace("~1", "/").replace("~0", "~")),
+            );
             let owner = LockOwner::Source {
                 kind: unit.envelope.kind.clone(),
-                name: unit.envelope.metadata.name.clone(),
+                name: name.to_string(),
                 path,
             };
             if let Some(lock) = collect_git_source(
@@ -599,6 +590,7 @@ spec:
         let old = "a".repeat(40);
         let document = format!("apiVersion: units.gitops.nyl/v1\nkind: OciImage\nmetadata: {{name: web}}\nspec:\n  context:\n    path: services/web\n    revision: main\n    commit: {old}\n  contexts:\n    tools:\n      path: tools\n      revision: tooling\n      commit: {old}\n  repository: registry.invalid/web\n");
         std::fs::write(directory.path().join("units.yaml"), &document).unwrap();
+        std::fs::write(directory.path().join("unrenderable.yaml"), "apiVersion: units.gitops.nyl/v1\nkind: OciImage\nmetadata: {name: dynamic}\nspec:\n  repository: '{{ values.registry }}'\n").unwrap();
         let repository = git2::Repository::init(directory.path()).unwrap();
         let mut index = repository.index().unwrap();
         index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
@@ -614,7 +606,10 @@ spec:
             .reference("refs/remotes/origin/tooling", head, true, "tooling")
             .unwrap();
         let inventory = super::super::discover_gitops_inventory(directory.path(), None).unwrap();
-        let locks = collect_source_locks(&inventory, None, None).unwrap();
+        let locks = collect_source_locks(&inventory, None, None, &|_, _, _| {
+            vec!["/context".to_owned(), "/contexts/tools".to_owned()]
+        })
+        .unwrap();
         assert_eq!(locks.len(), 2);
         let tools = locks
             .iter()
