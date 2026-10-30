@@ -1,0 +1,38 @@
+---
+// The page title with a breadcrumb above it: the layer and the page, and the
+// layer's status when it is in development or planned. Pages outside the
+// layers (Get started, Reference) show only the title.
+import { layerOf } from '../lib/layers.mjs';
+
+const { title } = Astro.locals.starlightRoute.entry.data;
+const layer = layerOf(Astro.url.pathname);
+---
+
+{
+  layer && (
+    <div class="crumbs">
+      <span>{layer.name}</span>
+      <span class="sep" aria-hidden="true">
+        /
+      </span>
+      <span class="current">{title}</span>
+      {layer.status && (
+        <span class="pill" data-tone={layer.tone}>
+          {layer.status}
+        </span>
+      )}
+    </div>
+  )
+}
+<h1 id="_top">{title}</h1>
+
+<style>
+  h1 {
+    margin-top: 1rem;
+    font-size: var(--sl-text-h1);
+    line-height: var(--sl-line-height-headings);
+    font-weight: 600;
+    color: var(--sl-color-white);
+    letter-spacing: -0.028em;
+  }
+</style>

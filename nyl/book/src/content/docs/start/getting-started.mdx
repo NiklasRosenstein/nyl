@@ -2,6 +2,8 @@
 title: 'Getting Started'
 ---
 
+import { Steps } from '@astrojs/starlight/components';
+
 This guide gets you from an empty GitOps source project to rendered Kubernetes manifests, then points you at the workflow that matches how you deploy.
 
 ## Installation
@@ -50,76 +52,80 @@ This installs `nyl` to `~/.cargo/bin/nyl`.
 
 ## Quick Start
 
-### 1. Create a Project
+<Steps>
 
-```bash
-nyl init platform --minimal
-cd platform
-```
+1. **Create a Project**
 
-This creates:
-- `nyl.toml` - Project configuration
-- `components/` - Directory for components
-- `applications/` - Application sources
-- `config/` - Cluster, target, repository, and Argo CD policy resources
+   ```bash
+   nyl init platform --minimal
+   cd platform
+   ```
 
-### 2. Add a Component
+   This creates:
+   - `nyl.toml` - Project configuration
+   - `components/` - Directory for components
+   - `applications/` - Application sources
+   - `config/` - Cluster, target, repository, and Argo CD policy resources
 
-```bash
-nyl create component v1.example.io MyApp
-```
+2. **Add a Component**
 
-This creates a new [local component](/nyl/kubernetes-rendering/components/authoring-local-components/) at `components/v1.example.io/MyApp/` with:
-- `Chart.yaml` - Helm chart metadata
-- `values.yaml` - Default values
-- `values.schema.json` - JSON schema for validation
-- `templates/deployment.yaml` - Kubernetes deployment template
+   ```bash
+   nyl create component v1.example.io MyApp
+   ```
 
-### 3. Validate
+   This creates a new [local component](/nyl/kubernetes-rendering/components/authoring-local-components/) at `components/v1.example.io/MyApp/` with:
+   - `Chart.yaml` - Helm chart metadata
+   - `values.yaml` - Default values
+   - `values.schema.json` - JSON schema for validation
+   - `templates/deployment.yaml` - Kubernetes deployment template
 
-```console
-$ nyl validate
-✓ Found project config: nyl.toml
-✓ Components search path exists: components
-✓ Helm chart search path exists: .
+3. **Validate**
 
-✓ Validation passed
-```
+   ```console
+   $ nyl validate
+   ✓ Found project config: nyl.toml
+   ✓ Components search path exists: components
+   ✓ Helm chart search path exists: .
 
-For CI, use strict mode to treat warnings as errors:
+   ✓ Validation passed
+   ```
 
-```bash
-nyl validate --strict
-```
+   For CI, use strict mode to treat warnings as errors:
 
-### 4. Render
+   ```bash
+   nyl validate --strict
+   ```
 
-Render a manifest file to stdout:
+4. **Render**
 
-```bash
-nyl render apps.yaml
-```
+   Render a manifest file to stdout:
 
-For a targetless deterministic render, provide Kubernetes capabilities explicitly:
+   ```bash
+   nyl render apps.yaml
+   ```
 
-```bash
-nyl render --kube-version 1.31.0 --kube-api-versions v1,apps/v1 apps.yaml
-```
+   For a targetless deterministic render, provide Kubernetes capabilities explicitly:
 
-For target-aware rendering, scaffold a Cluster and target, update the Cluster's
-capabilities, then select the target:
+   ```bash
+   nyl render --kube-version 1.31.0 --kube-api-versions v1,apps/v1 apps.yaml
+   ```
 
-```bash
-git init
-nyl create cluster local --context kind-kind
-nyl capture cluster local
-nyl create target dev
-nyl render --target dev apps.yaml
-```
+   For target-aware rendering, scaffold a Cluster and target, update the Cluster's
+   capabilities, then select the target:
 
-GitOps resource discovery follows Git visibility. Cluster creation records the
-context without contacting Kubernetes; `nyl capture cluster` performs the live
-capability refresh explicitly.
+   ```bash
+   git init
+   nyl create cluster local --context kind-kind
+   nyl capture cluster local
+   nyl create target dev
+   nyl render --target dev apps.yaml
+   ```
+
+   GitOps resource discovery follows Git visibility. Cluster creation records the
+   context without contacting Kubernetes; `nyl capture cluster` performs the live
+   capability refresh explicitly.
+
+</Steps>
 
 ## Project Structure
 

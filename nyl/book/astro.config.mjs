@@ -54,7 +54,11 @@ export default defineConfig({
           },
         },
       ],
-      expressiveCode: { plugins: [consoleOutput()] },
+      logo: { src: "./src/assets/logo.svg" },
+      expressiveCode: {
+        plugins: [consoleOutput()],
+        styleOverrides: { borderRadius: "0.625rem", borderColor: "var(--sl-color-gray-5)" },
+      },
       social: [
         {
           icon: "github",
@@ -65,6 +69,7 @@ export default defineConfig({
       customCss: ["./src/styles/custom.css"],
       components: {
         Header: "./src/components/Header.astro",
+        PageTitle: "./src/components/PageTitle.astro",
         Sidebar: "./src/components/Sidebar.astro",
       },
       plugins: [
@@ -79,9 +84,10 @@ export default defineConfig({
           {
             id: "kubernetes-rendering",
             label: "Kubernetes Rendering",
-            link: "/kubernetes-rendering/pipeline/",
+            link: "/kubernetes-rendering/",
             icon: "puzzle",
             items: [
+              "kubernetes-rendering",
               "kubernetes-rendering/pipeline",
               {
                 label: "Concepts",

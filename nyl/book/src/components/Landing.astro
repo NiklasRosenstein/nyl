@@ -10,7 +10,7 @@ const href = (path: string) => `${base}${path}`;
 
 const copy = {
   'kubernetes-rendering': {
-    link: '/kubernetes-rendering/pipeline/',
+    link: '/kubernetes-rendering/',
     text: 'Helm charts and reusable components, rendered from one config.',
     best: 'Testing, small teams, bootstrapping, break-glass.',
     badge: 'START HERE',
@@ -36,7 +36,7 @@ const stages = layers.map((layer, index) => ({ layer, number: index + 1, ...copy
 const [rendering, gitops, orchestration, modeling] = stages;
 ---
 
-<div class="landing">
+<div class="landing not-content">
   <section class="hero">
     <div class="intro">
       <div class="eyebrow">[ DOCUMENTATION ]</div>
@@ -142,7 +142,7 @@ const [rendering, gitops, orchestration, modeling] = stages;
     --surface: #0f181e;
     --surface-top: #131f28;
     --line: #26363f;
-    width: min(75rem, 100%);
+    width: min(71rem, 100%);
     margin-inline: auto;
     font-family: var(--__sl-font);
     color: var(--sl-color-gray-2);
@@ -387,13 +387,9 @@ const [rendering, gitops, orchestration, modeling] = stages;
     color: var(--sl-color-black);
     border: 6px solid var(--sl-color-bg);
   }
-  .stage[data-tone='teal']:not(:first-child) .node {
-    background: var(--sl-color-bg);
-    color: var(--tone);
-    border: 2px solid var(--tone);
-  }
   .stage[data-tone='grey'] .node {
     border-style: dashed;
+    border-color: var(--line);
   }
 
   .status {

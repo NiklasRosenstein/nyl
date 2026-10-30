@@ -95,10 +95,153 @@ body:has(.landing) .content-panel:first-child {
   border-top: 1px solid var(--sl-color-hairline);
 }
 
+.sl-markdown-content h2 {
+  font-size: 1.5625rem;
+}
+.sl-markdown-content h3 {
+  font-size: 1.0625rem;
+  font-weight: 600;
+}
+
+/* The page title: no rule under it, and the first paragraph leads. */
+.content-panel + .content-panel {
+  border-top: 0;
+}
+.sl-markdown-content > p:first-child {
+  font-size: 1.0625rem;
+  color: var(--sl-color-gray-2);
+}
+
 /* The current page in the sidebar is a tinted row, not a solid block. */
-:root[data-theme='dark'] .sidebar-content a[aria-current='page'] {
+.sidebar-content a[aria-current='page'] {
   background-color: var(--sl-color-accent-low);
   color: var(--sl-color-accent);
+}
+
+/* A layer in development takes amber for its current states. */
+:root:has(.sections a[data-tone='amber'][aria-current='page']) {
+  --sl-color-accent-low: #2a2312;
+  --sl-color-accent: var(--nyl-layer-amber);
+  --sl-color-accent-high: #f4dcae;
+}
+:root[data-theme='light']:has(.sections a[data-tone='amber'][aria-current='page']) {
+  --sl-color-accent-low: #fbf1dc;
+  --sl-color-accent-high: #5c3d00;
+}
+
+/* The sidebar tree is a compact list: small items, group names as labels,
+   no carets and no nesting rules. */
+.sidebar-content .top-level > li > a,
+.sidebar-content .large {
+  font-size: var(--sl-text-sm);
+  font-weight: 400;
+}
+.sidebar-content summary .group-label .large {
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  color: var(--sl-color-gray-3);
+}
+.sidebar-content summary svg {
+  display: none;
+}
+.sidebar-content ul ul {
+  border-inline-start: 0;
+  margin-inline-start: 0;
+  padding-inline-start: 0;
+}
+.sidebar-content a[aria-current='page'] {
+  font-weight: 600;
+}
+
+/* Inline code reads as teal. */
+.sl-markdown-content :not(pre) > code {
+  color: var(--sl-color-accent-high);
+  border-radius: 0.25rem;
+}
+.sl-markdown-content a code {
+  text-decoration: none;
+}
+
+/* Steps: numbered nodes on a rail, the first and last filled. */
+.sl-steps {
+  --bullet-size: 1.75rem;
+  --bullet-margin: 0.75rem;
+}
+.sl-steps > li::before {
+  background: var(--sl-color-bg);
+  border: 2px solid var(--sl-color-accent);
+  color: var(--sl-color-accent);
+  font-family: var(--__sl-font-mono);
+  font-size: 0.8125rem;
+  box-sizing: border-box;
+}
+.sl-steps > li:first-child::before,
+.sl-steps > li:last-child::before {
+  background: var(--sl-color-accent);
+  color: var(--sl-color-black);
+}
+.sl-steps > li::after {
+  border-inline-start: 2px solid var(--sl-color-gray-5);
+  background: none;
+}
+
+/* The page's breadcrumb, with the layer's status beside it. */
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+}
+.crumbs .sep {
+  margin-inline: -0.25rem;
+}
+.crumbs .current {
+  color: var(--sl-color-gray-1);
+}
+.crumbs .pill {
+  padding: 2px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-family: var(--__sl-font-mono);
+  font-size: var(--sl-text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.crumbs .pill[data-tone='amber'] {
+  color: var(--nyl-layer-amber);
+}
+.crumbs .pill[data-tone='grey'] {
+  color: var(--nyl-layer-grey);
+}
+
+/* Previous and next: compact cards. */
+.pagination-links a {
+  background: var(--sl-color-gray-6);
+  border-color: var(--sl-color-gray-5);
+  border-radius: 0.625rem;
+  box-shadow: none;
+}
+.pagination-links .link-title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* The mobile menu button matches the palette. */
+starlight-menu-button button {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-white);
+  border: 1px solid var(--sl-color-gray-5);
+  box-shadow: none;
+}
+
+/* The texture reaches the landing page's layer cards. */
+body:has(.landing)::before {
+  height: 1300px;
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 55%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 55%, transparent 100%);
 }
 
 /* Callouts: a full border with corner ticks in the callout's color. */
@@ -175,4 +318,10 @@ body:has(.landing) .content-panel:first-child {
 starlight-toc nav > ul,
 mobile-starlight-toc nav > ul {
   border-inline-start: 1px solid var(--sl-color-hairline);
+}
+starlight-toc h2 {
+  font: 500 0.6875rem var(--__sl-font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
 }

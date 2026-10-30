@@ -11,6 +11,9 @@ import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
 import { layerOf } from '../lib/layers.mjs';
 
 const { topics } = Astro.locals.starlightSidebarTopics;
+// Pages without a sidebar, such as the landing page, have no menu to hold the
+// tabs on narrow screens, so the tabs stay in the header and scroll.
+const { hasSidebar } = Astro.locals.starlightRoute;
 ---
 
 <div class="header">
@@ -18,7 +21,7 @@ const { topics } = Astro.locals.starlightSidebarTopics;
     <SiteTitle />
   </div>
   <div class="middle sl-flex print:hidden">
-    <nav class="sections" aria-label="Documentation sections">
+    <nav class:list={['sections', { 'no-sidebar': !hasSidebar }]} aria-label="Documentation sections">
       {
         topics.map((topic) => (
           <a
@@ -99,6 +102,15 @@ const { topics } = Astro.locals.starlightSidebarTopics;
 
   .sections a[data-tone='grey'][aria-current='page'] {
     border-bottom-color: var(--nyl-layer-grey);
+  }
+
+  @media (max-width: 49.99rem) {
+    .sections.no-sidebar {
+      display: flex;
+      overflow-x: auto;
+      max-width: 55vw;
+      scrollbar-width: none;
+    }
   }
 
   .right-group,
