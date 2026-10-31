@@ -8,9 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::units::{CommonUnitFields, KindSupport};
-use super::{DenyUnknownFields, GitSource};
-use crate::{CoreError, Result};
+use nyl_core::resources::units::{CommonUnitFields, KindSupport};
+use nyl_core::resources::{DenyUnknownFields, GitSource};
+use nyl_core::{CoreError, Result};
 
 /// A Terraform or OpenTofu infrastructure unit, preserving native state and locks.
 ///
@@ -22,7 +22,7 @@ pub struct TerraformUnit {
     /// `Terraform` or `OpenTofu`, selecting the native executable.
     pub kind: String,
     /// Literal unit name and labels used for environment selection.
-    pub metadata: super::units::UnitMetadata,
+    pub metadata: nyl_core::resources::units::UnitMetadata,
     /// Pinned configuration, native backend, variables, outputs, and common policy.
     pub spec: TerraformSpec,
 }
@@ -30,7 +30,7 @@ pub struct TerraformUnit {
 /// Infrastructure managed by Terraform or OpenTofu, retaining native state and locking.
 ///
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[schemars(transform = super::strict::deny_additional_properties)]
+#[schemars(transform = nyl_core::resources::strict::deny_additional_properties)]
 pub struct TerraformSpec {
     /// Configuration directory at the effective source revision. Relative local modules use the same checkout.
     #[schemars(schema_with = "required_source_schema")]
@@ -68,7 +68,7 @@ impl TerraformSpec {
             .path
             .as_deref()
             .ok_or_else(|| CoreError::config("spec.source.path is required"))?;
-        crate::local_path::validate_local_path("spec.source.path", path)?;
+        nyl_core::local_path::validate_local_path("spec.source.path", path)?;
         if self.source.is_remote() {
             self.source.validate_repository("spec.source")?;
         }
@@ -94,7 +94,7 @@ impl TerraformSpec {
         }
         for (field, paths) in [("files", &self.files), ("varFiles", &self.var_files)] {
             for (index, path) in paths.iter().enumerate() {
-                crate::local_path::validate_local_path(&format!("spec.{field}[{index}]"), path)?;
+                nyl_core::local_path::validate_local_path(&format!("spec.{field}[{index}]"), path)?;
                 if field == "files" {
                     glob::Pattern::new(path)
                         .map_err(|error| CoreError::config(format!("invalid spec.files glob: {error}")))?;
@@ -143,7 +143,7 @@ pub fn credential_setting(name: &str) -> bool {
 
 fn required_source_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let mut schema = GitSource::json_schema(generator);
-    super::git_source::require_fields(&mut schema, &["path"]);
+    nyl_core::resources::git_source::require_fields(&mut schema, &["path"]);
     schema
 }
 

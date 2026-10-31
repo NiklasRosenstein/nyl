@@ -1013,6 +1013,7 @@ mod tests {
         let cache_dir = TempDir::new().unwrap();
         let render_cache = RenderCache::with_root(cache_dir.path(), CacheMode::Default).unwrap();
         let config = ProjectConfig {
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
             file: None,
             config: ProjectFile::default(),
         };

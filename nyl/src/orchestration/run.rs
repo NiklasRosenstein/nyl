@@ -91,10 +91,23 @@ impl ProcessWiring {
     /// [`Self::new`], cancelled when `cancellation` is set: the process
     /// runner forwards its signal to every running tool's process group.
     pub fn cancelled_by(cancellation: Cancellation) -> Self {
-        #[cfg(feature = "tier2")]
-        let drivers = nyl_drivers::registry::with_fake_publication(&nyl_drivers::fake::Script::new());
-        #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
-        let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
+        #[cfg(feature = "test-kinds")]
+        let drivers = {
+            let script = nyl_drivers::fake::Script::new();
+            #[cfg(feature = "tier2")]
+            let mut drivers = nyl_drivers::registry::with_fake_publication(&script);
+            #[cfg(not(feature = "tier2"))]
+            let mut drivers = nyl_drivers::registry::with_test_kinds(&script);
+            drivers.register_as(
+                nyl_core::constants::API_VERSION_UNITS,
+                "KubernetesPublication",
+                std::sync::Arc::new(
+                    nyl_drivers::fake::FakePublication::new(script)
+                        .with_resource_catalogue(crate::config::ResourceCatalogue(crate::resource_catalogue())),
+                ),
+            );
+            drivers
+        };
         #[cfg(not(feature = "test-kinds"))]
         let drivers = nyl_drivers::registry::builtin();
         Self {

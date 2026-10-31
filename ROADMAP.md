@@ -150,6 +150,8 @@ recovery; they are not implied by graph export.
 
 ## Architectural frame
 
+Built-in unit declarations and their schemas live in the pure `nyl-units` crate. The CLI combines their descriptors with core resource descriptors for schema and editor workflows; drivers own native execution and orchestration remains generic.
+
 ### Layers
 
 | Layer | Responsibility |

@@ -2,6 +2,7 @@
 members = [
     "nyl",
     "crates/nyl-core",
+    "crates/nyl-units",
     "crates/nyl-git",
     "crates/nyl-render",
     "crates/nyl-state",
@@ -21,6 +22,7 @@ publish = false
 
 [workspace.dependencies]
 nyl-core = { path = "crates/nyl-core" }
+nyl-units = { path = "crates/nyl-units" }
 nyl-git = { path = "crates/nyl-git" }
 nyl-render = { path = "crates/nyl-render" }
 nyl-state = { path = "crates/nyl-state" }

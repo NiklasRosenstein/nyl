@@ -17,6 +17,7 @@ native-tests = []
 
 [dependencies]
 nyl-core = { workspace = true }
+nyl-units = { workspace = true }
 nyl-render = { workspace = true }
 
 chrono = { workspace = true }

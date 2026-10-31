@@ -7,7 +7,7 @@
 //! with an environment built here from nothing: `PATH` from the runner,
 //! `HOME` as a fresh directory, the `NYL_*` variables, and the admitted
 //! passthrough and secrets. The spec type is
-//! [`CommandSpec`](nyl_core::resources::units::CommandSpec).
+//! [`CommandSpec`](nyl_units::command::CommandSpec).
 //!
 //! - Every step's timeout is the context's `deadline - now`; the driver never
 //!   reads a clock.
@@ -32,8 +32,8 @@ use nyl_core::orchestration::state::{
     ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, Lifecycle, Receipt,
 };
 use nyl_core::orchestration::time::Timestamp;
-use nyl_core::resources::units::{CommandSpec, KIND_COMMAND};
 use nyl_render::util::project_path::ProjectPaths;
+use nyl_units::command::{CommandSpec, KIND_COMMAND};
 use serde_json::{Map, Value};
 
 /// Largest outputs file a step may write: 1 MiB.

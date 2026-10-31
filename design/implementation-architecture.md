@@ -20,7 +20,9 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
          │                      └► nyl-collections ─► nyl-core
          ├─► nyl-state ─────────┬► nyl-core
          │                      └► nyl-git
+         ├─► nyl-units ───────────► nyl-core
          ├─► nyl-drivers ─┬──────► nyl-core
+         │                ├──────► nyl-units
          │                └──────► nyl-render ─┬► nyl-core
          │                                     ├► nyl-collections
          │                                     └► nyl-git
@@ -30,13 +32,14 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
 | `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-units` | Built-in unit models, validation and static schema descriptors | Effects and Nyl crates other than `nyl-core` |
 | `nyl-collections` | Domain resource rules shared by rendering and orchestration: schema validation and defaulting, identity, membership, ownership claims, the reference closure, bundle assembly, transition rules ([domain resources](domain-resources.md#code-homes)) | Git, processes, network, clock, environment, and every Nyl crate except `nyl-core` |
 | `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
 | `nyl-render` | Today's Kubernetes rendering and Kubernetes GitOps, unchanged in behavior | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
-| `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
+| `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit execution using `nyl-units`; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` and `nyl-collections` |
-| `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
+| `nyl-cli` | Argument parsing, output formats, exit categories, the assembled resource catalogue, and wiring the concrete implementations into orchestration | Business rules |
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
   the binary, `cargo install --path nyl`, and the release artifacts unchanged.

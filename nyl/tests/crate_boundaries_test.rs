@@ -8,17 +8,19 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Each crate and the Nyl crates it may depend on.
-const ALLOWED: [(&str, &[&str]); 7] = [
+const ALLOWED: [(&str, &[&str]); 8] = [
     ("crates/nyl-core", &[]),
+    ("crates/nyl-units", &["nyl-core"]),
     ("crates/nyl-git", &[]),
     ("crates/nyl-render", &["nyl-core", "nyl-git"]),
     ("crates/nyl-state", &["nyl-core", "nyl-git"]),
     ("crates/nyl-orchestration", &["nyl-core"]),
-    ("crates/nyl-drivers", &["nyl-core", "nyl-render"]),
+    ("crates/nyl-drivers", &["nyl-core", "nyl-units", "nyl-render"]),
     (
         "nyl",
         &[
             "nyl-core",
+            "nyl-units",
             "nyl-git",
             "nyl-render",
             "nyl-state",

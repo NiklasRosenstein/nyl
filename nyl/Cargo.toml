@@ -32,6 +32,7 @@ tier2 = ["test-clock", "test-kinds"]
 
 [dependencies]
 nyl-core = { workspace = true }
+nyl-units = { workspace = true }
 nyl-render = { workspace = true }
 nyl-git = { workspace = true }
 nyl-state = { workspace = true }

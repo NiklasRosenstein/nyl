@@ -1,0 +1,16 @@
+[package]
+name = "nyl-units"
+description = "Pure built-in unit models and schemas"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+nyl-core = { workspace = true }
+glob = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

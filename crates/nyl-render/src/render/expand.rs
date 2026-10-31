@@ -219,9 +219,10 @@ pub(crate) async fn generate_render_resource(
     generated
         .into_iter()
         .map(|value| {
-            crate::resources::schema::validate_resource_api(&value).map_err(|error| {
-                NylError::from(error).with_render_provenance(provenance.resource(&value).to_string())
-            })?;
+            crate::resources::schema::validate_resource_api_with_catalog(&value, &config.resource_catalogue.0)
+                .map_err(|error| {
+                    NylError::from(error).with_render_provenance(provenance.resource(&value).to_string())
+                })?;
             Ok(RenderResource {
                 value,
                 provenance: provenance.clone(),
@@ -293,7 +294,7 @@ pub(crate) async fn generate_resource(
     gitops_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
-    crate::resources::schema::validate_resource_api(resource)?;
+    crate::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.0)?;
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());

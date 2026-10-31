@@ -4,18 +4,16 @@
 mod argocd_application_field_catalog;
 mod component;
 pub mod environment;
-mod git_source;
+pub mod git_source;
 mod gitops;
 mod helmchart;
 mod kyverno;
-pub mod oci_image;
 mod path_glob;
 mod release;
 pub mod release_inputs;
 mod remote_manifest;
 pub mod schema;
-mod strict;
-pub mod terraform;
+pub mod strict;
 pub mod units;
 
 pub use argocd_application_field_catalog::{

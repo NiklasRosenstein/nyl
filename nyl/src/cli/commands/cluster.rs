@@ -5,7 +5,7 @@ use std::path::Path;
 use clap::Args;
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
-use crate::gitops::discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
+use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::kubernetes::{KubeClient, KubeRsClient};
 use crate::resources::{Cluster, DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -177,7 +177,7 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
         })?;
     let capture_crds = !args.no_crds && (args.crds || inventory.project_config.config.capture.cluster.crds);
     let (info, crds) = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_mins(1),
         client.fetch(cluster, args.context.as_deref(), capture_crds),
     )
     .await

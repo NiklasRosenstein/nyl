@@ -1692,7 +1692,6 @@ fn default_source_include() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -2314,22 +2313,5 @@ mod tests {
                 "release.schema.json"
             ]
         );
-    }
-
-    #[test]
-    fn generated_gitops_schemas_match_published_artifacts() {
-        let schema_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../nyl/book")
-            .join("public")
-            .join("reference")
-            .join("schemas");
-        for (path, expected) in crate::resources::schema::schema_artifacts() {
-            let published = fs::read_to_string(schema_directory.join(&path)).unwrap();
-            let published: serde_json::Value = serde_json::from_str(&published).unwrap();
-            assert_eq!(
-                published, expected,
-                "Regenerate published schema {path} with nyl schema all"
-            );
-        }
     }
 }

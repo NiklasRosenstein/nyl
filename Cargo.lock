@@ -1945,6 +1945,7 @@ dependencies = [
  "nyl-orchestration",
  "nyl-render",
  "nyl-state",
+ "nyl-units",
  "predicates",
  "regex",
  "reqwest",
@@ -1995,6 +1996,7 @@ dependencies = [
  "libc",
  "nyl-core",
  "nyl-render",
+ "nyl-units",
  "regex",
  "schemars",
  "serde",
@@ -2085,6 +2087,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
+]
+
+[[package]]
+name = "nyl-units"
+version = "0.5.9"
+dependencies = [
+ "glob",
+ "nyl-core",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -14,8 +14,8 @@ use nyl_core::orchestration::ids::{EnvironmentName, Uid};
 use nyl_core::orchestration::state::{
     ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, FailureCategory, Receipt,
 };
-use nyl_core::resources::oci_image::{ImageContext, OciImageSpec};
 use nyl_render::util::project_path::ProjectPaths;
+use nyl_units::oci_image::{ImageContext, OciImageSpec};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::ffi::OsString;

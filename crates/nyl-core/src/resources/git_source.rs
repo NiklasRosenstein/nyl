@@ -137,7 +137,7 @@ impl GitSource {
 /// Mark `fields` required in the schema of a resource that flattens
 /// [`GitSource`], for the fields its use requires, and drop `null` from their
 /// types, as for a plain required field.
-pub(crate) fn require_fields(schema: &mut schemars::Schema, fields: &[&str]) {
+pub fn require_fields(schema: &mut schemars::Schema, fields: &[&str]) {
     let object = schema.ensure_object();
     if let Some(serde_json::Value::Object(properties)) = object.get_mut("properties") {
         for field in fields {

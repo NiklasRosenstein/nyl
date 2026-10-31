@@ -19,8 +19,8 @@ use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{
     DesiredUnit, Drift, FailureCategory, Lifecycle, Receipt, RetryAcknowledgement, UnitIdentity,
 };
-use nyl_core::resources::terraform::TerraformSpec;
 use nyl_render::util::project_path::ProjectPaths;
+use nyl_units::terraform::TerraformSpec;
 use serde_json::{json, Value};
 
 pub mod plan;

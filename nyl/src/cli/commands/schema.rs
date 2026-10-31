@@ -1,10 +1,25 @@
-use clap::{Args, Subcommand};
+use clap::{
+    builder::{PossibleValue, PossibleValuesParser},
+    Args, Subcommand,
+};
 use std::path::{Path, PathBuf};
 
-use crate::{resources::schema::ResourceKind, NylError, Result};
+use crate::{NylError, Result};
 
 /// Resource selector accepted by the schema CLI.
-pub type SchemaResourceKind = ResourceKind;
+pub type SchemaResourceKind = String;
+fn resource_parser() -> PossibleValuesParser {
+    PossibleValuesParser::new(
+        crate::resource_catalogue()
+            .into_iter()
+            .map(|kind| {
+                PossibleValue::new(kind.name)
+                    .alias(kind.slug)
+                    .aliases(kind.aliases.iter().copied())
+            })
+            .collect::<Vec<_>>(),
+    )
+}
 
 /// Generate project and resource schemas.
 #[derive(Args, Debug)]
@@ -20,7 +35,7 @@ enum SchemaCommand {
 
     /// Generate JSON schema for one resource kind.
     Resource {
-        #[arg(value_enum)]
+        #[arg(value_parser = resource_parser())]
         kind: SchemaResourceKind,
         /// Require this exact API version for the selected resource.
         #[arg(long)]
@@ -49,16 +64,21 @@ pub async fn execute(args: SchemaArgs) -> Result<()> {
     match args.command {
         SchemaCommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
         SchemaCommand::Resource { kind, api_version } => {
+            let kind = crate::resource_catalogue()
+                .into_iter()
+                .find(|item| {
+                    item.name.eq_ignore_ascii_case(&kind) || item.slug == kind || item.aliases.contains(&kind.as_str())
+                })
+                .ok_or_else(|| NylError::config(format!("Unknown resource kind {kind:?}")))?;
             if let Some(api_version) = api_version {
-                if api_version != kind.api_version() {
+                if api_version != kind.api_version {
                     return Err(NylError::config(format!(
                         "{} is defined in {}, not {api_version}",
-                        kind.name(),
-                        kind.api_version()
+                        kind.name, kind.api_version
                     )));
                 }
             }
-            print_schema(&kind.schema())
+            print_schema(&(kind.schema)())
         }
         SchemaCommand::Gitops => print_schema(&crate::resources::generate_gitops_aggregate_schema()),
         SchemaCommand::All { output_dir } => write_all_schemas(&output_dir),
@@ -68,7 +88,7 @@ pub async fn execute(args: SchemaArgs) -> Result<()> {
 
 async fn annotate(check: bool) -> Result<()> {
     let inventory = crate::gitops::discover_gitops_inventory_for_editing(&std::env::current_dir()?)?;
-    let report = crate::editor::annotate_project(&inventory, check).await?;
+    let report = crate::editor::annotate_project(&inventory, check, &crate::resource_catalogue()).await?;
     for (_, reason) in &report.unavailable_schemas {
         eprintln!("warning: {reason}; its comment is written, rerun nyl schema annotate once it is reachable");
     }
@@ -127,7 +147,7 @@ fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
 }
 
 fn write_all_schemas(output_dir: &Path) -> Result<()> {
-    for (path, schema) in crate::config::schema::published_schema_artifacts() {
+    for (path, schema) in crate::config::schema::published_schema_artifacts(&crate::resource_catalogue()) {
         let path = output_dir.join(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -136,4 +156,21 @@ fn write_all_schemas(output_dir: &Path) -> Result<()> {
         println!("Generated {}", path.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn generated_schemas_match_published_artifacts() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("book/public/reference/schemas");
+        for (path, expected) in crate::config::schema::published_schema_artifacts(&crate::resource_catalogue()) {
+            let published = std::fs::read_to_string(directory.join(&path)).unwrap();
+            let published: serde_json::Value = serde_json::from_str(&published).unwrap();
+            assert_eq!(
+                published, expected,
+                "Regenerate published schema {path} with nyl schema all"
+            );
+        }
+    }
 }

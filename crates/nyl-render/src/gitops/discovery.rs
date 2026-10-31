@@ -203,7 +203,21 @@ pub fn derived_group_source_root(project_root: &Path, group_source_path: &Path, 
 /// A relative `output_subtree` is resolved beneath the project root. The
 /// subtree is omitted from both the YAML file list and resource inventory.
 pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>) -> Result<GitOpsInventory> {
-    discover_inventory(start_dir, output_subtree, InvalidResources::Fail)
+    discover_inventory(
+        start_dir,
+        output_subtree,
+        InvalidResources::Fail,
+        crate::config::ResourceCatalogue::default(),
+    )
+}
+
+/// Discover a project using the resource APIs registered by the caller.
+pub fn discover_gitops_inventory_with_catalogue(
+    start_dir: &Path,
+    output_subtree: Option<&Path>,
+    catalogue: crate::config::ResourceCatalogue,
+) -> Result<GitOpsInventory> {
+    discover_inventory(start_dir, output_subtree, InvalidResources::Fail, catalogue)
 }
 
 /// Discover a project like [`discover_gitops_inventory`], leaving out
@@ -214,7 +228,12 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
 /// and a later duplicate of a name are skipped. The inventory is incomplete by
 /// design and must not feed rendering.
 pub fn discover_gitops_inventory_for_editing(start_dir: &Path) -> Result<GitOpsInventory> {
-    discover_inventory(start_dir, None, InvalidResources::Skip)
+    discover_inventory(
+        start_dir,
+        None,
+        InvalidResources::Skip,
+        crate::config::ResourceCatalogue::default(),
+    )
 }
 
 /// What discovery does with a resource document that cannot be parsed.
@@ -228,6 +247,7 @@ fn discover_inventory(
     start_dir: &Path,
     output_subtree: Option<&Path>,
     invalid: InvalidResources,
+    catalogue: crate::config::ResourceCatalogue,
 ) -> Result<GitOpsInventory> {
     let start_dir = if start_dir.is_file() {
         start_dir.parent().unwrap_or(start_dir)
@@ -236,7 +256,8 @@ fn discover_inventory(
     };
     let config_file =
         ProjectConfig::find(Some(start_dir))?.ok_or_else(|| NylError::ConfigNotFound("nyl.toml".to_owned()))?;
-    let project_config = ProjectConfig::load(Some(config_file.clone()))?;
+    let mut project_config = ProjectConfig::load(Some(config_file.clone()))?;
+    project_config.resource_catalogue = catalogue;
     let project_root = config_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -318,7 +339,13 @@ fn discover_project_inventory(
 
     for relative_path in &yaml_files {
         let absolute_path = project_root.join(relative_path);
-        match discover_file_resources(&absolute_path, relative_path, &mut resources, invalid) {
+        match discover_file_resources(
+            &absolute_path,
+            relative_path,
+            &mut resources,
+            invalid,
+            &project_config.resource_catalogue,
+        ) {
             Err(_) if invalid == InvalidResources::Skip => {}
             result => result?,
         }
@@ -404,12 +431,13 @@ fn discover_file_resources(
     relative_path: &Path,
     resources: &mut BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
     invalid: InvalidResources,
+    catalogue: &crate::config::ResourceCatalogue,
 ) -> Result<()> {
     let bytes = std::fs::read(absolute_path)?;
     let contents = String::from_utf8_lossy(&bytes);
 
     for (document_index, document) in split_yaml_documents(&contents).into_iter().enumerate() {
-        let discovered = discover_document(document, document_index, relative_path);
+        let discovered = discover_document(document, document_index, relative_path, catalogue);
         let (key, discovered) = match discovered {
             Ok(Some(found)) => found,
             Ok(None) => continue,
@@ -440,7 +468,22 @@ fn discover_document(
     document: &str,
     document_index: usize,
     relative_path: &Path,
+    catalogue: &crate::config::ResourceCatalogue,
 ) -> Result<Option<(GitOpsInventoryKey, DiscoveredGitOpsResource)>> {
+    let envelope = crate::yaml::parse_yaml_documents_k8s_compatible(document)
+        .ok()
+        .and_then(|documents| (documents.len() == 1).then(|| documents[0].clone()))
+        .unwrap_or_else(|| {
+            let (api_version, kind, name) = scan_static_envelope_fields(document);
+            serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
+        });
+    crate::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
+        NylError::config(format!(
+            "{} document {}: {error}",
+            relative_path.display(),
+            document_index + 1
+        ))
+    })?;
     if !advertises_gitops_api(document) {
         return Ok(None);
     }

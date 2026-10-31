@@ -28,6 +28,56 @@ fn project() -> TempDir {
 }
 
 #[test]
+fn test_invalid_unit_api_stops_validation_and_reconciliation_before_teardown() {
+    let fixture = project();
+    let world = World::new(fixture.path());
+    let checkout = world.fresh_clone("main");
+    nyl(&checkout, &["state", "init", "-e", "local"]).assert().success();
+    let marker = world.scenario_tmp().join("teardown");
+    let unit = checkout.join("unit.yaml");
+    std::fs::write(&unit, format!("apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata: {{name: job}}\nspec:\n  command: [sh, -c, 'true']\n  teardown: [sh, -c, 'touch {}']\n  idempotent: true\n", marker.display())).unwrap();
+    nyl(&checkout, &["reconcile", "-e", "local", "--worktree"])
+        .assert()
+        .success();
+    let state = git2::Repository::open_bare(world.scenario_tmp().join("state.git")).unwrap();
+    let refs = || {
+        state
+            .references()
+            .unwrap()
+            .map(|reference| {
+                let reference = reference.unwrap();
+                (reference.name().unwrap().to_owned(), reference.target())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = refs();
+    std::fs::write(
+        &unit,
+        "apiVersion: k8s.nyl/v1\nkind: OpenTofu\nmetadata: {name: job}\nspec: {}\n",
+    )
+    .unwrap();
+    let output = Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(&checkout)
+        .arg("validate")
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("units.gitops.nyl/v1"), "{error}");
+    let output = nyl(&checkout, &["reconcile", "-e", "local", "--worktree"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("units.gitops.nyl/v1"), "{error}");
+    assert_eq!(refs(), before);
+    assert!(!marker.exists());
+}
+
+#[test]
 fn test_worktree_reconciles_untracked_units_and_retains_source_for_fresh_clone_teardown_after_a_move() {
     let fixture = project();
     let world = World::new(fixture.path());

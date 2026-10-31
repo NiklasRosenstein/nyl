@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use nyl::resources::environment::Environment;
-use nyl::resources::units::{CommandSpec, UnitEnvelope, KIND_COMMAND};
+use nyl::resources::units::UnitEnvelope;
 use nyl::resources::{parse_gitops_resource, Release};
+use nyl_units::command::{CommandSpec, KIND_COMMAND};
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -60,11 +61,11 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
             } else if api_version == "units.gitops.nyl/v1" && kind == KIND_COMMAND {
                 parse_command(&document)
             } else if api_version == "units.gitops.nyl/v1" && kind == "OciImage" {
-                serde_json::from_value::<nyl::resources::oci_image::OciImage>(document.clone())
+                serde_json::from_value::<nyl_units::oci_image::OciImage>(document.clone())
                     .map_err(|error| error.to_string())
                     .and_then(|unit| unit.spec.validate().map_err(|error| error.to_string()))
             } else if api_version == "units.gitops.nyl/v1" && matches!(kind.as_str(), "OpenTofu" | "Terraform") {
-                serde_json::from_value::<nyl::resources::terraform::TerraformUnit>(document.clone())
+                serde_json::from_value::<nyl_units::terraform::TerraformUnit>(document.clone())
                     .map_err(|error| error.to_string())
                     .and_then(|unit| unit.spec.validate().map_err(|error| error.to_string()))
             } else if Release::is_release(&document) {
