@@ -151,7 +151,11 @@ A source input that needs a submodule or a Git LFS pointer cannot be
 reconstructed from the snapshot; vendor those files as ordinary Git content.
 Direct worktree operations reject required LFS pointer files; hydrate local file
 inputs or vendor Git source files as ordinary Git content. The flag requires exactly one named environment and
-conflicts with `--source`, label selectors, and group selectors.
+conflicts with `--source`, label selectors, and group selectors. Capture progress on
+stderr shows the base revision and file scope, then whether the snapshot was
+created or reused, its commit, elapsed time, local ref, and state history location.
+The state history retains it when the run records state. Structured
+output remains on stdout.
 
 State and run checkpoints archive the snapshot, including Git-visible uncommitted
 files, in the configured state repository. The source base is recorded as provenance
@@ -216,6 +220,13 @@ content its kind reads, such as a Command's `files` and `fingerprint`, and
 the names of the variables it may read. A change outside those inputs, such
 as a new commit that touches other files, never runs a unit again. A repeated
 reconcile with no changes executes nothing and writes no commit.
+
+Execution progress and the reconcile report explain why each dispatched unit
+runs. A changed driver behavior version is identified when the receipt records it;
+other key differences are reported as changed execution inputs. The complete earlier input manifest is not stored.
+Status and reconcile show a different Nyl version recorded in a receipt as
+provenance. Nyl version is not an execution key input and does not make a
+receipt stale or trigger execution.
 
 ## Waves
 

@@ -141,6 +141,7 @@ impl Session {
             &self.entry_commit()?,
             &identity,
             wiring.clock.as_ref(),
+            wiring.progress,
         )
         .map_err(|error| {
             Finding::new(
@@ -510,9 +511,17 @@ pub fn cell_label(value: Option<impl serde::Serialize>) -> String {
 /// held or deleting unit next to it, such as `held (uncertain)`.
 pub fn state_cell(unit: &UnitReport) -> String {
     let outcome = unit.outcome_name().unwrap_or("-");
-    match unit.condition {
-        Some(condition) => format!("{outcome} ({})", cell_label(Some(condition))),
-        None => outcome.to_owned(),
+    let mut details = Vec::new();
+    if outcome == "held" && unit.no_instance {
+        details.push("no instance".to_owned());
+    }
+    if let Some(condition) = unit.condition {
+        details.push(cell_label(Some(condition)));
+    }
+    if details.is_empty() {
+        outcome.to_owned()
+    } else {
+        format!("{outcome} ({})", details.join(", "))
     }
 }
 
@@ -550,24 +559,31 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
 /// failure message, or driver summary, followed by a held unit's pending
 /// changes (`pending changes from <commit>`) and the drift observation.
 pub fn detail(unit: &UnitReport) -> String {
-    if let Some(error) = &unit.plan_error {
-        return format!("plan failed: {error}");
+    let leading = if let Some(error) = &unit.plan_error {
+        Some(format!("plan failed: {error}"))
+    } else if !unit.blocked_by.is_empty() {
+        Some(
+            unit.blocked_by
+                .iter()
+                .map(|blocked| match &blocked.unit {
+                    Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
+                    None => format!("{}: {}", blocked.pointer, blocked.reason),
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
+        Some(reason.clone())
+    } else {
+        None
+    };
+    let mut parts: Vec<String> = leading.into_iter().collect();
+    if let Some(reason) = unit.execution_reason {
+        parts.push(format!("reason: {}", reason.description()));
     }
-    if !unit.blocked_by.is_empty() {
-        return unit
-            .blocked_by
-            .iter()
-            .map(|blocked| match &blocked.unit {
-                Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
-                None => format!("{}: {}", blocked.pointer, blocked.reason),
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
+    if let Some(version) = &unit.receipt_nyl_version {
+        parts.push(format!("receipt Nyl version: {version}"));
     }
-    if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
-        return reason.clone();
-    }
-    let mut parts = Vec::new();
     if let Some(pending) = &unit.pending {
         parts.push(format!("pending changes from {pending}"));
     }
@@ -627,7 +643,29 @@ pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, fi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nyl_orchestration::run_report::UnitResult;
+    use nyl_orchestration::run_report::{ConditionState, UnitResult, UnitState};
+
+    #[test]
+    fn test_held_without_instance_keeps_its_condition_visible() {
+        let mut unit = UnitReport::new("Command");
+        unit.state = Some(UnitState::Held);
+        unit.no_instance = true;
+        assert_eq!(state_cell(&unit), "held (no instance)");
+        unit.condition = Some(ConditionState::Uncertain);
+        assert_eq!(state_cell(&unit), "held (no instance, uncertain)");
+        unit.no_instance = false;
+        assert_eq!(state_cell(&unit), "held (uncertain)");
+    }
+
+    #[test]
+    fn test_blocked_unit_shows_receipt_version() {
+        let mut unit = UnitReport::new("Command");
+        unit.result = Some(UnitResult::Blocked {
+            reason: "waiting".to_owned(),
+        });
+        unit.receipt_nyl_version = Some("1.0".to_owned());
+        assert_eq!(detail(&unit), "waiting; receipt Nyl version: 1.0");
+    }
 
     /// Catches the table and the JSON telling different stories: both come
     /// from one report, and the exit is the one the command passes.

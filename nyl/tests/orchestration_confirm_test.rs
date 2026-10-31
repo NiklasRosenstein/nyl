@@ -565,6 +565,10 @@ fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
     );
     assert!(kubernetes.contains("state: held"), "{kubernetes}");
     assert!(
+        kubernetes.contains("teardown requested; automatic recreation is suspended"),
+        "{kubernetes}"
+    );
+    assert!(
         kubernetes.contains("name: kubernetes\n  apiVersion:"),
         "the held file has no uid: {kubernetes}"
     );

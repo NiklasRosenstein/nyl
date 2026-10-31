@@ -52,6 +52,18 @@ pub fn receipt_state(desired: Option<&DesiredUnit>, observed: Option<&ObservedUn
     }
 }
 
+/// Receipt provenance for this incarnation when its Nyl version differs.
+pub fn receipt_nyl_version(desired: &DesiredUnit, observed: Option<&ObservedUnit>, version: &str) -> Option<String> {
+    desired.unit.uid.as_ref()?;
+    crate::rules::freshness::same_incarnation(desired, observed)?
+        .receipt
+        .as_ref()?
+        .versions
+        .get("nyl")
+        .filter(|recorded| recorded.as_str() != version)
+        .cloned()
+}
+
 /// A unit's state from its persisted documents; `running` when a live run
 /// ref names it.
 pub fn unit_state(desired: &DesiredUnit, observed: Option<&ObservedUnit>, running: bool) -> UnitState {
@@ -284,7 +296,7 @@ fn condition_warning(
 /// (`NYL-TEARDOWN-PENDING`) or waiting under its `teardownWait`
 /// (`NYL-TEARDOWN-WAITING`). Contract: [Deletion](../../../../design/orchestration-core.md#deletion)
 /// and [Inspection](../../../../design/orchestration-core.md#inspection).
-fn lifecycle_details(
+pub(crate) fn lifecycle_details(
     environment: &EnvironmentName,
     name: &UnitName,
     desired: &DesiredUnit,
@@ -293,6 +305,7 @@ fn lifecycle_details(
 ) {
     match &desired.lifecycle {
         Lifecycle::Held { hold, deletion } => {
+            unit.no_instance = desired.unit.uid.is_none();
             unit.pending = hold.pending.as_ref().map(|pending| pending.source_commit.clone());
             let mut what = Vec::new();
             if let Some(pending) = &unit.pending {
@@ -919,12 +932,15 @@ mod tests {
             "deletion": {"reason": "replace", "intent": "teardown", "teardown": "pending",
                 "requested": {"by": "jane", "at": "2026-01-01T00:00:00Z"}}
         }));
+        snapshot.observed.remove(&name("network"));
         let report = status_at(&snapshot, &Coordination::default(), at("00:30"));
         let api = &report.units[&name("api")];
         assert_eq!(api.state, Some(UnitState::Held));
+        assert!(api.no_instance);
         assert_eq!(api.receipt, Some(ReceiptState::None));
         assert_eq!(api.kind, "");
         let network = &report.units[&name("network")];
+        assert!(!network.no_instance);
         assert_eq!(
             network.summary.as_deref(),
             Some("teardown pending, carried out after resume")
@@ -1008,5 +1024,32 @@ mod tests {
 
     fn codes(findings: &[Finding]) -> Vec<Code> {
         findings.iter().map(|finding| finding.code).collect()
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::receipt_nyl_version;
+    use crate::rules::fixtures::{desired_numbered, hex_key, observed_numbered};
+
+    #[test]
+    fn receipt_version_is_advisory_for_the_same_incarnation() {
+        let mut desired = desired_numbered("build", 1, Some(hex_key('a')));
+        let mut observed = observed_numbered("build", 1, Some(hex_key('a')));
+        observed
+            .receipt
+            .as_mut()
+            .unwrap()
+            .versions
+            .insert("nyl".into(), "1.0".into());
+        assert_eq!(
+            receipt_nyl_version(&desired, Some(&observed), "1.1").as_deref(),
+            Some("1.0")
+        );
+        assert_eq!(receipt_nyl_version(&desired, Some(&observed), "1.0"), None);
+        desired.unit.uid = None;
+        assert_eq!(receipt_nyl_version(&desired, Some(&observed), "1.1"), None);
+        desired.unit.uid = desired_numbered("build", 2, Some(hex_key('a'))).unit.uid;
+        assert_eq!(receipt_nyl_version(&desired, Some(&observed), "1.1"), None);
     }
 }

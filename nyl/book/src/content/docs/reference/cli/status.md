@@ -30,6 +30,8 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   resume". A held marker, written by `nyl hold` for a unit the environment
   never reconciled, has no kind (`-`) and no receipt. Each held unit warns
   with `NYL-UNIT-HELD`, naming [`nyl resume`](/nyl/reference/cli/hold/).
+  A held unit without a managed instance shows `held (no instance)`; this
+  does not say whether resources released from management still exist.
 - **Drift.** A unit with a current receipt shows its latest drift
   observation from [`nyl verify`](/nyl/reference/cli/verify/) in its detail
   (`drift: clean`, `drifted`, or `unknown`). A current unit whose latest

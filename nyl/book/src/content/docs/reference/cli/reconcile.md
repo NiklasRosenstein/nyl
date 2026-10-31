@@ -72,7 +72,7 @@ run still checkpoints them and writes its transition commit:
 
 ```console
 $ nyl reconcile -e dev --fail-fast --concurrency 1
-[dev/broken] starting Command (reconcile)
+[dev/broken] starting Command (reconcile): no receipt
   [dev/broken] connection refused
 [dev/broken] failed in 0.0s: command exited with code 1
 UNIT    KIND     RESULT   DETAIL

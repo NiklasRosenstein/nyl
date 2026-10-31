@@ -170,6 +170,8 @@ impl Cli {
             | Commands::Teardown(_)
             | Commands::Hold(_)
             | Commands::Resume(_) => {
+                #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
+                eprintln!("Nyl test build: fake drivers enabled; use a production build for real orchestration");
                 let cancellation = nyl_orchestration::shell::run::Cancellation::new();
                 // reconcile, verify, and recover end cleanly on SIGINT or
                 // SIGTERM instead of dying with the lease held.

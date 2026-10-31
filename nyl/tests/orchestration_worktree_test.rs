@@ -69,6 +69,10 @@ spec:
         .get_output()
         .clone();
     let stderr = String::from_utf8(first.stderr).unwrap();
+    assert!(stderr.contains(&format!("base {head}")), "{stderr}");
+    assert!(stderr.contains("[worktree] created snapshot"), "{stderr}");
+    assert!(stderr.contains("local ref refs/nyl-worktrees/"), "{stderr}");
+    assert!(stderr.find("[worktree] created snapshot").unwrap() < stderr.find("[local/producer] starting").unwrap());
     assert!(
         stderr.contains("[local/producer] starting Command (reconcile)"),
         "{stderr}"
@@ -86,9 +90,9 @@ spec:
         .assert()
         .success()
         .get_output()
-        .stdout
         .clone();
-    let again: serde_json::Value = serde_json::from_slice(&again).unwrap();
+    assert!(String::from_utf8_lossy(&again.stderr).contains("[worktree] reused snapshot"));
+    let again: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
     assert_eq!(
         again["environments"][0]["unitOrder"],
         serde_json::json!(["producer", "consumer"])

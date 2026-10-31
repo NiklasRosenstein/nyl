@@ -674,6 +674,8 @@ pub struct WorktreeSnapshot {
     pub commit: CommitId,
     /// Content-addressed local ref used by source selection and persisted provenance.
     pub revision: String,
+    /// Whether an existing snapshot with the same base and tree was reused.
+    pub reused: bool,
 }
 
 /// One unit as an environment's source renders it.

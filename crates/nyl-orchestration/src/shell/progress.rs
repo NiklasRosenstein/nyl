@@ -2,7 +2,7 @@
 //! Contract: [Execution](../../../../../design/orchestration-core.md#execution).
 use super::run::RunContext;
 use nyl_core::orchestration::ids::UnitAddress;
-use nyl_core::orchestration::progress::{UnitPhase, UnitProgress, UnitResult};
+use nyl_core::orchestration::progress::{ExecutionReason, UnitPhase, UnitProgress, UnitResult};
 use nyl_core::orchestration::state::{DesiredUnit, Operation};
 use nyl_core::orchestration::time::Timestamp;
 
@@ -13,13 +13,19 @@ pub(crate) struct Progress<'a> {
 }
 
 impl<'a> Progress<'a> {
-    pub(crate) fn start(context: &'a RunContext<'a>, unit: UnitAddress, kind: &str, operation: Operation) -> Self {
+    pub(crate) fn start(
+        context: &'a RunContext<'a>,
+        unit: UnitAddress,
+        kind: &str,
+        operation: Operation,
+        reason: Option<ExecutionReason>,
+    ) -> Self {
         let started = context.base.clock.now();
         let event = UnitProgress {
             unit,
             kind: kind.to_owned(),
             operation,
-            phase: UnitPhase::Started { at: started },
+            phase: UnitPhase::Started { at: started, reason },
         };
         if let Some(observer) = context.progress {
             observer.observe(&event);
@@ -32,12 +38,14 @@ impl<'a> Progress<'a> {
         environment: &nyl_core::orchestration::ids::EnvironmentName,
         unit: &DesiredUnit,
         operation: Operation,
+        reason: Option<ExecutionReason>,
     ) -> Self {
         Self::start(
             context,
             UnitAddress::new(environment.clone(), unit.unit.name.clone()),
             &unit.unit.kind,
             operation,
+            reason,
         )
     }
 
@@ -56,7 +64,7 @@ impl<'a> Progress<'a> {
         result: &UnitResult,
         message: Option<&str>,
     ) {
-        let UnitPhase::Started { at: started } = event.phase else {
+        let UnitPhase::Started { at: started, .. } = event.phase else {
             return;
         };
         event.phase = UnitPhase::Finished {

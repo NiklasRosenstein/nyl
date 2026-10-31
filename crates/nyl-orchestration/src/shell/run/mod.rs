@@ -2726,8 +2726,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             entry.receipt = Some(receipt_state(Some(unit), current));
             entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
             entry.blocked_by = blocked_by(unit);
+            entry.receipt_nyl_version =
+                crate::rules::unit_state::receipt_nyl_version(unit, current, &context.base.version);
             if let Some(execution) = executions.get(name) {
                 entry.result = Some(execution.result.clone());
+                entry.execution_reason = Some(execution.reason);
                 entry.change_digest.clone_from(&execution.change_digest);
                 entry.approval.clone_from(&execution.approval);
                 entry.message.clone_from(&execution.message);
@@ -2780,6 +2783,13 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         for (name, entry) in std::mem::take(&mut life.results) {
             if named(&name) {
                 self.report.units.insert(name, entry);
+            }
+        }
+        for (name, entry) in &mut self.report.units {
+            if matches!(entry.result, Some(UnitResult::Held { .. })) || entry.state == Some(UnitState::Held) {
+                entry.receipt_nyl_version = life.desired.get(name).and_then(|unit| {
+                    crate::rules::unit_state::receipt_nyl_version(unit, observed.get(name), &context.base.version)
+                });
             }
         }
         if let Some(stopped) = &life.stopped {

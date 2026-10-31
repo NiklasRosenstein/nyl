@@ -120,12 +120,43 @@ pub struct UnitProgress {
     pub phase: UnitPhase,
 }
 
+/// Why a unit was selected for execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionReason {
+    NoReceipt,
+    Retry,
+    Recovery,
+    Reapply,
+    DriftRepair,
+    OperatorModified,
+    DriverBehaviorChanged,
+    InputsChanged,
+}
+
+impl ExecutionReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::NoReceipt => "no receipt",
+            Self::Retry => "retry after failure",
+            Self::Recovery => "recover uncertain execution",
+            Self::Reapply => "requested reapply",
+            Self::DriftRepair => "repair drift",
+            Self::OperatorModified => "reconcile operator changes",
+            Self::DriverBehaviorChanged => "driver behavior version changed",
+            Self::InputsChanged => "execution inputs changed",
+        }
+    }
+}
+
 /// Start and completion of a unit, including setup failures before tool execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "phase", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum UnitPhase {
     Started {
         at: Timestamp,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<ExecutionReason>,
     },
     Finished {
         started: Timestamp,
@@ -135,7 +166,25 @@ pub enum UnitPhase {
     },
 }
 
+/// Capture of Git-visible working files before unit execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeCaptureProgress {
+    Started {
+        base: CommitId,
+        at: Timestamp,
+    },
+    Finished {
+        snapshot: super::ports::WorktreeSnapshot,
+        location: super::state::StateLocation,
+        started: Timestamp,
+        at: Timestamp,
+    },
+}
+
 /// Receives live events from concurrent unit executions. Observers must be thread-safe.
 pub trait ProgressObserver: Send + Sync {
     fn observe(&self, progress: &UnitProgress);
+
+    /// Receives worktree capture events before unit execution.
+    fn observe_worktree_capture(&self, _progress: &WorktreeCaptureProgress) {}
 }

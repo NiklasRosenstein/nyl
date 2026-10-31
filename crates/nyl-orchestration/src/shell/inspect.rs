@@ -45,14 +45,20 @@ pub fn status_with(
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
         let readiness = drivers.map(|drivers| teardown_readiness(environment, &snapshot, drivers));
-        Ok(crate::rules::unit_state::status_with_readiness(
+        let mut report = crate::rules::unit_state::status_with_readiness(
             environment,
             &snapshot,
             &coordination,
             context.clock.now(),
             drivers,
             &readiness.unwrap_or_default(),
-        ))
+        );
+        for (name, unit) in &mut report.units {
+            unit.receipt_nyl_version = snapshot.desired.get(name).and_then(|desired| {
+                crate::rules::unit_state::receipt_nyl_version(desired, snapshot.observed.get(name), &context.version)
+            });
+        }
+        Ok(report)
     };
     let mut environment_report = read().unwrap_or_else(|finding: Finding| {
         let mut failed = EnvironmentRunReport::new(environment.clone());

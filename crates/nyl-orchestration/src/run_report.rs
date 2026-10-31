@@ -452,12 +452,21 @@ impl LeavingConsequence {
 #[serde(rename_all = "camelCase")]
 pub struct UnitReport {
     pub kind: String,
+    /// Why this invocation selected the unit for execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_reason: Option<nyl_core::orchestration::progress::ExecutionReason>,
+    /// Receipt provenance when its Nyl version differs from this invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_nyl_version: Option<String>,
     /// What a reconcile did; `None` in plan and status reports.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub result: Option<UnitResult>,
     /// The unit's state for plan and status; `None` in reconcile reports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<UnitState>,
+    /// A held unit has no managed instance (its desired document has no uid).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_instance: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ReceiptState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -538,8 +547,11 @@ impl UnitReport {
     pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
+            execution_reason: None,
+            receipt_nyl_version: None,
             result: None,
             state: None,
+            no_instance: false,
             receipt: None,
             changes: None,
             change_digest: None,

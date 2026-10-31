@@ -17,6 +17,12 @@ use nyl_core::orchestration::state::{
     DeletionIntent, DeletionReason, Hold, Request, TeardownProgress, TeardownWaiting,
 };
 
+fn hold_reason(reason: Option<&str>) -> String {
+    reason
+        .unwrap_or("teardown requested; automatic recreation is suspended")
+        .to_owned()
+}
+
 /// The lifecycle state of one run: the stored desired documents as the run
 /// leaves them, what it writes, and what it reports.
 #[derive(Debug, Default)]
@@ -119,7 +125,7 @@ impl Life {
                     Hold {
                         since: requested.at,
                         by: requested.by.clone(),
-                        reason: requested.reason.clone(),
+                        reason: Some(hold_reason(requested.reason.as_deref())),
                         pending: None,
                     },
                 );
@@ -203,8 +209,7 @@ fn held_pending(unit: &DesiredUnit) -> (Option<CommitId>, bool) {
     }
 }
 
-/// The report of a held unit: what its hold keeps from applying, and
-/// `NYL-UNIT-HELD` when that is anything.
+/// The report of a held unit and what its hold keeps from applying.
 pub(super) fn held_report(
     environment: &EnvironmentName,
     name: &UnitName,
@@ -218,25 +223,7 @@ pub(super) fn held_report(
         teardown,
         recorded,
     });
-    entry.pending.clone_from(&pending);
-    if pending.is_some() || teardown {
-        let (what, then) = match (pending.as_ref(), teardown) {
-            (Some(commit), true) => (
-                format!("the changes of source commit {commit} and a pending teardown"),
-                "to apply them; the next reconcile or teardown carries the teardown out",
-            ),
-            (Some(commit), false) => (format!("the changes of source commit {commit}"), "to apply them"),
-            (None, _) => (
-                "a pending teardown".to_owned(),
-                "and the next reconcile or teardown carries it out",
-            ),
-        };
-        entry.warnings.push(Finding::new(
-            Code::UnitHeld,
-            format!("unit {name} of {environment} is held; the hold keeps {what} from applying"),
-            format!("lift the hold with `nyl resume -e {environment} --unit {name}` {then}"),
-        ));
-    }
+    crate::rules::unit_state::lifecycle_details(environment, name, unit, None, &mut entry);
     entry
 }
 
@@ -1166,9 +1153,14 @@ fn run_jobs(
         let handles: Vec<_> = jobs
             .into_iter()
             .map(|job| {
-                let progress =
-                    crate::shell::progress::Progress::for_unit(context, environment, job.unit, Operation::Teardown)
-                        .into_event();
+                let progress = crate::shell::progress::Progress::for_unit(
+                    context,
+                    environment,
+                    job.unit,
+                    Operation::Teardown,
+                    None,
+                )
+                .into_event();
                 scope.spawn(move || call(context, slots, environment, project_dir, job, &progress))
             })
             .collect();
@@ -1340,7 +1332,7 @@ pub(super) fn mark_teardowns(
         let hold = (request.lifecycle.hold || (all && in_set)).then(|| Hold {
             since: now,
             by: context.base.requested_by.clone(),
-            reason: request.reason.clone(),
+            reason: Some(hold_reason(request.reason.as_deref())),
             pending: None,
         });
         let capable = !unit.is_held_marker()
@@ -1439,4 +1431,12 @@ pub(super) fn mark_teardowns(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hold_reason_tests {
+    #[test]
+    fn test_preserves_requested_reason() {
+        assert_eq!(super::hold_reason(Some("maintenance")), "maintenance");
+    }
 }

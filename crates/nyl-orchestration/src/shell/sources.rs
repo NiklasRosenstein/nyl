@@ -21,19 +21,36 @@ pub fn snapshot_worktree(
     base: &CommitId,
     identity: &nyl_core::orchestration::ports::CommitIdentity,
     clock: &dyn nyl_core::orchestration::ports::Clock,
+    progress: Option<&dyn nyl_core::orchestration::progress::ProgressObserver>,
 ) -> Result<nyl_core::orchestration::ports::WorktreeSnapshot, String> {
+    use nyl_core::orchestration::progress::WorktreeCaptureProgress;
+    let started = clock.now();
+    if let Some(progress) = progress {
+        progress.observe_worktree_capture(&WorktreeCaptureProgress::Started {
+            base: base.clone(),
+            at: started,
+        });
+    }
     let previous = store.snapshot(location).map_err(|error| error.to_string())?;
     let snapshot = sources
         .snapshot_worktree(
             base,
             identity,
-            clock.now(),
+            started,
             previous.environment.as_ref().map(|record| &record.source_commit),
         )
         .map_err(|error| error.to_string())?;
     store
         .prepare_worktree_snapshot(location, &snapshot.commit)
         .map_err(|error| error.to_string())?;
+    if let Some(progress) = progress {
+        progress.observe_worktree_capture(&WorktreeCaptureProgress::Finished {
+            snapshot: snapshot.clone(),
+            location: location.clone(),
+            started,
+            at: clock.now(),
+        });
+    }
     Ok(snapshot)
 }
 

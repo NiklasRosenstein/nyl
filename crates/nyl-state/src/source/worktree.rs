@@ -297,6 +297,7 @@ pub(super) fn capture(
                     base: base.clone(),
                     commit: CommitId::new(candidate.to_string()).map_err(|cause| error(cause.to_string()))?,
                     revision,
+                    reused: true,
                 });
             }
         }
@@ -317,6 +318,7 @@ pub(super) fn capture(
         base: base.clone(),
         commit: CommitId::new(commit.to_string()).map_err(|cause| error(cause.to_string()))?,
         revision,
+        reused: false,
     })
 }
 
@@ -398,22 +400,21 @@ mod tests {
             .message()
             .unwrap()
             .contains(&format!("Nyl-Worktree-Base: {base}")));
-        assert_eq!(
-            capture(&repository, &base, &identity, now + chrono::Duration::hours(1), None).unwrap(),
-            snapshot
-        );
+        assert!(!snapshot.reused);
+        let reused = capture(&repository, &base, &identity, now + chrono::Duration::hours(1), None).unwrap();
+        assert!(reused.reused);
+        assert_eq!(reused.commit, snapshot.commit);
         repository.find_reference(&snapshot.revision).unwrap().delete().unwrap();
-        assert_eq!(
-            capture(
-                &repository,
-                &base,
-                &identity,
-                now + chrono::Duration::hours(2),
-                Some(&snapshot.commit)
-            )
-            .unwrap(),
-            snapshot
-        );
+        let recovered = capture(
+            &repository,
+            &base,
+            &identity,
+            now + chrono::Duration::hours(2),
+            Some(&snapshot.commit),
+        )
+        .unwrap();
+        assert!(recovered.reused);
+        assert_eq!(recovered.commit, snapshot.commit);
         std::fs::write(root.path().join("input"), "later").unwrap();
         assert_eq!(repository.find_blob(input).unwrap().content(), b"working");
         assert_ne!(

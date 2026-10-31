@@ -36,6 +36,8 @@ transition commit per state ref with the operation `teardown` and the
   still depends on waits for it, `pending-teardown`, exit 2.
 - `--all`: every unit, consumers first. Units still in the ownership set are
   held afterwards, without an incarnation, so nothing recreates them.
+  The hold records the supplied reason, or `teardown requested; automatic
+  recreation is suspended` when none is supplied.
   `--all` honours `deletionPolicy: Retain`: Retain units and retained
   tombstones are released, and so are units whose kind cannot tear down,
   such as an `OciImage`. A released unit's resources stay in place and the
@@ -80,17 +82,8 @@ request on its held desired file, tears nothing down, and exits 0, reporting
 the unit `held` with a pending teardown. After `nyl resume`, the next
 `reconcile` or `teardown` carries the request out as an explicit teardown.
 
-```console
-$ nyl teardown -e dev --unit config --reason replace config
-UNIT    KIND     RESULT  DETAIL
-config  Command  held
-
-  run:      01a17ac9-068c-7804-b8ec-12a293ec3f77
-  desired:  c61ce895d31795f4dd681bc8fb50101a1f4ea7b8
-
-warning NYL-UNIT-HELD (config)
-  unit config of dev is held; the hold keeps a pending teardown from applying
-  fix: lift the hold with `nyl resume -e dev --unit config` and the next reconcile or teardown carries it out
+```sh
+nyl teardown -e dev --unit config --reason 'replace config'
 ```
 
 ### Order and waits

@@ -28,6 +28,7 @@ use nyl_core::orchestration::state::{ApprovalRecord, FailureCategory};
 
 /// One finished execution.
 pub(super) struct Execution {
+    pub(super) reason: nyl_core::orchestration::progress::ExecutionReason,
     pub(super) name: UnitName,
     pub(super) result: UnitResult,
     pub(super) message: Option<String>,
@@ -47,6 +48,7 @@ pub(super) struct Execution {
 /// Everything one execution thread needs, prepared before it starts.
 struct Job<'j> {
     unit: &'j DesiredUnit,
+    reason: nyl_core::orchestration::progress::ExecutionReason,
     commit: &'j CommitId,
     observed: Option<&'j ObservedUnit>,
     previous_artifacts: BTreeMap<String, ArtifactDocument>,
@@ -76,6 +78,12 @@ pub(super) fn execute_batch(
         .enumerate()
         .map(|(slot, name)| Job {
             unit: &resolved.units[name],
+            reason: crate::rules::selection::execution_reason(
+                &resolved.units[name],
+                observed.get(name),
+                session.request.reapply_units().contains(name),
+                session.context.drivers,
+            ),
             commit: &resolved.commits[name],
             observed: observed.get(name),
             previous_artifacts: artifacts.get(name).cloned().unwrap_or_default(),
@@ -105,6 +113,7 @@ pub(super) fn execute_batch(
                     shared.environment,
                     job.unit,
                     Operation::Reconcile,
+                    Some(job.reason),
                 );
                 scope.spawn(move || execute(shared, job, progress))
             })
@@ -156,6 +165,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     let name = unit.unit.name.clone();
     let mut execution = Execution {
         name: name.clone(),
+        reason: job.reason,
         result: UnitResult::Current,
         message: None,
         change_digest: None,
