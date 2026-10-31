@@ -15,7 +15,7 @@ nyl apply [--target <TARGET>] [OPTIONS] <FILE>
 The `apply` command renders manifests, applies them with server-side apply, and tracks release state.
 It applies a Release as its Argo CD Application would deploy it from the
 `render-tree` output, including managed Namespaces, and prunes as an Argo CD sync
-prunes. See [Rendering Pipeline](/nyl/kubernetes/pipeline/#the-releases-application)
+prunes. See [Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/#the-releases-application)
 for the behavior `render`, `diff`, and `apply` share.
 
 ## Arguments
@@ -104,7 +104,7 @@ Like an Argo CD sync, pruning reads each live resource's
 tracking it, and `Prune=confirm` keeps it, still tracked, until an apply with
 `--confirm-prune`. Managed Namespaces carry `Prune=confirm` by default, so
 dropping a namespace from a Release never deletes it and its contents
-unconfirmed. See [Pruning and deletion](/nyl/kubernetes/pipeline/#pruning-and-deletion).
+unconfirmed. See [Pruning and deletion](/nyl/kubernetes-rendering/pipeline/#pruning-and-deletion).
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by
@@ -222,10 +222,10 @@ nyl apply --target production --no-release manifest.yaml
 - Resources without `metadata.namespace` take the destination namespace of the
   Release's Application, or `--namespace` for a file without a Release. The kube
   context's default namespace is never used. See
-  [Namespaces in diff and apply](/nyl/kubernetes/pipeline/#namespaces-in-diff-and-apply).
+  [Namespaces in diff and apply](/nyl/kubernetes-rendering/pipeline/#namespaces-in-diff-and-apply).
 
 ## Manifest validation
 
 Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
+[Manifest validation](/nyl/kubernetes-rendering/validation/manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.

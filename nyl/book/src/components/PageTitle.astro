@@ -1,0 +1,44 @@
+---
+// The page title with a breadcrumb above it: the section and the page, and a
+// layer's status when it is in development or planned. A section's landing
+// page shows the section once.
+import { layerOf } from '../lib/layers.mjs';
+
+const { title } = Astro.locals.starlightRoute.entry.data;
+const topic = Astro.locals.starlightSidebarTopics.topics.find((candidate) => candidate.isCurrent);
+const layer = layerOf(Astro.url.pathname);
+const isLanding = topic ? Astro.url.pathname.replace(/\/$/, '').endsWith(topic.link.replace(/\/$/, '')) : false;
+---
+
+{
+  topic && (
+    <div class="crumbs">
+      <span class={isLanding ? 'current' : undefined}>{topic.label}</span>
+      {!isLanding && (
+        <>
+          <span class="sep" aria-hidden="true">
+            /
+          </span>
+          <span class="current">{title}</span>
+        </>
+      )}
+      {layer?.status && (
+        <span class="pill" data-tone={layer.tone}>
+          {layer.status}
+        </span>
+      )}
+    </div>
+  )
+}
+<h1 id="_top">{title}</h1>
+
+<style>
+  h1 {
+    margin-top: 1rem;
+    font-size: var(--sl-text-h1);
+    line-height: var(--sl-line-height-headings);
+    font-weight: 600;
+    color: var(--sl-color-white);
+    letter-spacing: -0.028em;
+  }
+</style>

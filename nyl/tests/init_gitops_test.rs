@@ -37,7 +37,7 @@ fn initializes_simple_gitops_project_from_detected_repository() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Initialized rendered GitOps configuration at gitops.yaml",
+            "Initialized Kubernetes GitOps configuration at gitops.yaml",
         ));
 
     assert!(repository.path().join("nyl.toml").is_file());
