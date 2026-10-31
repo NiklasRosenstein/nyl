@@ -205,3 +205,64 @@ fn test_parallel_completion_keeps_dispatch_order_and_normalized_events() {
         .iter()
         .all(|event| event.operation == Operation::Teardown));
 }
+
+#[test]
+fn test_cli_color_policy_and_structured_diagnostic() {
+    let unit = command("web", "true", "  idempotent: true\n");
+    let fixture = project(&[
+        NYL_TOML,
+        ("nyl/environment.yaml", ENVIRONMENT),
+        ("nyl/unit.yaml", &unit),
+    ]);
+    let world = scenario::world::World::new(fixture.path());
+    let checkout = world.fresh_clone("main");
+    let home = tempfile::TempDir::new().unwrap();
+    let run = |args: &[&str]| {
+        let command = if args[0] == "state" {
+            scenario::nyl_as_author(&checkout, args)
+        } else {
+            scenario::nyl_binary(&checkout, home.path(), args)
+        };
+        assert_cmd::Command::from_std(command)
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .get_output()
+            .clone()
+    };
+    assert!(run(&["state", "init", "-e", "dev"]).status.success());
+    let plain = run(&["get", "units", "--color", "never"]);
+    let colored = run(&["get", "units", "--color", "always"]);
+    assert_eq!(
+        plain.status.code(),
+        colored.status.code(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    assert!(!plain.stdout.is_empty(), "{}", String::from_utf8_lossy(&plain.stderr));
+    let plain = String::from_utf8(plain.stdout).unwrap();
+    let colored = String::from_utf8(colored.stdout).unwrap();
+    assert!(colored.contains("\x1b[1mNAME\x1b[0m"), "{colored:?}");
+    assert_eq!(
+        colored
+            .replace("\x1b[1m", "")
+            .replace("\x1b[2m", "")
+            .replace("\x1b[0m", ""),
+        plain
+    );
+    assert!(run(&["state", "delete", "-e", "dev", "--reason", "decommission"])
+        .status
+        .success());
+    let plain = run(&["status", "-e", "dev", "--color", "never"]);
+    let colored = run(&["status", "-e", "dev", "--color", "always", "-o", "json"]);
+    let automatic = run(&["status", "-e", "dev", "--color", "auto", "-o", "json"]);
+    let _: serde_json::Value = serde_json::from_slice(&colored.stdout).unwrap();
+    let plain = String::from_utf8(plain.stderr).unwrap();
+    let colored = String::from_utf8(colored.stderr).unwrap();
+    let automatic = String::from_utf8(automatic.stderr).unwrap();
+    assert_eq!(automatic, plain);
+    assert!(colored.contains("\x1b[1;31merror\x1b[0m"), "{colored:?}");
+    assert!(
+        plain.contains("Start over") && plain.contains("Decommission") && plain.contains("NYL-STATE-DELETED"),
+        "{plain}"
+    );
+}

@@ -323,19 +323,32 @@ pub(crate) fn lifecycle_details(
                 Some(reason) => format!("{} ({reason})", hold.by),
                 None => hold.by.clone(),
             };
-            let what = if what.is_empty() {
+            let pending = what.join(", ");
+            let what = if pending.is_empty() {
                 String::new()
             } else {
-                format!("; {}", what.join(", "))
+                format!("; {pending}")
             };
-            unit.warnings.push(Finding::new(
+            let mut finding = Finding::new(
                 Code::UnitHeld,
                 format!(
                     "{name} is held by {by} since {}{what}",
                     hold.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 ),
                 format!("reconcile changes nothing about it until `nyl resume -e {environment} --unit {name}`"),
-            ));
+            )
+            .with_title(format!("Unit '{name}' is held in environment '{environment}'"));
+            if let Some(reason) = &hold.reason {
+                finding = finding.with_detail("Reason", reason);
+            }
+            finding = finding
+                .with_detail("Since", hold.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .with_detail("By", &hold.by);
+            if !pending.is_empty() {
+                finding = finding.with_detail("Pending", pending);
+            }
+            unit.warnings
+                .push(finding.with_action("Action", format!("nyl resume -e {environment} --unit {name}")));
         }
         Lifecycle::Deleting { deletion } => {
             if let Some(waiting) = observed.and_then(|observed| observed.waiting.as_ref()) {
@@ -874,7 +887,7 @@ mod tests {
     fn test_held_and_uncertain_exits_4_with_the_condition() {
         let mut snapshot = snapshot(&[("database", 2)]);
         snapshot.desired.get_mut(&name("database")).unwrap().lifecycle = lifecycle(json!({
-            "state": "held", "hold": {"since": "2026-01-01T00:00:00Z", "by": "jane",
+            "state": "held", "hold": {"since": "2026-01-01T00:00:00Z", "by": "jane", "reason": "maintenance",
                 "pending": {"sourceCommit": "5a90000000000000000000000000000000000000"}}
         }));
         snapshot.observed.get_mut(&name("database")).unwrap().condition = Some(condition(json!({
@@ -893,6 +906,27 @@ mod tests {
             .iter()
             .find(|warning| warning.code == Code::UnitHeld)
             .unwrap();
+        assert_eq!(
+            held.presentation.title.as_deref(),
+            Some("Unit 'database' is held in environment 'dev'")
+        );
+        assert_eq!(
+            held.presentation
+                .details
+                .iter()
+                .map(|field| (field.label.as_str(), field.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Reason", "maintenance"),
+                ("Since", "2026-01-01T00:00:00Z"),
+                ("By", "jane"),
+                (
+                    "Pending",
+                    "pending changes from 5a90000000000000000000000000000000000000"
+                ),
+            ]
+        );
+        assert_eq!(held.presentation.actions[0].value, "nyl resume -e dev --unit database");
         assert!(held.fix.contains("nyl resume -e dev --unit database"), "{}", held.fix);
         assert!(held.message.contains("pending changes from 5a90"), "{}", held.message);
         assert_eq!(report.exit, ExitCategory::Uncertain);

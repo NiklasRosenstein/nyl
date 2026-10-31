@@ -135,6 +135,9 @@ pub fn deleted(environment: &EnvironmentName) -> Finding {
             "remove the Environment {environment} from source to decommission it, or start it over with `nyl state init -e {environment} --fresh`"
         ),
     )
+    .with_title(format!("State for environment '{environment}' was deleted"))
+    .with_action("Start over", format!("nyl state init -e {environment} --fresh"))
+    .with_action("Decommission", format!("remove Environment {environment} from source"))
 }
 
 /// Check that the state record exists, belongs to `environment`, and
@@ -389,6 +392,22 @@ mod tests {
         };
         let finding = check_record(Some(&record), &dev(), &location).unwrap_err();
         assert_eq!(finding.code, Code::StateDeleted);
+        assert_eq!(
+            finding.presentation.title.as_deref(),
+            Some("State for environment 'dev' was deleted")
+        );
+        assert_eq!(
+            finding
+                .presentation
+                .actions
+                .iter()
+                .map(|field| (field.label.as_str(), field.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Start over", "nyl state init -e dev --fresh"),
+                ("Decommission", "remove Environment dev from source"),
+            ]
+        );
         assert!(finding.fix.contains("remove the Environment") && finding.fix.contains("--fresh"));
         check_location(Some(&record), &dev(), &location).unwrap();
         record.events.push(StateEvent::StateInitialized {

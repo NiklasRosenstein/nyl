@@ -566,9 +566,19 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
                 Outcome::Unchanged => "unchanged",
                 Outcome::Refused => "refused",
             };
+            let status = match report.outcome {
+                Outcome::Done => crate::cli::presentation::styled(status, crate::cli::presentation::Style::Success),
+                Outcome::Refused => crate::cli::presentation::styled(status, crate::cli::presentation::Style::Failure),
+                Outcome::Unchanged => status.to_owned(),
+            };
             let _ = writeln!(stdout, "{} {}: {status}", report.operation, report.environment);
             for (side, commit) in &report.commits {
-                let _ = writeln!(stdout, "  {side}: {commit}");
+                let _ = writeln!(
+                    stdout,
+                    "  {} {}",
+                    crate::cli::presentation::styled(&format!("{side}:"), crate::cli::presentation::Style::Dim),
+                    crate::cli::presentation::styled(commit.as_ref(), crate::cli::presentation::Style::Dim)
+                );
             }
             for (key, value) in &report.details {
                 if key == "teardown" {
@@ -578,7 +588,11 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
                     continue;
                 }
                 let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
-                let _ = writeln!(stdout, "  {key}: {value}");
+                let _ = writeln!(
+                    stdout,
+                    "  {} {value}",
+                    crate::cli::presentation::styled(&format!("{key}:"), crate::cli::presentation::Style::Dim)
+                );
             }
         }
     }
@@ -616,7 +630,7 @@ mod tests {
         assert_eq!(text.stdout, "state-init local: refused\n  location: repository\n");
         assert_eq!(
             text.stderr,
-            "\nerror NYL-STATE-DELETED\n  state was deleted\n  fix: use --fresh\n"
+            "\nerror  state was deleted\n\n  Action  use --fresh\n\n  NYL-STATE-DELETED\n"
         );
 
         report
@@ -633,7 +647,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&json.stdout).unwrap(),
             json.report
         );
-        assert_eq!(json.stderr, "\nwarning NYL-DRIVER-ERROR\n  warning one\n  fix: fix one\n\nwarning NYL-DRIVER-ERROR\n  warning two\n  fix: fix two\n\nerror NYL-STATE-DELETED\n  state was deleted\n  fix: use --fresh\n\nerror NYL-DRIVER-ERROR\n  error two\n  fix: fix three\n");
+        assert_eq!(json.stderr, "\nwarning  warning one\n\n  Action  fix one\n\n  NYL-DRIVER-ERROR\n\nwarning  warning two\n\n  Action  fix two\n\n  NYL-DRIVER-ERROR\n\nerror  state was deleted\n\n  Action  use --fresh\n\n  NYL-STATE-DELETED\n\nerror  error two\n\n  Action  fix three\n\n  NYL-DRIVER-ERROR\n");
 
         report.warnings.clear();
         report.errors.clear();

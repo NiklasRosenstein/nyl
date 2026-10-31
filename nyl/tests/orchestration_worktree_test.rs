@@ -82,6 +82,25 @@ spec:
     let first = first.stdout;
     let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
     let environment = &first["environments"][0];
+    let warning = environment["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "NYL-SOURCE-WORKTREE")
+        .unwrap();
+    assert_eq!(warning["title"], "Running a worktree snapshot");
+    assert_eq!(
+        warning["details"],
+        serde_json::json!([
+            {"label": "Snapshot", "value": environment["sourceCommit"]},
+            {"label": "Base", "value": head},
+            {"label": "Storage", "value": "the configured state repository"},
+        ])
+    );
+    assert_eq!(
+        warning["actions"][0]["value"],
+        "Commit source changes and reconcile without --worktree for committed-source evidence."
+    );
     assert_eq!(environment["unitOrder"], serde_json::json!(["producer", "consumer"]));
     assert_eq!(environment["units"]["producer"]["result"], "executed");
     assert_eq!(environment["units"]["consumer"]["result"], "executed");

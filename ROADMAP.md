@@ -28,8 +28,8 @@ items and exit criterion are tracked in the documentation, on the
 
 ## Progress and next step
 
-The interfaces below describe the current direction, including planned capabilities.
-Status, progress, and the next step are on the
+The interfaces below describe the current direction, including planned
+capabilities. Status, progress, and the next step are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/). Milestone identifiers stay
 stable for references from issues and pull requests:
 
