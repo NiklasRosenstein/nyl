@@ -1,4 +1,4 @@
-//! Kubernetes-shaped configuration resources for rendered GitOps workflows.
+//! Kubernetes-shaped configuration resources for Kubernetes GitOps workflows.
 //!
 //! These resources are compiler inputs. They are not installed in a Kubernetes
 //! cluster. Their `apiVersion`, `kind`, and local `metadata.name` form a static
@@ -77,7 +77,7 @@ pub struct GitRepositorySpec {
 ///
 /// ## When needed
 ///
-/// Required for every workload destination and every explicitly configured Argo CD control-plane destination in rendered GitOps.
+/// Required for every workload destination and every explicitly configured Argo CD control-plane destination in Kubernetes GitOps.
 ///
 /// ## If omitted
 ///
@@ -269,7 +269,7 @@ impl Default for CatalogApplicationDefaults {
 ///
 /// ## When needed
 ///
-/// Required for target-aware rendered GitOps operations. It supplies workload Cluster selection and publication coordinates.
+/// Required for target-aware Kubernetes GitOps operations. It supplies workload Cluster selection and publication coordinates.
 ///
 /// ## If omitted
 ///
@@ -446,7 +446,7 @@ pub enum AppProjectManagement {
 ///
 /// ## When needed
 ///
-/// Required to select Release entry files and generate their workload Applications in rendered GitOps.
+/// Required to select Release entry files and generate their workload Applications in Kubernetes GitOps.
 ///
 /// ## If omitted
 ///
@@ -990,7 +990,7 @@ pub fn parse_gitops_resource_identity(value: &serde_json::Value) -> Result<Optio
     }))
 }
 
-/// Strictly parse and validate a complete, already-rendered GitOps resource.
+/// Strictly parse and validate a complete, already-Kubernetes GitOps resource.
 pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsResource>> {
     let Some(identity) = parse_gitops_resource_identity(value)? else {
         return Ok(None);
@@ -1598,7 +1598,7 @@ pub fn validate_relative_path(field: &str, value: &str, allow_empty: bool, allow
 }
 
 /// Convert a platform-native relative path to the slash-separated form stored
-/// in rendered GitOps metadata.
+/// in Kubernetes GitOps metadata.
 pub fn relative_path_to_posix(field: &str, value: &Path) -> Result<String> {
     let mut segments = Vec::new();
     for component in value.components() {

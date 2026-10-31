@@ -32,16 +32,16 @@ export function resourceUsage(schema) {
  */
 export const resourceSections = [
   {
-    id: 'kubernetes',
-    label: 'Kubernetes Resources',
-    route: '/reference/resources/kubernetes/',
+    id: 'kubernetes-rendering',
+    label: 'Kubernetes Rendering Resources',
+    route: '/reference/resources/kubernetes-rendering/',
     apiVersions: ['k8s.nyl/v1', 'components.k8s.nyl/v1'],
     include: ['Release'],
   },
   {
-    id: 'rendered-gitops',
-    label: 'Rendered GitOps Resources',
-    route: '/reference/resources/rendered-gitops/',
+    id: 'kubernetes-gitops',
+    label: 'Kubernetes GitOps Resources',
+    route: '/reference/resources/kubernetes-gitops/',
     apiVersions: ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'],
     exclude: ['Release', 'Environment', 'EnvironmentGroup'],
   },
@@ -54,8 +54,8 @@ export const resourceSections = [
   },
 ];
 /** Each resource's usage guide: its section's guide directory, unless it lives elsewhere. */
-const guideDirectories = { kubernetes: 'kubernetes', 'rendered-gitops': 'rendered-gitops', orchestration: 'orchestration' };
-const guideOverrides = { Release: 'rendered-gitops', Cluster: 'rendered-gitops' };
+const guideDirectories = { 'kubernetes-rendering': 'kubernetes-rendering', 'kubernetes-gitops': 'kubernetes-gitops', orchestration: 'orchestration' };
+const guideOverrides = { Release: 'kubernetes-gitops', Cluster: 'kubernetes-gitops' };
 export function guideRoute(resource) {
   return `/${guideOverrides[resource.name] ?? guideDirectories[sectionOf(resource).id]}/resource-guides/${resource.slug}/`;
 }
@@ -98,8 +98,3 @@ export function resourceSidebar() {
     };
   });
 }
-export const resourceRedirects = Object.fromEntries(resources.map((resource) => {
-  const oldSlug = resource.name === 'HelmChart' ? 'helmchart' : resource.slug;
-  const prefix = ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'].includes(resource.apiVersion) ? 'gitops/' : '';
-  return [`/reference/resources/${prefix}${oldSlug}`, resource.route];
-}));

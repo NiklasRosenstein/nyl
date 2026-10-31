@@ -252,7 +252,7 @@ async fn init_gitops(args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result
     }
 
     println!(
-        "✓ Initialized rendered GitOps configuration at {}",
+        "✓ Initialized Kubernetes GitOps configuration at {}",
         path_for_display(&config.output).display()
     );
     if config.create_project_config {

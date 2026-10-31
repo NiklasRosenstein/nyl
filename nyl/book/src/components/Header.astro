@@ -2,13 +2,22 @@
 // Starlight's header with the documentation sections as tabs between the
 // site title and the search box. Below the desktop breakpoint the tabs move
 // into the menu, which shows the sections above each section's sidebar.
+// The current tab is underlined in its layer's color.
 import LanguageSelect from '@astrojs/starlight/components/LanguageSelect.astro';
 import Search from '@astrojs/starlight/components/Search.astro';
 import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
 import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
 import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
+import { layerOf } from '../lib/layers.mjs';
 
 const { topics } = Astro.locals.starlightSidebarTopics;
+// Pages without a sidebar, such as the landing page, have no menu to hold the
+// tabs on narrow screens, so the tabs stay in the header and scroll.
+const { hasSidebar, id } = Astro.locals.starlightRoute;
+// The topics plugin marks no topic on pages without a sidebar; the landing page
+// belongs to Get started.
+const isLanding = !hasSidebar && (id === '' || id === 'index');
+const isCurrent = (topic: (typeof topics)[number]) => topic.isCurrent || (isLanding && topic.link.includes('/start/'));
 ---
 
 <div class="header">
@@ -16,10 +25,14 @@ const { topics } = Astro.locals.starlightSidebarTopics;
     <SiteTitle />
   </div>
   <div class="middle sl-flex print:hidden">
-    <nav class="sections" aria-label="Documentation sections">
+    <nav class:list={['sections', { 'no-sidebar': !hasSidebar }]} aria-label="Documentation sections">
       {
         topics.map((topic) => (
-          <a href={topic.link} aria-current={topic.isCurrent ? 'page' : undefined}>
+          <a
+            href={topic.link}
+            aria-current={isCurrent(topic) ? 'true' : undefined}
+            data-tone={layerOf(topic.link)?.tone ?? 'teal'}
+          >
             {topic.label}
           </a>
         ))
@@ -49,36 +62,73 @@ const { topics } = Astro.locals.starlightSidebarTopics;
     overflow: clip;
     padding: 0.25rem;
     margin: -0.25rem;
-    min-width: 0;
+    min-width: auto;
+    flex-shrink: 0;
   }
 
   .middle {
     align-items: center;
     gap: 1.5rem;
+    height: 100%;
   }
 
   .sections {
     display: none;
-    gap: 1.25rem;
+    gap: 1.375rem;
+    align-self: stretch;
   }
 
+  /* Every tab has the same box, so the labels share one baseline and the
+     current tab's underline sits on the bottom edge of the header. */
   .sections a {
-    color: var(--sl-color-gray-2);
+    display: flex;
+    align-items: center;
+    color: var(--sl-color-gray-3);
     font-size: var(--sl-text-sm);
-    font-weight: 600;
+    font-weight: 500;
     text-decoration: none;
     white-space: nowrap;
-    padding-block: 0.25rem;
     border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
   }
 
   .sections a:hover {
     color: var(--sl-color-white);
   }
 
-  .sections a[aria-current='page'] {
+  .sections a[aria-current='true'] {
     color: var(--sl-color-white);
-    border-bottom-color: var(--sl-color-accent);
+    border-bottom-color: var(--nyl-layer-teal);
+  }
+
+  .sections a[data-tone='amber'][aria-current='true'] {
+    border-bottom-color: var(--nyl-layer-amber);
+  }
+
+  .sections a[data-tone='grey'][aria-current='true'] {
+    border-bottom-color: var(--nyl-layer-grey);
+  }
+
+  /* Where the tabs would not fit (or have no menu to move into), they stay in
+     the header and scroll, with a fade at the edge that hints at more. */
+  @media (max-width: 75.99rem) {
+    .sections.no-sidebar {
+      display: flex;
+      overflow-x: auto;
+      /* Only sideways: the tabs' 1px overlap with the header edge would
+         otherwise make the strip scroll, and bounce, vertically too. */
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+      min-width: 0;
+      flex: 1;
+      scrollbar-width: none;
+      -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent);
+      mask-image: linear-gradient(90deg, #000 85%, transparent);
+    }
+    .middle:has(.no-sidebar) {
+      min-width: 0;
+      flex: 1;
+    }
   }
 
   .right-group,
@@ -93,11 +143,14 @@ const { topics } = Astro.locals.starlightSidebarTopics;
     border-inline-end: 1px solid var(--sl-color-gray-5);
   }
 
-  @media (min-width: 50rem) {
+  /* The tabs need about 75rem; narrower than that they live in the sidebar. */
+  @media (min-width: 76rem) {
     .sections {
       display: flex;
     }
+  }
 
+  @media (min-width: 50rem) {
     .header {
       display: grid;
       grid-template-columns: auto 1fr auto;

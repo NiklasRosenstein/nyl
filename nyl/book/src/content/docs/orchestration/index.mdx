@@ -1,0 +1,50 @@
+---
+title: 'Orchestration'
+---
+
+import LinkCards from '../../../components/LinkCards.astro';
+
+:::caution[In development]
+Orchestration is in development. The orchestration core (milestone M3) has
+shipped: environments, their state in Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
+[Command](/nyl/orchestration/resource-guides/command/) units, one
+environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
+[`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs,
+drift repair, and lifecycle work), and [`nyl status`](/nyl/reference/cli/status/),
+recovery with [`nyl recover`](/nyl/reference/cli/recover/) and
+[`nyl verify`](/nyl/reference/cli/verify/), and deletion with
+[`nyl teardown`](/nyl/reference/cli/teardown/),
+[`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), `nyl state
+delete`, runs over several environments, and approvals. Container image and
+Terraform units (M4) come next. The [roadmap](/nyl/orchestration/roadmap/)
+tracks the milestones.
+:::
+
+Orchestration makes Nyl a Git-driven reconciler for whole environments. Units
+such as commands, infrastructure configurations, container images, and
+Kubernetes publications run in dependency order, record their results in Git,
+and pass their outputs to the units that depend on them. Like everything in
+Nyl, a run takes [one path](/nyl/start/introduction/#one-declaration-one-path)
+whether it starts on a workstation or in CI.
+
+## Resources
+
+<LinkCards
+  mono
+  items={[
+    { title: 'Environment', text: 'Selects the units it runs and names where its state lives.', href: '/reference/resources/gitops.nyl/v1/environment/' },
+    { title: 'EnvironmentGroup', text: 'Gives several environments shared defaults.', href: '/reference/resources/gitops.nyl/v1/environment-group/' },
+  ]}
+/>
+
+## Guides
+
+<LinkCards
+  items={[
+    { title: 'Environments and state', text: 'How state is stored, protected by a lease, and supported by Git hosts.', href: '/orchestration/environments-and-state/' },
+    { title: 'Runs', text: 'How a run chooses its source commit, resolves references between units, decides what executes, and records the result.', href: '/orchestration/runs/' },
+    { title: 'Recovery', text: 'How a run takes over from one that died, what an uncertain unit is, how to recover it, and how drift is repaired.', href: '/orchestration/recovery/' },
+    { title: 'Deletion and holds', text: 'How units leave an environment, how they are torn down, and how a hold freezes one.', href: '/orchestration/deletion/' },
+    { title: 'Git storage', text: 'Every repository and ref orchestration reads and writes.', href: '/reference/git-storage/' },
+  ]}
+/>

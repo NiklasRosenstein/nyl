@@ -3,11 +3,19 @@ import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import starlightSidebarTopics from "starlight-sidebar-topics";
 import { consoleOutput } from "./src/lib/console-output.mjs";
-import { movedPages } from "./src/lib/moved-pages.mjs";
-import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
+import { resourceSidebar } from "./src/lib/resources.mjs";
+import { layers } from "./src/lib/layers.mjs";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
 const authoredDocsBase = "/nyl";
+
+// A layer's tab label and status badge come from the one list of layers.
+const layer = (id) => layers.find((candidate) => candidate.id === id);
+const layerLabel = (id) => layer(id).name;
+const layerBadge = (id) => {
+  const { status, tone } = layer(id);
+  return status ? { text: status, variant: tone === "amber" ? "caution" : "default" } : undefined;
+};
 
 function rewriteNylLinks() {
   return (tree) => {
@@ -37,17 +45,29 @@ function rewriteNylLinks() {
 export default defineConfig({
   site: "https://niklasrosenstein.github.io",
   base: basePath,
-  redirects: Object.fromEntries(
-    Object.entries({ ...resourceRedirects, ...movedPages }).map(([from, to]) => [from, `${basePath}${to}`]),
-  ),
   markdown: {
     processor: unified({ remarkPlugins: [rewriteNylLinks] }),
   },
   integrations: [
     starlight({
       title: "Nyl",
-      description: "A fast Kubernetes manifest generator for rendered GitOps.",
-      expressiveCode: { plugins: [consoleOutput()] },
+      description: "Nyl turns configuration in Git into deployed systems.",
+      head: [
+        { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" } },
+        { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" } },
+        {
+          tag: "link",
+          attrs: {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap",
+          },
+        },
+      ],
+      logo: { src: "./src/assets/logo.svg" },
+      expressiveCode: {
+        plugins: [consoleOutput()],
+        styleOverrides: { borderRadius: "0.625rem", borderColor: "var(--sl-color-gray-5)" },
+      },
       social: [
         {
           icon: "github",
@@ -58,6 +78,7 @@ export default defineConfig({
       customCss: ["./src/styles/custom.css"],
       components: {
         Header: "./src/components/Header.astro",
+        PageTitle: "./src/components/PageTitle.astro",
         Sidebar: "./src/components/Sidebar.astro",
       },
       plugins: [
@@ -65,87 +86,89 @@ export default defineConfig({
           {
             id: "start",
             label: "Get started",
-            link: "/",
+            link: "/start/getting-started/",
             icon: "rocket",
             items: ["index", "start/introduction", "start/getting-started"],
           },
           {
-            id: "kubernetes",
-            label: "Kubernetes",
-            link: "/kubernetes/pipeline/",
+            id: "kubernetes-rendering",
+            label: layerLabel("kubernetes-rendering"),
+            link: "/kubernetes-rendering/",
             icon: "puzzle",
             items: [
-              "kubernetes/pipeline",
+              "kubernetes-rendering",
+              "kubernetes-rendering/pipeline",
               {
                 label: "Concepts",
                 items: [
                   {
                     label: "Components",
                     items: [
-                      "kubernetes/components/overview",
-                      "kubernetes/components/authoring-local-components",
-                      "kubernetes/components/value-imports",
-                      "kubernetes/components/resolution-and-lookup",
-                      "kubernetes/components/remote-shortcuts-and-aliases",
-                      "kubernetes/components/troubleshooting",
+                      "kubernetes-rendering/components/overview",
+                      "kubernetes-rendering/components/authoring-local-components",
+                      "kubernetes-rendering/components/value-imports",
+                      "kubernetes-rendering/components/resolution-and-lookup",
+                      "kubernetes-rendering/components/remote-shortcuts-and-aliases",
+                      "kubernetes-rendering/components/troubleshooting",
                     ],
                   },
-                  "kubernetes/git-integration",
+                  "kubernetes-rendering/git-integration",
                 ],
               },
               {
                 label: "Workflow",
                 items: [
-                  "kubernetes/cli-workflows",
-                  "kubernetes/validation/manifest-validation",
-                  "kubernetes/validation/kyverno-policies",
-                  "kubernetes/renovate",
+                  "kubernetes-rendering/cli-workflows",
+                  "kubernetes-rendering/validation/manifest-validation",
+                  "kubernetes-rendering/validation/kyverno-policies",
+                  "kubernetes-rendering/renovate",
                 ],
               },
-              { label: "Resources", items: [{ autogenerate: { directory: "kubernetes/resource-guides" } }] },
+              { label: "Resources", items: [{ autogenerate: { directory: "kubernetes-rendering/resource-guides" } }] },
             ],
           },
           {
-            id: "rendered-gitops",
-            label: "Rendered GitOps",
-            link: "/rendered-gitops/",
+            id: "kubernetes-gitops",
+            label: layerLabel("kubernetes-gitops"),
+            link: "/kubernetes-gitops/",
             icon: "code-branch",
             items: [
-              "rendered-gitops",
+              "kubernetes-gitops",
+              "kubernetes-gitops/rendered-manifest-pattern",
               {
                 label: "Concepts",
                 items: [
-                  "rendered-gitops/project-structure",
-                  "rendered-gitops/targets-and-clusters",
-                  "rendered-gitops/release-inputs",
-                  "rendered-gitops/rendered-layout",
+                  "kubernetes-gitops/project-structure",
+                  "kubernetes-gitops/targets-and-clusters",
+                  "kubernetes-gitops/release-inputs",
+                  "kubernetes-gitops/rendered-layout",
                 ],
               },
               {
                 label: "Workflow",
                 items: [
-                  "rendered-gitops/workflow/render",
-                  "rendered-gitops/workflow/diff",
-                  "rendered-gitops/workflow/publish",
-                  "rendered-gitops/workflow/move-publication",
+                  "kubernetes-gitops/workflow/render",
+                  "kubernetes-gitops/workflow/diff",
+                  "kubernetes-gitops/workflow/publish",
+                  "kubernetes-gitops/workflow/move-publication",
                 ],
               },
               {
                 label: "Resources",
                 items: [
-                  { slug: "rendered-gitops/resources", label: "Overview" },
-                  { autogenerate: { directory: "rendered-gitops/resource-guides" } },
+                  { slug: "kubernetes-gitops/resources", label: "Overview" },
+                  { autogenerate: { directory: "kubernetes-gitops/resource-guides" } },
                 ],
               },
-              "rendered-gitops/security",
+              "kubernetes-gitops/security",
             ],
           },
           {
             id: "orchestration",
-            label: "Orchestration",
+            label: layerLabel("orchestration"),
             link: "/orchestration/",
             icon: "setting",
-            badge: { text: "M3", variant: "caution" },
+            badge: layerBadge("orchestration"),
             items: [
               "orchestration",
               "orchestration/environments-and-state",
@@ -157,12 +180,12 @@ export default defineConfig({
             ],
           },
           {
-            id: "domain-resources",
-            label: "Domain resources",
-            link: "/domain-resources/",
+            id: "domain-modeling",
+            label: layerLabel("domain-modeling"),
+            link: "/domain-modeling/",
             icon: "list-format",
-            badge: { text: "Planned", variant: "note" },
-            items: ["domain-resources", "domain-resources/example", "domain-resources/roadmap"],
+            badge: layerBadge("domain-modeling"),
+            items: ["domain-modeling", "domain-modeling/example", "domain-modeling/roadmap"],
           },
           {
             id: "reference",

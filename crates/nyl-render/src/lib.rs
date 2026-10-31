@@ -15,7 +15,7 @@
     clippy::derivable_impls
 )]
 
-//! Nyl rendering: Kubernetes manifest generation and rendered GitOps.
+//! Nyl rendering: Kubernetes manifest generation and Kubernetes GitOps.
 //!
 //! This crate holds today's rendering pipeline. It never depends on
 //! orchestration crates. See `design/implementation-architecture.md`.
