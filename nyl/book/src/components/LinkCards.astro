@@ -1,0 +1,65 @@
+---
+// A grid of cards that link to pages under the docs base. Section index pages
+// use it for their resources and guides, so each card is one click target.
+interface Props {
+  items: { title: string; text: string; href: string }[];
+  // Titles are resource kinds, set in the mono face.
+  mono?: boolean;
+}
+
+const { items, mono = false } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+
+<div class="cards not-content">
+  {
+    items.map((item) => (
+      <a class="card" href={`${base}${item.href}`}>
+        <div class:list={['title', { mono }]}>{item.title}</div>
+        <div class="text">{item.text}</div>
+      </a>
+    ))
+  }
+</div>
+
+<style>
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: 1rem;
+    margin-top: 1.25rem;
+  }
+
+  .card {
+    display: block;
+    padding: 1.125rem 1.25rem;
+    background: var(--sl-color-gray-6);
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.625rem;
+    text-decoration: none;
+    transition: border-color 0.15s;
+  }
+
+  .card:hover {
+    border-color: var(--sl-color-accent);
+  }
+
+  .title {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--sl-color-white);
+  }
+
+  .title.mono {
+    font-family: var(--__sl-font-mono);
+    font-weight: 500;
+    font-size: 0.9375rem;
+  }
+
+  .text {
+    margin-top: 0.5rem;
+    font-size: var(--sl-text-sm);
+    line-height: 1.55;
+    color: var(--sl-color-gray-3);
+  }
+</style>

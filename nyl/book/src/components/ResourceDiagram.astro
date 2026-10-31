@@ -4,7 +4,7 @@
 import { resources } from '../lib/resources.mjs';
 
 interface Props {
-  section: 'kubernetes' | 'rendered-gitops' | 'orchestration';
+  section: 'kubernetes-rendering' | 'kubernetes-gitops' | 'orchestration';
 }
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
@@ -18,7 +18,7 @@ const H = 44;
 type Node = { label: string; x: number; y: number; w?: number; h?: number; link?: boolean; note?: string };
 type Edge = { from: [number, number]; to: [number, number]; label: string; at?: [number, number]; anchor?: string };
 
-// Rendered GitOps: configuration resources and the fields that reference others.
+// Kubernetes GitOps: configuration resources and the fields that reference others.
 const gitops: Node[] = [
   { label: 'ArgoCDInstance', x: 40, y: 30, link: true },
   { label: 'DeploymentTarget', x: 300, y: 30, link: true },
@@ -77,7 +77,7 @@ const orchestrationEdges: Edge[] = [
 
 const diagrams = [
   {
-    id: 'rendered-gitops',
+    id: 'kubernetes-gitops',
     nodes: gitops,
     edges: gitopsEdges,
     viewBox: '0 0 760 390',
@@ -85,7 +85,7 @@ const diagrams = [
       'A DeploymentTarget binds a Cluster, an optional ArgoCDInstance, and a publication GitRepository, and selects ApplicationGroups by label. Each ApplicationGroup reads Releases from its source directory and may share an AppProjectDefinition.',
   },
   {
-    id: 'kubernetes',
+    id: 'kubernetes-rendering',
     nodes: rendering,
     edges: renderingEdges,
     viewBox: '0 0 790 320',
