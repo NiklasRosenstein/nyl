@@ -197,3 +197,21 @@ The published project schema is available at
 arguments that return CI approvers as JSON. It runs before unit effects, with
 a 30-second timeout. See [Approvals](/nyl/orchestration/runs/#approvals) for
 its context variables, response format, identity precedence, and GitHub lookup.
+
+## Native unit tool versions
+
+Set a default exact version per native infrastructure kind:
+
+```toml
+[units.OpenTofu]
+version = "1.13.2"
+
+[units.Terraform]
+version = "1.9.8"
+```
+
+A unit's `spec.version` overrides its kind's project default. The selected
+version enters its execution key, and a different installed binary fails before
+native effects. Without a version, the installed tool runs and its version is
+recorded in the receipt without triggering execution when the binary changes.
+Nyl never downloads tools.

@@ -96,7 +96,7 @@ its kind's recovery policy:
 
 | Policy | Next run | Kinds |
 | --- | --- | --- |
-| `converge` | Executes the unit again, in the same run that marked it. The result is `recovered`. | [Command](/nyl/orchestration/resource-guides/command/) with `idempotent: true`, [OciImage](/nyl/orchestration/resource-guides/oci-image/), and the planned OpenTofu and KubernetesPublication kinds |
+| `converge` | Executes the unit again, in the same run that marked it. The result is `recovered`. | [Command](/nyl/orchestration/resource-guides/command/) with `idempotent: true`, OpenTofu, Terraform, and OciImage; KubernetesPublication is planned |
 | `inspect` | Asks the driver whether the effects were applied: applied records the receipt (`recovered`), not applied executes again, and unknown leaves the condition for `nyl recover` | Kinds that can observe their effects |
 | `manual` | Leaves the condition; the unit waits for `nyl recover` | Command without `idempotent: true` |
 

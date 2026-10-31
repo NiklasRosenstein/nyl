@@ -90,6 +90,20 @@
       "name": "OciImage",
       "schema": "units.gitops.nyl/v1/oci-image.schema.json",
       "slug": "oci-image"
+    },
+    {
+      "apiVersion": "units.gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "Terraform",
+      "schema": "units.gitops.nyl/v1/terraform.schema.json",
+      "slug": "terraform"
+    },
+    {
+      "apiVersion": "units.gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "OpenTofu",
+      "schema": "units.gitops.nyl/v1/open-tofu.schema.json",
+      "slug": "open-tofu"
     }
   ]
 }

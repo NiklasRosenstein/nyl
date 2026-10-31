@@ -16,6 +16,8 @@ pub fn builtin() -> DriverSet {
     let mut drivers = DriverSet::new();
     drivers.register(Arc::new(CommandDriver));
     drivers.register(Arc::new(crate::oci_image::OciImageDriver));
+    drivers.register(Arc::new(crate::terraform::TerraformDriver::terraform()));
+    drivers.register(Arc::new(crate::terraform::TerraformDriver::opentofu()));
     drivers
 }
 

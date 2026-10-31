@@ -5,9 +5,10 @@ title: 'Orchestration'
 import LinkCards from '../../../components/LinkCards.astro';
 
 :::caution[In development]
-Orchestration is in development. The orchestration core (milestone M3) has
-shipped: environments, their state in Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
-[Command](/nyl/orchestration/resource-guides/command/) units, one
+Orchestration is in development. Environments, their state in Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
+[Command](/nyl/orchestration/resource-guides/command/),
+[OciImage](/nyl/orchestration/resource-guides/oci-image/), and
+[Terraform and OpenTofu](/nyl/orchestration/resource-guides/terraform/) units, one
 environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
 [`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs,
 drift repair, and lifecycle work), and [`nyl status`](/nyl/reference/cli/status/),
@@ -15,7 +16,8 @@ recovery with [`nyl recover`](/nyl/reference/cli/recover/) and
 [`nyl verify`](/nyl/reference/cli/verify/), and deletion with
 [`nyl teardown`](/nyl/reference/cli/teardown/),
 [`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), `nyl state
-delete`, runs over several environments, and approvals. [OciImage](/nyl/orchestration/resource-guides/oci-image/) units build and publish container images; Terraform units are in development. The [roadmap](/nyl/orchestration/roadmap/)
+delete`, runs over several environments, and approvals are available.
+Kubernetes publication units are planned for M5. The [roadmap](/nyl/orchestration/roadmap/)
 tracks the milestones.
 :::
 
@@ -33,8 +35,10 @@ whether it starts on a workstation or in CI.
   items={[
     { title: 'Environment', text: 'Selects the units it runs and names where its state lives.', href: '/reference/resources/gitops.nyl/v1/environment/' },
     { title: 'EnvironmentGroup', text: 'Gives several environments shared defaults.', href: '/reference/resources/gitops.nyl/v1/environment-group/' },
-    { title: 'Command', text: 'Runs a declared command.', href: '/orchestration/resource-guides/command/' },
-    { title: 'OciImage', text: 'Builds and publishes a container image.', href: '/reference/resources/units.gitops.nyl/v1/oci-image/' },
+    { title: 'Command', text: 'Runs a declared command as a unit.', href: '/orchestration/resource-guides/command/' },
+    { title: 'OciImage', text: 'Builds a container image and records its digest.', href: '/reference/resources/units.gitops.nyl/v1/oci-image/' },
+    { title: 'Terraform', text: 'Manages infrastructure with Terraform.', href: '/reference/resources/units.gitops.nyl/v1/terraform/' },
+    { title: 'OpenTofu', text: 'Manages infrastructure with OpenTofu.', href: '/reference/resources/units.gitops.nyl/v1/open-tofu/' },
   ]}
 />
 

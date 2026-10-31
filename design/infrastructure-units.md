@@ -1,6 +1,6 @@
 # Infrastructure units
 
-**Status:** M1 contract for M4. See [ROADMAP.md](../ROADMAP.md) and the
+**Status:** M4 native image and infrastructure drivers. See [ROADMAP.md](../ROADMAP.md) and the
 [orchestration core contract](orchestration-core.md), which defines the common
 unit fields, execution, approval, credentials, and recovery used here.
 
@@ -61,8 +61,9 @@ to consumers when the registry holds it.
 
 - **Artifact:** the unit publishes a `ContainerImage` artifact named `image`
   with `repository`, `digest`, `reference`
-  (`registry.example.com/web@sha256:…`), `platforms`, and `tags`, taken from
-  the metadata file, never from parsing build output. The kind declares no
+  (`registry.example.com/web@sha256:…`), `platforms`, and `tags`. The digest comes from
+  the metadata file; tags record the exact build arguments, and platforms come
+  from the requested platforms or image inspection, never build output. The kind declares no
   outputs; consumers reference the artifact, for example
   `{fromUnit: {unit: web-image, artifact: image, pointer: /reference}}`.
 - **Tags:** every push carries the tag `nyl-<environment>-<first 16 hex digits
@@ -101,7 +102,7 @@ then changes the Dockerfile and rebuilds.
 | reconcile | Build and push; record the artifact |
 | verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
-| build | Supported: `nyl build <unit> [-e <env>]` builds from the current worktree and loads the image into the local Docker engine with `--load`, or pushes it with `--push`, which is safe because nothing consumes an image until a reference names it. It pushes only the spec's `tags` and `--tag` values, never the `nyl-` tag that identifies recorded executions |
+| build | Supported: `nyl build <unit> [-e <env>]` builds from the current worktree and loads the image into the local Docker engine with `-- --load`, or pushes it with `-- --push`, which is safe because nothing consumes an image until a reference names it. The driver validates these arguments after `--`. It pushes only the spec's `tags` and driver `--tag` values, never the `nyl-` tag that identifies recorded executions |
 | teardown | Not supported: registry deletion differs between registries and may break consumers. The default `deletionPolicy` for this kind is therefore `Retain`, and an explicit `Teardown` is rejected. Removing the unit leaves the image in the registry and drops the unit from state without a tombstone; an EnvironmentTemplate's forced `Teardown` skips it the same way |
 | recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
 | exec | Not supported: registry tools need no unit context |
@@ -175,7 +176,9 @@ category `output-rejected`. A
 secret can therefore never be recorded by accident, and the check never leaves
 changes applied without a receipt.
 
-A plan with no changes skips `apply` and records the receipt directly. "No
+A plan with no changes skips `apply` when a state object exists. When the backend
+has no state object, Nyl applies the saved plan to persist the initial empty state
+before recording a receipt. "No
 changes" means the plan would change nothing at all, as `plan
 -detailed-exitcode` exit 0 reports: no resource changes, no outputs, and no
 `moved` or `import` operations.
@@ -267,7 +270,11 @@ A unit with a receipt whose backend now holds no state fails before planning
 with `NYL-TOFU-STATE-MISSING`, a non-retryable `ownership` failure, instead of
 planning to create everything again: a wrong `key`, a lost bucket, or a
 misconfigured backend looks exactly like that. `nyl recover --retry --reason`
-accepts the empty state for the current ownership scope when it is intended.
+acknowledges the driver's recorded retry context when the empty state is
+intended. The context binds the unit incarnation, canonical backend, and workspace;
+the driver rejects it for another scope, and a successful receipt consumes it.
+Terraform and OpenTofu emit the same ownership namespace so that both kinds
+conflict when they claim the same backend and workspace.
 
 ### Repair
 

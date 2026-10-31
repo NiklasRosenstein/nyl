@@ -15,6 +15,7 @@ pub mod release_inputs;
 mod remote_manifest;
 pub mod schema;
 mod strict;
+pub mod terraform;
 pub mod units;
 
 pub use argocd_application_field_catalog::{
