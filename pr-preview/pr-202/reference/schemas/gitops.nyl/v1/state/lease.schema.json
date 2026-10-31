@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "LeaseKind": {
+      "const": "Lease"
+    },
+    "Operation": {
+      "description": "The operations that write state, as the `Nyl-Operation` trailer names them.",
+      "enum": [
+        "reconcile",
+        "promote",
+        "teardown",
+        "hold",
+        "resume",
+        "recover",
+        "verify",
+        "attest",
+        "exec",
+        "ci-admit",
+        "state-init",
+        "state-move",
+        "state-delete",
+        "state-forget",
+        "state-restore"
+      ],
+      "type": "string"
+    },
+    "Request": {
+      "additionalProperties": false,
+      "description": "Who requested an operator action, when, and why.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "by": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "by",
+        "at"
+      ],
+      "type": "object"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The lease ref's document: which run holds the environment until when.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "broken": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Request"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Set by `nyl lease break`: the holder is declared gone, so the next run\ntakes over at once and records the break in its transition commit."
+    },
+    "deadline": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/LeaseKind"
+    },
+    "operation": {
+      "$ref": "#/$defs/Operation"
+    },
+    "run": {
+      "$ref": "#/$defs/RunId"
+    },
+    "runner": {
+      "description": "Who runs it, such as a CI run URL or `user@host`.",
+      "type": "string"
+    },
+    "takenAt": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "units": {
+      "description": "Units executing now.",
+      "items": {
+        "$ref": "#/$defs/UnitName"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "run",
+    "runner",
+    "operation",
+    "deadline",
+    "takenAt"
+  ],
+  "title": "Lease",
+  "type": "object"
+}
