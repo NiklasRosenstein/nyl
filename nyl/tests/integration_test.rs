@@ -260,7 +260,8 @@ fn create_get_and_delete_edit_the_primary_gitops_file() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
         .current_dir(temp.path())
-        .args(["get", "cluster", "production"])
+        .env("CI", "1")
+        .args(["--color", "never", "get", "cluster", "production"])
         .assert()
         .success()
         .stdout(predicate::str::contains("NAME        DESTINATION"))
