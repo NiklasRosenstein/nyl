@@ -3,7 +3,7 @@
 ## Purpose and use
 
 This roadmap frames Nyl's expansion from Kubernetes manifest generation and
-rendered GitOps into GitOps orchestration across infrastructure tools: container
+Kubernetes GitOps into GitOps orchestration across infrastructure tools: container
 image builds, Terraform/OpenTofu configurations, and Kubernetes manifests
 rendered from their outputs. It guides work across milestones; it is not a
 complete specification, a release schedule, or a commitment to every proposed
@@ -11,7 +11,7 @@ interface.
 
 Nyl implements the orchestration semantics natively, in Rust, as one tool with
 one state model. Every orchestration capability is additive: existing commands,
-resources, and rendered GitOps behavior keep their meaning, and a project that
+resources, and Kubernetes GitOps behavior keep their meaning, and a project that
 never declares an orchestration resource never needs to understand one.
 
 Key architectural departures require a focused second check against evidence and
@@ -23,13 +23,13 @@ working instructions.
 This file records direction. Progress, the next step, and each milestone's
 items and exit criterion are tracked in the documentation, on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/) and the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/), generated from
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/), generated from
 [`nyl/book/src/lib/roadmaps/`](nyl/book/src/lib/roadmaps/).
 
 ## Progress and next step
 
-Orchestration and the interfaces below are planned capabilities, not claims
-about Nyl's current CLI. Status, progress, and the next step are on the
+The interfaces below describe the current direction, including planned capabilities.
+Status, progress, and the next step are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/). Milestone identifiers stay
 stable for references from issues and pull requests:
 
@@ -43,7 +43,7 @@ stable for references from issues and pull requests:
 | M6 | Promotion paths |
 | M7 | Continuous operation and scope decision |
 | M8 | Provider-neutral CI execution and first GitLab adapter |
-| M9 | Domain resource collections for units and Releases |
+| M9 | Domain modeling for units and Releases |
 
 ## Product direction
 
@@ -89,7 +89,7 @@ contract for publication.
   external Git state, or state in the target's own publication branch.
 - Units with declared inputs, public outputs, and artifact descriptors; a
   constrained command unit; container image and Terraform units; a Kubernetes
-  publication unit over the existing rendered GitOps path.
+  publication unit over the existing Kubernetes GitOps path.
 - Dependency-aware execution with typed references to recorded outputs.
 - Unit identity, execution coordination, evidence freshness, and recovery.
 - Explicit promotion paths between environments with recorded lineage.
@@ -410,14 +410,14 @@ must be reachable from a protected ref or its lock's own branch; run source
 commits must be reachable too, unless an environment opts into unprotected
 sources.
 
-### Domain resource collections (M9, proposed)
+### Domain modeling (M9, proposed)
 
-Teams declare typed domain resources, such as AWS accounts or GitHub teams, in
+Teams declare typed resources, such as AWS accounts or GitHub teams, in
 paths they own, and explicitly registered units consume them as a tool-neutral
 bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
-the [domain resources design](design/domain-resources.md), and its slices and
+the [domain modeling design](design/domain-resources.md), and its slices and
 progress are on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 Kubernetes Releases consume collections too, without orchestration, as
 described in the [Release catalog design](design/release-catalog.md). The
@@ -713,7 +713,7 @@ structured results.
 
 Each milestone's items and exit criterion are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/#milestones), with M9's slices
-on the [Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+on the [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 ## Open decisions
 
@@ -746,7 +746,7 @@ reasons to delay independent work.
   PromotionRecord, state selection, attestations, and observation for M5–M6
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
-- [Domain resource collections](design/domain-resources.md): the M9 proposal
+- [Domain modeling](design/domain-resources.md): the M9 proposal
   for team-owned declarations as unit inputs
 - [Release catalog](design/release-catalog.md): Releases as inventoried
   resources, label membership, and collections in rendering, part of M9

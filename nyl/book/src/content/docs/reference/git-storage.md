@@ -5,7 +5,7 @@ title: 'Git storage'
 Nyl keeps everything it records in Git: the configuration it renders from, the
 trees it publishes, and the state orchestration writes. This page lists every
 repository and ref involved, who writes it, and when to use which layout. The
-guides explain the concepts: [Rendered GitOps](/nyl/rendered-gitops/) for
+guides explain the concepts: [Kubernetes GitOps](/nyl/kubernetes-gitops/) for
 publication, and [Environments and state](/nyl/orchestration/environments-and-state/),
 [Runs](/nyl/orchestration/runs/), and [Recovery](/nyl/orchestration/recovery/)
 for orchestration.
@@ -29,7 +29,7 @@ a branch or revision, and a path prefix:
 - The tree beneath the prefix carries an ownership index, `_nyl/index.json`,
   that records which files Nyl owns. Publication removes only owned files and
   fails when an owned file was changed outside Nyl
-  ([Rendered layout](/nyl/rendered-gitops/rendered-layout/#ownership-index)).
+  ([Rendered layout](/nyl/kubernetes-gitops/rendered-layout/#ownership-index)).
 - One target owns one repository, revision, and prefix. Targets sharing a
   revision must use disjoint prefixes, which Nyl checks, including through
   URL aliases.

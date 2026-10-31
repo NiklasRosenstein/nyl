@@ -1,0 +1,95 @@
+---
+title: 'Rendered Manifest Pattern'
+---
+
+The rendered manifest pattern is the recommended Nyl deployment model. Nyl
+compiles trusted source configuration into ordinary Kubernetes YAML in a
+deployment Git revision. Argo CD reads plain recursive directories and does not
+run Nyl in the reconciliation path.
+
+## How the model fits together
+
+Kubernetes-shaped configuration resources describe the deployment:
+
+1. A [`GitRepository`](/nyl/reference/resources/gitops.nyl/v1/git-repository/) names
+   credential-free read and write coordinates.
+2. A [`Cluster`](/nyl/reference/resources/k8s.nyl/v1/cluster/) records one concrete
+   destination and the Kubernetes capabilities used for offline rendering.
+3. A [`DeploymentTarget`](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/) binds that
+   Cluster to deployment values and a publication repository, revision, and
+   path prefix.
+4. An optional [`ArgoCDInstance`](/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/)
+   separates the Argo CD control plane from workload destinations and owns
+   parent-catalog defaults.
+5. An [`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/)
+   declares source releases and generated Application and Namespace policy. It
+   owns an implied least-privilege AppProject unless it shapes one with
+   `projectTemplate` or shares one through an AppProjectDefinition.
+
+These resources are compiler inputs. They are not installed in Kubernetes.
+`nyl render-tree` produces workload manifests, managed Namespaces, Argo CD
+AppProjects and Applications, and an ownership index. `nyl publish-tree` can
+commit that tree to the target revision.
+
+## Quick start
+
+Initialize a Git repository with one cluster, deployment target, AppProject, and
+ApplicationGroup:
+
+```bash
+mkdir platform && cd platform
+git init
+git remote add origin https://git.example.com/platform/deploy.git
+nyl init --cluster-name production --context admin@production
+```
+
+The wizard detects the Git remote and current kube context, writes a compact
+`gitops.yaml`, creates a minimal `nyl.toml` when needed, and creates the
+`applications/` source directory. See [`nyl init`](/nyl/reference/cli/init/)
+for fully non-interactive flags and stdout mode.
+
+Then list the targets, and validate and render one:
+
+```console
+$ nyl get targets
+NAME        CLUSTER  PUBLICATION      PATH-PREFIX  FILE
+production  primary  platform@deploy  production   config/targets/production.yaml#document-1
+staging     staging  platform@deploy  staging      config/targets/staging.yaml#document-1
+```
+
+```bash
+nyl validate
+nyl render-tree --target production --output-dir deploy-worktree
+```
+
+Seed the generated `<target>-catalog` Application once after the first publish.
+It then recursively manages the generated catalog, including itself. Generated
+Applications use ordinary Git directory sources with recursive discovery.
+
+## Guides
+
+- [Project structure and discovery](/nyl/kubernetes-gitops/project-structure/)
+  explains the conventional layout, colocated groups, and remote sources.
+- [Targets and cluster variation](/nyl/kubernetes-gitops/targets-and-clusters/)
+  covers multiple environments, clusters, publication models, values, and
+  conditional rendering.
+- [Release inputs](/nyl/kubernetes-gitops/release-inputs/) declares the values a
+  Release takes and binds them per target.
+- [Rendered layout](/nyl/kubernetes-gitops/rendered-layout/) describes the
+  generated tree, its catalog, and the ownership index.
+- [Git storage](/nyl/reference/git-storage/) lists the repositories, branches,
+  and path prefixes Nyl reads and publishes to, and when to use separate
+  publication repositories.
+- The workflow pages follow a CI pipeline in order:
+  [render and validate](/nyl/kubernetes-gitops/workflow/render/),
+  [diff in pull requests](/nyl/kubernetes-gitops/workflow/diff/),
+  [publish from the protected branch](/nyl/kubernetes-gitops/workflow/publish/),
+  and [move a publication](/nyl/kubernetes-gitops/workflow/move-publication/).
+- [Trust and admission boundaries](/nyl/kubernetes-gitops/security/)
+  identifies what Nyl validates and what the Git forge, Argo CD, and Kubernetes
+  must enforce.
+- [Kubernetes GitOps resource reference](/nyl/kubernetes-gitops/resources/)
+  documents every configuration field by resource kind.
+
+For direct cluster operations and debugging, see
+[CLI-first workflows](/nyl/kubernetes-rendering/cli-workflows/).
