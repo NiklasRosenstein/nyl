@@ -353,7 +353,9 @@ pub fn snapshot_entry(
 ) -> Result<()> {
     let original = prepared.worktree.clone();
     let repository = git2::Repository::discover(&original).map_err(config)?;
-    let (files, changed) = nyl_state::source::worktree::visible_files(&repository).map_err(config)?;
+    let cache = crate::git::CacheLayout::for_project(&prepared.inventory.project_root);
+    let (files, changed) =
+        nyl_state::source::worktree::visible_files(&repository, Some(cache.root())).map_err(config)?;
     let destination = prepared.workspace.path().join("worktree-snapshot");
     std::fs::create_dir_all(&destination)?;
     let mut digests = BTreeMap::new();

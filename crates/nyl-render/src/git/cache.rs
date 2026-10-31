@@ -41,6 +41,11 @@ impl CacheLayout {
         Self { root: path.into() }
     }
 
+    /// Root directory for Nyl-managed caches.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// Path to the local state object database for a repository identity.
     pub fn state_repo_path(&self, identity: &str) -> PathBuf {
         self.root

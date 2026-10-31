@@ -51,6 +51,7 @@ const SYMLINK_MODE: i32 = 0o120_000;
 pub struct GitSourceResolver {
     git_dir: PathBuf,
     snapshot_git_dir: Option<PathBuf>,
+    worktree_cache: Option<PathBuf>,
     auth: GitAuth,
     /// Read URLs of repositories named by credential-free URL, as for
     /// [`crate::git::Endpoint`].
@@ -125,11 +126,19 @@ impl GitSourceResolver {
         Self {
             git_dir: git_dir.into(),
             snapshot_git_dir: None,
+            worktree_cache: None,
             auth,
             endpoints: BTreeMap::new(),
             fetched: Mutex::new(BTreeSet::new()),
             symlinks: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Exclude the configured Nyl cache from working-file snapshots.
+    #[must_use]
+    pub fn with_worktree_cache(mut self, path: impl Into<PathBuf>) -> Self {
+        self.worktree_cache = Some(path.into());
+        self
     }
 
     /// Read retained worktree snapshots from the state repository when absent from the source clone.
@@ -625,7 +634,14 @@ impl SourceResolver for GitSourceResolver {
         previous: Option<&CommitId>,
     ) -> SourceResult<nyl_core::orchestration::ports::WorktreeSnapshot> {
         let repository = self.open()?;
-        worktree::capture(&repository, base, identity, now, previous)
+        worktree::capture(
+            &repository,
+            base,
+            identity,
+            now,
+            previous,
+            self.worktree_cache.as_deref(),
+        )
     }
 
     fn is_worktree_snapshot(&self, commit: &CommitId) -> SourceResult<bool> {
