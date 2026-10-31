@@ -352,6 +352,45 @@
       "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
       "type": "string"
     },
+    "ExecStatus": {
+      "description": "How an operator's tool ended.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "status": {
+              "const": "exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "signal": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "status": {
+              "const": "signaled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "signal"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ExecutionKey": {
       "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
       "type": "string"
@@ -513,6 +552,41 @@
     },
     "ObservedUnitKind": {
       "const": "ObservedUnit"
+    },
+    "OperatorModification": {
+      "additionalProperties": false,
+      "description": "A native operator call is fenced before it starts and records its result afterwards.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "by": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent if the runner stopped before recording the tool's exit."
+        }
+      },
+      "required": [
+        "by",
+        "at"
+      ],
+      "type": "object"
     },
     "PromotionProvenance": {
       "additionalProperties": false,
@@ -734,6 +808,45 @@
       ],
       "type": "object"
     },
+    "RetryAcknowledgement": {
+      "description": "Driver-owned retry context and the operator's acknowledgement.\nContext contains no secrets and is interpreted only by the emitting driver.\nA successful receipt consumes the acknowledgement.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context": true,
+            "state": {
+              "const": "required",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "context"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context": true,
+            "request": {
+              "$ref": "#/$defs/Request"
+            },
+            "state": {
+              "const": "acknowledged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "context",
+            "request"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RunId": {
       "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
       "type": "string"
@@ -904,6 +1017,17 @@
     "kind": {
       "$ref": "#/$defs/ObservedUnitKind"
     },
+    "operatorModified": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OperatorModification"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A native repair requires an explicit approval before the next execution."
+    },
     "receipt": {
       "anyOf": [
         {
@@ -913,6 +1037,17 @@
           "type": "null"
         }
       ]
+    },
+    "retry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RetryAcknowledgement"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A driver-requested retry acknowledgement, bound to this unit incarnation."
     },
     "unit": {
       "$ref": "#/$defs/UnitIdentity"
