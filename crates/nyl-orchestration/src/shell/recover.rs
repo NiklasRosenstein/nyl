@@ -19,8 +19,7 @@
 //!   run's refs stay for the next import.
 //! - **The way out** (Q40): where `recover` would otherwise refuse, because
 //!   `state.yaml` is missing (a broken `state init`), the state moved
-//!   (`NYL-STATE-MOVED`), or the remote tip is a `Nyl-Local` commit
-//!   (`NYL-STATE-LOCAL-TIP`), `recover -e` without `--unit` still takes the
+//!   (`NYL-STATE-MOVED`), `recover -e` without `--unit` still takes the
 //!   broken lease over, records the break with an unchanged commit where
 //!   that is allowed, and releases the lease, so `state init`, `state
 //!   move`, or `state restore` can proceed.
@@ -75,8 +74,8 @@ pub struct RecoverUnit {
 /// commit ([`after_import`]). It writes no run record: its one transition
 /// commit (import, `leaseBroken`, the optional action) is all it writes,
 /// and it consumes the broken run's refs as a takeover does; if it crashes,
-/// those refs stay for the next import. Where the state is missing, moved,
-/// or has a local tip, it clears the break without importing (see the
+/// those refs stay for the next import. Where the state is missing or moved,
+/// it clears the break without importing (see the
 /// module documentation). Otherwise it applies the action as [`recover`]
 /// does, and without `--unit` refuses with `NYL-RECOVER-NOTHING`. Contract:
 /// [Recovery](../../../../design/orchestration-core.md#recovery), "Importing a broken run".
@@ -136,14 +135,9 @@ fn nothing_to_import(environment: &EnvironmentName) -> Finding {
 }
 
 /// Whether `recover -e` clears a break where it would otherwise refuse
-/// (Q40): state missing, moved away, deleted by `nyl state delete`, or with
-/// a `Nyl-Local` remote tip, which only `state init` (`--fresh` for deleted
-/// state), `state move`, and `state restore` resolve.
+/// (Q40): state missing, moved away, or deleted by `nyl state delete`.
 fn way_out(finding: &Finding) -> bool {
-    matches!(
-        finding.code,
-        Code::StateMissing | Code::StateMoved | Code::StateLocalTip | Code::StateDeleted
-    )
+    matches!(finding.code, Code::StateMissing | Code::StateMoved | Code::StateDeleted)
 }
 
 /// Import the broken run through the run path and report it as a state
@@ -223,33 +217,27 @@ fn clear_break(
     };
     let mut report = report;
     let broken = held.broken.clone();
-    // Nyl commits only on a tip that passes the local-tip check, and there
-    // is nothing to commit onto without `state.yaml`.
-    let committed = if finding.code == Code::StateLocalTip {
-        Ok(())
-    } else {
-        read(context, location, environment).and_then(|snapshot| {
-            if snapshot.record.is_none() {
-                return Ok(());
-            }
-            let mut summary = summary(Operation::Recover, environment, "");
-            summarize(&mut summary, None);
-            let changes = TransitionChanges {
-                commit_unchanged: true,
-                ..TransitionChanges::default()
-            };
-            commit(
-                context,
-                location,
-                &mut held,
-                &snapshot,
-                summary,
-                changes,
-                requested,
-                &mut report,
-            )
-        })
-    };
+    let committed = read(context, location, environment).and_then(|snapshot| {
+        if snapshot.record.is_none() {
+            return Ok(());
+        }
+        let mut summary = summary(Operation::Recover, environment, "");
+        summarize(&mut summary, None);
+        let changes = TransitionChanges {
+            commit_unchanged: true,
+            ..TransitionChanges::default()
+        };
+        commit(
+            context,
+            location,
+            &mut held,
+            &snapshot,
+            summary,
+            changes,
+            requested,
+            &mut report,
+        )
+    });
     let landed = committed.is_ok();
     if let Err(error) = lease::release(context, &held, landed) {
         report.warnings.push(store_error(environment, &error));
@@ -316,6 +304,7 @@ pub(crate) fn summarize(summary: &mut TransitionSummary, action: Option<(UnitNam
 /// leftover and evidence run refs the import read, so `--accept` finds the
 /// checkpoint; an accepted checkpoint becomes the receipt, carrying the
 /// copy of `desired` it was produced for. A refusal is the finding.
+#[allow(clippy::too_many_arguments)] // Recovery result, evidence, and explicit native authorization.
 pub(crate) fn after_import(
     environment: &EnvironmentName,
     recover: &RecoverUnit,
@@ -323,8 +312,9 @@ pub(crate) fn after_import(
     observed: &mut BTreeMap<UnitName, ObservedUnit>,
     artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
     runs: &[RunState],
+    acknowledgement: &nyl_core::orchestration::state::Request,
 ) -> Result<Value, Finding> {
-    let recovery = decide(
+    let mut recovery = decide(
         environment,
         &recover.unit,
         desired,
@@ -332,6 +322,9 @@ pub(crate) fn after_import(
         &recover.action,
         runs,
     )?;
+    if let Some(desired) = desired {
+        crate::rules::recovery::acknowledge_retry(desired, &recover.action, acknowledgement, &mut recovery.observed)?;
+    }
     if let Some(set) = recovery.artifacts {
         if set.is_empty() {
             artifacts.remove(&recover.unit);
@@ -360,8 +353,6 @@ pub fn recover(
         requested,
         |held, report| {
             let snapshot = read(context, location, environment)?;
-            // The state record matches the environment, and remote state
-            // carries no local tip.
             check_record(context.store, snapshot.record.as_ref(), environment, location)?;
             check_remote_tips(context.store, location, environment)?;
             let coordination = context
@@ -389,7 +380,19 @@ pub fn recover(
                 "evidence".to_owned(),
                 serde_json::to_value(evidence(unit, desired, &runs)).expect("evidence serializes"),
             );
-            let recovery = decide(environment, unit, desired, observed, action, &runs)?;
+            let mut recovery = decide(environment, unit, desired, observed, action, &runs)?;
+            if let Some(desired) = desired {
+                crate::rules::recovery::acknowledge_retry(
+                    desired,
+                    action,
+                    &nyl_core::orchestration::state::Request {
+                        by: context.requested_by.clone(),
+                        at: context.clock.now(),
+                        reason: requested.reason.clone(),
+                    },
+                    &mut recovery.observed,
+                )?;
+            }
 
             let mut changes = TransitionChanges {
                 observed: BTreeMap::from([(unit.clone(), Some(recovery.observed.clone()))]),
@@ -431,4 +434,70 @@ pub fn recover(
             Ok(())
         },
     )
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use crate::rules::fixtures;
+    use nyl_core::orchestration::state::{FailureCategory, Request, RetryAcknowledgement};
+
+    #[test]
+    fn test_imported_retry_requires_a_reason_and_returns_opaque_context() {
+        let desired = fixtures::desired("service", "TestUnit", json!({}), "key");
+        let mut failed = fixtures::observed("service", "TestUnit", None);
+        failed.condition = Some(Condition::Failed {
+            since: "2026-10-28T00:00:00Z".parse().unwrap(),
+            run: fixtures::run(fixtures::RUN_1),
+            category: FailureCategory::Ownership,
+            retryable: false,
+            message: "driver diagnostic".to_owned(),
+        });
+        let context = json!({"version":1,"resource":"test-scope"});
+        failed.retry = Some(RetryAcknowledgement::Required {
+            context: context.clone(),
+        });
+        let recover = RecoverUnit {
+            unit: fixtures::name("service"),
+            action: RecoverAction::Retry,
+        };
+        let mut observed = BTreeMap::from([(recover.unit.clone(), failed.clone())]);
+        let mut artifacts = BTreeMap::new();
+        let mut request = Request {
+            by: "operator".to_owned(),
+            at: "2026-10-28T00:00:00Z".parse().unwrap(),
+            reason: None,
+        };
+        assert_eq!(
+            after_import(
+                &fixtures::env(),
+                &recover,
+                Some(&desired),
+                &mut observed,
+                &mut artifacts,
+                &[],
+                &request
+            )
+            .unwrap_err()
+            .code,
+            Code::RecoverReasonRequired
+        );
+        assert_eq!(observed[&recover.unit], failed);
+        request.reason = Some("verified the resource".to_owned());
+        after_import(
+            &fixtures::env(),
+            &recover,
+            Some(&desired),
+            &mut observed,
+            &mut artifacts,
+            &[],
+            &request,
+        )
+        .unwrap();
+        assert_eq!(
+            observed[&recover.unit].retry,
+            Some(RetryAcknowledgement::Acknowledged { context, request })
+        );
+        assert!(observed[&recover.unit].condition.is_none());
+    }
 }

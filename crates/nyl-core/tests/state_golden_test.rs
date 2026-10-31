@@ -4,7 +4,7 @@
 //! one kind. The test fails when serialization changes or when a golden file
 //! no longer parses, so a format change is always deliberate: it adds a
 //! version, a migration, and a new golden file, and keeps the old one.
-//! (The v1 formats are unreleased while M3 is in progress; until the first
+//! (The v1 formats are unreleased; until the first
 //! release that writes them, v1 is amended in place and its golden files
 //! regenerated.)
 //!
@@ -56,7 +56,7 @@ fn receipt() -> Value {
 
 /// One sample per golden file: its file name, and the document as JSON.
 fn samples() -> Vec<(&'static str, Value)> {
-    vec![
+    let mut samples = vec![
         (
             "state-record.v1.yaml",
             json!({
@@ -233,7 +233,20 @@ fn samples() -> Vec<(&'static str, Value)> {
                 "at": "2026-09-24T12:30:00Z", "from": "alice@workstation"
             }),
         ),
-    ]
+    ];
+    let mut repaired = samples
+        .iter()
+        .find(|(name, _)| *name == "observed-unit.v1.yaml")
+        .unwrap()
+        .1
+        .clone();
+    repaired["operatorModified"] = json!({"by":"operator","at":"2026-10-28T00:00:00Z","reason":"restore native state","status":{"status":"exited","code":0}});
+    repaired["retry"] = json!({"state":"acknowledged","context":{"version":1,"resource":"test-owned-context"},"request":{"by":"operator","at":"2026-10-28T00:00:00Z","reason":"verified the resource"}});
+    let mut required = repaired.clone();
+    required["retry"] = json!({"state":"required","context":{"version":1,"resource":"test-owned-context"}});
+    samples.push(("observed-unit-retry-required.v1.yaml", required));
+    samples.push(("observed-unit-repaired.v1.yaml", repaired));
+    samples
 }
 
 fn golden_dir() -> PathBuf {
@@ -295,6 +308,18 @@ fn test_readers_reject_unknown_format_versions_and_kinds() {
     lease["apiVersion"] = json!("gitops.nyl/v1");
     lease["kind"] = json!("Run");
     assert!(serde_json::from_value::<Lease>(lease).is_err());
+}
+
+#[test]
+fn test_observed_v1_preserves_evidence_and_rejects_unknown_versions() {
+    for name in ["observed-unit", "observed-unit-waiting", "observed-unit-repaired"] {
+        let original = std::fs::read_to_string(golden_dir().join(format!("{name}.v1.yaml"))).unwrap();
+        let document: ObservedUnit = serde_saphyr::from_str(&original).unwrap();
+        assert_eq!(serde_saphyr::to_string(&document).unwrap(), original);
+        let mut unknown = serde_json::to_value(document).unwrap();
+        unknown["apiVersion"] = json!("gitops.nyl/v2");
+        assert!(serde_json::from_value::<ObservedUnit>(unknown).is_err());
+    }
 }
 
 #[test]

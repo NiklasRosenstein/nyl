@@ -37,16 +37,8 @@ pub struct UnitEnvelope {
     pub metadata: UnitMetadata,
 }
 
-/// A unit's identity and selection labels. Both are literal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UnitMetadata {
-    /// The unit's identity for references, receipts, leases, and deletion; unique per environment across all unit kinds.
-    pub name: String,
-    /// Literal labels that Environment `unitSelector`s match.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
+/// A unit's literal identity and selection labels.
+pub use super::gitops::GitOpsResourceMetadata as UnitMetadata;
 
 impl UnitEnvelope {
     /// The validated unit name.
@@ -401,13 +393,6 @@ pub enum AttestationSource {
 /// `NYL_UNIT`, `NYL_ENVIRONMENT`, `NYL_OPERATION`, and what `env` admits.
 /// There is no sandbox beyond the working directory and that environment.
 ///
-/// ## When needed
-///
-/// For a step no built-in kind covers, such as seeding a database.
-///
-/// ## If omitted
-///
-/// Nothing runs outside the built-in kinds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(transform = super::strict::deny_additional_properties)]
 pub struct CommandSpec {

@@ -44,6 +44,9 @@ pub const API_VERSION_TEST_UNITS: &str = "units.test.nyl/v1";
 /// A scripted result for a fake's next call of one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scripted {
+    RetryRequired {
+        context: Value,
+    },
     Failed {
         category: FailureCategory,
         retryable: bool,
@@ -114,7 +117,7 @@ impl Script {
             Some(Scripted::Uncertain) => Some(Drift::Unknown {
                 reason: "scripted unknown verify".to_owned(),
             }),
-            Some(Scripted::Failed { .. }) => {
+            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. }) => {
                 return Err(DriverError::before_effects("scripted verify failure"));
             }
         })
@@ -130,6 +133,11 @@ impl Script {
             Some(Scripted::Succeeded { outputs }) => ScriptedOutcome::Run { outputs },
             Some(Scripted::Uncertain) => ScriptedOutcome::Return(Outcome::Uncertain {
                 reason: format!("scripted uncertain {}", operation.as_str()),
+            }),
+            Some(Scripted::RetryRequired { context }) => ScriptedOutcome::Return(Outcome::RetryRequired {
+                category: FailureCategory::Ownership,
+                message: "scripted retry acknowledgement".to_owned(),
+                context,
             }),
             Some(Scripted::Failed { category, retryable }) => ScriptedOutcome::Return(Outcome::Failed {
                 category,
@@ -186,7 +194,12 @@ fn source_files(
     field: &str,
 ) -> DriverResult<BTreeMap<String, String>> {
     let path = required_str(spec, pointer)?;
-    let paths = crate::command::roots(&ctx.worktree, &ctx.project_dir)?;
+    let source_field = pointer.strip_suffix("/path").unwrap_or(pointer);
+    let root = ctx.source_roots.get(source_field);
+    let paths = crate::command::roots(
+        root.map_or(&ctx.worktree, |root| &root.worktree),
+        root.map_or(&ctx.project_dir, |root| &root.project_dir),
+    )?;
     let directory = paths
         .resolve(field, path)
         .map_err(|error| DriverError::before_effects(error.to_string()))?;
@@ -247,6 +260,10 @@ mod tests {
 
     fn context<'a>(directory: &TempDir, tools: &'a NoTools, approved: Option<ChangeDigestArg>) -> ExecutionContext<'a> {
         ExecutionContext {
+            source_roots: std::collections::BTreeMap::default(),
+            secrets: std::collections::BTreeMap::default(),
+            artifacts: std::collections::BTreeMap::default(),
+            interactive: false,
             unit: "dev/database".parse::<UnitAddress>().unwrap(),
             operation: DriverOperation::Reconcile,
             worktree: directory.path().to_path_buf(),

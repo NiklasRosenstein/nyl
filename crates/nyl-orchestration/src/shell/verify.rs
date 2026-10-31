@@ -48,7 +48,7 @@ use nyl_core::orchestration::time::{Duration, Timestamp};
 use super::lease::{self, HeldLease};
 use super::run::slots::Slots;
 use super::run::{
-    execution_env, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
+    execution_credentials, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
     RunRequest,
 };
 use super::{store_error, Settings};
@@ -114,7 +114,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
     }
 
     let run = base.ids.run_id();
-    let longest = longest_timeout(verified.iter().map(|name| &snapshot.desired[*name]));
+    let longest = longest_timeout(context.drivers, verified.iter().map(|name| &snapshot.desired[*name]));
     let mut held = match lease::acquire(
         base,
         location,
@@ -252,7 +252,7 @@ fn verify_units(
             outcome = Err(cancelled(&request.environment, signal));
             break;
         }
-        let longest = longest_timeout(batch.iter().map(|name| &snapshot.desired[*name]));
+        let longest = longest_timeout(context.drivers, batch.iter().map(|name| &snapshot.desired[*name]));
         // Move the lease's deadline to cover the batch about to start.
         let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
         if let Err(error) = lease::update(context.base, held, held.lease.units.clone(), deadline) {
@@ -408,24 +408,33 @@ fn verify_unit(
         Err(message) => return failed(message),
     };
     let temp_dir = directory.join(format!("tmp-{name}"));
-    let worktree = match std::fs::create_dir_all(&temp_dir)
+    let (worktree, source_roots) = match std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", temp_dir.display()))
-        .and_then(|()| slots.checkout(context.sources, job.slot, &commit))
+        .and_then(|()| slots.checkout_unit(context.sources, job.slot, &commit, driver, spec, project_dir))
     {
-        Ok(worktree) => worktree,
+        Ok(roots) => roots,
         Err(message) => return failed(message),
     };
     let now = context.base.clock.now();
-    let timeout = unit_timeout(unit);
+    let timeout = unit_timeout(context.drivers, unit);
     let deadline = unit_deadline(&context.base.settings, now, timeout, job.lease_deadline);
-    let env = match execution_env(context, &unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &unit.spec) {
         Ok(env) => env,
         Err(message) => {
             let _ = std::fs::remove_dir_all(&temp_dir);
             return failed(message);
         }
     };
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: context.tools,
+        clock: context.base.clock,
+        deadline,
+    };
     let ctx = ExecutionContext {
+        secrets,
+        interactive: false,
+        artifacts: snapshot.artifacts.get(name).cloned().unwrap_or_default(),
+        source_roots,
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Verify,
         project_dir: project_path(&worktree, project_dir),
@@ -436,7 +445,7 @@ fn verify_unit(
         deadline,
         now,
         observed,
-        tools: context.tools,
+        tools: &budget,
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: None,

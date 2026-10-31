@@ -30,6 +30,14 @@ macro_rules! codes {
 }
 
 codes! {
+    /// Native repair requires a held incarnation.
+    ExecNotHeld => "NYL-EXEC-NOT-HELD",
+    /// The unit's driver cannot run an operator tool.
+    ExecUnsupported => "NYL-EXEC-UNSUPPORTED",
+    /// The repair spec claims another unit's resources.
+    ExecScopeConflict => "NYL-EXEC-SCOPE-CONFLICT",
+    /// The repair's spec, source, credentials, or arguments are unavailable.
+    ExecInvalid => "NYL-EXEC-INVALID",
     /// An approval or approver lookup is invalid; no effects start.
     ApprovalInvalid => "NYL-APPROVAL-INVALID",
     /// Another run holds the environment's lease.
@@ -107,6 +115,8 @@ codes! {
     /// A run checkpointed a unit after the unit was marked uncertain; it is evidence for `nyl recover --accept`.
     RunLateCheckpoint => "NYL-RUN-LATE-CHECKPOINT",
     /// `nyl recover` names a unit that has no condition to clear.
+    /// A driver requested an acknowledgement with a nonempty reason before retry.
+    RecoverReasonRequired => "NYL-RECOVER-REASON-REQUIRED",
     RecoverNothing => "NYL-RECOVER-NOTHING",
     /// `nyl recover --accept <run>` names a run without a checkpoint of the unit.
     RecoverCheckpointMissing => "NYL-RECOVER-CHECKPOINT-MISSING",

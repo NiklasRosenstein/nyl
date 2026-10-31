@@ -20,6 +20,14 @@ pub fn receipt_is_current(desired: &DesiredUnit, observed: Option<&ObservedUnit>
     let Some(observed) = observed else {
         return false;
     };
+    if observed.operator_modified.is_some()
+        && !matches!(
+            desired.lifecycle,
+            nyl_core::orchestration::state::Lifecycle::Held { .. }
+        )
+    {
+        return false;
+    }
     let (Some(key), Some(receipt)) = (&desired.execution_key, &observed.receipt) else {
         return false;
     };

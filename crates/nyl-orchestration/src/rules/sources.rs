@@ -15,9 +15,8 @@
 //!   Environment source's `revision` + `commit`) must be reachable from
 //!   `protectedRefs` or its own revision, and `allowUnprotectedSource` never
 //!   waives that ([`pin_refs`]).
-//! - A unit executes from one worktree: its effective commit
-//!   ([`effective_commit`]). In part 3, source fields naming different
-//!   commits are rejected, and so are sources in another repository.
+//! - Each Git source field reads its own repository and pinned commit,
+//!   exposed to drivers through source_roots. The main worktree stays at S.
 //! - Resolution writes the resolved commit and the worktree-rooted path into
 //!   every Git source field of a resolved spec; without `revision` a source
 //!   is S.
@@ -94,17 +93,23 @@ pub fn source_request(entry: &Environment, entry_commit: &CommitId, override_rev
     }
 }
 
-/// The finding for an Environment source this milestone cannot choose S
-/// from: `fromPromotion` (M6). `None` when [`source_request`] covers it.
+/// Refuse source forms the entry-repository resolver cannot represent.
 pub fn unsupported_source(entry: &Environment) -> Option<Finding> {
     let source = entry.spec.source.as_ref()?;
+    if source.git.is_remote() {
+        return Some(Finding::new(
+            Code::SourceUnavailable,
+            format!(
+                "Environment {} names a remote source repository, which is not supported yet",
+                entry.metadata.name
+            ),
+            "remove spec.source.repository and repositoryRef, and use a revision or commit from the entry repository",
+        ));
+    }
     source.from_promotion.as_ref()?;
     Some(Finding::new(
         Code::SourceUnavailable,
-        format!(
-            "Environment {} takes its source from a promotion, which is not supported yet",
-            entry.metadata.name
-        ),
+        format!("Environment {} takes its source from a promotion, which is not supported yet", entry.metadata.name),
         "set spec.source.revision (optionally with commit), or omit spec.source to run from the entry worktree's commit",
     ))
 }
@@ -171,7 +176,7 @@ pub struct SourceLock {
 }
 
 /// The Git source at `field` of `spec`, or `None` when the field is absent.
-fn git_source(spec: &Value, field: &str) -> Result<Option<GitSource>, String> {
+pub fn git_source(spec: &Value, field: &str) -> Result<Option<GitSource>, String> {
     match spec.pointer(field) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => serde_json::from_value(value.clone())
@@ -188,24 +193,85 @@ fn locked_commit(field: &str, source: &GitSource) -> Result<Option<CommitId>, St
         .transpose()
 }
 
+/// Replace named repository references with the declared read URL in a resolved spec.
+pub fn resolve_repository_refs(
+    spec: &mut Value,
+    fields: &[String],
+    repositories: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for field in fields {
+        let Some(source) = git_source(spec, field)? else {
+            continue;
+        };
+        let Some(reference) = source.repository_ref else {
+            continue;
+        };
+        if source.repository.is_some() {
+            return Err(format!("{field}: repository and repositoryRef are mutually exclusive"));
+        }
+        let url = repositories
+            .get(&reference.name)
+            .ok_or_else(|| format!("{field}: GitRepository {:?} is not declared", reference.name))?;
+        let object = spec
+            .pointer_mut(field)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("{field} must be an object"))?;
+        object.remove("repositoryRef");
+        object.insert("repository".to_owned(), serde_json::json!({"repoURL": url}));
+    }
+    Ok(())
+}
+
+/// The repository identity of a source; named references must first be resolved.
+pub fn source_repository(source: &GitSource) -> Result<SourceRepository, String> {
+    if source.repository_ref.is_some() {
+        return Err("resolve repositoryRef to a declared GitRepository before choosing a source".to_owned());
+    }
+    Ok(source.repository.as_ref().map_or(SourceRepository::This, |repository| {
+        SourceRepository::Url(repository.repo_url.clone())
+    }))
+}
+
+/// Each resolved source field's repository and pinned commit.
+pub fn source_checkouts(
+    spec: &Value,
+    fields: &[String],
+    source_commit: &CommitId,
+) -> Result<BTreeMap<String, (SourceRepository, CommitId)>, String> {
+    let mut result = BTreeMap::new();
+    for field in fields {
+        let Some(source) = git_source(spec, field)? else {
+            continue;
+        };
+        result.insert(
+            field.clone(),
+            (
+                source_repository(&source)?,
+                locked_commit(field, &source)?.unwrap_or_else(|| source_commit.clone()),
+            ),
+        );
+    }
+    Ok(result)
+}
+
 /// The revisions and locks the Git source fields of `spec` name. `fields`
-/// are the driver's `source_fields`. A field in another repository
-/// (`repositoryRef`/`repository`) is an error in part 3.
+/// are the driver's source_fields; remote sources require their own revision.
 pub fn source_revisions(spec: &Value, fields: &[String]) -> Result<Vec<SourceLock>, String> {
     let mut locks = Vec::new();
     for field in fields {
         let Some(source) = git_source(spec, field)? else {
             continue;
         };
-        if source.is_remote() {
-            return Err(format!("{field}: sources in another repository are not supported yet"));
+        let repository = source_repository(&source)?;
+        if source.is_remote() && source.revision.is_none() {
+            return Err(format!("{field}: revision is required for a remote source"));
         }
-        let Some(revision) = &source.revision else {
+        let Some(revision) = source.revision.as_ref().or(source.commit.as_ref()) else {
             continue;
         };
         locks.push(SourceLock {
             field: field.clone(),
-            repository: SourceRepository::This,
+            repository,
             revision: revision.clone(),
             commit: locked_commit(field, &source)?,
         });
@@ -228,21 +294,28 @@ pub fn pin_source_fields(
         let Some(source) = git_source(resolved_spec, field)? else {
             continue;
         };
-        if source.is_remote() {
-            return Err(format!("{field}: sources in another repository are not supported yet"));
+        let repository = source_repository(&source)?;
+        if source.is_remote() && source.revision.is_none() {
+            return Err(format!("{field}: revision is required for a remote source"));
         }
         let commit = match (&source.revision, locked_commit(field, &source)?) {
-            (None, _) => source_commit.clone(),
-            (Some(_), Some(locked)) => locked,
+            (_, Some(locked)) => locked,
+            (None, None) => source_commit.clone(),
             (Some(revision), None) => revisions
-                .get(&(SourceRepository::This, revision.clone()))
+                .get(&(repository, revision.clone()))
                 .cloned()
                 .ok_or_else(|| format!("{field}: revision {revision:?} was not resolved"))?,
         };
         let path = source
             .path
             .as_deref()
-            .map(|path| worktree_path(&format!("{field}/path"), project_dir, path))
+            .map(|path| {
+                worktree_path(
+                    &format!("{field}/path"),
+                    if source.is_remote() { "/" } else { project_dir },
+                    path,
+                )
+            })
             .transpose()?;
         let object = resolved_spec
             .pointer_mut(field)
@@ -331,34 +404,15 @@ fn worktree_path(field: &str, project_dir: &str, path: &str) -> Result<String, S
     Ok(format!("/{}", segments.join("/")))
 }
 
-/// The unit's effective commit: the one commit its pinned Git source fields
-/// name, or S when it has none. The shell checks out this commit as the
-/// worktree of key inputs and executions; it is recorded in the resolved
-/// source fields, while `sourceRevision` stays S. Fields naming different
-/// commits are an error in part 3 (one worktree per execution).
+/// The main worktree remains at the environment's source commit. Every Git
+/// source field has an independent checkout in the driver's source_roots.
 pub fn effective_commit(
     resolved_spec: &Value,
     fields: &[String],
     source_commit: &CommitId,
 ) -> Result<CommitId, String> {
-    let mut effective: Option<(String, CommitId)> = None;
-    for field in fields {
-        let Some(source) = git_source(resolved_spec, field)? else {
-            continue;
-        };
-        let commit = locked_commit(field, &source)?.unwrap_or_else(|| source_commit.clone());
-        match &effective {
-            Some((first, existing)) if *existing != commit => {
-                return Err(format!(
-                    "{first} reads commit {existing} and {field} reads commit {commit}; the source fields of one \
-                     unit must name the same commit"
-                ));
-            }
-            Some(_) => {}
-            None => effective = Some((field.clone(), commit)),
-        }
-    }
-    Ok(effective.map_or_else(|| source_commit.clone(), |(_, commit)| commit))
+    source_checkouts(resolved_spec, fields, source_commit)?;
+    Ok(source_commit.clone())
 }
 
 #[cfg(test)]
@@ -501,6 +555,18 @@ mod tests {
         assert!(unsupported_source(&environment(&json!({"source": {"revision": "main"}}))).is_none());
     }
 
+    #[test]
+    fn test_remote_environment_source_is_not_resolved_from_entry_repository() {
+        for source in [
+            json!({"repositoryRef": {"name": "other"}, "revision": "main"}),
+            json!({"repository": {"repoURL": "https://example.com/other.git"}, "revision": "main"}),
+        ] {
+            let finding = unsupported_source(&environment(&json!({"source": source}))).unwrap();
+            assert_eq!(finding.code, Code::SourceUnavailable);
+            assert!(finding.fix.contains("entry repository"));
+        }
+    }
+
     /// Catches `allowUnprotectedSource` leaking into pinned commits, which
     /// would let a lock name a commit that later disappears.
     #[test]
@@ -590,29 +656,52 @@ mod tests {
         assert!(pin_source_fields(&mut root, &fields(&["/source"]), "/", &commit('a'), &BTreeMap::new()).is_err());
     }
 
-    /// Catches sources in other repositories being read from this one.
     #[test]
-    fn test_sources_in_another_repository_are_rejected() {
-        let spec = json!({"source": {"repositoryRef": {"name": "platform"}, "revision": "main"}});
-        let error = source_revisions(&spec, &fields(&["/source"])).unwrap_err();
-        assert!(error.contains("another repository"), "{error}");
+    fn test_remote_sources_resolve_declared_repository_and_root_paths_at_that_checkout() {
+        let mut spec =
+            json!({"source": {"repositoryRef": {"name": "platform"}, "revision": "main", "path": "modules/network"}});
+        let fields = fields(&["/source"]);
+        assert!(resolve_repository_refs(&mut spec, &fields, &BTreeMap::new()).is_err());
+        resolve_repository_refs(
+            &mut spec,
+            &fields,
+            &BTreeMap::from([("platform".to_owned(), "https://example.com/platform.git".to_owned())]),
+        )
+        .unwrap();
+        let repository = SourceRepository::Url("https://example.com/platform.git".to_owned());
+        let locks = source_revisions(&spec, &fields).unwrap();
+        assert_eq!(locks[0].repository, repository);
+        let revisions = BTreeMap::from([((repository.clone(), "main".to_owned()), commit('b'))]);
+        pin_source_fields(&mut spec, &fields, "/nyl", &commit('a'), &revisions).unwrap();
+        assert_eq!(spec["source"]["path"], "/modules/network");
+        assert_eq!(
+            source_checkouts(&spec, &fields, &commit('a')).unwrap()["/source"],
+            (repository, commit('b'))
+        );
+        spec["source"].as_object_mut().unwrap().remove("revision");
+        assert!(source_revisions(&spec, &fields)
+            .unwrap_err()
+            .contains("revision is required"));
     }
 
-    /// Catches a unit executing from one commit while a second source field
-    /// pins another, which one worktree cannot serve.
     #[test]
-    fn test_effective_commit_is_the_single_pinned_commit_or_s() {
-        let one = json!({"a": {"commit": "c".repeat(40)}, "b": {"commit": "c".repeat(40)}});
-        assert_eq!(
-            effective_commit(&one, &fields(&["/a", "/b"]), &commit('a')).unwrap(),
-            commit('c')
-        );
-        assert_eq!(
-            effective_commit(&json!({}), &fields(&["/a"]), &commit('a')).unwrap(),
-            commit('a')
-        );
-        let mixed = json!({"a": {"commit": "c".repeat(40)}, "b": {"commit": "d".repeat(40)}});
-        let error = effective_commit(&mixed, &fields(&["/a", "/b"]), &commit('a')).unwrap_err();
-        assert!(error.contains("/a") && error.contains("/b"), "{error}");
+    fn test_commit_without_revision_stays_pinned_and_requires_reachability() {
+        let mut spec = json!({"source": {"path": "../infra", "commit": "b".repeat(40)}});
+        let fields = fields(&["/source"]);
+        let locks = source_revisions(&spec, &fields).unwrap();
+        assert_eq!(locks[0].commit, Some(commit('b')));
+        assert_eq!(locks[0].revision, "b".repeat(40));
+        pin_source_fields(&mut spec, &fields, "/nyl", &commit('a'), &BTreeMap::new()).unwrap();
+        assert_eq!(spec["source"]["commit"], "b".repeat(40));
+    }
+
+    #[test]
+    fn test_source_fields_keep_independent_commits_and_main_worktree_stays_at_s() {
+        let spec = json!({"a": {"commit": "c".repeat(40)}, "b": {"commit": "d".repeat(40)}});
+        let fields = fields(&["/a", "/b"]);
+        let roots = source_checkouts(&spec, &fields, &commit('a')).unwrap();
+        assert_eq!(roots["/a"], (SourceRepository::This, commit('c')));
+        assert_eq!(roots["/b"], (SourceRepository::This, commit('d')));
+        assert_eq!(effective_commit(&spec, &fields, &commit('a')).unwrap(), commit('a'));
     }
 }

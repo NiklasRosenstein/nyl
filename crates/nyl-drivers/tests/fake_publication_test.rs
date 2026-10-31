@@ -163,6 +163,10 @@ fn context<'a>(
         .unwrap()
         .with_timezone(&chrono::Utc);
     ExecutionContext {
+        source_roots: std::collections::BTreeMap::default(),
+        secrets: std::collections::BTreeMap::default(),
+        artifacts: std::collections::BTreeMap::default(),
+        interactive: false,
         unit: "dev/kubernetes".parse::<UnitAddress>().unwrap(),
         operation,
         worktree: world.work(),
@@ -184,6 +188,7 @@ fn key(driver: &FakePublication, world: &World) -> ExecutionKey {
     let inputs = driver
         .execution_key_inputs(
             &ResolutionContext {
+                source_roots: std::collections::BTreeMap::default(),
                 environment: EnvironmentName::new("dev").unwrap(),
                 worktree: world.work(),
                 project_dir: world.work().join("nyl"),
@@ -304,7 +309,9 @@ fn deleting(unit: DesiredUnit) -> DesiredUnit {
 /// The observed file of a unit whose teardown waits after `phase1`.
 fn waiting_on(unit: &DesiredUnit, phase1: &str) -> ObservedUnit {
     ObservedUnit {
-        api_version: StateV1,
+        api_version: nyl_core::orchestration::state::StateV1,
+        operator_modified: None,
+        retry: None,
         kind: ObservedUnitKind,
         unit: unit.unit.clone(),
         receipt: None,

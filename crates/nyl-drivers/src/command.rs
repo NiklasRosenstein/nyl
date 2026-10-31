@@ -271,6 +271,9 @@ fn prepare(ctx: &StepContext<'_>, spec: &CommandSpec, step: &Step<'_>) -> Driver
             env,
             stdin: None,
             timeout: Some(ctx.timeout),
+            private_stdout: false,
+            forward_stdout: false,
+            interactive: false,
             masked,
         },
         directory,
@@ -495,7 +498,7 @@ impl Driver for CommandDriver {
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
         let spec = parse_for_driver(spec)?;
         let paths = roots(&ctx.worktree, &ctx.project_dir)?;
-        let files = file_digests(&paths, &spec.files)?;
+        let files = file_digests(&paths, &spec.files, &[])?;
         let fingerprint = match &spec.fingerprint {
             None => None,
             Some(argv) => {
@@ -519,7 +522,7 @@ impl Driver for CommandDriver {
                 };
                 let ran = run(&step_ctx, &spec, &step)?;
                 match ran.exit {
-                    ToolExit::Exited { code: 0, stdout } => Some(String::from_utf8_lossy(&stdout).into_owned()),
+                    ToolExit::Exited { code: 0, stdout, .. } => Some(String::from_utf8_lossy(&stdout).into_owned()),
                     ToolExit::Exited { code, .. } => {
                         return Err(DriverError::before_effects(format!(
                             "fingerprint exited with code {code}; it must exit 0"
@@ -602,6 +605,7 @@ impl Driver for CommandDriver {
                 let path = ran.prepared.outputs.as_deref().expect("reconcile has an outputs file");
                 match read_outputs(&spec, path) {
                     Ok(outputs) => Outcome::Succeeded {
+                        versions: std::collections::BTreeMap::new(),
                         outputs,
                         artifacts: Vec::new(),
                         attestations: read_attestations(&spec, ran.prepared.attestations.as_deref()),
@@ -686,6 +690,7 @@ impl Driver for CommandDriver {
         let ran = run(&execution_context(ctx, true), &spec, &step)?;
         let outcome = match &ran.exit {
             ToolExit::Exited { code: 0, .. } => Outcome::Succeeded {
+                versions: std::collections::BTreeMap::new(),
                 outputs: Value::Object(Map::new()),
                 artifacts: Vec::new(),
                 attestations: Vec::new(),
@@ -699,7 +704,7 @@ impl Driver for CommandDriver {
         &self,
         _ctx: &ExecutionContext<'_>,
         _unit: &DesiredUnit,
-        _push: bool,
+        _options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         Ok(Supported::Unsupported)
     }
@@ -717,7 +722,11 @@ impl Driver for CommandDriver {
 /// Digests of the files the `files` globs match, keyed worktree-rooted, such
 /// as `/scripts/seed/run.sh`. Directories behind symbolic links are never
 /// entered, and a pattern matching a symbolic link is an error.
-fn file_digests(paths: &ProjectPaths, patterns: &[String]) -> DriverResult<BTreeMap<String, String>> {
+pub(crate) fn file_digests(
+    paths: &ProjectPaths,
+    patterns: &[String],
+    excluded_directories: &[&str],
+) -> DriverResult<BTreeMap<String, String>> {
     let options = glob::MatchOptions {
         case_sensitive: true,
         require_literal_separator: true,
@@ -757,7 +766,11 @@ fn file_digests(paths: &ProjectPaths, patterns: &[String]) -> DriverResult<BTree
         if !start.exists() {
             continue;
         }
-        for entry in walkdir::WalkDir::new(&start).follow_links(false) {
+        for entry in walkdir::WalkDir::new(&start)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| !excluded_directories.iter().any(|name| entry.file_name() == *name))
+        {
             let entry = entry.map_err(|error| DriverError::before_effects(error.to_string()))?;
             let file_type = entry.file_type();
             if file_type.is_dir() {

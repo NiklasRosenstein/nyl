@@ -574,6 +574,29 @@ pub trait SourceResolver: Send + Sync {
         commit: &CommitId,
         path: &std::path::Path,
     ) -> SourceResult<()>;
+    /// A checkout restricted to declared worktree-rooted paths and globs.
+    /// Adapters without sparse support preserve semantics with a full checkout.
+    fn worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &std::path::Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let _ = paths;
+        self.worktree(repository, commit, path)
+    }
+    /// Reset a private concurrency-slot checkout with the same path selection.
+    fn reset_worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &std::path::Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let _ = paths;
+        self.reset_worktree(repository, commit, path)
+    }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
 }
@@ -594,6 +617,8 @@ pub struct RenderedUnit {
 /// unit discovery found, selected or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedSource {
+    /// Named Git read URLs declared at this source revision.
+    pub repositories: BTreeMap<String, String>,
     pub source_commit: CommitId,
     /// Worktree-rooted directory containing `nyl.toml` at the source commit,
     /// such as `/nyl`, or `/` at the worktree root. Drivers resolve local

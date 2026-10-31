@@ -16,6 +16,7 @@ export function summary(schema) { return schema.description.split(/\n\s*\n/)[0];
 /** Resource-level usage sections authored in Rust doc comments and carried by the schema description. */
 export function resourceUsage(schema) {
   const sections = schema.description.split(/^## /m).slice(1);
+  if (sections.length === 0) return [];
   return ['When needed', 'If omitted'].map((label) => {
     const matches = sections.filter((section) => section.split('\n', 1)[0].trim() === label);
     const markdown = matches[0]?.slice(matches[0].indexOf('\n') + 1).trim();

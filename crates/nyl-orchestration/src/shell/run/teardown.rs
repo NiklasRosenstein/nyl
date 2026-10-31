@@ -561,7 +561,7 @@ impl Reconcile<'_, '_, '_> {
         });
         if !calls.is_empty() {
             let now = context.base.clock.now();
-            let longest = longest_timeout(calls.iter().map(|(_, unit, _)| unit));
+            let longest = longest_timeout(context.drivers, calls.iter().map(|(_, unit, _)| unit));
             let names: Vec<UnitName> = calls.iter().map(|(name, _, _)| name.clone()).collect();
             self.phase(names, lease::deadline(context.base, now, longest), &[])?;
             let results = {
@@ -687,9 +687,13 @@ impl Reconcile<'_, '_, '_> {
         };
         let outcome = match outcome {
             // A teardown that ran past its deadline may have left anything.
-            Outcome::Succeeded { .. } | Outcome::Failed { .. } if call.finished > call.deadline => Outcome::Uncertain {
-                reason: "the teardown passed the unit's timeout".to_owned(),
-            },
+            Outcome::Succeeded { .. } | Outcome::Failed { .. } | Outcome::RetryRequired { .. }
+                if call.finished > call.deadline =>
+            {
+                Outcome::Uncertain {
+                    reason: "the teardown passed the unit's timeout".to_owned(),
+                }
+            }
             outcome => outcome,
         };
         // The driver's teardown started: the teardown is in progress (Q8).
@@ -743,6 +747,25 @@ impl Reconcile<'_, '_, '_> {
                     self.fail_fast(life, name);
                     return Ok(false);
                 }
+                Outcome::RetryRequired {
+                    category,
+                    message,
+                    context,
+                } => (
+                    UnitResult::Failed {
+                        category,
+                        retryable: false,
+                    },
+                    Some(message.clone()),
+                    condition(Event::RetryRequired {
+                        since,
+                        run,
+                        category,
+                        message,
+                        context,
+                    }),
+                    false,
+                ),
                 Outcome::Failed {
                     category,
                     retryable,
@@ -887,7 +910,7 @@ impl Reconcile<'_, '_, '_> {
             let strategy = crate::rules::teardown_wait::strategy(spec);
             let now = context.base.clock.now();
             let end = crate::rules::teardown_wait::ends(strategy, &waiting)
-                .unwrap_or_else(|| unit_timeout(&unit).after(now))
+                .unwrap_or_else(|| unit_timeout(context.drivers, &unit).after(now))
                 .max(now);
             let lease_deadline = context.base.settings.lease_grace.after(end);
             self.phase(vec![name.clone()], lease_deadline, &[])?;
@@ -956,7 +979,7 @@ impl Reconcile<'_, '_, '_> {
         let now = context.base.clock.now();
         self.phase(
             vec![name.clone()],
-            lease::deadline(context.base, now, unit_timeout(&unit)),
+            lease::deadline(context.base, now, unit_timeout(context.drivers, &unit)),
             &[],
         )?;
         let environment = self.environment().clone();
@@ -1131,7 +1154,7 @@ fn call(
 ) -> Call {
     let name = job.unit.unit.name.clone();
     let now = context.base.clock.now();
-    let deadline = unit_timeout(job.unit).after(now);
+    let deadline = unit_timeout(context.drivers, job.unit).after(now);
     let finish = |outcome: DriverResult<Supported<Outcome>>, killed: bool| Call {
         name: name.clone(),
         outcome,
@@ -1152,9 +1175,18 @@ fn call(
     let temp_dir = job.directory.join("tmp");
     let worktree = std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", job.directory.display()))
-        .and_then(|()| slots.checkout(context.sources, job.slot, &job.commit));
-    let worktree = match worktree {
-        Ok(worktree) => worktree,
+        .and_then(|()| {
+            slots.checkout_unit(
+                context.sources,
+                job.slot,
+                &job.commit,
+                driver,
+                job.unit.resolved_spec.as_ref().unwrap_or(&job.unit.spec),
+                project_dir,
+            )
+        });
+    let (worktree, source_roots) = match worktree {
+        Ok(roots) => roots,
         Err(message) => {
             let _ = std::fs::remove_dir_all(&job.directory);
             return Call {
@@ -1163,7 +1195,7 @@ fn call(
             };
         }
     };
-    let env = match execution_env(context, &job.unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &job.unit.spec) {
         Ok(env) => env,
         Err(message) => {
             let _ = std::fs::remove_dir_all(&job.directory);
@@ -1183,7 +1215,16 @@ fn call(
         }
     };
     let _ = context.base.faults.at(FaultPoint::Executing, Some(&name));
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: context.tools,
+        clock: context.base.clock,
+        deadline,
+    };
     let execution = ExecutionContext {
+        secrets,
+        interactive: false,
+        artifacts: BTreeMap::new(),
+        source_roots,
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Teardown,
         project_dir: project_path(&worktree, project_dir),
@@ -1194,7 +1235,7 @@ fn call(
         deadline,
         now,
         observed: job.observed,
-        tools: context.tools,
+        tools: &budget,
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: job.completion,
@@ -1324,7 +1365,9 @@ pub(super) fn mark_teardowns(
                         observed.insert(
                             name.clone(),
                             ObservedUnit {
-                                api_version: StateV1,
+                                api_version: nyl_core::orchestration::state::StateV1,
+                                operator_modified: None,
+                                retry: None,
                                 kind: nyl_core::orchestration::state::ObservedUnitKind,
                                 unit: unit.unit.clone(),
                                 receipt: Some(receipt),

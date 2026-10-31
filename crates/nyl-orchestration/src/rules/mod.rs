@@ -5,7 +5,7 @@ pub mod desired;
 pub mod drift;
 pub mod execution_key;
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 pub mod freshness;
 pub mod graph;
 pub mod hold;

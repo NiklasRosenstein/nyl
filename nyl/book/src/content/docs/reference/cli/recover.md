@@ -60,7 +60,6 @@ break, so the command that repairs the state can run:
 | No `state.yaml`, such as after a broken `nyl state init` | Takes the lease over and releases it | `nyl state init` |
 | Moved away (`NYL-STATE-MOVED`) | Records the break in an unchanged commit and releases the lease | `nyl state move`, or point the Environment at the new location |
 | Deleted by `nyl state delete` (`NYL-STATE-DELETED`) | Records the break in an unchanged commit and releases the lease | `nyl state init --fresh`, or remove the Environment from source |
-| A `Nyl-Local` commit at a remote tip (`NYL-STATE-LOCAL-TIP`) | Releases the lease without committing on that tip | `nyl state restore` |
 
 It reports the state's finding as a warning. With `--unit`, `recover`
 refuses in these states with that finding instead.
@@ -69,6 +68,13 @@ Without a broken lease and without `--unit`, `recover` refuses with
 `NYL-RECOVER-NOTHING`.
 
 ## Recovering a unit
+
+A driver may require a reasoned acknowledgement before retrying a failure. Pass
+`--reason` after checking the driver's diagnostic. Nyl records the acknowledgement
+for this unit incarnation; the driver checks its resource context on the next
+execution. Successful reconciliation consumes it. This requirement also applies
+when `--retry` follows an imported interrupted run.
+
 
 - `--retry` clears the unit's condition and keeps its last receipt, so the
   unit is ready for the next [`nyl reconcile`](/nyl/reference/cli/reconcile/).
@@ -101,6 +107,9 @@ which imports its checkpoints. After its commit, `recover` deletes the
 evidence refs, the checkpoints a takeover kept for `uncertain` units, that
 no unit still uncertain needs.
 
+Use `--local` to recover local run and checkpoint records without contacting
+the remote state repository.
+
 ## Options
 
 | Option | Meaning |
@@ -121,6 +130,7 @@ no unit still uncertain needs.
 
 | Code | Meaning and fix |
 | --- | --- |
+| `NYL-RECOVER-REASON-REQUIRED` | The driver requires an explicit acknowledgement before retry. Verify the failure and pass a nonempty `--reason`. |
 | `NYL-RECOVER-NOTHING` | The unit has no uncertain or failed condition, or, without `--unit`, the lease is not broken, so there is no run to import. Check the environment with `nyl status`. |
 | `NYL-RECOVER-CHECKPOINT-MISSING` | The run has no checkpoint of the unit, its checkpoint holds a failure instead of a receipt, or `--accept` names no run ID. Pass a run the evidence lists as `receipt`, or use `--retry`. |
 | `NYL-RECOVER-KEY-MISMATCH` | The run executed the unit with another execution key or uid than its current desired document, or the unit is held. Use `--retry` to execute it again, or `nyl resume` a held unit first. |

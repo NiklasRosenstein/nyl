@@ -1,5 +1,5 @@
-//! Source locks: ApplicationGroup remote sources and `fromGit` Release input
-//! bindings, refreshed together by `nyl update source-locks`.
+//! Source locks: groups, Release inputs, unit sources and named contexts,
+//! and Environment sources, refreshed together by `nyl update source-locks`.
 //!
 //! Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
 //!
@@ -19,7 +19,7 @@ use crate::git::GitManager;
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
-use super::{DiscoveredGitOpsResource, GitOpsInventory};
+use super::GitOpsInventory;
 
 /// The resource field that holds a lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,12 @@ pub enum LockOwner {
     ApplicationGroup { name: String },
     /// `DeploymentTarget.spec.releaseInputs.<key>.<input>.fromGit.commit`.
     ReleaseInput { target: String, key: String, input: String },
+    /// A unit or Environment Git source field, addressed by its document path.
+    Source {
+        kind: String,
+        name: String,
+        path: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for LockOwner {
@@ -35,6 +41,7 @@ impl std::fmt::Display for LockOwner {
         match self {
             Self::ApplicationGroup { name } => write!(formatter, "ApplicationGroup {name}"),
             Self::ReleaseInput { target, key, input } => write!(formatter, "DeploymentTarget {target} {key}/{input}"),
+            Self::Source { kind, name, path } => write!(formatter, "{kind} {name} {}", path.join(".")),
         }
     }
 }
@@ -43,8 +50,12 @@ impl std::fmt::Display for LockOwner {
 #[derive(Debug, Clone)]
 pub struct SourceLock {
     pub owner: LockOwner,
-    pub resource: DiscoveredGitOpsResource,
+    pub source_path: std::path::PathBuf,
+    pub document_index: usize,
+    pub raw_document: String,
     pub repository_url: String,
+    /// This project uses the clone's local and origin-tracking refs without a second clone.
+    pub local: bool,
     pub revision: String,
     pub commit: String,
 }
@@ -71,6 +82,7 @@ pub fn collect_source_locks(
     inventory: &GitOpsInventory,
     group: Option<&str>,
     target: Option<&str>,
+    source_fields: &dyn Fn(&str, &str, &serde_json::Value) -> Vec<String>,
 ) -> Result<Vec<SourceLock>> {
     let groups_selected = group.is_some() || target.is_none();
     let targets_selected = target.is_some() || group.is_none();
@@ -99,15 +111,16 @@ pub fn collect_source_locks(
                 };
                 let source = &source.git;
                 group_found = true;
-                let repository = inventory
-                    .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
-                    .0;
+                let repository = inventory.resolve_git_source(source)?.0;
                 locks.push(SourceLock {
                     owner: LockOwner::ApplicationGroup {
                         name: resource.metadata.name.clone(),
                     },
-                    resource: discovered.clone(),
+                    source_path: discovered.source_path.clone(),
+                    document_index: discovered.document_index,
+                    raw_document: discovered.raw_document.clone(),
                     repository_url: repository.repo_url,
+                    local: false,
                     revision: source.revision.clone().expect("validated remote source has revision"),
                     commit: source.commit.clone().expect("validated remote source has commit"),
                 });
@@ -121,17 +134,18 @@ pub fn collect_source_locks(
                         let Some(source) = binding.from_git.as_ref().map(|source| &source.git) else {
                             continue;
                         };
-                        let repository = inventory
-                            .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
-                            .0;
+                        let repository = inventory.resolve_git_source(source)?.0;
                         locks.push(SourceLock {
                             owner: LockOwner::ReleaseInput {
                                 target: resource.metadata.name.clone(),
                                 key: key.clone(),
                                 input: input.clone(),
                             },
-                            resource: discovered.clone(),
+                            source_path: discovered.source_path.clone(),
+                            document_index: discovered.document_index,
+                            raw_document: discovered.raw_document.clone(),
                             repository_url: repository.repo_url,
+                            local: false,
                             revision: source.revision.clone().expect("validated fromGit source has revision"),
                             commit: source.commit.clone().expect("validated fromGit source has commit"),
                         });
@@ -140,6 +154,10 @@ pub fn collect_source_locks(
             }
             _ => {}
         }
+    }
+    if group.is_none() && target.is_none() {
+        collect_unit_locks(inventory, source_fields, &mut locks)?;
+        collect_environment_locks(inventory, &mut locks)?;
     }
     if let Some(requested) = group.filter(|_| !group_found) {
         return Err(NylError::config(format!(
@@ -155,6 +173,114 @@ pub fn collect_source_locks(
     Ok(locks)
 }
 
+fn collect_unit_locks(
+    inventory: &GitOpsInventory,
+    source_fields: &dyn Fn(&str, &str, &serde_json::Value) -> Vec<String>,
+    locks: &mut Vec<SourceLock>,
+) -> Result<()> {
+    for (name, unit) in super::units::discover_units(inventory)? {
+        let spec = match super::units::render_direct_unit(inventory, &name, None) {
+            Ok((_, spec)) => spec,
+            Err(error) => {
+                tracing::warn!(
+                    "{}: cannot inspect source locks for {} {}: {error}; make the unit render without environment values or refresh its locks manually",
+                    nyl_core::orchestration::codes::Code::UnitInvalid,
+                    unit.envelope.kind,
+                    name
+                );
+                continue;
+            }
+        };
+        for pointer in source_fields(&unit.envelope.api_version, &unit.envelope.kind, &spec) {
+            let Some(value) = spec.pointer(&pointer).filter(|value| value.get("commit").is_some()) else {
+                continue;
+            };
+            let source: crate::resources::GitSource = serde_json::from_value(value.clone())
+                .map_err(|error| NylError::config(format!("{} {} {pointer}: {error}", unit.envelope.kind, name)))?;
+            let mut path = vec!["spec".to_owned()];
+            path.extend(
+                pointer
+                    .trim_start_matches('/')
+                    .split('/')
+                    .map(|segment| segment.replace("~1", "/").replace("~0", "~")),
+            );
+            let owner = LockOwner::Source {
+                kind: unit.envelope.kind.clone(),
+                name: name.to_string(),
+                path,
+            };
+            if let Some(lock) = collect_git_source(
+                inventory,
+                owner,
+                (&unit.source_path, unit.document_index, &unit.raw_document),
+                source,
+            )? {
+                locks.push(lock);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_environment_locks(inventory: &GitOpsInventory, locks: &mut Vec<SourceLock>) -> Result<()> {
+    for resource in inventory.resources.values() {
+        let Some(GitOpsResource::Environment(environment)) = &resource.resource else {
+            continue;
+        };
+        let Some(source) = &environment.spec.source else {
+            continue;
+        };
+        let owner = LockOwner::Source {
+            kind: "Environment".to_owned(),
+            name: environment.metadata.name.clone(),
+            path: vec!["spec".to_owned(), "source".to_owned()],
+        };
+        if let Some(lock) = collect_git_source(
+            inventory,
+            owner,
+            (&resource.source_path, resource.document_index, &resource.raw_document),
+            source.git.clone(),
+        )? {
+            locks.push(lock);
+        }
+    }
+    Ok(())
+}
+
+fn collect_git_source(
+    inventory: &GitOpsInventory,
+    owner: LockOwner,
+    (source_path, document_index, raw_document): (&std::path::Path, usize, &str),
+    source: crate::resources::GitSource,
+) -> Result<Option<SourceLock>> {
+    let (Some(revision), Some(commit)) = (&source.revision, &source.commit) else {
+        return Ok(None);
+    };
+    if nyl_core::template_syntax::has_template_syntax(revision)
+        || nyl_core::template_syntax::has_template_syntax(commit)
+    {
+        return Err(NylError::config(format!(
+            "{owner}: revision and commit must be literal for source-lock update"
+        )));
+    }
+    let local = !source.is_remote();
+    let repository_url = if source.is_remote() {
+        inventory.resolve_git_source(&source)?.0.repo_url
+    } else {
+        inventory.worktree_root.to_string_lossy().into_owned()
+    };
+    Ok(Some(SourceLock {
+        owner,
+        source_path: source_path.to_owned(),
+        document_index,
+        raw_document: raw_document.to_owned(),
+        repository_url,
+        local,
+        revision: revision.clone(),
+        commit: commit.clone(),
+    }))
+}
+
 /// Resolve every lock to the commit it should name: the head of its revision.
 ///
 /// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds),
@@ -165,20 +291,24 @@ pub fn resolve_source_locks(locks: Vec<SourceLock>, manager: &mut GitManager) ->
     // equal repositories may be spelled differently, and each spelling can
     // map to its own cached copy.
     let mut fetched = BTreeSet::new();
-    let mut heads = BTreeMap::<(String, String), git2::Oid>::new();
+    let mut heads = BTreeMap::<(String, String, bool), git2::Oid>::new();
     let mut resolutions = Vec::new();
     for lock in locks {
         let url = lock.repository_url.clone();
-        if fetched.insert(url.clone()) {
+        if !lock.local && fetched.insert(url.clone()) {
             manager.fetch_refs(&url).map_err(NylError::Git)?;
         }
-        let head_key = (url.clone(), lock.revision.clone());
+        let head_key = (url.clone(), lock.revision.clone(), lock.local);
         let head = if let Some(head) = heads.get(&head_key) {
             *head
         } else {
-            let head = manager
-                .resolve_cached_ref(&url, &lock.revision)
-                .map_err(NylError::Git)?;
+            let head = if lock.local {
+                resolve_project_ref(&url, &lock.revision)?
+            } else {
+                manager
+                    .resolve_cached_ref(&url, &lock.revision)
+                    .map_err(NylError::Git)?
+            };
             heads.insert(head_key, head);
             head
         };
@@ -191,14 +321,49 @@ pub fn resolve_source_locks(locks: Vec<SourceLock>, manager: &mut GitManager) ->
     Ok(resolutions)
 }
 
+/// Match SourceResolver::This: local branches, then origin branches, then tags.
+fn resolve_project_ref(path: &str, revision: &str) -> Result<git2::Oid> {
+    let repository = git2::Repository::open(path).map_err(|error| NylError::config(error.to_string()))?;
+    if revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if let Ok(commit) = git2::Oid::from_str(revision).and_then(|oid| repository.find_commit(oid)) {
+            return Ok(commit.id());
+        }
+    }
+    let candidates = if revision.starts_with("refs/") {
+        vec![revision.to_owned()]
+    } else {
+        vec![
+            format!("refs/heads/{revision}"),
+            format!("refs/remotes/origin/{revision}"),
+            format!("refs/tags/{revision}"),
+        ]
+    };
+    for candidate in candidates {
+        if let Ok(reference) = repository.find_reference(&candidate) {
+            return reference
+                .peel_to_commit()
+                .map(|commit| commit.id())
+                .map_err(|error| NylError::config(error.to_string()));
+        }
+    }
+    Err(NylError::config(format!(
+        "revision {revision:?} does not exist in this repository"
+    )))
+}
+
 /// Replace one lock's commit in its resource document.
 pub fn replace_lock_commit(lock: &SourceLock, resolved: &str) -> Result<String> {
-    let path = match &lock.owner {
+    let path: Vec<&str> = match &lock.owner {
         // A group has one source, so its only commit scalar is the lock, even
         // when the document is templated.
         LockOwner::ApplicationGroup { .. } => {
-            return replace_single_commit_scalar(&lock.resource.raw_document, &lock.commit, resolved)
+            return replace_single_commit_scalar(&lock.raw_document, &lock.commit, resolved)
         }
+        LockOwner::Source { path, .. } => path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once("commit"))
+            .collect(),
         LockOwner::ReleaseInput { key, input, .. } => {
             vec![
                 "spec",
@@ -210,11 +375,11 @@ pub fn replace_lock_commit(lock: &SourceLock, resolved: &str) -> Result<String> 
             ]
         }
     };
-    replace_block_scalar(&lock.resource.raw_document, &path, &lock.commit, resolved).ok_or_else(|| {
+    replace_block_scalar(&lock.raw_document, &path, &lock.commit, resolved).ok_or_else(|| {
         NylError::config(format!(
             "Cannot locate the commit lock of {} in {}; write {} in block style, one key per line",
             lock.owner,
-            lock.resource.source_path.display(),
+            lock.source_path.display(),
             path.join(".")
         ))
     })
@@ -416,6 +581,57 @@ spec:
                 1
             )
         );
+    }
+
+    #[test]
+    fn test_unit_context_and_configuration_locks_are_addressed_independently() {
+        let directory = tempfile::TempDir::new().unwrap();
+        std::fs::write(directory.path().join("nyl.toml"), "[project]\n").unwrap();
+        let old = "a".repeat(40);
+        let document = format!("apiVersion: units.gitops.nyl/v1\nkind: OciImage\nmetadata: {{name: web}}\nspec:\n  context:\n    path: services/web\n    revision: main\n    commit: {old}\n  contexts:\n    tools:\n      path: tools\n      revision: tooling\n      commit: {old}\n  repository: registry.invalid/web\n");
+        std::fs::write(directory.path().join("units.yaml"), &document).unwrap();
+        std::fs::write(directory.path().join("unrenderable.yaml"), "apiVersion: units.gitops.nyl/v1\nkind: OciImage\nmetadata: {name: dynamic}\nspec:\n  repository: '{{ values.registry }}'\n").unwrap();
+        let repository = git2::Repository::init(directory.path()).unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "fixture", &tree, &[])
+            .unwrap();
+        let head = repository.head().unwrap().target().unwrap();
+        repository.reference("refs/heads/main", head, true, "main").unwrap();
+        repository
+            .reference("refs/remotes/origin/tooling", head, true, "tooling")
+            .unwrap();
+        let inventory = super::super::discover_gitops_inventory(directory.path(), None).unwrap();
+        let locks = collect_source_locks(&inventory, None, None, &|_, _, _| {
+            vec!["/context".to_owned(), "/contexts/tools".to_owned()]
+        })
+        .unwrap();
+        assert_eq!(locks.len(), 2);
+        let tools = locks
+            .iter()
+            .find(
+                |lock| matches!(&lock.owner, LockOwner::Source { path, .. } if path == &["spec", "contexts", "tools"]),
+            )
+            .unwrap();
+        let updated = replace_lock_commit(tools, &"b".repeat(40)).unwrap();
+        assert_eq!(
+            updated,
+            document.replacen(
+                &format!("      commit: {old}"),
+                &format!("      commit: {}", "b".repeat(40)),
+                1
+            )
+        );
+        assert_eq!(tools.repository_url, inventory.worktree_root.to_string_lossy());
+        let cache = tempfile::TempDir::new().unwrap();
+        let resolved = resolve_source_locks(locks, &mut GitManager::with_cache_dir(cache.path())).unwrap();
+        assert!(resolved
+            .iter()
+            .all(|resolution| resolution.resolved == head.to_string()));
     }
 
     #[test]

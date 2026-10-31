@@ -93,6 +93,44 @@ These rules keep it maintainable:
 - State-file formats are versioned with golden files; a format change adds a
   version and a migration.
 
+### Driver boundary
+
+The orchestration engine is generic over registered unit drivers. Native tool
+semantics belong to the driver implementing the unit kind. This boundary applies
+to behavior and persisted data, not just crate dependencies.
+
+- Keep tool-specific validation, defaults, execution, ownership semantics,
+  recovery requirements, and diagnostic codes in the driver. Shared code owns
+  dependency resolution, coordination, lifecycle, and evidence through generic
+  driver contracts.
+- Shared core protocols, orchestration, state storage, and CLI workflows must
+  not select behavior by concrete unit kind, tool name, vendor error code, or
+  human diagnostic text. Driver diagnostics may be recorded and displayed
+  unchanged; they are not a control protocol.
+- Shared protocol and state types describe cross-driver orchestration facts.
+  Do not add tool-specific variants or fields, such as a Terraform backend
+  variant or an accepted-empty-backend flag. A generic name does not make a
+  tool-specific rule generic.
+- Drivers expose their requirements and validate tool-specific decisions through
+  the driver contract. The engine coordinates and records the result without
+  interpreting driver-private data. A driver using existing capabilities must
+  not require edits to shared scheduling, lifecycle, recovery, or state commands.
+- Concrete kind names belong in registration, declarative resource schemas,
+  driver implementations, and their documentation and tests. Those locations
+  do not authorize kind-specific policy in the engine. Test generic rules with
+  test drivers; use real drivers for integration and driver conformance tests.
+
+Reviewers must check the boundary explicitly:
+
+- Trace each tool-specific requirement from declaration through execution,
+  recovery, and persistence. Does any shared layer interpret its meaning?
+- Inspect shared branches, enums, state fields, and defaults for concrete kind
+  names, backend concepts, vendor codes, and message matching. Check semantics
+  even when names appear generic.
+- Could another driver use the same orchestration path without an engine edit?
+  Reject special cases; require a driver-owned decision or a genuinely generic
+  contract, with tests at the layer that owns the rule.
+
 ## Repository Structure
 
 ```
@@ -519,7 +557,7 @@ See `BENCHMARKS.md` for detailed performance analysis.
 ### Writing Documentation
 - Resource reference pages and catalog summaries are generated from Rust-derived
   JSON Schemas. Put purpose and field descriptions in Rust doc comments and
-  examples in schema annotations. Every resource's doc comment includes
+  examples in schema annotations. Every non-unit resource's doc comment includes
   `## When needed` and `## If omitted` sections; the catalog reads these sections
   from the schema description. Keep workflow narratives in the Astro guides.
   Regenerate schemas with `nyl schema all --output-dir nyl/book/public/reference/schemas`.

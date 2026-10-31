@@ -93,6 +93,7 @@ pub(super) fn execute_batch(
         run,
         read_desired: snapshot.tips.desired.as_ref(),
         cancellation: &session.request.cancellation,
+        lease_deadline: session.lease_deadline.get(),
     };
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -116,6 +117,7 @@ struct Shared<'s> {
     run: &'s RunId,
     read_desired: Option<&'s CommitId>,
     cancellation: &'s super::Cancellation,
+    lease_deadline: Option<Timestamp>,
 }
 
 /// The condition reason of a unit that was running when the run was cancelled.
@@ -170,9 +172,18 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     let temp_dir = job.directory.join("tmp");
     let prepared = std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", job.directory.display()))
-        .and_then(|()| shared.slots.checkout(context.sources, job.slot, job.commit));
-    let worktree = match prepared {
-        Ok(worktree) => worktree,
+        .and_then(|()| {
+            shared.slots.checkout_unit(
+                context.sources,
+                job.slot,
+                job.commit,
+                driver,
+                unit.resolved_spec.as_ref().unwrap_or(&unit.spec),
+                shared.project_dir,
+            )
+        });
+    let (worktree, source_roots) = match prepared {
+        Ok(roots) => roots,
         Err(message) => {
             before_effects(&mut execution, message);
             let _ = std::fs::remove_dir_all(&job.directory);
@@ -194,7 +205,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         current.and_then(|observed| observed.condition.as_ref()),
         Some(Condition::Uncertain { .. })
     );
-    let env = match execution_env(context, &unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &unit.spec) {
         Ok(env) => env,
         Err(message) => {
             if uncertain {
@@ -226,7 +237,24 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         }
     };
     let started = context.base.clock.now();
+    let deadline = shared.lease_deadline.map_or_else(
+        || unit_timeout(context.drivers, unit).after(started),
+        |lease| {
+            unit_timeout(context.drivers, unit)
+                .after(started)
+                .min(crate::shell::lease::bound(&context.base.settings, lease))
+        },
+    );
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: context.tools,
+        clock: context.base.clock,
+        deadline,
+    };
     let call = |operation: DriverOperation, now: Timestamp| ExecutionContext {
+        secrets: secrets.clone(),
+        interactive: false,
+        artifacts: job.previous_artifacts.clone(),
+        source_roots: source_roots.clone(),
         unit: UnitAddress::new(shared.environment.clone(), name.clone()),
         operation,
         project_dir: project_path(&worktree, shared.project_dir),
@@ -234,10 +262,10 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         temp_dir: temp_dir.clone(),
         env: env.clone(),
         approved_digest: job.approval.as_ref().and_then(|approval| approval.digest.clone()),
-        deadline: unit_timeout(unit).after(now),
+        deadline,
         now,
         observed: job.observed,
-        tools: context.tools,
+        tools: &budget,
         commit_identity: context.commit_identity,
         cache_dir: shared.cache_dir.clone(),
         teardown_wait: None,
@@ -266,6 +294,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             return execution;
         }
         Inspected::Applied { outputs, artifacts } => Ok(Supported::Supported(Outcome::Succeeded {
+            versions: BTreeMap::default(),
             outputs,
             artifacts,
             attestations: Vec::new(),
@@ -299,7 +328,12 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         },
     };
     let event = match outcome {
-        Outcome::Succeeded { outputs, artifacts, .. } => {
+        Outcome::Succeeded {
+            outputs,
+            artifacts,
+            mut versions,
+            ..
+        } => {
             let key = unit
                 .execution_key
                 .clone()
@@ -325,7 +359,10 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                     read_desired: shared.read_desired.cloned(),
                     started_at: started,
                     finished_at: finished,
-                    versions: BTreeMap::from([("nyl".to_owned(), context.base.version.clone())]),
+                    versions: {
+                        versions.insert("nyl".to_owned(), context.base.version.clone());
+                        versions
+                    },
                     approval: job.approval.clone(),
                     provenance: unit.provenance.clone(),
                     outputs,
@@ -337,6 +374,24 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             execution.change_digest = Some(digest);
             execution.result = UnitResult::AwaitingApproval;
             return execution;
+        }
+        Outcome::RetryRequired {
+            category,
+            message,
+            context,
+        } => {
+            execution.result = UnitResult::Failed {
+                category,
+                retryable: false,
+            };
+            execution.message = Some(message.clone());
+            Event::RetryRequired {
+                since: finished,
+                run: shared.run.clone(),
+                category,
+                message,
+                context,
+            }
         }
         Outcome::Failed {
             category,

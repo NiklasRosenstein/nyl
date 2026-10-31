@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{GitError, Result};
-use crate::transport::base_command;
+use crate::transport::repository_command;
 
 /// A changed path relative to the worktree root.
 #[derive(Debug, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub struct WorktreeStatusEntry {
 /// Paths are relative to `worktree`, including when `git_dir` belongs to a
 /// linked worktree. Git's index and user configuration are left unchanged.
 pub fn worktree_status(git_dir: &Path, worktree: &Path) -> Result<Vec<WorktreeStatusEntry>> {
-    let output = base_command(git_dir)
+    let output = repository_command(git_dir)
         // The process working directory accepts Windows verbatim paths without
         // passing them to Git's path parser.
         .current_dir(worktree)
@@ -89,7 +89,7 @@ mod tests {
     }
 
     fn git(repository: &Repository, root: &Path, args: &[&str]) {
-        let output = base_command(repository.path())
+        let output = repository_command(repository.path())
             .current_dir(root)
             .args(args)
             .output()

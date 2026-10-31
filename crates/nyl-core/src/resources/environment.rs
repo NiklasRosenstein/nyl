@@ -314,7 +314,7 @@ impl EnvironmentSource {
             )));
         }
         if git.is_remote() {
-            validate_repository_choice(git.repository_ref.as_ref(), git.repository.as_ref(), field)?;
+            git.validate_repository(field)?;
         }
         let revision = git
             .revision

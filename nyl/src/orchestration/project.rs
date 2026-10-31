@@ -130,21 +130,76 @@ pub fn open_store(
     resolved: &ResolvedEnvironment,
     author: Option<CommitAuthor>,
 ) -> Result<GitStateStore> {
+    open_store_mode(inventory, resolved, author, false)
+}
+
+/// Open the configured state repositories, optionally without network access.
+pub fn open_store_mode(
+    inventory: &GitOpsInventory,
+    resolved: &ResolvedEnvironment,
+    author: Option<CommitAuthor>,
+    offline: bool,
+) -> Result<GitStateStore> {
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
-    let store = match author {
+    let mut store = match author {
         Some(author) => GitStateStore::new(&resolved.git_dir, auth, author),
         None => GitStateStore::read_only(&resolved.git_dir, auth),
     };
-    let mut store = store;
+    store = store.strict_routing();
     for environment in declared(inventory).0 {
         let Ok(other) = resolve_environment(inventory, &environment.metadata.name) else {
             continue;
         };
         if let Some(endpoint) = other.endpoint {
-            store = store.with_endpoint(other.location.repository, endpoint);
+            store = configure_repository(inventory, resolved, store, &other.location.repository, endpoint)?;
         }
     }
-    Ok(store)
+    Ok(if offline { store.offline() } else { store })
+}
+
+/// Route a repository identity through its own local object database.
+pub fn configure_repository(
+    inventory: &GitOpsInventory,
+    resolved: &ResolvedEnvironment,
+    mut store: GitStateStore,
+    identity: &str,
+    endpoint: Endpoint,
+) -> Result<GitStateStore> {
+    let cache = crate::git::CacheLayout::for_project(&inventory.project_root);
+    let file_path = if endpoint.read.starts_with("file://") {
+        Some(
+            reqwest::Url::parse(&endpoint.read)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .ok_or_else(|| NylError::config(format!("invalid local state repository URL: {}", endpoint.read)))?,
+        )
+    } else {
+        let path = std::path::Path::new(&endpoint.read);
+        (path.is_absolute() || (!endpoint.read.contains("://") && !endpoint.read.contains(':')))
+            .then(|| inventory.project_root.join(path))
+    };
+    let direct = file_path.is_some() && endpoint.write.as_ref().is_none_or(|write| write == &endpoint.read);
+    let source = git2::Repository::open(&resolved.git_dir)
+        .ok()
+        .and_then(|repo| {
+            repo.find_remote("origin")
+                .ok()
+                .and_then(|remote| remote.url().ok().map(crate::util::credential_free_url))
+        })
+        .is_some_and(|origin| origin == identity);
+    let path = if let Some(path) = file_path {
+        path
+    } else if source {
+        resolved.git_dir.clone()
+    } else {
+        let path = cache.state_repo_path(identity);
+        store = store.with_managed_repository(&path);
+        path
+    };
+    if direct {
+        store = store.with_direct_repository(identity);
+    }
+    Ok(store.with_repository(identity, path).with_endpoint(identity, endpoint))
 }
 
 /// The fix of a missing or invalid commit identity.

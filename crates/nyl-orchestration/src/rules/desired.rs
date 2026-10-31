@@ -55,9 +55,7 @@ use nyl_core::orchestration::state::{
     UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
-use nyl_core::resources::units::{
-    is_builtin_unit_api_version, CommandSpec, CommonUnitFields, DeletionPolicy, KindSupport, KIND_COMMAND,
-};
+use nyl_core::resources::units::{CommonUnitFields, DeletionPolicy, KindSupport};
 use serde_json::Value;
 
 use super::freshness::same_incarnation;
@@ -715,7 +713,7 @@ impl UnitError {
 }
 
 /// The driver's validation and the common fields' validation.
-fn validate_unit(driver: &dyn Driver, api_version: &str, kind: &str, spec: &Value) -> Result<(), UnitError> {
+fn validate_unit(driver: &dyn Driver, _api_version: &str, _kind: &str, spec: &Value) -> Result<(), UnitError> {
     let invalid = |error: &dyn std::fmt::Display| UnitError::Invalid(error.to_string());
     driver.validate_spec(spec).map_err(UnitError::Invalid)?;
     let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
@@ -726,18 +724,11 @@ fn validate_unit(driver: &dyn Driver, api_version: &str, kind: &str, spec: &Valu
             "approval bind: plan requires a kind that reports change digests".to_owned(),
         ));
     }
-    if is_builtin_unit_api_version(api_version) && kind == KIND_COMMAND {
-        let command: CommandSpec = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
-        command.validate().map_err(|error| invalid(&error))?;
-    } else {
-        let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
-        let support = KindSupport {
-            // Whether a kind lets units declare outputs is its driver's to check in `validate_spec`.
-            declared_outputs: true,
-            teardown: driver.capabilities(spec).teardown,
-        };
-        common.validate(support).map_err(|error| invalid(&error))?;
-    }
+    let support = KindSupport {
+        declared_outputs: true,
+        teardown: driver.capabilities(spec).teardown,
+    };
+    common.validate(support).map_err(|error| invalid(&error))?;
     Ok(())
 }
 
@@ -747,7 +738,7 @@ fn overlaps<N: Ord + std::fmt::Display>(scopes: &[(OwnershipScope, N)]) -> Vec<F
     let mut reported = BTreeSet::new();
     for (index, (scope, unit)) in scopes.iter().enumerate() {
         for (other_scope, other_unit) in &scopes[index + 1..] {
-            if unit == other_unit || !scopes_overlap(scope, other_scope) {
+            if unit == other_unit || !scope.overlaps(other_scope) {
                 continue;
             }
             let pair = if unit < other_unit {
@@ -762,66 +753,13 @@ fn overlaps<N: Ord + std::fmt::Display>(scopes: &[(OwnershipScope, N)]) -> Vec<F
                 Code::UnitOwnershipOverlap,
                 format!(
                     "units {} and {} claim overlapping resources: {} and {}",
-                    pair.0,
-                    pair.1,
-                    describe_scope(scope),
-                    describe_scope(other_scope)
+                    pair.0, pair.1, scope.description, other_scope.description
                 ),
-                "give each unit resources of its own, such as a distinct backend key or publication path prefix, or remove one of the units",
+                "give each unit disjoint ownership claims, or remove one of the units",
             ));
         }
     }
     findings
-}
-
-fn scopes_overlap(left: &OwnershipScope, right: &OwnershipScope) -> bool {
-    if left == right {
-        return true;
-    }
-    match (left, right) {
-        (
-            OwnershipScope::Publication {
-                repository,
-                revision,
-                path_prefix,
-            },
-            OwnershipScope::Publication {
-                repository: other_repository,
-                revision: other_revision,
-                path_prefix: other_prefix,
-            },
-        ) => repository == other_repository && revision == other_revision && prefixes_nest(path_prefix, other_prefix),
-        _ => false,
-    }
-}
-
-/// Whether one path prefix equals or contains the other, by path segment.
-fn prefixes_nest(left: &str, right: &str) -> bool {
-    let segments = |prefix: &str| -> Vec<String> {
-        prefix
-            .split('/')
-            .filter(|segment| !segment.is_empty() && *segment != ".")
-            .map(str::to_owned)
-            .collect()
-    };
-    let (left, right) = (segments(left), segments(right));
-    left.starts_with(&right) || right.starts_with(&left)
-}
-
-fn describe_scope(scope: &OwnershipScope) -> String {
-    match scope {
-        OwnershipScope::TerraformBackend { backend, workspace } => {
-            format!("Terraform backend {backend} workspace {workspace}")
-        }
-        OwnershipScope::OciRepository { repository, tag_prefix } => {
-            format!("OCI repository {repository} tags {tag_prefix}*")
-        }
-        OwnershipScope::Publication {
-            repository,
-            revision,
-            path_prefix,
-        } => format!("publication {repository} {revision} {path_prefix}"),
-    }
 }
 
 /// `removed` when S no longer declares the unit, `deselected` when the
@@ -869,6 +807,7 @@ fn unmatched_labels(
 
 #[cfg(test)]
 mod tests {
+    use nyl_core::resources::units::KIND_COMMAND;
     use std::sync::Arc;
 
     use nyl_core::constants::API_VERSION_UNITS;
@@ -910,6 +849,7 @@ mod tests {
 
     fn source(units: Vec<(&str, RenderedUnit)>) -> RenderedSource {
         RenderedSource {
+            repositories: BTreeMap::new(),
             source_commit: commit('a'),
             project_dir: "/nyl".to_owned(),
             environment: serde_json::from_value(json!({
@@ -1514,7 +1454,7 @@ mod tests {
         let source = source(vec![
             ("unknown", rendered("Mystery", true, Some(json!({})))),
             ("broken", rendered("Publication", true, Some(json!({"broken": 1})))),
-            ("argv", rendered(KIND_COMMAND, true, Some(json!({"command": []})))),
+            ("argv", rendered(KIND_COMMAND, true, Some(json!({"broken": 1})))),
         ]);
         let desired = run_desire(&source, &EnvironmentSnapshot::default());
         let codes: BTreeMap<Code, &Finding> = desired.errors.iter().map(|error| (error.code, error)).collect();

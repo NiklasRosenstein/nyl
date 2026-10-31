@@ -1,35 +1,6 @@
-//! Local state branches and `--local` runs.
+//! Decisions for guarded local-state reset and historical restore.
 //!
-//! Contract: [Local runs](../../../../design/orchestration-core.md#local-runs)
-//! and [Initialization and moves](../../../../design/orchestration-core.md#initialization-and-moves).
-//!
-//! - A `--local` run reads and writes the clone's local branches of the
-//!   remote state refs, the local view of the location ([`view`]), and marks
-//!   its commits `Nyl-Local: true`.
-//! - A run against remote state refuses when a remote state ref's tip is a
-//!   `Nyl-Local` commit, naming the last commit without the trailer
-//!   ([`check_tip`], `NYL-STATE-LOCAL-TIP`).
-//! - Diverged local branches are reported, such as "local state has 2 local
-//!   transitions and is 3 behind the remote" ([`divergence_warning`]).
-//! - `state reset --local` lists the units whose local receipts the remote
-//!   does not reflect and proceeds only with `--discard <unit>…` or
-//!   `--discard-all` ([`unreflected`], [`check_discard`]).
-//! - `state restore --to <commit>` writes forward commits restoring that
-//!   commit's content and never restores `admission.yaml`
-//!   ([`restore_changes`]); it records the local transitions it rejects
-//!   ([`rejected`]).
-//! - A `--local` run refuses while the remote holds run refs of dead runs
-//!   that remote state has not taken over yet ([`check_leftovers`],
-//!   `NYL-LOCAL-RUN-LEFTOVERS`, naming a remote `nyl reconcile` or `nyl
-//!   recover -e <env>`), because it never imports remote run refs;
-//!   the lease it takes at the remote lists no units, since remote runs do
-//!   not notice local effects.
-//! - `state restore --to` pairs the other state ref through the transition
-//!   trailers ([`restore_tips`]).
-//! - A local run warns about every unit it executes, naming the remote
-//!   command that records it again ([`unrecorded_warning`]), and runs units
-//!   whose recovery policy is not `converge` only when named with
-//!   `--approve` (decided in `rules::selection`).
+//! Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,19 +9,15 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry, StateSide, StateTips, TransitionChanges,
 };
-use nyl_core::orchestration::state::{ObservedUnit, StateLocation, StateRecord};
+use nyl_core::orchestration::state::{StateLocation, StateRecord};
 use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::lease::run_live;
 use crate::rules::state_location::describe;
 use crate::transition::trailer;
 
-/// The local view of a remote location: the same refs, path, and prefix in
-/// the clone itself. `--local-lease` takes the lease here too.
-///
-/// `NYL-LOCAL-RUN-UNSUPPORTED` for a location that already is the clone's
-/// own branches, and for state refs with full `refs/…` names outside
-/// `refs/heads/`, which have no local branch.
+/// The local view of a remote location, retaining its refs, path, and prefix.
+/// A state location without a remote has no separate view to reset.
 pub fn view(location: &StateLocation) -> Result<StateLocation, Finding> {
     if location.is_local() {
         return Err(Finding::new(
@@ -62,60 +29,9 @@ pub fn view(location: &StateLocation) -> Result<StateLocation, Finding> {
             "run without --local: the local branches already are the state",
         ));
     }
-    for configured in [&location.desired_ref, &location.observed_ref] {
-        if !StateLocation::is_branch_ref(configured) {
-            return Err(Finding::new(
-                Code::LocalRunUnsupported,
-                format!("state ref {configured} is a full ref name, which has no local branch in the clone"),
-                "name desiredRef and observedRef as branches to work on local state, or run against the remote state",
-            ));
-        }
-    }
     let mut view = location.clone();
     StateLocation::LOCAL_REPOSITORY.clone_into(&mut view.repository);
     Ok(view)
-}
-
-/// Whether a commit message carries the `Nyl-Local: true` trailer.
-pub fn is_local_commit(message: &str) -> bool {
-    trailer(message, "Nyl-Local").is_some_and(|value| value.trim() == "true")
-}
-
-/// Refuse when the newest of an environment's commits on a remote state
-/// ref (its `log` filtered by [`environment_log`]) is a `Nyl-Local` commit,
-/// naming the last commit without the trailer.
-pub fn check_tip(environment: &EnvironmentName, side: StateSide, log: &[LogEntry]) -> Result<(), Finding> {
-    let Some(tip) = log.first() else {
-        return Ok(());
-    };
-    if !is_local_commit(&tip.message) {
-        return Ok(());
-    }
-    let message = format!(
-        "the tip {} of the {} state ref of {environment} is a Nyl-Local commit, which only a manual push of local state branches produces",
-        tip.commit,
-        side.as_str()
-    );
-    let fix = match log.iter().find(|entry| !is_local_commit(&entry.message)) {
-        Some(last) => format!(
-            "restore the last commit without the trailer with `nyl state restore -e {environment} --to {}`; pushed local transitions are never accepted",
-            last.commit
-        ),
-        None => format!(
-            "none of the last {} commits of {environment} on the ref is without the trailer; name the commit to restore with `nyl state restore -e {environment} --to <commit>`",
-            log.len()
-        ),
-    };
-    Err(Finding::new(Code::StateLocalTip, message, fix))
-}
-
-/// The local transitions on top of a remote state ref, newest first: what
-/// `state restore` records as rejected.
-pub fn rejected(log: &[LogEntry]) -> Vec<CommitId> {
-    log.iter()
-        .take_while(|entry| is_local_commit(&entry.message))
-        .map(|entry| entry.commit.clone())
-        .collect()
 }
 
 /// `1 local transition`, `2 local transitions`.
@@ -157,28 +73,16 @@ pub fn divergence_warning(environment: &EnvironmentName, divergence: &LocalDiver
     Some(Finding::new(Code::StateLocalDiverged, message, fix))
 }
 
-/// Units whose receipt in the local view differs from the remote's: what
-/// `state reset --local` would forget. A unit counts when it has a local
-/// receipt and the remote has another receipt (execution key or uid), none,
-/// or another condition.
+/// Units whose observed state differs from the remote and would be discarded.
 pub fn unreflected(local: &EnvironmentSnapshot, remote: &EnvironmentSnapshot) -> Vec<UnitName> {
-    let receipt = |unit: &ObservedUnit| {
-        (
-            unit.unit.uid.clone(),
-            unit.receipt.as_ref().map(|receipt| receipt.execution_key.clone()),
-        )
-    };
     local
         .observed
-        .iter()
-        .filter(|(_, observed)| observed.receipt.is_some())
-        .filter(|(unit, observed)| {
-            remote
-                .observed
-                .get(*unit)
-                .is_none_or(|theirs| receipt(observed) != receipt(theirs) || observed.condition != theirs.condition)
-        })
-        .map(|(unit, _)| unit.clone())
+        .keys()
+        .chain(remote.observed.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|unit| local.observed.get(unit) != remote.observed.get(unit))
         .collect()
 }
 
@@ -324,17 +228,6 @@ fn commit_environment(message: &str) -> Option<&str> {
     trailer(message, "Nyl-Environment").map(str::trim)
 }
 
-/// The entries of a state ref's `log` that belong to `environment`, newest
-/// first: several environments may share one ref through `path`, so the tip
-/// check, the rejected transitions, and `state restore` look only at the
-/// environment's own commits, those whose `Nyl-Environment` trailer names it.
-pub fn environment_log(environment: &EnvironmentName, log: &[LogEntry]) -> Vec<LogEntry> {
-    log.iter()
-        .filter(|entry| commit_environment(&entry.message) == Some(environment.as_str()))
-        .cloned()
-        .collect()
-}
-
 /// `NYL-STATE-MISSING` for remote state that is missing while the clone's
 /// local branches of the same refs hold the environment's state, recorded
 /// as local: a remote was added after the state started without one, and
@@ -366,8 +259,7 @@ pub fn missing_on_remote(
 /// reads it). The other side is the commit carrying the same `Nyl-Run-Id`
 /// trailer, else the one `to`'s `Nyl-Read-Desired`/`Nyl-Read-Observed`
 /// trailer names. `NYL-STATE-RESTORE-INVALID` when `to` is in neither log,
-/// when either chosen commit is a `Nyl-Local` commit, or when the other side
-/// cannot be paired, or when `to` is a transition commit of another
+/// when the other side cannot be paired, or when `to` is a transition commit of another
 /// environment sharing the refs. With one shared ref, both tips are `to`.
 ///
 /// Both sides of one transition carry the same message, so among several
@@ -380,9 +272,7 @@ pub fn restore_tips(
     observed: &[LogEntry],
     shared: bool,
 ) -> Result<StateTips, Finding> {
-    let fix = format!(
-        "name a commit without the Nyl-Local trailer from `git log` of a state ref of {environment}, such as the one the NYL-STATE-LOCAL-TIP refusal names"
-    );
+    let fix = format!("name a commit from the state history of {environment}");
     let invalid = |message: String| Finding::new(Code::StateRestoreInvalid, message, fix.clone());
     let find = |log: &[LogEntry]| log.iter().find(|entry| entry.commit == *to).cloned();
     let (entry, side) = match (find(desired), find(observed)) {
@@ -394,22 +284,11 @@ pub fn restore_tips(
             )))
         }
     };
-    let refuse_local = |entry: &LogEntry, what: &str| {
-        if is_local_commit(&entry.message) {
-            Err(invalid(format!(
-                "{what} {} is a Nyl-Local commit; pushed local transitions are never restored",
-                entry.commit
-            )))
-        } else {
-            Ok(())
-        }
-    };
     if let Some(other) = commit_environment(&entry.message).filter(|name| *name != environment.as_str()) {
         return Err(invalid(format!(
             "{to} is a transition commit of environment {other}, not of {environment}"
         )));
     }
-    refuse_local(&entry, "--to")?;
     if shared {
         return Ok(StateTips {
             desired: Some(to.clone()),
@@ -451,9 +330,6 @@ pub fn restore_tips(
             )))
         }
     };
-    if let Some(other) = &other {
-        refuse_local(other, &format!("the paired {} commit", other_side.as_str()))?;
-    }
     let other = other.map(|entry| entry.commit);
     Ok(match side {
         StateSide::Desired => StateTips {
@@ -523,7 +399,7 @@ mod tests {
     /// Catches a `--local` run reading the remote refs, or a view of refs
     /// the clone has no branch for.
     #[test]
-    fn test_view_keeps_refs_in_the_clone_and_refuses_full_ref_names() {
+    fn test_view_preserves_full_ref_names() {
         let view = view(&remote()).unwrap();
         assert_eq!(view.repository, StateLocation::LOCAL_REPOSITORY);
         assert_eq!(
@@ -536,39 +412,11 @@ mod tests {
         );
         let mut full = remote();
         full.observed_ref = "refs/nyl/dev/observed".to_owned();
-        assert_eq!(super::view(&full).unwrap_err().code, Code::LocalRunUnsupported);
+        assert!(super::view(&full).is_ok());
         let mut heads = remote();
         heads.desired_ref = "refs/heads/nyl/dev/desired".to_owned();
         assert!(super::view(&heads).is_ok());
         assert_eq!(super::view(&view).unwrap_err().code, Code::LocalRunUnsupported);
-    }
-
-    /// Catches a run continuing on pushed local transitions, or a fix that
-    /// names a commit restore would refuse.
-    #[test]
-    fn test_check_tip_refuses_a_local_tip_naming_the_last_remote_commit() {
-        let ordinary = entry('1', message(RUN_A, None, false));
-        assert!(check_tip(&dev(), StateSide::Desired, std::slice::from_ref(&ordinary)).is_ok());
-        assert!(check_tip(&dev(), StateSide::Desired, &[]).is_ok());
-        let log = [
-            entry('3', message(RUN_C, None, true)),
-            entry('2', message(RUN_B, None, true)),
-            ordinary,
-        ];
-        let finding = check_tip(&dev(), StateSide::Observed, &log).unwrap_err();
-        assert_eq!(finding.code, Code::StateLocalTip);
-        assert!(finding.message.contains("observed"), "{}", finding.message);
-        assert!(
-            finding
-                .fix
-                .contains(&format!("nyl state restore -e dev --to {}", commit('1'))),
-            "{}",
-            finding.fix
-        );
-        let all_local = check_tip(&dev(), StateSide::Desired, &log[..2]).unwrap_err();
-        assert!(all_local.fix.contains("--to <commit>"), "{}", all_local.fix);
-        assert_eq!(rejected(&log), vec![commit('3'), commit('2')]);
-        assert!(rejected(&log[2..]).is_empty());
     }
 
     /// Catches a silent divergence or a warning while the branches follow
@@ -619,13 +467,18 @@ mod tests {
         );
     }
 
-    fn observed(name: &str, uid: u64, key: char, condition: Option<&serde_json::Value>) -> ObservedUnit {
+    fn observed(
+        name: &str,
+        uid: u64,
+        key: char,
+        condition: Option<&serde_json::Value>,
+    ) -> nyl_core::orchestration::state::ObservedUnit {
         let mut document = observed_numbered(name, uid, Some(hex_key(key)));
         document.condition = condition.map(|condition| serde_json::from_value(condition.clone()).unwrap());
         document
     }
 
-    fn snapshot(units: Vec<ObservedUnit>) -> EnvironmentSnapshot {
+    fn snapshot(units: Vec<nyl_core::orchestration::state::ObservedUnit>) -> EnvironmentSnapshot {
         EnvironmentSnapshot {
             observed: units
                 .into_iter()
@@ -670,6 +523,28 @@ mod tests {
         );
         assert!(check_discard(&dev(), &units, Some(&Discard::All)).is_ok());
         assert!(check_discard(&dev(), &[], None).is_ok());
+    }
+
+    #[test]
+    fn test_reset_requires_discard_for_operator_fences_and_same_key_receipts() {
+        let clean = observed("repair", 1, 'a', None);
+        let mut fenced = clean.clone();
+        fenced.operator_modified = Some(nyl_core::orchestration::state::OperatorModification {
+            request: nyl_core::orchestration::state::Request {
+                by: "operator".to_owned(),
+                at: "2026-10-28T00:00:00Z".parse().unwrap(),
+                reason: Some("repair".to_owned()),
+            },
+            status: None,
+        });
+        let remote = snapshot(vec![clean.clone()]);
+        let units = unreflected(&snapshot(vec![fenced]), &remote);
+        assert_eq!(units, vec![unit("repair")]);
+        assert!(check_discard(&dev(), &units, None).is_err());
+        let mut rerun = clean;
+        rerun.receipt.as_mut().unwrap().run = RunId::new(RUN_B).unwrap();
+        assert_eq!(unreflected(&snapshot(vec![rerun]), &remote), vec![unit("repair")]);
+        assert_eq!(unreflected(&snapshot(vec![]), &remote), vec![unit("repair")]);
     }
 
     /// Catches a restore that leaves units the target lacks, rewrites
@@ -758,10 +633,9 @@ mod tests {
             "{}",
             finding.message
         );
-        // A paired commit that is local is refused too.
+        // A paired commit is identified by its run regardless of other trailers.
         let paired_local = [entry('8', message(RUN_C, Some(('3', '2')), true))];
-        let finding = restore_tips(&dev(), &commit('4'), &paired_local, &observed[1..], false);
-        assert!(finding.is_err());
+        assert!(restore_tips(&dev(), &commit('4'), &paired_local, &observed[1..], false).is_ok());
         // One shared ref.
         assert_eq!(
             restore_tips(&dev(), &commit('3'), &desired, &desired, true).unwrap(),
@@ -814,14 +688,6 @@ mod tests {
         }
     }
 
-    /// Catches a `Nyl-Local` trailer of another value counting as local.
-    #[test]
-    fn test_is_local_commit_reads_the_trailer() {
-        assert!(is_local_commit(&message(RUN_A, None, true)));
-        assert!(!is_local_commit(&message(RUN_A, None, false)));
-        assert!(!is_local_commit("nyl: reconcile dev\n\nNyl-Local: false\n"));
-    }
-
     /// Catches a `--local` run taking a broken remote lease while the broken
     /// holder's run ref is still within its deadline: it would never import
     /// that run ref, and would erase the break the next remote run needs.
@@ -869,16 +735,7 @@ mod tests {
             commit_of("dev", '2', RUN_B, true),
             commit_of("preview", '1', RUN_A, false),
         ];
-        let own = environment_log(&dev(), &log);
-        assert_eq!(
-            own.iter().map(|entry| entry.commit.clone()).collect::<Vec<_>>(),
-            vec![commit('2')]
-        );
-        assert_eq!(rejected(&own), vec![commit('2')]);
-        assert!(check_tip(&dev(), StateSide::Desired, &own).is_err());
         let preview = EnvironmentName::new("preview").unwrap();
-        assert_eq!(rejected(&environment_log(&preview, &log)), vec![commit('3')]);
-
         let finding = restore_tips(&dev(), &commit('1'), &log, &log, true).unwrap_err();
         assert_eq!(finding.code, Code::StateRestoreInvalid);
         assert!(finding.message.contains("environment preview"), "{}", finding.message);

@@ -2741,7 +2741,7 @@ struct ResolvedGroupSource {
     source_session: Option<RenderSession>,
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
-    repository: Option<InlineGitRepository>,
+    repository: Option<crate::resources::ReadGitRepository>,
 }
 
 struct StaticReleaseFile {
@@ -2809,7 +2809,7 @@ fn resolve_remote_group_source(
     git_manager: &mut Option<GitManager>,
     cache: Option<&GitOpsCache>,
     provenance_inputs: &mut Vec<PathBuf>,
-) -> Result<(PathBuf, PathBuf, InlineGitRepository)> {
+) -> Result<(PathBuf, PathBuf, crate::resources::ReadGitRepository)> {
     let (repository, repository_path) = resolve_source_repository(inventory, source)?;
     if let Some(repository_path) = repository_path {
         provenance_inputs.push(repository_path);
@@ -3096,8 +3096,8 @@ fn warn_unclaimed_group_manifests(
 fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
-) -> Result<(InlineGitRepository, Option<PathBuf>)> {
-    inventory.resolve_git_repository(source.git.repository_ref.as_ref(), source.git.repository.as_ref())
+) -> Result<(crate::resources::ReadGitRepository, Option<PathBuf>)> {
+    inventory.resolve_git_source(&source.git)
 }
 
 fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {

@@ -252,7 +252,7 @@
         "repository": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InlineGitRepository"
+              "$ref": "#/$defs/ReadGitRepository"
             },
             {
               "type": "null"
@@ -318,7 +318,7 @@
           "type": "object"
         },
         "name": {
-          "description": "Project-local identity. Must be a Kubernetes DNS subdomain and remain static during discovery.",
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
           "type": "string"
         }
       },
@@ -1099,6 +1099,20 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "ReadGitRepository": {
+      "additionalProperties": false,
+      "description": "Credential-free coordinates for a repository that is only read.",
+      "properties": {
+        "repoURL": {
+          "description": "Git read URL. Source checkouts never publish to this repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
       ],
       "type": "object"
     },

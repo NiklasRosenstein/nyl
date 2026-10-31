@@ -15,7 +15,20 @@ pub(crate) fn update_locks(
     check: bool,
 ) -> Result<()> {
     let inventory = discover_gitops_inventory(path, None)?;
-    let locks = collect_source_locks(&inventory, requested_group, requested_target)?;
+    #[cfg(feature = "test-kinds")]
+    let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
+    #[cfg(not(feature = "test-kinds"))]
+    let drivers = nyl_drivers::registry::builtin();
+    let locks = collect_source_locks(
+        &inventory,
+        requested_group,
+        requested_target,
+        &|api_version, kind, spec| {
+            drivers
+                .get(api_version, kind)
+                .map_or_else(Vec::new, |driver| driver.source_fields(spec))
+        },
+    )?;
     let mut manager = GitManager::new().map_err(NylError::Git)?;
     let resolutions = resolve_source_locks(locks, &mut manager)?;
     let mut stale = 0;
@@ -63,19 +76,19 @@ fn plan_lock_edits(project_root: &Path, resolutions: &[LockResolution]) -> Resul
     for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
         let lock = &resolution.lock;
         let resolved = resolution.resolved.as_str();
-        let file = project_root.join(&lock.resource.source_path);
+        let file = project_root.join(&lock.source_path);
         if !files.contains_key(&file) {
             let contents = fs::read_to_string(&file)?;
             files.insert(file.clone(), (contents.clone(), contents, BTreeMap::new()));
         }
         let (_, contents, documents) = files.get_mut(&file).expect("inserted above");
-        let index = lock.resource.document_index;
+        let index = lock.document_index;
         let expected = documents
             .get(&index)
             .cloned()
-            .unwrap_or_else(|| lock.resource.raw_document.clone());
+            .unwrap_or_else(|| lock.raw_document.clone());
         let mut current_lock = lock.clone();
-        current_lock.resource.raw_document.clone_from(&expected);
+        current_lock.raw_document.clone_from(&expected);
         let document = replace_lock_commit(&current_lock, resolved)?;
         *contents = replace_document(contents, index, &expected, &document)?;
         documents.insert(index, document);
@@ -90,8 +103,6 @@ fn plan_lock_edits(project_root: &Path, resolutions: &[LockResolution]) -> Resul
 mod tests {
     use super::*;
     use crate::gitops::source_locks::{LockOwner, SourceLock};
-    use crate::gitops::DiscoveredGitOpsResource;
-    use crate::resources::{GitOpsResourceIdentity, GitOpsResourceKind};
 
     fn group(name: &str) -> String {
         format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  source:\n    revision: main\n    commit: aaaa\n")
@@ -101,18 +112,11 @@ mod tests {
         LockResolution {
             lock: SourceLock {
                 owner,
-                resource: DiscoveredGitOpsResource {
-                    source_path: file.into(),
-                    document_index,
-                    raw_document: raw_document.to_owned(),
-                    identity: GitOpsResourceIdentity {
-                        kind: GitOpsResourceKind::ApplicationGroup,
-                        name: "second".to_owned(),
-                    },
-                    static_labels: BTreeMap::default(),
-                    resource: None,
-                },
+                source_path: file.into(),
+                document_index,
+                raw_document: raw_document.to_owned(),
                 repository_url: "https://git.example.com/apps.git".to_owned(),
+                local: false,
                 revision: "main".to_owned(),
                 commit: "aaaa".to_owned(),
             },

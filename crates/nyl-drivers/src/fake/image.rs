@@ -5,9 +5,9 @@ use std::ffi::OsString;
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
-    BuildPush, Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, Verification,
+    Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection,
+    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
+    Verification,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, Receipt};
@@ -80,12 +80,16 @@ impl Driver for FakeImage {
         1
     }
 
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(60)
+    }
+
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
             plan: true,
             reconcile: true,
             verify: true,
-            build: Some(BuildPush::Safe),
+            build: true,
             ..Capabilities::default()
         }
     }
@@ -125,16 +129,30 @@ impl Driver for FakeImage {
         Vec::new()
     }
 
-    fn source_fields(&self, _spec: &Value) -> Vec<String> {
-        vec!["/context".to_owned()]
+    fn source_fields(&self, spec: &Value) -> Vec<String> {
+        let mut fields = vec!["/context".to_owned()];
+        if let Some(contexts) = spec.get("contexts").and_then(Value::as_object) {
+            fields.extend(
+                contexts
+                    .keys()
+                    .map(|name| format!("/contexts/{}", name.replace('~', "~0").replace('/', "~1"))),
+            );
+        }
+        fields
+    }
+
+    fn checkout_paths(&self, _spec: &Value) -> Option<Vec<String>> {
+        Some(Vec::new())
     }
 
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.get("repository")
             .and_then(Value::as_str)
-            .map(|repository| OwnershipScope::OciRepository {
-                repository: repository.to_owned(),
-                tag_prefix: format!("nyl-{environment}-"),
+            .map(|repository| OwnershipScope {
+                namespace: "oci-tags".to_owned(),
+                key: vec![repository.to_owned(), format!("nyl-{environment}-")],
+                path: vec![],
+                description: format!("OCI repository {repository} tags nyl-{environment}-*"),
             })
             .into_iter()
             .collect()
@@ -175,6 +193,7 @@ impl Driver for FakeImage {
             .ok_or_else(|| DriverError::before_effects("an executing unit has an execution key"))?;
         let artifact = Self::artifact(unit, key, resolved_spec(unit)?)?;
         Ok(Supported::Supported(Outcome::Succeeded {
+            versions: std::collections::BTreeMap::new(),
             outputs: json!({}),
             artifacts: vec![artifact],
             attestations: Vec::new(),
@@ -207,7 +226,7 @@ impl Driver for FakeImage {
         &self,
         _ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        _push: bool,
+        _args: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         let spec = resolved_spec(unit)?;
         let key = ExecutionKey::from_digest_of(

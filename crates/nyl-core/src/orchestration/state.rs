@@ -560,6 +560,32 @@ pub struct ObservedUnit {
     /// Teardown, and [Drivers](../../../../design/orchestration-core.md#drivers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<TeardownWaiting>,
+    /// A native repair requires an explicit approval before the next execution.
+    #[serde(rename = "operatorModified", default, skip_serializing_if = "Option::is_none")]
+    pub operator_modified: Option<OperatorModification>,
+    /// A driver-requested retry acknowledgement, bound to this unit incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryAcknowledgement>,
+}
+
+/// Driver-owned retry context and the operator's acknowledgement.
+/// Context contains no secrets and is interpreted only by the emitting driver.
+/// A successful receipt consumes the acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum RetryAcknowledgement {
+    Required { context: Value },
+    Acknowledged { context: Value, request: Request },
+}
+
+/// A native operator call is fenced before it starts and records its result afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperatorModification {
+    #[serde(flatten)]
+    pub request: Request,
+    /// Absent if the runner stopped before recording the tool's exit.
+    pub status: Option<super::driver::ExecStatus>,
 }
 
 /// A teardown waiting after its first phase, as the observed unit records it.
@@ -996,7 +1022,7 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         schema["title"] = serde_json::Value::String(title.to_owned());
         schema
     }
-    [
+    let schemas: BTreeMap<_, _> = [
         ("state-record", schema::<StateRecord>("StateRecord")),
         ("environment-record", schema::<EnvironmentRecord>("EnvironmentRecord")),
         ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
@@ -1010,5 +1036,6 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
     ]
     .into_iter()
     .map(|(slug, schema)| (format!("{API_VERSION_GITOPS}/state/{slug}.schema.json"), schema))
-    .collect()
+    .collect();
+    schemas
 }

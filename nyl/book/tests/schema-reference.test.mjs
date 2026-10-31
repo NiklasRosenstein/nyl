@@ -16,7 +16,7 @@ test('every resource has an accurate, documented schema and valid example', () =
   for (const resource of resources) {
     const schema = schemaFor(resource);
     assert.ok(summary(schema).length > 20, resource.name);
-    assert.deepEqual(resourceUsage(schema).map(({ label }) => label), ['When needed', 'If omitted']);
+    assert.deepEqual(resourceUsage(schema).map(({ label }) => label), resource.apiVersion.startsWith('units.') ? [] : ['When needed', 'If omitted']);
     assert.equal(schema.properties.apiVersion.const, resource.apiVersion);
     assert.ok(schema.examples.length, resource.name);
     const validate = ajv.compile(schema);

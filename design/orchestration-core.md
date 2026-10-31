@@ -773,7 +773,7 @@ previews branch
   only when it does not exist yet, and otherwise warns when its own rendering
   would differ, so pull requests running different Nyl versions never
   overwrite each other. `nyl build` on the template renders it on demand, and
-  `--push` publishes it.
+  a driver argument such as `-- --push` publishes it.
 - Nothing is reconciled from state: Git holds the other targets' files, and
   a publish removes only files in the publishing target's index.
 - Nyl renders the shared catalog, so the readiness table checks its settings.
@@ -1441,8 +1441,7 @@ Nyl-Version: 0.7.0
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
   `recover`, `verify`, `attest`, `exec`, `ci-admit`, `state-init`,
   `state-move`, `state-delete`,
-  `state-forget`, and `state-restore`. `state reset` rewrites only the clone's
-  local branches, and `lease break` writes only the lease ref; the
+  and `state-forget`. `lease break` writes only the lease ref; the
   transition commit that imports the broken run lists the break under
   `leaseBroken` with who broke it and why.
 - Replaying operations in order, from the read commits and evaluation times
@@ -1700,7 +1699,7 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    state-writing operation takes the lease (`reconcile`, `promote`,
    `teardown`, `hold`, `resume`, `recover`, `verify`, `attest`, `exec`,
    `ci admit`, `state init`,
-   `state move`, `state delete`, `state forget`, `state restore`), so only one
+   `state move`, `state delete`, `state forget`), so only one
    runs per environment at a time. `promote` takes the target environment's
    lease only. `lease break` is the one command that changes a lease it does
    not hold. A broken lease whose run no run has imported yet is taken over
@@ -1722,9 +1721,8 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    latest finish time of the units executing, by their `timeout`; `verify` by
    the timeouts of the units it verifies; a teardown wait by the wait's end.
    The runner updates the lease and the `Run` record together at each phase
-   and unit start, with the batch's `created/` documents, in one atomic push
-   that lands both or neither; a `--local` run whose lease is at the remote
-   writes the two one after the other. There are no heartbeats.
+   and unit start, with the batch's `created/` documents, in one atomic
+   update that lands both or neither. There are no heartbeats.
 3. **Checkpoints.** Each finished unit is checkpointed on the run ref before
    the next wave, together with the desired document it executed and its uid,
    including documents the run created. Before a unit the run created starts,
@@ -1788,8 +1786,8 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    - `nyl recover` touches run refs only when it imports the run of a broken
      lease (see [Recovery](#recovery)). It writes a single transition commit
      and executes nothing, so it writes no `Run` record or run ref of its
-     own: its phases renew only the lease. A `--local` run never imports,
-     retires, or deletes remote run refs (see [Local runs](#local-runs)).
+     own: its phases renew only the lease. A `--local` run operates on the
+     local coordination refs (see [Local runs](#local-runs)).
 5. **Fenced commit.** The final transition commit is pushed with
    `git push --atomic`, together with a compare-and-swap of the lease ref that
    expects the run's own lease commit, so either both land or neither does.
@@ -1869,6 +1867,16 @@ executing, and the first run's results are reported as superseded.
 
 ### Recovery
 
+A driver can return `RetryRequired {category, message, context}`. It is recorded
+as a non-retryable failure with `retry: {state: required, context}` on the
+observed unit. Context is non-secret, driver-owned data; orchestration does not
+interpret it or diagnostic text. `recover --retry` requires a nonempty reason
+and records `retry: {state: acknowledged, context, request}` while clearing the
+condition. Ordinary recovery and recovery after importing a run use the same
+rule. The acknowledgement is bound to the observed unit incarnation; the
+driver validates its context against the resource it will operate on. A
+successful receipt consumes it; a failed attempt retains it.
+
 An uncertain condition means effects may or may not have happened. Each driver
 declares a recovery policy for execution and for teardown:
 
@@ -1937,10 +1945,9 @@ Once the import is recorded, `recover` exits 0 and lists what it imported;
 `nyl status` then exits 4 for the units left uncertain. Without `--unit` and
 without a broken run to import, `recover` refuses with `NYL-RECOVER-NOTHING`.
 Where no state can be read, because it is missing, moved, deleted by
-`nyl state delete`, or has a local tip, `nyl recover -e <env>` still takes
+`nyl state delete`, `nyl recover -e <env>` still takes
 the broken lease over, records the break where state exists, and releases
-it, so `state init` (`--fresh` for deleted state), `state move`, or
-`state restore` can run.
+it, so `state init` (`--fresh` for deleted state) or `state move` can run.
 
 **Holds on uncertain units.** A hold on a unit with an `uncertain` condition
 keeps the desired document and uid of the unit's last receipt as its desired
@@ -2074,6 +2081,13 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
   that differ from the desired document, with values only where they are not
   sensitive, and the snapshot's digest with the paths that differ from that
   commit. It never records file contents, secrets, or tool output.
+  Nyl first writes an observed transition with the operator-modified marker,
+  before the tool can change native state, then records the tool status in a
+  second observed transition. A crash between them preserves the approval
+  fence. When the driver proves the command could not start, a further
+  transition restores the complete prior observed document; failures after a
+  possible effect retain the fence. ObservedUnit records this marker and the exact native scope accepted
+  by a reasoned missing-state recovery.
 - **Afterwards.** The unit's receipt is marked `operator-modified`. While held,
   consumers keep resolving from it, as for any hold. After `resume`, the next
   execution of the unit needs explicit approval, whatever its `approval`
@@ -2418,104 +2432,26 @@ initialization, move, or fresh start, each as its own event.
 
 ### Local runs
 
-Runs from a workstation are ordinary runs. Without CI wired up yet, `nyl
-reconcile -e <env>` from a workstation takes the remote lease and pushes
-transition commits to the remote state exactly like a CI job; its source
-commit must be pushed and reachable per [Pinned commits](#pinned-commits). CI
-later continues from the state those runs recorded.
+Each state identity has a local Git repository. A configured local path or
+`file://` URL opens that repository directly, including bare repositories.
+When the source checkout represents the configured state repository, Nyl uses
+that checkout. Other identities use a bare repository in the project cache.
+State moves transfer the required objects between repositories.
 
-Nyl keeps the clone's own branches of the state refs, `nyl/<env>/desired` and
-`nyl/<env>/observed` by default, as the local known version of the state:
+Ordinary commands fetch the configured state, take the remote lease, and
+publish state and coordination updates with compare-and-swap. A local view
+with unpublished receipts or checkpoints stops an online operation before it
+can overwrite or merge them. Inspect and recover the local work before using
+remote state again. `state reset --local` follows the remote only after the
+operator explicitly accepts unreflected receipts; unpublished coordination
+records must first be recovered locally. `state restore --to` writes forward
+commits with historical state content and preserves current admission.
 
-- Every command that fetches an environment's remote state fast-forwards those
-  local branches, creating them if needed. It never rewrites a local branch
-  that has diverged, and it sets no upstream, so a bare `git push` does not
-  publish them. `git log nyl/<env>/desired` works in any clone that ran Nyl.
-- **No remote.** When the state repository resolves to the local repository,
-  because nothing is configured and the checkout has no `origin`, the local
-  branches are the state. Runs are ordinary runs with a local lease;
-  `nyl state init -e <env>` creates the state there.
-- **Adding a remote.** Once the state repository resolves to a remote, a run
-  finds no `state.yaml` there, refuses, and names `nyl state move -e <env>
-  --from local`. The move pushes the branches' history to the remote, writes
-  the move event there as the new tip, with `state.yaml` naming the remote,
-  and fast-forwards the local branches to it. Old and new location share one
-  history, so a run with the old configuration reads the new location from
-  `state.yaml` and refuses; no marker is needed at the old location.
-
-`--local` runs orchestration next to remote state without publishing it, for
-experiments from a workstation:
-
-- A local run continues from the local branches and writes its transition
-  commits to them with a `Nyl-Local: true` trailer, never pushing state. It
-  needs state refs that have local branches: short names or `refs/heads/…`.
-  State without a remote, whose branches already are the state, and full
-  `refs/…` state refs outside `refs/heads/` refuse `--local` with
-  `NYL-LOCAL-RUN-UNSUPPORTED`. While
-  the remote does not move, the local branches are the remote state plus the
-  local runs; once it moves, they have diverged, Nyl stops fast-forwarding
-  them, and `nyl status -e <env>` reports it, such as "local state has 2
-  local transitions and is 3 behind the remote". `nyl status` and `nyl get`
-  with `--local` show the local view.
-- A local run takes the remote lease (`refs/nyl/<env>/lease`), because the lease is
-  coordination, not state: a local run and a CI run of the same environment
-  never execute at the same time. This needs push access to the lease ref.
-  The lease it holds lists no units, and its run ref stays in the clone,
-  because remote runs do not notice local effects and a takeover of a
-  crashed local run must not mark remote units uncertain. Live remote run
-  refs still block it like a held lease.
-- A local run never imports remote run refs, so it refuses with
-  `NYL-LOCAL-RUN-LEFTOVERS` while the remote holds run refs of dead runs that
-  no remote run has taken over yet: finished, past their deadline, or the
-  holder of a broken lease. It checks before taking the lease, leaving the
-  lease and any break as they were; a remote `reconcile` or `recover` takes
-  them over first. It never retires or deletes remote run refs or evidence refs.
-  Under the remote lease, it also refuses a broken remote lease whose run is
-  not imported with `NYL-LEASE-BROKEN`, exit 2, naming `nyl recover -e
-  <env>`, even when the broken holder left no run ref, because only an import
-  records the break (owner: `shell::lease::run_takeover`).
-- `--local-lease` explicitly opts into a local lease instead, for working
-  without that access, and accepts that CI may run at the same time. It
-  reads only the clone's own lease and run refs.
-- Effects are real, and local state is never pushed, so remote runs do not
-  notice them: a unit whose remote receipt is current is not executed again,
-  and the remote state keeps describing what ran before. A local run next to
-  remote state warns about every unit it executes and names the remote
-  command that records it again, such as `nyl reconcile -e <env> --unit
-  <u>` after the change is committed (`NYL-LOCAL-RUN-UNRECORDED`). Units
-  whose recovery policy is not `converge` run locally only when named with
-  `--approve <unit>`; others report `awaiting-approval`, exit 2, like any
-  approval wait. The executed unit's receipt and the local transition
-  commit's summary record `approval: {by: [<commit identity>], identity:
-  local, source: local, digest: null, reviewed: false}` by default; explicit
-  identities and configured lookups follow the common approval rules. Without
-  a commit identity nothing is approved.
-- `nyl state reset -e <env> --local` drops the local transitions and follows
-  the remote again, once the remote has recorded the change or the local
-  effects were undone. It lists the units whose local receipts the remote
-  does not reflect, because forgetting them can leave resources behind, and
-  proceeds only with `--discard <unit>…` or `--discard-all`.
-- A run against remote state refuses when the tip of a remote state ref is a
-  `Nyl-Local` commit, which only a manual push of local branches produces;
-  Nyl itself commits only on tips that pass this check. The refusal,
-  `NYL-STATE-LOCAL-TIP`, names the last commit without the trailer. The check
-  runs in every operation that writes remote state: `reconcile`, `verify`,
-  `recover`, `state init --fresh`, `state forget`, and `state move` at both
-  locations. On refs several environments share through `path`, each
-  environment looks only at its own commits, those whose `Nyl-Environment`
-  trailer names it. A store that keeps no history passes. `nyl state restore -e <env> --to <commit>`
-  writes a forward commit restoring that commit's content, so protected
-  branches need no force push, and records the local transitions as rejected.
-  It never restores `admission.yaml`: the current deployment admission is
-  carried forward, so a restore cannot move the deployment generation back.
-  With separate desired and observed refs, the commit on the other ref is
-  paired with `--to` by the same `Nyl-Run-Id`, else by the
-  `Nyl-Read-Desired` or `Nyl-Read-Observed` trailer of `--to`. A `--to` or
-  paired commit that is a `Nyl-Local` commit, that belongs to another
-  environment, or that cannot be paired is refused with
-  `NYL-STATE-RESTORE-INVALID`.
-  Pushed local transitions are never accepted, because their source commits
-  may be unpushed or dirty and were never checked for reachability.
+`--local` uses the same local state repository without fetching, pushing, or
+acquiring a remote lease. A missing cached repository is an error that names
+the path and asks for an online state command first. Local effects are real,
+and another operator can run concurrently against remote state. Source
+selection is independent of the state repository.
 
 ### Pinned commits
 
@@ -2572,6 +2508,11 @@ revisions, and locked `fromGit` bindings.
 
 ## Drivers
 
+Shared orchestration selects behavior through driver capabilities and generic
+contracts. Drivers own validation, timeout defaults, committed-source
+requirements, resource identity normalization, and retry context validation.
+The engine never branches on a concrete kind or vendor diagnostic code.
+
 Built-in drivers are Rust implementations behind one trait:
 
 ```rust
@@ -2579,10 +2520,13 @@ trait Driver {
     fn api_version(&self) -> &'static str; // units.gitops.nyl/v1 for built-ins
     fn kind(&self) -> &'static str;
     fn behavior_version(&self) -> u32;
+    fn default_timeout(&self) -> Duration; // used when the common timeout is omitted
     fn capabilities(&self, spec: &Spec) -> Capabilities;  // a Command tears down only with a `teardown` step
     fn recovery(&self, spec: &Spec) -> RecoveryPolicies;  // for execution and teardown; a Command converges only when idempotent
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
     fn validate_spec(&self, spec: &Spec) -> Result<()>;  // kind rules beyond the schema
+    fn secret_refs(&self, spec: &Spec) -> Result<Vec<String>>; // explicit driver credential provider keys
+    fn credential_environment(&self, spec: &Spec, process_env: &EnvironmentSnapshot) -> Environment; // pure admission from the supplied snapshot
     fn attestations(&self, spec: &ResolvedSpec) -> Vec<AttestationName>; // names it can produce for this spec
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &ResolvedSpec) -> Vec<OwnershipScope>; // see Identity; an image tag prefix names the environment
     fn execution_key_inputs(&self, ctx: &ResolutionContext, spec: &ResolvedSpec) -> Result<KeyInputs>; // selected files, excluded fields, fingerprint
@@ -2600,7 +2544,7 @@ trait Driver {
 struct Capabilities {
     plan: bool, reconcile: bool, verify: bool, inspect: bool, teardown: bool,
     observe: bool,              // verify records observations, such as Argo CD health
-    build: Option<BuildPush>,   // None: no `nyl build`; Some(Safe | LoadOnly)
+    build: bool,               // supports `nyl build` with driver-owned arguments
     change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed
     exec: Option<ExecTerminal>, // None: no `nyl exec`; Some(Interactive | NonInteractive)
 }
@@ -2630,7 +2574,7 @@ enum Outcome {
 | `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
-| `OwnershipScope` | A typed claim, such as `{terraformBackend: <canonical backend config and key>, workspace}`, `{ociRepository, tagPrefix}`, or `{publication: {repository, revision, pathPrefix}}` |
+| `OwnershipScope` | A driver-defined namespace, canonical key components, normalized path segments, and display description. Equal namespace/key claims overlap when either path contains the other by segment. |
 
 - `Waiting` is how a two-phase teardown reports that phase 1 is published and
   its `teardownWait` has not completed: the unit stays `tearing-down`, the
@@ -2676,7 +2620,7 @@ enum Outcome {
 ### Direct builds
 
 A kind whose only effect is producing an artifact from source declares the
-`build` capability, and `nyl build <unit> [-e <env>]` runs it outside
+`build` capability, and `nyl build <unit> [-e <env>] [-- <driver-args>...]` runs it outside
 orchestration:
 
 - It calls the driver's `build` method, without a lease, a receipt, or
@@ -2688,10 +2632,12 @@ orchestration:
   resolve read-only against its current receipts, exactly as `nyl get output`
   does. Without `-e`, a spec that uses environment values or references fails
   with an error naming the reference and `-e`; there are no per-kind override
-  flags, so the command stays the same for every kind.
-- The capability declares whether publishing the artifact outside
-  orchestration is safe (`BuildPush::Safe`). `--push` is refused for a kind
-  that declares only `LoadOnly`, and names `reconcile` instead.
+  flags in the generic CLI. Arguments after `--` reach the driver unchanged;
+  each driver defines and validates its own build options.
+- The capability is a boolean declaring support for direct builds. The driver
+  owns publishing policy and validates its arguments. For example, the image
+  driver accepts `-- --push`; a kind that cannot safely publish outside
+  orchestration rejects such a request and names `reconcile` instead.
 - Kinds with external effects never declare `build`: a Terraform apply or a
   command without a receipt would leave state describing something else. Their
   direct forms are `nyl plan --unit` and `--local` runs.
@@ -2837,11 +2783,9 @@ spec:
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
 | `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing the environment's files and leaving the deleted marker in `state.yaml`; the refs and their history stay |
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
-| `state reset` | With `--local`, drop local transitions and follow the remote state again (see [Local runs](#local-runs)) | The clone's local state branches only |
-| `state restore` | Restore remote state to an earlier commit's content after local transitions were pushed by hand | One desired and one observed commit |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the transition commit that imports the broken run |
-| `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only with `--push` where the kind allows it |
+| `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only through driver arguments (for example `-- --push`) where the kind allows it |
 | `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or a pull request under `changeGate: pullRequest` |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
@@ -2974,7 +2918,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
   prints the latest receipt's value with a warning instead.
 - `--state-revision <commit>` reads state as of an earlier state commit, the
   same name `nyl promote` uses for a state commit; `--local`
-  reads the clone's local state branches, including local runs. Output formats: `table` (default), `wide`,
+  reads the configured local state repository. Output formats: `table` (default), `wide`,
   `yaml`, `json`, `name`.
 - `get` only reads: it needs read access to the state repository and never
   takes the lease. Document and table forms exit 0 whenever they can read the
@@ -2989,7 +2933,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approve-all`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-dependents`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--make-room`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`, `--local-lease`,
+`--allow-teardown`, `--allow-dependents`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--make-room`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--leaving`, `--generation`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
@@ -3241,7 +3185,7 @@ idempotent Command and of one that is not. `verify` records both as drifted,
 exit 3 with `NYL-VERIFY-DRIFT`; `status` shows them `drifted`, exit 2, and
 `plan` lists them as units that would execute. The next `reconcile` repairs
 the idempotent unit, listed under `driftRepaired`, and reports the other
-`awaiting-approval`, exit 2; a `--local` run executes it with `--approve`.
+`awaiting-approval`, exit 2; an explicit approval permits it to run.
 Under `driftRepair: manual`, `reconcile` repairs nothing and the unit stays
 `drifted` until `reconcile --unit idempotent --reapply --reason …`, recorded
 under `reapplied`.

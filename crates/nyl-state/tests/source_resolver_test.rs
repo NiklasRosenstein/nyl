@@ -495,3 +495,132 @@ fn test_reset_worktree_refuses_a_foreign_directory() {
     assert!(error.to_string().contains("not empty"), "{error}");
     assert_eq!(std::fs::read_to_string(foreign.join("precious.txt")).unwrap(), "keep");
 }
+
+/// Sparse source checkouts contain declared source/config/module paths, not
+/// unrelated repository files, and a reused slot cannot retain earlier inputs.
+#[test]
+fn test_sparse_worktree_keeps_declared_inputs_and_resets_the_path_set() {
+    let world = World::new();
+    let clone = Repository::open(world.clone_dir()).unwrap();
+    let commit = commit(
+        &clone,
+        Some(world.c2),
+        &[
+            ("infra/network/main.tf", "module source"),
+            ("infra/modules/shared/main.tf", "shared module"),
+            ("unrelated/large.bin", "unread bytes"),
+        ],
+        "add source directories",
+    );
+    let resolver = world.resolver();
+    let slot = world.root.path().join("sparse");
+    let paths = vec![
+        "/infra/network/**".to_owned(),
+        "/infra/modules/shared/**".to_owned(),
+        "/nyl".to_owned(),
+    ];
+    resolver
+        .worktree_with_paths(&SourceRepository::This, &id(commit), &slot, Some(&paths))
+        .unwrap();
+    assert!(slot.join("infra/network/main.tf").is_file());
+    assert!(slot.join("infra/modules/shared/main.tf").is_file());
+    assert!(slot.join("nyl/nyl.toml").is_file());
+    assert!(!slot.join("unrelated").exists());
+    assert!(!slot.join("app.txt").exists());
+    std::fs::write(slot.join("untracked"), "previous unit").unwrap();
+    resolver
+        .reset_worktree_with_paths(
+            &SourceRepository::This,
+            &id(commit),
+            &slot,
+            Some(&["/app.txt".to_owned()]),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(slot.join("app.txt")).unwrap(), "two");
+    assert!(!slot.join("infra").exists());
+    assert!(!slot.join("untracked").exists());
+    resolver
+        .reset_worktree_with_paths(&SourceRepository::This, &id(commit), &slot, None)
+        .unwrap();
+    assert!(slot.join("infra/network/main.tf").is_file());
+    assert!(slot.join("unrelated/large.bin").is_file());
+}
+
+#[test]
+fn test_sparse_checkout_preserves_literal_metacharacters() {
+    let world = World::new();
+    let repository = Repository::open(world.clone_dir()).unwrap();
+    let revision = commit(
+        &repository,
+        Some(world.c2),
+        &[("infra/[live]/main.tf", "literal"), ("infra/l/main.tf", "glob match")],
+        "literal directory",
+    );
+    let target = world.root.path().join("literal");
+    world
+        .resolver()
+        .worktree_with_paths(
+            &SourceRepository::This,
+            &id(revision),
+            &target,
+            Some(&["/infra/[live]".to_owned()]),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(target.join("infra/[live]/main.tf")).unwrap(),
+        "literal"
+    );
+    assert!(!target.join("infra/l").exists());
+}
+
+/// Git hooks export repository selectors. Exercise them in a child process so
+/// this regression never changes the environment of concurrently running tests.
+#[test]
+fn test_sparse_checkout_ignores_repository_selectors() {
+    if let Some(source) = std::env::var_os("NYL_SPARSE_SELECTOR_SOURCE") {
+        let target = PathBuf::from(std::env::var_os("NYL_SPARSE_SELECTOR_TARGET").unwrap());
+        let revision = CommitId::new(std::env::var("NYL_SPARSE_SELECTOR_COMMIT").unwrap()).unwrap();
+        GitSourceResolver::new(PathBuf::from(source), GitAuth::none())
+            .worktree_with_paths(
+                &SourceRepository::This,
+                &revision,
+                &target,
+                Some(&["/app.txt".to_owned()]),
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("app.txt")).unwrap(), "one");
+        return;
+    }
+    let world = World::new();
+    let victim = TempDir::new().unwrap();
+    let repository = Repository::init(victim.path()).unwrap();
+    let revision = commit(&repository, None, &[("app.txt", "original")], "victim");
+    repository.set_head_detached(revision).unwrap();
+    repository
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    std::fs::write(victim.path().join("app.txt"), "operator changes").unwrap();
+    let index = std::fs::read(repository.path().join("index")).unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "test_sparse_checkout_ignores_repository_selectors",
+            "--nocapture",
+        ])
+        .env("NYL_SPARSE_SELECTOR_SOURCE", world.clone_dir().join(".git"))
+        .env("NYL_SPARSE_SELECTOR_TARGET", world.root.path().join("isolated"))
+        .env("NYL_SPARSE_SELECTOR_COMMIT", world.c1.to_string())
+        .env("GIT_DIR", repository.path())
+        .env("GIT_WORK_TREE", victim.path())
+        .env("GIT_INDEX_FILE", repository.path().join("index"))
+        .env("GIT_OBJECT_DIRECTORY", repository.path().join("objects"))
+        .env("GIT_COMMON_DIR", repository.path())
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        std::fs::read_to_string(victim.path().join("app.txt")).unwrap(),
+        "operator changes"
+    );
+    assert_eq!(std::fs::read(repository.path().join("index")).unwrap(), index);
+}

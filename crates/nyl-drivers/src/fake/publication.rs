@@ -183,8 +183,13 @@ impl Driver for FakePublication {
         1
     }
 
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(10)
+    }
+
     fn capabilities(&self, _spec: &Value) -> Capabilities {
         Capabilities {
+            requires_committed_source: true,
             plan: true,
             reconcile: true,
             verify: true,
@@ -353,6 +358,7 @@ impl Driver for FakePublication {
             .push()
             .map_err(|error| DriverError::after_effects(format!("cannot publish the tree: {error}")))?;
         Ok(Supported::Supported(Outcome::Succeeded {
+            versions: std::collections::BTreeMap::new(),
             outputs: outputs.unwrap_or_else(|| json!({})),
             artifacts: vec![ArtifactDocument {
                 api_version: API_VERSION_ARTIFACTS.to_owned(),
@@ -414,6 +420,7 @@ impl Driver for FakePublication {
                 .push()
                 .map_err(|error| DriverError::after_effects(format!("cannot remove the tree: {error}")))?;
             return Ok(Supported::Supported(Outcome::Succeeded {
+                versions: std::collections::BTreeMap::new(),
                 outputs: json!({}),
                 artifacts: Vec::new(),
                 attestations: Vec::new(),
@@ -468,7 +475,7 @@ impl Driver for FakePublication {
         &self,
         _ctx: &ExecutionContext<'_>,
         _unit: &DesiredUnit,
-        _push: bool,
+        _options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
         Ok(Supported::Unsupported)
     }

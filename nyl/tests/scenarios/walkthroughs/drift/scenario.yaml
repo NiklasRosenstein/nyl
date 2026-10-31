@@ -3,7 +3,7 @@
 # amended by the part 5 decisions).
 contract: design/orchestration-core.md#drift
 milestone: M3
-tiers: [1]                            # the local approval and --local run need tier 1's clones
+tiers: [1]                            # the local run uses tier 1's Git repository
 steps:
   - nyl: [state, init, -e, dev]
     exit: 0
@@ -54,15 +54,15 @@ steps:
       current: [idempotent]
       drifted: [other]
 
-  # A local run repairs it with the local approval identity. Its commits stay
-  # in its own clone, so the remote state still shows `other` drifted.
+  # A local run repairs it with an explicit approval. The configured file
+  # repository holds its receipt.
   - nyl: [reconcile, -e, dev, --local, --approve, other]
     exit: 0
     expect:
       executed: [other]
       current: [idempotent]
       driftRepaired: [other]
-      commits: {desired: 0, observed: 0}
+      commits: {desired: 0, observed: 1}
   - nyl: [verify, -e, dev]
     exit: 0                           # the local run restored other's resource
     expect:

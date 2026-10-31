@@ -79,20 +79,16 @@ pub struct Capabilities {
     pub teardown: bool,
     /// `verify` records observations, such as Argo CD health.
     pub observe: bool,
-    /// `nyl build` support; `None` without it.
-    pub build: Option<BuildPush>,
+    /// Whether the kind supports `nyl build`.
+    pub build: bool,
     /// `plan` reports a change digest, so `bind: plan` is allowed.
     #[serde(rename = "changeDigest")]
     pub change_digest: bool,
     /// `nyl exec` support; `None` without it.
     pub exec: Option<ExecTerminal>,
-}
-
-/// Whether publishing a direct build's artifact outside orchestration is safe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum BuildPush {
-    Safe,
-    LoadOnly,
+    /// This kind requires committed inputs rather than a worktree snapshot.
+    #[serde(default, rename = "requiresCommittedSource")]
+    pub requires_committed_source: bool,
 }
 
 /// Whether an operator tool takes the terminal.
@@ -121,20 +117,26 @@ pub struct RecoveryPolicies {
     pub teardown: RecoveryPolicy,
 }
 
-/// A typed claim on native resources, checked for overlap across units.
+/// A driver's claim on a resource identity and a subtree beneath it.
+/// Equal namespaces and keys overlap when either path contains the other.
+/// Drivers canonicalize keys and path segments; descriptions are display-only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub enum OwnershipScope {
-    /// A Terraform or OpenTofu backend: its canonical configuration and key, and workspace.
-    TerraformBackend { backend: String, workspace: String },
-    /// An OCI repository and the tag prefix one environment moves.
-    OciRepository { repository: String, tag_prefix: String },
-    /// A publication repository, revision, and path prefix.
-    Publication {
-        repository: String,
-        revision: String,
-        path_prefix: String,
-    },
+pub struct OwnershipScope {
+    pub namespace: String,
+    pub key: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+    pub description: String,
+}
+
+impl OwnershipScope {
+    /// Whether these claims intersect, independently of their display text.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.namespace == other.namespace
+            && self.key == other.key
+            && (self.path.starts_with(&other.path) || other.path.starts_with(&self.path))
+    }
 }
 
 /// What resolution needs from a driver to compute an execution key.
@@ -187,6 +189,9 @@ pub struct AttestationOutcome {
 #[serde(tag = "outcome", rename_all = "kebab-case")]
 pub enum Outcome {
     Succeeded {
+        /// Native tool versions recorded in the receipt, independent of key material.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        versions: BTreeMap<String, String>,
         /// Every non-sensitive output the tool reported, declared or not. Nyl
         /// validates them against the declarations, warns about undeclared ones
         /// (`NYL-OUTPUT-UNDECLARED`), and records only declared ones.
@@ -212,6 +217,13 @@ pub enum Outcome {
         category: FailureCategory,
         retryable: bool,
         message: String,
+    },
+    /// A failure requiring an operator's reason before retry. The context is
+    /// non-secret driver-owned data, recorded and returned without interpretation.
+    RetryRequired {
+        category: FailureCategory,
+        message: String,
+        context: Value,
     },
     /// Effects may or may not have happened.
     Uncertain { reason: String },
@@ -288,6 +300,12 @@ pub struct ToolInvocation {
     pub env: BTreeMap<String, String>,
     /// Bytes on stdin; none closes it.
     pub stdin: Option<Vec<u8>>,
+    /// Capture stdout for structured parsing without copying it to the transcript.
+    pub private_stdout: bool,
+    /// Forward operator-tool stdout directly, independently of terminal interactivity.
+    pub forward_stdout: bool,
+    /// Give an operator tool the terminal; callers enable this only on a terminal.
+    pub interactive: bool,
     /// How long the tool may run: the driver computes it as the context's
     /// `deadline - now`, so no runner reads a clock to decide it. At expiry
     /// the runner sends SIGTERM to the process group and SIGKILL 30 seconds
@@ -307,19 +325,17 @@ pub enum ToolExit {
     Exited {
         code: i32,
         stdout: Vec<u8>,
+        /// Raw diagnostics for driver classification, bounded to 1 MiB; transcripts remain masked.
+        stderr: Vec<u8>,
     },
     /// The tool died from a signal it was not sent by Nyl.
-    Signaled {
-        signal: i32,
-    },
+    Signaled { signal: i32 },
     /// The deadline passed; the process group was terminated.
     DeadlineExceeded,
     /// The run is being cancelled; the process group was terminated.
     Cancelled,
     /// The program could not be started, such as a missing binary.
-    NotStarted {
-        reason: String,
-    },
+    NotStarted { reason: String },
 }
 
 /// Runs a driver's external tools. Implemented on Nyl's side: each tool runs
@@ -330,11 +346,20 @@ pub trait ToolRunner: Send + Sync {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit>;
 }
 
+/// A source field's independent checkout and authored path root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRoot {
+    pub worktree: PathBuf,
+    pub project_dir: PathBuf,
+}
+
 /// What one driver call may use.
 pub struct ExecutionContext<'a> {
+    /// Checkouts by Git source field JSON Pointer; fields may name different repositories and commits.
+    pub source_roots: BTreeMap<String, SourceRoot>,
     pub unit: UnitAddress,
     pub operation: DriverOperation,
-    /// A detached checkout of the effective source revision, owned by this execution.
+    /// The main checkout at the environment source commit S; source fields use source_roots.
     pub worktree: PathBuf,
     /// The directory containing `nyl.toml` inside `worktree`.
     pub project_dir: PathBuf,
@@ -342,6 +367,10 @@ pub struct ExecutionContext<'a> {
     pub temp_dir: PathBuf,
     /// Admitted variables and secrets, by name; masking of secret values is the runner's.
     pub env: BTreeMap<String, String>,
+    /// Explicit credential-helper keys, resolved only for this driver call.
+    pub secrets: BTreeMap<String, String>,
+    /// Whether an operator call may inherit the terminal.
+    pub interactive: bool,
     /// The approved change digest of a `bind: plan` unit.
     pub approved_digest: Option<ChangeDigest>,
     pub deadline: Timestamp,
@@ -350,6 +379,8 @@ pub struct ExecutionContext<'a> {
     pub now: Timestamp,
     /// The unit's observed file, holding its last receipt.
     pub observed: Option<&'a ObservedUnit>,
+    /// Artifact documents belonging to the observed receipt.
+    pub artifacts: BTreeMap<String, ArtifactDocument>,
     pub tools: &'a dyn ToolRunner,
     /// Who authors commits a driver writes, such as a publication's commit:
     /// the identity the command line resolved for state commits, with
@@ -409,10 +440,10 @@ pub struct TeardownSettings {
 
 /// What resolution provides to compute execution-key inputs.
 pub struct ResolutionContext<'a> {
+    /// The same source checkouts execution uses, keyed by Git source field JSON Pointer.
+    pub source_roots: BTreeMap<String, SourceRoot>,
     pub environment: EnvironmentName,
-    /// A Git worktree of the unit's effective commit: the commit resolution
-    /// writes into its Git source fields (S for a unit without `revision`).
-    /// Execution-key inputs are read from these bytes.
+    /// The main checkout at S. Read each source field's bytes from source_roots.
     pub worktree: PathBuf,
     /// The directory containing `nyl.toml` inside `worktree`.
     pub project_dir: PathBuf,
@@ -446,6 +477,10 @@ pub trait Driver: Send + Sync {
     fn kind(&self) -> &'static str;
     /// Bumped only when execution semantics change in a way that requires re-execution.
     fn behavior_version(&self) -> u32;
+    /// The execution timeout when the common `timeout` field is omitted.
+    fn default_timeout(&self) -> super::time::Duration {
+        super::time::Duration::from_mins(30)
+    }
     /// Capabilities for a spec: a Command can tear down only with a `teardown` step.
     fn capabilities(&self, spec: &Value) -> Capabilities;
     /// Recovery policies for a spec: a Command converges only with `idempotent: true`.
@@ -454,6 +489,19 @@ pub trait Driver: Send + Sync {
     fn spec_schema(&self) -> schemars::Schema;
     /// Parse and validate a rendered spec, references still as expressions.
     fn validate_spec(&self, spec: &Value) -> std::result::Result<(), String>;
+    /// Provider keys explicitly declared by this spec for driver credentials.
+    fn secret_refs(&self, _spec: &Value) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    /// Additional environment admitted by the driver's explicit credential declaration.
+    /// The snapshot is supplied by the shell; this method performs no process reads.
+    fn credential_environment(
+        &self,
+        _spec: &Value,
+        _process_env: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
     /// Attestation names the kind can produce for a spec; none by default.
     fn attestations(&self, spec: &Value) -> Vec<String> {
         let _ = spec;
@@ -482,6 +530,12 @@ pub trait Driver: Send + Sync {
     fn local_path_fields(&self, spec: &Value) -> Vec<LocalPathField> {
         let _ = spec;
         Vec::new()
+    }
+    /// Complete paths and globs this kind reads, in worktree-rooted form.
+    /// None requires a full checkout; declared paths permit sparse checkouts.
+    fn checkout_paths(&self, spec: &Value) -> Option<Vec<String>> {
+        let _ = spec;
+        None
     }
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs>;
 
@@ -521,9 +575,9 @@ pub trait Driver: Send + Sync {
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
-        push: bool,
+        args: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        let _ = (ctx, unit, push);
+        let _ = (ctx, unit, args);
         Ok(Supported::Unsupported)
     }
     /// `nyl exec`; unsupported by default.
@@ -574,5 +628,34 @@ impl DriverSet {
 impl std::fmt::Debug for DriverSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_list().entries(self.drivers.keys()).finish()
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn test_claims_compare_namespaces_keys_and_path_segments_independently_of_descriptions() {
+        let parent = OwnershipScope {
+            namespace: "test-tree".to_owned(),
+            key: vec!["resource".to_owned()],
+            path: vec!["app".to_owned()],
+            description: "parent".to_owned(),
+        };
+        let mut child = parent.clone();
+        child.path.push("web".to_owned());
+        child.description = "child".to_owned();
+        assert!(parent.overlaps(&child) && child.overlaps(&parent));
+        child.path = vec!["application".to_owned()];
+        assert!(!parent.overlaps(&child));
+        child.path = parent.path.clone();
+        child.key.push("other".to_owned());
+        assert!(!parent.overlaps(&child));
+        child.key = parent.key.clone();
+        child.namespace = "other".to_owned();
+        assert!(!parent.overlaps(&child));
+        child.namespace = parent.namespace.clone();
+        child.path.clear();
+        assert!(parent.overlaps(&child));
     }
 }
