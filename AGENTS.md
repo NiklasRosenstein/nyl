@@ -7,10 +7,10 @@ This file provides guidelines for AI assistants (Claude, GitHub Copilot) working
 Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 - Jinja2-compatible templating with MiniJinja
 - Helm chart integration
-- Cluster- and target-aware rendered GitOps configuration
+- Cluster- and target-aware Kubernetes GitOps configuration
 - Git repository support with authentication
 - Kubernetes client integration (kubectl diff/apply)
-- Target-aware rendered GitOps trees, diffs, and publication
+- Target-aware Kubernetes GitOps trees, diffs, and publication
 
 **Primary Language:** Rust 1.93.0+  
 **Build System:** Cargo  
@@ -48,7 +48,7 @@ bug, and document a deliberate one where users choose it.
   permission.
 - Progress is tracked in the documentation, not in ROADMAP.md: the data
   modules in `nyl/book/src/lib/roadmaps/` render the Orchestration and Domain
-  resources roadmap pages. Tick an item in the change that ships it, keep the
+  modeling roadmap pages. Tick an item in the change that ships it, keep the
   next step accurate, and set a stage's `done` only when its exit criterion is
   met; a test rejects `done` while an item is unticked. Distinguish proposals
   from implemented capabilities, and preserve milestone identifiers for
@@ -138,7 +138,7 @@ Reviewers must check the boundary explicitly:
 ├── Cargo.toml         # Workspace: shared version, dependencies, and profiles
 ├── crates/
 │   ├── nyl-core/      # Resource and state types, schemas, digests, orchestration traits (no effects)
-│   ├── nyl-render/    # Kubernetes rendering and rendered GitOps
+│   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
 │   └── nyl-drivers/   # Unit kind drivers and the process runner
@@ -164,6 +164,7 @@ published to crates.io; Nyl ships as release binaries and container images.
 - kubectl (for diff/apply commands)
 - Helm (for Helm chart rendering)
 - mise (recommended for task management)
+- Node.js 22.23.4 or newer (for the documentation site; Astro rejects older 22.x releases)
 
 ### Essential Commands
 
@@ -363,7 +364,7 @@ fn test_operation() -> Result<()> {
 - **Trait Composition:** Define traits for testability and extensibility
 - **Immutability:** Prefer immutable data structures where possible
 
-### Rendered GitOps invariants
+### Kubernetes GitOps invariants
 
 - `DeploymentTarget.spec.applicationGroupSelector` matches literal
   `ApplicationGroup.metadata.labels` before target rendering. Effective
@@ -406,14 +407,14 @@ src/
 ├── kubernetes/   # Kubernetes client (kube-rs)
 ├── resources/    # HelmChart, Component resources
 ├── git/          # Git repository management
-├── gitops/       # Rendered GitOps discovery, compilation, layout, and ownership
+├── gitops/       # Kubernetes GitOps discovery, compilation, layout, and ownership
 ├── helm/         # Helm chart processing
 ├── components/   # Component discovery and registry
 ├── secrets/      # Secrets provider framework
 └── util/         # Shared utilities
 ```
 
-### Rendered GitOps invariants
+### Kubernetes GitOps invariants
 
 - Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
   (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
@@ -485,7 +486,7 @@ src/
 1. Add filter function in `crates/nyl-render/src/template/mod.rs`
 2. Register in `TemplateEngine::new()`
 3. Add unit test
-4. Document it in the Kubernetes section, `nyl/book/src/content/docs/kubernetes/`
+4. Document it in the Kubernetes Rendering section, `nyl/book/src/content/docs/kubernetes-rendering/`
 
 ### Adding a New Resource Type
 1. Define resource struct in `crates/nyl-core/src/resources/`
@@ -525,7 +526,7 @@ src/
 - **Caching:** Cache expensive operations (Git clones, Helm downloads)
 - **Profile before optimizing:** Use `cargo bench` to measure performance
 
-### Rendered GitOps cache invariants
+### Kubernetes GitOps cache invariants
 
 - Every value that can affect rendered bytes must enter the shared dependency
   recorder at the layer that consumes it. This includes file content and
@@ -580,11 +581,11 @@ The site is split into header sections, each with its own sidebar
 
 | Content | Location under `nyl/book/src/content/docs/` |
 | --- | --- |
-| First steps and the core principle | `start/`, `index.md` |
-| Rendering and applying manifests directly | `kubernetes/` |
-| The rendered manifest pattern | `rendered-gitops/` |
+| First steps and the core principle | `start/`, `index.mdx` |
+| Rendering and applying manifests directly | `kubernetes-rendering/` |
+| The rendered manifest pattern | `kubernetes-gitops/` |
 | Environments, state, orchestration, and its roadmap | `orchestration/` |
-| Domain resources and their roadmap | `domain-resources/` |
+| Domain modeling and its roadmap | `domain-modeling/` |
 | One page per command or closely related pair | `reference/cli/` |
 | `nyl.toml` and editor schemas | `reference/` |
 | Usage guide for a resource | the owning section's `resource-guides/` |
@@ -598,14 +599,18 @@ Mechanics that are easy to miss:
 - Sidebars are explicit lists. Add every new page to its section in
   `astro.config.mjs`, and list a new command in `reference/cli/index.md` under
   its purpose group.
-- Moving or renaming a page adds its old route to `src/lib/moved-pages.mjs`, so
-  the old URL redirects, and updates every link to it, including links in Rust
-  sources.
+- Moving or renaming a page updates every link to it, including links in Rust
+  sources. The docs keep no redirects from old routes.
 - A new resource joins a section in `resourceSections` (`src/lib/resources.mjs`),
   needs a usage guide (the build fails without one), and appears in its
   section's diagram (`src/components/ResourceDiagram.astro`) when it references
   or is referenced by other resources there. A changed reference field updates
   that diagram.
+- The four layers (Kubernetes Rendering, Kubernetes GitOps, Orchestration, Domain
+  modeling) are listed once, in `src/lib/layers.mjs`. The header tabs, the
+  sidebar's layer rail, and the landing page read that list, so renaming or
+  reordering a layer updates it, `astro.config.mjs`, and the landing page's copy
+  (`src/components/Landing.astro`) together.
 - Regenerate schemas after changing a resource's Rust doc comments or fields.
 - A deprecation keeps the old form working, warns when the CLI reads it, and
   adds a row to `reference/deprecations.md`. Deprecated API versions live in

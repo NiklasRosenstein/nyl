@@ -24,7 +24,7 @@ units never touches orchestration state.
 Every resource in a unit group is a unit; the group identifies the family and
 the kind selects the driver, as `components.k8s.nyl/v1` does for component
 invocations. Discovery follows Git visibility across the project, like the
-rendered GitOps resources. `nyl create` and `nyl delete` gain `environment`,
+Kubernetes GitOps resources. `nyl create` and `nyl delete` gain `environment`,
 `environment-group`, `environment-template`, `unit`, and `promotion-path` resources; `nyl get` covers those declarations
 and, with `-e`, an environment's units, outputs, artifacts, and promotions
 (see [Inspection](#inspection)).

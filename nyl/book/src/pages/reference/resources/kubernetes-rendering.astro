@@ -1,0 +1,7 @@
+---
+import ResourceSection from '../../../components/ResourceSection.astro';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+<ResourceSection section="kubernetes-rendering" description="A Release and the resources it contains, which render into plain Kubernetes manifests, and the Cluster they render for, whether nyl render, diff, or apply runs them or a deployment target publishes them.">
+  <p>Native Kubernetes resources and <a href={`${base}/kubernetes-rendering/validation/kyverno-policies/`}>Kyverno policies</a> use their upstream API versions.</p>
+</ResourceSection>
