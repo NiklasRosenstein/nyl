@@ -1,0 +1,31 @@
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: web-image
+  labels:
+    example: oci-image-opentofu
+spec:
+  context: {path: web}
+  repository: localhost:5000/nyl-example/web
+  env:
+    passthrough: [DOCKER_CONFIG, DOCKER_HOST]
+  timeout: 10m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: web
+  labels:
+    example: oci-image-opentofu
+spec:
+  source: {path: tofu}
+  backend:
+    path: '{{ values.statePath }}'
+  variables:
+    image:
+      fromUnit: {unit: web-image, artifact: image, pointer: /reference}
+  env:
+    passthrough: [DOCKER_HOST]
+  outputs:
+    url: {type: string}
+  timeout: 10m

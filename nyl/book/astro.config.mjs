@@ -219,6 +219,7 @@ export default defineConfig({
                   "reference/cli/teardown",
                   "reference/cli/hold",
                   "reference/cli/recover",
+                  "reference/cli/exec",
                   "reference/cli/state",
                 ],
               },

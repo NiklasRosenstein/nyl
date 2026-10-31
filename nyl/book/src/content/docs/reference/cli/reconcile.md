@@ -7,10 +7,9 @@ results in its state. See [Runs](/nyl/orchestration/runs/) for how a run
 chooses its source commit, resolves references, and decides what executes.
 
 :::note
-Orchestration is being built in milestone M3. `reconcile` runs selected
-environments'  [Command](/nyl/orchestration/resource-guides/command/) units,
-takes over from runs that died, repairs drift, and deletes units that left
-the environment; remote approvals and runs over several environments follow.
+`reconcile` runs selected environments' Command, OciImage, Terraform, and
+OpenTofu units, with recorded approvals, recovery, drift repair, and lifecycle
+handling. Kubernetes publication and promotion drivers follow in M5 and M6.
 :::
 
 ```bash

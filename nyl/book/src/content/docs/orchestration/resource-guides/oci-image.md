@@ -26,6 +26,9 @@ never moves its execution tag. The artifact contains `repository`, `digest`,
 `reference`, `platforms`, and `tags`; its digest comes from Buildx's metadata
 file, never from build logs.
 
+The [local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu)
+connects an image build to an OpenTofu container deployment on one local daemon.
+
 ```yaml
 values:
   image:

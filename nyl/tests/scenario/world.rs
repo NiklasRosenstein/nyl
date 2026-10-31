@@ -22,12 +22,18 @@ pub struct World {
     root: TempDir,
     /// Numbers fresh clones, so concurrent invocations never share one.
     clones: AtomicUsize,
+    registry: String,
 }
 
 impl World {
     /// Create the world and commit `project` as the first commit of `main`.
     pub fn new(project: &Path) -> Self {
+        Self::with_registry(project, FAKE_REGISTRY)
+    }
+
+    pub fn with_registry(project: &Path, registry: &str) -> Self {
         let world = Self {
+            registry: registry.to_owned(),
             root: TempDir::new().expect("temporary directory"),
             clones: AtomicUsize::new(0),
         };
@@ -101,7 +107,11 @@ impl World {
     fn substitute(&self, text: &str) -> String {
         text.replace("%SCENARIO_TMP%", &self.scenario_tmp_for_scripts())
             .replace("%PROJECT_URL%", &self.project_url())
-            .replace("%REGISTRY%", FAKE_REGISTRY)
+            .replace("%REGISTRY%", &self.registry)
+            .replace(
+                "['%DOCKER_PASSTHROUGH%']",
+                &serde_json::to_string(&super::docker_selectors().keys().collect::<Vec<_>>()).unwrap(),
+            )
     }
 
     fn commit_and_push(&self, branch: &str, message: &str) {

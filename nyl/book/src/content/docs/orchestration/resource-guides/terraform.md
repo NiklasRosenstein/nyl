@@ -51,6 +51,10 @@ such as an ECS task, a container-based Lambda function, or a Docker container.
 The infrastructure configuration declares how to use the image; `fromUnit`
 supplies the built artifact reference and waits for its current receipt.
 
+The [local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu)
+builds an `OciImage`, pushes it to a local registry, and deploys it with
+OpenTofu's Docker provider. It includes setup, verification, and teardown.
+
 `version` optionally requires an exact installed version. Set project defaults
 under `[units.Terraform]` or `[units.OpenTofu]`; an explicit unit version wins.
 Without a pin, changing the installed tool does not force execution. Receipts
@@ -76,13 +80,14 @@ A missing backend state for a unit with a receipt fails with
 `nyl recover --retry --reason` to accept an intentionally empty state for that
 ownership scope. The acknowledgement applies to the recorded unit incarnation,
 backend, and workspace, and expires after successful reconciliation. Changing any
-of those requires a fresh acknowledgement. A native state lock error is non-retryable; Nyl never breaks
-native locks automatically. Use the held-unit repair workflow
+of those requires a fresh acknowledgement. A native state lock error is
+non-retryable; Nyl never breaks native locks automatically. Use the
+[held-unit repair workflow](/nyl/reference/cli/exec/)
 for inspection, import, and recovery. The first execution after operator repair
 requires approval of its newly generated plan.
 
 Changing a unit between `Terraform` and `OpenTofu` is a kind change, so the
 ordinary deletion policy and teardown gate apply. For migration without
 destruction, first reconcile `deletionPolicy: Retain`, change the kind, and
-follow the native state migration and repair workflow
+follow the native state migration and [repair workflow](/nyl/reference/cli/exec/)
 before resuming.

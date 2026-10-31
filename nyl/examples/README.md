@@ -1,7 +1,12 @@
 # Nyl Examples
 
-This directory contains practical examples for Kubernetes rendering and
-deployment workflows.
+These examples cover Kubernetes rendering and orchestration workflows.
+
+## Local Docker with OciImage and OpenTofu
+
+[`oci-image-opentofu`](../../examples/oci-image-opentofu/) builds a web image,
+pushes it to a local registry, and passes its digest to OpenTofu to deploy a
+container on the local Docker daemon. Its README includes setup and teardown.
 
 ## Simple app
 

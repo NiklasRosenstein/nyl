@@ -35,7 +35,7 @@ spec:
   releaseInputs:
     web/web:
       image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {fromUnit: {unit: database, output: host}}
+      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment

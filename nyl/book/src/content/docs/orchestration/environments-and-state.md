@@ -19,6 +19,24 @@ selects it, else the checkout's `origin`, else the clone itself. Without a
 remote, the clone's own branches are the state. A GitRepository's
 `publishURL` is used for pushes.
 
+For state stored outside the source checkout on the same machine, declare an
+absolute local repository URL and initialize the environment:
+
+```yaml
+spec:
+  state:
+    repository:
+      repoURL: file:///absolute/path/to/state.git
+```
+
+```bash
+nyl state init -e dev
+```
+
+`state init` creates a missing local bare repository, so no separate `git init`
+is needed. See [`nyl state init`](/nyl/reference/cli/state/#nyl-state-init)
+for repository requirements.
+
 Runs take the environment's lease, `refs/nyl/<environment>/lease` under the
 default `coordinationRefPrefix`, so only one run changes an environment at a
 time. Every state change reaches the state refs in one atomic push together

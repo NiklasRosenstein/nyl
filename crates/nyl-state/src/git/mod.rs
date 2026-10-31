@@ -12,6 +12,7 @@
 //! move of the lease to a new commit land in one atomic push, so a run whose
 //! lease was taken over never changes state.
 
+mod initialize;
 mod refs;
 mod tree;
 
@@ -546,6 +547,21 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
 }
 
 impl StateStore for GitStateStore {
+    fn prepare_init(&self, location: &StateLocation) -> StateResult<()> {
+        if self.author.is_none() {
+            return Err(StateError::Unavailable(
+                "a read-only store cannot initialize a repository".to_owned(),
+            ));
+        }
+        if location.is_local() {
+            return Ok(());
+        }
+        let endpoint = self.endpoints.get(&location.repository);
+        let read = endpoint.map_or(location.repository.as_str(), |endpoint| endpoint.read.as_str());
+        let write = endpoint.and_then(|endpoint| endpoint.write.as_deref()).unwrap_or(read);
+        initialize::prepare(read, write)
+    }
+
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         let repository = self.open(location)?;
         let refs = self.refs(&repository, location);

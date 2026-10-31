@@ -120,7 +120,8 @@ description = "Validate Renovate custom regex matchers against fixtures"
 run = "bash scripts/test-renovate-matchers.sh"
 
 [tasks.test-native]
-description = "Run required native infrastructure acceptance tests"
+description = "Run required native infrastructure, image, and binary acceptance tests"
 run = [
   "cargo test -p nyl-drivers --features native-tests --test terraform_native_test",
+  "cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test",
 ]
