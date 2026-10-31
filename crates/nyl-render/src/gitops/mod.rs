@@ -1,4 +1,4 @@
-//! Project discovery and compilation support for rendered GitOps workflows.
+//! Project discovery and compilation support for Kubernetes GitOps workflows.
 
 pub mod argocd;
 pub mod direct;

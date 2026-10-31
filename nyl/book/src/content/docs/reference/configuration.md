@@ -113,7 +113,7 @@ share one lock entry and one blob. See [`nyl vendor`](/nyl/reference/cli/vendor/
 for snapshot maintenance.
 
 Deployment values, Kubernetes capabilities, and kube contexts live in
-Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/rendered-gitops/resources/),
+Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/kubernetes-gitops/resources/),
 not in `nyl.toml`.
 
 ## Git credentials

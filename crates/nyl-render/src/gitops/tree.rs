@@ -793,7 +793,7 @@ async fn compile_target_tree_recording(
             validate_path_segment("Release metadata.name", &release.metadata.name)?;
             if release.metadata.name == "_namespaces" {
                 return Err(NylError::config(
-                    "Release metadata.name \"_namespaces\" is reserved by the rendered GitOps layout",
+                    "Release metadata.name \"_namespaces\" is reserved by the Kubernetes GitOps layout",
                 ));
             }
             let release_directory = PathBuf::from(group_output).join(&release.metadata.name);

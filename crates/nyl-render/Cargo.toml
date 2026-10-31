@@ -1,6 +1,6 @@
 [package]
 name = "nyl-render"
-description = "Nyl Kubernetes rendering and rendered GitOps"
+description = "Nyl Kubernetes rendering and Kubernetes GitOps"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

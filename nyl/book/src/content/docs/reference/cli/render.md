@@ -16,7 +16,7 @@ The `render` command generates Kubernetes manifests and writes final YAML to std
 It never connects to Kubernetes. With `--target`, a Release renders as
 `render-tree` publishes it for its Argo CD Application, including managed
 Namespaces; resources without a namespace keep none. See
-[Rendering Pipeline](/nyl/kubernetes/pipeline/#the-releases-application) for the
+[Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/#the-releases-application) for the
 behavior `render`, `diff`, and `apply` share.
 
 ## Arguments
@@ -143,18 +143,18 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 - A Release that declares `spec.inputs` renders with the same values as
   `render-tree`: overrides, then the target binding of the selected
   ApplicationGroup whose source contains the file, then defaults. See
-  [Release inputs](/nyl/rendered-gitops/release-inputs/#direct-commands).
+  [Release inputs](/nyl/kubernetes-gitops/release-inputs/#direct-commands).
   `nyl diff` and `nyl apply` accept the same input options.
 
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.
 - Bundle and Helm rendering use the shared content-addressed render cache. `diff` and `apply` reuse the same desired-manifest artifacts before performing their live-cluster operations.
-- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for the Release's Application, namespaces, and filter semantics.
+- See [Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/) for the Release's Application, namespaces, and filter semantics.
 
 ## Manifest validation
 
 Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
+[Manifest validation](/nyl/kubernetes-rendering/validation/manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.
 Validation failures return a nonzero exit status while still emitting manifests
 to stdout for inspection. Diagnostics go to stderr.

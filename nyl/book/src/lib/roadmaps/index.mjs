@@ -1,9 +1,9 @@
 // Shared rules for the roadmap pages. A roadmap is a list of stages, such as
 // milestones or slices, each with items that are ticked as they ship.
-import { domainResourcesRoadmap } from './domain-resources.mjs';
+import { domainModelingRoadmap } from './domain-modeling.mjs';
 import { orchestrationRoadmap } from './orchestration.mjs';
 
-export const roadmaps = [orchestrationRoadmap, domainResourcesRoadmap];
+export const roadmaps = [orchestrationRoadmap, domainModelingRoadmap];
 
 export const issueUrl = (number) => `https://github.com/NiklasRosenstein/nyl/issues/${number}`;
 
