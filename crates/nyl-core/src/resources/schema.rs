@@ -38,11 +38,13 @@ pub enum ResourceKind {
     RemoteManifest,
     #[value(name = "Component", alias = "component")]
     Component,
+    #[value(name = "OciImage", alias = "oci-image")]
+    OciImage,
 }
 
 impl ResourceKind {
     /// All supported schemas in catalog order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::GitRepository,
         Self::Environment,
         Self::EnvironmentGroup,
@@ -55,6 +57,7 @@ impl ResourceKind {
         Self::HelmChart,
         Self::RemoteManifest,
         Self::Component,
+        Self::OciImage,
     ];
 
     /// Public schema name (Component is an envelope, not a literal kind).
@@ -72,6 +75,7 @@ impl ResourceKind {
             Self::HelmChart => "HelmChart",
             Self::RemoteManifest => "RemoteManifest",
             Self::Component => "Component",
+            Self::OciImage => "OciImage",
         }
     }
 
@@ -81,6 +85,7 @@ impl ResourceKind {
             Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
             Self::HelmChart | Self::RemoteManifest | Self::Cluster | Self::Release => API_VERSION,
             Self::Component => API_VERSION_COMPONENTS,
+            Self::OciImage => crate::constants::API_VERSION_UNITS,
             _ => API_VERSION_K8S_GITOPS,
         }
     }
@@ -100,6 +105,7 @@ impl ResourceKind {
             Self::HelmChart => "helm-chart",
             Self::RemoteManifest => "remote-manifest",
             Self::Component => "component",
+            Self::OciImage => "oci-image",
         }
     }
 
@@ -118,6 +124,7 @@ impl ResourceKind {
                 Self::HelmChart => json!(schema_for!(HelmChart)),
                 Self::RemoteManifest => json!(schema_for!(RemoteManifest)),
                 Self::Component => json!(schema_for!(NylComponent)),
+                Self::OciImage => json!(schema_for!(super::oci_image::OciImage)),
                 _ => unreachable!("control resources handled above"),
             }
         };
@@ -127,6 +134,9 @@ impl ResourceKind {
             (self != Self::Component).then(|| self.name()),
         );
         schema["title"] = json!(self.name());
+        if schema.get("examples").is_none() {
+            schema["examples"] = json!([resource_example(self)]);
+        }
         schema
     }
 }
@@ -255,6 +265,9 @@ pub fn schema_artifacts() -> BTreeMap<String, Value> {
 /// Minimal authored example shared by schema consumers and the documentation.
 pub fn resource_example(kind: ResourceKind) -> Value {
     let spec = match kind {
+        ResourceKind::OciImage => {
+            json!({"context":{"path":"services/web"},"repository":"registry.example.com/team/web","platforms":["linux/amd64"]})
+        }
         ResourceKind::GitRepository => json!({"repoURL": "https://github.com/example/deploy.git"}),
         ResourceKind::Environment => {
             json!({"unitSelector": {"matchLabels": {"stage": "production"}}, "values": {"target": "production"}, "state": {"repositoryRef": {"name": "deploy"}}, "protectedRefs": ["main"]})
@@ -447,6 +460,13 @@ mod tests {
                     }
                     ResourceKind::Component => {
                         serde_json::from_value::<NylComponent>(example).unwrap();
+                    }
+                    ResourceKind::OciImage => {
+                        serde_json::from_value::<super::super::oci_image::OciImage>(example)
+                            .unwrap()
+                            .spec
+                            .validate()
+                            .unwrap();
                     }
                     _ => unreachable!(),
                 }

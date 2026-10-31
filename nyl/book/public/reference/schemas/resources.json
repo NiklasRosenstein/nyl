@@ -83,6 +83,13 @@
       "name": "Component",
       "schema": "components.k8s.nyl/v1/component.schema.json",
       "slug": "component"
+    },
+    {
+      "apiVersion": "units.gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "OciImage",
+      "schema": "units.gitops.nyl/v1/oci-image.schema.json",
+      "slug": "oci-image"
     }
   ]
 }

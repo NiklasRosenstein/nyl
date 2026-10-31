@@ -990,7 +990,7 @@ pub fn parse_gitops_resource_identity(value: &serde_json::Value) -> Result<Optio
     }))
 }
 
-/// Strictly parse and validate a complete, already-Kubernetes GitOps resource.
+/// Strictly parse and validate a complete, already-rendered GitOps resource.
 pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsResource>> {
     let Some(identity) = parse_gitops_resource_identity(value)? else {
         return Ok(None);

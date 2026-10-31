@@ -16,7 +16,9 @@
 //! `design/implementation-architecture.md`.
 
 pub mod command;
+mod dockerignore;
 #[cfg(any(test, feature = "test-kinds"))]
 pub mod fake;
+pub mod oci_image;
 pub mod process;
 pub mod registry;
