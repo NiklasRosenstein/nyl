@@ -600,8 +600,45 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
+    use nyl_core::orchestration::codes::{Code, Finding};
+    use nyl_core::orchestration::ids::EnvironmentName;
+    use nyl_orchestration::report::StateOperationReport;
 
+    use super::{render, Output};
     use crate::cli::Cli;
+
+    #[test]
+    fn test_render_diagnostics_are_separate_blocks() {
+        let mut report = StateOperationReport::new(EnvironmentName::new("local").unwrap(), "state-init")
+            .refused(Finding::new(Code::StateDeleted, "state was deleted", "use --fresh"));
+        report.details.insert("location".into(), "repository".into());
+        let text = render(&report, Output::Text);
+        assert_eq!(text.stdout, "state-init local: refused\n  location: repository\n");
+        assert_eq!(
+            text.stderr,
+            "\nerror NYL-STATE-DELETED\n  state was deleted\n  fix: use --fresh\n"
+        );
+
+        report
+            .warnings
+            .push(Finding::new(Code::DriverError, "warning one", "fix one"));
+        report
+            .warnings
+            .push(Finding::new(Code::DriverError, "warning two", "fix two"));
+        report
+            .errors
+            .push(Finding::new(Code::DriverError, "error two", "fix three"));
+        let json = render(&report, Output::Json);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json.stdout).unwrap(),
+            json.report
+        );
+        assert_eq!(json.stderr, "\nwarning NYL-DRIVER-ERROR\n  warning one\n  fix: fix one\n\nwarning NYL-DRIVER-ERROR\n  warning two\n  fix: fix two\n\nerror NYL-STATE-DELETED\n  state was deleted\n  fix: use --fresh\n\nerror NYL-DRIVER-ERROR\n  error two\n  fix: fix three\n");
+
+        report.warnings.clear();
+        report.errors.clear();
+        assert!(render(&report, Output::Text).stderr.is_empty());
+    }
 
     fn parses(args: &[&str]) -> bool {
         Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()

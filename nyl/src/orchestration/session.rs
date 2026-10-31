@@ -381,10 +381,7 @@ pub fn outcome(report: &RunReport, output: RunOutput, exit: u8) -> CommandOutcom
         RunOutput::Json => pretty_json(&json),
         RunOutput::Table => table(report),
     };
-    let mut stderr = diagnostics(report);
-    if matches!(output, RunOutput::Table) && !stdout.is_empty() && !stderr.is_empty() {
-        stderr.insert(0, '\n');
-    }
+    let stderr = diagnostics(report);
     CommandOutcome {
         exit,
         report: json,
@@ -625,11 +622,9 @@ fn diagnostics(report: &RunReport) -> String {
     text
 }
 
-/// Print one finding with its code and fix.
+/// Append a finding with its code and fix, preceded by a blank-line separator.
 pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, finding: &Finding) {
-    if !text.is_empty() {
-        text.push('\n');
-    }
+    text.push('\n');
     let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
     let heading = format!("{level} {}{unit}", finding.code);
     let heading = match level {
