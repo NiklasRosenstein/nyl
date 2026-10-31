@@ -496,6 +496,7 @@ fn invoke(harness: &harness::Harness, args: &[&str]) -> CommandOutcome {
         cancellation: Cancellation::default(),
         prompt: None,
         observer: None,
+        progress: None,
     };
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     invoke_in(&harness.world, &wiring, &args, "main", "").unwrap()
@@ -563,6 +564,10 @@ fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
         &["show", "refs/heads/nyl/dev/desired:desired/units/kubernetes.yaml"],
     );
     assert!(kubernetes.contains("state: held"), "{kubernetes}");
+    assert!(
+        kubernetes.contains("teardown requested; automatic recreation is suspended"),
+        "{kubernetes}"
+    );
     assert!(
         kubernetes.contains("name: kubernetes\n  apiVersion:"),
         "the held file has no uid: {kubernetes}"
@@ -698,6 +703,7 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
                 cancellation: Cancellation::default(),
                 prompt: None,
                 observer: None,
+                progress: None,
             };
             let args = ["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]
                 .map(str::to_owned)

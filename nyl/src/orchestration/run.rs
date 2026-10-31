@@ -49,6 +49,8 @@ pub struct Wiring<'a> {
     /// brings a real one (an `observe` wait without one is uncertain).
     /// Tests pass a `FakeObserver`.
     pub observer: Option<&'a dyn ArgoObserver>,
+    /// Live unit events, delivered on stderr by production wiring.
+    pub progress: Option<&'a dyn nyl_core::orchestration::progress::ProgressObserver>,
 }
 
 /// How one orchestration command ended, without printing or exiting.
@@ -170,6 +172,7 @@ impl<'a> Wiring<'a> {
             cancellation: owned.cancellation.clone(),
             prompt: owned.prompt.as_ref().map(|prompt| prompt as &dyn OperatorPrompt),
             observer: None,
+            progress: Some(&TerminalProgress),
         })
     }
 
@@ -217,11 +220,126 @@ fn unicode_env(
         .collect()
 }
 
+/// Line-oriented live progress; stdout remains available for structured reports.
+pub struct TerminalProgress;
+
+impl nyl_core::orchestration::progress::ProgressObserver for TerminalProgress {
+    fn observe_worktree_capture(&self, progress: &nyl_core::orchestration::progress::WorktreeCaptureProgress) {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{}", worktree_capture_line(progress));
+    }
+
+    fn observe(&self, progress: &nyl_core::orchestration::progress::UnitProgress) {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{}", progress_line(progress));
+    }
+}
+
+fn worktree_capture_line(progress: &nyl_core::orchestration::progress::WorktreeCaptureProgress) -> String {
+    use nyl_core::orchestration::progress::WorktreeCaptureProgress;
+    match progress {
+        WorktreeCaptureProgress::Started { base, .. } => format!(
+            "[worktree] capturing Git-visible tracked and untracked files (excluding ignored files), base {base}"
+        ),
+        WorktreeCaptureProgress::Finished {
+            snapshot,
+            location,
+            started,
+            at,
+        } => {
+            let seconds = (*at - *started).to_std().unwrap_or_default().as_secs_f64();
+            let action = if snapshot.reused { "reused" } else { "created" };
+            format!(
+                "[worktree] {action} snapshot {} in {seconds:.1}s\n[worktree] local ref {}\n[worktree] state history {} (ref {}, path {}) when recorded",
+                snapshot.commit, snapshot.revision, crate::util::credential_free_url(&location.repository), location.desired_ref,
+                if location.path.is_empty() { "/" } else { &location.path }
+            )
+        }
+    }
+}
+
+fn progress_line(progress: &nyl_core::orchestration::progress::UnitProgress) -> String {
+    use nyl_core::orchestration::progress::UnitPhase;
+    match &progress.phase {
+        UnitPhase::Started { reason, .. } => format!(
+            "[{}] starting {} ({}){}",
+            progress.unit,
+            progress.kind,
+            progress.operation.as_str(),
+            reason.map_or_else(String::new, |reason| format!(": {}", reason.description()))
+        ),
+        UnitPhase::Finished {
+            started,
+            at,
+            result,
+            message,
+        } => {
+            let seconds = (*at - *started).to_std().unwrap_or_default().as_secs_f64();
+            let reason = message.as_deref().or(match result {
+                nyl_core::orchestration::progress::UnitResult::Blocked { reason }
+                | nyl_core::orchestration::progress::UnitResult::Uncertain { reason } => Some(reason.as_str()),
+                _ => None,
+            });
+            let reason = reason
+                .and_then(|text| text.lines().next())
+                .map(|text| text.chars().take(240).collect::<String>());
+            format!(
+                "[{}] {} in {seconds:.1}s{}",
+                progress.unit,
+                result.name(),
+                reason
+                    .filter(|text| !text.is_empty())
+                    .map_or_else(String::new, |text| format!(": {text}"))
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    #[test]
+    fn test_worktree_capture_progress_describes_scope_and_retained_snapshot() {
+        use nyl_core::orchestration::progress::WorktreeCaptureProgress;
+        let base = nyl_core::orchestration::ids::CommitId::new("1111111111111111111111111111111111111111").unwrap();
+        let commit = nyl_core::orchestration::ids::CommitId::new("2222222222222222222222222222222222222222").unwrap();
+        let started = "2026-10-28T12:00:00Z".parse().unwrap();
+        let at = "2026-10-28T12:00:02Z".parse().unwrap();
+        let start = worktree_capture_line(&WorktreeCaptureProgress::Started {
+            base: base.clone(),
+            at: started,
+        });
+        assert!(start.contains(base.as_str()));
+        assert!(start.contains("tracked and untracked files (excluding ignored files)"));
+        for reused in [false, true] {
+            let line = worktree_capture_line(&WorktreeCaptureProgress::Finished {
+                snapshot: nyl_core::orchestration::ports::WorktreeSnapshot {
+                    base: base.clone(),
+                    commit: commit.clone(),
+                    revision: "refs/nyl-worktrees/test".to_owned(),
+                    reused,
+                },
+                location: nyl_core::orchestration::state::StateLocation {
+                    repository: "https://user:secret@example.com/state.git".to_owned(),
+                    desired_ref: "refs/heads/state".to_owned(),
+                    observed_ref: "refs/heads/observed".to_owned(),
+                    path: "dev".to_owned(),
+                    coordination_ref_prefix: "refs/nyl/".to_owned(),
+                },
+                started,
+                at,
+            });
+            assert!(line.contains(if reused { "reused" } else { "created" }));
+            assert!(line.contains(commit.as_str()));
+            assert!(line.contains("2.0s"));
+            assert!(line.contains("refs/nyl-worktrees/test"));
+            assert!(line.contains("https://example.com/state.git"));
+            assert!(!line.contains("secret"));
+        }
+    }
 
     /// Catches a non-Unicode variable unrelated to any unit aborting every
     /// orchestration command.

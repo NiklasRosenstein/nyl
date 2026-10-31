@@ -181,6 +181,17 @@ fn test_create_cluster_does_not_inspect_kubeconfig() {
     cmd.assert().success().stderr(predicate::str::is_empty());
 }
 
+#[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
+#[test]
+fn test_orchestration_identifies_test_driver_build() {
+    let temp = TempDir::new().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["status", "-e", "dev"])
+        .assert()
+        .stderr(predicate::str::contains("Nyl test build: fake drivers enabled"));
+}
+
 #[test]
 fn test_create_repository_requires_and_writes_repository_urls() {
     let temp = TempDir::new().unwrap();

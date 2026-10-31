@@ -89,6 +89,7 @@ export const orchestrationRoadmap = {
       items: [
         { text: 'Add the `OciImage` kind over `docker buildx`, recording digest references and a `ContainerImage` artifact, with the `registryAuth` helper and named build contexts.', done: true },
         { text: 'Add `nyl build` for kinds with the `build` capability, starting with `OciImage`: builds from the current worktree, forwards driver options after `--`, and writes no state.', done: true },
+        { text: 'Support `nyl reconcile --worktree` for one environment, using an immutable working-file snapshot throughout preflight and execution, retained in state and run history for fresh-clone recovery and teardown.', done: true },
         { text: 'Add the `Terraform` and `OpenTofu` kinds over one implementation, with native state and locking, declared output admission, change digests, plan approval (`bind: plan`), verification, and teardown.', done: true },
         { text: 'Support a local-module Terraform configuration pinned to a source commit and path.', done: true },
         { text: 'Demonstrate Terraform-to-Terraform output references.', done: true },

@@ -32,6 +32,31 @@ fn nyl(checkout: &Path, args: &[&str]) -> Command {
 }
 
 #[test]
+fn test_source_repository_context_strips_credentials_and_falls_back_to_the_checkout() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    git_output(
+        &checkout,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://user:source-secret@example.com/source.git",
+        ],
+    );
+    let session = nyl::orchestration::session::Session::open(&checkout, "dev")
+        .unwrap_or_else(|_| panic!("project should resolve"));
+    assert_eq!(session.resolved.source_repository, "https://example.com/source.git");
+    git_output(&checkout, &["remote", "remove", "origin"]);
+    let session = nyl::orchestration::session::Session::open(&checkout, "dev")
+        .unwrap_or_else(|_| panic!("project should resolve"));
+    assert_eq!(
+        Path::new(&session.resolved.source_repository).canonicalize().unwrap(),
+        checkout.canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn test_state_init_writes_state_once_to_the_configured_repository() {
     let world = World::new(&project());
     let checkout = world.fresh_clone("main");
@@ -94,7 +119,12 @@ fn test_state_init_creates_a_missing_local_repository_and_is_idempotent() {
         .code(1);
     assert!(!state_path.exists());
 
-    nyl(&checkout, &["state", "init", "-e", "local"]).assert().success();
+    nyl(&checkout, &["state", "init", "-e", "local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "location: {url} (nyl/local/desired and nyl/local/observed, coordination refs/nyl/)"
+        )));
     assert!(git2::Repository::open(&state_path).unwrap().is_bare());
     for side in ["desired", "observed"] {
         assert!(git_output(
@@ -107,7 +137,8 @@ fn test_state_init_creates_a_missing_local_repository_and_is_idempotent() {
     nyl(&checkout, &["state", "init", "-e", "local", "-o", "json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"outcome\": \"unchanged\""));
+        .stdout(predicate::str::contains("\"outcome\": \"unchanged\""))
+        .stdout(predicate::str::contains(format!("\"location\": \"{url} (")));
     assert_eq!(git_output(&state_path, &["for-each-ref", "refs/heads/nyl/"]), before);
     assert!(git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/"]).is_empty());
 }
@@ -451,7 +482,10 @@ fn test_cached_remote_state_offline_and_guarded_reset() {
     let remote_before = git_output(&state_path, &["rev-parse", "refs/heads/nyl/dev/desired"]);
     let offline_remote = world.scenario_tmp().join("offline-state.git");
     std::fs::rename(&state_path, &offline_remote).unwrap();
-    command(&["reconcile", "-e", "dev", "--local"]).assert().success();
+    std::fs::write(checkout.join("nyl/units.yaml"), "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata: {name: local-check, labels: {dev: 'true'}}\nspec: {command: [sh, -c, 'true'], idempotent: true}\n").unwrap();
+    command(&["reconcile", "-e", "dev", "--local", "--worktree"])
+        .assert()
+        .success();
     command(&["status", "-e", "dev", "--local"]).assert().success();
     assert_eq!(
         git_output(&offline_remote, &["rev-parse", "refs/heads/nyl/dev/desired"]),

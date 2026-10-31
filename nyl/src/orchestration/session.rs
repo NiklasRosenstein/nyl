@@ -2,6 +2,7 @@
 //! its environment, building the shell's request and context, and rendering
 //! the one typed [`RunReport`] as a table or JSON with its exit category.
 
+use colored::Colorize as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -114,7 +115,42 @@ impl Session {
     /// Sources in the clone, through the project's Git credentials.
     pub fn sources(&self) -> Result<GitSourceResolver, NylError> {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
-        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth))
+        let state = self.store(None)?;
+        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
+            .with_snapshot_repository(state.repository_path(&self.resolved.location)))
+    }
+
+    /// Wire explicit working-file capture through the shared source shell.
+    pub fn snapshot_worktree(
+        &self,
+        wiring: &Wiring<'_>,
+        author: Option<&str>,
+        local: bool,
+    ) -> Result<nyl_core::orchestration::ports::WorktreeSnapshot, Stop> {
+        let identity = wiring.commit_identity(&self.resolved.git_dir, author)?;
+        let store = if local {
+            self.offline_store(None)?
+        } else {
+            self.store(None)?
+        };
+        let sources = self.sources()?;
+        nyl_orchestration::shell::sources::snapshot_worktree(
+            &store,
+            &sources,
+            &self.resolved.location,
+            &self.entry_commit()?,
+            &identity,
+            wiring.clock.as_ref(),
+            wiring.progress,
+        )
+        .map_err(|error| {
+            Finding::new(
+                Code::SourceUnavailable,
+                error,
+                "check state access and worktree paths; symlink targets must stay inside the repository",
+            )
+            .into()
+        })
     }
 
     /// The renderer of the environment's units at a source commit.
@@ -154,7 +190,7 @@ impl Session {
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
         let mut report = self.run_with(wiring, store, identity, request, operation)?;
-        self.add_warnings(&mut report);
+        self.annotate_report(&mut report);
         Ok(report)
     }
 
@@ -186,14 +222,18 @@ impl Session {
             secrets: Some(&secrets),
             commit_identity: identity,
             observer: wiring.observer,
+            progress: wiring.progress,
             prompt: wiring.prompt,
         };
         Ok(operation(&context, request))
     }
 
-    /// Add the warnings of resolving the environment to `report`.
-    pub fn add_warnings(&self, report: &mut RunReport) {
+    /// Add source repository context and environment-resolution warnings to the report.
+    pub fn annotate_report(&self, report: &mut RunReport) {
         for environment in &mut report.environments {
+            if environment.source_commit.is_some() {
+                environment.source_repository = Some(self.resolved.source_repository.clone());
+            }
             let mut warnings = self.resolved.warnings.clone();
             warnings.append(&mut environment.warnings);
             environment.warnings = warnings;
@@ -235,6 +275,7 @@ impl Session {
             units,
             concurrency: options.concurrency.max(1),
             source_override: options.source.map(str::to_owned),
+            worktree_source: None,
             wait: options.wait,
             local: options.local.clone(),
             cancellation: options.cancellation.clone(),
@@ -340,11 +381,12 @@ pub fn outcome(report: &RunReport, output: RunOutput, exit: u8) -> CommandOutcom
         RunOutput::Json => pretty_json(&json),
         RunOutput::Table => table(report),
     };
+    let stderr = diagnostics(report);
     CommandOutcome {
         exit,
         report: json,
         stdout,
-        stderr: diagnostics(report),
+        stderr,
     }
 }
 
@@ -411,8 +453,7 @@ fn table(report: &RunReport) -> String {
             text.push('\n');
         }
         let rows = environment
-            .units
-            .iter()
+            .ordered_units()
             .map(|(name, unit)| unit_row(report.kind, name, unit))
             .collect::<Vec<_>>();
         let headers: &[&str] = match report.kind {
@@ -429,8 +470,11 @@ fn table(report: &RunReport) -> String {
         } else {
             let _ = writeln!(text, "{}", render_table(headers, &rows));
         }
+        if environment.run.is_some() || environment.source_commit.is_some() || !environment.commits.is_empty() {
+            text.push('\n');
+        }
         if let Some(run) = &environment.run {
-            let _ = writeln!(text, "run: {run}");
+            let _ = writeln!(text, "  run:      {run}");
         }
         if let Some(repository) = &environment.state_repository {
             let _ = writeln!(text, "state repository: {repository}");
@@ -439,10 +483,13 @@ fn table(report: &RunReport) -> String {
             let _ = writeln!(text, "state local path: {path}");
         }
         if let Some(source) = &environment.source_commit {
-            let _ = writeln!(text, "source: {source}");
+            let _ = writeln!(text, "  source:   {source}");
+            if let Some(repository) = &environment.source_repository {
+                let _ = writeln!(text, "            {repository}");
+            }
         }
         for (side, commit) in &environment.commits {
-            let _ = writeln!(text, "{side}: {commit}");
+            let _ = writeln!(text, "  {label:<9} {commit}", label = format!("{side}:"));
         }
     }
     text
@@ -461,9 +508,17 @@ pub fn cell_label(value: Option<impl serde::Serialize>) -> String {
 /// held or deleting unit next to it, such as `held (uncertain)`.
 pub fn state_cell(unit: &UnitReport) -> String {
     let outcome = unit.outcome_name().unwrap_or("-");
-    match unit.condition {
-        Some(condition) => format!("{outcome} ({})", cell_label(Some(condition))),
-        None => outcome.to_owned(),
+    let mut details = Vec::new();
+    if outcome == "held" && unit.no_instance {
+        details.push("no instance".to_owned());
+    }
+    if let Some(condition) = unit.condition {
+        details.push(cell_label(Some(condition)));
+    }
+    if details.is_empty() {
+        outcome.to_owned()
+    } else {
+        format!("{outcome} ({})", details.join(", "))
     }
 }
 
@@ -501,24 +556,31 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
 /// failure message, or driver summary, followed by a held unit's pending
 /// changes (`pending changes from <commit>`) and the drift observation.
 pub fn detail(unit: &UnitReport) -> String {
-    if let Some(error) = &unit.plan_error {
-        return format!("plan failed: {error}");
+    let leading = if let Some(error) = &unit.plan_error {
+        Some(format!("plan failed: {error}"))
+    } else if !unit.blocked_by.is_empty() {
+        Some(
+            unit.blocked_by
+                .iter()
+                .map(|blocked| match &blocked.unit {
+                    Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
+                    None => format!("{}: {}", blocked.pointer, blocked.reason),
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
+        Some(reason.clone())
+    } else {
+        None
+    };
+    let mut parts: Vec<String> = leading.into_iter().collect();
+    if let Some(reason) = unit.execution_reason {
+        parts.push(format!("reason: {}", reason.description()));
     }
-    if !unit.blocked_by.is_empty() {
-        return unit
-            .blocked_by
-            .iter()
-            .map(|blocked| match &blocked.unit {
-                Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
-                None => format!("{}: {}", blocked.pointer, blocked.reason),
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
+    if let Some(version) = &unit.receipt_nyl_version {
+        parts.push(format!("receipt Nyl version: {version}"));
     }
-    if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
-        return reason.clone();
-    }
-    let mut parts = Vec::new();
     if let Some(pending) = &unit.pending {
         parts.push(format!("pending changes from {pending}"));
     }
@@ -560,20 +622,45 @@ fn diagnostics(report: &RunReport) -> String {
     text
 }
 
-/// Print one finding with its code and fix.
+/// Append a finding with its code and fix, preceded by a blank-line separator.
 pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, finding: &Finding) {
+    text.push('\n');
     let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
-    let _ = writeln!(
-        text,
-        "{level} {}{unit}: {}\n  fix: {}",
-        finding.code, finding.message, finding.fix
-    );
+    let heading = format!("{level} {}{unit}", finding.code);
+    let heading = match level {
+        "warning" => heading.yellow().bold().to_string(),
+        "error" => heading.red().bold().to_string(),
+        _ => heading,
+    };
+    let _ = writeln!(text, "{heading}\n  {}\n  fix: {}", finding.message, finding.fix);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nyl_orchestration::run_report::UnitResult;
+    use nyl_orchestration::run_report::{ConditionState, UnitResult, UnitState};
+
+    #[test]
+    fn test_held_without_instance_keeps_its_condition_visible() {
+        let mut unit = UnitReport::new("Command");
+        unit.state = Some(UnitState::Held);
+        unit.no_instance = true;
+        assert_eq!(state_cell(&unit), "held (no instance)");
+        unit.condition = Some(ConditionState::Uncertain);
+        assert_eq!(state_cell(&unit), "held (no instance, uncertain)");
+        unit.no_instance = false;
+        assert_eq!(state_cell(&unit), "held (uncertain)");
+    }
+
+    #[test]
+    fn test_blocked_unit_shows_receipt_version() {
+        let mut unit = UnitReport::new("Command");
+        unit.result = Some(UnitResult::Blocked {
+            reason: "waiting".to_owned(),
+        });
+        unit.receipt_nyl_version = Some("1.0".to_owned());
+        assert_eq!(detail(&unit), "waiting; receipt Nyl version: 1.0");
+    }
 
     /// Catches the table and the JSON telling different stories: both come
     /// from one report, and the exit is the one the command passes.
@@ -581,6 +668,15 @@ mod tests {
     fn test_outcome_renders_table_and_json_from_one_report() {
         let mut report = RunReport::new(ReportKind::ReconcileReport);
         let mut environment = EnvironmentRunReport::new(EnvironmentName::new("dev").unwrap());
+        environment.source_commit = Some(CommitId::new("a".repeat(40)).unwrap());
+        environment.warnings.push(Finding::new(
+            Code::StateLocalDiverged,
+            "state branches differ",
+            "inspect --local",
+        ));
+        environment
+            .warnings
+            .push(Finding::new(Code::DriverError, "unit failed", "retry"));
         environment.units.insert(
             UnitName::new("web").unwrap(),
             UnitReport {
@@ -594,6 +690,8 @@ mod tests {
         report.environments.push(environment);
         let table = outcome(&report, RunOutput::Table, 2);
         assert_eq!(table.exit, 2);
+        assert!(table.stdout.contains("\n\n  source:   "), "{}", table.stdout);
+        assert_eq!(table.stderr, "\nwarning NYL-STATE-LOCAL-DIVERGED\n  state branches differ\n  fix: inspect --local\n\nwarning NYL-DRIVER-ERROR\n  unit failed\n  fix: retry\n");
         assert!(table.stdout.contains("web"), "{}", table.stdout);
         assert!(table.stdout.contains("blocked"), "{}", table.stdout);
         assert!(

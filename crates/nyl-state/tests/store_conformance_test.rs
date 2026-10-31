@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, Committed, StateError, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
@@ -47,6 +47,110 @@ fn test_read_only_git_store_cannot_create_backing_storage() {
     let location = location(&path.display().to_string(), "desired", "observed", "");
     assert!(store.prepare_init(&location).is_err());
     assert!(!path.exists());
+}
+
+#[test]
+fn test_worktree_source_is_archived_with_a_run_and_retired_evidence_before_a_transition() {
+    use nyl_core::orchestration::ports::{SourceRepository, SourceResolver as _};
+    use nyl_state::source::GitSourceResolver;
+
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("source");
+    let repository = git2::Repository::init(&source).unwrap();
+    std::fs::write(source.join("input"), "committed").unwrap();
+    let mut index = repository.index().unwrap();
+    index.add_path(std::path::Path::new("input")).unwrap();
+    index.write().unwrap();
+    let tree = index.write_tree().unwrap();
+    let signature = git2::Signature::now("Scenario", "scenario@example.invalid").unwrap();
+    let base = repository
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "source",
+            &repository.find_tree(tree).unwrap(),
+            &[],
+        )
+        .unwrap();
+    std::fs::write(source.join("input"), "working").unwrap();
+    let sources = GitSourceResolver::new(repository.path(), GitAuth::none());
+    let snapshot = sources
+        .snapshot_worktree(
+            &CommitId::new(base.to_string()).unwrap(),
+            &author().identity,
+            at(),
+            None,
+        )
+        .unwrap();
+    let remote = root.path().join("state.git");
+    let bare = git2::Repository::init_bare(&remote).unwrap();
+    let url = url::Url::from_file_path(&remote).unwrap().to_string();
+    let location = location(&url, "desired", "observed", "");
+    let cache = root.path().join("state-cache.git");
+    git2::Repository::init_bare(&cache).unwrap();
+    let store = GitStateStore::new(repository.path(), GitAuth::none(), author()).with_repository(&url, &cache);
+    repository.find_reference(&snapshot.revision).unwrap().delete().unwrap();
+    assert!(store.prepare_worktree_snapshot(&location, &snapshot.commit).is_err());
+    repository
+        .reference(
+            &snapshot.revision,
+            git2::Oid::from_str(snapshot.commit.as_str()).unwrap(),
+            true,
+            "restore snapshot",
+        )
+        .unwrap();
+    store.prepare_worktree_snapshot(&location, &snapshot.commit).unwrap();
+    let mut record = run();
+    record.source_commit = Some(snapshot.commit.clone());
+    store.write_run(&location, &environment("dev"), &record, None).unwrap();
+    let oid = git2::Oid::from_str(snapshot.commit.as_str()).unwrap();
+    assert!(
+        bare.find_commit(oid).is_ok(),
+        "source must be durable before effects or a transition"
+    );
+    let version = store.coordination(&location, &environment("dev")).unwrap().runs[0]
+        .version
+        .clone();
+    store
+        .retire_run(&location, &environment("dev"), &record.run, Some(&version))
+        .unwrap();
+
+    let fresh = root.path().join("fresh");
+    let repository = git2::Repository::init(&fresh).unwrap();
+    let fresh_cache = root.path().join("fresh-state-cache.git");
+    git2::Repository::init_bare(&fresh_cache).unwrap();
+    let reader = GitStateStore::read_only(repository.path(), GitAuth::none()).with_repository(&url, &fresh_cache);
+    assert_eq!(
+        reader
+            .coordination(&location, &environment("dev"))
+            .unwrap()
+            .evidence
+            .len(),
+        1
+    );
+    let checkout = root.path().join("recovered");
+    let isolated = git2::Repository::init(root.path().join("isolated")).unwrap();
+    let resolver = GitSourceResolver::new(isolated.path(), GitAuth::none())
+        .with_snapshot_repository(reader.repository_path(&location));
+    assert!(resolver.is_worktree_snapshot(&snapshot.commit).unwrap());
+    assert_eq!(
+        resolver
+            .resolve_revision(&SourceRepository::This, snapshot.commit.as_str())
+            .unwrap(),
+        snapshot.commit
+    );
+    assert!(resolver
+        .worktree(
+            &SourceRepository::This,
+            &CommitId::new(base.to_string()).unwrap(),
+            &checkout
+        )
+        .is_err());
+    resolver
+        .worktree(&SourceRepository::This, &snapshot.commit, &checkout)
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(checkout.join("input")).unwrap(), "working");
 }
 
 const RUN_A: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";

@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 nyl-core = { workspace = true }
 nyl-git = { workspace = true }
+glob = { workspace = true }
 
 git2 = { workspace = true }
 serde = { workspace = true }

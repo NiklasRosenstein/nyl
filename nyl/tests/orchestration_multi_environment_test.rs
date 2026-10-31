@@ -86,6 +86,7 @@ impl Harness {
             cancellation: Cancellation::default(),
             prompt: None,
             observer: None,
+            progress: None,
         };
         let argv = std::iter::once("nyl".to_owned())
             .chain(args.iter().map(|arg| (*arg).to_owned()))

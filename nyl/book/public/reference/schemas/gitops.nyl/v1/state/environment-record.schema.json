@@ -108,7 +108,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "`--source` for this run.",
+          "description": "An invocation-selected revision. A `refs/nyl-worktrees/` revision is\narchived worktree provenance and cannot establish clean promotion evidence.",
           "properties": {
             "by": {
               "const": "override",

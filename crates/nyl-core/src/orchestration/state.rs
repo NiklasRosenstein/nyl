@@ -267,8 +267,16 @@ pub enum SourceChoice {
     Promotion { path: String, sequence: u64 },
     /// The current deployment admission.
     Admission { generation: String },
-    /// `--source` for this run.
+    /// An invocation-selected revision. A `refs/nyl-worktrees/` revision is
+    /// archived worktree provenance and cannot establish clean promotion evidence.
     Override { revision: String },
+}
+
+impl SourceChoice {
+    /// Whether the recorded source is an explicit worktree snapshot.
+    pub fn is_worktree(&self) -> bool {
+        matches!(self, Self::Override { revision } if revision.starts_with(super::ports::WORKTREE_SNAPSHOT_PREFIX))
+    }
 }
 
 /// A unit's identity in state documents.

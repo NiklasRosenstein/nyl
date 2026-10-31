@@ -187,7 +187,7 @@ spec:
 
 ### Source
 
-Every run of an environment works in one worktree at one source commit S:
+Every run of an environment works in one worktree at one immutable source commit S:
 discovery, the Environment's own fields, targets, units, Releases, `fromFile`,
 are all read there, and nothing else in the entry worktree is read again. The
 one exception is a `carryFileFromWorktree` file for a `fromPublication` binding: it exists only
@@ -238,6 +238,33 @@ spec:
   every run does, and the next run uses the environment's source again. It
   must satisfy the same reachability rules, the transition commit marks it as
   an override, and a fleet reconcile rejects it.
+- `reconcile -e <env> --worktree` snapshots Git-visible tracked and untracked
+  working files once, with deletions and executable modes. It leaves HEAD and
+  the user's index untouched, preserves internal symbolic links without following
+  them, rejects traversal through symlinked directories, and excludes ignored untracked
+  files. Exactly one named environment is required; `--source`, label selectors,
+  and group selectors conflict with this mode. The snapshot overrides the
+  Environment's source selection and ordinary run-source reachability only;
+  explicitly pinned unit source fields retain their own revisions and checks.
+  Discovery, ownership preflight, rendering, execution keys, and every execution
+  consume this snapshot, even if working files change during the run.
+- Worktree snapshots are orphan synthetic commits recording HEAD as provenance, under local refs
+  `refs/nyl-worktrees/<base>/<tree>`, with a `Nyl-Worktree-Snapshot: true`
+  trailer. Identical snapshots reuse the retained commit. Persisted
+  `sourceChosenBy` uses `by: override` and that reserved revision; the transition
+  summary records `worktreeSource`, and `NYL-SOURCE-WORKTREE` explains the source
+  and retention. They cannot establish clean promotion evidence or publish
+  Kubernetes trees, including through `publish-tree` after checkout. An ordinary
+  run cannot select a snapshot through `--source`.
+- Before effects, the run commit retains the snapshot as an additional parent.
+  State transition and retired evidence commits retain referenced snapshots
+  likewise. State history follows first parents and stops before a source
+  snapshot, including on fresh refs populated by a copy-based move. State and coordination
+  fetches and state moves therefore preserve inputs for recovery and teardown
+  from a fresh clone. The configured state repository archives Git-visible
+  uncommitted files without source ancestry. `--local` uses that repository's
+  local copy without contacting the remote; source selection is independent. These
+  provenance forms use the existing v1 state documents.
 - With `admission: required` (M8), the current
   [deployment admission](ci-execution.md#deployment-admission) chooses S for
   state-writing runs: admission resolves the environment's source by the rules
@@ -1449,6 +1476,18 @@ Nyl-Version: 0.7.0
 
 ## Execution
 
+The shell emits typed start and end events for dispatched units, using the
+injected clock and the same normalized result and message as the unit report.
+The CLI prints them on stderr, including the unit address, elapsed time, and
+short failure reason. Public native-tool transcript lines are indented and carry
+the unit address after secret masking. `--quiet-unit-output` hides those lines
+without hiding lifecycle events; `--unit-log-dir` independently appends masked
+lines to local per-unit files. A log open or write failure emits `NYL-UNIT-LOG`
+and preserves the native tool result. Captured bytes and private stdout remain unchanged. Reports
+keep a keyed `units` map and a `unitOrder` list: dispatch order first, then
+undispatched units in dependency order, or consumers first for teardown. Names
+break ties within a wave. Machine reports alone go to stdout.
+
 The optional [CI execution adapter](ci-execution.md) exposes the same dependency
 graph as separate jobs. Its first backend invokes ordinary unit-scoped operations:
 each job is a separate run, acquires the environment lease, and revalidates
@@ -2454,8 +2493,8 @@ operator explicitly accepts unreflected receipts; unpublished coordination
 records must first be recovered locally. `state restore --to` writes forward
 commits with historical state content and preserves current admission.
 
-`--local` uses the same local state repository without fetching, pushing, or
-acquiring a remote lease. A missing cached repository is an error that names
+Run and read commands with `--local` use the same local state repository without
+fetching, pushing, or acquiring a remote lease. A missing cached repository is an error that names
 the path and asks for an online state command first. Local effects are real,
 and another operator can run concurrently against remote state. Source
 selection is independent of the state repository.
@@ -2619,8 +2658,9 @@ enum Outcome {
   teardown ended this way, or by the tool dying from a signal, is `uncertain`,
   because effects may have happened; a plan or verification ended this way
   fails with category `timeout`.
-- Transcripts are masked as they are written, stored on the runner only for
-  the invocation, and printed on stderr; state records no transcript.
+- Transcripts are masked as they are written and printed on stderr unless
+  explicitly suppressed. Optional local log files contain the same masked public
+  lines, never private stdout. State records no transcript.
 - Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
   reported, never silently skipped.
 

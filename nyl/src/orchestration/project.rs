@@ -23,6 +23,8 @@ pub struct ResolvedEnvironment {
     pub warnings: Vec<Finding>,
     /// The git directory of the clone the project lives in.
     pub git_dir: PathBuf,
+    /// Credential-free source origin, or the local checkout path without an origin.
+    pub source_repository: String,
     /// How to reach the location's repository, when it is not the clone.
     pub endpoint: Option<Endpoint>,
 }
@@ -74,6 +76,13 @@ pub fn resolve_environment(
         .ok()
         .and_then(|remote| remote.url().ok().map(str::to_owned));
     let origin_identity = origin.as_deref().map(crate::util::credential_free_url);
+    let source_repository = origin_identity.clone().unwrap_or_else(|| {
+        repository
+            .workdir()
+            .unwrap_or(&inventory.worktree_root)
+            .display()
+            .to_string()
+    });
     let repositories =
         |reference: &crate::resources::LocalReference| -> std::result::Result<InlineGitRepository, String> {
             inventory
@@ -116,6 +125,7 @@ pub fn resolve_environment(
         location,
         warnings: resolved.warnings,
         git_dir: repository.path().to_path_buf(),
+        source_repository,
         endpoint,
     })
 }

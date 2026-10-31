@@ -3,6 +3,20 @@ use nyl_core::orchestration::driver::{DriverResult, ToolExit, ToolInvocation, To
 use nyl_core::orchestration::ports::Clock;
 use nyl_core::orchestration::time::Timestamp;
 
+/// Attach a unit address to every tool in its execution without changing captured bytes.
+pub(crate) struct UnitRunner<'a> {
+    pub tools: &'a dyn ToolRunner,
+    pub unit: nyl_core::orchestration::ids::UnitAddress,
+}
+
+impl ToolRunner for UnitRunner<'_> {
+    fn run(&self, mut invocation: ToolInvocation) -> DriverResult<ToolExit> {
+        invocation.forward_stdout = false;
+        invocation.interactive = false;
+        self.tools.run_for_unit(invocation, &self.unit)
+    }
+}
+
 /// A driver cannot renew its deadline by starting another native tool.
 pub struct DeadlineRunner<'a> {
     pub tools: &'a dyn ToolRunner,

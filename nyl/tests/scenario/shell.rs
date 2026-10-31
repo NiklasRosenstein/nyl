@@ -212,6 +212,7 @@ impl Harness {
             cancellation,
             prompt: None,
             observer: None,
+            progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         super::runner::invoke_in(&self.world, &wiring, &args, "main", "").unwrap()
@@ -271,6 +272,7 @@ impl Harness {
             sources,
             renderer,
             request: RunRequest {
+                worktree_source: None,
                 unavailable: BTreeSet::new(),
                 environment_errors: BTreeMap::new(),
                 planned: BTreeMap::new(),
@@ -320,6 +322,7 @@ impl Harness {
             secrets: None,
             commit_identity: identity.then_some(&self.identity),
             observer: None,
+            progress: None,
             prompt: None,
         };
         operation(&context, &job.request)
@@ -416,6 +419,9 @@ fn take_failure(left: &AtomicUsize) -> bool {
 }
 
 impl StateStore for FaultyStore {
+    fn prepare_worktree_snapshot(&self, location: &StateLocation, commit: &CommitId) -> StateResult<()> {
+        self.inner.prepare_worktree_snapshot(location, commit)
+    }
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         self.inner.snapshot(location)
     }

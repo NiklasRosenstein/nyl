@@ -46,6 +46,7 @@ impl Slots {
         String,
     > {
         let worktree = self.directory.join(format!("slot-{slot}"));
+        crate::shell::sources::validate_local_inputs(sources, driver, spec, commit)?;
         let paths = crate::shell::sources::main_checkout_paths(driver, spec, commit, commit, project_dir)?;
         sources
             .reset_worktree_with_paths(&SourceRepository::This, commit, &worktree, paths.as_deref())

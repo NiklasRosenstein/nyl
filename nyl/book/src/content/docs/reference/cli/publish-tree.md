@@ -18,6 +18,10 @@ Publication proceeds when both rendered trees and their publication coordinates
 match, using the clean checkout for provenance. Local files such as editor
 configuration therefore do not block a reproducible publication.
 
+Synthetic snapshots created by `reconcile --worktree` are rejected with
+`NYL-SOURCE-WORKTREE`, including after checkout and with `--allow-dirty`.
+Commit the source changes and publish that revision.
+
 `--require-clean` rejects any non-ignored source worktree change before
 rendering. Its error lists up to 20 dirty files with Git index/worktree status
 codes and repository-relative paths, and reports how many more were omitted.

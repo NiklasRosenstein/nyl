@@ -132,6 +132,75 @@ are not checked out. Command units retain a full checkout because their
 may read. Changing a source commit alone does not re-run a unit when its
 recorded input bytes are unchanged.
 
+## Worktree inputs
+
+For local development, reconcile uncommitted declarations and input files with:
+
+```bash
+nyl reconcile -e dev --worktree
+```
+
+Nyl snapshots Git-visible tracked and untracked files once, preserving deletions
+and executable modes. Ignored untracked files are excluded. Internal symlinks
+are preserved without following their targets; input paths cannot traverse
+symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
+rendering, and all execution waves use that immutable snapshot; subsequent edits
+belong to the next run. Explicitly pinned unit sources keep their declared
+commits. Drivers may require committed source; `--worktree` refuses those units.
+A source input that needs a submodule or a Git LFS pointer cannot be
+reconstructed from the snapshot; vendor those files as ordinary Git content.
+Direct worktree operations reject required LFS pointer files; hydrate local file
+inputs or vendor Git source files as ordinary Git content. The flag requires exactly one named environment and
+conflicts with `--source`, label selectors, and group selectors. Capture progress on
+stderr shows the base revision and file scope, then whether the snapshot was
+created or reused, its commit, elapsed time, local ref, and state history location.
+The state history retains it when the run records state. Structured
+output remains on stdout.
+
+State and run checkpoints archive the snapshot, including Git-visible uncommitted
+files, in the configured state repository. The source base is recorded as provenance
+without retaining its ancestry. Recovery and
+teardown can retrieve those inputs from another clone after the working files
+are gone. Choose a local state repository for disposable experiments, as in the
+[local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu).
+`--local` independently uses the configured state repository's local copy without
+contacting the remote.
+
+`NYL-SOURCE-WORKTREE`, the transition's `worktreeSource` summary, and the reserved
+`refs/nyl-worktrees/` source revision identify the run's provenance. Those refs
+cache snapshots locally; the state history retains the archived inputs. Nyl does
+not automatically garbage collect snapshots or compact that history. Snapshots
+cannot publish Kubernetes trees or count as clean committed-source promotion
+evidence. Commit changes and reconcile without the flag for that evidence.
+
+## Following execution
+
+Reconcile prints a start and end message for every dispatched unit. End messages
+include the result and elapsed time, with a short reason when the unit fails.
+Public tool output streams live, indented and labelled with the environment/unit
+address, so concurrent units remain distinguishable. Terraform and OpenTofu show
+their readable init, plan and apply output; structured version, plan inspection
+and output-value JSON stays private. Admitted secrets are masked before display
+or logging. Progress and tool transcripts go to stderr; JSON reports stay on stdout.
+
+Use `--quiet-unit-output` to hide tool output while keeping unit start/end
+messages. `--unit-log-dir DIR` also appends the masked transcript to
+`DIR/<environment>/<unit>.log`; combine the flags to write files without showing
+tool output. These files contain public tool output, never private structured
+stdout. Log files append across invocations, and new files have private
+permissions on Unix. `NYL-UNIT-LOG` warns when a log cannot be opened or written;
+the tool result remains authoritative. Logs are local files and are not stored in Nyl state.
+
+```bash
+nyl reconcile -e dev --unit-log-dir /tmp/nyl-logs
+nyl reconcile -e dev --quiet-unit-output --unit-log-dir /tmp/nyl-logs
+```
+
+The final summary follows dispatch order, with names breaking ties in a parallel
+wave. Units that did not run follow in dependency order, and teardown lists
+consumers before their producers. JSON reports provide this order in `unitOrder`
+alongside the `units` map.
+
 ## Execution keys and receipts
 
 Each execution records a **receipt** in the observed state: the execution key
@@ -151,6 +220,13 @@ content its kind reads, such as a Command's `files` and `fingerprint`, and
 the names of the variables it may read. A change outside those inputs, such
 as a new commit that touches other files, never runs a unit again. A repeated
 reconcile with no changes executes nothing and writes no commit.
+
+Execution progress and the reconcile report explain why each dispatched unit
+runs. A changed driver behavior version is identified when the receipt records it;
+other key differences are reported as changed execution inputs. The complete earlier input manifest is not stored.
+Status and reconcile show a different Nyl version recorded in a receipt as
+provenance. Nyl version is not an execution key input and does not make a
+receipt stale or trigger execution.
 
 ## Waves
 

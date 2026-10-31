@@ -182,7 +182,17 @@ fn test_native_reconcile_uses_readonly_init_saved_plan_and_private_json_with_ver
     assert_eq!(versions["tofu"], "1.9.5");
     assert_eq!(tool.count("apply"), 1);
     let calls = tool.calls.lock().unwrap();
-    assert!(calls.iter().all(|call| call.private_stdout));
+    for call in calls.iter() {
+        let step = call.args[0].to_str().unwrap();
+        assert_eq!(
+            call.private_stdout,
+            matches!(step, "version" | "show" | "output"),
+            "{step}"
+        );
+        if !call.private_stdout {
+            assert!(call.args.iter().any(|arg| arg == "-no-color"), "{step}");
+        }
+    }
     assert!(calls
         .iter()
         .find(|call| call.args[0] == "init")

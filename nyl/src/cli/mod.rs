@@ -39,6 +39,14 @@ pub struct Cli {
     /// When to use colored output
     #[arg(long, value_enum, default_value = "auto", global = true)]
     pub color: ColorChoice,
+
+    /// Hide public unit tool output; unit start/end messages still appear.
+    #[arg(long, global = true)]
+    pub quiet_unit_output: bool,
+
+    /// Append masked unit tool output to DIR/<environment>/<unit>.log.
+    #[arg(long, value_name = "DIR", global = true)]
+    pub unit_log_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -162,6 +170,8 @@ impl Cli {
             | Commands::Teardown(_)
             | Commands::Hold(_)
             | Commands::Resume(_) => {
+                #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
+                eprintln!("Nyl test build: fake drivers enabled; use a production build for real orchestration");
                 let cancellation = nyl_orchestration::shell::run::Cancellation::new();
                 // reconcile, verify, and recover end cleanly on SIGINT or
                 // SIGTERM instead of dying with the lease held.
@@ -174,7 +184,10 @@ impl Cli {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let worker = std::thread::spawn(move || {
                     let outcome = (|| -> Result<crate::orchestration::run::CommandOutcome> {
-                        let owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        let mut owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        owned.tools = owned
+                            .tools
+                            .unit_output(self.quiet_unit_output, self.unit_log_dir.clone());
                         let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
                         self.execute_in_process(&wiring)
                     })();

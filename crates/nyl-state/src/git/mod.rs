@@ -265,6 +265,27 @@ impl GitStateStore {
         .map_err(unavailable)
     }
 
+    fn ensure_imported_snapshots<'a>(
+        &self,
+        repository: &Repository,
+        sources: impl IntoIterator<Item = &'a CommitId>,
+    ) -> StateResult<()> {
+        let source = Repository::open(&self.git_dir).map_err(unavailable)?;
+        for commit in sources {
+            let id = oid(commit)?;
+            if source
+                .find_commit(id)
+                .is_ok_and(|commit| crate::source::worktree::is_snapshot(&commit))
+                && !repository
+                    .find_commit(id)
+                    .is_ok_and(|commit| crate::source::worktree::is_snapshot(&commit))
+            {
+                return Err(unavailable(format!("worktree snapshot {commit} is missing from the state repository; restore its refs/nyl-worktrees source ref and retry")));
+            }
+        }
+        Ok(())
+    }
+
     fn check_pending(&self, location: &StateLocation) -> StateResult<()> {
         if !self.offline && !self.allow_pending && !location.is_local() && !self.direct.contains(&location.repository) {
             self.snapshot(location)?;
@@ -292,6 +313,7 @@ impl GitStateStore {
         self.check_pending(location)?;
         let repository = self.open(location)?;
         self.import_source_snapshots(&repository)?;
+        self.ensure_imported_snapshots(&repository, run.source_commit.iter())?;
         let refs = self.refs(&repository, location);
         let name = run_ref(location, environment, &run.run);
         let lease_name = lease_ref(location, environment);
@@ -309,7 +331,8 @@ impl GitStateStore {
             let mut files = tree::read(&repository, tip).map_err(UpdateError::Other)?;
             files.insert(RUN_FILE.to_owned(), to_yaml(run).map_err(UpdateError::Other)?);
             change(&mut files).map_err(UpdateError::Other)?;
-            let parents = tip.into_iter().collect::<Vec<_>>();
+            let mut parents = tip.into_iter().collect::<Vec<_>>();
+            retain_worktree_sources(&repository, &mut parents, run.source_commit.iter()).map_err(UpdateError::Other)?;
             let message = format!("nyl: run {} of {environment}", run.run);
             let commit = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)
                 .map_err(UpdateError::Other)?
@@ -547,6 +570,16 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
 }
 
 impl StateStore for GitStateStore {
+    fn prepare_worktree_snapshot(&self, location: &StateLocation, commit: &CommitId) -> StateResult<()> {
+        let repository = self.open(location)?;
+        self.import_source_snapshots(&repository)?;
+        let snapshot = repository.find_commit(oid(commit)?).map_err(unavailable)?;
+        if !crate::source::worktree::is_snapshot(&snapshot) {
+            return Err(unavailable("worktree source is not a retained snapshot"));
+        }
+        Ok(())
+    }
+
     fn prepare_init(&self, location: &StateLocation) -> StateResult<()> {
         if self.author.is_none() {
             return Err(StateError::Unavailable(
@@ -842,7 +875,22 @@ impl StateStore for GitStateStore {
         for (index, checkpoint) in (first..).zip(&retired.checkpoints) {
             insert_checkpoint(&mut files, index, checkpoint)?;
         }
-        let parents = evidence_tip.into_iter().collect::<Vec<_>>();
+        let mut parents = evidence_tip.into_iter().collect::<Vec<_>>();
+        retain_worktree_sources(
+            &repository,
+            &mut parents,
+            retired
+                .run
+                .source_commit
+                .iter()
+                .chain(retired.created.iter().filter_map(|unit| unit.source_commit.as_ref()))
+                .chain(
+                    retired
+                        .checkpoints
+                        .iter()
+                        .filter_map(|checkpoint| checkpoint.desired.source_commit.as_ref()),
+                ),
+        )?;
         let message = format!("nyl: evidence of run {run} of {environment}");
         let commit = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)?
             .expect("allow_empty commits");
@@ -984,6 +1032,22 @@ impl StateStore for GitStateStore {
         self.check_pending(location)?;
         let repository = self.open(location)?;
         self.import_source_snapshots(&repository)?;
+        self.ensure_imported_snapshots(
+            &repository,
+            transition
+                .changes
+                .environment
+                .iter()
+                .map(|record| &record.source_commit)
+                .chain(
+                    transition
+                        .changes
+                        .desired
+                        .values()
+                        .flatten()
+                        .filter_map(|unit| unit.source_commit.as_ref()),
+                ),
+        )?;
         let author = self.author.as_ref();
         let refs = self.refs(&repository, location);
         let desired_name = StateLocation::full_name(&location.desired_ref);
@@ -1398,12 +1462,68 @@ fn transition_commit(
     }
     apply_changes(&mut inner, &transition.changes, desired, observed)?;
     let files = replace_beneath(&all, &location.path, &inner);
-    let parents = tip.into_iter().collect::<Vec<_>>();
+    let mut parents = tip.into_iter().collect::<Vec<_>>();
+    if let Some(record) = &transition.changes.environment {
+        if record.source_chosen_by.is_worktree() {
+            let source = oid(&record.source_commit)?;
+            let snapshot = repository.find_commit(source).map_err(unavailable)?;
+            if !crate::source::worktree::is_snapshot(&snapshot) {
+                return Err(unavailable("worktree source is not a retained snapshot"));
+            }
+        }
+    }
+    retain_worktree_sources(
+        repository,
+        &mut parents,
+        transition
+            .changes
+            .environment
+            .iter()
+            .map(|record| &record.source_commit)
+            .chain(
+                transition
+                    .changes
+                    .desired
+                    .values()
+                    .flatten()
+                    .filter_map(|unit| unit.source_commit.as_ref()),
+            ),
+    )?;
     let allow_empty = transition.changes.commit_unchanged && observed;
     tree::commit(repository, author, &files, &transition.message, &parents, allow_empty)
 }
 
-/// The newest `limit` commits of `tip`'s first-parent history, newest first.
+/// Keep snapshot objects with state and checkpoints while preserving first-parent
+/// state history. Ordinary source commits are not added to state ancestry.
+fn retain_worktree_sources<'a>(
+    repository: &Repository,
+    parents: &mut Vec<Oid>,
+    sources: impl IntoIterator<Item = &'a CommitId>,
+) -> StateResult<()> {
+    for source in sources {
+        let commit = oid(source)?;
+        let Ok(snapshot) = repository.find_commit(commit) else {
+            continue;
+        };
+        if !crate::source::worktree::is_snapshot(&snapshot) {
+            continue;
+        }
+        let mut retained = false;
+        for parent in parents.iter() {
+            if *parent == commit || repository.graph_descendant_of(*parent, commit).map_err(unavailable)? {
+                retained = true;
+                break;
+            }
+        }
+        if !retained {
+            parents.push(commit);
+        }
+    }
+    Ok(())
+}
+
+/// The newest state operations on the first-parent chain. A retained source
+/// snapshot bounds the history of a fresh ref populated by a copy-based move.
 fn first_parent_log(repository: &Repository, tip: Oid, limit: usize) -> StateResult<Vec<LogEntry>> {
     let mut entries = Vec::new();
     let mut next = Some(tip);
@@ -1412,6 +1532,9 @@ fn first_parent_log(repository: &Repository, tip: Oid, limit: usize) -> StateRes
             break;
         }
         let commit = repository.find_commit(oid).map_err(unavailable)?;
+        if crate::source::worktree::is_snapshot(&commit) {
+            break;
+        }
         entries.push(LogEntry {
             commit: commit_id(oid),
             message: String::from_utf8_lossy(commit.message_raw_bytes()).into_owned(),

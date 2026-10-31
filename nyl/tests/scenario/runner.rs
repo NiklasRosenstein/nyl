@@ -162,6 +162,7 @@ impl Shared {
             cancellation: nyl_orchestration::shell::run::Cancellation::default(),
             prompt: None,
             observer: None,
+            progress: None,
         }
     }
 }

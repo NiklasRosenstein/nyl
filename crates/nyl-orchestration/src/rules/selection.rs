@@ -72,6 +72,38 @@ pub struct Candidates<'a> {
     pub reapply: &'a BTreeSet<UnitName>,
 }
 
+/// Explain a selected unit using its prior receipt and invocation.
+pub fn execution_reason(
+    desired: &DesiredUnit,
+    observed: Option<&ObservedUnit>,
+    reapply: bool,
+    drivers: &DriverSet,
+) -> nyl_core::orchestration::progress::ExecutionReason {
+    use nyl_core::orchestration::progress::ExecutionReason as Reason;
+    let observed = same_incarnation(desired, observed);
+    match observed.and_then(|o| o.condition.as_ref()) {
+        Some(Condition::Uncertain { .. }) => return Reason::Recovery,
+        Some(Condition::Failed { retryable: true, .. }) => return Reason::Retry,
+        _ => {}
+    }
+    let Some(receipt) = observed.and_then(|o| o.receipt.as_ref()) else {
+        return Reason::NoReceipt;
+    };
+    if observed.is_some_and(|o| o.operator_modified.is_some()) {
+        return Reason::OperatorModified;
+    }
+    if desired.execution_key.as_ref() == Some(&receipt.execution_key) {
+        return if reapply { Reason::Reapply } else { Reason::DriftRepair };
+    }
+    if drivers
+        .get(&desired.unit.api_version, &desired.unit.kind)
+        .is_some_and(|driver| driver.behavior_version() != receipt.behavior_version)
+    {
+        return Reason::DriverBehaviorChanged;
+    }
+    Reason::InputsChanged
+}
+
 /// Why a unit is not selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Skipped {
@@ -549,6 +581,38 @@ mod tests {
     }
 
     #[test]
+    fn test_release_version_does_not_select_current_receipt() {
+        let mut world = World::new();
+        world.current("build", json!({}));
+        world
+            .observed
+            .get_mut(&name("build"))
+            .unwrap()
+            .receipt
+            .as_mut()
+            .unwrap()
+            .versions
+            .insert("nyl".into(), "old-release".into());
+        let (ready, skipped) = world.select(None);
+        assert!(ready.is_empty());
+        assert_eq!(skipped[&name("build")], Skipped::Current);
+    }
+
+    #[test]
+    fn test_execution_reason_identifies_driver_behavior_change() {
+        let mut world = World::new();
+        world.current("build", json!({}));
+        let observed = world.observed.get_mut(&name("build")).unwrap();
+        let receipt = observed.receipt.as_mut().unwrap();
+        receipt.behavior_version = 0;
+        receipt.execution_key = key("older");
+        assert_eq!(
+            execution_reason(&world.desired[&name("build")], Some(observed), false, &world.drivers),
+            nyl_core::orchestration::progress::ExecutionReason::DriverBehaviorChanged
+        );
+    }
+
+    #[test]
     fn test_batches_split_by_concurrency_of_at_least_one() {
         let ready = [name("a"), name("b"), name("c")];
         assert_eq!(batches(&ready, 2), [vec![name("a"), name("b")], vec![name("c")]]);
@@ -701,5 +765,36 @@ mod tests {
             },
         )]));
         assert_eq!(world.select(None).0, [name("repaired")]);
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::execution_reason;
+    use crate::rules::fixtures;
+    use nyl_core::orchestration::driver::DriverSet;
+    use nyl_core::orchestration::progress::ExecutionReason as Reason;
+    use serde_json::json;
+
+    #[test]
+    fn execution_reason_uses_receipt_evidence_without_guessing_inputs() {
+        let mut desired = fixtures::desired("build", "Command", json!({}), "new");
+        desired.resolved_spec = Some(json!({"command": "build"}));
+        let observed = fixtures::observed("build", "Command", Some(fixtures::receipt("old", json!({}), vec![])));
+        let drivers = DriverSet::new();
+        assert_eq!(execution_reason(&desired, None, false, &drivers), Reason::NoReceipt);
+        assert_eq!(
+            execution_reason(&desired, Some(&observed), false, &drivers),
+            Reason::InputsChanged
+        );
+        desired.execution_key = Some(observed.receipt.as_ref().unwrap().execution_key.clone());
+        assert_eq!(
+            execution_reason(&desired, Some(&observed), true, &drivers),
+            Reason::Reapply
+        );
+        assert_eq!(
+            execution_reason(&desired, Some(&observed), false, &drivers),
+            Reason::DriftRepair
+        );
     }
 }

@@ -30,17 +30,17 @@ run = "cargo fmt --all --check"
 [tasks.lint]
 description = "Run Rust clippy"
 dir = "nyl"
-run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+run = "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests"
 dir = "nyl"
-run = "cargo test --workspace --features nyl/test-clock,nyl/test-kinds"
+run = "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo test --workspace --features nyl/test-clock,nyl/test-kinds"
 
 [tasks.test-verbose]
 description = "Run Rust tests with output"
 dir = "nyl"
-run = "cargo test --workspace --features nyl/test-clock,nyl/test-kinds -- --nocapture"
+run = "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo test --workspace --features nyl/test-clock,nyl/test-kinds -- --nocapture"
 
 [tasks.bench]
 description = "Run Rust benchmarks"
@@ -62,8 +62,8 @@ description = "Run all checks"
 dir = "nyl"
 run = [
   "cargo fmt --all --check",
-  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-  "cargo test --workspace --features nyl/test-clock,nyl/test-kinds",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo test --workspace --features nyl/test-clock,nyl/test-kinds",
 ]
 
 [tasks.pre-commit]
@@ -122,6 +122,6 @@ run = "bash scripts/test-renovate-matchers.sh"
 [tasks.test-native]
 description = "Run required native infrastructure, image, and binary acceptance tests"
 run = [
-  "cargo test -p nyl-drivers --features native-tests --test terraform_native_test",
-  "cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl-drivers --features native-tests --test terraform_native_test",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test",
 ]

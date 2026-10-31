@@ -304,7 +304,7 @@ pub(crate) fn summarize(summary: &mut TransitionSummary, action: Option<(UnitNam
 /// leftover and evidence run refs the import read, so `--accept` finds the
 /// checkpoint; an accepted checkpoint becomes the receipt, carrying the
 /// copy of `desired` it was produced for. A refusal is the finding.
-#[allow(clippy::too_many_arguments)] // Recovery result, evidence, and explicit native authorization.
+#[allow(clippy::too_many_arguments)] // Recovery result, evidence, and the operator acknowledgement.
 pub(crate) fn after_import(
     environment: &EnvironmentName,
     recover: &RecoverUnit,

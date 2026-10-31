@@ -9,6 +9,7 @@ pub mod lease;
 pub mod lifecycle;
 pub mod local;
 pub mod operator;
+mod progress;
 pub mod recover;
 pub mod run;
 pub mod signal;

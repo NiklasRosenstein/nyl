@@ -74,7 +74,9 @@ hold dev: done
 $ nyl status -e dev
 UNIT     KIND  STATE  RECEIPT  LAST RUN  DETAIL
 migrate  -     held   none     -
-warning NYL-UNIT-HELD (migrate): migrate is held by Alice <alice@example.com> (incident 4711) since 2026-10-26T23:03:58Z
+
+warning NYL-UNIT-HELD (migrate)
+  migrate is held by Alice <alice@example.com> (incident 4711) since 2026-10-26T23:03:58Z
   fix: reconcile changes nothing about it until `nyl resume -e dev --unit migrate`
 ```
 

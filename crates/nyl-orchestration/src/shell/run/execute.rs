@@ -28,6 +28,7 @@ use nyl_core::orchestration::state::{ApprovalRecord, FailureCategory};
 
 /// One finished execution.
 pub(super) struct Execution {
+    pub(super) reason: nyl_core::orchestration::progress::ExecutionReason,
     pub(super) name: UnitName,
     pub(super) result: UnitResult,
     pub(super) message: Option<String>,
@@ -47,6 +48,7 @@ pub(super) struct Execution {
 /// Everything one execution thread needs, prepared before it starts.
 struct Job<'j> {
     unit: &'j DesiredUnit,
+    reason: nyl_core::orchestration::progress::ExecutionReason,
     commit: &'j CommitId,
     observed: Option<&'j ObservedUnit>,
     previous_artifacts: BTreeMap<String, ArtifactDocument>,
@@ -76,6 +78,12 @@ pub(super) fn execute_batch(
         .enumerate()
         .map(|(slot, name)| Job {
             unit: &resolved.units[name],
+            reason: crate::rules::selection::execution_reason(
+                &resolved.units[name],
+                observed.get(name),
+                session.request.reapply_units().contains(name),
+                session.context.drivers,
+            ),
             commit: &resolved.commits[name],
             observed: observed.get(name),
             previous_artifacts: artifacts.get(name).cloned().unwrap_or_default(),
@@ -100,7 +108,14 @@ pub(super) fn execute_batch(
             .into_iter()
             .map(|job| {
                 let shared = &shared;
-                scope.spawn(move || execute(shared, job))
+                let progress = crate::shell::progress::Progress::for_unit(
+                    shared.context,
+                    shared.environment,
+                    job.unit,
+                    Operation::Reconcile,
+                    Some(job.reason),
+                );
+                scope.spawn(move || execute(shared, job, progress))
             })
             .collect();
         handles.into_iter().map(join).collect()
@@ -137,13 +152,20 @@ enum Inspected {
 }
 
 /// Execute one unit in a worktree of its effective commit and map its outcome.
-#[allow(clippy::too_many_lines)] // One execution in order: worktree, inspection, driver call, fault point, and the outcome's record.
-fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
+fn execute(shared: &Shared<'_>, job: Job<'_>, progress: crate::shell::progress::Progress<'_>) -> Execution {
+    let execution = execute_unit(shared, job);
+    progress.finish(&execution.result, execution.message.as_deref());
+    execution
+}
+
+#[allow(clippy::too_many_lines)] // One execution in order: setup, inspection, driver call, and outcome mapping.
+fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     let context = shared.context;
     let unit = job.unit;
     let name = unit.unit.name.clone();
     let mut execution = Execution {
         name: name.clone(),
+        reason: job.reason,
         result: UnitResult::Current,
         message: None,
         change_digest: None,
@@ -245,8 +267,12 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 .min(crate::shell::lease::bound(&context.base.settings, lease))
         },
     );
-    let budget = crate::shell::tools::DeadlineRunner {
+    let tools = crate::shell::tools::UnitRunner {
         tools: context.tools,
+        unit: UnitAddress::new(shared.environment.clone(), name.clone()),
+    };
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: &tools,
         clock: context.base.clock,
         deadline,
     };

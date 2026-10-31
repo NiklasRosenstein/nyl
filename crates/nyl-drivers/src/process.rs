@@ -13,8 +13,8 @@
 //! detaches its readers. Windows has no process groups to signal: the
 //! console delivers Ctrl+C to the tool itself, and the runner kills the
 //! tool once the grace passes. Output goes to the
-//! transcript sink (stderr by default) with secret values masked, and is
-//! never stored; stdout is also returned for steps Nyl reads, such as a
+//! transcript sink (stderr by default) with secret values masked. Unit logs
+//! can also be appended to files; stdout is returned for steps Nyl reads, such as a
 //! fingerprint.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -43,6 +43,14 @@ mod terminal;
 /// Where transcripts go: this process's stderr, or a buffer in tests.
 type Sink = Option<Arc<Mutex<Vec<u8>>>>;
 
+#[derive(Debug, Clone, Default)]
+struct UnitOutput {
+    quiet: bool,
+    directory: Option<std::path::PathBuf>,
+    file: Option<Arc<Mutex<std::fs::File>>>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
 /// Runs tools as child processes.
 #[derive(Debug, Clone)]
 pub struct ProcessRunner {
@@ -50,6 +58,9 @@ pub struct ProcessRunner {
     pub(crate) kill_grace: StdDuration,
     /// A buffer that receives the transcript instead of stderr, for tests.
     pub(crate) transcript: Sink,
+    /// Unit address for each public transcript line.
+    unit: Option<nyl_core::orchestration::ids::UnitAddress>,
+    output: UnitOutput,
     /// The run's cancellation: 0 while it runs, else the signal (such as
     /// SIGINT or SIGTERM) that cancelled it, which the runner forwards to
     /// every running tool's process group, with SIGKILL after the grace.
@@ -61,6 +72,8 @@ impl Default for ProcessRunner {
         Self {
             kill_grace: KILL_GRACE,
             transcript: None,
+            unit: None,
+            output: UnitOutput::default(),
             cancel: None,
         }
     }
@@ -69,6 +82,15 @@ impl Default for ProcessRunner {
 impl ProcessRunner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Control public unit transcripts. Files append masked lines at
+    /// `<directory>/<environment>/<unit>.log`; private stdout is never logged.
+    #[must_use]
+    pub fn unit_output(mut self, quiet: bool, directory: Option<std::path::PathBuf>) -> Self {
+        self.output.quiet = quiet;
+        self.output.directory = directory;
+        self
     }
 
     /// Forward the signal `cancel` holds, once it is set (non-zero), to the
@@ -115,6 +137,39 @@ fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
 }
 
 impl ToolRunner for ProcessRunner {
+    fn run_for_unit(
+        &self,
+        invocation: ToolInvocation,
+        unit: &nyl_core::orchestration::ids::UnitAddress,
+    ) -> DriverResult<ToolExit> {
+        let mut runner = self.clone();
+        runner.unit = Some(unit.clone());
+        runner.output.error = Arc::new(Mutex::new(None));
+        if let Some(directory) = &self.output.directory {
+            let open = || -> std::io::Result<std::fs::File> {
+                let directory = directory.join(unit.environment.as_str());
+                std::fs::create_dir_all(&directory)?;
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    options.mode(0o600);
+                }
+                options.open(directory.join(format!("{}.log", unit.unit)))
+            };
+            match open() {
+                Ok(file) => runner.output.file = Some(Arc::new(Mutex::new(file))),
+                Err(error) => warn_log(
+                    &runner.transcript,
+                    &runner.output,
+                    format!("cannot open unit log for {unit}: {error}"),
+                ),
+            }
+        }
+        runner.run(invocation)
+    }
+
     #[allow(clippy::too_many_lines)] // One subprocess lifetime owns its streams, terminal, cancellation, deadline, and captured result.
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
         let mut masked = invocation
@@ -201,22 +256,26 @@ impl ToolRunner for ProcessRunner {
         let stdout = child.stdout.take().map(|pipe| {
             let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
             let private = invocation.private_stdout;
+            let unit = self.unit.clone();
+            let output = self.output.clone();
             thread::spawn(move || {
                 let captured = if private {
                     let mut captured = Vec::new();
                     let _ = BufReader::new(pipe).read_to_end(&mut captured);
                     captured
                 } else {
-                    transcribe(pipe, &masked, &sink, usize::MAX)
+                    transcribe_for_unit(pipe, &masked, &sink, usize::MAX, unit.as_ref(), &output)
                 };
                 let _ = done.send(());
                 captured
             })
         });
         let stderr = child.stderr.take().map(|pipe| {
+            let unit = self.unit.clone();
+            let output = self.output.clone();
             let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
             thread::spawn(move || {
-                let captured = transcribe(pipe, &masked, &sink, MAX_DIAGNOSTIC_BYTES);
+                let captured = transcribe_for_unit(pipe, &masked, &sink, MAX_DIAGNOSTIC_BYTES, unit.as_ref(), &output);
                 let _ = done.send(());
                 captured
             })
@@ -493,7 +552,34 @@ fn group_alive(child: &Child) -> bool {
 
 /// Copy a tool's output, line by line and masked, to the transcript; return
 /// raw bytes up to the capture limit while the full transcript continues.
+#[cfg(test)]
 fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture_limit: usize) -> Vec<u8> {
+    transcribe_for_unit(pipe, masked, sink, capture_limit, None, &UnitOutput::default())
+}
+
+fn warn_log(sink: &Sink, output: &UnitOutput, message: String) {
+    let mut error = output.error.lock().unwrap();
+    if error.is_some() {
+        return;
+    }
+    let warning = format!("warning NYL-UNIT-LOG: {message}; check log directory permissions and free space\n");
+    *error = Some(message);
+    match sink {
+        Some(buffer) => buffer.lock().unwrap().extend_from_slice(warning.as_bytes()),
+        None => {
+            let _ = std::io::stderr().lock().write_all(warning.as_bytes());
+        }
+    }
+}
+
+fn transcribe_for_unit(
+    pipe: impl Read,
+    masked: &[String],
+    sink: &Sink,
+    capture_limit: usize,
+    unit: Option<&nyl_core::orchestration::ids::UnitAddress>,
+    output: &UnitOutput,
+) -> Vec<u8> {
     let mut reader = BufReader::new(pipe);
     let mut captured = Vec::new();
     let mut line = Vec::new();
@@ -505,6 +591,26 @@ fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture_limit: us
                 let remaining = capture_limit.saturating_sub(captured.len());
                 captured.extend_from_slice(&line[..line.len().min(remaining)]);
                 let text = mask(&String::from_utf8_lossy(&line), masked);
+                let text = if let Some(unit) = unit {
+                    format!("  [{unit}] {text}{}", if text.ends_with('\n') { "" } else { "\n" })
+                } else {
+                    text
+                };
+                if let Some(file) = &output.file {
+                    if let Err(error) = file.lock().unwrap().write_all(text.as_bytes()) {
+                        warn_log(
+                            sink,
+                            output,
+                            format!(
+                                "cannot write unit log for {}: {error}",
+                                unit.map_or_else(|| "tool".to_owned(), ToString::to_string)
+                            ),
+                        );
+                    }
+                }
+                if unit.is_some() && output.quiet {
+                    continue;
+                }
                 match sink {
                     Some(buffer) => buffer
                         .lock()
@@ -619,6 +725,110 @@ mod tests {
         );
         let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
         assert!(transcript.contains("out") && transcript.contains("err"), "{transcript}");
+    }
+
+    #[test]
+    fn test_unit_labels_and_masking_leave_parser_bytes_and_private_stdout_unchanged() {
+        use nyl_core::orchestration::ids::UnitAddress;
+        let unit: UnitAddress = "dev/web".parse().unwrap();
+        let (runner, transcript) = quiet();
+        let mut invocation = sh("printf 'secret\nsecond'; printf 'diagnostic-secret' >&2");
+        invocation.masked = vec!["secret".to_owned()];
+        let exit = runner.run_for_unit(invocation.clone(), &unit).unwrap();
+        assert_eq!(
+            exit,
+            ToolExit::Exited {
+                code: 0,
+                stdout: b"secret\nsecond".to_vec(),
+                stderr: b"diagnostic-secret".to_vec()
+            }
+        );
+        let text = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("[dev/web] ***\n"), "{text}");
+        assert!(text.contains("[dev/web] second\n"), "{text}");
+        assert!(text.contains("[dev/web] diagnostic-***\n"), "{text}");
+        transcript.lock().unwrap().clear();
+        invocation.private_stdout = true;
+        assert_eq!(runner.run_for_unit(invocation, &unit).unwrap(), exit);
+        assert_eq!(*transcript.lock().unwrap(), b"  [dev/web] diagnostic-***\n");
+    }
+
+    #[test]
+    fn test_unit_logs_can_tee_or_replace_the_console_without_exposing_private_stdout() {
+        let unit = "dev/web".parse().unwrap();
+        for quiet_output in [false, true] {
+            let logs = tempfile::TempDir::new().unwrap();
+            let (runner, transcript) = quiet();
+            let runner = runner.unit_output(quiet_output, Some(logs.path().to_owned()));
+            let mut invocation = sh("printf 'secret\\n'; printf 'diagnostic\\n' >&2");
+            invocation.masked = vec!["secret".to_owned()];
+            let ToolExit::Exited { code: 0, stdout, .. } = runner.run_for_unit(invocation, &unit).unwrap() else {
+                panic!("tool should succeed")
+            };
+            assert_eq!(stdout, b"secret\n");
+            let mut private = sh("printf 'private-payload'; printf 'more\\n' >&2");
+            private.private_stdout = true;
+            runner.run_for_unit(private, &unit).unwrap();
+            let log = std::fs::read_to_string(logs.path().join("dev/web.log")).unwrap();
+            assert!(log.contains("  [dev/web] ***\n"), "{log}");
+            assert!(log.contains("  [dev/web] diagnostic\n"), "{log}");
+            assert!(log.contains("  [dev/web] more\n"), "{log}");
+            assert!(!log.contains("secret") && !log.contains("private-payload"), "{log}");
+            let console = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+            if quiet_output {
+                assert!(console.is_empty(), "{console}");
+            } else {
+                let mut console = console.lines().collect::<Vec<_>>();
+                let mut log = log.lines().collect::<Vec<_>>();
+                console.sort_unstable();
+                log.sort_unstable();
+                assert_eq!(console, log);
+            }
+        }
+    }
+
+    #[test]
+    fn test_unit_log_setup_failure_warns_and_preserves_tool_exit() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let logs = directory.path().join("logs");
+        std::fs::write(&logs, "not a directory").unwrap();
+        let (runner, transcript) = quiet();
+        let runner = runner.unit_output(true, Some(logs));
+        assert!(matches!(
+            runner.run_for_unit(sh("exit 7"), &"dev/web".parse().unwrap()).unwrap(),
+            ToolExit::Exited { code: 7, .. }
+        ));
+        assert!(String::from_utf8_lossy(&transcript.lock().unwrap()).contains("cannot open unit log"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_unit_log_write_failure_warns_without_affecting_later_unit() {
+        let logs = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(logs.path().join("dev")).unwrap();
+        let read_only = logs.path().join("read-only");
+        std::fs::write(&read_only, "").unwrap();
+        let (mut runner, transcript) = quiet();
+        runner.output.quiet = true;
+        runner.output.file = Some(Arc::new(Mutex::new(std::fs::File::open(read_only).unwrap())));
+        assert!(matches!(
+            runner
+                .run_for_unit(sh("echo hello; exit 7"), &"dev/web".parse().unwrap())
+                .unwrap(),
+            ToolExit::Exited { code: 7, .. }
+        ));
+        runner.output.file = None;
+        runner.output.directory = Some(logs.path().to_owned());
+        assert!(matches!(
+            runner
+                .run_for_unit(sh("echo later"), &"dev/other".parse().unwrap())
+                .unwrap(),
+            ToolExit::Exited { code: 0, .. }
+        ));
+        assert!(String::from_utf8_lossy(&transcript.lock().unwrap()).contains("cannot write unit log"));
+        assert!(std::fs::read_to_string(logs.path().join("dev/other.log"))
+            .unwrap()
+            .contains("later"));
     }
 
     #[test]

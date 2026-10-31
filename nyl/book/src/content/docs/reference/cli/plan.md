@@ -50,10 +50,15 @@ Units leaving the ownership set of dev (2):
 UNIT    KIND     STATE             RECEIPT  CHANGES  DETAIL
 cache   Command  pending-teardown  -        destroy  run sh
 worker  Command  pending-teardown  -        -        would be retained: its resources stay, and its state becomes a tombstone
-source: a16f93e6a1b69c767af8a3f37c84e6f102c20858
-warning NYL-PLAN-UNITS-LEAVING: 2 unit(s) leave the ownership set of dev: cache (removed), worker (removed)
+
+  source:   a16f93e6a1b69c767af8a3f37c84e6f102c20858
+
+warning NYL-PLAN-UNITS-LEAVING
+  2 unit(s) leave the ownership set of dev: cache (removed), worker (removed)
   fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
-warning NYL-TEARDOWN-PENDING (cache): unit cache of dev left the ownership set; its teardown waits for --allow-teardown
+
+warning NYL-TEARDOWN-PENDING (cache)
+  unit cache of dev left the ownership set; its teardown waits for --allow-teardown
   fix: pass --allow-teardown to nyl reconcile to tear it down, restore it in source to keep it, or let it go without a teardown with `nyl state forget -e dev --unit cache`
 ```
 

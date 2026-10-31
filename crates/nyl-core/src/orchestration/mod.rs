@@ -42,5 +42,6 @@ pub mod driver;
 pub mod graph;
 pub mod ids;
 pub mod ports;
+pub mod progress;
 pub mod state;
 pub mod time;

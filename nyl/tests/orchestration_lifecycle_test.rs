@@ -473,7 +473,7 @@ fn test_teardown_all_honours_retain_and_holds_the_ownership_set() {
         ),
     ));
     assert_eq!(harness.reconcile(&[]).exit.code(), 0);
-    let report = teardown(&harness, TeardownTarget::All, |_| {});
+    let report = teardown(&harness, TeardownTarget::All, |job| job.request.reason = None);
     assert_eq!(report.exit.code(), 0, "{report:#?}");
     assert_eq!(outcome(&report, "removed"), set(&["svc"]));
     assert_eq!(outcome(&report, "released"), set(&["img", "keep"]));
@@ -486,10 +486,23 @@ fn test_teardown_all_honours_retain_and_holds_the_ownership_set() {
     let snapshot = harness.snapshot();
     for name in ["svc", "img", "keep"] {
         let document = &snapshot.desired[&unit(name)];
-        assert!(matches!(document.lifecycle, Lifecycle::Held { .. }), "{name}");
+        let Lifecycle::Held { hold, .. } = &document.lifecycle else {
+            panic!("{name} is held")
+        };
+        assert_eq!(
+            hold.reason.as_deref(),
+            Some("teardown requested; automatic recreation is suspended")
+        );
         assert_eq!(document.unit.uid, None, "{name}");
     }
     assert!(snapshot.observed.is_empty());
+    let report = harness.reconcile(&[]);
+    let held = &report.units[&unit("img")];
+    assert!(held.no_instance);
+    assert!(held
+        .warnings
+        .iter()
+        .any(|warning| warning.message.contains("automatic recreation is suspended")));
 }
 
 /// Holds: a held unit's consumers resolve against its receipt, so a

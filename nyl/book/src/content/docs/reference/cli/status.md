@@ -30,6 +30,8 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   resume". A held marker, written by `nyl hold` for a unit the environment
   never reconciled, has no kind (`-`) and no receipt. Each held unit warns
   with `NYL-UNIT-HELD`, naming [`nyl resume`](/nyl/reference/cli/hold/).
+  A held unit without a managed instance shows `held (no instance)`; this
+  does not say whether resources released from management still exist.
 - **Drift.** A unit with a current receipt shows its latest drift
   observation from [`nyl verify`](/nyl/reference/cli/verify/) in its detail
   (`drift: clean`, `drifted`, or `unknown`). A current unit whose latest
@@ -56,6 +58,14 @@ shows the units it left uncertain as `uncertain`; a run that recorded every
 unit only warns. A run whose lease expired or was broken before it finished
 is reported with `NYL-LEASE-LOST`; the fix names `nyl reconcile`, and `nyl
 recover -e <env>`, which imports the run without executing anything.
+
+The table is separated from its indented source and commit provenance by a blank
+line. Beneath the source commit, the report shows the checkout's credential-free
+`origin` URL, or its local path when there is no origin. JSON exposes that context
+as `sourceRepository`. Diagnostics follow separately, with a code, message and
+suggested fix in each block. Warning and error headings use color according to
+the global `--color auto|always|never` setting. Environment names are quoted,
+such as `environment 'local'`.
 
 The report identifies the configured state repository and its local path.
 `--local` reads that repository without contacting the remote.

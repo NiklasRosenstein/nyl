@@ -92,7 +92,7 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         environment.state_repository = Some(session.resolved.location.repository.clone());
         environment.state_local_path = Some(store.repository_path(&session.resolved.location).display().to_string());
     }
-    session.add_warnings(&mut report);
+    session.annotate_report(&mut report);
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }

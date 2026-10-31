@@ -38,7 +38,15 @@ closely related pair.
   - [`exec`](/nyl/reference/cli/exec/) - Run a held unit's native tool with recorded repair context
   - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, restore, and delete an environment's state; break a lost lease
 
+Orchestration warnings and errors are separate blocks on stderr, preceded by a
+blank line. JSON reports remain on stdout.
+
 ## Global Options
+
+`--quiet-unit-output` hides public tool output from orchestration units while
+keeping their start/end messages. `--unit-log-dir DIR` appends masked unit logs
+to files, independently of console output. See
+[Following execution](/nyl/orchestration/runs/#following-execution) for usage.
 
 ### `--verbose` / `-v`
 

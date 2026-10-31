@@ -209,6 +209,7 @@ fn read_environment(
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
     let sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
     let source_commit = match source_request(&entry, commit, source_override) {
+        SourceRequest::Worktree(snapshot) => snapshot.commit,
         SourceRequest::Entry(commit) | SourceRequest::Commit { commit, .. } => commit,
         SourceRequest::Revision(revision) | SourceRequest::Override(revision) => sources
             .resolve_revision(&SourceRepository::This, &revision)

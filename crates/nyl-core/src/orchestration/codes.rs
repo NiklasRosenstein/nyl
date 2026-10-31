@@ -30,6 +30,8 @@ macro_rules! codes {
 }
 
 codes! {
+    /// An explicit worktree run uses an archived snapshot of uncommitted source.
+    SourceWorktree => "NYL-SOURCE-WORKTREE",
     /// Native repair requires a held incarnation.
     ExecNotHeld => "NYL-EXEC-NOT-HELD",
     /// The unit's driver cannot run an operator tool.

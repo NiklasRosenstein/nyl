@@ -70,6 +70,11 @@ digest. No-change plans skip apply when the backend has a state object. Otherwis
 Nyl applies the saved plan to persist the initial empty state before recording a
 receipt.
 
+Readable init, plan and apply output streams through the masked unit transcript.
+Native sensitivity annotations redact values in that readable output. See
+[Following execution](/nyl/orchestration/runs/#following-execution) to hide it or
+save masked logs to local files.
+
 Only declared, correctly typed, non-sensitive outputs are recorded. A native
 output marked sensitive must be declared sensitive; Nyl checks this before
 apply. Teardown creates and applies a native destroy plan using the same

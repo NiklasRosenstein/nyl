@@ -31,7 +31,8 @@ While a run is alive, its lease and its run ref both hold the environment:
 
 ```console
 $ nyl reconcile -e dev
-error NYL-LEASE-HELD: dev is held by run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 (reconcile) by unknown@localhost, until 2026-10-25T13:19:59.431883317+00:00
+error NYL-LEASE-HELD
+  dev is held by run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 (reconcile) by unknown@localhost, until 2026-10-25T13:19:59.431883317+00:00
   fix: wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone
 ```
 
@@ -71,10 +72,11 @@ $ nyl reconcile -e dev
 UNIT      KIND     RESULT     DETAIL
 database  Command  imported
 migrate   Command  uncertain  run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
-run: 01a1732a-44de-7b8d-90ca-4602a61d3a51
-source: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
-desired: fcfbb6fb6d03c2c3a539c4ef19787d50a9614d43
-observed: e83e5e124d593a94226d7a3287df158b2c87e93f
+
+  run:      01a1732a-44de-7b8d-90ca-4602a61d3a51
+  source:   8400718ac2236aa6b71cd5a9c43d4ddd94545257
+  desired:  fcfbb6fb6d03c2c3a539c4ef19787d50a9614d43
+  observed: e83e5e124d593a94226d7a3287df158b2c87e93f
 ```
 
 Its transition commit records both lists and the break:
@@ -111,8 +113,11 @@ $ nyl status -e dev
 UNIT      KIND     STATE      RECEIPT  LAST RUN                              DETAIL
 database  Command  current    current  01a1732a-11d1-7ed6-a3cc-174dc69c7856
 migrate   Command  uncertain  none     01a1732a-11d1-7ed6-a3cc-174dc69c7856  run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
-source: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
-warning NYL-UNIT-UNCERTAIN (migrate): unit migrate is uncertain: run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
+
+  source:   8400718ac2236aa6b71cd5a9c43d4ddd94545257
+
+warning NYL-UNIT-UNCERTAIN (migrate)
+  unit migrate is uncertain: run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
   fix: check what the execution did; a unit whose recovery policy converges runs again in the next nyl reconcile, otherwise run `nyl recover -e dev --unit migrate --retry --reason <text>` once it is safe to run it again
 ```
 
@@ -140,9 +145,10 @@ $ nyl reconcile -e dev
 UNIT      KIND     RESULT    DETAIL
 database  Command  current
 migrate   Command  executed
-run: 01a1732a-5626-7e0b-8be9-1f86f45686fb
-source: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
-observed: a86335501a1f0e3b0dd7e244d382ebd411adf6fd
+
+  run:      01a1732a-5626-7e0b-8be9-1f86f45686fb
+  source:   8400718ac2236aa6b71cd5a9c43d4ddd94545257
+  observed: a86335501a1f0e3b0dd7e244d382ebd411adf6fd
 ```
 
 `--accept <run>` adopts what a run checkpointed for the unit, its receipt,
@@ -200,7 +206,9 @@ gone:
 $ nyl lease break -e dev --reason "runner was killed"
 lease-break dev: done
   broken: run 01a17a9c-0455-77cd-a40d-42e3b92482da
-warning NYL-LEASE-HELD: the lease of run 01a17a9c-0455-77cd-a40d-42e3b92482da by unknown@localhost was broken; if that run is still alive it may still cause effects, but it can no longer write state
+
+warning NYL-LEASE-HELD
+  the lease of run 01a17a9c-0455-77cd-a40d-42e3b92482da by unknown@localhost was broken; if that run is still alive it may still cause effects, but it can no longer write state
   fix: make sure the runner is gone; units it was executing become uncertain at the next run
 ```
 
@@ -217,7 +225,9 @@ commands included, exits 2 with `NYL-LEASE-BROKEN`, or waits under
 ```console
 $ nyl state forget -e dev --unit migrate
 state-forget dev: refused
-error NYL-LEASE-BROKEN: the lease of dev was broken and its run 01a17a9c-0455-77cd-a40d-42e3b92482da has not been imported yet
+
+error NYL-LEASE-BROKEN
+  the lease of dev was broken and its run 01a17a9c-0455-77cd-a40d-42e3b92482da has not been imported yet
   fix: run `nyl recover -e dev` to import it (a `nyl reconcile` or `nyl teardown` of dev imports it too), then run this command again
 ```
 

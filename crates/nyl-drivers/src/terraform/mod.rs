@@ -362,11 +362,12 @@ impl TerraformDriver {
                 vec![
                     "apply".into(),
                     "-input=false".into(),
-                    "-json".into(),
+                    "-no-color".into(),
                     "-lock=true".into(),
                     native.plan_file().into_os_string(),
                 ],
                 true,
+                false,
             )?;
         }
         let outputs = if destroy { json!({}) } else { native.outputs()? };
@@ -529,18 +530,18 @@ impl<'a, 'c> Native<'a, 'c> {
                 retry_context: None,
             })
     }
-    fn checked(&self, args: Vec<OsString>, effects: bool) -> Result<Vec<u8>, Fault> {
+    fn checked(&self, args: Vec<OsString>, effects: bool, private_stdout: bool) -> Result<Vec<u8>, Fault> {
         let step = args
             .first()
             .map(|arg| arg.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match self.run(args, true)? {
+        match self.run(args, private_stdout)? {
             ToolExit::Exited { code: 0, stdout, .. } => Ok(stdout),
             exit => Err(self.unsuccessful(&step, exit, effects)),
         }
     }
     fn json(&self, args: &[&str]) -> Result<Value, Fault> {
-        let bytes = self.checked(args.iter().map(OsString::from).collect(), false)?;
+        let bytes = self.checked(args.iter().map(OsString::from).collect(), false, true)?;
         serde_json::from_slice(&bytes).map_err(|_| Fault::configuration("native tool returned invalid private JSON"))
     }
     fn initialize(&self) -> Result<String, Fault> {
@@ -581,6 +582,7 @@ impl<'a, 'c> Native<'a, 'c> {
                 "-lockfile=readonly".into(),
                 format!("-backend-config={}", backend_path.display()).into(),
             ],
+            false,
             false,
         )?;
         self.check_backend()?;
@@ -646,7 +648,7 @@ impl<'a, 'c> Native<'a, 'c> {
     }
 
     fn state_exists(&self) -> Result<bool, Fault> {
-        let bytes = self.checked(vec!["state".into(), "pull".into()], false)?;
+        let bytes = self.checked(vec!["state".into(), "pull".into()], false, true)?;
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(false);
         }
@@ -740,7 +742,7 @@ impl<'a, 'c> Native<'a, 'c> {
         let mut args: Vec<OsString> = vec![
             "plan".into(),
             "-input=false".into(),
-            "-json".into(),
+            "-no-color".into(),
             "-detailed-exitcode".into(),
             format!("-lock={locking}").into(),
             format!("-out={}", self.plan_file().display()).into(),
@@ -758,7 +760,7 @@ impl<'a, 'c> Native<'a, 'c> {
             );
         }
         args.push(format!("-var-file={}", variables.display()).into());
-        let changed = match self.run(args, true)? {
+        let changed = match self.run(args, false)? {
             ToolExit::Exited { code: 0, .. } => false,
             ToolExit::Exited { code: 2, .. } => true,
             exit => return Err(self.unsuccessful("plan", exit, false)),

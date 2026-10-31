@@ -2076,6 +2076,7 @@ version = "0.5.9"
 dependencies = [
  "chrono",
  "git2",
+ "glob",
  "nyl-core",
  "nyl-git",
  "proptest",

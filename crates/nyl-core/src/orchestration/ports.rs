@@ -306,6 +306,13 @@ pub trait StateStore: Send + Sync {
         Ok(())
     }
 
+    /// Import and validate an explicitly identified worktree snapshot before a run uses it.
+    fn prepare_worktree_snapshot(&self, _location: &StateLocation, _commit: &CommitId) -> StateResult<()> {
+        Err(StateError::Unavailable(
+            "this state store cannot retain worktree snapshots".to_owned(),
+        ))
+    }
+
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 
@@ -559,6 +566,27 @@ pub fn update_lease_then_run<S: StateStore + ?Sized>(
 
 /// Every Git operation on sources that decisions depend on.
 pub trait SourceResolver: Send + Sync {
+    /// Freeze Git-visible working files without changing HEAD or the user's index.
+    /// `previous` may reuse an identical snapshot retained in state history.
+    fn snapshot_worktree(
+        &self,
+        base: &CommitId,
+        identity: &CommitIdentity,
+        now: Timestamp,
+        previous: Option<&CommitId>,
+    ) -> SourceResult<WorktreeSnapshot> {
+        let _ = (base, identity, now, previous);
+        Err(SourceError(
+            "this source resolver cannot snapshot working files".to_owned(),
+        ))
+    }
+
+    /// Whether a commit is an explicitly marked worktree snapshot.
+    fn is_worktree_snapshot(&self, commit: &CommitId) -> SourceResult<bool> {
+        let _ = commit;
+        Ok(false)
+    }
+
     /// The commit a revision names now.
     fn resolve_revision(&self, repository: &SourceRepository, revision: &str) -> SourceResult<CommitId>;
     /// The first of `refs` (names or globs) whose tip contains `commit`, or
@@ -605,8 +633,49 @@ pub trait SourceResolver: Send + Sync {
         let _ = paths;
         self.reset_worktree(repository, commit, path)
     }
+    /// Ensure a declared source path can be reconstructed in a private checkout.
+    /// With `recursive`, check descendants too; otherwise check the path itself
+    /// and its ancestors. Paths may contain glob patterns.
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let _ = (repository, commit, path, recursive);
+        Ok(())
+    }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
+}
+
+/// Local source-cache refs for worktree snapshots, keyed by base commit and tree.
+/// State and run commits retain the snapshot as a parent in the configured state
+/// repository before effects start. These cache refs are not pushed there.
+/// Snapshots remain reachable while their cache refs or state history retain them;
+/// automatic snapshot garbage collection is not implemented.
+pub const WORKTREE_SNAPSHOT_PREFIX: &str = "refs/nyl-worktrees/";
+
+/// Commit trailer distinguishing snapshots from committed-source release evidence.
+pub const WORKTREE_SNAPSHOT_MARKER: &str = "Nyl-Worktree-Snapshot: true";
+
+/// Recognize snapshot provenance even after a source is checked out or fetched.
+pub fn is_worktree_snapshot_message(message: &str) -> bool {
+    message.lines().any(|line| line == WORKTREE_SNAPSHOT_MARKER)
+}
+
+/// An immutable invocation-selected source, independent of the state destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSnapshot {
+    /// The entry checkout's committed HEAD.
+    pub base: CommitId,
+    /// The immutable snapshot commit whose tree the run consumes.
+    pub commit: CommitId,
+    /// Content-addressed local ref used by source selection and persisted provenance.
+    pub revision: String,
+    /// Whether an existing snapshot with the same base and tree was reused.
+    pub reused: bool,
 }
 
 /// One unit as an environment's source renders it.

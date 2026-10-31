@@ -429,11 +429,11 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
                     "unit {name} ({}) has kind {kind} of {api_version}, which no driver serves",
                     rendered.source_path
                 ),
-                "use a unit kind Nyl provides, such as units.gitops.nyl/v1 Command, or correct the unit's apiVersion and kind",
+                "correct apiVersion and kind to match a registered unit driver",
             ));
             continue;
         };
-        if let Err(error) = validate_unit(driver, api_version, kind, spec) {
+        if let Err(error) = validate_unit(driver, spec) {
             errors.push(error.into_finding(name, &rendered.source_path));
             continue;
         }
@@ -713,7 +713,7 @@ impl UnitError {
 }
 
 /// The driver's validation and the common fields' validation.
-fn validate_unit(driver: &dyn Driver, _api_version: &str, _kind: &str, spec: &Value) -> Result<(), UnitError> {
+fn validate_unit(driver: &dyn Driver, spec: &Value) -> Result<(), UnitError> {
     let invalid = |error: &dyn std::fmt::Display| UnitError::Invalid(error.to_string());
     driver.validate_spec(spec).map_err(UnitError::Invalid)?;
     let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;

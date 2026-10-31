@@ -39,6 +39,8 @@ use serde_json::Value;
 /// How to find S.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceRequest {
+    /// An explicitly captured immutable snapshot of working files.
+    Worktree(nyl_core::orchestration::ports::WorktreeSnapshot),
     /// The entry worktree's commit.
     Entry(CommitId),
     /// The tip of a revision of this repository.
@@ -53,6 +55,9 @@ impl SourceRequest {
     /// How the environment record names the choice.
     pub fn choice(&self) -> SourceChoice {
         match self {
+            Self::Worktree(snapshot) => SourceChoice::Override {
+                revision: snapshot.revision.clone(),
+            },
             Self::Entry(_) => SourceChoice::Entry,
             Self::Revision(revision) => SourceChoice::Revision {
                 revision: revision.clone(),
