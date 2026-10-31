@@ -185,7 +185,8 @@ pub fn configure_repository(
         )
     } else {
         let path = std::path::Path::new(&endpoint.read);
-        (!endpoint.read.contains("://") && !endpoint.read.contains(':')).then(|| inventory.project_root.join(path))
+        (path.is_absolute() || (!endpoint.read.contains("://") && !endpoint.read.contains(':')))
+            .then(|| inventory.project_root.join(path))
     };
     let direct = file_path.is_some() && endpoint.write.as_ref().is_none_or(|write| write == &endpoint.read);
     let source = git2::Repository::open(&resolved.git_dir)
