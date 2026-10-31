@@ -51,7 +51,7 @@ fn test_source_repository_context_strips_credentials_and_falls_back_to_the_check
     let session = nyl::orchestration::session::Session::open(&checkout, "dev")
         .unwrap_or_else(|_| panic!("project should resolve"));
     assert_eq!(
-        Path::new(&session.resolved.source_repository),
+        Path::new(&session.resolved.source_repository).canonicalize().unwrap(),
         checkout.canonicalize().unwrap()
     );
 }
