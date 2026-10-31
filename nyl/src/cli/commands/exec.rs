@@ -44,15 +44,23 @@ pub fn run(args: &ExecArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     Ok(match result {
         Ok(outcome) => outcome,
         Err(stop) => {
-            let message = match stop {
-                Stop::Finding(finding) => format!("{}: {}\n{}\n", finding.code, finding.message, finding.fix),
-                Stop::Error(error) => format!("NYL-EXEC-INVALID: {error}\n"),
+            let (message, stderr) = match stop {
+                Stop::Finding(finding) => {
+                    let message = format!("{}: {}\n{}\n", finding.code, finding.message, finding.fix);
+                    let mut stderr = String::new();
+                    crate::orchestration::session::write_finding(&mut stderr, "error", None, &finding);
+                    (message, stderr)
+                }
+                Stop::Error(error) => {
+                    let message = format!("NYL-EXEC-INVALID: {error}\n");
+                    (message.clone(), message)
+                }
             };
             CommandOutcome {
                 exit: 125,
                 report: serde_json::json!({"kind":"ExecReport","errors":[message]}),
                 stdout: String::new(),
-                stderr: message,
+                stderr,
             }
         }
     })

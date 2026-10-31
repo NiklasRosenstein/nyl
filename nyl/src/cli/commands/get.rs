@@ -26,7 +26,8 @@ use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsI
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{
-    cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, write_finding, Session, Stop,
+    cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, styled_state_cell, write_finding, Session,
+    Stop,
 };
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -358,7 +359,9 @@ fn unit_state_row(name: &UnitName, unit: &UnitReport, wide: bool) -> Vec<Cell> {
     if wide {
         cells.push(readiness_cell(unit));
     }
-    cells.into_iter().map(Cell::plain).collect()
+    let mut cells: Vec<Cell> = cells.into_iter().map(Cell::plain).collect();
+    cells[2] = styled_state_cell(unit);
+    cells
 }
 
 /// `nyl get unit <u> -e <env>`: the exact persisted documents.

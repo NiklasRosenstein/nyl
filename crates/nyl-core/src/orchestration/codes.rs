@@ -250,12 +250,39 @@ impl JsonSchema for Code {
     }
 }
 
+/// A labelled fact or action for presenting a diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DiagnosticField {
+    pub label: String,
+    pub value: String,
+}
+
+/// Presentation facts for an error or warning.
+///
+/// When populated, these fields describe the same facts and remedies as
+/// the complete `message` and `fix` record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DiagnosticPresentation {
+    /// A concise headline for structured presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Labelled facts supporting the headline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<DiagnosticField>,
+    /// Labelled ways to act on the finding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DiagnosticField>,
+}
+
 /// An error or warning: its code, what happened, and how to fix it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Finding {
     pub code: Code,
     pub message: String,
     pub fix: String,
+    /// Optional facts for human presentation, serialized at the top level.
+    #[serde(flatten)]
+    pub presentation: Box<DiagnosticPresentation>,
 }
 
 impl Finding {
@@ -264,7 +291,34 @@ impl Finding {
             code,
             message: message.into(),
             fix: fix.into(),
+            presentation: Box::default(),
         }
+    }
+    /// Set the headline used for structured presentation.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.presentation.title = Some(title.into());
+        self
+    }
+
+    /// Add a labelled fact.
+    #[must_use]
+    pub fn with_detail(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
+        self.presentation.details.push(DiagnosticField {
+            label: label.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Add a labelled action.
+    #[must_use]
+    pub fn with_action(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
+        self.presentation.actions.push(DiagnosticField {
+            label: label.into(),
+            value: value.into(),
+        });
+        self
     }
 }
 
@@ -277,6 +331,27 @@ impl fmt::Display for Finding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_finding_presentation_fields_are_optional_and_round_trip() {
+        let legacy = serde_json::json!({"code": "NYL-STATE-MISSING", "message": "missing", "fix": "init"});
+        let finding: Finding = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&finding).unwrap(), legacy);
+        let rich = finding
+            .with_title("State missing")
+            .with_detail("Environment", "dev")
+            .with_action("Init", "nyl state init");
+        let json = serde_json::to_value(&rich).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "code": "NYL-STATE-MISSING", "message": "missing", "fix": "init",
+                "title": "State missing", "details": [{"label": "Environment", "value": "dev"}],
+                "actions": [{"label": "Init", "value": "nyl state init"}]
+            })
+        );
+        assert_eq!(serde_json::from_value::<Finding>(json).unwrap(), rich);
+    }
 
     #[test]
     fn test_codes_round_trip_and_never_collide() {

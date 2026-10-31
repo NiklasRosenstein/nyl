@@ -2279,11 +2279,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             } else {
                 "the configured state repository"
             };
-            self.report.warnings.push(Finding::new(
-                Code::SourceWorktree,
-                format!("running immutable worktree snapshot {} based on {}; Git-visible working files are retained in {storage}", snapshot.commit, snapshot.base),
-                "commit source changes and reconcile without --worktree for committed-source evidence",
-            ));
+            self.report.warnings.push(
+                Finding::new(
+                    Code::SourceWorktree,
+                    format!("running immutable worktree snapshot {} based on {}; Git-visible working files are retained in {storage}", snapshot.commit, snapshot.base),
+                    "commit source changes and reconcile without --worktree for committed-source evidence",
+                )
+                .with_title("Running a worktree snapshot")
+                .with_detail("Snapshot", snapshot.commit.to_string())
+                .with_detail("Base", snapshot.base.to_string())
+                .with_detail("Storage", storage)
+                .with_action("Action", "Commit source changes and reconcile without --worktree for committed-source evidence."),
+            );
         }
         self.report.leaving.clone_from(&prepared.desired.leaving);
         if !self.report.leaving.is_empty() {

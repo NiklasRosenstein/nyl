@@ -38,8 +38,23 @@ closely related pair.
   - [`exec`](/nyl/reference/cli/exec/) - Run a held unit's native tool with recorded repair context
   - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, restore, and delete an environment's state; break a lost lease
 
-Orchestration warnings and errors are separate blocks on stderr, preceded by a
-blank line. JSON reports remain on stdout.
+Orchestration warnings and errors appear as separate blocks on stderr. Each block
+shows a headline, labelled details and actions when available, and a stable code.
+Table headings and diagnostic severity use terminal styling when color is enabled;
+the same information remains readable without color. JSON reports remain on stdout.
+A finding retains its complete `code`, `message`, and `fix` in JSON; optional
+`title`, `details`, and `actions` provide presentation fields for the same facts
+and remedies. For example, a status check against deleted state reports:
+
+```console
+$ nyl status -e dev --color never
+error  State for environment 'dev' was deleted
+
+  Start over    nyl state init -e dev --fresh
+  Decommission  remove Environment dev from source
+
+  NYL-STATE-DELETED
+```
 
 ## Global Options
 

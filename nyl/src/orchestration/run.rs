@@ -286,7 +286,10 @@ fn progress_line(progress: &nyl_core::orchestration::progress::UnitProgress) -> 
             format!(
                 "[{}] {} in {seconds:.1}s{}",
                 progress.unit,
-                result.name(),
+                crate::cli::presentation::result_style(result).map_or_else(
+                    || result.name().to_owned(),
+                    |style| crate::cli::presentation::styled(result.name(), style)
+                ),
                 reason
                     .filter(|text| !text.is_empty())
                     .map_or_else(String::new, |text| format!(": {text}"))

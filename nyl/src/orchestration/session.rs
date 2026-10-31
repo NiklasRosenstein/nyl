@@ -2,7 +2,6 @@
 //! its environment, building the shell's request and context, and rendering
 //! the one typed [`RunReport`] as a table or JSON with its exit category.
 
-use colored::Colorize as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -21,6 +20,7 @@ use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::source::GitSourceResolver;
 
 use crate::cli::commands::reconcile::RunOutput;
+use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
 use crate::gitops::units::UnitSourceRenderer;
 use crate::gitops::{discover_gitops_inventory, GitOpsInventory};
@@ -474,22 +474,38 @@ fn table(report: &RunReport) -> String {
             text.push('\n');
         }
         if let Some(run) = &environment.run {
-            let _ = writeln!(text, "  run:      {run}");
+            let _ = writeln!(
+                text,
+                "  {}      {}",
+                styled("run:", Style::Dim),
+                styled(run.as_ref(), Style::Dim)
+            );
         }
         if let Some(repository) = &environment.state_repository {
-            let _ = writeln!(text, "state repository: {repository}");
+            let _ = writeln!(text, "{} {repository}", styled("state repository:", Style::Dim));
         }
         if let Some(path) = &environment.state_local_path {
-            let _ = writeln!(text, "state local path: {path}");
+            let _ = writeln!(text, "{} {path}", styled("state local path:", Style::Dim));
         }
         if let Some(source) = &environment.source_commit {
-            let _ = writeln!(text, "  source:   {source}");
+            let _ = writeln!(
+                text,
+                "  {}   {}",
+                styled("source:", Style::Dim),
+                styled(source.as_ref(), Style::Dim)
+            );
             if let Some(repository) = &environment.source_repository {
                 let _ = writeln!(text, "            {repository}");
             }
         }
         for (side, commit) in &environment.commits {
-            let _ = writeln!(text, "  {label:<9} {commit}", label = format!("{side}:"));
+            let _ = writeln!(
+                text,
+                "  {}{} {}",
+                styled(&format!("{side}:"), Style::Dim),
+                " ".repeat(9usize.saturating_sub(side.to_string().len() + 1)),
+                styled(commit.as_ref(), Style::Dim)
+            );
         }
     }
     text
@@ -522,6 +538,39 @@ pub fn state_cell(unit: &UnitReport) -> String {
     }
 }
 
+/// A state cell styled according to the report's typed outcome.
+pub(crate) fn styled_state_cell(unit: &UnitReport) -> Cell {
+    use nyl_orchestration::run_report::{UnitState, VerifyResult};
+    let style = match &unit.result {
+        Some(result) => result_style(result),
+        None => match unit.state {
+            Some(UnitState::Failed) => Some(Style::Failure),
+            Some(
+                UnitState::Blocked
+                | UnitState::AwaitingApproval
+                | UnitState::Uncertain
+                | UnitState::Held
+                | UnitState::PendingTeardown
+                | UnitState::Drifted,
+            ) => Some(Style::Attention),
+            _ => match unit.verification.as_ref().map(|v| &v.result) {
+                Some(
+                    VerifyResult::Drifted { .. }
+                    | VerifyResult::Unknown { .. }
+                    | VerifyResult::NoReceipt
+                    | VerifyResult::Unsupported,
+                ) => Some(Style::Attention),
+                _ => None,
+            },
+        },
+    };
+    let value = state_cell(unit);
+    match style {
+        Some(style) => Cell::styled(&value, styled(&value, style)),
+        None => Cell::plain(value),
+    }
+}
+
 /// The kind cell of a unit: `-` for a held marker, which names no kind.
 pub fn kind_cell(unit: &UnitReport) -> String {
     if unit.kind.is_empty() {
@@ -549,7 +598,9 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
             vec![name.to_string(), kind_cell(unit), outcome, receipt, last_run, detail]
         }
     };
-    cells.into_iter().map(Cell::plain).collect()
+    let mut cells: Vec<Cell> = cells.into_iter().map(Cell::plain).collect();
+    cells[2] = styled_state_cell(unit);
+    cells
 }
 
 /// The most useful single line about a unit: its plan error, blockers,
@@ -622,23 +673,108 @@ fn diagnostics(report: &RunReport) -> String {
     text
 }
 
-/// Append a finding with its code and fix, preceded by a blank-line separator.
+/// Append a finding as a readable block with its stable code.
 pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, finding: &Finding) {
     text.push('\n');
-    let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
-    let heading = format!("{level} {}{unit}", finding.code);
-    let heading = match level {
-        "warning" => heading.yellow().bold().to_string(),
-        "error" => heading.red().bold().to_string(),
-        _ => heading,
+    let severity = match level {
+        "warning" => styled(level, Style::Warning),
+        "error" => styled(level, Style::Error),
+        _ => level.to_owned(),
     };
-    let _ = writeln!(text, "{heading}\n  {}\n  fix: {}", finding.message, finding.fix);
+    let headline = finding.presentation.title.as_deref().unwrap_or(&finding.message);
+    let mut lines = headline.split('\n');
+    let first = lines.next().unwrap_or_default();
+    let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
+    let _ = writeln!(text, "{severity}  {}", styled(first, Style::Bold));
+    for line in lines {
+        let _ = writeln!(text, "  {line}");
+    }
+    text.push('\n');
+    let fallback_detail = (finding.presentation.title.is_some()
+        && finding.presentation.details.is_empty()
+        && finding.presentation.actions.is_empty()
+        && finding.message != headline)
+        .then_some(("Details", finding.message.as_str()));
+    let fallback_action = finding
+        .presentation
+        .actions
+        .is_empty()
+        .then_some(("Action", finding.fix.as_str()));
+    let fields = finding
+        .presentation
+        .details
+        .iter()
+        .chain(&finding.presentation.actions)
+        .map(|field| (field.label.as_str(), field.value.as_str()))
+        .chain(fallback_detail)
+        .chain(fallback_action)
+        .collect::<Vec<_>>();
+    let width = fields
+        .iter()
+        .map(|(label, _)| unicode_width::UnicodeWidthStr::width(*label))
+        .max()
+        .unwrap_or(0);
+    for (label, value) in fields {
+        write_field(text, label, value, width);
+    }
+    text.push('\n');
+    let _ = writeln!(text, "  {}", styled(&format!("{}{unit}", finding.code), Style::Dim));
+}
+
+fn write_field(text: &mut String, label: &str, value: &str, width: usize) {
+    let padding = width - unicode_width::UnicodeWidthStr::width(label);
+    let mut lines = value.split('\n');
+    let _ = writeln!(
+        text,
+        "  {}{}  {}",
+        styled(label, Style::Dim),
+        " ".repeat(padding),
+        lines.next().unwrap_or_default()
+    );
+    for line in lines {
+        let _ = writeln!(text, "  {}  {line}", " ".repeat(width));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use nyl_orchestration::run_report::{ConditionState, UnitResult, UnitState};
+
+    #[test]
+    fn test_structured_finding_fields_align_and_multiline_fallback_is_preserved() {
+        let finding = Finding::new(Code::DriverError, "legacy", "legacy fix")
+            .with_title("Unit is held")
+            .with_detail("Reason", "incident\nfollow up")
+            .with_action("Action", "resume");
+        let mut text = String::new();
+        write_finding(&mut text, "warning", None, &finding);
+        assert_eq!(text, "\nwarning  Unit is held\n\n  Reason  incident\n          follow up\n  Action  resume\n\n  NYL-DRIVER-ERROR\n");
+        let finding = Finding::new(Code::DriverError, "first\nsecond", "repair\nretry");
+        text.clear();
+        write_finding(&mut text, "error", None, &finding);
+        assert_eq!(
+            text,
+            "\nerror  first\n  second\n\n  Action  repair\n          retry\n\n  NYL-DRIVER-ERROR\n"
+        );
+    }
+
+    #[test]
+    fn test_optional_finding_fields_keep_actions_and_fallback_fix() {
+        let mut text = String::new();
+        let detail = Finding::new(Code::DriverError, "message", "repair")
+            .with_title("Headline")
+            .with_detail("Reason", "blocked");
+        write_finding(&mut text, "error", None, &detail);
+        assert_eq!(
+            text,
+            "\nerror  Headline\n\n  Reason  blocked\n  Action  repair\n\n  NYL-DRIVER-ERROR\n"
+        );
+        text.clear();
+        let action = Finding::new(Code::DriverError, "message", "repair").with_action("Retry", "run again");
+        write_finding(&mut text, "error", None, &action);
+        assert_eq!(text, "\nerror  message\n\n  Retry  run again\n\n  NYL-DRIVER-ERROR\n");
+    }
 
     #[test]
     fn test_held_without_instance_keeps_its_condition_visible() {
@@ -691,7 +827,7 @@ mod tests {
         let table = outcome(&report, RunOutput::Table, 2);
         assert_eq!(table.exit, 2);
         assert!(table.stdout.contains("\n\n  source:   "), "{}", table.stdout);
-        assert_eq!(table.stderr, "\nwarning NYL-STATE-LOCAL-DIVERGED\n  state branches differ\n  fix: inspect --local\n\nwarning NYL-DRIVER-ERROR\n  unit failed\n  fix: retry\n");
+        assert_eq!(table.stderr, "\nwarning  state branches differ\n\n  Action  inspect --local\n\n  NYL-STATE-LOCAL-DIVERGED\n\nwarning  unit failed\n\n  Action  retry\n\n  NYL-DRIVER-ERROR\n");
         assert!(table.stdout.contains("web"), "{}", table.stdout);
         assert!(table.stdout.contains("blocked"), "{}", table.stdout);
         assert!(

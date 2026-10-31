@@ -175,7 +175,10 @@ fn test_state_delete_leaves_the_deleted_marker_and_refuses_later_commands() {
             refused.stderr
         );
         assert!(
-            refused.stderr.contains("remove the Environment") && refused.stderr.contains("--fresh"),
+            refused.stderr.contains("Start over")
+                && refused.stderr.contains("--fresh")
+                && refused.stderr.contains("Decommission")
+                && refused.stderr.contains("remove Environment dev from source"),
             "{args:?}: {}",
             refused.stderr
         );
