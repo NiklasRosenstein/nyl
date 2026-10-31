@@ -363,6 +363,34 @@ fn project_with_state(world: &World, repository: &str) -> std::path::PathBuf {
 
 #[cfg(feature = "test-kinds")]
 #[test]
+fn test_absolute_path_state_uses_configured_repository() {
+    let world = World::new(&project());
+    let state_path = world.scenario_tmp().join("state.git");
+    git2::Repository::init_bare(&state_path).unwrap();
+    let checkout = project_with_state(&world, &state_path.to_string_lossy());
+
+    let cache = world.scenario_tmp().join("cache");
+    nyl(&checkout, &["state", "init", "-e", "dev"])
+        .env("NYL_CACHE_DIR", &cache)
+        .assert()
+        .success();
+    bare_nyl(
+        &checkout,
+        &checkout.with_extension("home"),
+        &["status", "-e", "dev", "--local"],
+    )
+    .env("NYL_CACHE_DIR", &cache)
+    .assert()
+    .success();
+    assert!(git_output(&state_path, &["show", "refs/heads/nyl/dev/desired:state.yaml"]).contains("StateRecord"));
+    assert!(
+        !cache.join("state").exists(),
+        "local state uses its own object database"
+    );
+}
+
+#[cfg(feature = "test-kinds")]
+#[test]
 fn test_foreign_file_state_uses_configured_repository_without_touching_source_refs() {
     let world = World::new(&project());
     let state_path = world.scenario_tmp().join("state.git");
