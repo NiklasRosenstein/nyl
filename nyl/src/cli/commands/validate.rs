@@ -200,7 +200,8 @@ fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Res
     use nyl_core::orchestration::ports::SourceRenderer;
 
     let wiring = crate::orchestration::run::ProcessWiring::new();
-    let renderer = crate::gitops::units::UnitSourceRenderer::new(crate::orchestration::session::project_dir(inventory));
+    let renderer = crate::gitops::units::UnitSourceRenderer::new(crate::orchestration::session::project_dir(inventory))
+        .with_resource_catalogue(inventory.project_config.resource_catalogue.clone());
     // The worktree is rendered as it is, committed or not; the commit only labels it.
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
     let (environments, _) = crate::orchestration::project::declared(inventory);

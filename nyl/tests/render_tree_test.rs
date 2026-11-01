@@ -4633,6 +4633,23 @@ fn with_production_api_bindings(fixture: &TempDir) {
 }
 
 #[test]
+fn test_render_and_tree_reject_unit_in_workload_api_group() {
+    let fixture = fixture();
+    let path = fixture.path().join("applications/workloads/api.yaml");
+    let source = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!("{source}\n---\napiVersion: k8s.nyl/v1\nkind: OciImage\nmetadata:\n  name: image\n"),
+    )
+    .unwrap();
+    let expected = predicate::str::contains("set apiVersion to \"units.gitops.nyl/v1\"");
+    nyl_render(&fixture, &["--target", "production", "applications/workloads/api.yaml"])
+        .failure()
+        .stderr(expected.clone());
+    render_production(&fixture).failure().stderr(expected);
+}
+
+#[test]
 fn test_render_with_target_applies_the_bindings_render_tree_applies() {
     let fixture = fixture();
     with_production_api_bindings(&fixture);

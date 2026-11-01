@@ -56,7 +56,7 @@ impl Cancellation {
     }
 
     /// The shared signal cell, for a tool runner that forwards the signal
-    /// to running tools (`ProcessRunner::cancelled_by` in `nyl-drivers`):
+    /// to running tools (`ProcessRunner::cancelled_by` in `nyl-units`):
     /// 0 while the run is not cancelled, else the signal's number.
     pub fn shared(&self) -> Arc<AtomicI32> {
         self.signal.clone()

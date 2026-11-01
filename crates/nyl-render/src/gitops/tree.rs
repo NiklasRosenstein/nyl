@@ -1064,6 +1064,16 @@ fn prepare_target_cache(
     let key = format!("{}\0{}", inventory.project_root.display(), inputs.target.metadata.name);
     let previous = cache.load_record("target", &key)?;
     let mut recorder = cache.recorder();
+    recorder.record_value(
+        "resource-catalogue",
+        &inventory
+            .project_config
+            .resource_catalogue
+            .0
+            .iter()
+            .map(|d| (d.name, d.api_version, d.dynamic_kind))
+            .collect::<Vec<_>>(),
+    )?;
     if let Some(config_file) = &inventory.project_config.file {
         recorder.record_path_file(config_file)?;
     }
@@ -3033,7 +3043,10 @@ fn build_group_source_session(
                 "ApplicationGroup source.rendererConfig.projectPath",
             )?;
             let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
-            Some(RenderSession::for_remote_target(&project_root, target, &cluster)?)
+            Some(
+                RenderSession::for_remote_target(&project_root, target, &cluster)?
+                    .with_resource_catalogue(inventory.project_config.resource_catalogue.clone()),
+            )
         }
         (Some(_), RendererConfigMode::Central) => {
             let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;

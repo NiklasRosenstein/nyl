@@ -14,16 +14,16 @@ const ALLOWED: [(&str, &[&str]); 7] = [
     ("crates/nyl-render", &["nyl-core", "nyl-git"]),
     ("crates/nyl-state", &["nyl-core", "nyl-git"]),
     ("crates/nyl-orchestration", &["nyl-core"]),
-    ("crates/nyl-drivers", &["nyl-core", "nyl-render"]),
+    ("crates/nyl-units", &["nyl-core", "nyl-render"]),
     (
         "nyl",
         &[
             "nyl-core",
+            "nyl-units",
             "nyl-git",
             "nyl-render",
             "nyl-state",
             "nyl-orchestration",
-            "nyl-drivers",
         ],
     ),
 ];

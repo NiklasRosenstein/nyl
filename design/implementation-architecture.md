@@ -20,7 +20,7 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
          │                      └► nyl-collections ─► nyl-core
          ├─► nyl-state ─────────┬► nyl-core
          │                      └► nyl-git
-         ├─► nyl-drivers ─┬──────► nyl-core
+         ├─► nyl-units ───┬──────► nyl-core
          │                └──────► nyl-render ─┬► nyl-core
          │                                     ├► nyl-collections
          │                                     └► nyl-git
@@ -34,9 +34,9 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 | `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
 | `nyl-render` | Today's Kubernetes rendering and Kubernetes GitOps, unchanged in behavior | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
-| `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
+| `nyl-units` | The built-in unit kinds, one module each holding the kind's declaration, validation, schema descriptor, and `Driver` implementation; the driver registry and the process runner with masking; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` and `nyl-collections` |
-| `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
+| `nyl-cli` | Argument parsing, output formats, exit categories, the assembled resource catalogue, and wiring the concrete implementations into orchestration | Business rules |
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
   the binary, `cargo install --path nyl`, and the release artifacts unchanged.
@@ -55,9 +55,14 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 - `nyl-orchestration` depends only on the pure crates `nyl-core` and
   `nyl-collections`, so the compiler rejects any direct Git, process, or
   cluster call from orchestration; `nyl-cli` passes in
-  the implementations from `nyl-state` and `nyl-drivers`.
+  the implementations from `nyl-state` and `nyl-units`.
 - Plugin drivers, when added, implement the same driver trait through a
-  process adapter in `nyl-drivers`.
+  process adapter in `nyl-units`.
+- A unit kind's declaration and its driver live in one module of `nyl-units`,
+  so the rules of a kind, such as which capabilities a spec enables, are not
+  split across crates. `nyl-render` never depends on `nyl-units`: the CLI
+  passes the assembled resource catalogue into discovery, rendering, editor
+  annotations, and schema export.
 - `nyl-git` exists so that state pushes and `publish-tree` share one
   transport and one credential configuration without `nyl-state` depending
   on rendering.
@@ -224,7 +229,7 @@ preflight separated from the state mutation by another lease acquisition.
 
 Provider adapters hold no business rules: each serializes an export plan into
 its scheduler's syntax and maps runner profiles and job observations, behind a
-trait in `nyl-core`. The GitLab adapter lives in `nyl-drivers` beside the other
+trait in `nyl-core`. The GitLab adapter lives in `nyl-units` beside the other
 effectful implementations; `nyl-cli` only wires it. GitLab and an in-memory test
 adapter share graph, admission, and result conformance fixtures, so the rules
 are proven once; future providers implement this boundary without changing

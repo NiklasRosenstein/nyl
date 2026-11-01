@@ -807,7 +807,7 @@ fn unmatched_labels(
 
 #[cfg(test)]
 mod tests {
-    use nyl_core::resources::units::KIND_COMMAND;
+    const TEST_KIND: &str = "Test";
     use std::sync::Arc;
 
     use nyl_core::constants::API_VERSION_UNITS;
@@ -822,7 +822,7 @@ mod tests {
 
     fn drivers() -> DriverSet {
         let mut drivers = DriverSet::new();
-        drivers.register(Arc::new(TestDriver { kind: KIND_COMMAND }));
+        drivers.register(Arc::new(TestDriver { kind: TEST_KIND }));
         drivers.register(Arc::new(TestDriver { kind: "Publication" }));
         drivers
     }
@@ -920,17 +920,17 @@ mod tests {
     #[test]
     fn test_ownership_set_holds_selected_units_with_an_enabled_spec() {
         let source = source(vec![
-            ("enabled", rendered(KIND_COMMAND, true, Some(command(json!({}))))),
+            ("enabled", rendered(TEST_KIND, true, Some(command(json!({}))))),
             (
                 "explicit",
-                rendered(KIND_COMMAND, true, Some(command(json!({"enabled": true})))),
+                rendered(TEST_KIND, true, Some(command(json!({"enabled": true})))),
             ),
             (
                 "disabled",
-                rendered(KIND_COMMAND, true, Some(command(json!({"enabled": false})))),
+                rendered(TEST_KIND, true, Some(command(json!({"enabled": false})))),
             ),
-            ("empty", rendered(KIND_COMMAND, true, None)),
-            ("deselected", rendered(KIND_COMMAND, false, Some(command(json!({}))))),
+            ("empty", rendered(TEST_KIND, true, None)),
+            ("deselected", rendered(TEST_KIND, false, Some(command(json!({}))))),
         ]);
         let set: Vec<&str> = ownership_set(&source).keys().map(|unit| unit.as_str()).collect();
         assert_eq!(set, ["enabled", "explicit"]);
@@ -942,14 +942,14 @@ mod tests {
     #[test]
     fn test_uid_is_kept_while_the_kind_stays_and_new_after_a_kind_change() {
         let source = source(vec![
-            ("same", rendered(KIND_COMMAND, true, Some(command(json!({}))))),
+            ("same", rendered(TEST_KIND, true, Some(command(json!({}))))),
             ("changed", rendered("Publication", true, Some(json!({"prefix": "dev"})))),
-            ("new", rendered(KIND_COMMAND, true, Some(command(json!({}))))),
+            ("new", rendered(TEST_KIND, true, Some(command(json!({}))))),
         ]);
         let snapshot = EnvironmentSnapshot {
             desired: BTreeMap::from([
-                (name("same"), stored("same", KIND_COMMAND, 1, command(json!({})))),
-                (name("changed"), stored("changed", KIND_COMMAND, 2, command(json!({})))),
+                (name("same"), stored("same", TEST_KIND, 1, command(json!({})))),
+                (name("changed"), stored("changed", TEST_KIND, 2, command(json!({})))),
             ]),
             ..EnvironmentSnapshot::default()
         };
@@ -1057,7 +1057,7 @@ mod tests {
             scope_owners(&sources, &drivers()),
             BTreeSet::from([EnvironmentName::new("dev").unwrap()])
         );
-        let job = source(vec![("job", rendered(KIND_COMMAND, true, Some(command(json!({})))))]);
+        let job = source(vec![("job", rendered(TEST_KIND, true, Some(command(json!({})))))]);
         assert!(scope_owners(
             &BTreeMap::from([(EnvironmentName::new("dev").unwrap(), job)]),
             &drivers()
@@ -1113,7 +1113,7 @@ mod tests {
     /// wrong reason or deletion consequence.
     #[test]
     fn test_leaving_units_carry_their_reason_and_deletion_policy() {
-        let mut deselected = rendered(KIND_COMMAND, false, Some(command(json!({}))));
+        let mut deselected = rendered(TEST_KIND, false, Some(command(json!({}))));
         deselected
             .envelope
             .metadata
@@ -1132,7 +1132,7 @@ mod tests {
             .unit_selector
             .match_labels
             .insert("dve".to_owned(), "true".to_owned());
-        let mut held = stored("held", KIND_COMMAND, 4, command(json!({})));
+        let mut held = stored("held", TEST_KIND, 4, command(json!({})));
         held.lifecycle = Lifecycle::Retained {
             tombstone: serde_json::from_value(json!({"since": "2026-01-01T00:00:00Z"})).unwrap(),
         };
@@ -1140,7 +1140,7 @@ mod tests {
             desired: BTreeMap::from([
                 (
                     name("deselected"),
-                    stored("deselected", KIND_COMMAND, 1, command(json!({}))),
+                    stored("deselected", TEST_KIND, 1, command(json!({}))),
                 ),
                 (
                     name("disabled"),
@@ -1148,7 +1148,7 @@ mod tests {
                 ),
                 (
                     name("removed"),
-                    stored("removed", KIND_COMMAND, 3, command(json!({"deletionPolicy": "Retain"}))),
+                    stored("removed", TEST_KIND, 3, command(json!({"deletionPolicy": "Retain"}))),
                 ),
                 (name("held"), held),
             ]),
@@ -1177,7 +1177,7 @@ mod tests {
         assert!(desired.units.is_empty());
         assert_eq!(
             serde_json::to_value(&desired.leaving[0]).unwrap(),
-            json!({"unit": "deselected", "kind": "Command", "reason": "deselected", "consequence": "dropped", "labels": {"dve": "true"}})
+            json!({"unit": "deselected", "kind": TEST_KIND, "reason": "deselected", "consequence": "dropped", "labels": {"dve": "true"}})
         );
     }
 
@@ -1237,8 +1237,8 @@ mod tests {
     #[test]
     fn test_retain_leaves_a_tombstone_and_a_kind_without_teardown_is_released() {
         let source = source(vec![]);
-        let declared = stored("worker", KIND_COMMAND, 1, command(json!({"deletionPolicy": "Retain"})));
-        let by_kind = stored("image", KIND_COMMAND, 2, command(json!({})));
+        let declared = stored("worker", TEST_KIND, 1, command(json!({"deletionPolicy": "Retain"})));
+        let by_kind = stored("image", TEST_KIND, 2, command(json!({})));
         let snapshot = snapshot_of(vec![declared.clone(), by_kind.clone()]);
         let desired = run_desire(&source, &snapshot);
         for unit in ["worker", "image"] {
@@ -1248,7 +1248,7 @@ mod tests {
         let worker = desired.lifecycle[&name("worker")].desired.clone().unwrap();
         assert!(declares_retain(&worker));
         let receipt = crate::rules::fixtures::receipt("worker", json!({}), Vec::new());
-        let mut observed = crate::rules::fixtures::observed("worker", KIND_COMMAND, Some(receipt.clone()));
+        let mut observed = crate::rules::fixtures::observed("worker", TEST_KIND, Some(receipt.clone()));
         observed.unit.uid = Some(uid(1));
         let now: Timestamp = "2026-09-25T10:00:00Z".parse().unwrap();
         let event = Event::Retain {
@@ -1311,7 +1311,7 @@ mod tests {
     /// or adopting a receipt for changed inputs.
     #[test]
     fn test_tombstone_adoption_is_decided_by_the_execution_key_alone() {
-        let source = source(vec![("worker", rendered(KIND_COMMAND, true, Some(command(json!({})))))]);
+        let source = source(vec![("worker", rendered(TEST_KIND, true, Some(command(json!({})))))]);
         let mut receipt = crate::rules::fixtures::receipt("worker", json!({}), Vec::new());
         receipt.provenance.insert(
             nyl_core::orchestration::ids::JsonPointer::new("/values/cache").unwrap(),
@@ -1326,7 +1326,7 @@ mod tests {
         };
         let retained = stored_with(
             "worker",
-            KIND_COMMAND,
+            TEST_KIND,
             1,
             command(json!({})),
             Lifecycle::Retained {
@@ -1359,12 +1359,12 @@ mod tests {
             "api",
             rendered("Publication", true, Some(json!({"prefix": "dev"}))),
         )]);
-        let old = stored("api", KIND_COMMAND, 1, command(json!({"teardown": ["./down.sh"]})));
+        let old = stored("api", TEST_KIND, 1, command(json!({"teardown": ["./down.sh"]})));
         let desired = run_desire(&source, &snapshot_of(vec![old]));
         let write = &desired.lifecycle[&name("api")];
         assert_eq!(write.outcome, LifecycleOutcome::KindChange);
         let deleting = write.desired.as_ref().unwrap();
-        assert_eq!(deleting.unit.kind, KIND_COMMAND);
+        assert_eq!(deleting.unit.kind, TEST_KIND);
         assert_eq!(deleting.unit.uid, Some(uid(1)));
         assert_eq!(deletion_of(deleting).reason, DeletionReason::KindChange);
         assert!(desired.fenced.contains(&name("api")));
@@ -1380,12 +1380,12 @@ mod tests {
     #[test]
     fn test_held_units_and_markers_are_kept_out_of_the_run() {
         let source = source(vec![
-            ("api", rendered(KIND_COMMAND, true, Some(command(json!({}))))),
-            ("new", rendered(KIND_COMMAND, true, Some(command(json!({}))))),
+            ("api", rendered(TEST_KIND, true, Some(command(json!({}))))),
+            ("new", rendered(TEST_KIND, true, Some(command(json!({}))))),
         ]);
         let held = stored_with(
             "api",
-            KIND_COMMAND,
+            TEST_KIND,
             1,
             command(json!({})),
             Lifecycle::Held {
@@ -1396,7 +1396,7 @@ mod tests {
         let marker = DesiredUnit::held_marker(EnvironmentName::new("dev").unwrap(), name("new"), hold());
         let gone = stored_with(
             "gone",
-            KIND_COMMAND,
+            TEST_KIND,
             3,
             command(json!({})),
             Lifecycle::Held {
@@ -1421,7 +1421,7 @@ mod tests {
     /// staying in state forever.
     #[test]
     fn test_a_uid_less_file_outside_the_set_is_removed() {
-        let mut resumed = stored("old", KIND_COMMAND, 1, command(json!({})));
+        let mut resumed = stored("old", TEST_KIND, 1, command(json!({})));
         resumed.unit.uid = None;
         let desired = run_desire(&source(vec![]), &snapshot_of(vec![resumed]));
         let write = &desired.lifecycle[&name("old")];
@@ -1434,7 +1434,7 @@ mod tests {
     /// whose source resolves to what it already runs.
     #[test]
     fn test_hold_pending_names_only_what_source_would_change() {
-        let mut stored_unit = stored("api", KIND_COMMAND, 1, command(json!({})));
+        let mut stored_unit = stored("api", TEST_KIND, 1, command(json!({})));
         stored_unit.execution_key = Some(crate::rules::fixtures::key("a"));
         let held = HeldUnit {
             rendered: Some(stored_unit.clone()),
@@ -1454,7 +1454,7 @@ mod tests {
         let source = source(vec![
             ("unknown", rendered("Mystery", true, Some(json!({})))),
             ("broken", rendered("Publication", true, Some(json!({"broken": 1})))),
-            ("argv", rendered(KIND_COMMAND, true, Some(json!({"broken": 1})))),
+            ("argv", rendered(TEST_KIND, true, Some(json!({"broken": 1})))),
         ]);
         let desired = run_desire(&source, &EnvironmentSnapshot::default());
         let codes: BTreeMap<Code, &Finding> = desired.errors.iter().map(|error| (error.code, error)).collect();

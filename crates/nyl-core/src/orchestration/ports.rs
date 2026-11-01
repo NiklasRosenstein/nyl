@@ -3,7 +3,7 @@
 //! Decisions are pure functions over snapshots; the shell in
 //! `nyl-orchestration` reads and writes only through these traits, and
 //! `nyl-cli` passes in the implementations from `nyl-state` and
-//! `nyl-drivers`. Each trait has an in-memory or fake implementation used by
+//! `nyl-units`. Each trait has an in-memory or fake implementation used by
 //! the scenario tests. See the implementation architecture's "Formats and
 //! traits" (`design/implementation-architecture.md`).
 

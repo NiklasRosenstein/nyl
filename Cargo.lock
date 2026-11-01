@@ -1940,11 +1940,11 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "nyl-core",
- "nyl-drivers",
  "nyl-git",
  "nyl-orchestration",
  "nyl-render",
  "nyl-state",
+ "nyl-units",
  "predicates",
  "regex",
  "reqwest",
@@ -1982,26 +1982,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "nyl-drivers"
-version = "0.5.9"
-dependencies = [
- "base64 0.23.1",
- "chrono",
- "glob",
- "hex",
- "libc",
- "nyl-core",
- "nyl-render",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "walkdir",
 ]
 
 [[package]]
@@ -2085,6 +2065,26 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
+]
+
+[[package]]
+name = "nyl-units"
+version = "0.5.9"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "glob",
+ "hex",
+ "libc",
+ "nyl-core",
+ "nyl-render",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

@@ -38,17 +38,11 @@ pub enum ResourceKind {
     RemoteManifest,
     #[value(name = "Component", alias = "component")]
     Component,
-    #[value(name = "OciImage", alias = "oci-image")]
-    OciImage,
-    #[value(name = "Terraform", alias = "terraform")]
-    Terraform,
-    #[value(name = "OpenTofu", alias = "open-tofu", alias = "tofu")]
-    OpenTofu,
 }
 
 impl ResourceKind {
     /// All supported schemas in catalog order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 12] = [
         Self::GitRepository,
         Self::Environment,
         Self::EnvironmentGroup,
@@ -61,9 +55,6 @@ impl ResourceKind {
         Self::HelmChart,
         Self::RemoteManifest,
         Self::Component,
-        Self::OciImage,
-        Self::Terraform,
-        Self::OpenTofu,
     ];
 
     /// Public schema name (Component is an envelope, not a literal kind).
@@ -81,9 +72,6 @@ impl ResourceKind {
             Self::HelmChart => "HelmChart",
             Self::RemoteManifest => "RemoteManifest",
             Self::Component => "Component",
-            Self::OciImage => "OciImage",
-            Self::Terraform => "Terraform",
-            Self::OpenTofu => "OpenTofu",
         }
     }
 
@@ -93,7 +81,6 @@ impl ResourceKind {
             Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
             Self::HelmChart | Self::RemoteManifest | Self::Cluster | Self::Release => API_VERSION,
             Self::Component => API_VERSION_COMPONENTS,
-            Self::OciImage | Self::Terraform | Self::OpenTofu => crate::constants::API_VERSION_UNITS,
             _ => API_VERSION_K8S_GITOPS,
         }
     }
@@ -113,9 +100,6 @@ impl ResourceKind {
             Self::HelmChart => "helm-chart",
             Self::RemoteManifest => "remote-manifest",
             Self::Component => "component",
-            Self::OciImage => "oci-image",
-            Self::Terraform => "terraform",
-            Self::OpenTofu => "open-tofu",
         }
     }
 
@@ -134,8 +118,6 @@ impl ResourceKind {
                 Self::HelmChart => json!(schema_for!(HelmChart)),
                 Self::RemoteManifest => json!(schema_for!(RemoteManifest)),
                 Self::Component => json!(schema_for!(NylComponent)),
-                Self::OciImage => json!(schema_for!(super::oci_image::OciImage)),
-                Self::Terraform | Self::OpenTofu => json!(schema_for!(super::terraform::TerraformUnit)),
                 _ => unreachable!("control resources handled above"),
             }
         };
@@ -152,8 +134,75 @@ impl ResourceKind {
     }
 }
 
+/// Static metadata and schema generator for one resource kind.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceDescriptor {
+    /// Canonical kind name.
+    pub name: &'static str,
+    /// Canonical API version.
+    pub api_version: &'static str,
+    /// Stable schema filename stem.
+    pub slug: &'static str,
+    /// Additional CLI selectors.
+    pub aliases: &'static [&'static str],
+    /// Whether this schema describes a dynamic kind envelope.
+    pub dynamic_kind: bool,
+    /// Generate the schema and its examples.
+    pub schema: fn() -> Value,
+}
+impl PartialEq for ResourceDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.api_version == other.api_version
+            && self.slug == other.slug
+            && self.aliases == other.aliases
+            && self.dynamic_kind == other.dynamic_kind
+    }
+}
+impl ResourceDescriptor {
+    /// Version-qualified schema path.
+    pub fn schema_path(&self) -> String {
+        format!("{}/{}.schema.json", self.api_version, self.slug)
+    }
+}
+/// Core resource catalogue in publication order.
+pub fn resource_descriptors() -> Vec<ResourceDescriptor> {
+    ResourceKind::ALL
+        .into_iter()
+        .map(|kind| ResourceDescriptor {
+            name: kind.name(),
+            api_version: kind.api_version(),
+            slug: kind.slug(),
+            aliases: match kind {
+                ResourceKind::GitRepository => &["repository"],
+                ResourceKind::ArgoCDInstance => &["argocd"],
+                ResourceKind::DeploymentTarget => &["target"],
+                ResourceKind::AppProjectDefinition => &["project"],
+                ResourceKind::ApplicationGroup => &["group"],
+                ResourceKind::HelmChart => &["helmchart"],
+                _ => &[],
+            },
+            dynamic_kind: kind == ResourceKind::Component,
+            schema: match kind {
+                ResourceKind::GitRepository => || ResourceKind::GitRepository.schema(),
+                ResourceKind::Environment => || ResourceKind::Environment.schema(),
+                ResourceKind::EnvironmentGroup => || ResourceKind::EnvironmentGroup.schema(),
+                ResourceKind::Cluster => || ResourceKind::Cluster.schema(),
+                ResourceKind::DeploymentTarget => || ResourceKind::DeploymentTarget.schema(),
+                ResourceKind::ArgoCDInstance => || ResourceKind::ArgoCDInstance.schema(),
+                ResourceKind::ApplicationGroup => || ResourceKind::ApplicationGroup.schema(),
+                ResourceKind::AppProjectDefinition => || ResourceKind::AppProjectDefinition.schema(),
+                ResourceKind::Release => || ResourceKind::Release.schema(),
+                ResourceKind::HelmChart => || ResourceKind::HelmChart.schema(),
+                ResourceKind::RemoteManifest => || ResourceKind::RemoteManifest.schema(),
+                ResourceKind::Component => || ResourceKind::Component.schema(),
+            },
+        })
+        .collect()
+}
+
 /// Add discriminators without discarding descriptions from Rust documentation.
-pub(crate) fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&str>) {
+pub fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&str>) {
     schema["properties"]["apiVersion"]["const"] = json!(api_version);
     if let Some(kind) = kind {
         schema["properties"]["kind"]["const"] = json!(kind);
@@ -205,6 +254,10 @@ pub fn canonicalize_api_version(value: &mut Value) -> Option<DeprecatedApiVersio
 /// Unrelated Kubernetes APIs and custom component aliases remain available,
 /// and so do deprecated API versions.
 pub fn validate_resource_api(value: &Value) -> Result<()> {
+    validate_resource_api_with_catalog(value, &resource_descriptors())
+}
+/// Validate against the composed resource catalogue.
+pub fn validate_resource_api_with_catalog(value: &Value, descriptors: &[ResourceDescriptor]) -> Result<()> {
     if deprecated_api_version(value).is_some() {
         return Ok(());
     }
@@ -219,11 +272,12 @@ pub fn validate_resource_api(value: &Value) -> Result<()> {
     } else if matches!(
         api,
         API_VERSION | API_VERSION_GITOPS | API_VERSION_K8S_GITOPS | "nyl.niklasrosenstein.github.com/v1"
-    ) {
-        ResourceKind::ALL
-            .into_iter()
-            .find(|resource| *resource != ResourceKind::Component && resource.name() == kind)
-            .map(ResourceKind::api_version)
+    ) || descriptors.iter().any(|resource| resource.api_version == api)
+    {
+        descriptors
+            .iter()
+            .find(|resource| !resource.dynamic_kind && resource.name == kind)
+            .map(|resource| resource.api_version)
     } else {
         None
     };
@@ -241,17 +295,17 @@ pub fn validate_resource_api(value: &Value) -> Result<()> {
 /// URLs. The project configuration schema, `nyl.schema.json`, is published next
 /// to them by the rendering crate that owns `nyl.toml`, whose
 /// `config::schema::published_schema_artifacts` returns the complete set.
-pub fn schema_artifacts() -> BTreeMap<String, Value> {
+pub fn schema_artifacts(descriptors: &[ResourceDescriptor]) -> BTreeMap<String, Value> {
     let mut files = BTreeMap::new();
     let mut manifest = Vec::new();
-    for kind in ResourceKind::ALL {
+    for kind in descriptors {
         let path = kind.schema_path();
-        files.insert(path.clone(), kind.schema());
+        files.insert(path.clone(), (kind.schema)());
         files.insert(
-            format!("{}.schema.json", kind.slug()),
+            format!("{}.schema.json", kind.slug),
             json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": path}),
         );
-        manifest.push(json!({"name": kind.name(), "apiVersion": kind.api_version(), "slug": kind.slug(), "schema": path, "dynamicKind": kind == ResourceKind::Component}));
+        manifest.push(json!({"name": kind.name, "apiVersion": kind.api_version, "slug": kind.slug, "schema": path, "dynamicKind": kind.dynamic_kind}));
     }
     // Files that reference a deprecated API version's schema URL keep working.
     for deprecated in DEPRECATED_API_VERSIONS {
@@ -276,9 +330,6 @@ pub fn schema_artifacts() -> BTreeMap<String, Value> {
 /// Minimal authored example shared by schema consumers and the documentation.
 pub fn resource_example(kind: ResourceKind) -> Value {
     let spec = match kind {
-        ResourceKind::OciImage => {
-            json!({"context":{"path":"services/web"},"repository":"registry.example.com/team/web","platforms":["linux/amd64"]})
-        }
         ResourceKind::GitRepository => json!({"repoURL": "https://github.com/example/deploy.git"}),
         ResourceKind::Environment => {
             json!({"unitSelector": {"matchLabels": {"stage": "production"}}, "values": {"target": "production"}, "state": {"repositoryRef": {"name": "deploy"}}, "protectedRefs": ["main"]})
@@ -303,9 +354,6 @@ pub fn resource_example(kind: ResourceKind) -> Value {
         ResourceKind::HelmChart => json!({"chart": {"name": "./charts/app"}, "values": {"replicaCount": 2}}),
         ResourceKind::RemoteManifest => json!({"url": "https://example.com/manifests/app.yaml"}),
         ResourceKind::Component => json!({"replicaCount": 2}),
-        ResourceKind::Terraform | ResourceKind::OpenTofu => {
-            json!({"source": {"path": "infra/network"}, "backend": {"bucket": "acme-state", "key": "production/network"}, "variables": {"region": "eu-west-1"}, "outputs": {"id": {"type": "string"}}})
-        }
     };
     let name = match kind {
         ResourceKind::GitRepository => "deploy",
@@ -475,20 +523,7 @@ mod tests {
                     ResourceKind::Component => {
                         serde_json::from_value::<NylComponent>(example).unwrap();
                     }
-                    ResourceKind::OciImage => {
-                        serde_json::from_value::<super::super::oci_image::OciImage>(example)
-                            .unwrap()
-                            .spec
-                            .validate()
-                            .unwrap();
-                    }
-                    ResourceKind::Terraform | ResourceKind::OpenTofu => {
-                        serde_json::from_value::<super::super::terraform::TerraformUnit>(example)
-                            .unwrap()
-                            .spec
-                            .validate()
-                            .unwrap();
-                    }
+
                     _ => unreachable!(),
                 }
             }

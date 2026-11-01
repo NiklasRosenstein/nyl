@@ -220,6 +220,19 @@ pub struct ProjectConfig {
 
     /// The loaded project configuration.
     pub config: ProjectFile,
+
+    /// Resource APIs registered by the application.
+    pub resource_catalogue: ResourceCatalogue,
+}
+
+/// Resource APIs registered for rendering and validation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceCatalogue(pub Vec<nyl_core::resources::schema::ResourceDescriptor>);
+
+impl Default for ResourceCatalogue {
+    fn default() -> Self {
+        Self(nyl_core::resources::schema::resource_descriptors())
+    }
 }
 
 impl ProjectConfig {
@@ -295,6 +308,7 @@ impl ProjectConfig {
             Ok(Self {
                 file: None,
                 config: ProjectFile::default(),
+                resource_catalogue: ResourceCatalogue::default(),
             })
         }
     }
@@ -332,6 +346,7 @@ impl ProjectConfig {
             Ok(Self {
                 file: None,
                 config: ProjectFile::default(),
+                resource_catalogue: ResourceCatalogue::default(),
             })
         }
     }
@@ -409,6 +424,7 @@ impl ProjectConfig {
         Ok(Self {
             file: Some(path.to_path_buf()),
             config: project,
+            resource_catalogue: ResourceCatalogue::default(),
         })
     }
 
@@ -661,6 +677,7 @@ strip_empty_metadata_labels = "argocd"
     #[test]
     fn test_validate_aliases() {
         let config = ProjectConfig {
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
             file: None,
             config: ProjectFile {
                 project: ProjectSettings {
@@ -762,6 +779,7 @@ components_search_paths = ["comps1", "comps2"]
     #[test]
     fn test_validate_missing_paths() {
         let config = ProjectConfig {
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
             file: None,
             config: ProjectFile::default(),
         };

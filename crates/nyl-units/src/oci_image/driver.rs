@@ -3,7 +3,8 @@
 //! Contract: `design/infrastructure-units.md#ociimage`. Directory membership
 //! is shared between execution-key hashing and staging, so ignored files or
 //! disposable Git worktree metadata never become unrecorded build inputs.
-use crate::dockerignore::ContextFiles;
+use super::dockerignore::ContextFiles;
+use super::spec::{ImageContext, OciImageSpec};
 use base64::Engine;
 use nyl_core::constants::{API_VERSION_ARTIFACTS, API_VERSION_UNITS};
 use nyl_core::orchestration::driver::{
@@ -14,7 +15,6 @@ use nyl_core::orchestration::ids::{EnvironmentName, Uid};
 use nyl_core::orchestration::state::{
     ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, FailureCategory, Receipt,
 };
-use nyl_core::resources::oci_image::{ImageContext, OciImageSpec};
 use nyl_render::util::project_path::ProjectPaths;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

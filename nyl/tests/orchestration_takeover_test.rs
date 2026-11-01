@@ -20,8 +20,6 @@ use nyl_core::orchestration::state::{
     ApprovalIdentity, ApprovalRecord, FailureCategory, Lease, LeaseKind, Operation, StateV1,
 };
 use nyl_core::orchestration::time::Duration;
-use nyl_drivers::fake::Scripted;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::{FaultPoint, NoFaults};
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
@@ -29,6 +27,8 @@ use nyl_orchestration::shell::recover::{recover_environment, RecoverUnit};
 use nyl_orchestration::shell::run::{self, Cancellation, RunContext};
 use nyl_orchestration::shell::state as state_ops;
 use nyl_state::memory::MemoryStateStore;
+use nyl_units::fake::Scripted;
+use nyl_units::process::ProcessRunner;
 use scenario::format::CommitStep;
 use scenario::runner::{FaultSlot, AUTHOR};
 use scenario::shell::{

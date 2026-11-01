@@ -38,8 +38,8 @@ use super::reconcile::{
     RenderIndexPublication, DEFAULT_INDEX_PATH,
 };
 use super::{
-    compile_target_tree_recorded, discover_gitops_inventory, CacheMode, CompiledTargetTree, GitOpsCache,
-    GitOpsInventory, TargetDependencies, TreeRenderOptions,
+    compile_target_tree_recorded, CacheMode, CompiledTargetTree, GitOpsCache, GitOpsInventory, TargetDependencies,
+    TreeRenderOptions,
 };
 use crate::config::{ProjectConfig, ProjectFile};
 use crate::git::transport::GitAuth;
@@ -61,6 +61,8 @@ pub struct TargetRender<'a> {
     /// invocations and tests stay isolated and the result never depends on
     /// host state.
     pub cache_dir: Option<&'a Path>,
+    /// Resource APIs registered by the caller.
+    pub resource_catalogue: crate::config::ResourceCatalogue,
 }
 
 /// Who authors and commits a publication commit, and when. Orchestrated publications pass
@@ -156,7 +158,8 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         let relative = request.project_dir.strip_prefix("/").unwrap_or(request.project_dir);
         request.worktree.join(relative)
     };
-    let inventory = discover_gitops_inventory(&project_dir, None)?;
+    let inventory =
+        super::discover_gitops_inventory_with_catalogue(&project_dir, None, request.resource_catalogue.clone())?;
     super::resolve_deployment_target_name(&inventory, Some(request.target))?;
 
     // A render without a cache directory still keeps its source checkouts
@@ -984,6 +987,7 @@ spec:
             target: "dev",
             inputs,
             cache_dir,
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
         })
     }
 
@@ -1039,7 +1043,7 @@ spec:
         assert!(error.contains("fromUnit needs orchestrated execution"), "{error}");
 
         // Tree commands pass no snapshot at all and keep rejecting the binding.
-        let inventory = discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap();
+        let inventory = super::super::discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -397,7 +397,7 @@ async fn run_concurrently<T, R, Fut>(
 
 /// How long one prune waits in total for deleted resources to terminate before
 /// deleting the resources they may depend on.
-const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_secs(120);
+const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_mins(2);
 const PRUNE_TERMINATION_POLL: Duration = Duration::from_secs(1);
 
 /// Delete resources no longer desired, at most `concurrency` at a time, and return

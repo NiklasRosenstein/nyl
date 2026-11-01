@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::driver::{Driver, DriverOperation, ExecutionContext, Outcome, Supported};
 use nyl_core::orchestration::ids::ExecutionKey;
 use nyl_core::orchestration::state::{DesiredUnit, Drift, FailureCategory, ObservedUnit};
-use nyl_drivers::process::ProcessRunner;
-use nyl_drivers::terraform::TerraformDriver;
+use nyl_units::process::ProcessRunner;
+use nyl_units::terraform::TerraformDriver;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 

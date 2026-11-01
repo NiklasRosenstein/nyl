@@ -107,6 +107,20 @@ fn generated_api_error_identifies_source_parent_and_generated_resource() {
 }
 
 #[test]
+fn generated_unit_in_workload_api_group_is_rejected() {
+    let project = chart_emitting_helm_chart("k8s.nyl/v1");
+    std::fs::write(
+        project.path().join("charts/wrapper/templates/chart.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: OciImage\nmetadata:\n  name: generated\n",
+    )
+    .unwrap();
+    render_chart(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("set apiVersion to \"units.gitops.nyl/v1\""));
+}
+
+#[test]
 fn generated_helm_chart_in_kubernetes_api_group_is_preserved() {
     let project = chart_emitting_helm_chart("helm.cattle.io/v1");
     render_chart(&project)

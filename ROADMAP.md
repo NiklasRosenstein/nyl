@@ -150,6 +150,8 @@ recovery; they are not implied by graph export.
 
 ## Architectural frame
 
+Each built-in unit kind lives in one module of the `nyl-units` crate: its declaration, validation, schema descriptor, and driver, so a kind's rules are not split across crates. The CLI combines the unit descriptors with core resource descriptors for schema and editor workflows; drivers own native execution and orchestration remains generic.
+
 ### Layers
 
 | Layer | Responsibility |

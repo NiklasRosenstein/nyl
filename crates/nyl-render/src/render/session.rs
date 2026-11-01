@@ -106,6 +106,13 @@ pub struct RenderedBundle {
 }
 
 impl RenderSession {
+    /// Set the resource APIs registered by the calling application.
+    #[must_use]
+    pub fn with_resource_catalogue(mut self, catalogue: crate::config::ResourceCatalogue) -> Self {
+        self.project_config.resource_catalogue = catalogue;
+        self
+    }
+
     /// Build an offline rendering session from a project root and effective target.
     pub fn for_target(
         project_root: &Path,
@@ -428,6 +435,15 @@ impl RenderSession {
                 worktree: request.provenance_worktree_root,
             },
         )?;
+        for resource in &bundle.resources {
+            crate::resources::schema::validate_resource_api_with_catalog(
+                &resource.value,
+                &self.project_config.resource_catalogue.0,
+            )
+            .map_err(|error| {
+                NylError::from(error).with_render_provenance(resource.provenance.resource(&resource.value).to_string())
+            })?;
+        }
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
@@ -634,6 +650,7 @@ impl RenderSession {
         recorder.record_value(
             "request",
             &serde_json::json!({
+                "resourceCatalogue": self.project_config.resource_catalogue.0.iter().map(|d| (d.name, d.api_version, d.dynamic_kind)).collect::<Vec<_>>(),
                 "onlySourceKind": request.only_source_kind,
                 "pathMode": format!("{:?}", request.path_mode),
                 "provenanceRoot": request.provenance_root,
@@ -989,6 +1006,7 @@ mod tests {
     #[test]
     fn mutable_git_chart_selectors_cannot_reuse_complete_render_output() {
         let config = ProjectConfig {
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
             file: None,
             config: crate::config::ProjectFile::default(),
         };

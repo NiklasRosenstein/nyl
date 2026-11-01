@@ -121,6 +121,7 @@ impl Generator {
 impl Default for Generator {
     fn default() -> Self {
         Self::new(ProjectConfig::load(None).unwrap_or_else(|_| ProjectConfig {
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
             file: None,
             config: crate::config::ProjectFile::default(),
         }))

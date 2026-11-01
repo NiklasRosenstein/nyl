@@ -16,8 +16,8 @@ use nyl_core::orchestration::state::{
     DesiredUnit, DesiredUnitKind, FailureCategory, Lifecycle, Readiness, StateV1, UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
-use nyl_drivers::command::CommandDriver;
-use nyl_drivers::process::ProcessRunner;
+use nyl_units::command::CommandDriver;
+use nyl_units::process::ProcessRunner;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 

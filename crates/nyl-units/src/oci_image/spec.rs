@@ -1,7 +1,7 @@
 //! Container image units, built with Docker Buildx.
-use super::units::{CommonUnitFields, KindSupport, UnitMetadata};
-use super::{DenyUnknownFields, GitSource};
-use crate::{CoreError, Result};
+use nyl_core::resources::units::{CommonUnitFields, KindSupport, UnitMetadata};
+use nyl_core::resources::{DenyUnknownFields, GitSource};
+use nyl_core::{CoreError, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,7 +27,7 @@ pub struct OciImage {
 
 /// Docker Buildx inputs. Every directory context is a separately pinned Git source.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(transform = super::strict::deny_additional_properties)]
+#[schemars(transform = nyl_core::resources::strict::deny_additional_properties)]
 pub struct OciImageSpec {
     /// Main build context, following the common Git source and local path rules.
     pub context: GitSource,
@@ -119,7 +119,7 @@ fn source_path(source: &GitSource, field: &str) -> Result<()> {
         .as_deref()
         .ok_or_else(|| invalid(format!("{field}.path is required")))?;
     if path != "/" {
-        crate::local_path::validate_local_path(&format!("{field}.path"), path)?;
+        nyl_core::local_path::validate_local_path(&format!("{field}.path"), path)?;
     }
     if source.is_remote() {
         source.validate_repository(field)?;

@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use nyl_core::orchestration::ids::CommitId;
 use nyl_core::orchestration::ports::{SourceRepository, SourceResolver, SourceResult};
-use nyl_drivers::fake::{FakeImage, Script};
 use nyl_orchestration::shell::sources::{main_checkout_paths, prepare_source_roots};
+use nyl_units::fake::{FakeImage, Script};
 use serde_json::json;
 
 type CheckoutCall = (SourceRepository, CommitId, Option<Vec<String>>);

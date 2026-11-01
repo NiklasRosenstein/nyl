@@ -156,7 +156,9 @@ impl Session {
 
     /// The renderer of the environment's units at a source commit.
     pub fn renderer(&self) -> UnitSourceRenderer {
-        UnitSourceRenderer::new(self.entry_project_dir()).with_previous_paths(self.previous_paths())
+        UnitSourceRenderer::new(self.entry_project_dir())
+            .with_previous_paths(self.previous_paths())
+            .with_resource_catalogue(self.inventory.project_config.resource_catalogue.clone())
     }
 
     /// The shell context of one command, working through `store`: the

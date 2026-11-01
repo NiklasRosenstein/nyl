@@ -1,6 +1,6 @@
 [package]
-name = "nyl-drivers"
-description = "Nyl orchestration drivers: execution context, process runner, and unit kinds"
+name = "nyl-units"
+description = "Nyl built-in unit kinds: declarations, schemas, drivers, and the process runner"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

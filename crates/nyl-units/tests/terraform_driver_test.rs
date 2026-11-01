@@ -10,7 +10,7 @@ use nyl_core::orchestration::driver::{
 };
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
 use nyl_core::orchestration::state::{DesiredUnit, FailureCategory, ObservedUnit};
-use nyl_drivers::terraform::TerraformDriver;
+use nyl_units::terraform::TerraformDriver;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 

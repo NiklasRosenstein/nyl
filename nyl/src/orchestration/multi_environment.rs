@@ -58,6 +58,7 @@ pub fn select(
     let commit = CommitId::new(commit.id().to_string())
         .map_err(|error| Finding::new(Code::SourceUnavailable, error.to_string(), "check out a source commit"))?;
     let renderer = UnitSourceRenderer::new(super::session::project_dir(&inventory))
+        .with_resource_catalogue(inventory.project_config.resource_catalogue.clone())
         .with_previous_paths(inventory.project_config.config.project.previous_paths.clone());
     let mut graph = BTreeMap::new();
     let mut rendered_sources = BTreeMap::new();

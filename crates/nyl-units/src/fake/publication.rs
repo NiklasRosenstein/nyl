@@ -71,11 +71,22 @@ const PHASE_APPLICATIONS_REMOVED: &str = "applications-removed";
 #[derive(Debug, Clone, Default)]
 pub struct FakePublication {
     script: Script,
+    resource_catalogue: nyl_render::config::ResourceCatalogue,
 }
 
 impl FakePublication {
     pub fn new(script: Script) -> Self {
-        Self { script }
+        Self {
+            script,
+            resource_catalogue: nyl_render::config::ResourceCatalogue::default(),
+        }
+    }
+
+    /// Set the resource APIs available to publication rendering.
+    #[must_use]
+    pub fn with_resource_catalogue(mut self, catalogue: nyl_render::config::ResourceCatalogue) -> Self {
+        self.resource_catalogue = catalogue;
+        self
     }
 
     /// The resolved `spec.releases` as a pinned input snapshot.
@@ -95,6 +106,7 @@ impl FakePublication {
     }
 
     fn render(
+        &self,
         worktree: &std::path::Path,
         project_dir: &std::path::Path,
         cache_dir: &std::path::Path,
@@ -108,6 +120,7 @@ impl FakePublication {
             target,
             inputs: &inputs,
             cache_dir: Some(cache_dir),
+            resource_catalogue: self.resource_catalogue.clone(),
         })
         .map_err(|error| DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}")))
     }
@@ -290,7 +303,7 @@ impl Driver for FakePublication {
     }
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
-        let rendered = Self::render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
+        let rendered = self.render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
         Ok(KeyInputs {
             files: rendered.input_record,
             excluded_fields: Vec::new(),
@@ -346,7 +359,7 @@ impl Driver for FakePublication {
             .clone()
             .ok_or_else(|| DriverError::before_effects("an executing unit has a uid"))?;
         let spec = resolved_spec(unit)?;
-        let rendered = Self::render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
+        let rendered = self.render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
         let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
         // Credential variables come from the execution's admitted
         // environment (PATH and the unit's declared passthrough), never from
@@ -410,7 +423,7 @@ impl Driver for FakePublication {
         let variable = |name: &str| ctx.env.get(name).cloned();
         if ctx.teardown_wait.is_some() {
             // Phase 2: the wait ended; remove exactly what the index owns.
-            let rendered = Self::render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
+            let rendered = self.render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
             let message = format!(
                 "nyl: teardown {}/{}: remove the owned files",
                 unit.unit.environment, unit.unit.name
@@ -435,7 +448,7 @@ impl Driver for FakePublication {
                 published: waiting.phase1_commit.clone(),
             }));
         }
-        let rendered = Self::render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
+        let rendered = self.render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
         let phase1 = without_workload_applications(&rendered)
             .map_err(|error| DriverError::before_effects(format!("cannot prepare phase 1 of the teardown: {error}")))?;
         let message = format!(

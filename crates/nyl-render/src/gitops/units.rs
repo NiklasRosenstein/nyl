@@ -242,6 +242,7 @@ pub struct UnitSourceRenderer {
     entry_project_dir: String,
     /// `[project] previous_paths` of the entry `nyl.toml`.
     previous_paths: Vec<String>,
+    resource_catalogue: crate::config::ResourceCatalogue,
 }
 
 impl UnitSourceRenderer {
@@ -249,6 +250,7 @@ impl UnitSourceRenderer {
         Self {
             entry_project_dir: entry_project_dir.into(),
             previous_paths: Vec::new(),
+            resource_catalogue: crate::config::ResourceCatalogue::default(),
         }
     }
 
@@ -257,6 +259,13 @@ impl UnitSourceRenderer {
     #[must_use]
     pub fn with_previous_paths(mut self, previous_paths: Vec<String>) -> Self {
         self.previous_paths = previous_paths;
+        self
+    }
+
+    /// Use the caller's resource APIs when rendering a pinned checkout.
+    #[must_use]
+    pub fn with_resource_catalogue(mut self, catalogue: crate::config::ResourceCatalogue) -> Self {
+        self.resource_catalogue = catalogue;
         self
     }
 
@@ -269,7 +278,8 @@ impl UnitSourceRenderer {
         let same = self.entry_project_dir.trim_start_matches('/');
         let located =
             crate::util::project_path::locate_checkout_project(worktree, Path::new(same), &[], &self.previous_paths)?;
-        let inventory = super::discover_gitops_inventory(&located.directory, None)?;
+        let inventory =
+            super::discover_gitops_inventory_with_catalogue(&located.directory, None, self.resource_catalogue.clone())?;
         let effective = resolve_effective_environment(&inventory, environment)?;
         let units = discover_units(&inventory)?;
         let mut rendered = render_environment_units(&inventory, &units, &effective)?;
