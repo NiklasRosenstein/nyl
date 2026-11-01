@@ -16,10 +16,7 @@
 
 use std::collections::BTreeMap;
 
-pub use nyl_core::bindings::{
-    json_type_name, validate_input_name, BindingKind, FileInputSource, GitInputSource, InputBinding, InputDeclaration,
-    InputType, PromotionInputSource, PublicationInputSource, UnitInputSource,
-};
+use nyl_core::bindings::{validate_input_name, InputBinding, InputDeclaration};
 use nyl_core::{CoreError, Result};
 
 /// Validate the static form of `spec.inputs`.

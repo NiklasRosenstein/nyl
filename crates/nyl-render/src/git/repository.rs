@@ -204,7 +204,7 @@ impl BareRepository {
             (Ok(()), _) if self.has_object(commit) => Ok(()),
             (Ok(()), by_id) => Err(GitError::Other(format!(
                 "commit {commit} is not reachable from any branch or tag of {}{}",
-                crate::util::sanitize_url(&self.url),
+                nyl_git::sanitize_url(&self.url),
                 by_id
                     .map(|error| format!(", and fetching it by ID failed: {error}"))
                     .unwrap_or_default()

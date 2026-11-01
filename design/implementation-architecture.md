@@ -40,9 +40,9 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
   the binary, `cargo install --path nyl`, and the release artifacts unchanged.
-  Its library re-exports the `nyl-render` modules, whose `resources` module
-  also re-exports `nyl_core::resources`, so integration tests and benches use
-  `nyl::…` paths.
+  Code, tests, and benches import items from the crate that owns them; no
+  crate re-exports another's modules, so moving an item updates its importers
+  in the same change.
 - No crate is published to crates.io. Nyl ships as release binaries and
   container images, so crate boundaries can move without a public library
   API to keep stable.

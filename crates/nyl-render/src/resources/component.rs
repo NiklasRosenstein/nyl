@@ -7,8 +7,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::API_VERSION_COMPONENTS;
 use crate::resources::{ChartRef, ObjectMetadata};
+use nyl_core::constants::API_VERSION_COMPONENTS;
 
 fn default_spec() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())

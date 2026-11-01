@@ -165,7 +165,7 @@ impl OciChartPuller {
         request: &crate::render::artifact::ArtifactRequest,
     ) -> Result<PathBuf> {
         let coordinate_path = self.chart_cache_path(repository, chart_name, version);
-        tracing::debug!("Pulling Helm chart from {}", crate::util::sanitize_url(repository));
+        tracing::debug!("Pulling Helm chart from {}", nyl_git::sanitize_url(repository));
         std::fs::create_dir_all(&self.cache_dir)
             .map_err(|e| NylError::Process(format!("Failed to create chart cache directory: {}", e)))?;
         let tmp_dir = tempfile::Builder::new()

@@ -11,7 +11,7 @@ use nyl_state::git::CommitAuthor;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 /// Run a unit driver's operator tool without deploying source.
 #[derive(Args, Debug)]

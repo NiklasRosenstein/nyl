@@ -5,10 +5,11 @@ use std::path::Path;
 use clap::Args;
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
-use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
-use crate::kubernetes::{KubeClient, KubeRsClient};
-use crate::resources::{Cluster, DeploymentTarget, GitOpsResource, GitOpsResourceKind};
-use crate::{NylError, Result};
+use crate::discover_gitops_inventory;
+use nyl_render::gitops::{DiscoveredGitOpsResource, GitOpsInventory};
+use nyl_render::kubernetes::{KubeClient, KubeRsClient};
+use nyl_render::resources::{Cluster, DeploymentTarget, GitOpsResource, GitOpsResourceKind};
+use nyl_render::{NylError, Result};
 
 #[derive(Args, Debug)]
 pub struct ClusterCaptureArgs {
@@ -35,8 +36,8 @@ struct ClusterInfo {
 }
 
 impl ClusterInfo {
-    fn capabilities(&self) -> crate::resources::ClusterKubernetesCapabilities {
-        crate::resources::ClusterKubernetesCapabilities {
+    fn capabilities(&self) -> nyl_render::resources::ClusterKubernetesCapabilities {
+        nyl_render::resources::ClusterKubernetesCapabilities {
             kube_version: Some(self.kube_version.clone()),
             api_versions: self.api_versions.clone(),
             cluster_scoped_kinds: self.cluster_scoped_kinds.clone(),
@@ -44,7 +45,7 @@ impl ClusterInfo {
         }
     }
 
-    fn from_capabilities(capabilities: crate::resources::ClusterKubernetesCapabilities) -> Self {
+    fn from_capabilities(capabilities: nyl_render::resources::ClusterKubernetesCapabilities) -> Self {
         Self {
             kube_version: capabilities.kube_version.unwrap_or_default(),
             api_versions: capabilities.api_versions,
@@ -74,7 +75,7 @@ pub fn resolve_target_cluster_from_inventory(
     target_name: &str,
 ) -> Result<ResolvedTargetCluster> {
     let target = get_target(inventory, target_name)?.clone();
-    let cluster = crate::gitops::resolve_cluster_contract(inventory, target.cluster_name())?.cluster;
+    let cluster = nyl_render::gitops::resolve_cluster_contract(inventory, target.cluster_name())?.cluster;
     Ok(ResolvedTargetCluster { target, cluster })
 }
 
@@ -159,7 +160,7 @@ impl CaptureClient for LiveCapture {
 }
 
 async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client: &impl CaptureClient) -> Result<()> {
-    use crate::validation::store;
+    use nyl_render::validation::store;
     let inventory = inventory(start_dir)?;
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, &args.name)
@@ -234,7 +235,7 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
     println!(
         "Captured Cluster '{}' into {}",
         args.name,
-        crate::util::path_for_display(&path).display()
+        nyl_render::util::path_for_display(&path).display()
     );
     Ok(())
 }
@@ -453,8 +454,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use crate::resources::GitOpsResourceIdentity;
-    use crate::validation::store;
+    use nyl_render::resources::GitOpsResourceIdentity;
+    use nyl_render::validation::store;
 
     struct StubCapture {
         version: String,
@@ -560,10 +561,10 @@ mod tests {
             .await
             .unwrap();
         let cluster = |directory: &Path| {
-            let inventory = crate::gitops::discover_gitops_inventory(directory, None).unwrap();
-            crate::gitops::resolve_cluster_contract(&inventory, "staging")
+            let inventory = crate::discover_gitops_inventory(directory, None).unwrap();
+            nyl_render::gitops::resolve_cluster_contract(&inventory, "staging")
         };
-        let inventory = crate::gitops::discover_gitops_inventory(directory.path(), None).unwrap();
+        let inventory = crate::discover_gitops_inventory(directory.path(), None).unwrap();
         let GitOpsResource::Cluster(declared) = inventory
             .get(GitOpsResourceKind::Cluster, "staging")
             .unwrap()
@@ -587,7 +588,7 @@ mod tests {
         );
         assert_eq!(
             capabilities.scope_of("example.com", "Widget"),
-            Some(crate::resources::ResourceScope::Namespaced)
+            Some(nyl_render::resources::ResourceScope::Namespaced)
         );
         assert!(effective
             .inputs
@@ -610,7 +611,7 @@ mod tests {
         let path = directory.path().join("cluster.yaml");
         let mut value: serde_json::Value = serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         value["spec"].as_object_mut().unwrap().remove("kubernetes");
-        fs::write(path, crate::yaml::serialize_yaml_document(&value).unwrap()).unwrap();
+        fs::write(path, nyl_render::yaml::serialize_yaml_document(&value).unwrap()).unwrap();
         let failed = StubCapture {
             fail: true,
             ..capture_stub("integer")
@@ -641,7 +642,7 @@ mod tests {
             .await
             .unwrap();
         let root = directory.path().join("vendor");
-        let index = crate::validation::store::read_cluster_index(&root, "staging")
+        let index = nyl_render::validation::store::read_cluster_index(&root, "staging")
             .unwrap()
             .unwrap();
         let schemas = store::read_definition(
@@ -669,7 +670,7 @@ mod tests {
         capture_with_client(capture_args(false), directory.path(), &capture_stub("integer"))
             .await
             .unwrap();
-        let index_path = crate::validation::store::cluster_index_path(&root, "staging").unwrap();
+        let index_path = nyl_render::validation::store::cluster_index_path(&root, "staging").unwrap();
         let original = fs::read(&index_path).unwrap();
         capture_with_client(capture_args(true), directory.path(), &capture_stub("integer"))
             .await
@@ -691,7 +692,7 @@ mod tests {
         capture_with_client(capture_args(false), directory.path(), &empty)
             .await
             .unwrap();
-        assert!(crate::validation::store::read_cluster_index(&root, "staging")
+        assert!(nyl_render::validation::store::read_cluster_index(&root, "staging")
             .unwrap()
             .unwrap()
             .crds

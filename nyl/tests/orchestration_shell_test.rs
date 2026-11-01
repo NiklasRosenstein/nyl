@@ -11,8 +11,9 @@ use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::Change;
 use nyl_core::orchestration::ports::{SourceRepository, SourceResolver};
+use nyl_core::orchestration::progress::UnitResult;
 use nyl_git::GitAuth;
-use nyl_orchestration::run_report::{EnvironmentRunReport, LeavingConsequence, UnitResult, UnitState};
+use nyl_orchestration::run_report::{EnvironmentRunReport, LeavingConsequence, UnitState};
 use nyl_orchestration::shell::inspect::{self, GetValue};
 use nyl_orchestration::shell::run::{self, Cancellation, RunMode, TeardownTarget};
 use nyl_state::source::GitSourceResolver;
@@ -247,8 +248,8 @@ fn test_discovery_works_in_a_source_resolver_worktree() {
     let directory = TempDir::new().unwrap();
     let worktree = directory.path().join("worktree");
     resolver.worktree(&SourceRepository::This, &head, &worktree).unwrap();
-    let inventory = nyl::gitops::discover_gitops_inventory(&worktree.join("nyl"), None).unwrap();
-    let units = nyl::gitops::units::discover_units(&inventory).unwrap();
+    let inventory = nyl::discover_gitops_inventory(&worktree.join("nyl"), None).unwrap();
+    let units = nyl_render::gitops::units::discover_units(&inventory).unwrap();
     assert_eq!(units.len(), 4);
 }
 

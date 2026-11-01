@@ -42,8 +42,8 @@ use super::{
     TreeRenderOptions,
 };
 use crate::config::{ProjectConfig, ProjectFile};
-use crate::git::transport::GitAuth;
 use crate::{NylError, Result};
+use nyl_git::GitAuth;
 
 /// One orchestrated render.
 #[derive(Debug, Clone)]
@@ -186,7 +186,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     index.files = desired
         .iter()
         .map(|(path, bytes)| {
-            crate::resources::relative_path_to_posix("rendered output path", path)
+            nyl_core::resources::relative_path_to_posix("rendered output path", path)
                 .map(|path| (path, nyl_core::digest::sha256_hex(bytes)))
                 .map_err(NylError::from)
         })
@@ -211,7 +211,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     let revision = &compiled.target.spec.publication.revision;
     Ok(RenderedTarget {
         destination: PublicationDestination {
-            repository: crate::util::sanitize_url(&compiled.repository.repo_url),
+            repository: nyl_git::sanitize_url(&compiled.repository.repo_url),
             push_url: compiled
                 .repository
                 .publish_url
@@ -545,7 +545,7 @@ impl PreparedPublication {
         if actual != self.expected {
             return Err(NylError::config(format!(
                 "Publication {}@{} advanced from {:?} to {actual:?}; refusing stale publish",
-                crate::util::sanitize_url(&self.push_url),
+                nyl_git::sanitize_url(&self.push_url),
                 self.branch,
                 self.expected,
             )));
@@ -727,7 +727,7 @@ fn clone_branch(url: &str, branch: &str, path: &Path, auth: &GitAuth) -> Result<
             repository.remote("origin", url)?;
             Ok(repository)
         })
-        .map_err(|error| NylError::config(format!("Failed to clone {}: {error}", crate::util::sanitize_url(url))))?;
+        .map_err(|error| NylError::config(format!("Failed to clone {}: {error}", nyl_git::sanitize_url(url))))?;
     {
         let mut config = repository.config().map_err(crate::git::GitError::from)?;
         config

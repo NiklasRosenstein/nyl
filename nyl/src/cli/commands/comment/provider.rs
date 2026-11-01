@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::context::{append, Context, Provider};
 use super::error;
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 pub(super) struct UpsertResult {
     pub(super) outcome: &'static str,

@@ -17,7 +17,7 @@ use nyl_core::orchestration::ports::{ArgoObserver, Clock, CommitIdentity, IdGene
 use nyl_orchestration::fault::FaultInjector;
 use nyl_orchestration::shell::run::Cancellation;
 
-use crate::Result;
+use nyl_render::Result;
 
 /// What orchestration commands use beyond their arguments.
 pub struct Wiring<'a> {
@@ -103,7 +103,7 @@ impl ProcessWiring {
                 "KubernetesPublication",
                 std::sync::Arc::new(
                     nyl_units::fake::FakePublication::new(script)
-                        .with_resource_catalogue(crate::config::ResourceCatalogue(crate::resource_catalogue())),
+                        .with_resource_catalogue(nyl_render::config::ResourceCatalogue(crate::resource_catalogue())),
                 ),
             );
             drivers
@@ -172,7 +172,7 @@ impl<'a> Wiring<'a> {
     /// feature), the runner name from the CI variables, and the snapshot the
     /// shell admits `PATH` and declared passthrough variables from.
     pub fn from_process(owned: &'a ProcessWiring) -> Result<Self> {
-        let clock = crate::orchestration::clock::process_clock().map_err(crate::NylError::config)?;
+        let clock = crate::orchestration::clock::process_clock().map_err(nyl_render::NylError::config)?;
         Ok(Self {
             clock,
             ids: &owned.ids,
@@ -264,7 +264,7 @@ fn worktree_capture_line(progress: &nyl_core::orchestration::progress::WorktreeC
             let action = if snapshot.reused { "reused" } else { "created" };
             format!(
                 "[worktree] {action} snapshot {} in {seconds:.1}s\n[worktree] local ref {}\n[worktree] state history {} (ref {}, path {}) when recorded",
-                snapshot.commit, snapshot.revision, crate::util::credential_free_url(&location.repository), location.desired_ref,
+                snapshot.commit, snapshot.revision, nyl_render::util::credential_free_url(&location.repository), location.desired_ref,
                 if location.path.is_empty() { "/" } else { &location.path }
             )
         }

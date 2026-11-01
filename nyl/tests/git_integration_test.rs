@@ -5,7 +5,7 @@
 /// - Creating worktrees
 /// - Resolving refs
 /// - HelmChart Git integration
-use nyl::git::GitManager;
+use nyl_render::git::GitManager;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -153,9 +153,11 @@ fn test_git_manager_reports_source_cache_operations() {
     create_test_git_repo(temp_repo.path());
     let git_cache_dir = TempDir::new().unwrap();
     let render_cache_dir = TempDir::new().unwrap();
-    let render_cache =
-        nyl::render::cache::RenderCache::with_root(render_cache_dir.path(), nyl::render::cache::CacheMode::Default)
-            .unwrap();
+    let render_cache = nyl_render::render::cache::RenderCache::with_root(
+        render_cache_dir.path(),
+        nyl_render::render::cache::CacheMode::Default,
+    )
+    .unwrap();
     let mut manager = GitManager::with_cache_dir(git_cache_dir.path()).with_render_cache(Some(render_cache.clone()));
     let repository = path_to_file_url(temp_repo.path());
 
@@ -416,8 +418,8 @@ fn create_test_helm_chart_repo(repo_dir: &Path) {
 fn test_git_chart_with_https_protocol_prefix() {
     setup_test_env();
 
-    use nyl::helm::HelmChartResolver;
-    use nyl::resources::ChartRef;
+    use nyl_render::helm::HelmChartResolver;
+    use nyl_render::resources::ChartRef;
 
     let temp_repo = TempDir::new().unwrap();
     create_test_helm_chart_repo(temp_repo.path());
@@ -448,8 +450,8 @@ fn test_git_chart_with_https_protocol_prefix() {
 fn test_git_chart_with_subpath() {
     setup_test_env();
 
-    use nyl::helm::HelmChartResolver;
-    use nyl::resources::ChartRef;
+    use nyl_render::helm::HelmChartResolver;
+    use nyl_render::resources::ChartRef;
 
     let temp_repo = TempDir::new().unwrap();
     create_test_helm_chart_repo(temp_repo.path());
@@ -480,8 +482,8 @@ fn test_git_chart_with_subpath() {
 fn test_git_chart_with_tag_version() {
     setup_test_env();
 
-    use nyl::helm::HelmChartResolver;
-    use nyl::resources::ChartRef;
+    use nyl_render::helm::HelmChartResolver;
+    use nyl_render::resources::ChartRef;
 
     let temp_repo = TempDir::new().unwrap();
     create_test_helm_chart_repo(temp_repo.path());
@@ -579,8 +581,8 @@ dependencies:
 fn test_git_chart_with_dependencies() {
     setup_test_env();
 
-    use nyl::helm::HelmChartResolver;
-    use nyl::resources::ChartRef;
+    use nyl_render::helm::HelmChartResolver;
+    use nyl_render::resources::ChartRef;
 
     let temp_repo = TempDir::new().unwrap();
     create_test_helm_chart_with_dependencies_repo(temp_repo.path());
@@ -628,8 +630,8 @@ fn test_git_chart_with_dependencies() {
 fn test_git_chart_without_dependencies() {
     setup_test_env();
 
-    use nyl::helm::HelmChartResolver;
-    use nyl::resources::ChartRef;
+    use nyl_render::helm::HelmChartResolver;
+    use nyl_render::resources::ChartRef;
 
     let temp_repo = TempDir::new().unwrap();
     create_test_helm_chart_repo(temp_repo.path());

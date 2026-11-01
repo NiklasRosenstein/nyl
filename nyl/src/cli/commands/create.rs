@@ -7,18 +7,19 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::cli::resource_file::{append_document, atomic_replace};
-use crate::config::ProjectConfig;
-use crate::constants::API_VERSION;
-use crate::gitops::{
-    central_group_source_root, derived_group_source_root, discover_gitops_inventory, DiscoveredGitOpsResource,
-    GitOpsInventory, GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
+use crate::discover_gitops_inventory;
+use nyl_core::constants::API_VERSION;
+use nyl_render::config::ProjectConfig;
+use nyl_render::gitops::{
+    central_group_source_root, derived_group_source_root, DiscoveredGitOpsResource, GitOpsInventory,
+    GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
 };
-use crate::resources::{
+use nyl_render::resources::{
     ApplicationGroup, ApplicationGroupSource, GitOpsResource, GitOpsResourceKind, Release, KIND_RELEASE,
     RELEASE_SCHEMA_FILENAME,
 };
-use crate::util::path_for_display;
-use crate::{NylError, Result};
+use nyl_render::util::path_for_display;
+use nyl_render::{NylError, Result};
 
 fn display_path(path: &Path) -> String {
     path_for_display(path)
@@ -165,7 +166,7 @@ fn scaffold_alias_resource(kind: GitOpsResourceKind, args: AliasScaffoldArgs) ->
 }
 
 fn scaffold_repository(args: RepositoryScaffoldArgs) -> Result<()> {
-    crate::resources::validate_repository_coordinates(&args.repo_url, args.publish_url.as_deref())?;
+    nyl_core::resources::validate_repository_coordinates(&args.repo_url, args.publish_url.as_deref())?;
     let repository_urls = (args.repo_url.as_str(), args.publish_url.as_deref());
     scaffold_resource(
         ResourceScaffoldArgs {
@@ -356,7 +357,7 @@ fn group_source_root(
         Some(group) => group.spec.source.clone(),
         // The static envelope is known even when the spec needs a target; read
         // the source from the document itself, and refuse when it stays unknown.
-        None => match crate::yaml::parse_yaml_value_k8s_compatible(&discovered.raw_document) {
+        None => match nyl_render::yaml::parse_yaml_value_k8s_compatible(&discovered.raw_document) {
             Ok(document) => match document.pointer("/spec/source") {
                 None | Some(serde_json::Value::Null) => None,
                 Some(source) => Some(
@@ -449,7 +450,7 @@ fn warn_for_unselected_release(group: &ResolvedApplicationGroup, output: &Path) 
     let (Some(root), Some(source)) = (&group.root, &group.source) else {
         return;
     };
-    if !crate::gitops::source_matches(root, output, source) {
+    if !nyl_render::gitops::source_matches(root, output, source) {
         eprintln!(
             "⚠ ApplicationGroup {:?} does not select {}; adjust spec.source or use --output",
             group.name,
@@ -464,7 +465,7 @@ fn warn_for_namespace_outside_project(group: &ResolvedApplicationGroup, namespac
         return;
     };
     for namespace in std::iter::once(namespace).chain(additional.iter().map(String::as_str)) {
-        if !crate::gitops::namespace_matches_any(namespace, patterns) {
+        if !nyl_render::gitops::namespace_matches_any(namespace, patterns) {
             eprintln!(
                 "⚠ AppProject {project:?} does not allow namespace {namespace:?}; add it to the project destinations"
             );
@@ -530,7 +531,7 @@ fn render_release_scaffold(name: &str, namespace: &str, additional_namespaces: &
     Release::from_value(&document)?;
     let schema =
         format!("https://niklasrosenstein.github.io/nyl/reference/schemas/{API_VERSION}/{RELEASE_SCHEMA_FILENAME}");
-    let body = crate::yaml::serialize_yaml_value(&document)?;
+    let body = nyl_render::yaml::serialize_yaml_value(&document)?;
     Ok(format!(
         "# yaml-language-server: $schema={schema}\n{body}\n# Add this Release's workload manifests as further YAML documents below.\n"
     ))

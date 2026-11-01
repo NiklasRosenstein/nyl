@@ -154,9 +154,10 @@ Reviewers must check the boundary explicitly:
 └── .github/          # CI/CD workflows
 ```
 
-The `nyl` package re-exports the `nyl-render` modules, whose `resources` module also re-exports `nyl_core::resources`,
-so integration tests and benches keep using `nyl::…` paths. None of the crates is
-published to crates.io; Nyl ships as release binaries and container images.
+Code, tests, and benches import items from the crate that owns them
+(`nyl_render::…`, `nyl_core::…`, `nyl_units::…`); no crate re-exports another's
+modules. None of the crates is published to crates.io; Nyl ships as release
+binaries and container images.
 
 ## Development Workflow
 

@@ -436,7 +436,7 @@ impl RenderSession {
             },
         )?;
         for resource in &bundle.resources {
-            crate::resources::schema::validate_resource_api_with_catalog(
+            nyl_core::resources::schema::validate_resource_api_with_catalog(
                 &resource.value,
                 &self.project_config.resource_catalogue.0,
             )
@@ -820,7 +820,7 @@ fn record_resource_directory_dependency(
     resource: &Value,
     config: &ProjectConfig,
 ) -> Result<()> {
-    if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
+    if resource.get("apiVersion").and_then(Value::as_str) == Some(nyl_core::constants::API_VERSION)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
         let chart: HelmChart = serde_json::from_value(resource.clone())?;
@@ -848,7 +848,7 @@ fn record_resource_directory_dependency(
 }
 
 fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig) -> Option<String> {
-    if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
+    if resource.get("apiVersion").and_then(Value::as_str) == Some(nyl_core::constants::API_VERSION)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
         return match serde_json::from_value::<HelmChart>(resource.clone()) {
@@ -969,7 +969,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::constants::{API_VERSION, API_VERSION_K8S_GITOPS};
+    use nyl_core::constants::{API_VERSION, API_VERSION_K8S_GITOPS};
 
     fn target() -> DeploymentTarget {
         serde_json::from_value(serde_json::json!({

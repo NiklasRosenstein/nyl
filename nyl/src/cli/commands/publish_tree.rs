@@ -5,16 +5,17 @@ use clap::Args;
 use git2::Repository;
 use nyl_core::orchestration::ports::CommitIdentity;
 
-use crate::git::{GitManager, WorktreeManager};
-use crate::gitops::inputs::verify_publication_base;
-use crate::gitops::publication::{
+use crate::discover_gitops_inventory;
+use nyl_render::git::{GitManager, WorktreeManager};
+use nyl_render::gitops::inputs::verify_publication_base;
+use nyl_render::gitops::publication::{
     prepare_publication, target_render_index, writable_branch_name, PublicationAuthor, TreePublication,
 };
-use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, resolve_deployment_target_name,
-    CompiledTargetTree, GitOpsCache, GitOpsInventory, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
+use nyl_render::gitops::{
+    compile_target_tree_cached_with_observer_and_options, resolve_deployment_target_name, CompiledTargetTree,
+    GitOpsCache, GitOpsInventory, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
 };
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
@@ -22,7 +23,7 @@ use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 #[derive(Args, Debug)]
 pub struct PublishTreeArgs {
     #[command(flatten)]
-    pub validation: crate::validation::ValidationArgs,
+    pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
 
@@ -110,7 +111,7 @@ impl CleanHeadWorktree {
         };
         // The committed project may still be at an earlier location when the
         // move is not committed yet.
-        let clean_project_root = crate::util::project_path::locate_checkout_project(
+        let clean_project_root = nyl_render::util::project_path::locate_checkout_project(
             &worktree.checkout_root,
             project_relative,
             &[],
@@ -147,19 +148,19 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-    let carried = crate::gitops::inputs::carry_paths(&inventory, &target_name)?;
-    let crate::gitops::provenance::WorktreeSourceState {
+    let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target_name)?;
+    let nyl_render::gitops::provenance::WorktreeSourceState {
         commit: source_commit,
         dirty,
-    } = crate::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
+    } = nyl_render::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
     let Some(source_commit) = source_commit else {
         return Err(NylError::config(
             "publish-tree requires the source worktree to have a committed revision",
         ));
     };
-    crate::gitops::provenance::require_publication_source(&inventory.project_root, &source_commit)?;
+    nyl_render::gitops::provenance::require_publication_source(&inventory.project_root, &source_commit)?;
     if dirty && args.source.require_clean {
-        let summary = crate::gitops::provenance::dirty_worktree_summary(&inventory.project_root, &carried)?;
+        let summary = nyl_render::gitops::provenance::dirty_worktree_summary(&inventory.project_root, &carried)?;
         return Err(NylError::config(format!(
             "publish-tree --require-clean requires a clean source worktree\n{summary}\nCommit, stash, or remove the changes before publishing."
         )));
@@ -216,7 +217,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         }
         (&inventory, &compiled, dirty)
     };
-    crate::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
+    nyl_render::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
     publish_compiled(
         &args,
         publication_inventory,
@@ -437,15 +438,15 @@ fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTar
         match (working_files.get(path), committed_files.get(path)) {
             (Some(_), None) => differences.push(format!(
                 "added {}",
-                crate::resources::relative_path_to_posix("rendered output path", path)?
+                nyl_core::resources::relative_path_to_posix("rendered output path", path)?
             )),
             (None, Some(_)) => differences.push(format!(
                 "removed {}",
-                crate::resources::relative_path_to_posix("rendered output path", path)?
+                nyl_core::resources::relative_path_to_posix("rendered output path", path)?
             )),
             (Some(working), Some(committed)) if working != committed => differences.push(format!(
                 "modified {}",
-                crate::resources::relative_path_to_posix("rendered output path", path)?
+                nyl_core::resources::relative_path_to_posix("rendered output path", path)?
             )),
             _ => {}
         }
@@ -464,7 +465,7 @@ fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTar
 /// never contains them. Each `carryFileFromWorktree` path of the committed target is copied
 /// from the same worktree-relative location of the working tree, when present.
 fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, target_name: &str) -> Result<()> {
-    for destination in crate::gitops::inputs::carry_paths(committed, target_name)? {
+    for destination in nyl_render::gitops::inputs::carry_paths(committed, target_name)? {
         let relative = destination.strip_prefix(&committed.worktree_root).map_err(|_| {
             NylError::config(format!(
                 "Carried file {} is outside the committed worktree",
@@ -483,7 +484,7 @@ fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, ta
 }
 
 fn publication_current_commit(
-    compiled: &crate::gitops::CompiledTargetTree,
+    compiled: &nyl_render::gitops::CompiledTargetTree,
     publication_url: &str,
     cache: &GitOpsCache,
 ) -> Result<Option<git2::Oid>> {
@@ -501,11 +502,11 @@ fn publication_current_commit(
                 return Ok(None);
             }
         };
-    let published_repository = Repository::open(&checkout).map_err(crate::git::GitError::from)?;
+    let published_repository = Repository::open(&checkout).map_err(nyl_render::git::GitError::from)?;
     let published_commit = published_repository
         .head()
         .and_then(|head| head.peel_to_commit())
-        .map_err(crate::git::GitError::from)?
+        .map_err(nyl_render::git::GitError::from)?
         .id();
     let root = super::diff_tree::checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
     let published = super::diff_tree::read_rendered_tree(&root, &compiled.declared_state_paths())?;
@@ -528,7 +529,7 @@ fn publication_current_commit(
         .owned_files()
         .iter()
         .map(|(path, bytes)| {
-            crate::resources::relative_path_to_posix("rendered output path", path)
+            nyl_core::resources::relative_path_to_posix("rendered output path", path)
                 .map(|path| (path, nyl_core::digest::sha256_hex(bytes)))
                 .map_err(NylError::from)
         })
@@ -540,7 +541,7 @@ fn source_repository_url(repository: &Repository) -> Option<String> {
     repository
         .find_remote("origin")
         .ok()
-        .and_then(|remote| remote.url().ok().map(crate::util::sanitize_url))
+        .and_then(|remote| remote.url().ok().map(nyl_git::sanitize_url))
 }
 
 fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<'_>) -> String {
@@ -560,7 +561,7 @@ fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<
 
 fn print_publication_result(status: &str, repository: &str, branch: &str, commit: git2::Oid) {
     println!("✓ {status}");
-    println!("  Repository: {}", crate::util::sanitize_url(repository));
+    println!("  Repository: {}", nyl_git::sanitize_url(repository));
     println!("  Branch: {branch}");
     println!("  Commit: {commit}");
 }

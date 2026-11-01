@@ -24,9 +24,10 @@ use super::inputs::{
     CachedGitBlobSource, InputOrigin, InputSources, PublicationBase, PublicationRead, ResolvedReleaseInputs,
 };
 use super::GitOpsInventory;
-use crate::resources::release_inputs::{InputBinding, InputDeclaration, ReleaseKey};
+use crate::resources::release_inputs::ReleaseKey;
 use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
+use nyl_core::bindings::{InputBinding, InputDeclaration};
 
 /// Which target bindings a direct command applies.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -367,7 +368,7 @@ fn resolve_with(
     sources: &Sources<'_>,
 ) -> Result<DirectInputs> {
     let inventory = sources.inventory;
-    let repositories = |reference: &crate::resources::LocalReference| {
+    let repositories = |reference: &nyl_core::resources::LocalReference| {
         let inventory = inventory.ok_or_else(|| {
             NylError::config(format!(
                 "GitRepository {:?} can only be resolved with --target",

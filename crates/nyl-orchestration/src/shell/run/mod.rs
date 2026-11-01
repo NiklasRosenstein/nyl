@@ -87,10 +87,11 @@ use crate::rules::sources::{
 use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::teardown::TeardownOptions;
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
-use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
+use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitState};
 use crate::transition::Trailers;
 pub use cancel::{Cancellation, SIGINT, SIGTERM};
 use execute::{execute_batch, Execution};
+use nyl_core::orchestration::progress::UnitResult;
 use slots::Slots;
 
 mod cancel;

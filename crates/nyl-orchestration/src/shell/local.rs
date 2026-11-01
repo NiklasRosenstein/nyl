@@ -10,7 +10,8 @@ use nyl_core::orchestration::state::StateLocation;
 use super::run::RunRequest;
 use super::store_error;
 use crate::rules;
-use crate::run_report::{EnvironmentRunReport, UnitResult};
+use crate::run_report::EnvironmentRunReport;
+use nyl_core::orchestration::progress::UnitResult;
 
 /// Lease location for an injected local run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

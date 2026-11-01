@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, RunId};
 use nyl_core::orchestration::ports::{Clock, EnvironmentSnapshot, Transition, TransitionChanges};
+use nyl_core::orchestration::progress::UnitResult;
 use nyl_core::orchestration::state::{
     ApprovalIdentity, Condition, DeletionReason, DesiredUnit, Hold, Lease, LeaseKind, Lifecycle, Observation,
     ObservationType, Operation, Signal, SignalAction, SignalKind, StateV1, TeardownProgress,
@@ -22,7 +23,7 @@ use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::fault::{FaultPoint, NoFaults};
 use nyl_orchestration::rules::lifecycle::{transition, Event, Next};
 use nyl_orchestration::rules::recovery::RecoverAction;
-use nyl_orchestration::run_report::{EnvironmentRunReport, UnitResult};
+use nyl_orchestration::run_report::EnvironmentRunReport;
 use nyl_orchestration::shell::recover;
 use nyl_orchestration::shell::run::{Cancellation, RunMode, TeardownTarget};
 use nyl_orchestration::shell::state::Requested;

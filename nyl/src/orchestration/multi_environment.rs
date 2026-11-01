@@ -17,8 +17,9 @@ use super::project::declared;
 use super::run::CommandOutcome;
 use super::session::{pretty_json, stopped, Stop};
 use crate::cli::commands::reconcile::RunOutput;
-use crate::gitops::units::UnitSourceRenderer;
-use crate::gitops::{discover_gitops_inventory, GitOpsInventory};
+use crate::discover_gitops_inventory;
+use nyl_render::gitops::units::UnitSourceRenderer;
+use nyl_render::gitops::GitOpsInventory;
 
 /// Selected environments in dependency order, with independent preflight errors.
 pub struct Selection {
@@ -50,11 +51,11 @@ pub fn select(
     }
     single_source(source_override, &selection.iter().cloned().collect::<Vec<_>>())?;
     let repository = git2::Repository::discover(&inventory.project_root)
-        .map_err(|error| crate::NylError::config(error.to_string()))?;
+        .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
     let commit = repository
         .head()
         .and_then(|head| head.peel_to_commit())
-        .map_err(|error| crate::NylError::config(error.to_string()))?;
+        .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
     let commit = CommitId::new(commit.id().to_string())
         .map_err(|error| Finding::new(Code::SourceUnavailable, error.to_string(), "check out a source commit"))?;
     let renderer = UnitSourceRenderer::new(super::session::project_dir(&inventory))
@@ -66,7 +67,7 @@ pub fn select(
     for environment in environments {
         let name = environment
             .name()
-            .map_err(|error| crate::NylError::config(error.to_string()))?;
+            .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
         match read_environment(
             &inventory,
             &name,
@@ -134,7 +135,7 @@ fn ownership_preflight(
     for environment in declared(inventory).0 {
         let name = environment
             .name()
-            .map_err(|error| crate::NylError::config(error.to_string()))?;
+            .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
         match snapshot(inventory, &name, offline) {
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
@@ -222,7 +223,7 @@ fn read_environment(
                 )
             })?,
     };
-    let workspace = tempfile::TempDir::new().map_err(crate::NylError::from)?;
+    let workspace = tempfile::TempDir::new().map_err(nyl_render::NylError::from)?;
     let tree = workspace.path().join("source");
     sources
         .worktree(&SourceRepository::This, &source_commit, &tree)

@@ -484,7 +484,7 @@ impl DependencyRecorder {
                 .path()
                 .strip_prefix(&path)
                 .expect("walk entry is beneath dependency root");
-            let relative = crate::resources::relative_path_to_posix("cache directory dependency", relative)?;
+            let relative = nyl_core::resources::relative_path_to_posix("cache directory dependency", relative)?;
             contents.extend_from_slice(&(relative.len() as u64).to_le_bytes());
             contents.extend_from_slice(relative.as_bytes());
             let bytes = fs::read(entry.path())?;

@@ -11,9 +11,10 @@ use nyl_core::resources::environment::{sharing_group, Environment, EnvironmentGr
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
 use nyl_state::git::{CommitAuthor, Endpoint, GitStateStore};
 
-use crate::gitops::GitOpsInventory;
-use crate::resources::{GitOpsResource, InlineGitRepository};
-use crate::{NylError, Result};
+use nyl_core::resources::InlineGitRepository;
+use nyl_render::gitops::GitOpsInventory;
+use nyl_render::resources::GitOpsResource;
+use nyl_render::{NylError, Result};
 
 /// An environment ready for state operations.
 pub struct ResolvedEnvironment {
@@ -75,7 +76,7 @@ pub fn resolve_environment(
         .find_remote("origin")
         .ok()
         .and_then(|remote| remote.url().ok().map(str::to_owned));
-    let origin_identity = origin.as_deref().map(crate::util::credential_free_url);
+    let origin_identity = origin.as_deref().map(nyl_render::util::credential_free_url);
     let source_repository = origin_identity.clone().unwrap_or_else(|| {
         repository
             .workdir()
@@ -84,7 +85,7 @@ pub fn resolve_environment(
             .to_string()
     });
     let repositories =
-        |reference: &crate::resources::LocalReference| -> std::result::Result<InlineGitRepository, String> {
+        |reference: &nyl_core::resources::LocalReference| -> std::result::Result<InlineGitRepository, String> {
             inventory
                 .resolve_git_repository(Some(reference), None)
                 .map(|(repository, _)| repository)
@@ -175,7 +176,7 @@ pub fn configure_repository(
     identity: &str,
     endpoint: Endpoint,
 ) -> Result<GitStateStore> {
-    let cache = crate::git::CacheLayout::for_project(&inventory.project_root);
+    let cache = nyl_render::git::CacheLayout::for_project(&inventory.project_root);
     let file_path = if endpoint.read.starts_with("file://") {
         Some(
             reqwest::Url::parse(&endpoint.read)
@@ -194,7 +195,7 @@ pub fn configure_repository(
         .and_then(|repo| {
             repo.find_remote("origin")
                 .ok()
-                .and_then(|remote| remote.url().ok().map(crate::util::credential_free_url))
+                .and_then(|remote| remote.url().ok().map(nyl_render::util::credential_free_url))
         })
         .is_some_and(|origin| origin == identity);
     let path = if let Some(path) = file_path {

@@ -2,7 +2,7 @@
 ///
 /// This module provides functionality to filter manifests after rendering,
 /// complementing the pre-render source kind filtering.
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 /// Filter manifests by kind after rendering.
 ///

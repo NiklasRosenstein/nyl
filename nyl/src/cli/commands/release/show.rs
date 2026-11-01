@@ -3,6 +3,8 @@ use clap::Args;
 use crate::{
     cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat},
+};
+use nyl_render::{
     kubernetes::{KubernetesReleaseStorage, ReleaseStorage},
     NylError, Result,
 };
@@ -47,7 +49,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
     let storage = KubernetesReleaseStorage::new(client);
 
     // Get release
-    let release: Option<crate::kubernetes::ReleaseState> = if let Some(revision) = args.revision {
+    let release: Option<nyl_render::kubernetes::ReleaseState> = if let Some(revision) = args.revision {
         storage.get_release(&args.name, &args.namespace, revision).await?
     } else {
         storage.get_latest_release(&args.name, &args.namespace).await?
@@ -140,7 +142,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
         }
         OutputFormat::Yaml => {
             if args.manifest {
-                let yaml = crate::yaml::serialize_yaml_document(&release)?;
+                let yaml = nyl_render::yaml::serialize_yaml_document(&release)?;
                 print!("{}", yaml);
             } else {
                 // Create a filtered version without manifest
@@ -148,7 +150,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
                 if let Some(obj) = value.as_object_mut() {
                     obj.remove("manifest");
                 }
-                let yaml = crate::yaml::serialize_yaml_value(&value)?;
+                let yaml = nyl_render::yaml::serialize_yaml_value(&value)?;
                 print!("{}", yaml);
             }
         }

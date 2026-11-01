@@ -769,8 +769,8 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget => KIND_DEPLOYMENT_TARGET,
             Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
-            Self::Environment => super::environment::KIND_ENVIRONMENT,
-            Self::EnvironmentGroup => super::environment::KIND_ENVIRONMENT_GROUP,
+            Self::Environment => nyl_core::resources::environment::KIND_ENVIRONMENT,
+            Self::EnvironmentGroup => nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP,
         }
     }
 
@@ -782,8 +782,8 @@ impl GitOpsResourceKind {
             KIND_DEPLOYMENT_TARGET => Some(Self::DeploymentTarget),
             KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
-            super::environment::KIND_ENVIRONMENT => Some(Self::Environment),
-            super::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
+            nyl_core::resources::environment::KIND_ENVIRONMENT => Some(Self::Environment),
+            nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
             _ => None,
         }
     }
@@ -828,15 +828,19 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
-        GitOpsResourceKind::Environment => serde_json::to_value(schema_for!(super::environment::Environment)),
-        GitOpsResourceKind::EnvironmentGroup => serde_json::to_value(schema_for!(super::environment::EnvironmentGroup)),
+        GitOpsResourceKind::Environment => {
+            serde_json::to_value(schema_for!(nyl_core::resources::environment::Environment))
+        }
+        GitOpsResourceKind::EnvironmentGroup => {
+            serde_json::to_value(schema_for!(nyl_core::resources::environment::EnvironmentGroup))
+        }
     }
     .expect("schema serialization should never fail");
     tighten_resource_envelope(schema, kind)
 }
 
 fn tighten_resource_envelope(mut schema: serde_json::Value, kind: GitOpsResourceKind) -> serde_json::Value {
-    super::schema::set_envelope(&mut schema, kind.api_version(), Some(kind.as_str()));
+    nyl_core::resources::schema::set_envelope(&mut schema, kind.api_version(), Some(kind.as_str()));
     schema
 }
 
@@ -870,8 +874,8 @@ pub enum GitOpsResource {
     DeploymentTarget(DeploymentTarget),
     AppProjectDefinition(AppProjectDefinition),
     ApplicationGroup(Box<ApplicationGroup>),
-    Environment(Box<super::environment::Environment>),
-    EnvironmentGroup(super::environment::EnvironmentGroup),
+    Environment(Box<nyl_core::resources::environment::Environment>),
+    EnvironmentGroup(nyl_core::resources::environment::EnvironmentGroup),
 }
 
 /// True when the manifest advertises the GitOps API and one of its known kinds.
@@ -881,8 +885,9 @@ pub fn is_gitops_resource(value: &serde_json::Value) -> bool {
 
 pub fn gitops_resource_kind(value: &serde_json::Value) -> Option<GitOpsResourceKind> {
     let kind = GitOpsResourceKind::parse(value.get("kind")?.as_str()?)?;
-    (value.get("apiVersion")?.as_str()? == kind.api_version() || super::schema::deprecated_api_version(value).is_some())
-        .then_some(kind)
+    (value.get("apiVersion")?.as_str()? == kind.api_version()
+        || nyl_core::resources::schema::deprecated_api_version(value).is_some())
+    .then_some(kind)
 }
 
 /// Parse only the static envelope. Unrelated manifests return `None`.
@@ -930,7 +935,7 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
     };
     // A deprecated API version reads as the current one.
     let mut value = value.clone();
-    super::schema::canonicalize_api_version(&mut value);
+    nyl_core::resources::schema::canonicalize_api_version(&mut value);
     let value = &value;
     let resource = match identity.kind {
         GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
@@ -947,12 +952,14 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
         GitOpsResourceKind::ApplicationGroup => {
             GitOpsResource::ApplicationGroup(Box::new(parse_as(value, KIND_APPLICATION_GROUP)?))
         }
-        GitOpsResourceKind::Environment => {
-            GitOpsResource::Environment(Box::new(parse_as(value, super::environment::KIND_ENVIRONMENT)?))
-        }
-        GitOpsResourceKind::EnvironmentGroup => {
-            GitOpsResource::EnvironmentGroup(parse_as(value, super::environment::KIND_ENVIRONMENT_GROUP)?)
-        }
+        GitOpsResourceKind::Environment => GitOpsResource::Environment(Box::new(parse_as(
+            value,
+            nyl_core::resources::environment::KIND_ENVIRONMENT,
+        )?)),
+        GitOpsResourceKind::EnvironmentGroup => GitOpsResource::EnvironmentGroup(parse_as(
+            value,
+            nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP,
+        )?),
     };
     resource.validate()?;
     Ok(Some(resource))

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 use crate::cli::commands::source;
-use crate::Result;
+use nyl_render::Result;
 
 /// Refresh derived information stored in project resources.
 #[derive(Args, Debug)]

@@ -22,13 +22,14 @@ use nyl_state::source::GitSourceResolver;
 use crate::cli::commands::reconcile::RunOutput;
 use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
-use crate::gitops::units::UnitSourceRenderer;
-use crate::gitops::{discover_gitops_inventory, GitOpsInventory};
+use crate::discover_gitops_inventory;
 use crate::orchestration::project::{
     declared, open_store, requested_by as requested_by_default, resolve_environment, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::NylError;
+use nyl_render::gitops::units::UnitSourceRenderer;
+use nyl_render::gitops::GitOpsInventory;
+use nyl_render::NylError;
 
 /// Why a command stopped before the shell produced a report.
 pub enum Stop {
@@ -118,7 +119,7 @@ impl Session {
         let state = self.store(None)?;
         Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
-            .with_worktree_cache(crate::git::CacheLayout::for_project(&self.inventory.project_root).root()))
+            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root()))
     }
 
     /// Wire explicit working-file capture through the shared source shell.
@@ -623,7 +624,7 @@ pub fn detail(unit: &UnitReport) -> String {
                 .collect::<Vec<_>>()
                 .join("; "),
         )
-    } else if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
+    } else if let Some(nyl_core::orchestration::progress::UnitResult::Blocked { reason }) = &unit.result {
         Some(reason.clone())
     } else {
         None
@@ -742,7 +743,8 @@ fn write_field(text: &mut String, label: &str, value: &str, width: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nyl_orchestration::run_report::{ConditionState, UnitResult, UnitState};
+    use nyl_core::orchestration::progress::UnitResult;
+    use nyl_orchestration::run_report::{ConditionState, UnitState};
 
     #[test]
     fn test_structured_finding_fields_align_and_multiline_fallback_is_preserved() {

@@ -3,10 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
-use crate::git::GitManager;
-use crate::gitops::discover_gitops_inventory;
-use crate::gitops::source_locks::{collect_source_locks, replace_lock_commit, resolve_source_locks, LockResolution};
-use crate::{NylError, Result};
+use crate::discover_gitops_inventory;
+use nyl_render::git::GitManager;
+use nyl_render::gitops::source_locks::{
+    collect_source_locks, replace_lock_commit, resolve_source_locks, LockResolution,
+};
+use nyl_render::{NylError, Result};
 
 pub(crate) fn update_locks(
     path: &Path,
@@ -102,7 +104,7 @@ fn plan_lock_edits(project_root: &Path, resolutions: &[LockResolution]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gitops::source_locks::{LockOwner, SourceLock};
+    use nyl_render::gitops::source_locks::{LockOwner, SourceLock};
 
     fn group(name: &str) -> String {
         format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  source:\n    revision: main\n    commit: aaaa\n")

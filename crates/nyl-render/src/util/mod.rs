@@ -38,8 +38,6 @@ pub fn execute_command(_cmd: &str, _args: &[&str]) -> crate::Result<String> {
     Ok(String::new())
 }
 
-pub use nyl_git::{redact_url_credentials, sanitize_url};
-
 /// A repository URL without userinfo, for provenance keys.
 ///
 /// A parseable URL is always re-serialized, so a key does not depend on
@@ -76,37 +74,5 @@ mod tests {
                 "array": ["target"]
             })
         );
-    }
-
-    #[test]
-    fn test_sanitize_url_with_credentials() {
-        assert_eq!(
-            sanitize_url("https://user:token@github.com/repo"),
-            "https://***@github.com/repo"
-        );
-        assert_eq!(
-            sanitize_url("oci://username:password@registry.io/chart"),
-            "oci://***@registry.io/chart"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_url_without_credentials() {
-        assert_eq!(sanitize_url("https://github.com/repo"), "https://github.com/repo");
-        assert_eq!(sanitize_url("oci://registry.io/chart"), "oci://registry.io/chart");
-    }
-
-    #[test]
-    fn test_sanitize_url_with_port() {
-        assert_eq!(
-            sanitize_url("https://user:pass@example.com:8080/path"),
-            "https://***@example.com:8080/path"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_url_no_protocol() {
-        // URLs without protocol are returned as-is
-        assert_eq!(sanitize_url("user@host:/path"), "user@host:/path");
     }
 }

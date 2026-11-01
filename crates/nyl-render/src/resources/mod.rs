@@ -3,8 +3,8 @@
 //! HelmChart, Component, RemoteManifest, Release, Kyverno policies, and the
 //! Kubernetes GitOps control resources (Cluster, DeploymentTarget,
 //! ArgoCDInstance, ApplicationGroup, AppProjectDefinition). The shared
-//! resources and schema machinery of `nyl_core::resources` are re-exported
-//! here, so `crate::resources` names every resource rendering reads.
+//! `gitops.nyl/v1` resources and the schema machinery stay in
+//! `nyl_core::resources`.
 mod argocd_application_field_catalog;
 pub mod catalog;
 mod component;
@@ -15,8 +15,6 @@ mod path_glob;
 mod release;
 pub mod release_inputs;
 mod remote_manifest;
-
-pub use nyl_core::resources::*;
 
 pub use argocd_application_field_catalog::{
     is_supported_application_array_field_path, is_supported_application_field_path,

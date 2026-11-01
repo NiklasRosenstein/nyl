@@ -1,6 +1,6 @@
 /// Integration tests for resource validation and error reporting
-use nyl::resources::{HelmChart, Release};
-use nyl::util::SourceContext;
+use nyl_render::resources::{HelmChart, Release};
+use nyl_render::util::SourceContext;
 use std::path::PathBuf;
 
 #[test]
@@ -18,7 +18,7 @@ spec:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/app.yaml"));
-    let result: nyl::Result<HelmChart> = source_ctx.parse_yaml(yaml);
+    let result: nyl_render::Result<HelmChart> = source_ctx.parse_yaml(yaml);
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -51,7 +51,7 @@ spec:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/nested.yaml"));
-    let result: nyl::Result<HelmChart> = source_ctx.parse_yaml(yaml);
+    let result: nyl_render::Result<HelmChart> = source_ctx.parse_yaml(yaml);
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -79,7 +79,7 @@ spec:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/types.yaml"));
-    let result: nyl::Result<HelmChart> = source_ctx.parse_yaml(yaml);
+    let result: nyl_render::Result<HelmChart> = source_ctx.parse_yaml(yaml);
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -103,7 +103,7 @@ metadata:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/release.yaml"));
-    let result: nyl::Result<Release> = source_ctx.parse_yaml(yaml);
+    let result: nyl_render::Result<Release> = source_ctx.parse_yaml(yaml);
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -133,7 +133,7 @@ spec:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/valid.yaml"));
-    let result: nyl::Result<HelmChart> = source_ctx.parse_yaml(yaml);
+    let result: nyl_render::Result<HelmChart> = source_ctx.parse_yaml(yaml);
 
     // This should succeed
     assert!(result.is_ok(), "Valid manifest should parse successfully");
@@ -156,7 +156,7 @@ spec:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/typo.yaml"));
-    let result: nyl::Result<HelmChart> = source_ctx.parse_yaml(yaml);
+    let result: nyl_render::Result<HelmChart> = source_ctx.parse_yaml(yaml);
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use colored::Colorize;
 
 use crate::cli::table::Cell;
-use crate::kubernetes::ReleaseStatus;
+use nyl_render::kubernetes::ReleaseStatus;
 
 /// Format a timestamp as a human-readable age
 pub fn format_age(timestamp: &DateTime<Utc>) -> String {

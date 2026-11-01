@@ -1273,7 +1273,7 @@ fn project_templates_generate_constrained_projects() {
         ])
         .assert()
         .success();
-    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+    let project = nyl_render::yaml::parse_yaml_value_k8s_compatible(
         &fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"))
             .unwrap(),
     )
@@ -1333,7 +1333,7 @@ fn bare_project_template_derives_least_privilege_defaults() {
         ])
         .assert()
         .success();
-    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+    let project = nyl_render::yaml::parse_yaml_value_k8s_compatible(
         &fs::read_to_string(
             output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads-production.yaml"),
         )
@@ -3219,10 +3219,10 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
     let path = root.join("workloads/api/configmap/api/api.yaml");
     let rendered = fs::read_to_string(&path).unwrap();
     assert!(rendered.contains("config: |\n    first\n    second\n"), "{rendered}");
-    let documents = nyl::yaml::parse_yaml_documents_k8s_compatible(&rendered).unwrap();
+    let documents = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&rendered).unwrap();
     let quoted = documents
         .iter()
-        .map(|document| nyl::yaml::serialize_yaml_document(document).unwrap())
+        .map(|document| nyl_render::yaml::serialize_yaml_document(document).unwrap())
         .collect::<Vec<_>>()
         .join("---\n");
     fs::write(path, &quoted).unwrap();
@@ -4270,7 +4270,7 @@ spec:
         .success();
 
     let root = fixture.path().join("deploy-worktree/production");
-    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+    let project = nyl_render::yaml::parse_yaml_value_k8s_compatible(
         &fs::read_to_string(root.join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")).unwrap(),
     )
     .unwrap();
@@ -6737,7 +6737,7 @@ spec:
 }
 
 fn rendered_config_maps(stdout: &[u8]) -> BTreeMap<String, serde_json::Value> {
-    nyl::yaml::parse_yaml_documents_k8s_compatible(std::str::from_utf8(stdout).unwrap())
+    nyl_render::yaml::parse_yaml_documents_k8s_compatible(std::str::from_utf8(stdout).unwrap())
         .unwrap()
         .into_iter()
         .filter(|document| document["kind"] == "ConfigMap")

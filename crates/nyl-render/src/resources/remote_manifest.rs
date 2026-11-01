@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::API_VERSION;
 use crate::resources::ObjectMetadata;
+use nyl_core::constants::API_VERSION;
 use nyl_core::{CoreError, Result};
 
 /// RemoteManifest specification

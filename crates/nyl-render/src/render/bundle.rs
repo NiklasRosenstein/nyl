@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use glob::Pattern;
 
 use super::{best_effort_parse_yaml_documents, RenderProvenance, RenderResource};
-use crate::resources::release_inputs::InputDeclaration;
 use crate::resources::{extract_release, Release};
 use crate::template::{TemplateContext, TemplateEngine};
 use crate::{NylError, Result};
+use nyl_core::bindings::InputDeclaration;
 use nyl_core::template_syntax::has_template_syntax;
 
 #[derive(Debug)]

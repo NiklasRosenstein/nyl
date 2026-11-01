@@ -7,9 +7,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use nyl::resources::environment::Environment;
-use nyl::resources::units::UnitEnvelope;
-use nyl::resources::{parse_gitops_resource, Release};
+use nyl_core::resources::environment::Environment;
+use nyl_core::resources::units::UnitEnvelope;
+use nyl_render::resources::{parse_gitops_resource, Release};
 use nyl_units::command::{CommandSpec, KIND_COMMAND};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -72,7 +72,7 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
                 Release::from_value(&document)
                     .map(|_| ())
                     .map_err(|error| error.to_string())
-            } else if nyl::resources::gitops_resource_kind(&document).is_some() {
+            } else if nyl_render::resources::gitops_resource_kind(&document).is_some() {
                 parse_gitops_resource(&document)
                     .map(|_| ())
                     .map_err(|error| error.to_string())

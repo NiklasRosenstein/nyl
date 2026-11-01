@@ -3,7 +3,7 @@ use reqwest::Url;
 use serde_json::Value;
 
 use super::{error, UpsertArgs};
-use crate::Result;
+use nyl_render::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(super) enum Provider {

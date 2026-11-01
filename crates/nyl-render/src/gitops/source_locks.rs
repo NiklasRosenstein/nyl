@@ -195,7 +195,7 @@ fn collect_unit_locks(
             let Some(value) = spec.pointer(&pointer).filter(|value| value.get("commit").is_some()) else {
                 continue;
             };
-            let source: crate::resources::GitSource = serde_json::from_value(value.clone())
+            let source: nyl_core::resources::GitSource = serde_json::from_value(value.clone())
                 .map_err(|error| NylError::config(format!("{} {} {pointer}: {error}", unit.envelope.kind, name)))?;
             let mut path = vec!["spec".to_owned()];
             path.extend(
@@ -251,7 +251,7 @@ fn collect_git_source(
     inventory: &GitOpsInventory,
     owner: LockOwner,
     (source_path, document_index, raw_document): (&std::path::Path, usize, &str),
-    source: crate::resources::GitSource,
+    source: nyl_core::resources::GitSource,
 ) -> Result<Option<SourceLock>> {
     let (Some(revision), Some(commit)) = (&source.revision, &source.commit) else {
         return Ok(None);

@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::constants::API_VERSION;
+use nyl_core::constants::API_VERSION;
 
 /// Reference to a Helm chart
 ///
