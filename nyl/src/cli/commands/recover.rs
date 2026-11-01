@@ -25,7 +25,7 @@ use nyl_orchestration::shell::run::{LifecycleOptions, RunMode};
 use super::state::{render, Common};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::placeholder_environment;
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 /// Import a broken lease's run, clear a unit's condition, or accept a checkpointed result.
 #[derive(Args, Debug)]

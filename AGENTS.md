@@ -138,7 +138,7 @@ Reviewers must check the boundary explicitly:
 /
 ├── Cargo.toml         # Workspace: shared version, dependencies, and profiles
 ├── crates/
-│   ├── nyl-core/      # Resource and state types, schemas, digests, orchestration traits (no effects)
+│   ├── nyl-core/      # Shared gitops.nyl resources, unit fields, schema catalogue, state types, digests, orchestration traits (no effects)
 │   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
@@ -154,9 +154,10 @@ Reviewers must check the boundary explicitly:
 └── .github/          # CI/CD workflows
 ```
 
-The `nyl` package re-exports the `nyl-render` modules and `nyl_core::resources`,
-so integration tests and benches keep using `nyl::…` paths. None of the crates is
-published to crates.io; Nyl ships as release binaries and container images.
+Code, tests, and benches import items from the crate that owns them
+(`nyl_render::…`, `nyl_core::…`, `nyl_units::…`); no crate re-exports another's
+modules. None of the crates is published to crates.io; Nyl ships as release
+binaries and container images.
 
 ## Development Workflow
 
@@ -406,7 +407,7 @@ src/
 ├── template/     # Template engine (MiniJinja wrapper)
 ├── generator/    # Manifest generation pipeline
 ├── kubernetes/   # Kubernetes client (kube-rs)
-├── resources/    # HelmChart, Component resources
+├── resources/    # Kubernetes rendering and GitOps resources and their catalogue
 ├── git/          # Git repository management
 ├── gitops/       # Kubernetes GitOps discovery, compilation, layout, and ownership
 ├── helm/         # Helm chart processing
@@ -490,7 +491,10 @@ src/
 4. Document it in the Kubernetes Rendering section, `nyl/book/src/content/docs/kubernetes-rendering/`
 
 ### Adding a New Resource Type
-1. Define resource struct in `crates/nyl-core/src/resources/`
+1. Define the resource struct in the crate that owns it: Kubernetes rendering and
+   Kubernetes GitOps resources in `crates/nyl-render/src/resources/` (with its
+   descriptor and example in `catalog.rs`), resources orchestration also reads
+   in `crates/nyl-core/src/resources/`, and unit kinds in `crates/nyl-units/`
 2. Implement `Serialize`, `Deserialize` traits
 3. Add parsing logic in `crates/nyl-render/src/config/`
 4. Add validation in the resource type's `validate` method

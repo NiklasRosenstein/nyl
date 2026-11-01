@@ -1,6 +1,6 @@
 use chrono::Utc;
-use nyl::kubernetes::GroupVersionKind;
-use nyl::kubernetes::{ReleaseInfo, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey};
+use nyl_render::kubernetes::GroupVersionKind;
+use nyl_render::kubernetes::{ReleaseInfo, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -19,14 +19,14 @@ impl MockReleaseStorage {
 
 #[async_trait::async_trait]
 impl ReleaseStorage for MockReleaseStorage {
-    async fn save_release(&self, release: &ReleaseState) -> nyl::Result<()> {
+    async fn save_release(&self, release: &ReleaseState) -> nyl_render::Result<()> {
         let mut store = self.releases.lock().unwrap();
         let key = (
             format!("{}/{}", release.release_namespace, release.release_name),
             release.revision,
         );
         if store.contains_key(&key) {
-            return Err(nyl::NylError::Kubernetes(format!(
+            return Err(nyl_render::NylError::Kubernetes(format!(
                 "revision {} already exists",
                 release.revision
             )));
@@ -35,14 +35,14 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(())
     }
 
-    async fn complete_release(&self, release: &ReleaseState) -> nyl::Result<()> {
+    async fn complete_release(&self, release: &ReleaseState) -> nyl_render::Result<()> {
         let mut store = self.releases.lock().unwrap();
         let key = (
             format!("{}/{}", release.release_namespace, release.release_name),
             release.revision,
         );
         if !store.contains_key(&key) {
-            return Err(nyl::NylError::Config(format!(
+            return Err(nyl_render::NylError::Config(format!(
                 "revision {} not found",
                 release.revision
             )));
@@ -51,7 +51,11 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(())
     }
 
-    async fn get_latest_release(&self, release_name: &str, namespace: &str) -> nyl::Result<Option<ReleaseState>> {
+    async fn get_latest_release(
+        &self,
+        release_name: &str,
+        namespace: &str,
+    ) -> nyl_render::Result<Option<ReleaseState>> {
         let revisions = self.list_revisions(release_name, namespace).await?;
         if revisions.is_empty() {
             return Ok(None);
@@ -66,13 +70,13 @@ impl ReleaseStorage for MockReleaseStorage {
         release_name: &str,
         namespace: &str,
         revision: u32,
-    ) -> nyl::Result<Option<ReleaseState>> {
+    ) -> nyl_render::Result<Option<ReleaseState>> {
         let store = self.releases.lock().unwrap();
         let key = format!("{namespace}/{release_name}");
         Ok(store.get(&(key, revision)).cloned())
     }
 
-    async fn list_revisions(&self, release_name: &str, namespace: &str) -> nyl::Result<Vec<u32>> {
+    async fn list_revisions(&self, release_name: &str, namespace: &str) -> nyl_render::Result<Vec<u32>> {
         let store = self.releases.lock().unwrap();
         let key_prefix = format!("{namespace}/{release_name}");
         let mut revisions: Vec<u32> = store
@@ -91,7 +95,7 @@ impl ReleaseStorage for MockReleaseStorage {
         revision: u32,
         status: ReleaseStatus,
         error: Option<String>,
-    ) -> nyl::Result<()> {
+    ) -> nyl_render::Result<()> {
         let mut store = self.releases.lock().unwrap();
         let key = format!("{namespace}/{release_name}");
         if let Some(release) = store.get_mut(&(key, revision)) {
@@ -104,7 +108,7 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(())
     }
 
-    async fn list_releases(&self, namespace: Option<&str>) -> nyl::Result<Vec<ReleaseInfo>> {
+    async fn list_releases(&self, namespace: Option<&str>) -> nyl_render::Result<Vec<ReleaseInfo>> {
         use std::collections::HashMap;
 
         let store = self.releases.lock().unwrap();
@@ -154,14 +158,14 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(result)
     }
 
-    async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> nyl::Result<()> {
+    async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> nyl_render::Result<()> {
         let mut store = self.releases.lock().unwrap();
         let key = (format!("{namespace}/{release_name}"), revision);
         store.remove(&key);
         Ok(())
     }
 
-    async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> nyl::Result<u32> {
+    async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> nyl_render::Result<u32> {
         let revisions = self.list_revisions(release_name, namespace).await?;
         let count = revisions.len() as u32;
 

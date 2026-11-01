@@ -29,10 +29,10 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
-| `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-core` | The resources orchestration reads (GitRepository, Environment, EnvironmentGroup, the fields every unit shares), the resource catalogue machinery, state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
 | `nyl-collections` | Domain resource rules shared by rendering and orchestration: schema validation and defaulting, identity, membership, ownership claims, the reference closure, bundle assembly, transition rules ([domain resources](domain-resources.md#code-homes)) | Git, processes, network, clock, environment, and every Nyl crate except `nyl-core` |
 | `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
-| `nyl-render` | Today's Kubernetes rendering and Kubernetes GitOps, unchanged in behavior | Orchestration crates |
+| `nyl-render` | Kubernetes rendering and Kubernetes GitOps, including their resources (Release, HelmChart, Component, RemoteManifest, Cluster, DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) and their catalogue descriptors | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
 | `nyl-units` | The built-in unit kinds, one module each holding the kind's declaration, validation, schema descriptor, and `Driver` implementation; the driver registry and the process runner with masking; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` and `nyl-collections` |
@@ -40,8 +40,9 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
   the binary, `cargo install --path nyl`, and the release artifacts unchanged.
-  Its library re-exports the `nyl-render` modules and `nyl_core::resources`, so
-  integration tests and benches use `nyl::…` paths.
+  Code, tests, and benches import items from the crate that owns them; no
+  crate re-exports another's modules, so moving an item updates its importers
+  in the same change.
 - No crate is published to crates.io. Nyl ships as release binaries and
   container images, so crate boundaries can move without a public library
   API to keep stable.
@@ -63,6 +64,12 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
   split across crates. `nyl-render` never depends on `nyl-units`: the CLI
   passes the assembled resource catalogue into discovery, rendering, editor
   annotations, and schema export.
+- Each crate owns the resources of its layer and contributes their
+  descriptors to that catalogue: `nyl-core` the `gitops.nyl/v1` resources
+  orchestration reads, `nyl-render` the Kubernetes rendering and Kubernetes
+  GitOps resources, and `nyl-units` the unit kinds. `nyl-core` knows no
+  Kubernetes resource model; it keeps only the API group constants and the
+  deprecated API versions that validate every envelope.
 - `nyl-git` exists so that state pushes and `publish-tree` share one
   transport and one credential configuration without `nyl-state` depending
   on rendering.

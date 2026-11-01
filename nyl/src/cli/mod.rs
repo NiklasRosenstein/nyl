@@ -11,7 +11,7 @@ pub(crate) mod tree_progress;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::Result;
+use nyl_render::Result;
 
 /// When to use colored output
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -260,7 +260,7 @@ impl Cli {
             Commands::Hold(args) => commands::hold::run_hold(&args, wiring),
             Commands::Resume(args) => commands::hold::run_resume(&args, wiring),
             _ => {
-                return Err(crate::NylError::config(
+                return Err(nyl_render::NylError::config(
                     "only plan, reconcile, status, verify, recover, teardown, hold, resume, get, state, and lease run in-process",
                 ))
             }

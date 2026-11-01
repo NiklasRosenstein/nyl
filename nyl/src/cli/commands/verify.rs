@@ -26,7 +26,7 @@ use nyl_state::git::CommitAuthor;
 use super::reconcile::RunOutput;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::Result;
+use nyl_render::Result;
 
 /// Verify an environment's current receipts.
 #[derive(Args, Debug, Clone)]

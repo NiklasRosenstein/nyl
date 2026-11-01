@@ -19,7 +19,7 @@ use nyl_orchestration::shell::lifecycle;
 
 use super::state::{requested, run, Common};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 /// Freeze a unit.
 #[derive(Args, Debug)]

@@ -14,7 +14,7 @@ use nyl_orchestration::run_report::{ExitCategory, ReportKind};
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::Result;
+use nyl_render::Result;
 
 /// Plan an environment's run.
 #[derive(Args, Debug, Clone)]

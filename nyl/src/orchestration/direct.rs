@@ -1,10 +1,8 @@
 //! Read-only preparation of a unit from the current worktree or a source revision.
 //! Shared by direct artifact builds and operator tools using a worktree spec.
-use crate::gitops::units::{render_direct_unit, resolve_effective_environment};
-use crate::gitops::{discover_gitops_inventory, GitOpsInventory};
+use crate::discover_gitops_inventory;
 use crate::orchestration::project::{open_store, resolve_environment};
 use crate::orchestration::run::Wiring;
-use crate::{NylError, Result};
 use nyl_core::orchestration::driver::{ResolutionContext, SourceRoot};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, SourceRepository, SourceResolver, StateStore};
@@ -14,6 +12,9 @@ use nyl_orchestration::rules::{
     references::{resolve_unit, ReferenceView},
     sources,
 };
+use nyl_render::gitops::units::{render_direct_unit, resolve_effective_environment};
+use nyl_render::gitops::GitOpsInventory;
+use nyl_render::{NylError, Result};
 use nyl_state::source::GitSourceResolver;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -71,7 +72,7 @@ pub fn prepare(
             .worktree(&SourceRepository::This, &commit, &tree)
             .map_err(config)?;
         let project = entry.project_root.strip_prefix(&entry.worktree_root).map_err(config)?;
-        let located = crate::util::project_path::locate_checkout_project(
+        let located = nyl_render::util::project_path::locate_checkout_project(
             &tree,
             project,
             &[],
@@ -170,7 +171,7 @@ pub fn prepare(
         .resources
         .values()
         .filter_map(|resource| match &resource.resource {
-            Some(crate::resources::GitOpsResource::GitRepository(repository)) => {
+            Some(nyl_render::resources::GitOpsResource::GitRepository(repository)) => {
                 Some((repository.metadata.name.clone(), repository.spec.repo_url.clone()))
             }
             _ => None,
@@ -353,7 +354,7 @@ pub fn snapshot_entry(
 ) -> Result<()> {
     let original = prepared.worktree.clone();
     let repository = git2::Repository::discover(&original).map_err(config)?;
-    let cache = crate::git::CacheLayout::for_project(&prepared.inventory.project_root);
+    let cache = nyl_render::git::CacheLayout::for_project(&prepared.inventory.project_root);
     let (files, changed) =
         nyl_state::source::worktree::visible_files(&repository, Some(cache.root())).map_err(config)?;
     let destination = prepared.workspace.path().join("worktree-snapshot");

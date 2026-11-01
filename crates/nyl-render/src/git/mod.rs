@@ -191,7 +191,7 @@ impl GitManager {
     pub fn resolve_ref_cached(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
         if !self.bare_repos.contains_key(url) && !self.cache.bare_repo_path(url).exists() {
             return Err(GitError::NotCached {
-                url: crate::util::sanitize_url(url),
+                url: nyl_git::sanitize_url(url),
             });
         }
         self.resolve_ref_with_freshness(url, git_ref, subpath, Freshness::Cached)
@@ -266,7 +266,7 @@ impl GitManager {
                     }
                     if freshness == Freshness::Cached && matches!(resolve_error, GitError::RefNotFound { .. }) {
                         return Err(GitError::NotCachedRef {
-                            url: crate::util::sanitize_url(url),
+                            url: nyl_git::sanitize_url(url),
                             ref_name: git_ref.to_string(),
                         });
                     }
@@ -281,7 +281,7 @@ impl GitManager {
             if !repo.has_object(oid) {
                 if freshness == Freshness::Cached {
                     return Err(GitError::NotCachedRef {
-                        url: crate::util::sanitize_url(url),
+                        url: nyl_git::sanitize_url(url),
                         ref_name: git_ref.to_string(),
                     });
                 }
@@ -349,7 +349,7 @@ impl GitManager {
     pub fn branch_head(&mut self, url: &str, branch: &str, refresh: bool) -> Result<Option<String>> {
         if !refresh && !self.bare_repos.contains_key(url) && !self.cache.bare_repo_path(url).exists() {
             return Err(GitError::NotCached {
-                url: crate::util::sanitize_url(url),
+                url: nyl_git::sanitize_url(url),
             });
         }
         let bare_repo = self.get_or_create_bare_repo(url)?;

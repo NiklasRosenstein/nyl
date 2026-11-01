@@ -12,13 +12,13 @@ use std::path::{Component, Path, PathBuf};
 use git2::{Repository, Status, StatusOptions};
 
 use crate::config::ProjectConfig;
-use crate::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::resources::{
     parse_gitops_resource, parse_gitops_resource_identity, GitOpsResource, GitOpsResourceIdentity, GitOpsResourceKind,
 };
 use crate::util::project_path::ProjectPaths;
 use crate::util::SourceContext;
 use crate::{NylError, Result};
+use nyl_core::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 
 /// A stable key for a discovered compiler resource.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,15 +92,15 @@ impl GitOpsInventory {
     /// publication destination because source checkouts never write to it.
     pub fn resolve_git_source(
         &self,
-        source: &crate::resources::GitSource,
-    ) -> Result<(crate::resources::ReadGitRepository, Option<PathBuf>)> {
+        source: &nyl_core::resources::GitSource,
+    ) -> Result<(nyl_core::resources::ReadGitRepository, Option<PathBuf>)> {
         source.validate_repository("source")?;
         if let Some(repository) = &source.repository {
             return Ok((repository.clone(), None));
         }
         let (repository, path) = self.resolve_git_repository(source.repository_ref.as_ref(), None)?;
         Ok((
-            crate::resources::ReadGitRepository {
+            nyl_core::resources::ReadGitRepository {
                 repo_url: repository.repo_url,
             },
             path,
@@ -114,9 +114,9 @@ impl GitOpsInventory {
     /// Read sources use [`Self::resolve_git_source`] instead.
     pub fn resolve_git_repository(
         &self,
-        reference: Option<&crate::resources::LocalReference>,
-        inline: Option<&crate::resources::InlineGitRepository>,
-    ) -> Result<(crate::resources::InlineGitRepository, Option<PathBuf>)> {
+        reference: Option<&nyl_core::resources::LocalReference>,
+        inline: Option<&nyl_core::resources::InlineGitRepository>,
+    ) -> Result<(nyl_core::resources::InlineGitRepository, Option<PathBuf>)> {
         if let Some(repository) = inline {
             return Ok((repository.clone(), None));
         }
@@ -128,7 +128,7 @@ impl GitOpsInventory {
             unreachable!("inventory kind key and resource variant must agree");
         };
         Ok((
-            crate::resources::InlineGitRepository {
+            nyl_core::resources::InlineGitRepository {
                 repo_url: repository.spec.repo_url.clone(),
                 publish_url: repository.spec.publish_url.clone(),
             },
@@ -477,7 +477,7 @@ fn discover_document(
             let (api_version, kind, name) = scan_static_envelope_fields(document);
             serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
         });
-    crate::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
+    nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
         NylError::config(format!(
             "{} document {}: {error}",
             relative_path.display(),
@@ -841,12 +841,12 @@ spec:
         let (temporary, _) = project();
         fs::write(temporary.path().join("repository.yaml"), "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata: {name: shared}\nspec: {repoURL: 'https://example.invalid/read.git', publishURL: 'ssh://git@example.invalid/write.git'}\n").unwrap();
         let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
-        let reference = crate::resources::LocalReference {
+        let reference = nyl_core::resources::LocalReference {
             name: "shared".to_owned(),
         };
-        let source = crate::resources::GitSource {
+        let source = nyl_core::resources::GitSource {
             repository_ref: Some(reference.clone()),
-            ..crate::resources::GitSource::default()
+            ..nyl_core::resources::GitSource::default()
         };
         let (read, source_path) = inventory.resolve_git_source(&source).unwrap();
         assert_eq!(
@@ -859,7 +859,7 @@ spec:
             write.publish_url.as_deref(),
             Some("ssh://git@example.invalid/write.git")
         );
-        let invalid: crate::resources::GitSource = serde_json::from_value(serde_json::json!({
+        let invalid: nyl_core::resources::GitSource = serde_json::from_value(serde_json::json!({
             "repository": {"repoURL": "https://user:password@example.invalid/read.git"},
         }))
         .unwrap();

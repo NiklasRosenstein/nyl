@@ -21,16 +21,17 @@ use nyl_orchestration::shell::inspect::{self, GetValue};
 use serde_json::{json, Value};
 
 use crate::cli::table::{render as render_table, Cell};
-use crate::gitops::units::discover_units;
-use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
+use crate::discover_gitops_inventory;
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{
     cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, styled_state_cell, write_finding, Session,
     Stop,
 };
-use crate::resources::{GitOpsResource, GitOpsResourceKind};
-use crate::{NylError, Result};
+use nyl_render::gitops::units::discover_units;
+use nyl_render::gitops::{DiscoveredGitOpsResource, GitOpsInventory};
+use nyl_render::resources::{GitOpsResource, GitOpsResourceKind};
+use nyl_render::{NylError, Result};
 
 /// Inspect GitOps resources declared in the project, or an environment's state.
 #[derive(Args, Debug)]
@@ -540,7 +541,7 @@ fn lines(items: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
 }
 
 fn yaml(value: &Value) -> Result<String> {
-    crate::yaml::serialize_yaml_value(value).map_err(NylError::YamlEmit)
+    nyl_render::yaml::serialize_yaml_value(value).map_err(NylError::YamlEmit)
 }
 
 /// `nyl get units` without `-e`: unit declarations and the environments selecting each.
@@ -663,7 +664,7 @@ fn effective_clusters(
     stderr: &mut String,
 ) -> Result<()> {
     for resource in resources {
-        let effective = crate::gitops::resolve_cluster_contract(inventory, &resource.identity.name)?;
+        let effective = nyl_render::gitops::resolve_cluster_contract(inventory, &resource.identity.name)?;
         if effective.capabilities_source != resource.identity.name || effective.schemas_source != resource.identity.name
         {
             let _ = writeln!(
@@ -790,7 +791,11 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
     }
 }
 
-fn environment_row(name: &str, environment: &crate::resources::environment::Environment, file: String) -> Vec<String> {
+fn environment_row(
+    name: &str,
+    environment: &nyl_core::resources::environment::Environment,
+    file: String,
+) -> Vec<String> {
     let state = &environment.spec.state;
     let repository = state
         .repository_ref

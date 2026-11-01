@@ -9,6 +9,8 @@ use crate::{
         DEFAULT_APPLY_CONCURRENCY,
     },
     cli::commands::cluster::load_target_kube_config,
+};
+use nyl_render::{
     config::ProjectConfig,
     kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
     NylError, Result,
@@ -47,7 +49,7 @@ pub struct RollbackArgs {
     /// Maximum number of release revisions to keep; older revisions are deleted
     /// after this rollback. 0 keeps every revision. Overrides `[release]
     /// history_limit` in nyl.toml.
-    #[arg(long, value_name = "N", value_parser = crate::config::parse_release_history_limit)]
+    #[arg(long, value_name = "N", value_parser = nyl_render::config::parse_release_history_limit)]
     pub history_limit: Option<u32>,
 
     /// Prune resources whose Argo CD sync option is `Prune=confirm` (see `nyl apply --confirm-prune`).
@@ -73,7 +75,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let target = resolve_rollback_target(&storage, &args.name, &args.namespace, args.revision).await?;
 
     // Parse the stored manifest back into individual documents.
-    let manifests = crate::yaml::parse_yaml_documents_k8s_compatible(&target.manifest)
+    let manifests = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&target.manifest)
         .map_err(|e| NylError::Config(format!("Failed to parse stored manifest for rollback: {}", e)))?;
     if manifests.is_empty() {
         return Err(NylError::Config(format!(
@@ -204,8 +206,8 @@ async fn resolve_rollback_target(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::kubernetes::{ReleaseInfo, ReleaseStatus};
     use chrono::Utc;
+    use nyl_render::kubernetes::{ReleaseInfo, ReleaseStatus};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -423,7 +425,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_collect_live_state_spans_failed_revision_to_last_deployed() {
         use crate::cli::commands::apply::collect_live_state;
-        use crate::kubernetes::{GroupVersionKind, ResourceKey};
+        use nyl_render::kubernetes::{GroupVersionKind, ResourceKey};
 
         let key = |name: &str| ResourceKey {
             gvk: GroupVersionKind {

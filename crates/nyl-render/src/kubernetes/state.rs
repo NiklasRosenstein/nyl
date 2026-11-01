@@ -11,11 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
-use crate::{
-    constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE},
-    kubernetes::ResourceKey,
-    NylError, Result,
-};
+use crate::{kubernetes::ResourceKey, NylError, Result};
+use nyl_core::constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE};
 
 /// Status of a release
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

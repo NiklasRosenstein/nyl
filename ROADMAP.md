@@ -150,7 +150,7 @@ recovery; they are not implied by graph export.
 
 ## Architectural frame
 
-Each built-in unit kind lives in one module of the `nyl-units` crate: its declaration, validation, schema descriptor, and driver, so a kind's rules are not split across crates. The CLI combines the unit descriptors with core resource descriptors for schema and editor workflows; drivers own native execution and orchestration remains generic.
+Each built-in unit kind lives in one module of the `nyl-units` crate: its declaration, validation, schema descriptor, and driver, so a kind's rules are not split across crates. Resources likewise live with the layer that owns them: `nyl-core` holds the `gitops.nyl/v1` resources orchestration reads, and `nyl-render` the Kubernetes rendering and Kubernetes GitOps resources. The CLI combines the descriptors of all three into one catalogue for discovery, rendering, schema, and editor workflows; drivers own native execution and orchestration remains generic.
 
 ### Layers
 
@@ -755,7 +755,7 @@ reasons to delay independent work.
 
 - [Nyl rendering session and bundle](crates/nyl-render/src/render/session.rs)
 - [Nyl components](crates/nyl-render/src/components/mod.rs)
-- [Kubernetes GitOps resource model](crates/nyl-core/src/resources/gitops.rs)
+- [Kubernetes GitOps resource model](crates/nyl-render/src/resources/gitops.rs)
 - [Source-lock updates](nyl/src/cli/commands/source.rs)
 - [Rendered-file ownership reconciliation](crates/nyl-render/src/gitops/reconcile.rs)
 - [Rendered-tree publication](nyl/src/cli/commands/publish_tree.rs)

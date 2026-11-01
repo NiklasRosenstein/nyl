@@ -18,7 +18,7 @@ use nyl_core::orchestration::state::{AttestationResult, Operation};
 use serde::Serialize;
 
 use crate::transition::TransitionSummary;
-pub use nyl_core::orchestration::progress::UnitResult;
+use nyl_core::orchestration::progress::UnitResult;
 
 /// API version of every orchestration report.
 pub const REPORT_API_VERSION: &str = "gitops.nyl/v1";

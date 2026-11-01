@@ -10,21 +10,18 @@
 //!   replaces the Release default whole.
 //!
 //! Precedence, type checks, and aggregated issues are the shared resolver
-//! [`crate::bindings`]; reading the sources, which touches files and Git, is
+//! [`nyl_core::bindings`]; reading the sources, which touches files and Git, is
 //! its provider in the rendering crate. Everything here is a pure function of
 //! the declared values.
 
 use std::collections::BTreeMap;
 
-pub use crate::bindings::{
-    json_type_name, validate_input_name, BindingKind, FileInputSource, GitInputSource, InputBinding, InputDeclaration,
-    InputType, PromotionInputSource, PublicationInputSource, UnitInputSource,
-};
-use crate::{CoreError, Result};
+use nyl_core::bindings::{validate_input_name, InputBinding, InputDeclaration};
+use nyl_core::{CoreError, Result};
 
 /// Validate the static form of `spec.inputs`.
 pub fn validate_declarations(declarations: &BTreeMap<String, InputDeclaration>) -> Result<()> {
-    crate::bindings::validate_declarations_at("spec.inputs", declarations)
+    nyl_core::bindings::validate_declarations_at("spec.inputs", declarations)
 }
 
 /// A Release's identity on a target: `<applicationGroup>/<release>`.
@@ -157,5 +154,53 @@ mod tests {
         assert_eq!(key.group, "platform");
         assert_eq!(key.to_string(), "platform/web");
         assert!(ReleaseKey::parse("platform/web/x").is_err());
+    }
+    #[test]
+    fn test_from_git_requires_a_repository_revision_and_full_commit() {
+        let commit = "3f1c9a0000000000000000000000000000000000";
+        let cases = [
+            (
+                json!({"revision": "main", "commit": commit, "path": "a.json"}),
+                "Exactly one of",
+            ),
+            (
+                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "3f1c", "path": "a.json"}),
+                "40-character lowercase hexadecimal",
+            ),
+            (
+                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": commit.to_uppercase(), "path": "a.json"}),
+                "40-character lowercase hexadecimal",
+            ),
+            (
+                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "a".repeat(64), "path": "a.json"}),
+                "40-character lowercase hexadecimal",
+            ),
+            (
+                json!({"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "../a.json"}),
+                "fromGit.path",
+            ),
+        ];
+        for (source, expected) in cases {
+            let bindings: ReleaseInputBindings =
+                serde_json::from_value(json!({"g/r": {"image": {"fromGit": source.clone()}}})).unwrap();
+            let error = validate_bindings(&bindings).unwrap_err().to_string();
+            assert!(error.contains(expected), "{source}: {error}");
+        }
+    }
+    #[test]
+    fn test_from_publication_paths_stay_inside_the_prefix() {
+        for (source, expected) in [
+            (json!({"path": "../other/state.json"}), "fromPublication.path"),
+            (json!({"path": "/state.json"}), "fromPublication.path"),
+            (
+                json!({"path": "state.json", "carryFileFromWorktree": "build/./images.json"}),
+                "fromPublication.carryFileFromWorktree",
+            ),
+        ] {
+            let bindings: ReleaseInputBindings =
+                serde_json::from_value(json!({"g/r": {"image": {"fromPublication": source.clone()}}})).unwrap();
+            let error = validate_bindings(&bindings).unwrap_err().to_string();
+            assert!(error.contains(expected), "{source}: {error}");
+        }
     }
 }

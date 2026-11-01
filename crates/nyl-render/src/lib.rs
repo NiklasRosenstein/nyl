@@ -31,14 +31,13 @@ pub mod helm;
 pub mod kubernetes;
 pub mod postprocess;
 pub mod render;
+pub mod resources;
 pub mod secrets;
 pub mod template;
 pub mod util;
 #[doc(hidden)]
 pub mod validation;
 pub mod yaml;
-
-pub use nyl_core::{constants, resources};
 
 // Re-export commonly used types
 pub use error::{NylError, Result};

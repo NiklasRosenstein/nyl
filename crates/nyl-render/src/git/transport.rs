@@ -4,7 +4,7 @@
 
 use git2::{Oid, Repository};
 
-pub use nyl_git::GitAuth;
+use nyl_git::GitAuth;
 
 use super::error::Result;
 

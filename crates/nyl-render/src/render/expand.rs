@@ -8,7 +8,6 @@ use super::cache::RenderCache;
 use super::RenderResource;
 use crate::components::value_imports::{apply_value_imports, ComponentContract, ImportScope};
 use crate::config::ProjectConfig;
-use crate::constants::{API_VERSION, API_VERSION_COMPONENTS};
 use crate::helm::{HelmChartResolver, HelmTemplateExecutor};
 use crate::resources::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef,
@@ -16,6 +15,7 @@ use crate::resources::{
 };
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
+use nyl_core::constants::{API_VERSION, API_VERSION_COMPONENTS};
 
 /// Filter resources by source kind (before expansion)
 #[cfg(test)]
@@ -107,8 +107,8 @@ pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
     let nyl_api_versions = [
         API_VERSION,
         API_VERSION_COMPONENTS,
-        crate::constants::API_VERSION_GITOPS,
-        crate::constants::API_VERSION_K8S_GITOPS,
+        nyl_core::constants::API_VERSION_GITOPS,
+        nyl_core::constants::API_VERSION_K8S_GITOPS,
         "nyl.niklasrosenstein.github.com/v1",
     ];
 
@@ -219,7 +219,7 @@ pub(crate) async fn generate_render_resource(
     generated
         .into_iter()
         .map(|value| {
-            crate::resources::schema::validate_resource_api_with_catalog(&value, &config.resource_catalogue.0)
+            nyl_core::resources::schema::validate_resource_api_with_catalog(&value, &config.resource_catalogue.0)
                 .map_err(|error| {
                     NylError::from(error).with_render_provenance(provenance.resource(&value).to_string())
                 })?;
@@ -294,7 +294,7 @@ pub(crate) async fn generate_resource(
     gitops_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
-    crate::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.0)?;
+    nyl_core::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.0)?;
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
@@ -532,7 +532,7 @@ async fn fetch_single_remote_url(
     render_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
-    let sanitized_url = crate::util::sanitize_url(url);
+    let sanitized_url = nyl_git::sanitize_url(url);
     let request = crate::render::artifact::ArtifactRequest::RemoteManifest { url: url.to_owned() };
     if let Some(artifact) = artifact_resolver.lookup(&request)? {
         let bytes = std::fs::read(&artifact.path)?;
@@ -736,7 +736,7 @@ pub(crate) fn add_parent_annotations(
     parent_name: &str,
     parent_namespace: Option<&str>,
 ) {
-    use crate::constants::{
+    use nyl_core::constants::{
         ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
     };
 

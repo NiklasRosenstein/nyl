@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 
-use crate::{
+use nyl_render::{
     kubernetes::{GroupVersionKind, KubeClient, ResourceKey},
     NylError, Result,
 };
@@ -161,9 +161,9 @@ fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kubernetes::{ApplyOutcome, GroupVersionKind, MockKubeClient};
     use async_trait::async_trait;
     use kube::api::DynamicObject;
+    use nyl_render::kubernetes::{ApplyOutcome, GroupVersionKind, MockKubeClient};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -408,7 +408,7 @@ mod tests {
         let mut duplicates = HashMap::new();
         duplicates.insert(
             ResourceKey {
-                gvk: crate::kubernetes::GroupVersionKind {
+                gvk: nyl_render::kubernetes::GroupVersionKind {
                     group: String::new(),
                     version: "v1".to_string(),
                     kind: "ServiceAccount".to_string(),
@@ -423,7 +423,7 @@ mod tests {
             .await
             .unwrap();
         assert!(adjusted.contains_key(&ResourceKey {
-            gvk: crate::kubernetes::GroupVersionKind {
+            gvk: nyl_render::kubernetes::GroupVersionKind {
                 group: String::new(),
                 version: "v1".to_string(),
                 kind: "ServiceAccount".to_string(),

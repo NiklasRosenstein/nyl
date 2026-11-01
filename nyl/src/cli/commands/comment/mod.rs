@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
-use crate::{NylError, Result};
 use context::{Context, Provider};
+use nyl_render::{NylError, Result};
 
 /// Manage pull request and merge request comments.
 #[derive(Debug, Args)]

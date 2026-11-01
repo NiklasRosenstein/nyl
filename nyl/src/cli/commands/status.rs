@@ -15,7 +15,7 @@ use nyl_orchestration::run_report::ReportKind;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, Session, Stop};
-use crate::Result;
+use nyl_render::Result;
 
 /// Show an environment's state.
 #[derive(Args, Debug, Clone)]

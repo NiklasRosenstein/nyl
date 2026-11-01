@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use colored::Colorize;
 
-use crate::{
+use nyl_render::{
     kubernetes::{prune::PruneDecision, ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey},
     Result,
 };

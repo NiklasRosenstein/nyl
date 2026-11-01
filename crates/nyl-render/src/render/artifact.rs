@@ -61,15 +61,15 @@ impl ArtifactRequest {
                 repository,
                 name,
                 version,
-            } => format!("{}#{}@{}", crate::util::sanitize_url(repository), name, version),
-            Self::RemoteManifest { url } => crate::util::sanitize_url(url),
+            } => format!("{}#{}@{}", nyl_git::sanitize_url(repository), name, version),
+            Self::RemoteManifest { url } => nyl_git::sanitize_url(url),
             Self::GitSource {
                 repository,
                 revision,
                 commit,
                 subpath,
             } => {
-                let mut value = format!("{}@{}", crate::util::sanitize_url(repository), revision);
+                let mut value = format!("{}@{}", nyl_git::sanitize_url(repository), revision);
                 if let Some(commit) = commit {
                     value.push_str(" (commit ");
                     value.push_str(commit);
@@ -85,7 +85,7 @@ impl ArtifactRequest {
                 repository,
                 commit,
                 path,
-            } => format!("{}@{commit}#{path}", crate::util::sanitize_url(repository)),
+            } => format!("{}@{commit}#{path}", nyl_git::sanitize_url(repository)),
         }
     }
 

@@ -1,5 +1,5 @@
 /// Comprehensive error handling tests
-use nyl::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 #[test]
 fn test_error_variants() {

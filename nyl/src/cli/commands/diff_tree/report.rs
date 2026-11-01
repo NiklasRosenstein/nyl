@@ -8,10 +8,11 @@ use std::str::FromStr;
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
-use crate::render::cache::CacheStats;
-use crate::util::project_path::ProjectLocation;
-use crate::util::{ansi_style, sanitize_url};
-use crate::{NylError, Result};
+use nyl_git::sanitize_url;
+use nyl_render::render::cache::CacheStats;
+use nyl_render::util::ansi_style;
+use nyl_render::util::project_path::ProjectLocation;
+use nyl_render::{NylError, Result};
 
 use super::{is_null_output, DiffSelection, DiffTreeArgs, DiffTreeBase, ResolvedBaseline};
 
@@ -297,14 +298,14 @@ impl TreeDiff {
 
 fn normalize_yaml(bytes: &[u8]) -> Option<Vec<u8>> {
     let input = std::str::from_utf8(bytes).ok().filter(|text| !text.contains('\0'))?;
-    let documents = crate::yaml::parse_yaml_documents_k8s_compatible(input).ok()?;
+    let documents = nyl_render::yaml::parse_yaml_documents_k8s_compatible(input).ok()?;
     let mut output = String::new();
     for mut document in documents {
         document.sort_all_objects();
         if !output.is_empty() {
             output.push_str("---\n");
         }
-        output.push_str(&crate::yaml::serialize_yaml_value(&document).ok()?);
+        output.push_str(&nyl_render::yaml::serialize_yaml_value(&document).ok()?);
     }
     Some(output.into_bytes())
 }
@@ -400,7 +401,7 @@ struct Validation {
     status: &'static str,
     reason: Option<String>,
     scope: &'static str,
-    report: Option<crate::validation::ValidationReport>,
+    report: Option<nyl_render::validation::ValidationReport>,
 }
 
 /// A condition that does not fail the comparison but needs the user's
@@ -472,7 +473,7 @@ struct Publication {
 }
 
 impl Publication {
-    fn from_tree(tree: &crate::gitops::CompiledTargetTree) -> Self {
+    fn from_tree(tree: &nyl_render::gitops::CompiledTargetTree) -> Self {
         Self {
             cluster: tree.cluster.metadata.name.clone(),
             repository: sanitize_url(&tree.repository.repo_url),
@@ -597,12 +598,12 @@ impl Report {
         });
     }
 
-    pub fn desired(&mut self, desired: &crate::gitops::CompiledTargetTree) {
+    pub fn desired(&mut self, desired: &nyl_render::gitops::CompiledTargetTree) {
         self.comparison.desired_publication = Some(Publication::from_tree(desired));
         self.stages.render = StageState::Completed;
     }
 
-    pub fn baseline(&mut self, baseline: &ResolvedBaseline, desired: &crate::gitops::CompiledTargetTree) {
+    pub fn baseline(&mut self, baseline: &ResolvedBaseline, desired: &nyl_render::gitops::CompiledTargetTree) {
         self.comparison.baseline = Some(match baseline {
             ResolvedBaseline::Published(b) => Baseline::Published {
                 commit: b.commit.to_string(),
@@ -640,7 +641,7 @@ impl Report {
         self.stages.comparison = StageState::Completed;
     }
 
-    pub fn validation(&mut self, outcome: crate::validation::TreeValidationOutcome, disabled_reason: &str) {
+    pub fn validation(&mut self, outcome: nyl_render::validation::TreeValidationOutcome, disabled_reason: &str) {
         self.validation.report = outcome.report;
         self.validation.reason = outcome.result.as_ref().err().map(ToString::to_string);
         self.validation.status = if let Some(report) = &self.validation.report {

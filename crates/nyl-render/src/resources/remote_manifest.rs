@@ -7,14 +7,14 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::API_VERSION;
 use crate::resources::ObjectMetadata;
-use crate::{CoreError, Result};
+use nyl_core::constants::API_VERSION;
+use nyl_core::{CoreError, Result};
 
 /// RemoteManifest specification
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(transform = super::schema::remote_manifest_constraints)]
+#[schemars(transform = super::catalog::remote_manifest_constraints)]
 pub struct RemoteManifestSpec {
     /// Single HTTPS URL to fetch (mutually exclusive with `urls`)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,7 +43,7 @@ pub struct RemoteManifestSpec {
 /// Nyl does not fetch remote manifests automatically. Other authored resources render normally without a RemoteManifest.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::RemoteManifest))]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::RemoteManifest))]
 pub struct RemoteManifest {
     /// API version (must be core Nyl API version)
     #[serde(rename = "apiVersion")]

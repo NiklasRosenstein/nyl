@@ -2,7 +2,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use git2::Repository;
-use nyl::config::{ProjectConfig, VendorMode};
+use nyl_render::config::{ProjectConfig, VendorMode};
 use predicates::prelude::*;
 use tempfile::TempDir;
 

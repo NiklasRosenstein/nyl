@@ -1970,8 +1970,6 @@ name = "nyl-core"
 version = "0.5.9"
 dependencies = [
  "chrono",
- "clap",
- "glob",
  "hex",
  "proptest",
  "ryu-js",

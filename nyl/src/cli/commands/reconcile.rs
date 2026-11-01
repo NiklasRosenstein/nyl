@@ -17,7 +17,7 @@ use nyl_state::git::CommitAuthor;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::Result;
+use nyl_render::Result;
 
 /// Output format of orchestration commands.
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]

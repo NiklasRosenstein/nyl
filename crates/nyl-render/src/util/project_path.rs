@@ -19,7 +19,7 @@
 use crate::{NylError, Result};
 use std::path::{Component, Path, PathBuf};
 
-pub use nyl_core::local_path::validate_local_path;
+use nyl_core::local_path::validate_local_path;
 
 /// The two roots local paths resolve against.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl ProjectPaths {
 /// `source.path`, to a canonical directory inside the checkout. It rejects
 /// traversal, symbolic links, and anything resolving outside the checkout.
 pub fn checkout_subpath(checkout: &Path, relative: &str, field: &str) -> Result<PathBuf> {
-    crate::resources::validate_relative_path(field, relative, true, true)?;
+    nyl_core::resources::validate_relative_path(field, relative, true, true)?;
     let canonical_checkout = checkout
         .canonicalize()
         .map_err(|error| NylError::config(format!("Failed to resolve checkout {}: {error}", checkout.display())))?;
@@ -210,7 +210,7 @@ pub fn locate_checkout_project(
         .map(|(path, location)| {
             // Candidates are worktree-rooted; a leading `/` says so explicitly.
             let path = path.strip_prefix('/').unwrap_or(&path).to_owned();
-            crate::resources::validate_relative_path(field(location), &path, true, true)?;
+            nyl_core::resources::validate_relative_path(field(location), &path, true, true)?;
             Ok((path, location))
         })
         .collect::<Result<Vec<_>>>()?;

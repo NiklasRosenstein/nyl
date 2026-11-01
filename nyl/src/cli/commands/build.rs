@@ -2,9 +2,9 @@
 use crate::orchestration::direct;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::secrets::ProjectSecrets;
-use crate::{NylError, Result};
 use clap::Args;
 use nyl_core::orchestration::driver::{DriverOperation, ExecutionContext, Supported};
+use nyl_render::{NylError, Result};
 use std::path::PathBuf;
 
 /// Build one unit from the worktree, including uncommitted changes.

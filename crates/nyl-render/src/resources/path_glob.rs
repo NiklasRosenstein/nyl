@@ -1,6 +1,6 @@
 use glob::Pattern;
 
-use crate::{CoreError, Result};
+use nyl_core::{CoreError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PatternSegment {

@@ -15,11 +15,11 @@ use serde_json::Value;
 
 use crate::gitops::reconcile::in_rendered_tree;
 use crate::gitops::{resolve_cluster_contract, GitOpsInventory};
-use crate::resources::schema::ResourceDescriptor;
 use crate::resources::GitOpsResource;
 use crate::validation::resolve::{self, SchemaResolver};
 use crate::validation::{store, BuiltinSchemas, KubeconformSettings};
 use crate::{NylError, Result};
+use nyl_core::resources::schema::ResourceDescriptor;
 
 /// The comment prefix yaml-language-server reads in each document.
 pub const MODELINE_PREFIX: &str = "# yaml-language-server: $schema=";

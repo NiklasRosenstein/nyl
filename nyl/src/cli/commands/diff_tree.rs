@@ -8,13 +8,14 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use git2::Repository;
 
-use crate::git::GitManager;
-use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, resolve_deployment_target_name,
-    resource_path, GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
+use crate::discover_gitops_inventory;
+use nyl_render::git::GitManager;
+use nyl_render::gitops::{
+    compile_target_tree_cached_with_observer_and_options, resolve_deployment_target_name, resource_path, GitOpsCache,
+    RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
 };
-use crate::util::project_path::{locate_checkout_project, ProjectLocation};
-use crate::{NylError, Result};
+use nyl_render::util::project_path::{locate_checkout_project, ProjectLocation};
+use nyl_render::{NylError, Result};
 
 /// Documentation of the manual steps a publication move needs.
 pub(super) const PUBLICATION_MOVE_DOCS: &str =
@@ -37,7 +38,7 @@ pub enum DiffTreeBase {
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DiffTreeArgs {
     #[command(flatten)]
-    pub validation: crate::validation::ValidationArgs,
+    pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
 
@@ -121,7 +122,7 @@ struct PublishedBaseline {
 }
 
 struct SourceBaseline {
-    compiled: crate::gitops::CompiledTargetTree,
+    compiled: nyl_render::gitops::CompiledTargetTree,
     repository: String,
     revision: String,
     commit: git2::Oid,
@@ -137,14 +138,14 @@ enum ResolvedBaseline {
 
 impl ResolvedBaseline {
     /// Every owned file of the baseline, rendered files and state files.
-    fn files(&self) -> crate::gitops::DesiredFiles<'_> {
+    fn files(&self) -> nyl_render::gitops::DesiredFiles<'_> {
         match self {
             Self::Published(baseline) => borrowed(&baseline.files),
             Self::Source(baseline) => baseline.compiled.owned_files(),
         }
     }
 
-    fn publication_path_prefix<'a>(&'a self, desired: &'a crate::gitops::CompiledTargetTree) -> &'a str {
+    fn publication_path_prefix<'a>(&'a self, desired: &'a nyl_render::gitops::CompiledTargetTree) -> &'a str {
         match self {
             Self::Published(_) => desired.target.publication_path_prefix(),
             Self::Source(baseline) => baseline.compiled.target.publication_path_prefix(),
@@ -246,9 +247,9 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
         let inventory = discover_gitops_inventory(&args.path, None)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-        let carried = crate::gitops::inputs::carry_paths(&inventory, &target)?;
-        let crate::gitops::provenance::WorktreeSourceState { commit, dirty } =
-            crate::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
+        let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target)?;
+        let nyl_render::gitops::provenance::WorktreeSourceState { commit, dirty } =
+            nyl_render::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
         let repository = source_repository_url(&inventory.project_root)?;
         Ok::<_, NylError>((inventory, target, commit, dirty, repository))
     })();
@@ -272,7 +273,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let mut progress = TreeProgressReporter::new(args.progress, desired_phase);
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
-        publication_read: crate::gitops::inputs::PublicationRead::from_offline(args.offline),
+        publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(args.offline),
         ..TreeRenderOptions::default()
     };
     let rendered = compile_target_tree_cached_with_observer_and_options(
@@ -296,11 +297,11 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     }
     report.desired(&desired);
     // The combined report owns findings; the validator still emits progress and exports.
-    let validation_args = crate::validation::ValidationArgs {
+    let validation_args = nyl_render::validation::ValidationArgs {
         no_validation_stderr: true,
         ..args.validation.clone()
     };
-    let validation = crate::validation::collect_tree_validation(&validation_args, &inventory, &desired).await;
+    let validation = nyl_render::validation::collect_tree_validation(&validation_args, &inventory, &desired).await;
     report.validation(
         validation,
         if args.validation.no_validate {
@@ -348,9 +349,9 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
 
 async fn resolve_baseline(
     args: &DiffTreeArgs,
-    inventory: &crate::gitops::GitOpsInventory,
+    inventory: &nyl_render::gitops::GitOpsInventory,
     target_name: &str,
-    desired: &crate::gitops::CompiledTargetTree,
+    desired: &nyl_render::gitops::CompiledTargetTree,
     cache: &GitOpsCache,
     options: TreeRenderOptions,
 ) -> Result<ResolvedBaseline> {
@@ -358,7 +359,7 @@ async fn resolve_baseline(
         DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(
             desired,
             cache,
-            options.publication_read == crate::gitops::inputs::PublicationRead::Cached,
+            options.publication_read == nyl_render::gitops::inputs::PublicationRead::Cached,
         )?)),
         DiffTreeBase::Source => {
             let source_ref = args
@@ -382,7 +383,7 @@ async fn resolve_baseline(
 }
 
 /// Borrow owned files, for helpers that only read or filter them.
-fn borrowed(files: &BTreeMap<PathBuf, Vec<u8>>) -> crate::gitops::DesiredFiles<'_> {
+fn borrowed(files: &BTreeMap<PathBuf, Vec<u8>>) -> nyl_render::gitops::DesiredFiles<'_> {
     files
         .iter()
         .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
@@ -390,7 +391,7 @@ fn borrowed(files: &BTreeMap<PathBuf, Vec<u8>>) -> crate::gitops::DesiredFiles<'
 }
 
 /// An owned copy of borrowed files, for comparisons that add and remove entries.
-fn owned_copy(files: &crate::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
+fn owned_copy(files: &nyl_render::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
     files
         .iter()
         .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
@@ -400,7 +401,7 @@ fn owned_copy(files: &crate::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf, Vec<
 fn comparison_files(
     selection: &DiffSelection,
     baseline: &ResolvedBaseline,
-    desired: &crate::gitops::CompiledTargetTree,
+    desired: &nyl_render::gitops::CompiledTargetTree,
 ) -> Result<ComparisonFiles> {
     match selection {
         DiffSelection::Tree => {
@@ -438,9 +439,9 @@ fn comparison_files(
 
 fn application_comparison_files(
     selectors: &BTreeSet<String>,
-    base: &crate::gitops::DesiredFiles<'_>,
+    base: &nyl_render::gitops::DesiredFiles<'_>,
     base_path_prefix: &str,
-    desired: &crate::gitops::DesiredFiles<'_>,
+    desired: &nyl_render::gitops::DesiredFiles<'_>,
     desired_path_prefix: &str,
 ) -> Result<ComparisonFiles> {
     let base_views = derive_application_views(base, base_path_prefix)?;
@@ -496,7 +497,7 @@ fn validate_application_selector(selector: &str) -> Result<()> {
 }
 
 fn derive_application_views(
-    files: &crate::gitops::DesiredFiles<'_>,
+    files: &nyl_render::gitops::DesiredFiles<'_>,
     publication_path_prefix: &str,
 ) -> Result<BTreeMap<String, ApplicationView>> {
     let mut views = BTreeMap::new();
@@ -507,7 +508,7 @@ fn derive_application_views(
                 path.display()
             ))
         })?;
-        let manifest = crate::yaml::parse_yaml_value_k8s_compatible(text).map_err(|error| {
+        let manifest = nyl_render::yaml::parse_yaml_value_k8s_compatible(text).map_err(|error| {
             NylError::config(format!(
                 "Failed to parse generated catalog file {}: {error}",
                 path.display()
@@ -521,7 +522,7 @@ fn derive_application_views(
         let namespace = required_application_string(&manifest, "/metadata/namespace", path)?;
         let name = required_application_string(&manifest, "/metadata/name", path)?;
         let identity = format!("{namespace}/{name}");
-        let key = crate::kubernetes::ResourceKey::from_json_value(&manifest)?;
+        let key = nyl_render::kubernetes::ResourceKey::from_json_value(&manifest)?;
         let expected = Path::new(CATALOG_DIRECTORY).join(resource_path(&key)?);
         // Publications rendered before the per-resource catalog layout stored
         // Applications at applications/<namespace>/<name>.yaml; they remain
@@ -533,12 +534,12 @@ fn derive_application_views(
         if *path != expected && *path != legacy {
             return Err(NylError::config(format!(
                 "Generated Argo CD Application {identity:?} is at {}, expected {}",
-                crate::resources::relative_path_to_posix("generated catalog path", path)?,
-                crate::resources::relative_path_to_posix("generated catalog path", &expected)?
+                nyl_core::resources::relative_path_to_posix("generated catalog path", path)?,
+                nyl_core::resources::relative_path_to_posix("generated catalog path", &expected)?
             )));
         }
         let rendered_path = required_application_string(&manifest, "/spec/source/path", path)?;
-        crate::resources::validate_relative_path(
+        nyl_core::resources::validate_relative_path(
             "generated Application spec.source.path",
             rendered_path,
             false,
@@ -593,7 +594,7 @@ fn strip_publication_prefix(rendered_path: &str, path_prefix: &str, catalog_file
             catalog_file.display()
         )));
     }
-    crate::resources::relative_path_to_posix("generated Application payload path", payload)?;
+    nyl_core::resources::relative_path_to_posix("generated Application payload path", payload)?;
     Ok(payload.to_path_buf())
 }
 
@@ -618,7 +619,7 @@ fn validate_application_payloads(views: &BTreeMap<String, ApplicationView>) -> R
 }
 
 fn select_application_views(
-    files: &crate::gitops::DesiredFiles<'_>,
+    files: &nyl_render::gitops::DesiredFiles<'_>,
     views: &BTreeMap<String, ApplicationView>,
     selected: &BTreeSet<String>,
 ) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -635,7 +636,7 @@ fn select_application_views(
     output
 }
 
-fn files_beneath(files: &crate::gitops::DesiredFiles<'_>, prefix: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+fn files_beneath(files: &nyl_render::gitops::DesiredFiles<'_>, prefix: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
         .iter()
         .filter(|(path, _)| path.starts_with(prefix))
@@ -677,7 +678,7 @@ fn write_diff_output(output: &Path, contents: &[u8]) -> Result<()> {
 /// was read at, so both sides see one publication; otherwise the branch head,
 /// refreshed unless `offline`.
 fn published_tree(
-    compiled: &crate::gitops::CompiledTargetTree,
+    compiled: &nyl_render::gitops::CompiledTargetTree,
     cache: &GitOpsCache,
     offline: bool,
 ) -> Result<PublishedBaseline> {
@@ -720,7 +721,7 @@ fn published_tree(
 }
 
 pub(super) fn checked_published_root(checkout: &Path, path_prefix: &str) -> Result<PathBuf> {
-    crate::resources::validate_relative_path("DeploymentTarget publication.pathPrefix", path_prefix, true, false)?;
+    nyl_core::resources::validate_relative_path("DeploymentTarget publication.pathPrefix", path_prefix, true, false)?;
     let canonical_checkout = checkout.canonicalize().map_err(|error| {
         NylError::config(format!(
             "Failed to resolve published checkout {}: {error}",
@@ -757,7 +758,7 @@ pub(super) fn checked_published_root(checkout: &Path, path_prefix: &str) -> Resu
 
 #[allow(clippy::too_many_arguments)] // Each argument is an independent baseline input.
 async fn source_derived_tree(
-    local: &crate::gitops::GitOpsInventory,
+    local: &nyl_render::gitops::GitOpsInventory,
     project_candidates: &[String],
     source_repository: Option<&str>,
     source_ref: &str,
@@ -778,7 +779,7 @@ async fn source_derived_tree(
             .ok_or_else(|| NylError::config("Source repository has no origin; pass --source-repository"))?
     };
     let mut manager = git_manager(cache)?;
-    let checkout = if options.publication_read == crate::gitops::inputs::PublicationRead::Cached {
+    let checkout = if options.publication_read == nyl_render::gitops::inputs::PublicationRead::Cached {
         manager.resolve_ref_cached(&repository_url, Some(source_ref), None)
     } else {
         manager.resolve_ref_fresh(&repository_url, Some(source_ref), None)
@@ -809,11 +810,11 @@ async fn source_derived_tree(
 }
 
 fn checkout_commit(checkout: &Path) -> Result<git2::Oid> {
-    let repository = Repository::open(checkout).map_err(crate::git::GitError::from)?;
+    let repository = Repository::open(checkout).map_err(nyl_render::git::GitError::from)?;
     let commit = repository
         .head()
         .and_then(|head| head.peel_to_commit())
-        .map_err(crate::git::GitError::from)?
+        .map_err(nyl_render::git::GitError::from)?
         .id();
     Ok(commit)
 }
@@ -824,7 +825,7 @@ fn source_repository_url(project_root: &Path) -> Result<Option<String>> {
     Ok(repository
         .find_remote("origin")
         .ok()
-        .and_then(|remote| remote.url().ok().map(crate::util::sanitize_url)))
+        .and_then(|remote| remote.url().ok().map(nyl_git::sanitize_url)))
 }
 
 fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {
@@ -837,7 +838,7 @@ fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {
     }
 }
 
-fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Vec<u8>> {
+fn publication_marker(compiled: &nyl_render::gitops::CompiledTargetTree) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "cluster": compiled.cluster.metadata.name,
         "repoURL": compiled.repository.repo_url,
@@ -866,7 +867,7 @@ pub(super) fn read_rendered_tree(
             index: None,
         });
     }
-    let index_path = root.join(crate::gitops::reconcile::DEFAULT_INDEX_PATH);
+    let index_path = root.join(nyl_render::gitops::reconcile::DEFAULT_INDEX_PATH);
     if !index_path.is_file() {
         let foreign = unindexed_files(root)?
             .into_iter()
@@ -895,7 +896,7 @@ pub(super) fn read_rendered_tree(
     }
     reject_published_symlink(root, &index_path)?;
     let index: RenderIndex = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-    if index.version != crate::gitops::reconcile::RENDER_INDEX_VERSION {
+    if index.version != nyl_render::gitops::reconcile::RENDER_INDEX_VERSION {
         return Err(NylError::config(format!(
             "Published ownership index {} uses unsupported version {}",
             index_path.display(),
@@ -904,7 +905,7 @@ pub(super) fn read_rendered_tree(
     }
     let mut files = BTreeMap::new();
     for (relative, expected_hash) in &index.files {
-        crate::resources::validate_relative_path("published owned path", relative, false, false)?;
+        nyl_core::resources::validate_relative_path("published owned path", relative, false, false)?;
         let path = root.join(relative);
         reject_published_symlink(root, &path)?;
         let bytes = std::fs::read(&path).map_err(|error| {
@@ -978,7 +979,8 @@ fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::{Cluster, DeploymentTarget, InlineGitRepository};
+    use nyl_core::resources::InlineGitRepository;
+    use nyl_render::resources::{Cluster, DeploymentTarget};
 
     #[cfg(unix)]
     #[test]
@@ -1009,7 +1011,7 @@ mod tests {
     }
 
     fn application_yaml(namespace: &str, name: &str, path: &str) -> Vec<u8> {
-        crate::yaml::serialize_yaml_document(&serde_json::json!({
+        nyl_render::yaml::serialize_yaml_document(&serde_json::json!({
             "apiVersion": "argoproj.io/v1alpha1",
             "kind": "Application",
             "metadata": {"namespace": namespace, "name": name},
@@ -1127,7 +1129,7 @@ mod tests {
     #[test]
     fn publication_marker_changes_when_ownership_coordinates_change() {
         let target: DeploymentTarget = serde_json::from_value(serde_json::json!({
-            "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
+            "apiVersion": nyl_core::constants::API_VERSION_K8S_GITOPS,
             "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
@@ -1141,7 +1143,7 @@ mod tests {
         }))
         .unwrap();
         let cluster: Cluster = serde_json::from_value(serde_json::json!({
-            "apiVersion": crate::constants::API_VERSION,
+            "apiVersion": nyl_core::constants::API_VERSION,
             "kind": "Cluster",
             "metadata": {"name": "prod-eu-1"},
             "spec": {
@@ -1150,7 +1152,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let baseline = crate::gitops::CompiledTargetTree {
+        let baseline = nyl_render::gitops::CompiledTargetTree {
             provenance: BTreeMap::new(),
             target: target.clone(),
             cluster,

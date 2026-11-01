@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::constants::ANNOTATION_KYVERNO_SCOPE;
-use crate::{CoreError, Result};
+use nyl_core::constants::ANNOTATION_KYVERNO_SCOPE;
+use nyl_core::{CoreError, Result};
 
 /// Scope for Kyverno policy application
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

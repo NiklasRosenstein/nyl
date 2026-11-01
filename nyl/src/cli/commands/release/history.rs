@@ -4,6 +4,8 @@ use crate::{
     cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat},
     cli::table::{render as render_table, Cell},
+};
+use nyl_render::{
     kubernetes::{KubernetesReleaseStorage, ReleaseStorage},
     NylError, Result,
 };
@@ -88,7 +90,7 @@ pub async fn execute(args: HistoryArgs) -> Result<()> {
             println!("{}", json);
         }
         OutputFormat::Yaml => {
-            let yaml = crate::yaml::serialize_yaml_document(&releases)?;
+            let yaml = nyl_render::yaml::serialize_yaml_document(&releases)?;
             print!("{}", yaml);
         }
     }

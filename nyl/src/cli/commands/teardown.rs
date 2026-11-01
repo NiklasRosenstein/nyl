@@ -25,7 +25,7 @@ use nyl_state::git::CommitAuthor;
 use super::reconcile::RunOutput;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, unit_names, RunOptions, Session, Stop};
-use crate::Result;
+use nyl_render::Result;
 
 /// Tear units down.
 #[derive(Args, Debug)]

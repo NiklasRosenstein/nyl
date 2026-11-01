@@ -38,7 +38,7 @@ fn default_aliases() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
-pub use nyl_core::settings::StripEmptyMetadataLabelsMode;
+use nyl_core::settings::StripEmptyMetadataLabelsMode;
 
 /// Controls whether remote renderer inputs may use an in-tree vendor snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ValueEnum)]
@@ -231,7 +231,7 @@ pub struct ResourceCatalogue(pub Vec<nyl_core::resources::schema::ResourceDescri
 
 impl Default for ResourceCatalogue {
     fn default() -> Self {
-        Self(nyl_core::resources::schema::resource_descriptors())
+        Self(crate::resources::catalog::resource_catalogue())
     }
 }
 
@@ -394,7 +394,7 @@ impl ProjectConfig {
                 )));
             }
             if previous != "/" {
-                crate::util::project_path::validate_local_path("project.previous_paths", previous)?;
+                nyl_core::local_path::validate_local_path("project.previous_paths", previous)?;
             }
         }
         if let Some(vendor) = &mut project.vendor {

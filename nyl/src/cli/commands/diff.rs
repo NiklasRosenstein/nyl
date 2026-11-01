@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     cli::commands::apply::{prepare_desired_manifests, ObjectScopes},
     cli::commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
+};
+use nyl_render::{
     kubernetes::{
         extract_name,
         prune::{prune_decision, PruneDecision},
@@ -145,7 +147,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         ready
     };
 
-    crate::validation::validate_manifest_input(
+    nyl_render::validation::validate_manifest_input(
         &args.common.validation,
         &preflight.project_config,
         &preflight.project_root,
@@ -154,7 +156,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
         None,
-        crate::validation::ManifestValidationInput {
+        nyl_render::validation::ManifestValidationInput {
             manifests: &desired_manifests,
             source: &args.common.path,
             provenance: &preflight.provenance,
@@ -213,7 +215,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 }
 
 fn release_identity(
-    release: Option<&crate::resources::Release>,
+    release: Option<&nyl_render::resources::Release>,
     name: Option<String>,
     namespace: Option<String>,
 ) -> Result<(String, String)> {
@@ -275,7 +277,7 @@ impl DiffResult {
 async fn compute_diff_from_live(
     client: &dyn KubeClient,
     desired_manifests: &[serde_json::Value],
-    previous_state: Option<&crate::kubernetes::ReleaseState>,
+    previous_state: Option<&nyl_render::kubernetes::ReleaseState>,
     mode: DiffMode,
     scopes: &mut ObjectScopes,
     confirm_prune: bool,
@@ -677,7 +679,7 @@ fn missing_release_warning_message(namespace: &str, release_name: &str) -> Strin
 async fn merge_with_previous_release(
     client: &dyn KubeClient,
     mut current_manifests: Vec<serde_json::Value>,
-    previous_release: &crate::kubernetes::ReleaseState,
+    previous_release: &nyl_render::kubernetes::ReleaseState,
     scopes: &mut ObjectScopes,
 ) -> Result<Vec<serde_json::Value>> {
     // Build set of current objects, compared by identity as `nyl apply` merges.
@@ -734,9 +736,9 @@ async fn merge_with_previous_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kubernetes::ApplyOutcome;
     use async_trait::async_trait;
     use kube::api::DynamicObject;
+    use nyl_render::kubernetes::ApplyOutcome;
     use serde_json::json;
 
     #[test]
@@ -1008,7 +1010,7 @@ mod tests {
             "kind": "HorizontalPodAutoscaler",
             "metadata": {"name": "web", "namespace": "app"}
         })];
-        let previous = crate::kubernetes::ReleaseState {
+        let previous = nyl_render::kubernetes::ReleaseState {
             release_name: "app".to_string(),
             release_namespace: "app".to_string(),
             revision: 1,
@@ -1023,7 +1025,7 @@ mod tests {
             applied_at: None,
             error: None,
         };
-        let client = crate::kubernetes::MockKubeClient::new();
+        let client = nyl_render::kubernetes::MockKubeClient::new();
 
         let result = compute_diff_from_live(
             &client,

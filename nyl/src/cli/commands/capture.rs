@@ -1,8 +1,8 @@
 //! Explicit live reads that refresh committed API contracts.
 
 use super::cluster;
-use crate::Result;
 use clap::{Args, Subcommand};
+use nyl_render::Result;
 
 /// Capture live cluster facts into local project files.
 #[derive(Debug, Args)]

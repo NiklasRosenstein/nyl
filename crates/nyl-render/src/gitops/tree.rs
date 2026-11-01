@@ -15,13 +15,14 @@ use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
     AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
-    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DenyUnknownFields,
-    DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, GitSource, InlineGitRepository,
-    LocalReference, ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
+    GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy, RendererConfig,
+    RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
 use crate::{NylError, Result};
+use nyl_core::resources::{DenyUnknownFields, GitSource, InlineGitRepository, LocalReference};
 
 use super::{
     build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout_with_provenance,
@@ -789,7 +790,7 @@ async fn compile_target_tree_recording(
             }
 
             let group_output = group.spec.output_path.as_deref().unwrap_or(&group.metadata.name);
-            crate::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
+            nyl_core::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
             validate_path_segment("Release metadata.name", &release.metadata.name)?;
             if release.metadata.name == "_namespaces" {
                 return Err(NylError::config(
@@ -1927,9 +1928,9 @@ fn resolve_argocd_instance(
         return Ok(EffectiveArgoCDInstance {
             identity: format!("implicit:{}", target.metadata.name),
             resource: ArgoCDInstance {
-                api_version: crate::constants::API_VERSION_K8S_GITOPS.to_owned(),
+                api_version: nyl_core::constants::API_VERSION_K8S_GITOPS.to_owned(),
                 kind: crate::resources::KIND_ARGOCD_INSTANCE.to_owned(),
-                metadata: crate::resources::GitOpsResourceMetadata {
+                metadata: nyl_core::resources::GitOpsResourceMetadata {
                     name: format!("{}-implicit", target.metadata.name),
                     labels: BTreeMap::new(),
                 },
@@ -2751,14 +2752,14 @@ struct ResolvedGroupSource {
     source_session: Option<RenderSession>,
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
-    repository: Option<crate::resources::ReadGitRepository>,
+    repository: Option<nyl_core::resources::ReadGitRepository>,
 }
 
 struct StaticReleaseFile {
     path: PathBuf,
     name: Option<String>,
     /// Literal input declarations; empty when the Release declares none.
-    inputs: BTreeMap<String, crate::resources::release_inputs::InputDeclaration>,
+    inputs: BTreeMap<String, nyl_core::bindings::InputDeclaration>,
 }
 
 /// Resolve the target's Release inputs before any Release renders, so every
@@ -2790,7 +2791,7 @@ fn resolve_prepared_release_inputs(
         })
         .collect::<Vec<_>>();
     let paths = inventory.paths();
-    let repositories = |reference: &crate::resources::LocalReference| {
+    let repositories = |reference: &nyl_core::resources::LocalReference| {
         let (repository, source) = inventory.resolve_git_repository(Some(reference), None)?;
         let source = source.expect("a referenced GitRepository has a source file");
         // Absolute, like `fromFile` paths, so the cache recorder reads the
@@ -2819,7 +2820,7 @@ fn resolve_remote_group_source(
     git_manager: &mut Option<GitManager>,
     cache: Option<&GitOpsCache>,
     provenance_inputs: &mut Vec<PathBuf>,
-) -> Result<(PathBuf, PathBuf, crate::resources::ReadGitRepository)> {
+) -> Result<(PathBuf, PathBuf, nyl_core::resources::ReadGitRepository)> {
     let (repository, repository_path) = resolve_source_repository(inventory, source)?;
     if let Some(repository_path) = repository_path {
         provenance_inputs.push(repository_path);
@@ -3109,7 +3110,7 @@ fn warn_unclaimed_group_manifests(
 fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
-) -> Result<(crate::resources::ReadGitRepository, Option<PathBuf>)> {
+) -> Result<(nyl_core::resources::ReadGitRepository, Option<PathBuf>)> {
     inventory.resolve_git_source(&source.git)
 }
 
@@ -3369,7 +3370,7 @@ fn collect_leaf_paths(value: &Value, segments: &mut Vec<String>, output: &mut Ve
 }
 
 fn insert_file(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
-    crate::resources::relative_path_to_posix("rendered path", &path)?;
+    nyl_core::resources::relative_path_to_posix("rendered path", &path)?;
     if files.insert(path.clone(), bytes).is_some() {
         return Err(NylError::config(format!(
             "More than one rendered resource owns {}",

@@ -7,8 +7,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::API_VERSION_COMPONENTS;
 use crate::resources::{ChartRef, ObjectMetadata};
+use nyl_core::constants::API_VERSION_COMPONENTS;
 
 fn default_spec() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
@@ -27,7 +27,7 @@ fn default_spec() -> serde_json::Value {
 /// Charts in component search paths are not rendered until invoked. A HelmChart can render a chart through explicit coordinates instead; authored Kubernetes manifests need no component invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Component))]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::Component))]
 pub struct NylComponent {
     /// API group and version for chart-backed component invocations.
     #[serde(rename = "apiVersion")]

@@ -18,10 +18,10 @@ use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
-use crate::gitops::discover_gitops_inventory;
+use crate::discover_gitops_inventory;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 /// Output format of state commands.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -262,7 +262,7 @@ fn run_move(
                 StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
                 name if !name.contains(':') && !name.contains('/') => {
                     let (repository, _) = inventory.resolve_git_repository(
-                        Some(&crate::resources::LocalReference { name: name.to_owned() }),
+                        Some(&nyl_core::resources::LocalReference { name: name.to_owned() }),
                         None,
                     )?;
                     (
@@ -274,7 +274,7 @@ fn run_move(
                     )
                 }
                 url => (
-                    crate::util::credential_free_url(url),
+                    nyl_render::util::credential_free_url(url),
                     Some(Endpoint {
                         read: url.to_owned(),
                         write: None,

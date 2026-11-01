@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use glob::Pattern;
 
 use super::{best_effort_parse_yaml_documents, RenderProvenance, RenderResource};
-use crate::resources::release_inputs::InputDeclaration;
 use crate::resources::{extract_release, Release};
 use crate::template::{TemplateContext, TemplateEngine};
 use crate::{NylError, Result};
+use nyl_core::bindings::InputDeclaration;
 use nyl_core::template_syntax::has_template_syntax;
 
 #[derive(Debug)]
@@ -107,7 +107,7 @@ pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleas
         .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
     let documents = best_effort_parse_yaml_documents(&raw);
     for document in &documents {
-        crate::resources::schema::validate_resource_api(document)?;
+        crate::resources::catalog::validate_resource_api(document)?;
     }
     let Some(release) = documents.iter().find(|document| Release::is_release(document)) else {
         return Ok(None);

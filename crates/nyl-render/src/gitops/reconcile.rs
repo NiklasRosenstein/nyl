@@ -392,7 +392,7 @@ fn verify_owned_files(
     options: &ReconcileOptions,
 ) -> Result<()> {
     for (relative, expected) in &index.files {
-        crate::resources::validate_relative_path("owned rendered path", relative, false, false)?;
+        nyl_core::resources::validate_relative_path("owned rendered path", relative, false, false)?;
         if options.release.contains(Path::new(relative)) && !desired.contains_key(Path::new(relative)) {
             continue;
         }
@@ -476,7 +476,10 @@ fn validate_desired_paths(desired: &DesiredFiles<'_>) -> Result<()> {
 }
 
 fn path_text(path: &Path) -> Result<String> {
-    Ok(crate::resources::relative_path_to_posix("rendered output path", path)?)
+    Ok(nyl_core::resources::relative_path_to_posix(
+        "rendered output path",
+        path,
+    )?)
 }
 
 #[cfg(test)]

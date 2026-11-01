@@ -4,10 +4,10 @@ use std::path::{Component, Path};
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::release_inputs::InputDeclaration;
-use crate::constants::API_VERSION;
-use crate::settings::StripEmptyMetadataLabelsMode;
-use crate::{CoreError, Result};
+use nyl_core::bindings::InputDeclaration;
+use nyl_core::constants::API_VERSION;
+use nyl_core::settings::StripEmptyMetadataLabelsMode;
+use nyl_core::{CoreError, Result};
 
 pub const KIND_RELEASE: &str = "Release";
 pub const RELEASE_SCHEMA_FILENAME: &str = "release.schema.json";
@@ -25,7 +25,7 @@ pub const RELEASE_SCHEMA_FILENAME: &str = "release.schema.json";
 /// ApplicationGroup discovery ignores candidate files without a literal Release document. Direct `nyl render` can render without one; direct `nyl apply` and `nyl diff` require `--name` and `--namespace` when no Release supplies them.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Release))]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::Release))]
 pub struct Release {
     /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
@@ -115,13 +115,13 @@ impl Release {
     pub fn is_release(manifest: &serde_json::Value) -> bool {
         manifest.get("kind").and_then(|v| v.as_str()) == Some(KIND_RELEASE)
             && (manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION)
-                || super::schema::deprecated_api_version(manifest).is_some())
+                || nyl_core::resources::schema::deprecated_api_version(manifest).is_some())
     }
 
     /// Parse Release from JSON value; a deprecated API version reads as the current one.
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
         let mut value = value.clone();
-        super::schema::canonicalize_api_version(&mut value);
+        nyl_core::resources::schema::canonicalize_api_version(&mut value);
         let release: Self =
             serde_json::from_value(value).map_err(|e| CoreError::Config(format!("Invalid Release resource: {e}")))?;
         release.validate()?;
@@ -152,7 +152,7 @@ impl Release {
 
 pub fn generate_release_schema() -> serde_json::Value {
     let mut schema = serde_json::to_value(schema_for!(Release)).expect("schema serialization should never fail");
-    super::schema::set_envelope(&mut schema, API_VERSION, Some(KIND_RELEASE));
+    nyl_core::resources::schema::set_envelope(&mut schema, API_VERSION, Some(KIND_RELEASE));
     schema
 }
 
@@ -201,7 +201,7 @@ pub fn extract_release(manifests: &[serde_json::Value]) -> Result<(Option<Releas
     let mut filtered = Vec::new();
 
     for manifest in manifests {
-        super::schema::validate_resource_api(manifest)?;
+        super::catalog::validate_resource_api(manifest)?;
         if Release::is_release(manifest) {
             if release.is_some() {
                 return Err(CoreError::Config(
