@@ -1,0 +1,194 @@
+{
+  "$defs": {
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "EnvironmentRecordKind": {
+      "const": "EnvironmentRecord"
+    },
+    "SourceChoice": {
+      "description": "How a run's source commit was chosen.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The entry worktree's commit.",
+          "properties": {
+            "by": {
+              "const": "entry",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The tip of the Environment's `source.revision`.",
+          "properties": {
+            "by": {
+              "const": "revision",
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The Environment's `source.commit` lock.",
+          "properties": {
+            "by": {
+              "const": "commit",
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The newest PromotionRecord on a path.",
+          "properties": {
+            "by": {
+              "const": "promotion",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "by",
+            "path",
+            "sequence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The current deployment admission.",
+          "properties": {
+            "by": {
+              "const": "admission",
+              "type": "string"
+            },
+            "generation": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "generation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An invocation-selected revision. A `refs/nyl-worktrees/` revision is\narchived worktree provenance and cannot establish clean promotion evidence.",
+          "properties": {
+            "by": {
+              "const": "override",
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`desired/environment.yaml`: the resolved Environment, its source commit,\nand its ownership set.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "appliedPromotionSequence": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentName"
+    },
+    "kind": {
+      "$ref": "#/$defs/EnvironmentRecordKind"
+    },
+    "ownership": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Uid"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "description": "The ownership set: every selected, enabled unit, with the uid of its incarnation when it has one.",
+      "type": "object"
+    },
+    "sourceChosenBy": {
+      "$ref": "#/$defs/SourceChoice",
+      "description": "How S was chosen."
+    },
+    "sourceCommit": {
+      "$ref": "#/$defs/CommitId",
+      "description": "The source commit S of the run that wrote this record."
+    },
+    "spec": {
+      "description": "The resolved Environment spec with group defaults applied."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "environment",
+    "spec",
+    "sourceCommit",
+    "sourceChosenBy"
+  ],
+  "title": "EnvironmentRecord",
+  "type": "object"
+}
