@@ -141,7 +141,8 @@ nyl reconcile -e dev --worktree
 ```
 
 Nyl snapshots Git-visible tracked and untracked files once, preserving deletions
-and executable modes. Ignored untracked files are excluded. Internal symlinks
+and executable modes. Ignored untracked files and the configured Nyl cache are excluded.
+Tracked files inside the cache cause capture to fail; move the cache or untrack them. Internal symlinks
 are preserved without following their targets; input paths cannot traverse
 symlinks. HEAD and the staging index stay untouched. Discovery, preflight,
 rendering, and all execution waves use that immutable snapshot; subsequent edits

@@ -239,7 +239,7 @@ fn worktree_capture_line(progress: &nyl_core::orchestration::progress::WorktreeC
     use nyl_core::orchestration::progress::WorktreeCaptureProgress;
     match progress {
         WorktreeCaptureProgress::Started { base, .. } => format!(
-            "[worktree] capturing Git-visible tracked and untracked files (excluding ignored files), base {base}"
+            "[worktree] capturing Git-visible tracked and untracked files (excluding ignored files and the Nyl cache), base {base}"
         ),
         WorktreeCaptureProgress::Finished {
             snapshot,
@@ -316,7 +316,7 @@ mod tests {
             at: started,
         });
         assert!(start.contains(base.as_str()));
-        assert!(start.contains("tracked and untracked files (excluding ignored files)"));
+        assert!(start.contains("tracked and untracked files (excluding ignored files and the Nyl cache)"));
         for reused in [false, true] {
             let line = worktree_capture_line(&WorktreeCaptureProgress::Finished {
                 snapshot: nyl_core::orchestration::ports::WorktreeSnapshot {

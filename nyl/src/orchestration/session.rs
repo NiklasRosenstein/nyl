@@ -117,7 +117,8 @@ impl Session {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
         let state = self.store(None)?;
         Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
-            .with_snapshot_repository(state.repository_path(&self.resolved.location)))
+            .with_snapshot_repository(state.repository_path(&self.resolved.location))
+            .with_worktree_cache(crate::git::CacheLayout::for_project(&self.inventory.project_root).root()))
     }
 
     /// Wire explicit working-file capture through the shared source shell.

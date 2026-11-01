@@ -242,7 +242,8 @@ spec:
   working files once, with deletions and executable modes. It leaves HEAD and
   the user's index untouched, preserves internal symbolic links without following
   them, rejects traversal through symlinked directories, and excludes ignored untracked
-  files. Exactly one named environment is required; `--source`, label selectors,
+  files and the configured Nyl cache. Tracked files inside the cache cause capture
+  to fail. Exactly one named environment is required; `--source`, label selectors,
   and group selectors conflict with this mode. The snapshot overrides the
   Environment's source selection and ordinary run-source reachability only;
   explicitly pinned unit source fields retain their own revisions and checks.

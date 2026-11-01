@@ -18,13 +18,17 @@ use super::{error, git_error};
 
 /// Git-visible tracked and untracked paths, and paths whose working bytes changed.
 /// Deleted files remain candidates so callers can omit them from the snapshot.
-pub fn visible_files(repository: &Repository) -> SourceResult<(BTreeSet<String>, Vec<String>)> {
-    let (files, changed, _) = visible_files_status(repository)?;
+pub fn visible_files(
+    repository: &Repository,
+    cache: Option<&std::path::Path>,
+) -> SourceResult<(BTreeSet<String>, Vec<String>)> {
+    let (files, changed, _) = visible_files_status(repository, cache)?;
     Ok((files, changed))
 }
 
 fn visible_files_status(
     repository: &Repository,
+    cache: Option<&std::path::Path>,
 ) -> SourceResult<(BTreeSet<String>, Vec<String>, BTreeSet<std::path::PathBuf>)> {
     let index = repository
         .index()
@@ -51,6 +55,50 @@ fn visible_files_status(
         changed.push(path.to_owned());
         if entry.untracked || entry.status[1] != b' ' {
             working_changes.insert(entry.path);
+        }
+    }
+    if let Some(cache) = cache {
+        let worktree = root;
+        let root =
+            std::fs::canonicalize(worktree).map_err(|cause| error(format!("cannot resolve worktree: {cause}")))?;
+        let absolute = if cache.is_absolute() {
+            cache.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|cause| error(format!("cannot resolve cache directory: {cause}")))?
+                .join(cache)
+        };
+        let mut paths = Vec::new();
+        if std::fs::symlink_metadata(&absolute).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            if let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) {
+                if let Ok(parent) = std::fs::canonicalize(parent) {
+                    if parent.starts_with(&root) {
+                        paths.push(parent.join(name));
+                    }
+                }
+            }
+        }
+        match std::fs::canonicalize(cache) {
+            Ok(path) => paths.push(path),
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cause) => return Err(error(format!("cannot resolve Nyl cache: {cause}"))),
+        }
+        for cache in paths {
+            if root.starts_with(&cache) {
+                return Err(error("the Nyl cache cannot contain the worktree root"));
+            }
+            if let Ok(relative) = cache.strip_prefix(&root) {
+                if index.iter().any(|entry| {
+                    std::path::Path::new(std::str::from_utf8(&entry.path).unwrap_or("")).starts_with(relative)
+                }) {
+                    return Err(error(format!(
+                        "tracked files are inside the Nyl cache {}; move the cache or untrack those files",
+                        cache.display()
+                    )));
+                }
+                files.retain(|path| !std::path::Path::new(path).starts_with(relative));
+                changed.retain(|path| !std::path::Path::new(path).starts_with(relative));
+            }
         }
     }
     Ok((files, changed, working_changes))
@@ -180,11 +228,12 @@ pub(super) fn capture(
     identity: &CommitIdentity,
     now: Timestamp,
     previous: Option<&CommitId>,
+    cache: Option<&std::path::Path>,
 ) -> SourceResult<WorktreeSnapshot> {
     let root = repository
         .workdir()
         .ok_or_else(|| error("worktree snapshots require a working checkout"))?;
-    let (files, changed, working_changes) = visible_files_status(repository)?;
+    let (files, changed, working_changes) = visible_files_status(repository, cache)?;
     let source_index = repository
         .index()
         .map_err(|cause| git_error("cannot read source index", &cause))?;
@@ -379,7 +428,7 @@ mod tests {
         }
         let identity = "Test <test@example.invalid>".parse().unwrap();
         let now: Timestamp = "2026-10-28T12:00:00Z".parse().unwrap();
-        let snapshot = capture(&repository, &base, &identity, now, None).unwrap();
+        let snapshot = capture(&repository, &base, &identity, now, None, None).unwrap();
         let commit = repository
             .find_commit(Oid::from_str(snapshot.commit.as_str()).unwrap())
             .unwrap();
@@ -401,7 +450,15 @@ mod tests {
             .unwrap()
             .contains(&format!("Nyl-Worktree-Base: {base}")));
         assert!(!snapshot.reused);
-        let reused = capture(&repository, &base, &identity, now + chrono::Duration::hours(1), None).unwrap();
+        let reused = capture(
+            &repository,
+            &base,
+            &identity,
+            now + chrono::Duration::hours(1),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(reused.reused);
         assert_eq!(reused.commit, snapshot.commit);
         repository.find_reference(&snapshot.revision).unwrap().delete().unwrap();
@@ -411,6 +468,7 @@ mod tests {
             &identity,
             now + chrono::Duration::hours(2),
             Some(&snapshot.commit),
+            None,
         )
         .unwrap();
         assert!(recovered.reused);
@@ -418,9 +476,138 @@ mod tests {
         std::fs::write(root.path().join("input"), "later").unwrap();
         assert_eq!(repository.find_blob(input).unwrap().content(), b"working");
         assert_ne!(
-            capture(&repository, &base, &identity, now, None).unwrap().commit,
+            capture(&repository, &base, &identity, now, None, None).unwrap().commit,
             snapshot.commit
         );
+    }
+
+    #[test]
+    fn test_snapshot_excludes_configured_cache_and_recovers_without_omitting_tracked_files() {
+        for cache_path in [".nyl/cache", "custom/cache"] {
+            let (root, repository, base) = project();
+            let cache = root.path().join(cache_path);
+            std::fs::create_dir_all(cache.join("state/repository.git/objects")).unwrap();
+            std::fs::write(cache.join("state/repository.git/objects/data"), "state").unwrap();
+            std::fs::create_dir_all(root.path().join(".nyl")).unwrap();
+            std::fs::write(root.path().join(".nyl/authored.yaml"), "source").unwrap();
+            std::fs::create_dir_all(root.path().join("custom/cache-sibling")).unwrap();
+            std::fs::write(root.path().join("custom/cache-sibling/input"), "source").unwrap();
+            let identity = "Test <test@example.invalid>".parse().unwrap();
+            let now = "2026-10-28T12:00:00Z".parse().unwrap();
+            let snapshot = capture(&repository, &base, &identity, now, None, Some(&cache)).unwrap();
+            let commit = repository
+                .find_commit(Oid::from_str(snapshot.commit.as_str()).unwrap())
+                .unwrap();
+            assert!(commit
+                .tree()
+                .unwrap()
+                .get_path(std::path::Path::new(cache_path))
+                .is_err());
+            assert!(commit
+                .tree()
+                .unwrap()
+                .get_path(std::path::Path::new(".nyl/authored.yaml"))
+                .is_ok());
+            assert!(commit
+                .tree()
+                .unwrap()
+                .get_path(std::path::Path::new("custom/cache-sibling/input"))
+                .is_ok());
+            std::fs::write(cache.join("state/repository.git/objects/data"), "new state").unwrap();
+            repository.find_reference(&snapshot.revision).unwrap().delete().unwrap();
+            let recovered = capture(&repository, &base, &identity, now, Some(&snapshot.commit), Some(&cache)).unwrap();
+            assert!(recovered.reused);
+            assert_eq!(recovered.commit, snapshot.commit);
+            std::fs::write(cache.join("tracked"), "source").unwrap();
+            let mut index = repository.index().unwrap();
+            index
+                .add_path(&std::path::Path::new(cache_path).join("tracked"))
+                .unwrap();
+            index.write().unwrap();
+            assert!(capture(&repository, &base, &identity, now, None, Some(&cache))
+                .unwrap_err()
+                .to_string()
+                .contains("tracked files are inside the Nyl cache"));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_snapshot_excludes_cache_symlink_to_external_directory() {
+        let (root, repository, base) = project();
+        let external = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(external.path(), root.path().join("cache-link")).unwrap();
+        std::os::unix::fs::symlink("input", root.path().join("source-link")).unwrap();
+        let snapshot = capture(
+            &repository,
+            &base,
+            &"Test <test@example.invalid>".parse().unwrap(),
+            "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
+            Some(&root.path().join("cache-link")),
+        )
+        .unwrap();
+        let tree = repository
+            .find_commit(Oid::from_str(snapshot.commit.as_str()).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(tree.get_name("cache-link").is_none());
+        assert!(tree.get_name("source-link").is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_snapshot_preserves_source_symlink_ancestor_of_cache() {
+        for tracked in [false, true] {
+            let (root, repository, base) = project();
+            std::fs::create_dir_all(root.path().join("sources/cache")).unwrap();
+            std::fs::write(root.path().join("sources/cache/state"), "state").unwrap();
+            std::fs::create_dir(root.path().join("cache")).unwrap();
+            std::fs::write(root.path().join("cache/state"), "state").unwrap();
+            std::os::unix::fs::symlink("sources", root.path().join("source-link")).unwrap();
+            if tracked {
+                let mut index = repository.index().unwrap();
+                index.add_path(std::path::Path::new("source-link")).unwrap();
+                index.write().unwrap();
+            }
+            for (cache, excluded) in [
+                ("source-link/cache", "sources/cache"),
+                ("source-link/../cache", "cache"),
+            ] {
+                let snapshot = capture(
+                    &repository,
+                    &base,
+                    &"Test <test@example.invalid>".parse().unwrap(),
+                    "2026-10-28T12:00:00Z".parse().unwrap(),
+                    None,
+                    Some(&root.path().join(cache)),
+                )
+                .unwrap();
+                let tree = repository
+                    .find_commit(Oid::from_str(snapshot.commit.as_str()).unwrap())
+                    .unwrap()
+                    .tree()
+                    .unwrap();
+                assert_eq!(tree.get_name("source-link").unwrap().filemode(), 0o120_000);
+                assert!(tree.get_path(std::path::Path::new(excluded)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_snapshot_rejects_worktree_root_as_cache() {
+        let (root, repository, base) = project();
+        let error = capture(
+            &repository,
+            &base,
+            &"Test <test@example.invalid>".parse().unwrap(),
+            "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
+            Some(root.path()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cache cannot contain the worktree root"));
     }
 
     #[test]
@@ -456,6 +643,7 @@ mod tests {
             &base,
             &"Test <test@example.invalid>".parse().unwrap(),
             "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
             None,
         )
         .unwrap();
@@ -500,6 +688,7 @@ mod tests {
             &"Test <test@example.invalid>".parse().unwrap(),
             "2026-10-28T12:00:00Z".parse().unwrap(),
             None,
+            None,
         )
         .unwrap();
         let resolver = crate::source::GitSourceResolver::new(repository.path(), nyl_git::GitAuth::default());
@@ -526,6 +715,7 @@ mod tests {
             &"Test <test@example.invalid>".parse().unwrap(),
             "2026-10-28T12:00:00Z".parse().unwrap(),
             None,
+            None,
         )
         .unwrap();
         let commit = repository
@@ -543,6 +733,7 @@ mod tests {
             &base,
             &"Test <test@example.invalid>".parse().unwrap(),
             "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
             None
         )
         .is_err());
@@ -567,6 +758,7 @@ mod tests {
             &base,
             &"Test <test@example.invalid>".parse().unwrap(),
             "2026-10-28T12:00:00Z".parse().unwrap(),
+            None,
             None
         )
         .is_err());
