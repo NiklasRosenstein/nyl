@@ -256,7 +256,7 @@
           "type": "object"
         },
         "name": {
-          "description": "Project-local identity. Must be a Kubernetes DNS subdomain and remain static during discovery.",
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
           "type": "string"
         }
       },
