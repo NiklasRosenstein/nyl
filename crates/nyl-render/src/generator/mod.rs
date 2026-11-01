@@ -118,16 +118,6 @@ impl Generator {
     }
 }
 
-impl Default for Generator {
-    fn default() -> Self {
-        Self::new(ProjectConfig::load(None).unwrap_or_else(|_| ProjectConfig {
-            resource_catalogue: crate::config::ResourceCatalogue::default(),
-            file: None,
-            config: crate::config::ProjectFile::default(),
-        }))
-    }
-}
-
 impl std::fmt::Debug for Generator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Generator")
@@ -177,7 +167,7 @@ mod tests {
         let config_path = base.join("nyl.toml");
         fs::write(&config_path, "[project]\ncomponents_search_paths = [\"components\"]\n").unwrap();
 
-        ProjectConfig::load(Some(config_path)).unwrap()
+        ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap()
     }
 
     fn create_test_component(base: &std::path::Path, api_version: &str, kind: &str) {
@@ -298,12 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generator_default() {
-        let generator = Generator::default();
-        assert!(generator.config().file.is_none());
-    }
-
-    #[test]
     fn test_build_search_paths() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
@@ -317,7 +301,7 @@ components_search_paths = ['{}']
 
         fs::write(&config_path, toml).unwrap();
 
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let config = ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap();
         let paths = Generator::build_search_paths(&config);
 
         assert_eq!(paths.len(), 1);

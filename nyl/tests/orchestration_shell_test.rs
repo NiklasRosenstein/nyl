@@ -248,7 +248,8 @@ fn test_discovery_works_in_a_source_resolver_worktree() {
     let directory = TempDir::new().unwrap();
     let worktree = directory.path().join("worktree");
     resolver.worktree(&SourceRepository::This, &head, &worktree).unwrap();
-    let inventory = nyl::discover_gitops_inventory(&worktree.join("nyl"), None).unwrap();
+    let inventory =
+        nyl_render::gitops::discover_gitops_inventory(&worktree.join("nyl"), None, nyl::resource_catalogue()).unwrap();
     let units = nyl_render::gitops::units::discover_units(&inventory).unwrap();
     assert_eq!(units.len(), 4);
 }

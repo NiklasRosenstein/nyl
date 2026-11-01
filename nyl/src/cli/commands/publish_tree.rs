@@ -5,8 +5,8 @@ use clap::Args;
 use git2::Repository;
 use nyl_core::orchestration::ports::CommitIdentity;
 
-use crate::discover_gitops_inventory;
 use nyl_render::git::{GitManager, WorktreeManager};
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::inputs::verify_publication_base;
 use nyl_render::gitops::publication::{
     prepare_publication, target_render_index, writable_branch_name, PublicationAuthor, TreePublication,
@@ -146,7 +146,7 @@ impl TreeRenderObserver for SilentTreeRenderObserver {}
 
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     args.validation.validate_outputs(false, &[], &[])?;
-    let inventory = discover_gitops_inventory(&args.path, None)?;
+    let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target_name)?;
     let nyl_render::gitops::provenance::WorktreeSourceState {
@@ -353,7 +353,7 @@ async fn compile_clean_head(
             format!("could not locate the committed project: {error}"),
         )
     })?;
-    let inventory = discover_gitops_inventory(&project_root, None).map_err(|error| {
+    let inventory = discover_gitops_inventory(&project_root, None, crate::resource_catalogue()).map_err(|error| {
         dirty_verification_failure(
             target_name,
             source_commit,

@@ -62,7 +62,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     // the rollback before it leaves a revision behind.
     let history_limit = match args.history_limit {
         Some(limit) => limit,
-        None => ProjectConfig::load(None)?.release_history_limit(),
+        None => ProjectConfig::load(None, crate::resource_catalogue())?.release_history_limit(),
     };
 
     // Create Kubernetes clients

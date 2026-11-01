@@ -68,25 +68,19 @@ pub(super) const KIND: &str = "FakePublication";
 const PHASE_APPLICATIONS_REMOVED: &str = "applications-removed";
 
 /// The fake publication kind.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FakePublication {
     script: Script,
     resource_catalogue: nyl_render::config::ResourceCatalogue,
 }
 
 impl FakePublication {
-    pub fn new(script: Script) -> Self {
+    /// A fake publication rendering against the caller's resource catalogue.
+    pub fn new(script: Script, resource_catalogue: nyl_render::config::ResourceCatalogue) -> Self {
         Self {
             script,
-            resource_catalogue: nyl_render::config::ResourceCatalogue::default(),
+            resource_catalogue,
         }
-    }
-
-    /// Set the resource APIs available to publication rendering.
-    #[must_use]
-    pub fn with_resource_catalogue(mut self, catalogue: nyl_render::config::ResourceCatalogue) -> Self {
-        self.resource_catalogue = catalogue;
-        self
     }
 
     /// The resolved `spec.releases` as a pinned input snapshot.
@@ -510,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_validate_spec_checks_field_types() {
-        let driver = FakePublication::default();
+        let driver = FakePublication::new(Script::new(), crate::fake::test_catalogue());
         assert!(driver
             .validate_spec(&json!({"target": "dev", "mode": "publish", "releases": {"web/web": {"image": "x"}}}))
             .is_ok());

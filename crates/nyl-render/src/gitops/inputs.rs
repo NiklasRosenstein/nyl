@@ -1744,7 +1744,8 @@ mod tests {
         let source = CachedGitBlobSource::new(
             Some(crate::git::GitManager::with_cache_dir(temp.path().join("cache"))),
             temp.path(),
-            &crate::config::ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap(),
+            &crate::config::ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue())
+                .unwrap(),
             None,
         );
         let url = temp.path().join("publication").to_string_lossy().into_owned();

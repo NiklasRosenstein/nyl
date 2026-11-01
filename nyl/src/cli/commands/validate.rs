@@ -125,7 +125,7 @@ impl ValidationReport {
 /// end the run.
 async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()> {
     let config_file = ProjectConfig::find(Some(project_dir))?;
-    let config = ProjectConfig::load(config_file.clone())?;
+    let config = ProjectConfig::load(config_file.clone(), crate::resource_catalogue())?;
     report.config_dir = config_file.as_deref().and_then(Path::parent).map(Path::to_path_buf);
     match &config_file {
         Some(file) => report.config_file = Some(slash_path(&path_for_display(file))),
@@ -156,7 +156,7 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
         }
         return Ok(());
     }
-    let inventory = crate::discover_gitops_inventory(project_root, None)?;
+    let inventory = nyl_render::gitops::discover_gitops_inventory(project_root, None, crate::resource_catalogue())?;
     nyl_render::gitops::validate_gitops_inventory(&inventory)?;
     report.warnings.extend(
         crate::orchestration::project::validate_environments(&inventory)?
@@ -200,9 +200,10 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     use nyl_core::orchestration::ports::SourceRenderer;
 
     let wiring = crate::orchestration::run::ProcessWiring::new();
-    let renderer =
-        nyl_render::gitops::units::UnitSourceRenderer::new(crate::orchestration::session::project_dir(inventory))
-            .with_resource_catalogue(inventory.project_config.resource_catalogue.clone());
+    let renderer = nyl_render::gitops::units::UnitSourceRenderer::new(
+        crate::orchestration::session::project_dir(inventory),
+        crate::resource_catalogue(),
+    );
     // The worktree is rendered as it is, committed or not; the commit only labels it.
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
     let (environments, _) = crate::orchestration::project::declared(inventory);

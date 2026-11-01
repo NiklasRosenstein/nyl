@@ -246,11 +246,13 @@ pub struct UnitSourceRenderer {
 }
 
 impl UnitSourceRenderer {
-    pub fn new(entry_project_dir: impl Into<String>) -> Self {
+    /// A renderer for the project at `entry_project_dir`, validating pinned
+    /// checkouts against the caller's resource catalogue.
+    pub fn new(entry_project_dir: impl Into<String>, resource_catalogue: crate::config::ResourceCatalogue) -> Self {
         Self {
             entry_project_dir: entry_project_dir.into(),
             previous_paths: Vec::new(),
-            resource_catalogue: crate::config::ResourceCatalogue::default(),
+            resource_catalogue,
         }
     }
 
@@ -259,13 +261,6 @@ impl UnitSourceRenderer {
     #[must_use]
     pub fn with_previous_paths(mut self, previous_paths: Vec<String>) -> Self {
         self.previous_paths = previous_paths;
-        self
-    }
-
-    /// Use the caller's resource APIs when rendering a pinned checkout.
-    #[must_use]
-    pub fn with_resource_catalogue(mut self, catalogue: crate::config::ResourceCatalogue) -> Self {
-        self.resource_catalogue = catalogue;
         self
     }
 
@@ -278,8 +273,7 @@ impl UnitSourceRenderer {
         let same = self.entry_project_dir.trim_start_matches('/');
         let located =
             crate::util::project_path::locate_checkout_project(worktree, Path::new(same), &[], &self.previous_paths)?;
-        let inventory =
-            super::discover_gitops_inventory_with_catalogue(&located.directory, None, self.resource_catalogue.clone())?;
+        let inventory = super::discover_gitops_inventory(&located.directory, None, self.resource_catalogue.clone())?;
         let effective = resolve_effective_environment(&inventory, environment)?;
         let units = discover_units(&inventory)?;
         let mut rendered = render_environment_units(&inventory, &units, &effective)?;
@@ -824,11 +818,12 @@ spec:
     }
 
     fn inventory(worktree: &TempDir) -> GitOpsInventory {
-        super::super::discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap()
+        super::super::discover_gitops_inventory(&worktree.path().join("nyl"), None, crate::config::test_catalogue())
+            .unwrap()
     }
 
     fn render(worktree: &TempDir, environment: &str) -> SourceResult<RenderedSource> {
-        UnitSourceRenderer::new("/nyl").render(
+        UnitSourceRenderer::new("/nyl", crate::config::test_catalogue()).render(
             worktree.path(),
             &EnvironmentName::new(environment).unwrap(),
             &CommitId::new("a".repeat(40)).unwrap(),
@@ -1005,7 +1000,12 @@ spec:
             unit(&source, "database").spec.as_ref().unwrap()["version"],
             json!("1.9.5")
         );
-        let inventory = crate::gitops::discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap();
+        let inventory = crate::gitops::discover_gitops_inventory(
+            &worktree.path().join("nyl"),
+            None,
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         let (_, direct) = render_direct_unit(&inventory, &UnitName::new("database").unwrap(), None).unwrap();
         assert_eq!(direct["version"], json!("1.9.5"));
         fs::write(

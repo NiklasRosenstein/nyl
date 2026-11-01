@@ -21,13 +21,13 @@ use nyl_orchestration::shell::inspect::{self, GetValue};
 use serde_json::{json, Value};
 
 use crate::cli::table::{render as render_table, Cell};
-use crate::discover_gitops_inventory;
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{
     cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, styled_state_cell, write_finding, Session,
     Stop,
 };
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::units::discover_units;
 use nyl_render::gitops::{DiscoveredGitOpsResource, GitOpsInventory};
 use nyl_render::resources::{GitOpsResource, GitOpsResourceKind};
@@ -546,7 +546,7 @@ fn yaml(value: &Value) -> Result<String> {
 
 /// `nyl get units` without `-e`: unit declarations and the environments selecting each.
 fn unit_declarations(path: &Path, output: GetOutput) -> Result<CommandOutcome> {
-    let inventory = discover_gitops_inventory(path, None)?;
+    let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let units = discover_units(&inventory)?;
     let (environments, _) = declared(&inventory);
     let selecting = |labels: &BTreeMap<String, String>| {
@@ -620,7 +620,7 @@ fn unit_declarations(path: &Path, output: GetOutput) -> Result<CommandOutcome> {
 
 /// The declaration forms: one table of the resources of `kind`.
 fn declarations(kind: GitOpsResourceKind, selection: &GetResourceArgs) -> Result<CommandOutcome> {
-    let inventory = discover_gitops_inventory(&selection.path, None)?;
+    let inventory = discover_gitops_inventory(&selection.path, None, crate::resource_catalogue())?;
     let resources = inventory
         .resources
         .values()

@@ -213,7 +213,7 @@ fn key(driver: &FakePublication, world: &World) -> ExecutionKey {
 #[test]
 fn test_fake_publication_publishes_the_target_tree_and_records_the_tree_artifact() {
     let world = World::new();
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let unit = desired(spec(), key(&driver, &world));
     let identity: CommitIdentity = "Nyl Orchestration <nyl@example.invalid>".parse().unwrap();
 
@@ -280,7 +280,7 @@ fn test_fake_publication_publishes_the_target_tree_and_records_the_tree_artifact
 #[test]
 fn test_fake_publication_without_a_commit_identity_fails_before_effects() {
     let world = World::new();
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let unit = desired(spec(), ExecutionKey::from_digest_of(b"key"));
     let error = driver
         .reconcile(&context(&world, DriverOperation::Reconcile, None), &unit)
@@ -383,7 +383,7 @@ fn commit_unowned(world: &World, path: &str) {
 #[test]
 fn test_fake_publication_tears_down_in_two_phases() {
     let world = World::new();
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let identity: CommitIdentity = "Nyl Orchestration <nyl@example.invalid>".parse().unwrap();
     let unit = desired(spec(), key(&driver, &world));
     let Supported::Supported(Outcome::Succeeded { .. }) = driver
@@ -478,7 +478,7 @@ fn test_fake_publication_tears_down_in_two_phases() {
 #[test]
 fn test_fake_publication_teardown_without_a_commit_identity_fails_before_effects() {
     let world = World::new();
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let unit = deleting(desired(spec(), ExecutionKey::from_digest_of(b"key")));
     let error = driver
         .teardown(&context(&world, DriverOperation::Teardown, None), &unit)
@@ -491,7 +491,7 @@ fn test_fake_publication_teardown_without_a_commit_identity_fails_before_effects
 /// stored document, or claiming requirements for a document that records none.
 #[test]
 fn test_fake_publication_teardown_settings_come_from_the_stored_document() {
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let mut recorded = spec();
     recorded["teardownSettings"] = json!({
         "catalogPrunes": false,
@@ -530,7 +530,7 @@ fn test_fake_publication_teardown_settings_come_from_the_stored_document() {
 /// as a delay without a duration, reaching state.
 #[test]
 fn test_fake_publication_validates_teardown_wait_and_settings() {
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let with = |field: &str, value: Value| {
         let mut spec = spec();
         spec[field] = value;
@@ -562,7 +562,7 @@ fn test_fake_publication_validates_teardown_wait_and_settings() {
 #[test]
 fn test_fake_publication_plans_a_deleting_unit_as_destroy() {
     let world = World::new();
-    let driver = FakePublication::new(Script::new());
+    let driver = FakePublication::new(Script::new(), nyl_units::fake::test_catalogue());
     let unit = deleting(desired(spec(), ExecutionKey::from_digest_of(b"key")));
     let Supported::Supported(plan) = driver
         .plan(&context(&world, DriverOperation::Plan, None), &unit)

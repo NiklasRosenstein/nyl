@@ -18,9 +18,9 @@ use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
-use crate::discover_gitops_inventory;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::{NylError, Result};
 
 /// Output format of state commands.
@@ -254,7 +254,7 @@ fn run_move(
     from: Option<&String>,
     [desired_ref, observed_ref, state_path, coordination_refs]: [Option<&String>; 4],
 ) -> Result<CommandOutcome> {
-    let inventory = discover_gitops_inventory(&common.path, None)?;
+    let inventory = discover_gitops_inventory(&common.path, None, crate::resource_catalogue())?;
     // The old repository and, unless it is this clone's branches, how to reach it.
     let from = from
         .map(|from| -> Result<_> {

@@ -132,7 +132,7 @@ fn records_the_requested_vendor_policy_in_the_generated_project_config() {
         .assert()
         .success();
 
-    let config = ProjectConfig::load(Some(repository.path().join("nyl.toml"))).unwrap();
+    let config = ProjectConfig::load(Some(repository.path().join("nyl.toml")), nyl::resource_catalogue()).unwrap();
     assert_eq!(config.vendor().map(|vendor| vendor.mode), Some(VendorMode::Required));
 
     // The policy of an existing project configuration is never rewritten.
@@ -165,7 +165,7 @@ fn minimal_mode_records_the_requested_vendor_policy() {
         .assert()
         .success();
 
-    let config = ProjectConfig::load(Some(project.join("nyl.toml"))).unwrap();
+    let config = ProjectConfig::load(Some(project.join("nyl.toml")), nyl::resource_catalogue()).unwrap();
     assert_eq!(config.vendor().map(|vendor| vendor.mode), Some(VendorMode::Preferred));
     assert_eq!(
         config.vendor().map(|vendor| vendor.path.clone()),

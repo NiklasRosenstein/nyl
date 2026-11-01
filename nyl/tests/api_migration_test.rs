@@ -40,7 +40,7 @@ fn discovery_rejects_obsolete_envelopes_with_structurally_templated_specs() {
         ("Release", "gitops.nyl/v1", "k8s.nyl/v1"),
     ] {
         std::fs::write(project.path().join("resource.yaml"), format!("apiVersion: {api}\nkind: {kind}\nmetadata:\n  name: test\nspec:\n{{% if values.enabled %}}\n  enabled: true\n{{% endif %}}\n")).unwrap();
-        let error = nyl::discover_gitops_inventory(project.path(), None)
+        let error = nyl_render::gitops::discover_gitops_inventory(project.path(), None, nyl::resource_catalogue())
             .unwrap_err()
             .to_string();
         assert!(error.contains(expected), "{error}");

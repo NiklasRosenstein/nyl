@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use git2::Repository;
 
-use crate::discover_gitops_inventory;
 use nyl_render::git::GitManager;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{
     compile_target_tree_cached_with_observer_and_options, resolve_deployment_target_name, resource_path, GitOpsCache,
     RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
@@ -245,7 +245,7 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
 
 async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
-        let inventory = discover_gitops_inventory(&args.path, None)?;
+        let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
         let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target)?;
         let nyl_render::gitops::provenance::WorktreeSourceState { commit, dirty } =
@@ -795,7 +795,7 @@ async fn source_derived_tree(
         project_candidates,
         &local.project_config.config.project.previous_paths,
     )?;
-    let inventory = discover_gitops_inventory(&located.directory, None)?;
+    let inventory = discover_gitops_inventory(&located.directory, None, crate::resource_catalogue())?;
     let mut progress = TreeProgressReporter::new(progress_args, Some(format!("Baseline {source_ref}")));
     let compiled =
         compile_target_tree_cached_with_observer_and_options(&inventory, target, cache, &mut progress, options).await?;

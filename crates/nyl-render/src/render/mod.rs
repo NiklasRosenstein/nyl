@@ -32,7 +32,7 @@ mod tests {
 
     fn test_project_config() -> ProjectConfig {
         ProjectConfig {
-            resource_catalogue: crate::config::ResourceCatalogue::default(),
+            resource_catalogue: crate::config::test_catalogue(),
             file: None,
             config: crate::config::ProjectFile::default(),
         }

@@ -22,11 +22,11 @@ use nyl_state::source::GitSourceResolver;
 use crate::cli::commands::reconcile::RunOutput;
 use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
-use crate::discover_gitops_inventory;
 use crate::orchestration::project::{
     declared, open_store, requested_by as requested_by_default, resolve_environment, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_render::gitops::GitOpsInventory;
 use nyl_render::NylError;
@@ -61,7 +61,7 @@ pub struct Session {
 impl Session {
     /// Discover the project at `path` and resolve `environment` in it.
     pub fn open(path: &Path, environment: &str) -> Result<Self, Stop> {
-        let inventory = discover_gitops_inventory(path, None)?;
+        let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
         let resolved = resolve_environment(&inventory, environment)?;
         Ok(Self { inventory, resolved })
     }
@@ -157,9 +157,8 @@ impl Session {
 
     /// The renderer of the environment's units at a source commit.
     pub fn renderer(&self) -> UnitSourceRenderer {
-        UnitSourceRenderer::new(self.entry_project_dir())
+        UnitSourceRenderer::new(self.entry_project_dir(), crate::resource_catalogue())
             .with_previous_paths(self.previous_paths())
-            .with_resource_catalogue(self.inventory.project_config.resource_catalogue.clone())
     }
 
     /// The shell context of one command, working through `store`: the

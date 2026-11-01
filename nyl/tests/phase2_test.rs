@@ -204,7 +204,7 @@ helm_chart_search_paths = []
     create_test_chart(&charts_dir, "redis");
 
     // Load config and create generator
-    let config = ProjectConfig::load(Some(config_path)).unwrap();
+    let config = ProjectConfig::load(Some(config_path), nyl::resource_catalogue()).unwrap();
     let generator = Generator::new(config);
 
     // Find and instantiate components

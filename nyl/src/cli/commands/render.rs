@@ -175,9 +175,9 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .validate_outputs(false, &[PathBuf::from(&options.common.path)], &[])?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
-    let (mut project_config, project_root, resolved_target, inventory) =
+    let (project_config, project_root, resolved_target, inventory) =
         if options.common.target.is_some() || target_required {
-            let inventory = discover_gitops_inventory(&current_dir, None)?;
+            let inventory = discover_gitops_inventory(&current_dir, None, crate::resource_catalogue())?;
             let target_name = resolve_deployment_target_name(&inventory, options.common.target.as_deref())?;
             let resolved_target = resolve_target_cluster_from_inventory(&inventory, &target_name)?;
             (
@@ -187,7 +187,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 Some(inventory),
             )
         } else {
-            let project_config = ProjectConfig::load_with_warning(None)?;
+            let project_config = ProjectConfig::load_with_warning(None, crate::resource_catalogue())?;
             let project_root = project_config
                 .file
                 .as_deref()
@@ -207,7 +207,6 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             "--kube-version and --kube-api-versions cannot be used with --target; the Cluster resource is authoritative",
         ));
     }
-    project_config.resource_catalogue.0 = crate::resource_catalogue();
     options.common.validation.enabled(&project_config.config.validation)?;
     let explicit_capabilities = match (options.kube_version, options.kube_api_versions.is_empty()) {
         (Some(version), false) if !version.trim().is_empty() => {

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
-use crate::discover_gitops_inventory;
 use nyl_render::git::GitManager;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::source_locks::{
     collect_source_locks, replace_lock_commit, resolve_source_locks, LockResolution,
 };
@@ -16,9 +16,9 @@ pub(crate) fn update_locks(
     requested_target: Option<&str>,
     check: bool,
 ) -> Result<()> {
-    let inventory = discover_gitops_inventory(path, None)?;
+    let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     #[cfg(feature = "test-kinds")]
-    let drivers = nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new());
+    let drivers = nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new(), crate::resource_catalogue());
     #[cfg(not(feature = "test-kinds"))]
     let drivers = nyl_units::registry::builtin();
     let locks = collect_source_locks(

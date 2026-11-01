@@ -5,7 +5,7 @@ use std::path::Path;
 use clap::Args;
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
-use crate::discover_gitops_inventory;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{DiscoveredGitOpsResource, GitOpsInventory};
 use nyl_render::kubernetes::{KubeClient, KubeRsClient};
 use nyl_render::resources::{Cluster, DeploymentTarget, GitOpsResource, GitOpsResourceKind};
@@ -62,7 +62,7 @@ pub struct ResolvedTargetCluster {
 }
 
 fn inventory(start_dir: &Path) -> Result<GitOpsInventory> {
-    discover_gitops_inventory(start_dir, None)
+    discover_gitops_inventory(start_dir, None, crate::resource_catalogue())
 }
 
 pub fn resolve_target_cluster(start_dir: &Path, target_name: &str) -> Result<ResolvedTargetCluster> {
@@ -561,10 +561,12 @@ mod tests {
             .await
             .unwrap();
         let cluster = |directory: &Path| {
-            let inventory = crate::discover_gitops_inventory(directory, None).unwrap();
+            let inventory =
+                nyl_render::gitops::discover_gitops_inventory(directory, None, crate::resource_catalogue()).unwrap();
             nyl_render::gitops::resolve_cluster_contract(&inventory, "staging")
         };
-        let inventory = crate::discover_gitops_inventory(directory.path(), None).unwrap();
+        let inventory =
+            nyl_render::gitops::discover_gitops_inventory(directory.path(), None, crate::resource_catalogue()).unwrap();
         let GitOpsResource::Cluster(declared) = inventory
             .get(GitOpsResourceKind::Cluster, "staging")
             .unwrap()

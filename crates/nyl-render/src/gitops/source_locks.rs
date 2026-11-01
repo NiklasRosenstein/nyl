@@ -605,7 +605,8 @@ spec:
         repository
             .reference("refs/remotes/origin/tooling", head, true, "tooling")
             .unwrap();
-        let inventory = super::super::discover_gitops_inventory(directory.path(), None).unwrap();
+        let inventory =
+            super::super::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
         let locks = collect_source_locks(&inventory, None, None, &|_, _, _| {
             vec!["/context".to_owned(), "/contexts/tools".to_owned()]
         })

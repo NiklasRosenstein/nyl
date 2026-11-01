@@ -1,6 +1,5 @@
 //! Read-only preparation of a unit from the current worktree or a source revision.
 //! Shared by direct artifact builds and operator tools using a worktree spec.
-use crate::discover_gitops_inventory;
 use crate::orchestration::project::{open_store, resolve_environment};
 use crate::orchestration::run::Wiring;
 use nyl_core::orchestration::driver::{ResolutionContext, SourceRoot};
@@ -12,6 +11,7 @@ use nyl_orchestration::rules::{
     references::{resolve_unit, ReferenceView},
     sources,
 };
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::units::{render_direct_unit, resolve_effective_environment};
 use nyl_render::gitops::GitOpsInventory;
 use nyl_render::{NylError, Result};
@@ -48,7 +48,7 @@ pub fn prepare(
     source: Option<&str>,
     wiring: &Wiring<'_>,
 ) -> Result<DirectUnit> {
-    let entry = discover_gitops_inventory(path, None)?;
+    let entry = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let repository = git2::Repository::discover(&entry.project_root).map_err(config)?;
     let head = repository
         .head()
@@ -78,7 +78,7 @@ pub fn prepare(
             &[],
             &entry.project_config.config.project.previous_paths,
         )?;
-        discover_gitops_inventory(&located.directory, None)?
+        discover_gitops_inventory(&located.directory, None, crate::resource_catalogue())?
     } else {
         entry.clone()
     };

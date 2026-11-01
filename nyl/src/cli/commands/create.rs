@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::cli::resource_file::{append_document, atomic_replace};
-use crate::discover_gitops_inventory;
 use nyl_core::constants::API_VERSION;
 use nyl_render::config::ProjectConfig;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{
     central_group_source_root, derived_group_source_root, DiscoveredGitOpsResource, GitOpsInventory,
     GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
@@ -227,7 +227,7 @@ fn scaffold_release(args: ReleaseScaffoldArgs) -> Result<()> {
 fn scaffold_release_in_dir(args: ReleaseScaffoldArgs, project_dir: Option<&Path>) -> Result<PathBuf> {
     validate_resource_name(&args.name)?;
     let start_dir = project_dir.unwrap_or_else(|| Path::new("."));
-    let inventory = discover_gitops_inventory(start_dir, None)?;
+    let inventory = discover_gitops_inventory(start_dir, None, crate::resource_catalogue())?;
 
     // An exact output path needs no source directory; the group still supplies the namespace default.
     let group = if args.output.is_some() {
@@ -550,7 +550,7 @@ fn scaffold_resource(
         ));
     }
     let start_dir = project_dir.unwrap_or_else(|| Path::new("."));
-    let inventory = discover_gitops_inventory(start_dir, None)?;
+    let inventory = discover_gitops_inventory(start_dir, None, crate::resource_catalogue())?;
     let key = GitOpsInventoryKey::new(args.kind, &args.name);
     if let Some(existing) = inventory.resources.get(&key) {
         return Err(NylError::config(format!(
@@ -726,7 +726,7 @@ fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&P
 
     // Load project config to find components directory
     let config_file = ProjectConfig::find(project_dir)?.ok_or_else(|| NylError::ConfigNotFound("nyl.toml".into()))?;
-    let config = ProjectConfig::load(Some(config_file))?;
+    let config = ProjectConfig::load(Some(config_file), crate::resource_catalogue())?;
     let components_base = config.get_components_search_paths()[0].clone();
 
     debug!("Components base path: {}", components_base.display());
