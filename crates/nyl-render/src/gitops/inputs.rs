@@ -15,7 +15,7 @@
 //!   and each resolved input is digested for the ownership index.
 //!
 //! The declaration types and their pure rules live in
-//! [`nyl_core::resources::release_inputs`], and precedence, type checks, and
+//! [`crate::resources::release_inputs`], and precedence, type checks, and
 //! aggregated issues in the shared resolver [`nyl_core::bindings`];
 //! [`InputSources`] is its provider for Release inputs.
 

@@ -1,0 +1,2060 @@
+//! Kubernetes-shaped configuration resources for Kubernetes GitOps workflows.
+//!
+//! These resources are compiler inputs. They are not installed in a Kubernetes
+//! cluster. Their `apiVersion`, `kind`, and local `metadata.name` form a static
+//! envelope so that discovery does not need to evaluate templates.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use clap::ValueEnum;
+use schemars::{schema_for, JsonSchema};
+use serde::{Deserialize, Serialize};
+
+use nyl_core::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
+use nyl_core::resources::git_source::GitSource;
+use nyl_core::resources::strict::DenyUnknownFields;
+use nyl_core::resources::{
+    validate_dns_subdomain, validate_relative_path, validate_repository_choice, validate_required,
+    validate_static_required, GitOpsResourceMetadata, GitRepository, InlineGitRepository, LabelSelector,
+    LocalReference, KIND_GIT_REPOSITORY,
+};
+use nyl_core::{CoreError, Result};
+
+pub const KIND_CLUSTER: &str = "Cluster";
+
+pub const KIND_ARGOCD_INSTANCE: &str = "ArgoCDInstance";
+
+pub const KIND_DEPLOYMENT_TARGET: &str = "DeploymentTarget";
+
+pub const KIND_APP_PROJECT_DEFINITION: &str = "AppProjectDefinition";
+
+pub const KIND_APPLICATION_GROUP: &str = "ApplicationGroup";
+
+/// Describes a concrete Kubernetes destination and its deterministic rendering capabilities.
+///
+/// Cluster values supply reusable facts; target values take precedence. This is compiler configuration and is not emitted as a workload manifest.
+///
+/// ## When needed
+///
+/// Required for every workload destination and every explicitly configured Argo CD control-plane destination in Kubernetes GitOps.
+///
+/// ## If omitted
+///
+/// Target rendering fails if the referenced Cluster is missing. Omitting `DeploymentTarget.spec.clusterRef` selects a Cluster with the target name; it does not create that Cluster or infer its capabilities from kubeconfig.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::Cluster))]
+pub struct Cluster {
+    /// API group and version defining this resource.
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    /// Resource kind within the API group.
+    pub kind: String,
+    /// Resource identity and metadata.
+    pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
+    pub spec: ClusterSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = super::catalog::cluster_contract_constraints)]
+pub struct ClusterSpec {
+    /// Exactly one concrete Argo CD destination, identified by server URL or registered cluster name.
+    pub destination: ClusterDestination,
+    /// Committed Kubernetes capabilities for deterministic offline rendering. Required unless apiContractFrom.mode is all; omit when inheriting all capabilities. Target rendering requires an effective version and at least one API version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kubernetes: Option<ClusterKubernetesCapabilities>,
+    /// Borrow a declared Cluster's captured API contract. Destination, values, and live settings remain local.
+    #[serde(rename = "apiContractFrom", skip_serializing_if = "Option::is_none")]
+    pub api_contract_from: Option<ClusterApiContractFrom>,
+    /// Cluster facts merged recursively with target values; target values win.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// Local connection settings. Omitted from templates and render hashes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<ClusterLiveConfiguration>,
+}
+
+/// Argo CD's identity for a concrete cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = super::catalog::cluster_destination_constraints)]
+pub struct ClusterDestination {
+    /// Kubernetes API server URL. Exactly one of `server` and `name` must be non-null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Argo CD registered cluster name. Exactly one of `server` and `name` must be non-null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Kubernetes discovery information used for deterministic offline rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterKubernetesCapabilities {
+    /// Kubernetes version exposed to Helm. May be omitted for scaffolding; required for target rendering.
+    #[serde(rename = "kubeVersion", skip_serializing_if = "Option::is_none")]
+    pub kube_version: Option<String>,
+    /// API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry. With `vendoredCrds`, entries served by vendored CustomResourceDefinitions are omitted here and added from the snapshot.
+    #[serde(default, rename = "apiVersions", skip_serializing_if = "Vec::is_empty")]
+    pub api_versions: Vec<String>,
+    /// Cluster-scoped kinds as `group/Kind`, with `core` for the core API group, such as `core/Namespace`. Recorded by `nyl capture cluster`; every other kind listed in `apiVersions` is namespaced. Empty means the scope is unknown.
+    #[serde(default, rename = "clusterScopedKinds", skip_serializing_if = "Vec::is_empty")]
+    pub cluster_scoped_kinds: Vec<String>,
+    /// Whether CustomResourceDefinitions were vendored by `nyl capture cluster --crds`. Their API versions and scopes then come from the vendored snapshot, and rendering fails while it is missing or stale.
+    #[serde(default, rename = "vendoredCrds", skip_serializing_if = "std::ops::Not::not")]
+    pub vendored_crds: bool,
+}
+
+/// Whether a Kubernetes kind is cluster-scoped or namespaced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ResourceScope {
+    Cluster,
+    Namespaced,
+}
+
+/// The `group/Kind` key of `clusterScopedKinds`, with `core` naming the core API group.
+pub fn group_kind_key(group: &str, kind: &str) -> String {
+    format!("{}/{kind}", if group.is_empty() { "core" } else { group })
+}
+
+/// The source and extent of an explicitly borrowed API contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterApiContractFrom {
+    /// Project-local Cluster providing the contract. References must be acyclic.
+    #[serde(rename = "clusterRef")]
+    pub cluster_ref: LocalReference,
+    /// `schemas` borrows CRD schemas; `all` also borrows Kubernetes capabilities.
+    pub mode: ClusterApiContractMode,
+}
+
+/// Which parts of a Cluster's API contract are inherited.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterApiContractMode {
+    Schemas,
+    All,
+}
+
+/// Local-only connection settings for live operations against a cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterLiveConfiguration {
+    /// Local kubeconfig context. Live commands prefer an explicit `--context`, then this value, then the current kubeconfig context.
+    pub context: String,
+}
+
+/// Defines an Argo CD control plane and the catalog defaults for its deployment targets.
+///
+/// This is compiler configuration. Targets sharing an instance must use unambiguous generated Application and AppProject names.
+///
+/// ## When needed
+///
+/// Declare one to configure a shared or remote Argo CD control plane, a different namespace, or shared catalog defaults.
+///
+/// ## If omitted
+///
+/// When no ArgoCDInstance resources are declared, each target uses an implicit instance in its workload Cluster, in namespace `argocd`, with the catalog defaults. Leave `spec.argocdRef` unset in this case. Once any explicit instance exists, every DeploymentTarget must set `spec.argocdRef.name` to a declared instance.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::ArgoCDInstance))]
+pub struct ArgoCDInstance {
+    /// API group and version defining this resource.
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    /// Resource kind within the API group.
+    pub kind: String,
+    /// Resource identity and metadata.
+    pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
+    pub spec: ArgoCDInstanceSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgoCDInstanceSpec {
+    /// Project-local Cluster containing the Argo CD control plane.
+    #[serde(rename = "clusterRef")]
+    pub cluster_ref: LocalReference,
+    /// Namespace containing Argo CD Applications and AppProjects.
+    #[serde(default = "default_argocd_namespace")]
+    pub namespace: String,
+    /// Default policy for the catalog Applications of targets using this instance.
+    #[serde(rename = "catalogApplicationDefaults", default)]
+    pub catalog_application_defaults: CatalogApplicationDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogApplicationDefaults {
+    /// Argo CD project assigned to generated catalog Applications.
+    #[serde(default = "default_argocd_project")]
+    pub project: String,
+    /// Catalog synchronization policy. Defaults to manual sync with apply-only-out-of-sync and server-side apply.
+    #[serde(rename = "syncPolicy", default = "default_catalog_sync_policy")]
+    pub sync_policy: GitOpsSyncPolicy,
+    /// Argo CD Application finalizer policy: foreground cascade, background cascade, or orphan workloads.
+    #[serde(rename = "applicationDeletionPolicy", default)]
+    pub application_deletion_policy: ApplicationDeletionPolicy,
+    /// Policy for pruning the catalog Application itself. Confirmation is required by default.
+    #[serde(rename = "selfPrunePolicy", default)]
+    pub self_prune_policy: ManagedResourceDeletionPolicy,
+    /// Labels added to generated Applications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations added to generated Applications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+impl Default for CatalogApplicationDefaults {
+    fn default() -> Self {
+        Self {
+            project: default_argocd_project(),
+            sync_policy: default_catalog_sync_policy(),
+            application_deletion_policy: ApplicationDeletionPolicy::Foreground,
+            self_prune_policy: ManagedResourceDeletionPolicy::Confirm,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        }
+    }
+}
+
+/// Binds a Kubernetes Cluster to render values, ApplicationGroup selection, and Git publication coordinates.
+///
+/// A target owns one independently renderable publication slice. It is compiler configuration and does not represent a general infrastructure environment.
+///
+/// ## When needed
+///
+/// Required for target-aware Kubernetes GitOps operations. It supplies workload Cluster selection and publication coordinates.
+///
+/// ## If omitted
+///
+/// Operations requiring a target fail when none are declared. If exactly one target exists, Nyl selects it without `--target`; with multiple targets, select one explicitly. Target selection never creates a DeploymentTarget.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::DeploymentTarget))]
+pub struct DeploymentTarget {
+    /// API group and version defining this resource.
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    /// Resource kind within the API group.
+    pub kind: String,
+    /// Resource identity and metadata.
+    pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
+    pub spec: DeploymentTargetSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentTargetSpec {
+    /// Project-local workload Cluster. Defaults to the target name when omitted.
+    #[serde(rename = "clusterRef", skip_serializing_if = "Option::is_none")]
+    pub cluster_ref: Option<LocalReference>,
+    /// Project-local ArgoCDInstance. Required when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace.
+    #[serde(rename = "argocdRef", skip_serializing_if = "Option::is_none")]
+    pub argocd_ref: Option<LocalReference>,
+    /// Matches literal ApplicationGroup metadata labels before rendering their specs. An empty selector matches all groups.
+    #[serde(rename = "applicationGroupSelector", default)]
+    pub application_group_selector: LabelSelector,
+    /// Target values recursively overlaid on Cluster values and exposed as template inputs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes.
+    pub publication: GitPublication,
+    /// Target-specific catalog Application settings. Unspecified policy inherits from the ArgoCDInstance.
+    #[serde(rename = "catalogApplication", default)]
+    pub catalog_application: CatalogApplicationOverrides,
+    /// Release input bindings, keyed by `<applicationGroup>/<release>` and then input name. Each binding sets exactly one source and replaces the Release default whole. Keys of selected but disabled groups are ignored; other keys must name a rendered Release and inputs it declares. Not visible to templates as `target.spec.releaseInputs`.
+    #[serde(rename = "releaseInputs", default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub release_inputs: super::release_inputs::ReleaseInputBindings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogApplicationOverrides {
+    /// Whether to generate a catalog Application recursively sourcing `_nyl/catalog`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Catalog Application name. Defaults to the target name; names must be unique within the Argo CD instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Argo CD project override; inherits the instance catalog default when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Catalog synchronization override; inherits the instance default when omitted.
+    #[serde(rename = "syncPolicy", skip_serializing_if = "Option::is_none")]
+    pub sync_policy: Option<GitOpsSyncPolicy>,
+    /// Application deletion override; inherits the instance default when omitted.
+    #[serde(rename = "applicationDeletionPolicy", skip_serializing_if = "Option::is_none")]
+    pub application_deletion_policy: Option<ApplicationDeletionPolicy>,
+    /// Self-pruning override; inherits the instance default when omitted.
+    #[serde(rename = "selfPrunePolicy", skip_serializing_if = "Option::is_none")]
+    pub self_prune_policy: Option<ManagedResourceDeletionPolicy>,
+    /// Labels added to generated Applications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations added to generated Applications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+impl Default for CatalogApplicationOverrides {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            name: None,
+            project: None,
+            sync_policy: None,
+            application_deletion_policy: None,
+            self_prune_policy: None,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        }
+    }
+}
+
+/// Git coordinates used as a rendered output and Argo CD source.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = super::catalog::publication_constraints)]
+pub struct GitPublication {
+    /// Project-local GitRepository identity in `gitops.nyl/v1`. Exactly one of `repositoryRef` and `repository` is required.
+    #[serde(rename = "repositoryRef", skip_serializing_if = "Option::is_none")]
+    pub repository_ref: Option<LocalReference>,
+    /// Inline Git coordinates. Exactly one of `repositoryRef` and `repository` is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<InlineGitRepository>,
+    /// Publication branch or revision for this target.
+    pub revision: String,
+    /// Normalized repository-relative output prefix. Defaults to the target name.
+    #[serde(rename = "pathPrefix", skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+}
+
+/// Defines an Argo CD AppProject manifest or an externally managed project contract.
+///
+/// Rendered projects are emitted into the catalog. External projects supply an admission contract without transferring ownership to Nyl.
+///
+/// ## When needed
+///
+/// Required when one project is shared by several ApplicationGroups, when the Argo CD AppProject is externally managed, or when the project needs AppProject fields beyond `spec.projectTemplate`.
+///
+/// ## If omitted
+///
+/// An ApplicationGroup generates its own AppProject, admitting only what the group's Applications deploy unless `spec.projectTemplate` declares otherwise. Nyl does not assume an existing Argo CD project supplies the required policy contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::AppProjectDefinition))]
+pub struct AppProjectDefinition {
+    /// API group and version defining this resource.
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    /// Resource kind within the API group.
+    pub kind: String,
+    /// Resource identity and metadata.
+    pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
+    pub spec: AppProjectDefinitionSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectDefinitionSpec {
+    /// Whether Nyl emits the AppProject or validates against an externally managed project contract.
+    pub management: AppProjectManagement,
+    /// GitRepository names admitted as source repositories. Valid only for a Rendered project; duplicate names are rejected.
+    #[serde(default, rename = "sourceRepositoryRefs", skip_serializing_if = "Vec::is_empty")]
+    pub source_repository_refs: Vec<LocalReference>,
+    /// Argo CD `argoproj.io/v1alpha1` AppProject manifest. Its metadata name supplies the Argo CD project identity.
+    pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub enum AppProjectManagement {
+    /// Emit this AppProject into the target catalog.
+    Rendered,
+    /// Use the project contract for validation without emitting or owning the AppProject.
+    External,
+}
+
+/// Selects Kubernetes Releases and defines their Argo CD Application, project, and namespace policies.
+///
+/// Literal metadata labels participate in target selection; the spec is rendered afterward. This is compiler configuration, not a workload manifest.
+///
+/// ## When needed
+///
+/// Required to select Release entry files and generate their workload Applications in Kubernetes GitOps.
+///
+/// ## If omitted
+///
+/// Nyl does not infer groups from directories or Release files. Without a selected, enabled ApplicationGroup, a target emits no workload Applications. Direct file rendering does not require an ApplicationGroup.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::ApplicationGroup))]
+pub struct ApplicationGroup {
+    /// API group and version defining this resource.
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    /// Resource kind within the API group.
+    pub kind: String,
+    /// Resource identity and metadata.
+    pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
+    pub spec: ApplicationGroupSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = super::catalog::application_group_constraints)]
+pub struct ApplicationGroupSpec {
+    /// Whether to render this selected group. Evaluated after target selection and may be templated.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Release source selection. Omission derives `applications/<group-name>` for central groups or the containing directory for `_application-group.yaml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<ApplicationGroupSource>,
+    /// Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies an AppProject named after this group that admits only what the group deploys.
+    #[serde(rename = "projectRef", skip_serializing_if = "Option::is_none")]
+    pub project_ref: Option<String>,
+    /// Generated AppProject fields. Mutually exclusive with `projectRef`; declared fields are kept as written and omitted fields are derived from what the group deploys.
+    #[serde(rename = "projectTemplate", skip_serializing_if = "Option::is_none")]
+    pub project_template: Option<AppProjectTemplate>,
+    /// Namespace containing generated Argo CD Applications.
+    #[serde(rename = "applicationNamespace")]
+    pub application_namespace: String,
+    /// Workload namespace override. Defaults to each Release namespace.
+    #[serde(rename = "destinationNamespace", skip_serializing_if = "Option::is_none")]
+    pub destination_namespace: Option<String>,
+    /// Relative output directory beneath the target prefix. Defaults to the group name.
+    #[serde(rename = "outputPath", skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    /// Generated workload Application name, as a template value expanded once per Release. It must contain at least one `${ expression }`, evaluated with the target context plus `release`, the rendered Release; `$${` writes a literal `${`, and all other text, including `{{ … }}`, is literal. Defaults to the Release name; use target-qualified names such as `${ target.metadata.name }-${ release.metadata.name }` when targets share an Argo CD namespace.
+    #[serde(rename = "applicationNameTemplate", skip_serializing_if = "Option::is_none")]
+    pub application_name_template: Option<String>,
+    /// Workload Application sync policy. Generated Applications include apply-only-out-of-sync and server-side apply unless explicitly overridden.
+    #[serde(rename = "syncPolicy", skip_serializing_if = "Option::is_none")]
+    pub sync_policy: Option<GitOpsSyncPolicy>,
+    /// Argo CD Application finalizer policy: foreground cascade, background cascade, or orphan workloads.
+    #[serde(rename = "applicationDeletionPolicy", default)]
+    pub application_deletion_policy: ApplicationDeletionPolicy,
+    /// Namespace creation and deletion policy for workload-owned namespaces.
+    #[serde(default)]
+    pub namespace: ManagedNamespacePolicy,
+    /// Explicit ownership by namespace name. Every consuming group must agree. Kubernetes bootstrap namespaces are externally owned unless explicitly delegated here.
+    #[serde(rename = "sharedNamespaces", default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shared_namespaces: BTreeMap<String, SharedNamespacePolicy>,
+    /// Limits on per-release Application overrides. Releases cannot expand the generated project or namespace policy.
+    #[serde(rename = "releaseCustomization", default)]
+    pub release_customization: GitOpsReleaseCustomization,
+    /// Labels added to generated Applications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations added to generated Applications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+/// An Argo CD AppProject generated for one ApplicationGroup and target.
+///
+/// `name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field is derived from what the group's Applications need on the target, so a bare template only renames the implied project: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds the group renders. Declare a field to set it explicitly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectTemplate {
+    /// Generated AppProject name; defaults to the ApplicationGroup name. Must be unambiguous across targets sharing an Argo CD namespace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Labels on the generated AppProject.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations on the generated AppProject.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+    /// Finalizers on the generated AppProject, such as `resources-finalizer.argocd.argoproj.io`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalizers: Vec<String>,
+    /// Project description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Permitted source repository URL patterns. Omitted, the project admits the target publication repository.
+    #[serde(rename = "sourceRepos", skip_serializing_if = "Option::is_none")]
+    pub source_repos: Option<Vec<String>>,
+    /// Namespaces whose Applications may use the project. `applicationNamespace` is always added.
+    #[serde(rename = "sourceNamespaces", skip_serializing_if = "Option::is_none")]
+    pub source_namespaces: Option<Vec<String>>,
+    /// Permitted destinations. Omitted, the project admits the target workload Cluster with every effective Release namespace and additional namespace of the group. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destinations: Option<Vec<AppProjectDestination>>,
+    /// Cluster-scoped resources the project admits. Omitted, the cluster-scoped kinds the group renders, including Namespaces Nyl creates for it; a declared list, including `[]`, admits only its patterns plus Namespace permissions for the admitted namespaces when namespace creation is enabled. Deriving a whitelist requires each rendered kind's scope, from a CRD rendered in the target or the Cluster's recorded capabilities.
+    #[serde(rename = "clusterResourceWhitelist", skip_serializing_if = "Option::is_none")]
+    pub cluster_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
+    /// Cluster-scoped resources the project denies.
+    #[serde(rename = "clusterResourceBlacklist", skip_serializing_if = "Option::is_none")]
+    pub cluster_resource_blacklist: Option<Vec<AppProjectResourcePattern>>,
+    /// Namespaced resources the project admits. Omitted, the namespaced kinds the group renders.
+    #[serde(rename = "namespaceResourceWhitelist", skip_serializing_if = "Option::is_none")]
+    pub namespace_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
+    /// Namespaced resources the project denies.
+    #[serde(rename = "namespaceResourceBlacklist", skip_serializing_if = "Option::is_none")]
+    pub namespace_resource_blacklist: Option<Vec<AppProjectResourcePattern>>,
+    /// Project roles, as Argo CD `spec.roles`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<serde_json::Value>>,
+    /// Sync windows, as Argo CD `spec.syncWindows`.
+    #[serde(rename = "syncWindows", skip_serializing_if = "Option::is_none")]
+    pub sync_windows: Option<Vec<serde_json::Value>>,
+    /// Orphaned resource monitoring, as Argo CD `spec.orphanedResources`.
+    #[serde(rename = "orphanedResources", skip_serializing_if = "Option::is_none")]
+    pub orphaned_resources: Option<serde_json::Value>,
+    /// GnuPG keys required to verify source commits, as Argo CD `spec.signatureKeys`.
+    #[serde(rename = "signatureKeys", skip_serializing_if = "Option::is_none")]
+    pub signature_keys: Option<Vec<serde_json::Value>>,
+    /// Whether only clusters scoped to this project are admitted, as Argo CD `spec.permitOnlyProjectScopedClusters`.
+    #[serde(rename = "permitOnlyProjectScopedClusters", skip_serializing_if = "Option::is_none")]
+    pub permit_only_project_scoped_clusters: Option<bool>,
+    /// Service accounts used for sync per destination, as Argo CD `spec.destinationServiceAccounts`.
+    #[serde(rename = "destinationServiceAccounts", skip_serializing_if = "Option::is_none")]
+    pub destination_service_accounts: Option<Vec<serde_json::Value>>,
+}
+
+/// One Argo CD AppProject destination. At least one of `server` and `name` is required.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectDestination {
+    /// Cluster API server URL pattern, such as `https://kubernetes.default.svc` or `*`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Argo CD cluster name pattern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Namespace pattern, such as `apps`, `preview-*`, or `*`.
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectResourcePattern {
+    /// Kubernetes API group pattern, such as `apiextensions.k8s.io` or `*`.
+    pub group: String,
+    /// Kubernetes resource kind pattern.
+    pub kind: String,
+    /// Optional resource name pattern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// A local source when no repository is given, otherwise an immutable remote source.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[schemars(transform = super::catalog::source_constraints)]
+pub struct ApplicationGroupSource {
+    /// Where the Releases are read from. A remote source requires `revision` and its `commit` lock; a local one admits neither.
+    #[serde(flatten)]
+    pub git: GitSource,
+    /// Relative candidate file globs. Only entries with a literal Release are rendered; attach other files using Release `spec.include`.
+    #[serde(default = "default_source_include")]
+    pub include: Vec<String>,
+    /// Relative file globs removed after inclusion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Whether source discovery descends into subdirectories.
+    #[serde(default = "default_true")]
+    pub recursive: bool,
+    /// Whether remote rendering uses central configuration or the remote project. Remote sessions cannot access secrets or the process environment.
+    #[serde(rename = "rendererConfig", default)]
+    pub renderer_config: RendererConfig,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown_fields: DenyUnknownFields,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RendererConfig {
+    /// Central uses platform configuration; Remote loads the remote project and requires a remote source.
+    #[serde(default)]
+    pub mode: RendererConfigMode,
+    /// Remote project root, relative to the checkout. Defaults to `.`; valid only in Remote mode and must remain inside the checkout.
+    #[serde(rename = "projectPath", skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            mode: RendererConfigMode::Central,
+            project_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+pub enum RendererConfigMode {
+    #[default]
+    /// Use the central platform project configuration.
+    Central,
+    /// Load project configuration from the remote source checkout with restricted inputs.
+    Remote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitOpsSyncPolicy {
+    /// Presence enables automated synchronization unless `enabled` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automated: Option<GitOpsAutomatedSyncPolicy>,
+    /// Argo CD sync options. Generated Applications add `ApplyOutOfSyncOnly=true` and `ServerSideApply=true` unless an option with the same key is supplied.
+    #[serde(default, rename = "syncOptions", skip_serializing_if = "Vec::is_empty")]
+    pub sync_options: Vec<String>,
+}
+
+impl GitOpsSyncPolicy {
+    /// Add the generated-Application sync option defaults whose keys are not already set.
+    pub fn add_generated_application_defaults(&mut self) {
+        for default in ["ApplyOutOfSyncOnly=true", "ServerSideApply=true"] {
+            let default_key = sync_option_key(default);
+            if !self
+                .sync_options
+                .iter()
+                .any(|option| sync_option_key(option) == default_key)
+            {
+                self.sync_options.push(default.to_owned());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitOpsAutomatedSyncPolicy {
+    /// Whether automated sync is enabled. Omission enables it when the automated block is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Allow Argo CD to prune resources removed from desired manifests.
+    #[serde(default)]
+    pub prune: bool,
+    /// Allow Argo CD to repair live drift automatically.
+    #[serde(default, rename = "selfHeal")]
+    pub self_heal: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+pub enum ApplicationDeletionPolicy {
+    #[default]
+    /// Cascade deletion in the foreground using the Argo CD resources finalizer.
+    Foreground,
+    /// Cascade deletion in the background using the Argo CD background finalizer.
+    Background,
+    /// Omit the finalizer and leave workload resources in place.
+    Orphan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedNamespacePolicy {
+    /// Synthesize missing destination and additional Namespaces within the owning workload Application.
+    #[serde(default = "default_true")]
+    pub create: bool,
+    /// Namespace pruning policy: Automatic, Confirm, or Retain.
+    #[serde(rename = "prunePolicy", default)]
+    pub prune_policy: ManagedResourceDeletionPolicy,
+    /// Namespace deletion policy when the owning Application is deleted.
+    #[serde(rename = "deletePolicy", default)]
+    pub delete_policy: ManagedResourceDeletionPolicy,
+}
+
+/// Explicit authorization and ownership for a namespace consumed by more than
+/// one generated workload Application.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SharedNamespacePolicy {
+    /// The sole owner of a shared Namespace. Release and Dedicated owners identify the responsible ApplicationGroup.
+    pub owner: SharedNamespaceOwner,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SharedNamespaceOwner {
+    /// The selected workload Release owns the Namespace; other workloads must not render its Namespace object.
+    Release {
+        #[serde(rename = "applicationGroup")]
+        /// ApplicationGroup owning the Namespace Application or selected workload Release.
+        application_group: String,
+        /// Release name within the owning ApplicationGroup.
+        release: String,
+    },
+    /// Generate a dedicated Namespace Application under the selected group; workloads must not render this Namespace.
+    Dedicated {
+        #[serde(rename = "applicationGroup")]
+        /// ApplicationGroup owning the Namespace Application or selected workload Release.
+        application_group: String,
+    },
+    /// The Namespace is externally owned. Nyl neither synthesizes nor accepts an authored Namespace object.
+    External,
+}
+
+impl Default for ManagedNamespacePolicy {
+    fn default() -> Self {
+        Self {
+            create: true,
+            prune_policy: ManagedResourceDeletionPolicy::Confirm,
+            delete_policy: ManagedResourceDeletionPolicy::Confirm,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+pub enum ManagedResourceDeletionPolicy {
+    /// Allow pruning or deletion without additional restrictions.
+    Automatic,
+    #[default]
+    /// Require confirmation through the Argo CD Prune or Delete sync option.
+    Confirm,
+    /// Set the Argo CD Prune or Delete sync option to false.
+    Retain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GitOpsReleaseCustomization {
+    /// Dotted field globs admitted in Release Application overrides. `*` matches one segment; `**` matches multiple segments. Core ownership fields remain protected.
+    #[serde(default, rename = "allowedPaths", skip_serializing_if = "Vec::is_empty")]
+    pub allowed_paths: Vec<String>,
+    /// Dotted field globs forbidden in Release Application overrides. Deny takes precedence over allow.
+    #[serde(default, rename = "deniedPaths", skip_serializing_if = "Vec::is_empty")]
+    pub denied_paths: Vec<String>,
+    /// Exact allowed values for Release `spec.syncPolicy.+syncOptions` overrides. Same-key values replace the generated option.
+    #[serde(default, rename = "allowedSyncOptions", skip_serializing_if = "Vec::is_empty")]
+    pub allowed_sync_options: Vec<String>,
+}
+
+/// The supported static kind from a GitOps control-resource envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GitOpsResourceKind {
+    #[value(name = "GitRepository", alias = "git-repository", alias = "repository")]
+    GitRepository,
+    #[value(name = "Cluster", alias = "cluster")]
+    Cluster,
+    #[value(name = "ArgoCDInstance", alias = "argocd-instance", alias = "argocd")]
+    ArgoCDInstance,
+    #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
+    DeploymentTarget,
+    #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
+    AppProjectDefinition,
+    #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
+    ApplicationGroup,
+    #[value(name = "Environment", alias = "environment")]
+    Environment,
+    #[value(name = "EnvironmentGroup", alias = "environment-group")]
+    EnvironmentGroup,
+}
+
+impl GitOpsResourceKind {
+    /// API version of this control resource.
+    pub const fn api_version(self) -> &'static str {
+        match self {
+            Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
+            Self::Cluster => API_VERSION,
+            _ => API_VERSION_K8S_GITOPS,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitRepository => KIND_GIT_REPOSITORY,
+            Self::Cluster => KIND_CLUSTER,
+            Self::ArgoCDInstance => KIND_ARGOCD_INSTANCE,
+            Self::DeploymentTarget => KIND_DEPLOYMENT_TARGET,
+            Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
+            Self::ApplicationGroup => KIND_APPLICATION_GROUP,
+            Self::Environment => super::environment::KIND_ENVIRONMENT,
+            Self::EnvironmentGroup => super::environment::KIND_ENVIRONMENT_GROUP,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            KIND_GIT_REPOSITORY => Some(Self::GitRepository),
+            KIND_CLUSTER => Some(Self::Cluster),
+            KIND_ARGOCD_INSTANCE => Some(Self::ArgoCDInstance),
+            KIND_DEPLOYMENT_TARGET => Some(Self::DeploymentTarget),
+            KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
+            KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
+            super::environment::KIND_ENVIRONMENT => Some(Self::Environment),
+            super::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
+            _ => None,
+        }
+    }
+
+    pub const fn schema_filename(self) -> &'static str {
+        match self {
+            Self::GitRepository => "git-repository.schema.json",
+            Self::Cluster => "cluster.schema.json",
+            Self::ArgoCDInstance => "argocd-instance.schema.json",
+            Self::DeploymentTarget => "deployment-target.schema.json",
+            Self::AppProjectDefinition => "app-project-definition.schema.json",
+            Self::ApplicationGroup => "application-group.schema.json",
+            Self::Environment => "environment.schema.json",
+            Self::EnvironmentGroup => "environment-group.schema.json",
+        }
+    }
+
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::GitRepository,
+            Self::Cluster,
+            Self::ArgoCDInstance,
+            Self::DeploymentTarget,
+            Self::AppProjectDefinition,
+            Self::ApplicationGroup,
+            Self::Environment,
+            Self::EnvironmentGroup,
+        ]
+    }
+}
+
+/// Generate the JSON Schema for one GitOps resource kind.
+///
+/// Schemars cannot infer that the Kubernetes resource envelope is a constant
+/// from a Rust `String`, so the two discriminator properties are tightened
+/// after deriving the remainder of the schema.
+pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::Value {
+    let schema = match kind {
+        GitOpsResourceKind::GitRepository => serde_json::to_value(schema_for!(GitRepository)),
+        GitOpsResourceKind::Cluster => serde_json::to_value(schema_for!(Cluster)),
+        GitOpsResourceKind::ArgoCDInstance => serde_json::to_value(schema_for!(ArgoCDInstance)),
+        GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
+        GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
+        GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
+        GitOpsResourceKind::Environment => serde_json::to_value(schema_for!(super::environment::Environment)),
+        GitOpsResourceKind::EnvironmentGroup => serde_json::to_value(schema_for!(super::environment::EnvironmentGroup)),
+    }
+    .expect("schema serialization should never fail");
+    tighten_resource_envelope(schema, kind)
+}
+
+fn tighten_resource_envelope(mut schema: serde_json::Value, kind: GitOpsResourceKind) -> serde_json::Value {
+    super::schema::set_envelope(&mut schema, kind.api_version(), Some(kind.as_str()));
+    schema
+}
+
+/// Generate a portable aggregate schema with relative references to all kinds.
+pub fn generate_gitops_aggregate_schema() -> serde_json::Value {
+    let mut references = GitOpsResourceKind::all()
+        .iter()
+        .map(|kind| serde_json::json!({"$ref": kind.schema_filename()}))
+        .collect::<Vec<_>>();
+    references.push(serde_json::json!({"$ref": super::RELEASE_SCHEMA_FILENAME}));
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Nyl GitOps resource",
+        "description": "A local Nyl rendered-GitOps compiler resource.",
+        "oneOf": references
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOpsResourceIdentity {
+    /// Resource kind within the API group.
+    pub kind: GitOpsResourceKind,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GitOpsResource {
+    GitRepository(GitRepository),
+    Cluster(Cluster),
+    ArgoCDInstance(ArgoCDInstance),
+    DeploymentTarget(DeploymentTarget),
+    AppProjectDefinition(AppProjectDefinition),
+    ApplicationGroup(Box<ApplicationGroup>),
+    Environment(Box<super::environment::Environment>),
+    EnvironmentGroup(super::environment::EnvironmentGroup),
+}
+
+/// True when the manifest advertises the GitOps API and one of its known kinds.
+pub fn is_gitops_resource(value: &serde_json::Value) -> bool {
+    gitops_resource_kind(value).is_some()
+}
+
+pub fn gitops_resource_kind(value: &serde_json::Value) -> Option<GitOpsResourceKind> {
+    let kind = GitOpsResourceKind::parse(value.get("kind")?.as_str()?)?;
+    (value.get("apiVersion")?.as_str()? == kind.api_version() || super::schema::deprecated_api_version(value).is_some())
+        .then_some(kind)
+}
+
+/// Parse only the static envelope. Unrelated manifests return `None`.
+pub fn parse_gitops_resource_identity(value: &serde_json::Value) -> Result<Option<GitOpsResourceIdentity>> {
+    super::catalog::validate_resource_api(value)?;
+    let api_version = value.get("apiVersion").and_then(serde_json::Value::as_str);
+    let kind_text = value.get("kind").and_then(serde_json::Value::as_str);
+    // k8s.nyl/v1 holds rendering resources too; only its Cluster is a control resource.
+    if api_version == Some(API_VERSION) && kind_text != Some(KIND_CLUSTER) {
+        return Ok(None);
+    }
+    if !matches!(
+        api_version,
+        Some(API_VERSION | API_VERSION_GITOPS | API_VERSION_K8S_GITOPS)
+    ) {
+        return Ok(None);
+    }
+    let kind_text = kind_text.ok_or_else(|| CoreError::config("GitOps resource kind must be a static string"))?;
+    // Release is discovered by the workload bundle loader.
+    if kind_text == super::KIND_RELEASE {
+        return Ok(None);
+    }
+    let kind = GitOpsResourceKind::parse(kind_text).ok_or_else(|| {
+        CoreError::config(format!(
+            "Unsupported {} kind {kind_text:?}",
+            api_version.unwrap_or_default()
+        ))
+    })?;
+    let name = value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CoreError::config(format!("{kind_text} metadata.name must be a static string")))?;
+    validate_static_required("metadata.name", name)?;
+    Ok(Some(GitOpsResourceIdentity {
+        kind,
+        name: name.to_owned(),
+    }))
+}
+
+/// Strictly parse and validate a complete, already-rendered GitOps resource.
+pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsResource>> {
+    let Some(identity) = parse_gitops_resource_identity(value)? else {
+        return Ok(None);
+    };
+    // A deprecated API version reads as the current one.
+    let mut value = value.clone();
+    super::schema::canonicalize_api_version(&mut value);
+    let value = &value;
+    let resource = match identity.kind {
+        GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
+        GitOpsResourceKind::Cluster => GitOpsResource::Cluster(parse_as(value, KIND_CLUSTER)?),
+        GitOpsResourceKind::ArgoCDInstance => GitOpsResource::ArgoCDInstance(parse_as(value, KIND_ARGOCD_INSTANCE)?),
+        GitOpsResourceKind::DeploymentTarget => {
+            let mut target: DeploymentTarget = parse_as(value, KIND_DEPLOYMENT_TARGET)?;
+            target.apply_defaults();
+            GitOpsResource::DeploymentTarget(target)
+        }
+        GitOpsResourceKind::AppProjectDefinition => {
+            GitOpsResource::AppProjectDefinition(parse_as(value, KIND_APP_PROJECT_DEFINITION)?)
+        }
+        GitOpsResourceKind::ApplicationGroup => {
+            GitOpsResource::ApplicationGroup(Box::new(parse_as(value, KIND_APPLICATION_GROUP)?))
+        }
+        GitOpsResourceKind::Environment => {
+            GitOpsResource::Environment(Box::new(parse_as(value, super::environment::KIND_ENVIRONMENT)?))
+        }
+        GitOpsResourceKind::EnvironmentGroup => {
+            GitOpsResource::EnvironmentGroup(parse_as(value, super::environment::KIND_ENVIRONMENT_GROUP)?)
+        }
+    };
+    resource.validate()?;
+    Ok(Some(resource))
+}
+
+fn parse_as<T: serde::de::DeserializeOwned>(value: &serde_json::Value, kind: &str) -> Result<T> {
+    serde_json::from_value(value.clone()).map_err(|error| CoreError::config(format!("Invalid {kind}: {error}")))
+}
+
+impl GitOpsResource {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::GitRepository(resource) => resource.validate(),
+            Self::Cluster(resource) => resource.validate(),
+            Self::ArgoCDInstance(resource) => resource.validate(),
+            Self::DeploymentTarget(resource) => resource.validate(),
+            Self::AppProjectDefinition(resource) => resource.validate(),
+            Self::ApplicationGroup(resource) => resource.validate(),
+            Self::Environment(resource) => resource.validate(),
+            Self::EnvironmentGroup(resource) => resource.validate(),
+        }
+    }
+}
+
+impl Cluster {
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_CLUSTER,
+            &self.metadata,
+        )?;
+        self.spec.destination.validate()?;
+        if let Some(reference) = &self.spec.api_contract_from {
+            validate_static_required("spec.apiContractFrom.clusterRef.name", &reference.cluster_ref.name)?;
+        }
+        let inherits_all = self
+            .spec
+            .api_contract_from
+            .as_ref()
+            .is_some_and(|reference| reference.mode == ClusterApiContractMode::All);
+        match (&self.spec.kubernetes, inherits_all) {
+            (Some(_), true) => {
+                return Err(CoreError::config(
+                    "spec.kubernetes must be omitted when spec.apiContractFrom.mode is all",
+                ))
+            }
+            (None, false) => {
+                return Err(CoreError::config(
+                    "spec.kubernetes is required unless spec.apiContractFrom.mode is all",
+                ))
+            }
+            (Some(capabilities), false) => capabilities.validate()?,
+            (None, true) => {}
+        }
+        if let Some(live) = &self.spec.live {
+            validate_static_required("spec.live.context", &live.context)?;
+        }
+        Ok(())
+    }
+}
+
+impl ClusterDestination {
+    pub fn validate(&self) -> Result<()> {
+        match (&self.server, &self.name) {
+            (Some(server), None) => validate_static_required("spec.destination.server", server),
+            (None, Some(name)) => validate_static_required("spec.destination.name", name),
+            (Some(_), Some(_)) => Err(CoreError::config(
+                "spec.destination.server and spec.destination.name are mutually exclusive",
+            )),
+            (None, None) => Err(CoreError::config(
+                "Exactly one of spec.destination.server or spec.destination.name is required",
+            )),
+        }
+    }
+}
+
+impl ClusterKubernetesCapabilities {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(kube_version) = &self.kube_version {
+            validate_static_required("spec.kubernetes.kubeVersion", kube_version)?;
+        }
+        validate_unique_static_names("spec.kubernetes.apiVersions", &self.api_versions)?;
+        validate_unique_static_names("spec.kubernetes.clusterScopedKinds", &self.cluster_scoped_kinds)?;
+        for entry in &self.cluster_scoped_kinds {
+            if !entry
+                .split_once('/')
+                .is_some_and(|(group, kind)| !group.is_empty() && !kind.is_empty() && !kind.contains('/'))
+            {
+                return Err(CoreError::config(format!(
+                    "spec.kubernetes.clusterScopedKinds entry {entry:?} must be group/Kind, with core for the core API group"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The recorded scope of a kind, or `None` when this capture cannot tell.
+    ///
+    /// A kind listed in `clusterScopedKinds` is cluster-scoped; any other kind
+    /// served in `apiVersions` is namespaced, provided scopes were recorded.
+    pub fn scope_of(&self, group: &str, kind: &str) -> Option<ResourceScope> {
+        if self.cluster_scoped_kinds.is_empty() {
+            return None;
+        }
+        if self.cluster_scoped_kinds.contains(&group_kind_key(group, kind)) {
+            return Some(ResourceScope::Cluster);
+        }
+        let served = self.api_versions.iter().any(|entry| {
+            entry.rsplit_once('/').is_some_and(|(api_version, served_kind)| {
+                served_kind == kind && api_version_group(api_version) == Some(group)
+            })
+        });
+        served.then_some(ResourceScope::Namespaced)
+    }
+}
+
+/// The API group of a `group/version` or core `version` entry; `None` for a `group/version/Kind` entry.
+fn api_version_group(api_version: &str) -> Option<&str> {
+    match api_version.split('/').collect::<Vec<_>>().as_slice() {
+        [_version] => Some(""),
+        [group, _version] => Some(group),
+        _ => None,
+    }
+}
+
+impl ArgoCDInstance {
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_ARGOCD_INSTANCE,
+            &self.metadata,
+        )?;
+        validate_static_required("spec.clusterRef.name", &self.spec.cluster_ref.name)?;
+        super::release::validate_namespace_name("spec.namespace", &self.spec.namespace)?;
+        validate_static_required(
+            "spec.catalogApplicationDefaults.project",
+            &self.spec.catalog_application_defaults.project,
+        )?;
+        Ok(())
+    }
+}
+
+impl DeploymentTarget {
+    /// Materialize target-relative defaults so downstream rendering and
+    /// templates observe the effective configuration.
+    pub fn apply_defaults(&mut self) {
+        self.spec.cluster_ref.get_or_insert_with(|| LocalReference {
+            name: self.metadata.name.clone(),
+        });
+        self.spec
+            .publication
+            .path_prefix
+            .get_or_insert_with(|| self.metadata.name.clone());
+    }
+
+    pub fn cluster_name(&self) -> &str {
+        self.spec
+            .cluster_ref
+            .as_ref()
+            .map_or(self.metadata.name.as_str(), |reference| reference.name.as_str())
+    }
+
+    pub fn publication_path_prefix(&self) -> &str {
+        self.spec
+            .publication
+            .path_prefix
+            .as_deref()
+            .unwrap_or(&self.metadata.name)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_DEPLOYMENT_TARGET,
+            &self.metadata,
+        )?;
+        validate_static_required("spec.clusterRef.name", self.cluster_name())?;
+        if let Some(reference) = &self.spec.argocd_ref {
+            validate_static_required("spec.argocdRef.name", &reference.name)?;
+        }
+        self.spec.publication.validate()?;
+        validate_relative_path(
+            "spec.publication.pathPrefix",
+            self.publication_path_prefix(),
+            true,
+            false,
+        )?;
+        if let Some(name) = &self.spec.catalog_application.name {
+            validate_dns_subdomain("spec.catalogApplication.name", name)?;
+        }
+        if let Some(project) = &self.spec.catalog_application.project {
+            validate_static_required("spec.catalogApplication.project", project)?;
+        }
+        super::release_inputs::validate_bindings(&self.spec.release_inputs)?;
+        Ok(())
+    }
+}
+
+impl GitPublication {
+    pub fn validate(&self) -> Result<()> {
+        validate_repository_choice(
+            self.repository_ref.as_ref(),
+            self.repository.as_ref(),
+            "spec.publication",
+        )?;
+        validate_static_required("spec.publication.revision", &self.revision)?;
+        if let Some(path_prefix) = &self.path_prefix {
+            validate_relative_path("spec.publication.pathPrefix", path_prefix, true, false)?;
+        }
+        Ok(())
+    }
+}
+
+impl AppProjectDefinition {
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_APP_PROJECT_DEFINITION,
+            &self.metadata,
+        )?;
+        let object = self
+            .spec
+            .manifest
+            .as_object()
+            .ok_or_else(|| CoreError::config("spec.manifest must be an object"))?;
+        if object.get("apiVersion").and_then(serde_json::Value::as_str) != Some("argoproj.io/v1alpha1")
+            || object.get("kind").and_then(serde_json::Value::as_str) != Some("AppProject")
+        {
+            return Err(CoreError::config(
+                "spec.manifest must be an argoproj.io/v1alpha1 AppProject",
+            ));
+        }
+        let name = object
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CoreError::config("spec.manifest.metadata.name must be a string"))?;
+        validate_dns_subdomain("spec.manifest.metadata.name", name)?;
+        let spec = object.get("spec").and_then(serde_json::Value::as_object);
+        if spec.is_none() {
+            return Err(CoreError::config("spec.manifest.spec must be an object"));
+        }
+        if let Some(source_repos) = spec.and_then(|spec| spec.get("sourceRepos")) {
+            let valid = source_repos
+                .as_array()
+                .is_some_and(|values| values.iter().all(serde_json::Value::is_string));
+            if !valid {
+                return Err(CoreError::config(
+                    "spec.manifest.spec.sourceRepos must be an array of strings",
+                ));
+            }
+        }
+        if self.spec.management == AppProjectManagement::External && !self.spec.source_repository_refs.is_empty() {
+            return Err(CoreError::config(
+                "spec.sourceRepositoryRefs is only valid when spec.management is Rendered",
+            ));
+        }
+        let mut repository_refs = BTreeSet::new();
+        for reference in &self.spec.source_repository_refs {
+            validate_static_required("spec.sourceRepositoryRefs[].name", &reference.name)?;
+            if !repository_refs.insert(&reference.name) {
+                return Err(CoreError::config(format!(
+                    "spec.sourceRepositoryRefs contains duplicate GitRepository reference {:?}",
+                    reference.name
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ApplicationGroup {
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_APPLICATION_GROUP,
+            &self.metadata,
+        )?;
+        if let Some(template) = &self.spec.application_name_template {
+            validate_application_name_template(template)?;
+        }
+        match (&self.spec.project_ref, &self.spec.project_template) {
+            (Some(reference), None) => validate_static_required("spec.projectRef", reference)?,
+            (None, Some(template)) => template.validate()?,
+            (Some(_), Some(_)) => {
+                return Err(CoreError::config(
+                    "spec.projectRef and spec.projectTemplate are mutually exclusive",
+                ))
+            }
+            // Neither declares the implied project: this group's own least-privilege AppProject.
+            (None, None) => {}
+        }
+        validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
+        if let Some(namespace) = &self.spec.destination_namespace {
+            super::release::validate_namespace_name("spec.destinationNamespace", namespace)?;
+        }
+        for (namespace, policy) in &self.spec.shared_namespaces {
+            super::release::validate_namespace_name("spec.sharedNamespaces key", namespace)?;
+            match &policy.owner {
+                SharedNamespaceOwner::Release {
+                    application_group,
+                    release,
+                } => {
+                    validate_dns_subdomain("spec.sharedNamespaces.*.owner.applicationGroup", application_group)?;
+                    validate_dns_subdomain("spec.sharedNamespaces.*.owner.release", release)?;
+                }
+                SharedNamespaceOwner::Dedicated { application_group } => {
+                    validate_dns_subdomain("spec.sharedNamespaces.*.owner.applicationGroup", application_group)?;
+                }
+                SharedNamespaceOwner::External => {}
+            }
+        }
+        if let Some(path) = &self.spec.output_path {
+            validate_relative_path("spec.outputPath", path, false, false)?;
+        }
+        if let Some(source) = &self.spec.source {
+            source.validate()?;
+        }
+        for pattern in self
+            .spec
+            .release_customization
+            .allowed_paths
+            .iter()
+            .chain(&self.spec.release_customization.denied_paths)
+        {
+            crate::resources::validate_path_glob_pattern(pattern)?;
+        }
+        validate_unique_static_names(
+            "spec.releaseCustomization.allowedSyncOptions",
+            &self.spec.release_customization.allowed_sync_options,
+        )?;
+        Ok(())
+    }
+}
+
+impl AppProjectTemplate {
+    fn validate(&self) -> Result<()> {
+        if let Some(name) = &self.name {
+            validate_dns_subdomain("spec.projectTemplate.name", name)?;
+        }
+        for repository in self.source_repos.iter().flatten() {
+            validate_static_required("spec.projectTemplate.sourceRepos[]", repository)?;
+        }
+        for namespace in self.source_namespaces.iter().flatten() {
+            validate_namespace_pattern("spec.projectTemplate.sourceNamespaces[]", namespace)?;
+        }
+        for destination in self.destinations.iter().flatten() {
+            if destination.server.is_none() && destination.name.is_none() {
+                return Err(CoreError::config(
+                    "spec.projectTemplate.destinations[] requires server or name; use server: '*' to admit every cluster",
+                ));
+            }
+            for (field, value) in [("server", &destination.server), ("name", &destination.name)] {
+                if let Some(value) = value {
+                    validate_static_required(&format!("spec.projectTemplate.destinations[].{field}"), value)?;
+                }
+            }
+            validate_namespace_pattern("spec.projectTemplate.destinations[].namespace", &destination.namespace)?;
+        }
+        for (field, patterns) in [
+            ("clusterResourceWhitelist", &self.cluster_resource_whitelist),
+            ("clusterResourceBlacklist", &self.cluster_resource_blacklist),
+            ("namespaceResourceWhitelist", &self.namespace_resource_whitelist),
+            ("namespaceResourceBlacklist", &self.namespace_resource_blacklist),
+        ] {
+            for pattern in patterns.iter().flatten() {
+                validate_static_required(&format!("spec.projectTemplate.{field}[].kind"), &pattern.kind)?;
+                if let Some(name) = &pattern.name {
+                    validate_static_required(&format!("spec.projectTemplate.{field}[].name"), name)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ApplicationGroupSource {
+    pub fn is_remote(&self) -> bool {
+        self.git.is_remote()
+    }
+
+    /// The path inside the remote checkout, without the optional leading `/`.
+    pub fn checkout_path(&self) -> &str {
+        self.git.checkout_path()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let remote = self.is_remote();
+        self.git.validate_application_group("spec.source")?;
+        for pattern in self.include.iter().chain(&self.exclude) {
+            glob::Pattern::new(pattern).map_err(|error| {
+                CoreError::config(format!(
+                    "Invalid ApplicationGroup source include/exclude pattern {pattern:?}: {error}"
+                ))
+            })?;
+        }
+        match self.renderer_config.mode {
+            RendererConfigMode::Central if self.renderer_config.project_path.is_some() => Err(CoreError::config(
+                "spec.source.rendererConfig.projectPath is only valid in Remote mode",
+            )),
+            RendererConfigMode::Remote if !remote => Err(CoreError::config(
+                "spec.source.rendererConfig.mode Remote requires a remote repository",
+            )),
+            RendererConfigMode::Remote => {
+                let project_path = self.renderer_config.project_path.as_deref().unwrap_or(".");
+                validate_relative_path("spec.source.rendererConfig.projectPath", project_path, false, true)
+            }
+            RendererConfigMode::Central => Ok(()),
+        }
+    }
+}
+
+fn validate_envelope(
+    api_version: &str,
+    actual_kind: &str,
+    expected_kind: &str,
+    metadata: &GitOpsResourceMetadata,
+) -> Result<()> {
+    let expected_api = GitOpsResourceKind::parse(expected_kind)
+        .expect("known control kind")
+        .api_version();
+    if api_version != expected_api {
+        return Err(CoreError::config(format!(
+            "{expected_kind} apiVersion must be {expected_api:?}"
+        )));
+    }
+    if actual_kind != expected_kind {
+        return Err(CoreError::config(format!(
+            "Expected kind {expected_kind:?}, got {actual_kind:?}"
+        )));
+    }
+    validate_dns_subdomain("metadata.name", &metadata.name)
+}
+
+fn validate_namespace_pattern(field: &str, value: &str) -> Result<()> {
+    validate_static_required(field, value)?;
+    if value.contains('/') || value.len() > 253 {
+        return Err(CoreError::config(format!(
+            "{field} must be an Argo CD namespace glob without slashes"
+        )));
+    }
+    glob::Pattern::new(value)
+        .map(|_| ())
+        .map_err(|error| CoreError::config(format!("Invalid {field} glob {value:?}: {error}")))
+}
+
+/// `applicationNameTemplate` is a template value that must contain at least
+/// one `${ … }` expression, so every Release gets its own name. Text outside
+/// expressions is literal; the `{{ … }}` form is not expanded.
+fn validate_application_name_template(template: &str) -> Result<()> {
+    use nyl_core::template_value::{parse, Segment};
+    let segments = parse(template)
+        .map_err(|error| CoreError::config(format!("spec.applicationNameTemplate has {error}: {template:?}")))?;
+    if segments.iter().any(|segment| matches!(segment, Segment::Expression(_))) {
+        return Ok(());
+    }
+    Err(CoreError::config(format!(
+        "spec.applicationNameTemplate {template:?} must contain at least one ${{ … }} expression, for example '${{ target.metadata.name }}-${{ release.metadata.name }}'; {{{{ … }}}} is not expanded in this field"
+    )))
+}
+
+fn validate_unique_static_names(field: &str, values: &[String]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        validate_static_required(field, value)?;
+        if !seen.insert(value) {
+            return Err(CoreError::config(format!("{field} contains duplicate value {value:?}")));
+        }
+    }
+    Ok(())
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_argocd_namespace() -> String {
+    "argocd".to_owned()
+}
+
+fn default_argocd_project() -> String {
+    "default".to_owned()
+}
+
+fn default_catalog_sync_policy() -> GitOpsSyncPolicy {
+    let mut policy = GitOpsSyncPolicy {
+        automated: None,
+        sync_options: Vec::new(),
+    };
+    policy.add_generated_application_defaults();
+    policy
+}
+
+fn sync_option_key(option: &str) -> &str {
+    option.split_once('=').map_or(option, |(key, _)| key)
+}
+
+fn default_source_include() -> Vec<String> {
+    vec!["*.yaml".to_owned(), "*.yml".to_owned()]
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_application_name_template_requires_an_expression() {
+        validate_application_name_template("${ target.metadata.name }-${ release.metadata.name }").unwrap();
+        validate_application_name_template("prefix-${release.metadata.name}").unwrap();
+        for template in [
+            "{{ target.metadata.name }}-{{ release.metadata.name }}",
+            "static-name",
+            "$${ release.metadata.name }",
+        ] {
+            let error = validate_application_name_template(template).unwrap_err().to_string();
+            assert!(error.contains("at least one ${ … } expression"), "{template}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_application_name_template_rejects_malformed_expressions() {
+        for template in ["${ release.metadata.name", "${ }-${ release.metadata.name }"] {
+            let error = validate_application_name_template(template).unwrap_err().to_string();
+            assert!(
+                error.contains("spec.applicationNameTemplate has an"),
+                "{template}: {error}"
+            );
+        }
+    }
+
+    fn target() -> serde_json::Value {
+        json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": KIND_DEPLOYMENT_TARGET,
+            "metadata": {"name": "production", "labels": {"environment": "production"}},
+            "spec": {
+                "clusterRef": {"name": "prod-eu-1"},
+                "values": {"replicas": 3},
+                "publication": {
+                    "repositoryRef": {"name": "deploy"},
+                    "revision": "deploy/production"
+                }
+            }
+        })
+    }
+
+    fn cluster() -> serde_json::Value {
+        json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": KIND_CLUSTER,
+            "metadata": {"name": "prod-eu-1", "labels": {"region": "fsn1"}},
+            "spec": {
+                "destination": {"server": "https://kubernetes.default.svc"},
+                "kubernetes": {
+                    "kubeVersion": "1.31.4",
+                    "apiVersions": ["apps/v1", "v1"]
+                },
+                "values": {"region": "fsn1", "nested": {"unrestricted": true}},
+                "live": {"context": "prod-eu-1"}
+            }
+        })
+    }
+
+    fn argocd_instance() -> serde_json::Value {
+        json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": KIND_ARGOCD_INSTANCE,
+            "metadata": {"name": "central"},
+            "spec": {"clusterRef": {"name": "prod-eu-1"}}
+        })
+    }
+
+    fn application_group() -> serde_json::Value {
+        json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": KIND_APPLICATION_GROUP,
+            "metadata": {"name": "cloud"},
+            "spec": {
+                "projectRef": "applications",
+                "applicationNamespace": "argocd-applications",
+                "source": {"path": "applications/cloud"},
+                "destinationNamespace": "cloud",
+                "outputPath": "cloud",
+                "namespace": {"create": true, "prunePolicy": "Confirm", "deletePolicy": "Confirm"}
+            }
+        })
+    }
+
+    #[test]
+    fn parses_and_validates_target() {
+        let parsed = parse_gitops_resource(&target()).unwrap().unwrap();
+        let GitOpsResource::DeploymentTarget(parsed) = parsed else {
+            panic!("expected target");
+        };
+        assert_eq!(parsed.metadata.name, "production");
+        assert_eq!(parsed.cluster_name(), "prod-eu-1");
+        assert_eq!(parsed.spec.values["replicas"], 3);
+        assert_eq!(parsed.publication_path_prefix(), "production");
+    }
+
+    #[test]
+    fn deployment_target_defaults_same_named_cluster_and_preserves_explicit_root_prefix() {
+        let mut value = target();
+        value["spec"].as_object_mut().unwrap().remove("clusterRef");
+        value["spec"]["publication"]["pathPrefix"] = json!("");
+        let GitOpsResource::DeploymentTarget(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected target");
+        };
+        assert_eq!(parsed.cluster_name(), "production");
+        assert_eq!(parsed.publication_path_prefix(), "");
+    }
+
+    #[test]
+    fn parses_and_validates_cluster() {
+        let parsed = parse_gitops_resource(&cluster()).unwrap().unwrap();
+        let GitOpsResource::Cluster(parsed) = parsed else {
+            panic!("expected cluster");
+        };
+        assert_eq!(parsed.metadata.name, "prod-eu-1");
+        assert_eq!(
+            parsed.spec.destination.server.as_deref(),
+            Some("https://kubernetes.default.svc")
+        );
+        assert_eq!(
+            parsed.spec.kubernetes.as_ref().unwrap().kube_version.as_deref(),
+            Some("1.31.4")
+        );
+        assert_eq!(parsed.spec.kubernetes.as_ref().unwrap().api_versions, ["apps/v1", "v1"]);
+        assert_eq!(parsed.spec.values["nested"]["unrestricted"], true);
+        assert_eq!(parsed.spec.live.unwrap().context, "prod-eu-1");
+    }
+
+    #[test]
+    fn parses_cluster_capability_defaults() {
+        let mut value = cluster();
+        value["spec"]["kubernetes"] = json!({});
+        let GitOpsResource::Cluster(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected cluster");
+        };
+        assert!(parsed.spec.kubernetes.as_ref().unwrap().kube_version.is_none());
+        assert!(parsed.spec.kubernetes.as_ref().unwrap().api_versions.is_empty());
+    }
+
+    #[test]
+    fn parses_argocd_instance_security_defaults() {
+        let GitOpsResource::ArgoCDInstance(parsed) = parse_gitops_resource(&argocd_instance()).unwrap().unwrap() else {
+            panic!("expected ArgoCD instance");
+        };
+        assert_eq!(parsed.spec.namespace, "argocd");
+        let defaults = parsed.spec.catalog_application_defaults;
+        assert_eq!(defaults.project, "default");
+        assert_eq!(
+            defaults.application_deletion_policy,
+            ApplicationDeletionPolicy::Foreground
+        );
+        assert_eq!(defaults.self_prune_policy, ManagedResourceDeletionPolicy::Confirm);
+        assert!(defaults.sync_policy.automated.is_none());
+    }
+
+    #[test]
+    fn automated_sync_accepts_argocd_enabled_semantics() {
+        let mut value = argocd_instance();
+        value["spec"]["catalogApplicationDefaults"] = json!({
+            "syncPolicy": {
+                "automated": {"prune": true, "selfHeal": true}
+            }
+        });
+        let GitOpsResource::ArgoCDInstance(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected ArgoCD instance");
+        };
+        let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
+        assert_eq!(automated.enabled, None);
+        assert!(serde_json::to_value(&automated).unwrap().get("enabled").is_none());
+        assert!(automated.prune);
+        assert!(automated.self_heal);
+
+        value["spec"]["catalogApplicationDefaults"]["syncPolicy"]["automated"]["enabled"] = json!(false);
+        let GitOpsResource::ArgoCDInstance(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected ArgoCD instance");
+        };
+        let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
+        assert_eq!(automated.enabled, Some(false));
+        assert_eq!(serde_json::to_value(automated).unwrap()["enabled"], false);
+    }
+
+    #[test]
+    fn test_clusters_parse_under_the_current_and_the_deprecated_api_version() {
+        for api_version in [API_VERSION, API_VERSION_K8S_GITOPS] {
+            let mut cluster = super::super::catalog::resource_example(super::super::catalog::ResourceKind::Cluster);
+            cluster["apiVersion"] = serde_json::json!(api_version);
+            let Some(GitOpsResource::Cluster(parsed)) = parse_gitops_resource(&cluster).unwrap() else {
+                panic!("{api_version}: expected a Cluster");
+            };
+            assert_eq!(
+                parsed.api_version, API_VERSION,
+                "{api_version} reads as the current version"
+            );
+            parsed.validate().unwrap();
+        }
+        // The rendering resources in k8s.nyl/v1 are not control resources.
+        let helm_chart = super::super::catalog::resource_example(super::super::catalog::ResourceKind::HelmChart);
+        assert!(parse_gitops_resource_identity(&helm_chart).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_scope_of_reads_recorded_cluster_scoped_kinds() {
+        let capabilities = ClusterKubernetesCapabilities {
+            kube_version: Some("1.31.4".into()),
+            api_versions: vec![
+                "v1".into(),
+                "v1/Namespace".into(),
+                "v1/ConfigMap".into(),
+                "rbac.authorization.k8s.io/v1".into(),
+                "rbac.authorization.k8s.io/v1/ClusterRole".into(),
+            ],
+            cluster_scoped_kinds: vec!["core/Namespace".into(), "rbac.authorization.k8s.io/ClusterRole".into()],
+            vendored_crds: false,
+        };
+        assert_eq!(capabilities.scope_of("", "Namespace"), Some(ResourceScope::Cluster));
+        assert_eq!(
+            capabilities.scope_of("rbac.authorization.k8s.io", "ClusterRole"),
+            Some(ResourceScope::Cluster)
+        );
+        assert_eq!(capabilities.scope_of("", "ConfigMap"), Some(ResourceScope::Namespaced));
+        // A kind the cluster does not serve has no recorded scope.
+        assert_eq!(capabilities.scope_of("example.com", "Widget"), None);
+        // Captures without recorded scopes cannot tell.
+        let unrecorded = ClusterKubernetesCapabilities {
+            cluster_scoped_kinds: Vec::new(),
+            ..capabilities
+        };
+        assert_eq!(unrecorded.scope_of("", "ConfigMap"), None);
+    }
+
+    #[test]
+    fn application_group_accepts_at_most_one_project_source() {
+        let mut value = application_group();
+        value["spec"]["projectTemplate"] = json!({"destinations": [{"server": "*", "namespace": "cloud"}]});
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("mutually exclusive"));
+        value["spec"].as_object_mut().unwrap().remove("projectRef");
+        assert!(parse_gitops_resource(&value).is_ok());
+        // Declaring neither is the implied project, not an error.
+        value["spec"].as_object_mut().unwrap().remove("projectTemplate");
+        let parsed = parse_gitops_resource(&value).unwrap().unwrap();
+        let GitOpsResource::ApplicationGroup(parsed) = parsed else {
+            panic!("expected application group");
+        };
+        assert!(parsed.spec.project_ref.is_none());
+        assert!(parsed.spec.project_template.is_none());
+    }
+
+    #[test]
+    fn parses_application_group_defaults() {
+        let parsed = parse_gitops_resource(&application_group()).unwrap().unwrap();
+        let GitOpsResource::ApplicationGroup(parsed) = parsed else {
+            panic!("expected application group");
+        };
+        assert!(parsed.spec.enabled);
+        assert_eq!(
+            parsed.spec.application_deletion_policy,
+            ApplicationDeletionPolicy::Foreground
+        );
+        assert_eq!(
+            parsed.spec.namespace.prune_policy,
+            ManagedResourceDeletionPolicy::Confirm
+        );
+        assert_eq!(parsed.spec.source.unwrap().include, vec!["*.yaml", "*.yml"]);
+    }
+
+    #[test]
+    fn strict_deserialization_rejects_unknown_fields() {
+        let mut value = target();
+        value["spec"]["unknown"] = json!(true);
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn identifies_only_supported_gitops_resources() {
+        assert!(is_gitops_resource(&target()));
+        assert_eq!(
+            parse_gitops_resource_identity(&target()).unwrap().unwrap(),
+            GitOpsResourceIdentity {
+                kind: GitOpsResourceKind::DeploymentTarget,
+                name: "production".to_owned()
+            }
+        );
+        assert!(!is_gitops_resource(&json!({"apiVersion": "v1", "kind": "ConfigMap"})));
+        assert!(
+            parse_gitops_resource_identity(&json!({"apiVersion": "v1", "kind": "ConfigMap"}))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_kind_in_gitops_api() {
+        let error = parse_gitops_resource_identity(&json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": "Mystery",
+            "metadata": {"name": "x"}
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Unsupported"));
+    }
+
+    #[test]
+    fn rejects_templated_static_identity() {
+        let mut value = target();
+        value["metadata"]["name"] = json!("{{ values.name }}");
+        assert!(parse_gitops_resource_identity(&value).is_err());
+    }
+
+    #[test]
+    fn validates_repository_choice() {
+        let mut value = target();
+        value["spec"]["publication"]["repository"] = json!({"repoURL": "ssh://example/deploy.git"});
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("mutually exclusive"));
+
+        value["spec"]["publication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repositoryRef");
+        assert!(parse_gitops_resource(&value).is_ok());
+    }
+
+    #[test]
+    fn rejects_credentials_in_http_repository_coordinates() {
+        let mut value = target();
+        value["spec"]["publication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repositoryRef");
+        value["spec"]["publication"]["repository"] = json!({"repoURL": "https://token@example.invalid/deploy.git"});
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("must not contain HTTP user information"));
+    }
+
+    #[test]
+    fn rejects_paths_with_traversal_or_non_normal_forms() {
+        for path in [
+            "applications/../outside",
+            "/../outside",
+            "/",
+            "applications//cloud",
+            "applications/./cloud",
+        ] {
+            let mut value = application_group();
+            value["spec"]["source"]["path"] = json!(path);
+            assert!(parse_gitops_resource(&value).is_err(), "accepted {path}");
+        }
+    }
+
+    #[test]
+    fn test_local_source_accepts_parent_and_worktree_rooted_paths() {
+        for path in ["../applications/cloud", "/applications/cloud"] {
+            let mut value = application_group();
+            value["spec"]["source"]["path"] = json!(path);
+            assert!(parse_gitops_resource(&value).is_ok(), "rejected {path}");
+        }
+    }
+
+    #[test]
+    fn test_remote_source_rejects_parent_traversal() {
+        let mut value = application_group();
+        value["spec"]["source"] = json!({
+            "repositoryRef": {"name": "workloads"},
+            "revision": "refs/heads/main",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "path": "../applications/cloud"
+        });
+        assert!(parse_gitops_resource(&value).is_err());
+        value["spec"]["source"]["path"] = json!("/applications/cloud");
+        assert!(parse_gitops_resource(&value).is_ok());
+    }
+
+    #[test]
+    fn validates_immutable_remote_source() {
+        let mut value = application_group();
+        value["spec"]["source"] = json!({
+            "repositoryRef": {"name": "workloads"},
+            "revision": "refs/heads/main",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "path": "applications/cloud",
+            "rendererConfig": {"mode": "Remote", "projectPath": "."}
+        });
+        assert!(parse_gitops_resource(&value).is_ok());
+
+        value["spec"]["source"]["commit"] = json!("main");
+        assert!(parse_gitops_resource(&value).is_err());
+        value["spec"]["source"].as_object_mut().unwrap().remove("commit");
+        assert!(parse_gitops_resource(&value).is_err());
+    }
+
+    #[test]
+    fn inline_source_repository_errors_name_the_nested_field_once() {
+        let mut value = application_group();
+        value["spec"]["source"] = json!({
+            "repository": {"repoURL": "https://token@example.invalid/workloads.git"},
+            "revision": "refs/heads/main",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "path": "applications/cloud"
+        });
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "spec.source.repository: spec.repoURL must not contain HTTP user information; configure Git \
+             credentials outside GitOps resources"
+        );
+    }
+
+    #[test]
+    fn local_source_rejects_remote_only_fields() {
+        let mut value = application_group();
+        value["spec"]["source"]["revision"] = json!("main");
+        assert!(parse_gitops_resource(&value).is_err());
+        value["spec"]["source"] = json!({
+            "path": "applications/cloud",
+            "rendererConfig": {"mode": "Remote"}
+        });
+        assert!(parse_gitops_resource(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_application_group_source_globs() {
+        let mut value = application_group();
+        value["spec"]["source"]["include"] = json!(["["]);
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("include/exclude pattern"));
+    }
+
+    #[test]
+    fn validates_shared_namespace_owners() {
+        let mut value = application_group();
+        value["spec"]["sharedNamespaces"] = json!({
+            "monitoring": {
+                "owner": {
+                    "kind": "Release",
+                    "applicationGroup": "cloud",
+                    "release": "prometheus"
+                }
+            },
+            "kube-system": {"owner": {"kind": "External"}}
+        });
+        assert!(parse_gitops_resource(&value).is_ok());
+
+        value["spec"]["sharedNamespaces"] = json!({
+            "not.valid": {"owner": {"kind": "External"}}
+        });
+        assert!(parse_gitops_resource(&value).is_err());
+
+        value["spec"]["sharedNamespaces"] = json!({
+            "monitoring": {
+                "owner": {
+                    "kind": "Release",
+                    "applicationGroup": "cloud"
+                }
+            }
+        });
+        assert!(parse_gitops_resource(&value).is_err());
+    }
+
+    #[test]
+    fn validates_allowed_release_sync_options() {
+        let mut value = application_group();
+        value["spec"]["releaseCustomization"] = json!({
+            "allowedSyncOptions": ["RespectIgnoreDifferences=false"]
+        });
+        assert!(parse_gitops_resource(&value).is_ok());
+
+        value["spec"]["releaseCustomization"]["allowedSyncOptions"] =
+            json!(["RespectIgnoreDifferences=false", "RespectIgnoreDifferences=false"]);
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("contains duplicate value"));
+    }
+
+    #[test]
+    fn validates_cluster_destination_exclusivity() {
+        let mut value = cluster();
+        value["spec"]["destination"]["name"] = json!("in-cluster");
+        assert!(parse_gitops_resource(&value).is_err());
+        value["spec"]["destination"].as_object_mut().unwrap().remove("server");
+        assert!(parse_gitops_resource(&value).is_ok());
+    }
+
+    #[test]
+    fn rejects_cluster_unknown_fields_and_duplicate_capabilities() {
+        let mut value = cluster();
+        value["spec"]["destination"]["namespace"] = json!("default");
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field"));
+
+        value = cluster();
+        value["spec"]["kubernetes"]["apiVersions"] = json!(["v1", "v1"]);
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate value"));
+    }
+
+    #[test]
+    fn validates_app_project_manifest_shape() {
+        let valid = json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": KIND_APP_PROJECT_DEFINITION,
+            "metadata": {"name": "platform"},
+            "spec": {
+                "management": "Rendered",
+                "manifest": {
+                    "apiVersion": "argoproj.io/v1alpha1",
+                    "kind": "AppProject",
+                    "metadata": {"name": "platform"},
+                    "spec": {}
+                }
+            }
+        });
+        assert!(parse_gitops_resource(&valid).is_ok());
+        let mut invalid = valid.clone();
+        invalid["spec"]["manifest"]["kind"] = json!("Application");
+        assert!(parse_gitops_resource(&invalid).is_err());
+
+        let mut with_references = valid.clone();
+        with_references["spec"]["sourceRepositoryRefs"] = json!([{"name": "deploy"}]);
+        assert!(parse_gitops_resource(&with_references).is_ok());
+        with_references["spec"]["sourceRepositoryRefs"] = json!([{"name": "deploy"}, {"name": "deploy"}]);
+        assert!(parse_gitops_resource(&with_references)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate GitRepository reference"));
+
+        let mut external = valid;
+        external["spec"]["management"] = json!("External");
+        external["spec"]["sourceRepositoryRefs"] = json!([{"name": "deploy"}]);
+        assert!(parse_gitops_resource(&external)
+            .unwrap_err()
+            .to_string()
+            .contains("only valid when spec.management is Rendered"));
+    }
+
+    #[test]
+    fn validates_repository_and_schema_generation() {
+        let repository = json!({
+            "apiVersion": API_VERSION_GITOPS,
+            "kind": KIND_GIT_REPOSITORY,
+            "metadata": {"name": "deploy"},
+            "spec": {"repoURL": "ssh://git@example/deploy.git"}
+        });
+        assert!(parse_gitops_resource(&repository).is_ok());
+        let schema = schemars::schema_for!(DeploymentTarget);
+        assert!(serde_json::to_value(schema).unwrap().is_object());
+    }
+
+    #[test]
+    fn generated_schemas_have_constant_resource_envelopes() {
+        for kind in GitOpsResourceKind::all() {
+            let schema = generate_gitops_resource_schema(kind);
+            assert_eq!(schema["properties"]["apiVersion"]["const"], kind.api_version());
+            assert_eq!(schema["properties"]["kind"]["const"], kind.as_str());
+            assert_eq!(
+                serde_json::to_string_pretty(&schema).unwrap(),
+                serde_json::to_string_pretty(&generate_gitops_resource_schema(kind)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_schema_has_relative_refs() {
+        let schema = generate_gitops_aggregate_schema();
+        let references = schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["$ref"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            references,
+            vec![
+                "git-repository.schema.json",
+                "cluster.schema.json",
+                "argocd-instance.schema.json",
+                "deployment-target.schema.json",
+                "app-project-definition.schema.json",
+                "application-group.schema.json",
+                "environment.schema.json",
+                "environment-group.schema.json",
+                "release.schema.json"
+            ]
+        );
+    }
+}

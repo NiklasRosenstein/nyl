@@ -34,7 +34,7 @@ pub use error::{NylError, Result};
 
 /// Resource descriptors assembled for every CLI workflow.
 pub fn resource_catalogue() -> Vec<nyl_core::resources::schema::ResourceDescriptor> {
-    let mut descriptors = nyl_core::resources::schema::resource_descriptors();
+    let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
     descriptors.extend_from_slice(nyl_units::catalog::RESOURCES);
     descriptors
 }

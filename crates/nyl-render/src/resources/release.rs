@@ -6,8 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::release_inputs::InputDeclaration;
 use crate::constants::API_VERSION;
-use crate::settings::StripEmptyMetadataLabelsMode;
-use crate::{CoreError, Result};
+use nyl_core::settings::StripEmptyMetadataLabelsMode;
+use nyl_core::{CoreError, Result};
 
 pub const KIND_RELEASE: &str = "Release";
 pub const RELEASE_SCHEMA_FILENAME: &str = "release.schema.json";
@@ -25,7 +25,7 @@ pub const RELEASE_SCHEMA_FILENAME: &str = "release.schema.json";
 /// ApplicationGroup discovery ignores candidate files without a literal Release document. Direct `nyl render` can render without one; direct `nyl apply` and `nyl diff` require `--name` and `--namespace` when no Release supplies them.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Release))]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::Release))]
 pub struct Release {
     /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
@@ -201,7 +201,7 @@ pub fn extract_release(manifests: &[serde_json::Value]) -> Result<(Option<Releas
     let mut filtered = Vec::new();
 
     for manifest in manifests {
-        super::schema::validate_resource_api(manifest)?;
+        super::catalog::validate_resource_api(manifest)?;
         if Release::is_release(manifest) {
             if release.is_some() {
                 return Err(CoreError::Config(

@@ -231,7 +231,7 @@ pub struct ResourceCatalogue(pub Vec<nyl_core::resources::schema::ResourceDescri
 
 impl Default for ResourceCatalogue {
     fn default() -> Self {
-        Self(nyl_core::resources::schema::resource_descriptors())
+        Self(crate::resources::catalog::resource_catalogue())
     }
 }
 

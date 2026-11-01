@@ -14,12 +14,17 @@ pub fn generate_project_config_schema() -> serde_json::Value {
 }
 
 /// The complete published schema set: every resource artifact from
-/// [`nyl_core::resources::schema::schema_artifacts`] plus the `nyl.toml`
-/// schema, keyed by path within the published schema directory.
+/// [`nyl_core::resources::schema::schema_artifacts`], the aggregate Kubernetes
+/// GitOps resource schema, and the `nyl.toml` schema, keyed by path within the
+/// published schema directory.
 pub fn published_schema_artifacts(
     descriptors: &[nyl_core::resources::schema::ResourceDescriptor],
 ) -> BTreeMap<String, serde_json::Value> {
     let mut artifacts = nyl_core::resources::schema::schema_artifacts(descriptors);
+    artifacts.insert(
+        "gitops-resource.schema.json".into(),
+        crate::resources::generate_gitops_aggregate_schema(),
+    );
     artifacts.insert(PROJECT_CONFIG_SCHEMA_PATH.into(), generate_project_config_schema());
     artifacts
 }

@@ -31,6 +31,7 @@ pub mod helm;
 pub mod kubernetes;
 pub mod postprocess;
 pub mod render;
+pub mod resources;
 pub mod secrets;
 pub mod template;
 pub mod util;
@@ -38,7 +39,7 @@ pub mod util;
 pub mod validation;
 pub mod yaml;
 
-pub use nyl_core::{constants, resources};
+pub use nyl_core::constants;
 
 // Re-export commonly used types
 pub use error::{NylError, Result};

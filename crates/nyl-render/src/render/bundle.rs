@@ -107,7 +107,7 @@ pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleas
         .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
     let documents = best_effort_parse_yaml_documents(&raw);
     for document in &documents {
-        crate::resources::schema::validate_resource_api(document)?;
+        crate::resources::catalog::validate_resource_api(document)?;
     }
     let Some(release) = documents.iter().find(|document| Release::is_release(document)) else {
         return Ok(None);

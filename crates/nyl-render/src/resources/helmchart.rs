@@ -130,7 +130,7 @@ impl Default for HelmChartSpec {
 /// Nyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::HelmChart))]
+#[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::HelmChart))]
 pub struct HelmChart {
     /// API version (e.g., "k8s.nyl/v1")
     #[serde(rename = "apiVersion")]

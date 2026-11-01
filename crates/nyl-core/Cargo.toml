@@ -11,8 +11,6 @@ publish.workspace = true
 # Core performs no effects: no Git, processes, network, clock, or environment.
 [dependencies]
 chrono = { workspace = true }
-clap = { workspace = true }
-glob = { workspace = true }
 hex = { workspace = true }
 ryu-js = { workspace = true }
 schemars = { workspace = true, features = ["chrono04"] }
