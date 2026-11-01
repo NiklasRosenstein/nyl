@@ -21,7 +21,6 @@ use nyl_core::orchestration::state::{
     Operation, Readiness, Run, RunKind, Signal, SignalAction, StateLocation, StateV1, TeardownWaiting, UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::NoFaults;
 use nyl_orchestration::run_report::ExitCategory;
 use nyl_orchestration::shell::run::Cancellation;
@@ -29,6 +28,7 @@ use nyl_orchestration::shell::signal::{deliver, Delivery};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use nyl_state::memory::MemoryStateStore;
+use nyl_units::process::ProcessRunner;
 use scenario::runner::{invoke_in, AUTHOR};
 use scenario::shell::{self as harness, shared_project};
 use scenario::world::git_output;

@@ -26,7 +26,7 @@ path = "src/lib.rs"
 # for end-to-end tests of the binary. Release builds never enable it.
 test-clock = []
 # Registers the fake kinds that stand in for built-in kinds a milestone lacks.
-test-kinds = ["nyl-drivers/test-kinds"]
+test-kinds = ["nyl-units/test-kinds"]
 # Real OpenTofu and Buildx scenarios; missing tools/daemon/registry fail the tests.
 tier2 = ["test-clock", "test-kinds"]
 
@@ -37,7 +37,6 @@ nyl-render = { workspace = true }
 nyl-git = { workspace = true }
 nyl-state = { workspace = true }
 nyl-orchestration = { workspace = true }
-nyl-drivers = { workspace = true }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -66,7 +65,7 @@ unicode-width = { workspace = true }
 [dev-dependencies]
 nyl-orchestration = { workspace = true, features = ["testing"] }
 # Tier-1 scenarios run the fake kinds in-process.
-nyl-drivers = { workspace = true, features = ["test-kinds"] }
+nyl-units = { workspace = true, features = ["test-kinds"] }
 assert_cmd = { workspace = true }
 # Paused virtual time for deterministic latency-injected apply tests.
 tokio = { workspace = true, features = ["test-util"] }

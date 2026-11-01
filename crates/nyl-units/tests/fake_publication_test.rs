@@ -21,7 +21,7 @@ use nyl_core::orchestration::state::{
     Deletion, DeletionIntent, DeletionReason, DesiredUnit, DesiredUnitKind, Lifecycle, ObservedUnit, ObservedUnitKind,
     Readiness, StateV1, TeardownProgress, TeardownWaiting, UnitIdentity,
 };
-use nyl_drivers::fake::{FakePublication, Script};
+use nyl_units::fake::{FakePublication, Script};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 

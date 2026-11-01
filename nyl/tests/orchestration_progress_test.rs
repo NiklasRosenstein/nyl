@@ -6,9 +6,9 @@ use std::sync::Mutex;
 
 use nyl_core::orchestration::progress::{ProgressObserver, UnitPhase, UnitProgress};
 use nyl_core::orchestration::state::Operation;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::run_report::EnvironmentRunReport;
 use nyl_orchestration::shell::run::{self, Cancellation, RunContext, RunMode, TeardownTarget};
+use nyl_units::process::ProcessRunner;
 use scenario::shell::{command, project, Harness, ENVIRONMENT, NYL_TOML};
 
 #[cfg(unix)]

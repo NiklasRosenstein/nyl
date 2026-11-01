@@ -642,7 +642,7 @@ in two phases, both through Git:
 
 Implementation status (M3): the stand-in `FakePublication` kind carries out
 both phases through Git on the real publication path
-(`nyl_drivers::fake::publication`, with the tree changes in
+(`nyl_units::fake::publication`, with the tree changes in
 `nyl_render::gitops::publication`), records the phase 1 commit as the wait's
 `phase1Commit`, and removes in phase 2 exactly the files of its own
 `_nyl/index.json`. The fake Argo CD observer (`FakeObserver`) stands in for

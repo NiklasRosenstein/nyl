@@ -70,11 +70,12 @@ Orchestration follows [design/implementation-architecture.md](design/implementat
 These rules keep it maintainable:
 
 - Respect the crate dependency direction: `nyl-core` depends on nothing Nyl
-  and owns the orchestration traits; `nyl-units` depends on core and owns built-in unit models; `nyl-render` never depends on
+  and owns the orchestration traits; `nyl-render` never depends on
   orchestration crates; `nyl-orchestration` depends only on `nyl-core` and,
   from M9, the equally pure `nyl-collections`, which both it and
   `nyl-render` use for domain resource rules;
-  `nyl-state` and `nyl-drivers` implement the traits; `nyl-cli` wires them
+  `nyl-state` and `nyl-units` (the built-in unit kinds: declarations
+  and drivers) implement the traits; `nyl-cli` wires them
   together and holds no business rules.
 - Decisions are pure functions over snapshots. Only the orchestration shell
   performs effects, and nothing outside it reads the clock, the process
@@ -138,11 +139,10 @@ Reviewers must check the boundary explicitly:
 ├── Cargo.toml         # Workspace: shared version, dependencies, and profiles
 ├── crates/
 │   ├── nyl-core/      # Resource and state types, schemas, digests, orchestration traits (no effects)
-│   ├── nyl-units/     # Pure built-in unit models and schema descriptors
 │   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
-│   └── nyl-drivers/   # Unit kind drivers and the process runner
+│   └── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
 ├── nyl/               # The `nyl` command line (plays the nyl-cli role)
 │   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests

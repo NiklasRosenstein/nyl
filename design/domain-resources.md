@@ -957,7 +957,7 @@ instantiating it differently in some environments.
 | Bundle assembly and its canonical digest | `nyl-collections`, shared by units and [Releases](release-catalog.md) |
 | Discovery of definitions and resources, the catalog, Kyverno admission | `nyl-render` (`gitops::discovery`, `validation`), returned through `SourceRenderer` as part of `RenderedSource` |
 | Resolving references inside a bundle, and the bundle digest in the execution key | `nyl-orchestration` resolution, `rules::execution_key` |
-| `prepare` and `NativeInputs` per kind | `nyl-drivers` |
+| `prepare` and `NativeInputs` per kind | `nyl-units`, in the kind's module |
 | `nyl prepare`, `get resources`, `schema resources` | `nyl-cli`, wiring only |
 
 Contract walkthroughs become scenarios under

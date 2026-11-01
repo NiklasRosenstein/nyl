@@ -122,6 +122,6 @@ run = "bash scripts/test-renovate-matchers.sh"
 [tasks.test-native]
 description = "Run required native infrastructure, image, and binary acceptance tests"
 run = [
-  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl-drivers --features native-tests --test terraform_native_test",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl-units --features native-tests --test terraform_native_test",
   "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test",
 ]

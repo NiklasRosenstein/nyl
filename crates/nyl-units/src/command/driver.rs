@@ -1,13 +1,13 @@
 //! The `Command` unit kind: runs argv steps, without a shell, in a pinned
 //! worktree of the source commit.
 //!
-//! Contract: [Command unit](../../../design/orchestration-core.md#command-unit)
-//! and [Drivers](../../../design/orchestration-core.md#drivers). Every
+//! Contract: [Command unit](../../../../design/orchestration-core.md#command-unit)
+//! and [Drivers](../../../../design/orchestration-core.md#drivers). Every
 //! process runs through the context's [`ToolRunner`](nyl_core::orchestration::driver::ToolRunner)
 //! with an environment built here from nothing: `PATH` from the runner,
 //! `HOME` as a fresh directory, the `NYL_*` variables, and the admitted
 //! passthrough and secrets. The spec type is
-//! [`CommandSpec`](nyl_units::command::CommandSpec).
+//! [`CommandSpec`].
 //!
 //! - Every step's timeout is the context's `deadline - now`; the driver never
 //!   reads a clock.
@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
+use super::spec::{CommandSpec, KIND_COMMAND};
 use nyl_core::orchestration::driver::{
     AttestationOutcome, Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
     ExecutionContext, Inspection, KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies,
@@ -33,7 +34,6 @@ use nyl_core::orchestration::state::{
 };
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::util::project_path::ProjectPaths;
-use nyl_units::command::{CommandSpec, KIND_COMMAND};
 use serde_json::{Map, Value};
 
 /// Largest outputs file a step may write: 1 MiB.

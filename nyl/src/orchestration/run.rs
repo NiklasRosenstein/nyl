@@ -71,7 +71,7 @@ pub struct CommandOutcome {
 pub struct ProcessWiring {
     pub ids: crate::orchestration::ids::UuidV7,
     pub drivers: DriverSet,
-    pub tools: nyl_drivers::process::ProcessRunner,
+    pub tools: nyl_units::process::ProcessRunner,
     pub faults: nyl_orchestration::fault::NoFaults,
     /// The flag the signal handler sets; `tools` forwards it to running tools.
     pub cancellation: Cancellation,
@@ -93,27 +93,27 @@ impl ProcessWiring {
     pub fn cancelled_by(cancellation: Cancellation) -> Self {
         #[cfg(feature = "test-kinds")]
         let drivers = {
-            let script = nyl_drivers::fake::Script::new();
+            let script = nyl_units::fake::Script::new();
             #[cfg(feature = "tier2")]
-            let mut drivers = nyl_drivers::registry::with_fake_publication(&script);
+            let mut drivers = nyl_units::registry::with_fake_publication(&script);
             #[cfg(not(feature = "tier2"))]
-            let mut drivers = nyl_drivers::registry::with_test_kinds(&script);
+            let mut drivers = nyl_units::registry::with_test_kinds(&script);
             drivers.register_as(
                 nyl_core::constants::API_VERSION_UNITS,
                 "KubernetesPublication",
                 std::sync::Arc::new(
-                    nyl_drivers::fake::FakePublication::new(script)
+                    nyl_units::fake::FakePublication::new(script)
                         .with_resource_catalogue(crate::config::ResourceCatalogue(crate::resource_catalogue())),
                 ),
             );
             drivers
         };
         #[cfg(not(feature = "test-kinds"))]
-        let drivers = nyl_drivers::registry::builtin();
+        let drivers = nyl_units::registry::builtin();
         Self {
             ids: crate::orchestration::ids::UuidV7,
             drivers,
-            tools: nyl_drivers::process::ProcessRunner::new().cancelled_by(cancellation.shared()),
+            tools: nyl_units::process::ProcessRunner::new().cancelled_by(cancellation.shared()),
             faults: nyl_orchestration::fault::NoFaults,
             cancellation,
             prompt: {

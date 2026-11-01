@@ -16,9 +16,9 @@ pub(crate) fn update_locks(
 ) -> Result<()> {
     let inventory = discover_gitops_inventory(path, None)?;
     #[cfg(feature = "test-kinds")]
-    let drivers = nyl_drivers::registry::with_test_kinds(&nyl_drivers::fake::Script::new());
+    let drivers = nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new());
     #[cfg(not(feature = "test-kinds"))]
-    let drivers = nyl_drivers::registry::builtin();
+    let drivers = nyl_units::registry::builtin();
     let locks = collect_source_locks(
         &inventory,
         requested_group,

@@ -17,8 +17,6 @@ use nyl_core::orchestration::ports::{
 };
 use nyl_core::orchestration::state::{Condition, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation};
 use nyl_core::orchestration::time::Duration;
-use nyl_drivers::fake::Script;
-use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
 use nyl_orchestration::fault::{FaultInjector, NoFaults};
 use nyl_orchestration::run_report::{EnvironmentRunReport, RunReport};
@@ -30,6 +28,8 @@ use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::memory::MemoryStateStore;
 use nyl_state::source::GitSourceResolver;
+use nyl_units::fake::Script;
+use nyl_units::process::ProcessRunner;
 use tempfile::TempDir;
 
 use super::runner::{AUTHOR, START};
@@ -176,7 +176,7 @@ impl Harness {
             (Box::new(MemoryStateStore::new()), None)
         };
         let script = Script::new();
-        let drivers = nyl_drivers::registry::with_test_kinds(&script);
+        let drivers = nyl_units::registry::with_test_kinds(&script);
         Self {
             location: location(&world),
             world,

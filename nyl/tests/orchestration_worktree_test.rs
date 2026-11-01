@@ -306,7 +306,7 @@ fn test_worktree_source_policy_comes_from_the_driver_for_any_kind() {
     harness.drivers.register_as(
         "units.gitops.nyl/v1",
         "OtherPublisher",
-        std::sync::Arc::new(nyl_drivers::fake::FakePublication::default()),
+        std::sync::Arc::new(nyl_units::fake::FakePublication::default()),
     );
     harness.init();
     let report = harness.invoke(&["reconcile", "-e", "dev", "--worktree"]);

@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use super::spec::TerraformSpec;
 use nyl_core::constants::API_VERSION_UNITS;
 use nyl_core::orchestration::driver::{
     Capabilities, Driver, DriverError, DriverResult, ExecStatus, ExecTerminal, ExecutionContext, KeyInputs,
@@ -20,10 +21,7 @@ use nyl_core::orchestration::state::{
     DesiredUnit, Drift, FailureCategory, Lifecycle, Receipt, RetryAcknowledgement, UnitIdentity,
 };
 use nyl_render::util::project_path::ProjectPaths;
-use nyl_units::terraform::TerraformSpec;
 use serde_json::{json, Value};
-
-pub mod plan;
 
 /// The two kinds differ only in executable and kind name.
 pub struct TerraformDriver {
@@ -772,14 +770,14 @@ impl<'a, 'c> Native<'a, 'c> {
                 .to_str()
                 .ok_or_else(|| Fault::configuration("plan path is not UTF-8"))?,
         ])?;
-        plan::check_outputs(&json, &self.spec.common.outputs).map_err(|message| Fault {
+        super::plan::check_outputs(&json, &self.spec.common.outputs).map_err(|message| Fault {
             category: FailureCategory::OutputRejected,
             retryable: false,
             message,
             uncertain: false,
             retry_context: None,
         })?;
-        let report = plan::report(&json, changed, destroy, &self.secrets).map_err(Fault::configuration)?;
+        let report = super::plan::report(&json, changed, destroy, &self.secrets).map_err(Fault::configuration)?;
         Ok((changed, report))
     }
     fn outputs(&self) -> Result<Value, Fault> {

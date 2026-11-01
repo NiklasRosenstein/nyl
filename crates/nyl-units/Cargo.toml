@@ -1,6 +1,6 @@
 [package]
 name = "nyl-units"
-description = "Pure built-in unit models and schemas"
+description = "Nyl built-in unit kinds: declarations, schemas, drivers, and the process runner"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,9 +8,37 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Registers the test-only fake kinds (`units.test.nyl/v1`) that stand in for
+# built-in kinds a milestone has not built yet.
+test-kinds = []
+# Real Terraform/OpenTofu acceptance tests; the native CI job installs both binaries.
+native-tests = []
+
 [dependencies]
 nyl-core = { workspace = true }
+nyl-render = { workspace = true }
+
+chrono = { workspace = true }
+# Command `files` globs and the files a key digests.
 glob = { workspace = true }
+# Docker context ignore patterns; already a workspace dependency.
+regex = { workspace = true }
+base64 = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+walkdir = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM/SIGKILL to a tool's process group.
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[test]]
+name = "fake_publication_test"
+required-features = ["test-kinds"]

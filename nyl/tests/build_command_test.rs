@@ -4,9 +4,9 @@ use clap::Parser;
 use nyl::cli::Cli;
 use nyl::orchestration::direct;
 use nyl::orchestration::run::Wiring;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::NoFaults;
 use nyl_orchestration::shell::run::Cancellation;
+use nyl_units::process::ProcessRunner;
 use scenario::shell::{project, Harness, NYL_TOML};
 use scenario::world::git_output;
 

@@ -4,7 +4,7 @@ use nyl_core::resources::schema::{set_envelope, ResourceDescriptor};
 use schemars::schema_for;
 use serde_json::{json, Value};
 
-fn schema(name: &str, mut schema: Value, spec: Value) -> Value {
+fn schema(name: &str, mut schema: Value, spec: &Value) -> Value {
     set_envelope(&mut schema, API_VERSION_UNITS, Some(name));
     schema["title"] = json!(name);
     if schema.get("examples").is_none() {
@@ -17,14 +17,14 @@ fn image() -> Value {
     schema(
         "OciImage",
         json!(schema_for!(crate::oci_image::OciImage)),
-        json!({"context":{"path":"services/web"},"repository":"registry.example.com/team/web","platforms":["linux/amd64"]}),
+        &json!({"context":{"path":"services/web"},"repository":"registry.example.com/team/web","platforms":["linux/amd64"]}),
     )
 }
 fn infrastructure(name: &str) -> Value {
     schema(
         name,
         json!(schema_for!(crate::terraform::TerraformUnit)),
-        json!({"source":{"path":"infra/network"},"backend":{"bucket":"acme-state","key":"production/network"},"variables":{"region":"eu-west-1"},"outputs":{"id":{"type":"string"}}}),
+        &json!({"source":{"path":"infra/network"},"backend":{"bucket":"acme-state","key":"production/network"},"variables":{"region":"eu-west-1"},"outputs":{"id":{"type":"string"}}}),
     )
 }
 fn terraform() -> Value {
