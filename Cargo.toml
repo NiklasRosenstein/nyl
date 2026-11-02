@@ -48,7 +48,7 @@ toml = "1"
 schemars = "1"
 
 # Kubernetes
-kube = { version = "4", features = ["client", "runtime", "derive"] }
+kube = { version = "5", features = ["client", "runtime", "derive"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
