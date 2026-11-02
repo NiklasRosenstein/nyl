@@ -982,7 +982,7 @@ mod tests {
             format!("[vendor]\nmode = \"{mode}\"\npath = \"vendor\"\nlfs_threshold_bytes = 8\n"),
         )
         .unwrap();
-        ProjectConfig::load(Some(config_path)).unwrap()
+        ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap()
     }
 
     fn manifest_request() -> ArtifactRequest {

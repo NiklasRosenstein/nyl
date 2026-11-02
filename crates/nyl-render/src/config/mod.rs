@@ -226,13 +226,18 @@ pub struct ProjectConfig {
 }
 
 /// Resource APIs registered for rendering and validation.
+///
+/// The application assembles it from every crate that owns resources and
+/// passes it to each entry point; there is no default, so every invocation
+/// validates against the same resource APIs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceCatalogue(pub Vec<nyl_core::resources::schema::ResourceDescriptor>);
 
-impl Default for ResourceCatalogue {
-    fn default() -> Self {
-        Self(crate::resources::catalog::resource_catalogue())
-    }
+/// The catalogue of the resources nyl-core and nyl-render own, for tests in
+/// this crate.
+#[cfg(test)]
+pub(crate) fn test_catalogue() -> ResourceCatalogue {
+    ResourceCatalogue(crate::resources::catalog::resource_catalogue())
 }
 
 impl ProjectConfig {
@@ -284,8 +289,8 @@ impl ProjectConfig {
     ///
     /// # Returns
     /// * ProjectConfig with loaded or default configuration
-    pub fn load(file: Option<PathBuf>) -> Result<Self> {
-        Self::load_from_dir(file, None)
+    pub fn load(file: Option<PathBuf>, catalogue: ResourceCatalogue) -> Result<Self> {
+        Self::load_from_dir(file, None, catalogue)
     }
 
     /// Load project configuration from file in a specific directory context.
@@ -296,19 +301,19 @@ impl ProjectConfig {
     ///
     /// # Returns
     /// * ProjectConfig with loaded or default configuration
-    pub fn load_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
+    pub fn load_from_dir(file: Option<PathBuf>, dir: Option<&Path>, catalogue: ResourceCatalogue) -> Result<Self> {
         let file = match file {
             Some(f) => Some(f),
             None => Self::find(dir)?,
         };
 
         if let Some(ref path) = file {
-            Self::load_from_file(path)
+            Self::load_from_file(path, catalogue)
         } else {
             Ok(Self {
                 file: None,
                 config: ProjectFile::default(),
-                resource_catalogue: ResourceCatalogue::default(),
+                resource_catalogue: catalogue,
             })
         }
     }
@@ -320,8 +325,8 @@ impl ProjectConfig {
     ///
     /// # Returns
     /// * ProjectConfig with loaded or default configuration
-    pub fn load_with_warning(file: Option<PathBuf>) -> Result<Self> {
-        Self::load_with_warning_from_dir(file, None)
+    pub fn load_with_warning(file: Option<PathBuf>, catalogue: ResourceCatalogue) -> Result<Self> {
+        Self::load_with_warning_from_dir(file, None, catalogue)
     }
 
     /// Load project configuration with warning from a specific directory context
@@ -332,27 +337,41 @@ impl ProjectConfig {
     ///
     /// # Returns
     /// * ProjectConfig with loaded or default configuration
-    pub fn load_with_warning_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
+    pub fn load_with_warning_from_dir(
+        file: Option<PathBuf>,
+        dir: Option<&Path>,
+        catalogue: ResourceCatalogue,
+    ) -> Result<Self> {
         let file = match file {
             Some(f) => Some(f),
             None => Self::find(dir)?,
         };
 
         if let Some(ref path) = file {
-            Self::load_from_file(path)
+            Self::load_from_file(path, catalogue)
         } else {
             tracing::warn!("No project configuration file found");
             tracing::info!("Using default settings. Run 'nyl init' to create a project.");
             Ok(Self {
                 file: None,
                 config: ProjectFile::default(),
-                resource_catalogue: ResourceCatalogue::default(),
+                resource_catalogue: catalogue,
             })
         }
     }
 
     /// Load configuration from a specific file.
-    fn load_from_file(path: &Path) -> Result<Self> {
+    fn load_from_file(path: &Path, resource_catalogue: ResourceCatalogue) -> Result<Self> {
+        Ok(Self {
+            file: Some(path.to_path_buf()),
+            config: Self::read_project_file(path)?,
+            resource_catalogue,
+        })
+    }
+
+    /// Read and validate one `nyl.toml`, resolving its paths against its
+    /// directory, for callers that need only the file's settings.
+    pub fn read_project_file(path: &Path) -> Result<ProjectFile> {
         if !path.exists() {
             return Err(NylError::Config(format!(
                 "Configuration file does not exist: {}",
@@ -421,11 +440,7 @@ impl ProjectConfig {
             }
         }
 
-        Ok(Self {
-            file: Some(path.to_path_buf()),
-            config: project,
-            resource_catalogue: ResourceCatalogue::default(),
-        })
+        Ok(project)
     }
 
     /// Component roots from configuration.
@@ -607,7 +622,7 @@ strip_empty_metadata_labels = "argocd"
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
-        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
+        let config = ProjectConfig::load(Some(config_path.clone()), crate::config::test_catalogue()).unwrap();
         assert_eq!(config.file, Some(config_path.clone()));
 
         assert_eq!(config.get_components_search_paths().len(), 1);
@@ -636,7 +651,7 @@ strip_empty_metadata_labels = "argocd"
         )
         .unwrap();
 
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let config = ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap();
         let vendor = config.vendor().unwrap();
         assert_eq!(vendor.mode, VendorMode::Required);
         assert_eq!(vendor.path, temp.path().join("third-party"));
@@ -652,7 +667,7 @@ strip_empty_metadata_labels = "argocd"
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "[vendor]\nmode = \"preferred\"\npath = \"../vendor\"\n").unwrap();
-        assert!(ProjectConfig::load(Some(config_path))
+        assert!(ProjectConfig::load(Some(config_path), crate::config::test_catalogue())
             .unwrap_err()
             .to_string()
             .contains("parent-directory"));
@@ -662,7 +677,7 @@ strip_empty_metadata_labels = "argocd"
     fn test_load_no_config_returns_defaults() {
         let temp = TempDir::new().unwrap();
 
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         assert!(config.file.is_none());
         assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
         assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
@@ -677,7 +692,7 @@ strip_empty_metadata_labels = "argocd"
     #[test]
     fn test_validate_aliases() {
         let config = ProjectConfig {
-            resource_catalogue: crate::config::ResourceCatalogue::default(),
+            resource_catalogue: crate::config::test_catalogue(),
             file: None,
             config: ProjectFile {
                 project: ProjectSettings {
@@ -715,7 +730,7 @@ components_search_paths = ["comps1", "comps2"]
         )
         .unwrap();
 
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let config = ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap();
         let resolved = config.resolve_component_chart_dir("v1.example.io/WebApp").unwrap();
         assert_eq!(resolved, root2.join("v1.example.io/WebApp"));
     }
@@ -779,7 +794,7 @@ components_search_paths = ["comps1", "comps2"]
     #[test]
     fn test_validate_missing_paths() {
         let config = ProjectConfig {
-            resource_catalogue: crate::config::ResourceCatalogue::default(),
+            resource_catalogue: crate::config::test_catalogue(),
             file: None,
             config: ProjectFile::default(),
         };
@@ -795,7 +810,7 @@ components_search_paths = ["comps1", "comps2"]
 
         fs::write(&config_path, "[project\ninvalid toml").unwrap();
 
-        let result = ProjectConfig::load(Some(config_path));
+        let result = ProjectConfig::load(Some(config_path), crate::config::test_catalogue());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Failed to parse TOML"));
     }
@@ -806,7 +821,7 @@ components_search_paths = ["comps1", "comps2"]
         let config_path = temp.path().join("nyl-project.toml");
         fs::write(&config_path, "[project]").unwrap();
 
-        let result = ProjectConfig::load(Some(config_path));
+        let result = ProjectConfig::load(Some(config_path), crate::config::test_catalogue());
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -836,7 +851,9 @@ api_versions = ["v1", "apps/v1"]
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
-        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        let error = ProjectConfig::load(Some(config_path), crate::config::test_catalogue())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("[profile.*] is no longer supported"));
         assert!(error.contains("--target"));
     }
@@ -852,7 +869,9 @@ context = "project-cluster"
 
 "#;
         fs::write(&config_path, toml_content).unwrap();
-        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        let error = ProjectConfig::load(Some(config_path), crate::config::test_catalogue())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("[project.kubernetes] is no longer supported"));
         assert!(error.contains("Cluster resource"));
     }
@@ -870,7 +889,9 @@ replicas = 1
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
-        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        let err = ProjectConfig::load(Some(config_path), crate::config::test_catalogue())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("[profile.*] is no longer supported"));
     }
 
@@ -885,7 +906,9 @@ strip_empty_metadata_labels = "sometimes"
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
-        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        let err = ProjectConfig::load(Some(config_path), crate::config::test_catalogue())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Failed to parse TOML config"));
         assert!(err.contains("strip_empty_metadata_labels"));
     }
@@ -895,11 +918,11 @@ strip_empty_metadata_labels = "sometimes"
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "[project]\n").unwrap();
-        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
+        let config = ProjectConfig::load(Some(config_path.clone()), crate::config::test_catalogue()).unwrap();
         assert_eq!(config.release_history_limit(), 5);
 
         fs::write(&config_path, "[release]\nhistory_limit = 0\n").unwrap();
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let config = ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap();
         assert_eq!(config.release_history_limit(), 0);
     }
 
@@ -909,7 +932,9 @@ strip_empty_metadata_labels = "sometimes"
         let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "[release]\nhistory_limit = 1\n").unwrap();
 
-        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        let err = ProjectConfig::load(Some(config_path), crate::config::test_catalogue())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("history_limit"));
         assert!(err.contains("roll back"));
         assert!(parse_release_history_limit("1").is_err());

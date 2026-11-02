@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use colored::Colorize;
 
-use crate::discover_gitops_inventory;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{
     compile_target_tree_cached_with_observer_and_options, reconcile_rendered_tree_with_options,
     resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache, RenderIndex, RenderIndexPublication,
@@ -62,7 +62,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     args.validation
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
     let started = Instant::now();
-    let initial = discover_gitops_inventory(&args.path, None)?;
+    let initial = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let target_name = resolve_deployment_target_name(&initial, args.target.as_deref())?;
     let target = initial
         .get(GitOpsResourceKind::DeploymentTarget, &target_name)

@@ -95,17 +95,9 @@ impl ProcessWiring {
         let drivers = {
             let script = nyl_units::fake::Script::new();
             #[cfg(feature = "tier2")]
-            let mut drivers = nyl_units::registry::with_fake_publication(&script);
+            let drivers = nyl_units::registry::with_fake_publication(&script, crate::resource_catalogue());
             #[cfg(not(feature = "tier2"))]
-            let mut drivers = nyl_units::registry::with_test_kinds(&script);
-            drivers.register_as(
-                nyl_core::constants::API_VERSION_UNITS,
-                "KubernetesPublication",
-                std::sync::Arc::new(
-                    nyl_units::fake::FakePublication::new(script)
-                        .with_resource_catalogue(nyl_render::config::ResourceCatalogue(crate::resource_catalogue())),
-                ),
-            );
+            let drivers = nyl_units::registry::with_test_kinds(&script, crate::resource_catalogue());
             drivers
         };
         #[cfg(not(feature = "test-kinds"))]

@@ -63,7 +63,10 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
   so the rules of a kind, such as which capabilities a spec enables, are not
   split across crates. `nyl-render` never depends on `nyl-units`: the CLI
   passes the assembled resource catalogue into discovery, rendering, editor
-  annotations, and schema export.
+  annotations, and schema export. The catalogue has no default: every
+  discovery entry point, project-configuration loader, render session, and
+  pinned-source renderer takes it as an argument, so no entry point can
+  validate against fewer resource APIs than another.
 - Each crate owns the resources of its layer and contributes their
   descriptors to that catalogue: `nyl-core` the `gitops.nyl/v1` resources
   orchestration reads, `nyl-render` the Kubernetes rendering and Kubernetes

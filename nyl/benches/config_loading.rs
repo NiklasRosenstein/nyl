@@ -56,7 +56,7 @@ helm_chart_search_paths = ["./charts"]
 
     c.bench_function("config_load_full", |b| {
         b.iter(|| {
-            let _result = ProjectConfig::load(Some(black_box(config_path.clone())));
+            let _result = ProjectConfig::load(Some(black_box(config_path.clone())), nyl::resource_catalogue());
         });
     });
 }

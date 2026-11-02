@@ -17,7 +17,7 @@ use super::project::declared;
 use super::run::CommandOutcome;
 use super::session::{pretty_json, stopped, Stop};
 use crate::cli::commands::reconcile::RunOutput;
-use crate::discover_gitops_inventory;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_render::gitops::GitOpsInventory;
 
@@ -40,7 +40,7 @@ pub fn select(
     offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
 ) -> Result<Selection, Stop> {
-    let inventory = discover_gitops_inventory(path, None)?;
+    let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let (environments, groups) = declared(&inventory);
     let selection = selection_names(&environments, &groups, names, labels, group)?;
     if selection.is_empty() {
@@ -58,8 +58,7 @@ pub fn select(
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
     let commit = CommitId::new(commit.id().to_string())
         .map_err(|error| Finding::new(Code::SourceUnavailable, error.to_string(), "check out a source commit"))?;
-    let renderer = UnitSourceRenderer::new(super::session::project_dir(&inventory))
-        .with_resource_catalogue(inventory.project_config.resource_catalogue.clone())
+    let renderer = UnitSourceRenderer::new(super::session::project_dir(&inventory), crate::resource_catalogue())
         .with_previous_paths(inventory.project_config.config.project.previous_paths.clone());
     let mut graph = BTreeMap::new();
     let mut rendered_sources = BTreeMap::new();

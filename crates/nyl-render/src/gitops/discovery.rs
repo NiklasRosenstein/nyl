@@ -198,21 +198,12 @@ pub fn derived_group_source_root(project_root: &Path, group_source_path: &Path, 
     }
 }
 
-/// Locate the nearest `nyl.toml` and discover Git-visible GitOps resources.
+/// Locate the nearest `nyl.toml` and discover Git-visible GitOps resources,
+/// validated against the caller's resource catalogue.
 ///
 /// A relative `output_subtree` is resolved beneath the project root. The
 /// subtree is omitted from both the YAML file list and resource inventory.
-pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>) -> Result<GitOpsInventory> {
-    discover_inventory(
-        start_dir,
-        output_subtree,
-        InvalidResources::Fail,
-        crate::config::ResourceCatalogue::default(),
-    )
-}
-
-/// Discover a project using the resource APIs registered by the caller.
-pub fn discover_gitops_inventory_with_catalogue(
+pub fn discover_gitops_inventory(
     start_dir: &Path,
     output_subtree: Option<&Path>,
     catalogue: crate::config::ResourceCatalogue,
@@ -227,13 +218,11 @@ pub fn discover_gitops_inventory_with_catalogue(
 /// a document without a valid envelope, a resource that does not deserialize,
 /// and a later duplicate of a name are skipped. The inventory is incomplete by
 /// design and must not feed rendering.
-pub fn discover_gitops_inventory_for_editing(start_dir: &Path) -> Result<GitOpsInventory> {
-    discover_inventory(
-        start_dir,
-        None,
-        InvalidResources::Skip,
-        crate::config::ResourceCatalogue::default(),
-    )
+pub fn discover_gitops_inventory_for_editing(
+    start_dir: &Path,
+    catalogue: crate::config::ResourceCatalogue,
+) -> Result<GitOpsInventory> {
+    discover_inventory(start_dir, None, InvalidResources::Skip, catalogue)
 }
 
 /// What discovery does with a resource document that cannot be parsed.
@@ -256,8 +245,7 @@ fn discover_inventory(
     };
     let config_file =
         ProjectConfig::find(Some(start_dir))?.ok_or_else(|| NylError::ConfigNotFound("nyl.toml".to_owned()))?;
-    let mut project_config = ProjectConfig::load(Some(config_file.clone()))?;
-    project_config.resource_catalogue = catalogue;
+    let project_config = ProjectConfig::load(Some(config_file.clone()), catalogue)?;
     let project_root = config_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -840,7 +828,7 @@ spec:
     fn test_read_source_resolves_named_repository_without_its_publication_coordinates() {
         let (temporary, _) = project();
         fs::write(temporary.path().join("repository.yaml"), "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata: {name: shared}\nspec: {repoURL: 'https://example.invalid/read.git', publishURL: 'ssh://git@example.invalid/write.git'}\n").unwrap();
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let reference = nyl_core::resources::LocalReference {
             name: "shared".to_owned(),
         };
@@ -880,7 +868,7 @@ spec:
         let staging = TARGET.replace("production", "staging");
         fs::write(temporary.path().join("config/targets/untracked.yml"), staging).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         assert_eq!(
             inventory.yaml_files,
             vec![
@@ -915,7 +903,12 @@ spec:
         )
         .unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), Some(Path::new("rendered"))).unwrap();
+        let inventory = discover_gitops_inventory(
+            temporary.path(),
+            Some(Path::new("rendered")),
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         assert_eq!(inventory.yaml_files, vec![PathBuf::from("applications.yaml")]);
         assert!(inventory.resources.is_empty());
     }
@@ -938,7 +931,7 @@ spec:
         .unwrap();
         track(&repository, "third-party/artifacts/manifests/example.com/target.yaml");
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
 
         assert!(inventory.yaml_files.is_empty(), "{:?}", inventory.yaml_files);
         assert!(inventory.resources.is_empty());
@@ -966,7 +959,7 @@ spec:
         )
         .unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let group = inventory.get(GitOpsResourceKind::ApplicationGroup, "optional").unwrap();
         assert_eq!(group.identity.name, "optional");
         assert!(inventory
@@ -987,7 +980,7 @@ spec:
         fs::write(temporary.path().join("outside"), TARGET).unwrap();
         symlink(temporary.path().join("outside"), temporary.path().join("linked.yaml")).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         assert!(inventory.yaml_files.is_empty());
     }
 
@@ -1016,7 +1009,7 @@ spec:
             .unwrap();
         index.write().unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         assert!(inventory.yaml_files.is_empty());
     }
 
@@ -1032,7 +1025,7 @@ spec:
         )
         .unwrap();
 
-        let error = discover_gitops_inventory(temporary.path(), None)
+        let error = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue())
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown field"));
@@ -1058,7 +1051,7 @@ spec:
         )
         .unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let cluster = inventory.get(GitOpsResourceKind::Cluster, "prod-eu-1").unwrap();
         assert!(matches!(cluster.resource, Some(GitOpsResource::Cluster(_))));
     }
@@ -1084,7 +1077,7 @@ spec:
         )
         .unwrap();
 
-        assert!(discover_gitops_inventory(temporary.path(), None).is_err());
+        assert!(discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).is_err());
     }
 
     #[test]
@@ -1093,7 +1086,7 @@ spec:
         fs::write(temporary.path().join("one.yaml"), TARGET).unwrap();
         fs::write(temporary.path().join("two.yaml"), TARGET).unwrap();
 
-        let error = discover_gitops_inventory(temporary.path(), None)
+        let error = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue())
             .unwrap_err()
             .to_string();
         assert!(error.contains("Duplicate GitOps resource DeploymentTarget/production"));
@@ -1113,8 +1106,9 @@ spec:
         .unwrap();
 
         // Rendering needs a complete inventory; editor tooling keeps what parses.
-        assert!(discover_gitops_inventory(temporary.path(), None).is_err());
-        let inventory = discover_gitops_inventory_for_editing(temporary.path()).unwrap();
+        assert!(discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).is_err());
+        let inventory =
+            discover_gitops_inventory_for_editing(temporary.path(), crate::config::test_catalogue()).unwrap();
         let target = inventory
             .get(GitOpsResourceKind::DeploymentTarget, "production")
             .unwrap();
@@ -1135,7 +1129,7 @@ spec:
         );
         fs::write(temporary.path().join("resources.yaml"), content).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let resource = inventory
             .get(GitOpsResourceKind::DeploymentTarget, "production")
             .unwrap();
@@ -1148,7 +1142,12 @@ spec:
         fs::write(temporary.path().join("target.yaml"), TARGET).unwrap();
         fs::create_dir_all(temporary.path().join("nested/deep")).unwrap();
 
-        let inventory = discover_gitops_inventory(&temporary.path().join("nested/deep"), None).unwrap();
+        let inventory = discover_gitops_inventory(
+            &temporary.path().join("nested/deep"),
+            None,
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         assert_eq!(inventory.project_root, temporary.path().canonicalize().unwrap());
         assert!(inventory
             .get(GitOpsResourceKind::DeploymentTarget, "production")
@@ -1160,7 +1159,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(temporary.path().join("target.yaml"), TARGET).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         fs::write(temporary.path().join("nyl.toml"), "not valid TOML = [").unwrap();
 
         let rediscovered = inventory.rediscover(None).unwrap();

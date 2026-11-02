@@ -4,7 +4,7 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 
 use crate::cli::resource_file::{atomic_replace, document_count, remove_document};
-use crate::discover_gitops_inventory;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{validate_gitops_inventory, GitOpsInventoryKey};
 use nyl_render::resources::GitOpsResourceKind;
 use nyl_render::util::path_for_display;
@@ -56,7 +56,7 @@ pub fn execute(args: DeleteArgs) -> Result<()> {
 }
 
 fn delete_resource(kind: GitOpsResourceKind, name: &str, dry_run: bool) -> Result<()> {
-    let inventory = discover_gitops_inventory(Path::new("."), None)?;
+    let inventory = discover_gitops_inventory(Path::new("."), None, crate::resource_catalogue())?;
     let key = GitOpsInventoryKey::new(kind, name);
     let discovered = inventory
         .resources

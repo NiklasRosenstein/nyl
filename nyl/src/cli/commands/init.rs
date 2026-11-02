@@ -344,7 +344,7 @@ fn resolve_config(mut args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Resul
         )));
     }
     if let (Some(mode), Some(existing)) = (vendor, &found_config) {
-        let declared = ProjectConfig::load(Some(existing.clone()))?
+        let declared = ProjectConfig::load(Some(existing.clone()), crate::resource_catalogue())?
             .vendor()
             .map(|settings| settings.mode);
         if declared != Some(mode) {

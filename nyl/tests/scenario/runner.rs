@@ -206,7 +206,7 @@ fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
         world,
         clock: Arc::new(FakeClock::new(start)),
         ids: SequentialIds::new(),
-        drivers: nyl_units::registry::with_test_kinds(&script),
+        drivers: nyl_units::registry::with_test_kinds(&script, nyl::resource_catalogue()),
         script,
         tools: ProcessRunner::new(),
         faults: FaultSlot::default(),

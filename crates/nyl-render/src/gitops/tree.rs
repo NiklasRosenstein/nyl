@@ -3044,10 +3044,12 @@ fn build_group_source_session(
                 "ApplicationGroup source.rendererConfig.projectPath",
             )?;
             let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
-            Some(
-                RenderSession::for_remote_target(&project_root, target, &cluster)?
-                    .with_resource_catalogue(inventory.project_config.resource_catalogue.clone()),
-            )
+            Some(RenderSession::for_remote_target(
+                &project_root,
+                target,
+                &cluster,
+                inventory.project_config.resource_catalogue.clone(),
+            )?)
         }
         (Some(_), RendererConfigMode::Central) => {
             let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;

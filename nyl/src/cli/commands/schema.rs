@@ -11,6 +11,7 @@ pub type SchemaResourceKind = String;
 fn resource_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(
         crate::resource_catalogue()
+            .0
             .into_iter()
             .map(|kind| {
                 PossibleValue::new(kind.name)
@@ -65,6 +66,7 @@ pub async fn execute(args: SchemaArgs) -> Result<()> {
         SchemaCommand::Config => print_schema(&nyl_render::config::schema::generate_project_config_schema()),
         SchemaCommand::Resource { kind, api_version } => {
             let kind = crate::resource_catalogue()
+                .0
                 .into_iter()
                 .find(|item| {
                     item.name.eq_ignore_ascii_case(&kind) || item.slug == kind || item.aliases.contains(&kind.as_str())
@@ -87,8 +89,11 @@ pub async fn execute(args: SchemaArgs) -> Result<()> {
 }
 
 async fn annotate(check: bool) -> Result<()> {
-    let inventory = nyl_render::gitops::discover_gitops_inventory_for_editing(&std::env::current_dir()?)?;
-    let report = nyl_render::editor::annotate_project(&inventory, check, &crate::resource_catalogue()).await?;
+    let inventory = nyl_render::gitops::discover_gitops_inventory_for_editing(
+        &std::env::current_dir()?,
+        crate::resource_catalogue(),
+    )?;
+    let report = nyl_render::editor::annotate_project(&inventory, check, &crate::resource_catalogue().0).await?;
     for (_, reason) in &report.unavailable_schemas {
         eprintln!("warning: {reason}; its comment is written, rerun nyl schema annotate once it is reachable");
     }
@@ -147,7 +152,7 @@ fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
 }
 
 fn write_all_schemas(output_dir: &Path) -> Result<()> {
-    for (path, schema) in nyl_render::config::schema::published_schema_artifacts(&crate::resource_catalogue()) {
+    for (path, schema) in nyl_render::config::schema::published_schema_artifacts(&crate::resource_catalogue().0) {
         let path = output_dir.join(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -164,7 +169,7 @@ mod tests {
     #[test]
     fn generated_schemas_match_published_artifacts() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("book/public/reference/schemas");
-        for (path, expected) in nyl_render::config::schema::published_schema_artifacts(&crate::resource_catalogue()) {
+        for (path, expected) in nyl_render::config::schema::published_schema_artifacts(&crate::resource_catalogue().0) {
             let published = std::fs::read_to_string(directory.join(&path)).unwrap();
             let published: serde_json::Value = serde_json::from_str(&published).unwrap();
             assert_eq!(

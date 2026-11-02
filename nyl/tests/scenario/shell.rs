@@ -176,7 +176,7 @@ impl Harness {
             (Box::new(MemoryStateStore::new()), None)
         };
         let script = Script::new();
-        let drivers = nyl_units::registry::with_test_kinds(&script);
+        let drivers = nyl_units::registry::with_test_kinds(&script, nyl::resource_catalogue());
         Self {
             location: location(&world),
             world,
@@ -266,7 +266,7 @@ impl Harness {
         let clone = self.world.fresh_clone("main");
         let entry_commit = CommitId::new(git_output(&clone, &["rev-parse", "HEAD"])).unwrap();
         let sources = GitSourceResolver::new(clone.join(".git"), GitAuth::none());
-        let renderer = UnitSourceRenderer::new("/nyl");
+        let renderer = UnitSourceRenderer::new("/nyl", nyl::resource_catalogue());
         let entry = renderer.render(&clone, &dev(), &entry_commit).unwrap().environment;
         Job {
             sources,

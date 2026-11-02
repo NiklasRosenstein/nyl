@@ -158,8 +158,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         let relative = request.project_dir.strip_prefix("/").unwrap_or(request.project_dir);
         request.worktree.join(relative)
     };
-    let inventory =
-        super::discover_gitops_inventory_with_catalogue(&project_dir, None, request.resource_catalogue.clone())?;
+    let inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?;
     super::resolve_deployment_target_name(&inventory, Some(request.target))?;
 
     // A render without a cache directory still keeps its source checkouts
@@ -419,7 +418,7 @@ pub fn index_digest(index: &RenderIndex) -> Result<String> {
 fn load_project_file(project_dir: &Path) -> Result<ProjectFile> {
     let file = project_dir.join("nyl.toml");
     if file.is_file() {
-        Ok(ProjectConfig::load_from_dir(Some(file), None)?.config)
+        ProjectConfig::read_project_file(&file)
     } else {
         Ok(ProjectFile::default())
     }
@@ -987,7 +986,7 @@ spec:
             target: "dev",
             inputs,
             cache_dir,
-            resource_catalogue: crate::config::ResourceCatalogue::default(),
+            resource_catalogue: crate::config::test_catalogue(),
         })
     }
 
@@ -1043,7 +1042,12 @@ spec:
         assert!(error.contains("fromUnit needs orchestrated execution"), "{error}");
 
         // Tree commands pass no snapshot at all and keep rejecting the binding.
-        let inventory = super::super::discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap();
+        let inventory = super::super::discover_gitops_inventory(
+            &worktree.path().join("nyl"),
+            None,
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

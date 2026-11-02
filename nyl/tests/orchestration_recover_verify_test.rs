@@ -667,7 +667,7 @@ impl Harness {
             ("OciImage", Arc::new(FakeImage::new(harness.script.clone()))),
             (
                 "KubernetesPublication",
-                Arc::new(FakePublication::new(harness.script.clone())),
+                Arc::new(FakePublication::new(harness.script.clone(), nyl::resource_catalogue())),
             ),
         ];
         for (kind, inner) in fakes {

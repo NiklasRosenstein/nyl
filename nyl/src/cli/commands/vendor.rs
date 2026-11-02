@@ -7,7 +7,7 @@ use clap::Args;
 use colored::Colorize;
 
 use crate::cli::tree_progress::{TreeProgressArgs, TreeProgressReporter};
-use crate::discover_gitops_inventory;
+use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::inputs::PublicationRead;
 use nyl_render::gitops::{
     compile_target_tree_cached_with_observer_and_options, CacheMode, GitOpsCache, TreeRenderOptions,
@@ -81,7 +81,7 @@ pub async fn execute(args: VendorArgs) -> Result<()> {
 }
 
 async fn sync(args: VendorRenderArgs) -> Result<()> {
-    let inventory = discover_gitops_inventory(&args.path, None)?;
+    let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_population(args.refresh);
@@ -105,7 +105,7 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
 }
 
 async fn check(args: VendorCheckArgs) -> Result<()> {
-    let inventory = discover_gitops_inventory(&args.path, None)?;
+    let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_check();
@@ -131,7 +131,7 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
 }
 
 fn prune(path: &Path) -> Result<()> {
-    let inventory = discover_gitops_inventory(path, None)?;
+    let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let schema_root = nyl_render::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
     let removed = nyl_render::validation::store::check_and_prune(&schema_root, true)? + writer.prune()?;
