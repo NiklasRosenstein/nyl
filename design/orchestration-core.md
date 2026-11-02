@@ -336,6 +336,8 @@ spec:
   | --- | --- | --- | --- |
   | `enabled` | boolean | `true` | Evaluated after rendering; `false` leaves the ownership set |
   | `outputs` | map of name to output declaration | `{}` | Declared outputs, for kinds that let units declare them (see below) |
+  | `observations` | map of name to `{type, maxAge?, …}` plus kind-specific source fields | `{}` | Observed outputs, for kinds with the `observed_outputs` capability (see [Observed outputs](#observed-outputs)) |
+  | `observationWait` | duration | `0s` | How long a run that executed the unit waits for its `pending` observations, within `timeout` |
   | `dependsOn` | list of unit names or `{environment?, unit, evidence?, attestations?}` | `[]` | Ordering without a data reference |
   | `approval` | `auto`, `manual`, or `{mode, bind, requireDigest}` | `auto` | See [Approval](#approval) |
   | `deletionPolicy` | `Teardown` \| `Retain` | `Teardown` where the kind supports teardown, else `Retain` | See [Deletion](#deletion) |
@@ -448,8 +450,9 @@ spec:
 | --- | --- | --- |
 | `fromUnit: {unit, output, pointer, evidence, attestations}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
 | `fromUnit: {unit, artifact, kind, pointer, evidence, attestations}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
+| `fromUnit: {unit, observation, pointer, evidence, attestations}` | The latest recorded value of a unit's [observed output](#observed-outputs) for its current receipt | The producer's receipt must be current, with the required `evidence`, and the observation must have a value (not `pending`, not older than its `maxAge`) |
 | `fromPromotion: {value, path}` | A value in a PromotionRecord in this environment's desired state: without `path`, the newest record carrying the value, limited to the source paths when the environment's source is promoted (see [Several paths into one environment](promotion.md#several-paths-into-one-environment)) | The record must exist; broken selectors are errors |
-| `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `fromUnit`, against the other environment's current receipt |
+| `fromUnit: {environment, unit, output \| artifact \| observation, …}` | An output, artifact, or observed output of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `fromUnit`, against the other environment's current receipt |
 
 - `pointer` is a JSON Pointer ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)):
   `/` separates tokens, `~1` escapes `/`, and `~0` escapes `~`. An empty or
@@ -621,6 +624,37 @@ spec:
   the promotion contract's [health evidence](promotion.md#health-evidence). Direct application through Nyl, which
   would attest `healthy` from rollout status during `reconcile`, is not a mode
   in the initial scope.
+- It supports [observed outputs](#observed-outputs) in `mode: observe`, whose
+  credentials it needs (M5). Each declares a `resource` (`apiVersion`, `kind`,
+  `namespace` for namespaced kinds, `name`) and a JSON `pointer` into it:
+
+  ```yaml
+  spec:
+    mode: observe
+    observations:
+      ingressIp:
+        type: string
+        resource: {apiVersion: v1, kind: Service, namespace: ingress, name: ingress-nginx}
+        pointer: /status/loadBalancer/ingress/0/ip
+    observationWait: 10m
+  ```
+
+  - The resource must be one the target renders: resolution rejects one that
+    is not in the rendered tree with `NYL-KUBERNETES-OBSERVATION-UNOWNED`, so
+    the cluster is the target's Cluster and nothing outside the declaration
+    is read. Secrets are rejected.
+  - The driver reads the resource from the target's Cluster through its
+    local context, only once the Application that owns it runs the current
+    receipt's publication, matched as for `accepted` (see
+    [Kubernetes publications](promotion.md#kubernetes-publications)). Only
+    that Application must match, so an observation whose Application did not
+    change in a publication resolves at once, and a slow, unrelated
+    Application does not hold it back. Until then it is `pending`
+    (`application-not-running-publication`); afterwards a pointer that does
+    not resolve yet is `pending` (`field-not-set`), because controllers fill
+    in status after Argo CD applies the manifest. A missing resource, or a
+    value of the wrong type, after the Application runs the publication is
+    `failed`.
 
 **Teardown.** A publication unit supports teardown when its target is
 configured so that removing the manifests removes the workloads. It proceeds
@@ -1167,7 +1201,7 @@ desired/
 observed/
   units/<unit>.yaml                          # ObservedUnit: latest receipt and condition
   units/<unit>/artifacts/<name>.yaml         # artifacts of the latest receipt
-  units/<unit>/observations/<type>.yaml      # latest observation per type (drift, health)
+  units/<unit>/observations/<type>.yaml      # latest observation per type (drift, health, outputs)
   units/<unit>/attestations/<name>.yaml      # latest attestation per name for the current receipt
   attestations/<name>.yaml                   # environment-wide attestations for the current state
 ```
@@ -1198,7 +1232,7 @@ files cover every version, and a reader rejects a version it does not know.
 | `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file; a held marker is a DesiredUnit with `lifecycle.state: held` and only the unit's environment and name (see [Deletion](#deletion)) |
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
-| `Observation` | `observed/units/<unit>/observations/<type>.yaml` | `unit`, `type` (`drift`, `health`), `executionKey`, `at`, `result`, driver-specific `details` |
+| `Observation` | `observed/units/<unit>/observations/<type>.yaml` | `unit`, `type` (`drift`, `health`, `outputs`), `executionKey`, `at`, `result`, driver-specific `details`; an `outputs` observation has `values`, each name with `value` and `observedAt` (the last successful read) or `pending` with the driver's reason (see [Observed outputs](#observed-outputs)). The `outputs` type is a format change: `Observation` gains a version whose migration from the previous one is the identity |
 | `Attestation` | `observed/units/<unit>/attestations/<name>.yaml`, `observed/attestations/<name>.yaml` | See [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
 | `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
@@ -1391,6 +1425,85 @@ the consumer's execution key. A producer recreated with a new uid and the same
 outputs therefore leaves its consumers current: re-resolution cites the new
 receipt and the consumers' execution keys stay the same.
 
+### Observed outputs
+
+An observed output is a value the unit's driver reads from the system the unit
+manages, such as the address a cloud load balancer assigns to a published
+Service. Unlike an output, executing the unit does not produce it: it can
+appear after the execution and change while the execution key stays the same.
+It is therefore an observation of the current receipt, never part of the
+receipt (owner: `nyl_orchestration::rules::observed_outputs`).
+
+```yaml
+spec:
+  observations:
+    ingressIp:
+      type: string
+      # kind-specific source fields, here a KubernetesPublication's:
+      resource: {apiVersion: v1, kind: Service, namespace: ingress, name: ingress-nginx}
+      pointer: /status/loadBalancer/ingress/0/ip
+  observationWait: 10m     # default 0s: one attempt, then later runs
+```
+
+- `observations` declares each observed output with a `type` from the Release
+  input type set, plus the source fields of the unit's kind, which its driver
+  validates. A name may not also be a declared output. Observed outputs are
+  never sensitive: a declaration with `sensitive` is rejected, because a value
+  that cannot be recorded cannot be referenced. A kind whose driver lacks the
+  `observed_outputs` capability rejects `observations` with
+  `NYL-OBSERVATIONS-UNSUPPORTED`.
+- **Reading.** The driver's `observe` reads each declared observation for the
+  unit's current receipt and reports a value, `pending` with a reason (the
+  system has not caught up with the receipt, or the field is not set yet), or
+  `failed` with a reason (it could not read, such as missing credentials).
+  The driver decides when a value belongs to the current receipt; the engine
+  checks it against the declared type and never interprets the reason.
+- **Lifetime.** A recorded value belongs to the receipt whose execution key it
+  names. A new receipt starts with every observation `pending` and removes the
+  previous receipt's values in the same commit, as for a drift observation, so
+  a value read from what ran before can never satisfy a reference.
+- **When Nyl observes.** `reconcile` observes every selected unit with a
+  current receipt and declared observations once, before it resolves the
+  unit's dependents, including a unit it does not execute; this is how a
+  value that changed by itself reaches its consumers. `verify` observes them
+  too. `plan` and `status` read only recorded observations.
+- **Waiting.** After the run executes a unit, a `pending` observation is
+  polled under the run's lease until it has a value or `observationWait` has
+  passed since the execution finished, within the unit's `timeout`; the run
+  checks about every 15 seconds and computes the end from the injected clock.
+  Units that do not depend on the observation are not held back. With the
+  default `0s`, the run makes one attempt and the observation stays `pending`
+  for a later run. A unit the run did not execute is observed once, without
+  waiting.
+- **Unavailable reads.** When a read `failed`, the last recorded value for the
+  current receipt stays usable and the run warns with
+  `NYL-OBSERVATION-FAILED`, naming the driver's reason. An observation
+  declared with `maxAge` stops resolving once its last successful read is
+  older than that; it is then `pending` for its consumers.
+- **Recording.** A run writes the unit's `outputs` Observation (see
+  [State layout](#state-layout)) only when a value or its `pending` state
+  changes, or when the last successful read is older than the refresh
+  interval, an hour by default, so `maxAge` stays satisfiable without a commit
+  per run. The transition commit lists units whose recorded values changed
+  under `observationsChanged`.
+- **Consumers.** `fromUnit: {unit, observation, pointer}` resolves the
+  recorded value; the producer's receipt must be current with the required
+  `evidence`, as for an output. A `pending` observation blocks the consumer,
+  exit 2, with `NYL-OBSERVATION-PENDING` and the driver's reason. The resolved
+  value enters the consumer's execution key, so a changed value makes the
+  consumer execute again like any changed input, under its own `approval`;
+  `driftRepair` does not apply, because the consumer's inputs changed rather
+  than its resources. Provenance cites the producer's receipt, the observation
+  name, its `observedAt`, and the observed commit. A run resolves each
+  observation once, so all its consumers see the same value.
+- Cross-environment references read observations like outputs, from the
+  producer environment's observed tip. PromotionPath selectors cannot select
+  an observation: observed values describe one environment's systems, like
+  native state, and are never promoted.
+- The walkthrough [`observed-output`](#walkthroughs) shows a value arriving
+  after a publication, a run that waits for it, and a change that reaches its
+  consumer without the producer executing.
+
 ### Transition commits
 
 Human review of the state refs is a goal, so each operation writes at most one
@@ -1445,6 +1558,9 @@ Nyl-Version: 0.7.0
 - `driftRepaired` lists the units the run executed again because their
   latest drift observation was `drifted`, and `reapplied` records
   `{by, at, reason, units}` of a `--reapply`; each appears only when not
+  empty.
+- `observationsChanged` lists, per unit, the observed outputs whose recorded
+  value or `pending` state the operation changed; it appears only when not
   empty.
 - Lifecycle work adds its specifics under `details`: `retained`, `released`
   (each unit with what it left in place), `allowDependents` (each unit with
@@ -2581,6 +2697,7 @@ trait Driver {
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
     fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Verification>>; // drift, observations, attestations
+    fn observe(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<ObservedOutputs>>; // see Observed outputs
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
     fn teardown_settings(&self, unit: &DesiredUnit) -> Result<Supported<TeardownSettings>>; // readiness from the stored document; default Unsupported
@@ -2591,6 +2708,7 @@ trait Driver {
 struct Capabilities {
     plan: bool, reconcile: bool, verify: bool, inspect: bool, teardown: bool,
     observe: bool,              // verify records observations, such as Argo CD health
+    observed_outputs: bool,     // `observe` reads declared observed outputs; validate_spec checks their source fields
     build: bool,               // supports `nyl build` with driver-owned arguments
     change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed
     exec: Option<ExecTerminal>, // None: no `nyl exec`; Some(Interactive | NonInteractive)
@@ -2617,6 +2735,7 @@ enum Outcome {
 | `Outputs` | A JSON object of declared, non-sensitive outputs; Nyl validates it against the declarations and drops the rest before recording |
 | `Artifact` | An artifact document without `metadata.unit` and `executionKey`, which Nyl fills in |
 | `Verification` | `drift`: `clean`, `drifted` with a summary, or `unknown` with a reason; `observations`; `attestations` |
+| `ObservedOutputs` | Per declared observation: `Value(value)`, `Pending { reason }`, or `Failed { reason }`; Nyl checks values against the declared types, records them, and shows reasons unchanged (see [Observed outputs](#observed-outputs)) |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
 | `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
@@ -2941,6 +3060,7 @@ nyl get unit database -e dev -o yaml --observed  # only one of them (--desired, 
 
 nyl get output network/vpcId -e dev              # resolves like {fromUnit: {unit: network, output: vpcId}}
 nyl get output database/connection -e dev --pointer /host   # pointer inside an object output
+nyl get observation kubernetes/ingressIp -e dev  # resolves like {fromUnit: {unit: kubernetes, observation: ingressIp}}
 
 nyl get artifacts -e dev
 UNIT        NAME   KIND            SUMMARY
@@ -2957,8 +3077,8 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 - Tables join desired and observed state for reading. `-o yaml` and `-o json`
   return the exact persisted documents, never a synthesized merge.
-- `nyl get output <unit>/<output>` and `nyl get artifact <unit>/<name>
-  --pointer …` return single values for scripts and resolve exactly like the
+- `nyl get output <unit>/<output>`, `nyl get observation <unit>/<name>`, and
+  `nyl get artifact <unit>/<name> --pointer …` return single values for scripts and resolve exactly like the
   matching `fromUnit` reference: the same pointer base (inside the artifact's
   `spec`), the same digest check, and the same freshness rule. When the
   reference would not resolve (no current receipt, or a missing output,
@@ -3239,6 +3359,22 @@ Under `driftRepair: manual`, `reconcile` repairs nothing and the unit stays
 under `reapplied`.
 ([`drift`](../nyl/tests/scenarios/walkthroughs/drift/scenario.yaml))
 
+**Observed output (M5).** The `kubernetes` publication in `mode: observe`
+declares the observed output `ingressIp` from its ingress Service, and the
+Command unit `dns` consumes it. The first reconcile publishes; with the
+default `observationWait: 0s` the address is not assigned yet, so
+`ingressIp` stays `pending` and `dns` is `blocked`, exit 2. The next reconcile
+observes the address, records it, and executes `dns`, while `kubernetes`
+stays `current`. When the load balancer later changes its address, the next
+reconcile records the new value under `observationsChanged` and executes
+`dns` again, without executing `kubernetes`. A reconcile in which the
+observer cannot read keeps the recorded value, warns
+`NYL-OBSERVATION-FAILED`, writes nothing, and leaves `dns` `current`. After a
+change with `observationWait: 10m`, a single run publishes, finds `ingressIp`
+`pending` for the new receipt, and polls until the address is observed
+again; it is unchanged, so `dns` stays `current`.
+([`observed-output`](../nyl/tests/scenarios/walkthroughs/observed-output/scenario.yaml))
+
 **Preview expiry.** Instance `pr-123` of template `preview` (`ttl: 7d`,
 `allowTeardown: true`) was last reconciled with `reconcile -e pr-123` eight days
 ago. The next reconcile that reaches it, whether a maintenance job's
@@ -3257,6 +3393,7 @@ extended the expiry first.
 | Question | Needed by |
 | --- | --- |
 | Built-in approver lookups beyond GitHub, starting with GitLab | After M3 |
+| Selecting from unordered status lists in observed outputs, such as the first load balancer entry with an `ip`, beyond one JSON pointer | After M5 |
 
 Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).
 

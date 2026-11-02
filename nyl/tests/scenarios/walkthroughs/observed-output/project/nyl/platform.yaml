@@ -1,0 +1,47 @@
+# The observed-output walkthrough's project: one environment, dev, whose
+# publication exposes the address a load balancer assigns to its Service.
+apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: platform
+spec:
+  repoURL: '%PROJECT_URL%'
+  publishURL: '%PROJECT_URL%'
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: dev
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1, v1/Namespace, v1/Service, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: dev
+spec:
+  clusterRef: {name: dev}
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  publication:
+    repositoryRef: {name: platform}
+    revision: deploy
+    pathPrefix: dev
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  values:
+    target: dev
+  state:
+    repositoryRef: {name: platform}
+  allowUnprotectedSource: true

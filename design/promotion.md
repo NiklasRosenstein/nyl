@@ -42,6 +42,11 @@ semantics ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)) and resolver as
 | `{unit, artifact, kind?, pointer}` | A field of an artifact the source unit's receipt lists, relative to the artifact's `spec` |
 | `{input: <pointer>}` | For a target source only: a Release input of the target, under the same `/releases/<group>~1<release>/<input>` layout a publication unit's `resolvedSpec` uses |
 
+There is no selector for an [observed output](orchestration-core.md#observed-outputs):
+an observed value describes one environment's systems, like native state, and
+is never promoted. For the same reason, an `input` selector refuses an input
+the source resolved from an observation.
+
 Validation checks every path: the source and target exist, selected units are
 selected by the source environment, pointers resolve against the source's
 current documents or the kind's schema, and each value's type fits every
