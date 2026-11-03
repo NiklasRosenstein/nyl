@@ -53,8 +53,8 @@ them. See [Runs](/nyl/orchestration/runs/#source-commit).
 
 ## Drift repair
 
-[`nyl verify`](/nyl/reference/cli/verify/) records whether each unit's
-resources still match its receipt. A unit whose latest verification found
+[`nyl detect-drift`](/nyl/reference/cli/detect-drift/) records whether each unit's
+resources still match its receipt. A unit whose latest drift record found
 drift is `drifted` in `nyl status` (exit 2) and is work for the next
 `nyl reconcile`, like a unit whose inputs changed. `spec.driftRepair` decides
 what that reconcile does with it:
@@ -69,8 +69,8 @@ spec:
   driftRepair: manual
 ```
 
-The new receipt of a repaired unit replaces the one the drift was observed
-on, so the drift observation is dropped in the same commit and the unit is
+The new receipt of a repaired unit replaces the one the drift was detected
+on, so the drift record is dropped in the same commit and the unit is
 current again. An EnvironmentGroup supplies `driftRepair` when the
 Environment omits it.
 

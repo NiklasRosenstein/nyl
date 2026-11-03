@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use nyl_core::constants::API_VERSION_UNITS;
 use nyl_core::orchestration::driver::{
-    Capabilities, Driver, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope, PlanReport,
-    RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, Verification,
+    Capabilities, DriftDetection, Driver, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope,
+    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitName};
 use nyl_core::orchestration::ports::RunState;
@@ -226,7 +226,7 @@ pub fn lease_record(id: &str, deadline: Timestamp) -> Lease {
 
 /// A driver of `units.gitops.nyl/v1` kind `kind`. Its execution recovery
 /// policy is `converge` when the spec sets `idempotent: true`, `inspect`
-/// when it sets `inspect: true`, else `manual`. The `Publication` kind tears
+/// when it sets `inspect: true`, else `manual`; it attests with `attests: true`. The `Publication` kind tears
 /// down and claims `spec.prefix` in one repository; `spec.broken` fails
 /// validation.
 pub struct TestDriver {
@@ -246,9 +246,10 @@ impl Driver for TestDriver {
     fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
         nyl_core::orchestration::time::Duration::from_mins(17)
     }
-    fn capabilities(&self, _: &Value) -> Capabilities {
+    fn capabilities(&self, spec: &Value) -> Capabilities {
         Capabilities {
             teardown: self.kind == "Publication",
+            attest: spec["attests"] == json!(true),
             ..Capabilities::default()
         }
     }
@@ -316,7 +317,12 @@ impl Driver for TestDriver {
     fn reconcile(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
         Ok(Supported::Unsupported)
     }
-    fn verify(&self, _: &ExecutionContext<'_>, _: &DesiredUnit, _: &Receipt) -> DriverResult<Supported<Verification>> {
+    fn detect_drift(
+        &self,
+        _: &ExecutionContext<'_>,
+        _: &DesiredUnit,
+        _: &Receipt,
+    ) -> DriverResult<Supported<DriftDetection>> {
         Ok(Supported::Unsupported)
     }
 }

@@ -33,7 +33,7 @@ pub(super) struct Life {
     pub(super) desired: BTreeMap<UnitName, DesiredUnit>,
     /// The desired files the lifecycle changes write (`None` removes one).
     pub(super) writes: BTreeMap<UnitName, Option<DesiredUnit>>,
-    /// Units whose observed file, observations, and attestations go.
+    /// Units whose observed file, drift record, and attestations go.
     pub(super) cleared: BTreeSet<UnitName>,
     /// The results of leaving units, and of held units a hold signal or a
     /// teardown request reached.

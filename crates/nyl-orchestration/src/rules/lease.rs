@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(broken.unwrap().by, "alice");
     }
 
-    /// Catches a state operation (or `hold`, `verify`) writing state before
+    /// Catches a state operation (or `hold`, `detect-drift`) writing state before
     /// the broken run's effects are imported.
     #[test]
     fn test_a_non_importer_is_refused_by_a_broken_lease() {

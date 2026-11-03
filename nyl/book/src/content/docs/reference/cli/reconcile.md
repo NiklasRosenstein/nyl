@@ -53,7 +53,7 @@ it is reported `held` with the source commit whose changes wait.
 
 ## Drift
 
-A unit whose latest [drift observation](/nyl/reference/cli/verify/) is
+A unit whose latest [drift record](/nyl/reference/cli/detect-drift/) is
 `drifted` runs again when its recovery policy is `converge` and the
 Environment's `driftRepair` is `converge`, the default, and the transition
 commit lists it under `driftRepaired`. A drifted unit that is not safe to

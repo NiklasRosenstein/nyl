@@ -26,9 +26,12 @@ pub struct CommandSpec {
     pub values: serde_json::Value,
     /// Argument vector of the reconcile step, executed without a shell. A relative first element is resolved against `workingDir`.
     pub command: Vec<String>,
-    /// Argument vector reporting drift: exit 0 for clean, 2 for drift, anything else for an error.
+    /// Argument vector `nyl detect-drift` runs: exit 0 for clean, 2 for drift, anything else for an error.
+    #[serde(rename = "detectDrift", default, skip_serializing_if = "Option::is_none")]
+    pub detect_drift: Option<Vec<String>>,
+    /// Argument vector `nyl attest` runs: it writes the results of the unit's own `attestations` to `NYL_ATTESTATIONS`. Requires an attestation without `from: external`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verify: Option<Vec<String>>,
+    pub attest: Option<Vec<String>>,
     /// Argument vector removing the command's effects. Without it the kind cannot tear down and defaults to `deletionPolicy: Retain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<Vec<String>>,
@@ -61,7 +64,8 @@ impl CommandSpec {
     pub fn validate(&self) -> Result<()> {
         validate_argv("spec.command", &self.command)?;
         for (field, argv) in [
-            ("spec.verify", &self.verify),
+            ("spec.detectDrift", &self.detect_drift),
+            ("spec.attest", &self.attest),
             ("spec.teardown", &self.teardown),
             ("spec.fingerprint", &self.fingerprint),
         ] {
@@ -82,6 +86,17 @@ impl CommandSpec {
         }
         if !(self.values.is_null() || self.values.is_object()) {
             return Err(CoreError::config("spec.values must be an object"));
+        }
+        if self.attest.is_some()
+            && self
+                .common
+                .attestations
+                .iter()
+                .all(|attestation| attestation.from.is_some())
+        {
+            return Err(CoreError::config(
+                "spec.attest needs an attestation it produces: declare one in spec.attestations without `from: external`",
+            ));
         }
         self.common.validate(self.support())
     }
@@ -114,7 +129,9 @@ mod tests {
             "files": ["../scripts/seed/**"],
             "values": {"bucket": {"fromUnit": {"unit": "storage", "output": "bucket"}}},
             "command": ["./run.sh"],
-            "verify": ["./verify.sh"],
+            "detectDrift": ["./drift.sh"],
+            "attest": ["./smoke.sh"],
+            "attestations": [{"name": "smoke"}],
             "teardown": ["./remove.sh"],
             "fingerprint": ["./tool-versions.sh"],
             "workingDir": "../scripts/seed",
@@ -142,6 +159,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot tear down"), "{error}");
+    }
+
+    /// Catches an `attest` step that could never record anything: every
+    /// attestation it may write must be declared, and external ones are
+    /// supplied by others.
+    #[test]
+    fn test_command_attest_needs_an_attestation_it_produces() {
+        let with = |attestations: serde_json::Value| {
+            command(json!({"command": ["./run.sh"], "attest": ["./smoke.sh"], "attestations": attestations}))
+        };
+        assert!(with(json!([{"name": "smoke"}])).is_ok());
+        for attestations in [json!([]), json!([{"name": "qa", "from": "external"}])] {
+            let error = with(attestations).unwrap_err().to_string();
+            assert!(
+                error.contains("spec.attest needs an attestation it produces"),
+                "{error}"
+            );
+        }
     }
 
     /// Catches a timeout so large that deadline arithmetic overflows.

@@ -10,7 +10,7 @@ spec:
   files: ['../scripts/resource.sh']
   workingDir: ../scripts
   command: [sh, './resource.sh', 'apply']
-  verify: [sh, './resource.sh', 'verify']
+  detectDrift: [sh, './resource.sh', 'verify']
   env:
     passthrough: [SCENARIO_TMP]
   idempotent: true
@@ -24,6 +24,6 @@ spec:
   files: ['../scripts/resource.sh']
   workingDir: ../scripts
   command: [sh, './resource.sh', 'apply']
-  verify: [sh, './resource.sh', 'verify']
+  detectDrift: [sh, './resource.sh', 'verify']
   env:
     passthrough: [SCENARIO_TMP]

@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Attestation, DesiredUnit, EnvironmentRecord, Lease, Observation, ObservedUnit, Run, Signal,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
     StateRecord,
 };
 use serde::de::DeserializeOwned;
@@ -177,10 +177,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
-            "observation.v1.yaml",
+            "drift-record.v1.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "Observation", "unit": identity("database", "OpenTofu"),
-                "type": "drift", "executionKey": KEY, "at": "2026-09-25T16:40:00Z",
+                "apiVersion": "gitops.nyl/v1", "kind": "DriftRecord", "unit": identity("database", "OpenTofu"),
+                "executionKey": KEY, "at": "2026-09-25T16:40:00Z",
                 "result": {"drift": "drifted", "summary": "applying would update"}
             }),
         ),
@@ -190,7 +190,7 @@ fn samples() -> Vec<(&'static str, Value)> {
                 "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "healthy",
                 "unit": {"environment": "dev", "name": "kubernetes", "uid": UID},
                 "executionKey": KEY, "result": "pass", "at": "2026-09-25T16:40:00Z",
-                "source": {"driver": "verify"}, "reason": null
+                "source": {"driver": "attest"}, "reason": null
             }),
         ),
         (
@@ -265,7 +265,7 @@ fn render(name: &str, sample: &Value) -> String {
         "DesiredUnit" => typed::<DesiredUnit>(name, sample),
         "ObservedUnit" => typed::<ObservedUnit>(name, sample),
         "ContainerImage" => typed::<ArtifactDocument>(name, sample),
-        "Observation" => typed::<Observation>(name, sample),
+        "DriftRecord" => typed::<DriftRecord>(name, sample),
         "Attestation" => typed::<Attestation>(name, sample),
         "Lease" => typed::<Lease>(name, sample),
         "Run" => typed::<Run>(name, sample),

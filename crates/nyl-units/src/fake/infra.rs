@@ -12,9 +12,9 @@ use std::path::PathBuf;
 
 use nyl_core::bindings::InputType;
 use nyl_core::orchestration::driver::{
-    Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection,
-    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
-    Verification,
+    Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
+    ExecutionContext, Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    ResolutionContext, Supported,
 };
 use nyl_core::orchestration::ids::{ChangeDigest, EnvironmentName};
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
@@ -155,7 +155,7 @@ impl Driver for FakeInfra {
         Capabilities {
             plan: true,
             reconcile: true,
-            verify: true,
+            detect_drift: true,
             teardown: true,
             change_digest: true,
             ..Capabilities::default()
@@ -264,13 +264,13 @@ impl Driver for FakeInfra {
         }))
     }
 
-    fn verify(
+    fn detect_drift(
         &self,
         _ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         _receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
-        let drift = match self.script.verification(&unit.unit.name)? {
+    ) -> DriverResult<Supported<DriftDetection>> {
+        let drift = match self.script.drift(&unit.unit.name)? {
             Some(drift) => drift,
             None => match Self::plan_change(unit, resolved_spec(unit)?)?.changes {
                 Change::None => Drift::Clean,
@@ -279,11 +279,7 @@ impl Driver for FakeInfra {
                 },
             },
         };
-        Ok(Supported::Supported(Verification {
-            drift,
-            observations: Vec::new(),
-            attestations: Vec::new(),
-        }))
+        Ok(Supported::Supported(drift.into()))
     }
 
     /// Only scripted: a scripted success is applied (with its outputs, or
@@ -298,7 +294,7 @@ impl Driver for FakeInfra {
                 },
                 artifacts: Vec::new(),
             },
-            // A drift verdict scripts `verify`, never `inspect`.
+            // A drift result scripts `detect_drift`, never `inspect`.
             Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Drifted) => {
                 Inspection::NotApplied
             }

@@ -290,7 +290,7 @@ fn test_validate_observe_driver_steps() {
     assert!(categorized.unwrap_err().contains("other than observe's"));
     let drifted = at_m5("{unit: kubernetes, operation: observe, outcome: drifted}");
     assert!(drifted.unwrap_err().contains("succeeded, pending, or failed"));
-    let pending = validation_error("  - driver: {unit: network, operation: verify, outcome: pending}\n");
+    let pending = validation_error("  - driver: {unit: network, operation: detect-drift, outcome: pending}\n");
     assert!(pending.contains("only an observe outcome"), "{pending}");
     let early = validation_error("  - driver: {unit: kubernetes, operation: observe, outcome: pending}\n");
     assert!(early.contains("runs from M5"), "{early}");
@@ -545,13 +545,16 @@ fn test_expect_accepts_part_five_keys_and_rejects_misspelt_ones() {
     }
 }
 
-/// A drift verdict scripts only `verify`; a file step stays inside
+/// A drift result scripts only `detect-drift`; a file step stays inside
 /// `%SCENARIO_TMP%`; and `nyl` arguments must parse with the real command
 /// line, so the boolean `--reapply` given a unit is caught up front.
 #[test]
 fn test_validate_part_five_steps_and_options() {
     let drifted = validation_error("  - driver: {unit: network, operation: reconcile, outcome: drifted}\n");
-    assert!(drifted.contains("only a verify outcome can be drifted"), "{drifted}");
+    assert!(
+        drifted.contains("only a detect-drift outcome can be drifted"),
+        "{drifted}"
+    );
     for (step, error) in [
         ("{path: ../outside, content: x}", "stay inside it"),
         ("{path: /etc/passwd, delete: true}", "stay inside it"),
@@ -596,7 +599,7 @@ fn test_validate_part_five_steps_and_options() {
     };
     assert_eq!(
         valid(concat!(
-            "  - driver: {unit: network, operation: verify, outcome: drifted}\n",
+            "  - driver: {unit: network, operation: detect-drift, outcome: drifted}\n",
             "  - file: {path: resources/network, content: changed}\n",
             "  - file: {path: resources/network, delete: true}\n",
         )),

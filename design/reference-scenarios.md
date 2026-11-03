@@ -170,7 +170,7 @@ and to the harness's validation, together with the first scenario using them.
 | `delete-branch: <name>` | Deletes a branch in `project.git` |
 | `clock: {advance: <duration>}` or `{set: <timestamp>}` | Moves the injected clock |
 | `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result |
-| `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `verify`, `teardown`, and from M5 `observe`), returning `outcome` (`succeeded`, `failed`, `uncertain`, and for `verify` also `drifted`); `observe` returns `succeeded` with the observed values in `outputs`, `pending`, or `failed` without a category |
+| `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `detect-drift`, `teardown`, and from M5 `observe`), returning `outcome` (`succeeded`, `failed`, `uncertain`, and for `detect-drift` also `drifted`); `observe` returns `succeeded` with the observed values in `outputs`, `pending`, or `failed` without a category |
 | `file: {path, content}` | Changes a file beneath the scenario's temporary directory, standing in for a change made outside Nyl, such as drift; Command units reach that directory through `env.passthrough: [SCENARIO_TMP]` |
 | `fault: {point, unit}` | Tier 1: the next `nyl` step dies at `point`, as a forced kill would: `after-effect` or `before-checkpoint` of `unit` (required); `before-lease-update`, where `unit` is optional and names the phase that starts that unit's batch, and without it the first phase; or `before-push` (no `unit`). That step has `killed: true` instead of `exit`, and fails when its fault never fired |
 | `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease` before a `--wait-lease` poll, or a fault point), leaving it running; the commits other steps write meanwhile do not count toward its `commits` |
@@ -181,12 +181,12 @@ and to the harness's validation, together with the first scenario using them.
 
 | Key | Checks |
 | --- | --- |
-| `executed`, `current`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed`, `released`, `held`, `drifted` | Exactly the units with that outcome in the operation's report, so `executed: []` asserts that nothing executed; a key that is not given is not checked. The outcome is each unit's `result` in a reconcile report and its `state` in a plan or status report (`UnitReport::outcome_name`). For a reconcile that wrote a transition commit, the commit summary's `units:` block must list the same sets |
+| `executed`, `current`, `ready`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed`, `released`, `held`, `drifted` | Exactly the units with that outcome in the operation's report, so `executed: []` asserts that nothing executed; a key that is not given is not checked. The outcome is each unit's `result` in a reconcile report and its `state` in a plan or status report (`UnitReport::outcome_name`). For a reconcile that wrote a transition commit, the commit summary's `units:` block must list the same sets |
 | `recovered`, `imported`, `driftRepaired`, `reapplied`, `observationsChanged` | The summary's lists of the same name (for `reapplied` and `observationsChanged`, their units), and the report's |
 | `lease-broken` | Whether the transition commit records a lease break under `leaseBroken` |
 | `outcome` | How a state operation such as `hold` or `resume` ended: `done`, `unchanged`, or `refused` |
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
-| `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit, or `none` for a held marker or a unit held without an incarnation); from `nyl status`, `condition-state` (the condition shown next to the unit's state, or `null`) and `drift: {result}` (the latest drift observation shown) |
+| `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit, or `none` for a held marker or a unit held without an incarnation); from `nyl status`, `condition-state` (the condition shown next to the unit's state, or `null`) and `drift: {result}` (the latest drift record shown) |
 | `codes` | Stable error and warning codes the invocation reported |
 | `get` | `{args, value}` or `{args, json: {<pointer>: <value>}}` for a `nyl get` invocation after the step |
 | `deploy` | Files and commits on a deploy branch |
@@ -589,7 +589,7 @@ Tier 1 variants:
   written nothing.
 - **Broken lease.** After a forced kill, `nyl lease break -e dev --reason
   "runner lost"` lets the next run take over before the deadline. Until a
-  run imports the dead one, `nyl verify -e dev` exits 2 with
+  run imports the dead one, `nyl detect-drift -e dev` exits 2 with
   `NYL-LEASE-BROKEN` and names `nyl recover -e dev`, which imports the dead
   run without executing and records the break once, in its own commit.
 - **Busy instance.** While a pull request job holds `pr-124`'s lease, the

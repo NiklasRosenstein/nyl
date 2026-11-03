@@ -140,7 +140,7 @@ pub struct CommitStep {
 
 /// A change made outside Nyl to a file in the scenario's temporary
 /// directory, `%SCENARIO_TMP%`, such as the resources a Command unit's
-/// `verify` inspects: `content` writes the file, `delete: true` removes it.
+/// `detectDrift` step inspects: `content` writes the file, `delete: true` removes it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileStep {
@@ -185,11 +185,11 @@ pub struct DriverStep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum DriverOperation {
     Plan,
     Reconcile,
-    Verify,
+    DetectDrift,
     Teardown,
     /// Reads the unit's observed values; `outputs` holds the values it
     /// reports. Executes from M5.
@@ -212,7 +212,7 @@ pub enum DriverOutcome {
     Succeeded,
     Failed,
     Uncertain,
-    /// `verify` only: the fake reports drift.
+    /// `detect-drift` only: the fake reports drift.
     Drifted,
     /// `observe` only: the observations are not available yet.
     Pending,
@@ -304,6 +304,8 @@ pub struct CiExportStep {
 pub struct Expect {
     pub executed: Option<Vec<String>>,
     pub current: Option<Vec<String>>,
+    /// A plan or status report's `ready` units: work for the next reconcile.
+    pub ready: Option<Vec<String>>,
     pub blocked: Option<Vec<String>>,
     pub failed: Option<Vec<String>>,
     pub uncertain: Option<Vec<String>>,
@@ -689,8 +691,8 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
             if driver.times == Some(0) {
                 return Err("times must be at least 1".to_owned());
             }
-            if (driver.outcome == DriverOutcome::Drifted) && driver.operation != DriverOperation::Verify {
-                return Err("only a verify outcome can be drifted".to_owned());
+            if (driver.outcome == DriverOutcome::Drifted) && driver.operation != DriverOperation::DetectDrift {
+                return Err("only a detect-drift outcome can be drifted".to_owned());
             }
         }
         StepKind::Fault => {

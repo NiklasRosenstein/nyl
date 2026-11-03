@@ -1438,7 +1438,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         attempted: &attempted,
         local: request.local.as_ref().map(|local| &local.approve),
         approvals: None,
-        observations: &snapshot.observations,
+        drift: &snapshot.drift,
         drift_repair: drift::drift_repair(&prepared.rendered.environment),
         // `nyl plan` has no `--reapply`.
         reapply: &BTreeSet::new(),
@@ -2441,7 +2441,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
-                observations: &snapshot.observations,
+                drift: &snapshot.drift,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
             };
@@ -2715,7 +2715,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .local
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
-                observations: &snapshot.observations,
+                drift: &snapshot.drift,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
@@ -3096,7 +3096,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     }
 
     /// The observed side of the transition: changed and removed observed
-    /// documents, artifact sets, and the observations and attestations of
+    /// documents, artifact sets, and the drift records and attestations of
     /// units whose receipt was replaced or whose state was removed.
     fn observed_changes(
         snapshot: &EnvironmentSnapshot,
@@ -3120,13 +3120,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.artifacts.insert(name.clone(), after.cloned());
             }
         }
-        // A new receipt replaces the one a drift observation was about.
-        changes
-            .observations
-            .extend(drift::observation_changes(snapshot, observed));
+        // A new receipt replaces the one a drift record was about.
+        changes.drift.extend(drift::drift_changes(snapshot, observed));
         for name in &life.cleared {
-            if snapshot.observations.contains_key(name) {
-                changes.observations.insert(name.clone(), None);
+            if snapshot.drift.contains_key(name) {
+                changes.drift.insert(name.clone(), None);
             }
             if snapshot.attestations.contains_key(name) {
                 changes.attestations.insert(name.clone(), None);

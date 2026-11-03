@@ -33,9 +33,9 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   A held unit without a managed instance shows `held (no instance)`; this
   does not say whether resources released from management still exist.
 - **Drift.** A unit with a current receipt shows its latest drift
-  observation from [`nyl verify`](/nyl/reference/cli/verify/) in its detail
+  record from [`nyl detect-drift`](/nyl/reference/cli/detect-drift/) in its detail
   (`drift: clean`, `drifted`, or `unknown`). A current unit whose latest
-  observation is `drifted` has the state `drifted`: work for the next
+  record is `drifted` has the state `drifted`: work for the next
   reconcile, like a changed unit.
 - **Teardowns.** A unit pending teardown warns with `NYL-TEARDOWN-PENDING`,
   naming `nyl reconcile --allow-teardown` for an omission (or `nyl teardown

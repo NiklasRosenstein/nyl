@@ -94,7 +94,7 @@ contract for publication.
 - Unit identity, execution coordination, evidence freshness, and recovery.
 - Explicit promotion paths between environments with recorded lineage.
 - Consistent local and CI commands for planning, reconciliation, inspection,
-  verification, promotion, and deletion intent.
+  drift detection, attestation, promotion, and deletion intent.
 - An opt-in CI adapter exposing named units as individual jobs from Nyl's
   dependency graph, with Nyl retaining readiness and lifecycle decisions.
 
@@ -164,7 +164,7 @@ Each built-in unit kind lives in one module of the `nyl-units` crate: its declar
 | Interfaces | One CLI and machine interface over the same operations and observations |
 
 Drivers are Rust implementations behind one internal trait with advertised
-capabilities (plan, reconcile, verify, inspect, teardown). The command unit is
+capabilities (plan, reconcile, detect drift, attest, inspect, teardown). The command unit is
 the extension point for tools without a dedicated driver. Every type crossing
 the trait is serializable, so plugin drivers (executables with their own unit
 API group, speaking a versioned JSON protocol) remain possible; the protocol
@@ -356,11 +356,12 @@ Cluster.
   under `observations` and referenced with `fromUnit: {unit, observation}`.
   Executing the unit does not produce them and they can change while its
   execution key stays the same, so they are observations of the current
-  receipt in observed state, not receipt outputs. `reconcile` and `verify`
-  re-observe them even when the unit is otherwise current, a run that
-  executed the unit may wait for them up to `observationWait`, and a changed
-  value changes the consumer's execution key, so the consumer executes again
-  without the producer. Reading is a generic `observe` driver capability; the
+  receipt in observed state, not receipt outputs. `reconcile` and
+  `nyl observe` re-observe them even when the unit is otherwise current, a run
+  that executed the unit may wait for them up to `observationWait`, and a
+  changed value changes the consumer's execution key: the consumer is `ready`
+  and the next reconcile executes it, without the producer. `nyl observe`
+  exists for jobs that hold the read credentials a reconcile may lack. Reading is a generic `observe` driver capability; the
   driver decides when a value belongs to the current receipt, and owns each
   value's `from` source. They are never sensitive, and promotion selectors do
   not select them yet.
@@ -410,8 +411,9 @@ never parsed. Only declared outputs are recorded, and outputs declared
 `sensitive` are validated but never persisted. Nyl cannot check idempotency
 for identical inputs, so `idempotent: true` is the author's claim, and an
 interrupted run is uncertain completion. An optional
-`verify` command exits with a documented clean, drift, or error status and
-records no receipt. The process starts from an empty environment plus declared
+`detectDrift` command exits with a documented clean, drift, or error status and
+records no receipt, and an optional `attest` command writes the unit's own
+attestations for `nyl attest`. The process starts from an empty environment plus declared
 runner variables and secrets from the project's secrets provider, which are
 masked in transcripts; there is no further sandbox. An interrupted command is
 re-run only when it declares `idempotent: true`, otherwise it waits for an
@@ -503,15 +505,18 @@ spec:
 
 Evidence beyond a receipt is an **attestation**: a named pass or fail result
 about one unit's current receipt or an environment's recorded state, written by
-the unit's driver during `reconcile` or `nyl verify`, or by people and external
-systems through `nyl attest`. A KubernetesPublication in observe mode attests
-`accepted` and `healthy` from Argo CD, matching each Application's running
-revision to the publication commit that introduced it. Observations are
-recorded where the credentials exist, typically in CI, and decisions read the
-recorded evidence. Argo CD health means Kubernetes considers the resources
+the unit's driver during `reconcile` or when `nyl attest` asks it, or by people
+and external systems through `nyl attest --name … --result …`. A
+KubernetesPublication in observe mode attests `accepted` and `healthy` from
+Argo CD, matching each Application's running revision to the publication
+commit that introduced it and listing them in the attestations' details.
+Attestations are recorded where the credentials exist, typically in CI, and
+decisions read the recorded evidence. Attestations are evidence for promotion
+and dependents; drift, which `nyl detect-drift` records, is separate: it is a
+reason for the next reconcile to act, not evidence. Argo CD health means Kubernetes considers the resources
 ready, not that the application works; application-level checks are further
 attestations. The [promotion contract](design/promotion.md#health-evidence)
-defines attestations, observation, publication matching, and coverage.
+defines attestations, publication matching, and coverage.
 
 ### State, evidence, and recovery
 
@@ -519,7 +524,7 @@ defines attestations, observation, publication matching, and coverage.
 | --- | --- |
 | Authored intent | Source Git |
 | Desired units (with deletion and hold lifecycle) and promotion records | Desired-state Git ref per environment |
-| Latest receipt and condition per unit, artifacts, latest observations and attestations | Observed-state Git ref per environment |
+| Latest receipt and condition per unit, artifacts, latest drift records and attestations | Observed-state Git ref per environment |
 | Terraform resource state | Terraform/OpenTofu backend |
 | Credentials and private keys | Secret store or execution environment |
 | Render cache | Disposable local storage |
@@ -664,7 +669,8 @@ nyl update source-locks --check
 nyl plan -e dev
 nyl reconcile -e dev [--unit …] [--approve …] [--allow-teardown]
 nyl status -e dev
-nyl verify -e dev
+nyl detect-drift -e dev
+nyl attest -e dev
 nyl promote dev-to-staging
 nyl teardown -e dev --unit web-image [--hold]
 nyl hold -e dev --unit web-image --reason "incident 4711"
@@ -696,12 +702,12 @@ policy.
 | plan | Preview effects and unresolved inputs without executing |
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
-| verify | Observe external state and report drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
+| detect-drift | Check whether current receipts still hold and record drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
 | promote | Move a proven source commit and selected values into the target environment, or open a change for review |
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason, or import the run of a broken lease without executing |
-| attest | Record an external attestation for a unit's current receipt or an environment's state |
+| attest | Ask drivers to attest current receipts, such as Argo CD acceptance and health, or record an external attestation for a unit's current receipt or an environment's state |
 | state init / move / forget / delete | Create state, relocate it and retire the old location, drop a unit from state without touching its resources, or remove an environment's state after its units are torn down |
 | state reset / restore | Guarded discard of local receipts to follow remote state, or restore historical content in forward commits |
 | lease break | Declare a dead lease holder gone so the next run takes over at once |

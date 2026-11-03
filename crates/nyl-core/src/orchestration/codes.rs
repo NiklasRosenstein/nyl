@@ -124,14 +124,20 @@ codes! {
     RecoverCheckpointMissing => "NYL-RECOVER-CHECKPOINT-MISSING",
     /// `nyl recover --accept <run>` names a checkpoint whose execution key differs from the unit's current desired document.
     RecoverKeyMismatch => "NYL-RECOVER-KEY-MISMATCH",
-    /// `nyl verify` found no current receipt to verify for a unit.
-    VerifyNoReceipt => "NYL-VERIFY-NO-RECEIPT",
+    /// `nyl detect-drift` found no current receipt to check for a unit.
+    DriftNoReceipt => "NYL-DRIFT-NO-RECEIPT",
     /// A unit's driver could not tell whether the unit drifted.
-    VerifyUnknown => "NYL-VERIFY-UNKNOWN",
-    /// A unit's kind cannot verify; it was reported, not skipped.
-    VerifyUnsupported => "NYL-VERIFY-UNSUPPORTED",
+    DriftUnknown => "NYL-DRIFT-UNKNOWN",
+    /// A unit's kind cannot detect drift; it was reported, not skipped.
+    DriftUnsupported => "NYL-DRIFT-UNSUPPORTED",
     /// A unit drifted from its current receipt.
-    VerifyDrift => "NYL-VERIFY-DRIFT",
+    DriftDetected => "NYL-DRIFT-DETECTED",
+    /// `nyl attest --unit` named a unit without a current receipt to attest.
+    AttestNoReceipt => "NYL-ATTEST-NO-RECEIPT",
+    /// A unit's driver could not produce its attestations.
+    AttestUnknown => "NYL-ATTEST-UNKNOWN",
+    /// `nyl attest --unit` named a unit whose kind produces no attestations for its spec.
+    AttestUnsupported => "NYL-ATTEST-UNSUPPORTED",
     /// A driver attestation of a unit's current receipt failed.
     AttestationFailed => "NYL-ATTESTATION-FAILED",
     /// A remote state ref's tip is a `Nyl-Local` commit, which only a manual push of local branches produces.
