@@ -70,7 +70,9 @@ run = [
 
 [tasks.pre-commit]
 description = "Run pre-commit checks"
-depends = ["fmt-check", "lint", "test", "python-check"]
+depends = ["fmt-check", "lint", "test"]
+# The Rust tests use feature-enabled CLI artifacts; Python builds the production CLI.
+run = "mise run python-check"
 
 [tasks.python-sync]
 description = "Install locked Python development dependencies"
@@ -83,7 +85,6 @@ depends = ["python-sync"]
 dir = "python"
 run = [
   "uv run --no-sync python scripts/version.py",
-  "cargo build --locked -p nyl",
   "uv run --no-sync pytest",
 ]
 

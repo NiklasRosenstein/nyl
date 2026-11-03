@@ -66,6 +66,8 @@ documents. It preserves the CLI's quoted string scalars without YAML 1.1 coercio
 Errors derive from `NylError`. `ExecutableNotFoundError`, `RenderTimeoutError`, and
 `RenderError` retain command arguments, stderr diagnostics, and an exit code when
 available. `InvalidOutputError` reports parsing failures without manifest excerpts.
+Timeouts terminate Nyl and its renderer children: a process group on POSIX, or a
+process tree through Windows' built-in `taskkill`.
 `ResourceNotFoundError` and `AmbiguousResourceError` show resource identities.
 Representations omit manifest bodies, and execution errors omit stdout; stderr
 may still contain sensitive CLI diagnostics.

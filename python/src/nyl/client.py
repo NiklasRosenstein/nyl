@@ -2,6 +2,7 @@
 
 import math
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -46,14 +47,23 @@ class NylClient:
             command.append("--allow-secret-inputs")
         command.extend(["--", os.fspath(source)])
         try:
-            result = subprocess.run(
+            with subprocess.Popen(
                 command,
                 shell=False,
                 cwd=self.project,
-                capture_output=True,
-                timeout=self.timeout,
-                check=False,
-            )
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=os.name != "nt",
+            ) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=self.timeout)
+                except BaseException as error:
+                    _terminate_tree(process)
+                    _, stderr = process.communicate(timeout=5)
+                    if isinstance(error, subprocess.TimeoutExpired):
+                        error.stderr = stderr
+                    raise
+                exit_code = process.returncode
         except FileNotFoundError:
             if not self.project.is_dir():
                 raise RenderError(
@@ -71,12 +81,32 @@ class NylClient:
             ) from None
         except OSError as error:
             raise RenderError(f"Could not execute Nyl: {error.strerror}", command=command) from None
-        diagnostics = result.stderr.decode("utf-8", errors="replace")
-        if result.returncode:
+        diagnostics = stderr.decode("utf-8", errors="replace")
+        if exit_code:
             raise RenderError(
-                f"Nyl rendering failed with exit code {result.returncode}",
+                f"Nyl rendering failed with exit code {exit_code}",
                 command=command,
                 diagnostics=diagnostics,
-                exit_code=result.returncode,
+                exit_code=exit_code,
             )
-        return ManifestSet.from_yaml(result.stdout)
+        return ManifestSet.from_yaml(stdout)
+
+
+def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

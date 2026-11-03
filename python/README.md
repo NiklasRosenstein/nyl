@@ -32,6 +32,8 @@ and requires a positive, finite timeout in seconds. `render(source, *, target=No
 offline=False, allow_secret_inputs=False)` invokes only `nyl render`. Relative
 source paths are relative to `project`; absolute paths are passed through.
 Calls leave Python's working directory and environment unchanged and use no shell.
+Timeouts terminate the invocation's process group on POSIX and its process tree
+with Windows' built-in `taskkill`; diagnostics are collected after termination.
 
 Rust owns configuration resolution, validation, rendering, and caching. Target-aware
 Releases use the compiled target's rendering rules. Each call runs the CLI again;
@@ -116,9 +118,13 @@ uv run python scripts/version.py
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
-uv run pytest  # Build ../target/debug/nyl first, or set NYL_TEST_EXECUTABLE
+uv run pytest
 uv build
 ```
+
+The test fixture builds the CLI and reads Cargo's executable artifact, honoring
+Cargo's configured target and output directory. Set `NYL_TEST_EXECUTABLE` to use
+a binary you built separately.
 
 `scripts/version.py` derives the release version from root `Cargo.toml` and stamps
 `src/nyl/_version.py` before building. For CLI `0.MINOR.PATCH`, Python uses

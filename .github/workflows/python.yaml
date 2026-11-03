@@ -31,16 +31,21 @@ permissions:
 
 jobs:
   check:
-    name: Python (${{ matrix.python }})
-    runs-on: ubuntu-latest
+    name: Python (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python: ['3.11', '3.14']
+        include:
+          - os: windows-latest
+            python: '3.11'
     defaults:
       run:
         working-directory: python
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -68,14 +73,12 @@ jobs:
           uv run --no-sync ruff check .
           uv run --no-sync ruff format --check .
           uv run --no-sync mypy
-      - name: Build checkout CLI
-        run: cargo build --locked -p nyl
-      - name: Test including independent package builds
+      - name: Build checkout CLI and test including independent package builds
         run: uv run --no-sync pytest
       - name: Build release artifacts
         run: uv build --no-sources
       - uses: actions/upload-artifact@v4
-        if: matrix.python == '3.11'
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
         with:
           name: python-dist
           path: python/dist/*
