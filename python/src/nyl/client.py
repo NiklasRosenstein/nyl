@@ -4,6 +4,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 from .errors import ExecutableNotFoundError, RenderError, RenderTimeoutError
@@ -53,7 +54,7 @@ class NylClient:
                 cwd=self.project,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=os.name != "nt",
+                start_new_session=sys.platform != "win32",
             ) as process:
                 try:
                     stdout, stderr = process.communicate(timeout=self.timeout)
@@ -93,7 +94,7 @@ class NylClient:
 
 
 def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
-    if os.name == "nt":
+    if sys.platform == "win32":
         try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
