@@ -88,8 +88,9 @@ document_kind!(StateRecordKind, "StateRecord");
 document_kind!(EnvironmentRecordKind, "EnvironmentRecord");
 document_kind!(DesiredUnitKind, "DesiredUnit");
 document_kind!(ObservedUnitKind, "ObservedUnit");
-document_kind!(ObservationKind, "Observation");
+document_kind!(DriftRecordKind, "DriftRecord");
 document_kind!(AttestationKind, "Attestation");
+document_kind!(AttestationRecordKind, "AttestationRecord");
 document_kind!(LeaseKind, "Lease");
 document_kind!(RunKind, "Run");
 document_kind!(SignalKind, "Signal");
@@ -823,42 +824,26 @@ pub struct ArtifactUnit {
     pub uid: Uid,
 }
 
-/// `observed/units/<unit>/observations/<type>.yaml`.
+/// A unit's latest drift detection, `observed/units/<unit>/drift.yaml`:
+/// what `nyl detect-drift` found for the receipt whose execution key it
+/// names. Contract: [Drift](../../../../design/orchestration-core.md#drift).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Observation {
+pub struct DriftRecord {
     #[serde(rename = "apiVersion")]
     pub api_version: StateV1,
-    pub kind: ObservationKind,
+    pub kind: DriftRecordKind,
     pub unit: UnitIdentity,
-    #[serde(rename = "type")]
-    pub observation_type: ObservationType,
     #[serde(rename = "executionKey")]
     pub execution_key: ExecutionKey,
     pub at: Timestamp,
     pub result: Drift,
+    /// Driver-specific details, recorded and shown unchanged.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub details: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum ObservationType {
-    Drift,
-    Health,
-}
-
-impl ObservationType {
-    /// `drift` or `health`, as the document's `type` field names it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Drift => "drift",
-            Self::Health => "health",
-        }
-    }
-}
-
-/// The result of a drift verification.
+/// The result of a drift detection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "drift", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Drift {
@@ -867,7 +852,8 @@ pub enum Drift {
     Unknown { reason: String },
 }
 
-/// An attestation of a receipt, or of an environment's state.
+/// An attestation of a receipt, or of an environment's state; stored as one
+/// entry of an [`AttestationRecord`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Attestation {
@@ -890,6 +876,90 @@ pub struct Attestation {
     pub details: Value,
 }
 
+/// The latest attestation per name of a unit's receipts,
+/// `observed/units/<unit>/attestations.yaml`, or of an environment's state,
+/// `observed/attestations.yaml`. One file per scope; `git blame` shows when
+/// each name last changed. Contract:
+/// [Attestations](../../../../design/orchestration-core.md#attestations).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationRecord {
+    #[serde(rename = "apiVersion")]
+    pub api_version: StateV1,
+    pub kind: AttestationRecordKind,
+    /// Absent for environment-wide attestations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<ArtifactUnit>,
+    pub attestations: BTreeMap<String, AttestationEntry>,
+}
+
+/// One name's latest attestation in an [`AttestationRecord`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationEntry {
+    /// The receipt attested; environment-wide, the desired commit of the state.
+    #[serde(rename = "executionKey")]
+    pub execution_key: String,
+    pub result: AttestationResult,
+    pub at: Timestamp,
+    pub source: Value,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
+}
+
+impl AttestationRecord {
+    /// The record of a scope's attestations, by name; `None` for an empty set.
+    pub fn from_set(set: &BTreeMap<String, Attestation>) -> Option<Self> {
+        let unit = set.values().next()?.unit.clone();
+        Some(Self {
+            api_version: StateV1,
+            kind: AttestationRecordKind,
+            unit,
+            attestations: set
+                .iter()
+                .map(|(name, attestation)| {
+                    (
+                        name.clone(),
+                        AttestationEntry {
+                            execution_key: attestation.execution_key.clone(),
+                            result: attestation.result,
+                            at: attestation.at,
+                            source: attestation.source.clone(),
+                            reason: attestation.reason.clone(),
+                            details: attestation.details.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// The attestations the record holds, by name.
+    pub fn into_set(self) -> BTreeMap<String, Attestation> {
+        let unit = self.unit;
+        self.attestations
+            .into_iter()
+            .map(|(name, entry)| {
+                let attestation = Attestation {
+                    api_version: StateV1,
+                    kind: AttestationKind,
+                    name: name.clone(),
+                    unit: unit.clone(),
+                    execution_key: entry.execution_key,
+                    result: entry.result,
+                    at: entry.at,
+                    source: entry.source,
+                    reason: entry.reason,
+                    details: entry.details,
+                };
+                (name, attestation)
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AttestationResult {
@@ -907,7 +977,7 @@ pub enum Operation {
     Hold,
     Resume,
     Recover,
-    Verify,
+    DetectDrift,
     Attest,
     Exec,
     CiAdmit,
@@ -927,7 +997,7 @@ impl Operation {
             Self::Hold => "hold",
             Self::Resume => "resume",
             Self::Recover => "recover",
-            Self::Verify => "verify",
+            Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
             Self::Exec => "exec",
             Self::CiAdmit => "ci-admit",
@@ -1036,8 +1106,8 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
         ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
         ("artifact", schema::<ArtifactDocument>("Artifact")),
-        ("observation", schema::<Observation>("Observation")),
-        ("attestation", schema::<Attestation>("Attestation")),
+        ("drift-record", schema::<DriftRecord>("DriftRecord")),
+        ("attestation-record", schema::<AttestationRecord>("AttestationRecord")),
         ("lease", schema::<Lease>("Lease")),
         ("run", schema::<Run>("Run")),
         ("signal", schema::<Signal>("Signal")),

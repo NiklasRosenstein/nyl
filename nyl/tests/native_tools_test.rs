@@ -98,7 +98,7 @@ spec:
         std::fs::read(world.scenario_tmp().join("network.tfstate")).unwrap(),
         before
     );
-    let verified = invoke(&world, &["verify", "-e", "dev"], 0);
+    let verified = invoke(&world, &["detect-drift", "-e", "dev"], 0);
     assert!(verified["environments"][0]["complete"].as_bool().unwrap());
     invoke(
         &world,
@@ -161,7 +161,7 @@ fn test_native_image_push_records_a_registry_digest_and_repeats_without_building
     );
     let repeated = invoke(&world, &["reconcile", "-e", "dev"], 0);
     assert_eq!(repeated["environments"][0]["units"]["web"]["result"], "current");
-    invoke(&world, &["verify", "-e", "dev"], 0);
+    invoke(&world, &["detect-drift", "-e", "dev"], 0);
     let desired = world.rev_parse("refs/heads/nyl/dev/desired");
     let observed = world.rev_parse("refs/heads/nyl/dev/observed");
     let direct = invoke(&world, &["build", "web", "--", "--push", "--tag", "direct"], 0);

@@ -10,8 +10,8 @@ use nyl_core::orchestration::ports::{
     Checkpoint, Committed, StateError, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, Attestation, DesiredUnit, Lease, LeaseKind, Observation, ObservationType, ObservedUnit,
-    Operation, Run, RunKind, Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
+    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservedUnit, Operation, Run, RunKind,
+    Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
 use nyl_state::git::{CommitAuthor, GitStateStore};
@@ -734,7 +734,7 @@ fn test_remote_state_fast_forwards_local_branches_and_refuses_rewrites() {
 }
 
 #[test]
-fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
+fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
     for subject in subjects() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
@@ -743,8 +743,8 @@ fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
         let name = UnitName::new("seed").unwrap();
         let identity = json!({"environment": "dev", "name": "seed", "uid": UID,
                               "apiVersion": "units.gitops.nyl/v1", "kind": "Command"});
-        let observation: Observation = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Observation", "unit": identity, "type": "drift",
+        let drift: DriftRecord = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "DriftRecord", "unit": identity,
             "executionKey": KEY, "at": "2026-09-24T10:00:00Z", "result": {"drift": "clean"}
         }))
         .unwrap();
@@ -756,10 +756,7 @@ fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
         .unwrap();
         let before = store.snapshot(&location).unwrap().tips;
         let changes = TransitionChanges {
-            observations: BTreeMap::from([(
-                name.clone(),
-                Some(BTreeMap::from([(ObservationType::Drift, observation.clone())])),
-            )]),
+            drift: BTreeMap::from([(name.clone(), Some(drift.clone()))]),
             attestations: BTreeMap::from([(
                 name.clone(),
                 Some(BTreeMap::from([("smoke".to_owned(), attestation.clone())])),
@@ -773,16 +770,11 @@ fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
         assert!(written.observed.is_some(), "{}", subject.name);
         let snapshot = store.snapshot(&location).unwrap();
         assert_eq!(snapshot.tips.desired, before.desired, "{}", subject.name);
-        assert_eq!(
-            snapshot.observations[&name][&ObservationType::Drift],
-            observation,
-            "{}",
-            subject.name
-        );
+        assert_eq!(snapshot.drift[&name], drift, "{}", subject.name);
         assert_eq!(snapshot.attestations[&name]["smoke"], attestation, "{}", subject.name);
 
         let removal = TransitionChanges {
-            observations: BTreeMap::from([(name.clone(), None)]),
+            drift: BTreeMap::from([(name.clone(), None)]),
             attestations: BTreeMap::from([(name.clone(), None)]),
             ..TransitionChanges::default()
         };
@@ -796,7 +788,7 @@ fn test_observations_and_attestations_round_trip_on_the_observed_ref_only() {
             )
             .unwrap();
         let snapshot = store.snapshot(&location).unwrap();
-        assert!(snapshot.observations.is_empty(), "{}", subject.name);
+        assert!(snapshot.drift.is_empty(), "{}", subject.name);
         assert!(snapshot.attestations.is_empty(), "{}", subject.name);
     }
 }

@@ -60,13 +60,13 @@ impl Driver for OperatorDriver {
             attestations: Vec::new(),
         }))
     }
-    fn verify(
+    fn detect_drift(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
-        CommandDriver.verify(ctx, unit, receipt)
+    ) -> DriverResult<Supported<DriftDetection>> {
+        CommandDriver.detect_drift(ctx, unit, receipt)
     }
     fn exec(
         &self,

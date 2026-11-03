@@ -327,7 +327,7 @@ pub fn project_dir(inventory: &GitOpsInventory) -> String {
     format!("/{relative}")
 }
 
-/// The options of a `plan`, `reconcile`, or `verify` request.
+/// The options of a `plan`, `reconcile`, `detect-drift`, or `attest` request.
 pub struct RunOptions<'a> {
     pub units: &'a [String],
     pub concurrency: usize,
@@ -335,7 +335,7 @@ pub struct RunOptions<'a> {
     pub wait: Option<Duration>,
     /// `--local`, `--local-lease`, and `--approve` of `reconcile`; `None` elsewhere.
     pub local: Option<nyl_orchestration::shell::local::LocalRun>,
-    /// The wiring's cancellation for `reconcile` and `verify`; never set for `plan`.
+    /// The wiring's cancellation for `reconcile`, `detect-drift`, and `attest`; never set for `plan`.
     pub cancellation: nyl_orchestration::shell::run::Cancellation,
     /// The operation on the run path: reconcile, a recover import, or a teardown.
     pub mode: nyl_orchestration::shell::run::RunMode,
@@ -463,7 +463,8 @@ fn table(report: &RunReport) -> String {
             ReportKind::PlanReport => &["UNIT", "KIND", "STATE", "RECEIPT", "CHANGES", "DETAIL"],
             ReportKind::ReconcileReport | ReportKind::TeardownReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
-            ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
+            ReportKind::DetectDriftReport => &["UNIT", "KIND", "DRIFT", "DETAIL"],
+            ReportKind::AttestReport => &["UNIT", "KIND", "ATTESTATIONS", "DETAIL"],
         };
         if rows.is_empty() {
             // A refused operation reaches no units; its error says why.
@@ -534,6 +535,14 @@ pub fn state_cell(unit: &UnitReport) -> String {
     if let Some(condition) = unit.condition {
         details.push(cell_label(Some(condition)));
     }
+    // `attest` shows each attestation's result next to `attested`.
+    for (name, result) in unit.check.iter().flat_map(|check| &check.attestations) {
+        let result = match result {
+            nyl_core::orchestration::state::AttestationResult::Pass => "pass",
+            nyl_core::orchestration::state::AttestationResult::Fail => "fail",
+        };
+        details.push(format!("{name}: {result}"));
+    }
     if details.is_empty() {
         outcome.to_owned()
     } else {
@@ -543,7 +552,7 @@ pub fn state_cell(unit: &UnitReport) -> String {
 
 /// A state cell styled according to the report's typed outcome.
 pub(crate) fn styled_state_cell(unit: &UnitReport) -> Cell {
-    use nyl_orchestration::run_report::{UnitState, VerifyResult};
+    use nyl_orchestration::run_report::{CheckResult, UnitState};
     let style = match &unit.result {
         Some(result) => result_style(result),
         None => match unit.state {
@@ -556,14 +565,23 @@ pub(crate) fn styled_state_cell(unit: &UnitReport) -> Cell {
                 | UnitState::PendingTeardown
                 | UnitState::Drifted,
             ) => Some(Style::Attention),
-            _ => match unit.verification.as_ref().map(|v| &v.result) {
-                Some(
-                    VerifyResult::Drifted { .. }
-                    | VerifyResult::Unknown { .. }
-                    | VerifyResult::NoReceipt
-                    | VerifyResult::Unsupported,
-                ) => Some(Style::Attention),
-                _ => None,
+            _ => match unit.check.as_ref() {
+                Some(check)
+                    if check
+                        .attestations
+                        .values()
+                        .any(|result| *result == nyl_core::orchestration::state::AttestationResult::Fail) =>
+                {
+                    Some(Style::Failure)
+                }
+                Some(check) => match check.result {
+                    CheckResult::Drifted { .. }
+                    | CheckResult::Unknown { .. }
+                    | CheckResult::NoReceipt
+                    | CheckResult::Unsupported => Some(Style::Attention),
+                    CheckResult::Clean | CheckResult::Attested => None,
+                },
+                None => None,
             },
         },
     };
@@ -593,7 +611,10 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
             let changes = cell_label(unit.changes);
             vec![name.to_string(), kind_cell(unit), outcome, receipt, changes, detail]
         }
-        ReportKind::ReconcileReport | ReportKind::TeardownReport | ReportKind::VerifyReport => {
+        ReportKind::ReconcileReport
+        | ReportKind::TeardownReport
+        | ReportKind::DetectDriftReport
+        | ReportKind::AttestReport => {
             vec![name.to_string(), kind_cell(unit), outcome, detail]
         }
         ReportKind::StatusReport => {
@@ -608,7 +629,7 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
 
 /// The most useful single line about a unit: its plan error, blockers,
 /// failure message, or driver summary, followed by a held unit's pending
-/// changes (`pending changes from <commit>`) and the drift observation.
+/// changes (`pending changes from <commit>`) and the drift record.
 pub fn detail(unit: &UnitReport) -> String {
     let leading = if let Some(error) = &unit.plan_error {
         Some(format!("plan failed: {error}"))

@@ -608,7 +608,7 @@ in its serialized `DesiredUnit`.
 - `DesiredUnit` gains `bundle: Option<ResourceBundle>`, loaded from the sidecar
   file. Drivers read it but never write it.
 - A new optional capability `prepare` returns the native inputs that the
-  driver's `plan`, `reconcile`, `verify`, and `exec` pass to the tool:
+  driver's `plan`, `reconcile`, `detect_drift`, and `exec` pass to the tool:
 
   ```rust
   fn prepare(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<NativeInputs>>;

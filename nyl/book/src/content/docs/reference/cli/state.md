@@ -169,7 +169,7 @@ takes the broken lease over at once, without waiting for its deadline:
 `nyl reconcile`, `nyl teardown`, or `nyl recover -e <env>`, which imports
 the broken run's results without executing anything. It records who broke
 the lease and why in its transition commit. Until then every other state
-writer, such as `hold`, `resume`, `verify`, and the state operations,
+writer, such as `hold`, `resume`, `detect-drift`, `attest`, and the state operations,
 refuses with `NYL-LEASE-BROKEN` (exit 2), naming `nyl recover -e <env>`. A
 lease that is already broken is reported as such. A holder that is in fact
 still running can still cause effects, but it can no longer write state.

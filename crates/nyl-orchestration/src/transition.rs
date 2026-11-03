@@ -28,7 +28,7 @@ pub struct TransitionSummary {
     pub imported: Vec<UnitName>,
     /// A `nyl lease break` this run's lease took over.
     pub lease_broken: Option<Request>,
-    /// Units executed again because their latest drift observation was
+    /// Units executed again because their latest drift record was
     /// `drifted`; printed only when not empty. Contract:
     /// [Drift](../../../../design/orchestration-core.md#drift).
     pub drift_repaired: Vec<UnitName>,

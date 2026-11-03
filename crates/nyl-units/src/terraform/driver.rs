@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use super::spec::TerraformSpec;
 use nyl_core::constants::API_VERSION_UNITS;
 use nyl_core::orchestration::driver::{
-    Capabilities, Driver, DriverError, DriverResult, ExecStatus, ExecTerminal, ExecutionContext, KeyInputs,
-    LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, ToolExit, ToolInvocation, Verification,
+    Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecTerminal, ExecutionContext,
+    KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    ResolutionContext, Supported, ToolExit, ToolInvocation,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{
@@ -194,7 +194,7 @@ impl Driver for TerraformDriver {
         Capabilities {
             plan: true,
             reconcile: true,
-            verify: true,
+            detect_drift: true,
             teardown: true,
             change_digest: true,
             exec: Some(ExecTerminal::Interactive),
@@ -276,28 +276,24 @@ impl Driver for TerraformDriver {
     fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
         Ok(failure(self.execute(ctx, unit, false)))
     }
-    fn verify(
+    fn detect_drift(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         _receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
+    ) -> DriverResult<Supported<DriftDetection>> {
         let result = (|| {
             let native = Native::new(self, ctx, resolved(unit)?, &unit.unit)?;
             native.initialize()?;
             native.require_state()?;
             let (changed, report) = native.plan(false, false)?;
-            Ok(Supported::Supported(Verification {
-                drift: if changed {
-                    Drift::Drifted {
-                        summary: report.summary,
-                    }
-                } else {
-                    Drift::Clean
-                },
-                observations: Vec::new(),
-                attestations: Vec::new(),
-            }))
+            Ok(Supported::Supported(DriftDetection::from(if changed {
+                Drift::Drifted {
+                    summary: report.summary,
+                }
+            } else {
+                Drift::Clean
+            })))
         })();
         result.map_err(|fault: Fault| DriverError::before_effects(fault.message))
     }

@@ -413,13 +413,8 @@ fn test_deadline_minus_now_terminates_the_command_as_uncertain() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }
 
-#[test]
-fn test_verify_maps_exit_codes_to_drift() {
-    use nyl_core::orchestration::state::Drift;
-    let world = World::new();
-    let tools = ProcessRunner::new();
-    let ctx = world.context(&tools, path_env(), 60_000);
-    let receipt: nyl_core::orchestration::state::Receipt = serde_json::from_value(json!({
+fn receipt() -> nyl_core::orchestration::state::Receipt {
+    serde_json::from_value(json!({
         "executionKey": format!("sha256:{}", "0".repeat(64)),
         "behaviorVersion": 1,
         "run": "00000000-0000-7000-8000-000000000002",
@@ -427,14 +422,30 @@ fn test_verify_maps_exit_codes_to_drift() {
         "finishedAt": "2026-01-01T00:00:00Z",
         "outputs": {}
     }))
-    .unwrap();
-    let unit = desired(json!({"command": ["./run.sh"], "verify": ["./verify.sh"]}));
+    .unwrap()
+}
+
+/// Catches a drift script whose exit codes are misread (drift taken as an
+/// error, or a failing script taken as clean), or one that can write
+/// outputs or attestations.
+#[test]
+fn test_detect_drift_maps_exit_codes_to_drift() {
+    use nyl_core::orchestration::state::Drift;
+    let world = World::new();
+    let tools = ProcessRunner::new();
+    let ctx = world.context(&tools, path_env(), 60_000);
+    let unit = desired(json!({
+        "command": ["./run.sh"], "detectDrift": ["./drift.sh"], "attestations": [{"name": "smoke"}]
+    }));
     for (code, expected) in [(0, "clean"), (2, "drifted"), (1, "unknown")] {
-        world.script("nyl/verify.sh", &format!("test -z \"$NYL_OUTPUTS\"\nexit {code}"));
-        let Supported::Supported(verification) = CommandDriver.verify(&ctx, &unit, &receipt).unwrap() else {
-            panic!("verify is supported with a verify step");
+        world.script(
+            "nyl/drift.sh",
+            &format!("test -z \"$NYL_OUTPUTS\"\ntest -z \"$NYL_ATTESTATIONS\"\nexit {code}"),
+        );
+        let Supported::Supported(detection) = CommandDriver.detect_drift(&ctx, &unit, &receipt()).unwrap() else {
+            panic!("drift detection is supported with a detectDrift step");
         };
-        let name = match verification.drift {
+        let name = match detection.drift {
             Drift::Clean => "clean",
             Drift::Drifted { .. } => "drifted",
             Drift::Unknown { .. } => "unknown",
@@ -443,7 +454,45 @@ fn test_verify_maps_exit_codes_to_drift() {
     }
     let without = desired(json!({"command": ["./run.sh"]}));
     assert_eq!(
-        CommandDriver.verify(&ctx, &without, &receipt).unwrap(),
+        CommandDriver.detect_drift(&ctx, &without, &receipt()).unwrap(),
+        Supported::Unsupported
+    );
+}
+
+/// Catches the attest step's results being lost, an undeclared name being
+/// recorded, or a failing step being taken as a set of attestations or as
+/// a Nyl-side error.
+#[test]
+fn test_attest_reads_declared_results_of_the_attest_step() {
+    use nyl_core::orchestration::driver::AttestationCheck;
+    use nyl_core::orchestration::state::AttestationResult;
+    let world = World::new();
+    let tools = ProcessRunner::new();
+    let ctx = world.context(&tools, path_env(), 60_000);
+    let unit = desired(json!({
+        "command": ["./run.sh"], "attest": ["./smoke.sh"], "attestations": [{"name": "smoke"}]
+    }));
+    world.script(
+        "nyl/smoke.sh",
+        "test \"$NYL_OPERATION\" = attest\necho '{\"smoke\": \"fail\", \"other\": \"pass\"}' > \"$NYL_ATTESTATIONS\"",
+    );
+    let Supported::Supported(AttestationCheck::Attested { outcomes }) =
+        CommandDriver.attest(&ctx, &unit, &receipt()).unwrap()
+    else {
+        panic!("attest is supported with an attest step");
+    };
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert_eq!(outcomes[0].name, "smoke");
+    assert_eq!(outcomes[0].result, AttestationResult::Fail);
+    // A failing step could not tell: unknown, not a Nyl-side error.
+    world.script("nyl/smoke.sh", "exit 1");
+    assert!(matches!(
+        CommandDriver.attest(&ctx, &unit, &receipt()).unwrap(),
+        Supported::Supported(AttestationCheck::Unknown { .. })
+    ));
+    let without = desired(json!({"command": ["./run.sh"]}));
+    assert_eq!(
+        CommandDriver.attest(&ctx, &without, &receipt()).unwrap(),
         Supported::Unsupported
     );
 }

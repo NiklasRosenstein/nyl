@@ -1,25 +1,27 @@
-//! `nyl verify -e <env>`: run driver verification against the current
-//! receipts and record the latest observations and driver attestations in
-//! one observed commit.
+//! `nyl detect-drift -e <env>` and `nyl attest -e <env>`: check the
+//! current receipts with their drivers and record the drift records, or the
+//! driver attestations, in one observed commit.
 //!
-//! Contract: [Commands](../../../../design/orchestration-core.md#commands)
-//! and [Inspection](../../../../design/orchestration-core.md#inspection).
-//! Exit categories: 0 every verified unit clean and its attestations pass;
-//! 2 a unit could not be verified (no current receipt, a kind that cannot
-//! verify, or unknown drift) or the lease is held; 3 drift or a failing
-//! attestation; 4 cancelled by SIGINT or SIGTERM (`NYL-RUN-CANCELLED`,
-//! nothing recorded); 1 error; the most severe wins.
+//! Contract: [Drift](../../../../design/orchestration-core.md#drift),
+//! [Attestations](../../../../design/orchestration-core.md#attestations),
+//! [Commands](../../../../design/orchestration-core.md#commands), and
+//! [Inspection](../../../../design/orchestration-core.md#inspection).
+//! Exit categories: 0 every checked unit clean, or its attestations pass;
+//! 2 a unit could not be checked (no current receipt, a kind that cannot
+//! run the check, or an unknown result) or the lease is held; 3 drift or a
+//! failing attestation; 4 cancelled by SIGINT or SIGTERM
+//! (`NYL-RUN-CANCELLED`, nothing recorded); 1 error; the most severe wins.
 //!
-//! A drifted unit's `NYL-VERIFY-DRIFT` fix says what the next reconcile does
-//! with it under the environment's stored `driftRepair` and the unit's
+//! A drifted unit's `NYL-DRIFT-DETECTED` fix says what the next reconcile
+//! does with it under the environment's stored `driftRepair` and the unit's
 //! recovery policy ([Drift](../../../../design/orchestration-core.md#drift);
-//! `nyl_orchestration::rules::verification::warnings`).
+//! `nyl_orchestration::rules::checks::warnings`).
 
 use std::path::PathBuf;
 
 use clap::Args;
 use nyl_core::orchestration::time::Duration;
-use nyl_orchestration::run_report::ReportKind;
+use nyl_orchestration::rules::checks::Check;
 use nyl_orchestration::shell::run::DEFAULT_CONCURRENCY;
 use nyl_state::git::CommitAuthor;
 
@@ -28,10 +30,10 @@ use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
 use nyl_render::Result;
 
-/// Verify an environment's current receipts.
+/// Check an environment's current receipts.
 #[derive(Args, Debug, Clone)]
-pub struct VerifyArgs {
-    /// The environment to verify.
+pub struct CheckArgs {
+    /// The environment to check.
     #[arg(short = 'e', long = "environment", required_unless_present_any = ["labels", "group"], conflicts_with_all = ["labels", "group"])]
     pub environment: Vec<String>,
 
@@ -43,7 +45,7 @@ pub struct VerifyArgs {
     #[arg(short = 'g', long, conflicts_with_all = ["environment", "labels"])]
     pub group: Option<String>,
 
-    /// Verify only these units (repeatable, or comma-separated with --units).
+    /// Check only these units (repeatable, or comma-separated with --units).
     #[arg(long = "unit", alias = "units", value_delimiter = ',')]
     pub units: Vec<String>,
 
@@ -67,11 +69,11 @@ pub struct VerifyArgs {
     pub path: PathBuf,
 }
 
-/// Run the command in-process with `wiring`.
-pub fn run(args: &VerifyArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
+/// Run `check` in-process with `wiring`.
+pub fn run(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     use crate::orchestration::multi_environment::{dispatch, select};
     Ok(dispatch(
-        ReportKind::VerifyReport,
+        check.report_kind(),
         args.output,
         select(
             &args.path,
@@ -95,19 +97,19 @@ pub fn run(args: &VerifyArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
                     selected,
                     selected.len() > 1,
                 )?;
-                verify(&args, wiring)
+                run_one(&args, check, wiring)
             };
             (
-                prepare().unwrap_or_else(|stop| stopped(ReportKind::VerifyReport, environment, args.output, stop)),
+                prepare().unwrap_or_else(|stop| stopped(check.report_kind(), environment, args.output, stop)),
                 std::collections::BTreeSet::default(),
             )
         },
     ))
 }
 
-fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
+fn run_one(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment[0])?;
-    // Verify writes observations, so it needs a commit identity.
+    // A check writes drift records or attestations, so it needs a commit identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
     let mut request = session.request(&RunOptions {
         units: &args.units,
@@ -129,13 +131,11 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         identity: identity.clone(),
         clock: wiring.clock.clone(),
     }))?;
-    let report = session.run(
-        wiring,
-        &store,
-        Some(&identity),
-        &request,
-        nyl_orchestration::shell::verify::verify,
-    )?;
+    let operation = match check {
+        Check::DetectDrift => nyl_orchestration::shell::check::detect_drift,
+        Check::Attest => nyl_orchestration::shell::check::attest,
+    };
+    let report = session.run(wiring, &store, Some(&identity), &request, operation)?;
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }

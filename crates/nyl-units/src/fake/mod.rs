@@ -13,8 +13,8 @@
 //! can also give `FakeInfra` the `inspect` recovery policy
 //! ([`Script::recover_by`]) and script its `inspect` results: a scripted
 //! success reports the effects applied, a failure not applied, and an
-//! uncertain result unknown. A scripted `verify` decides the fake's next
-//! drift verdict ([`Script::verification`]): `drifted`, `clean` for a
+//! uncertain result unknown. A scripted `detect-drift` decides the fake's next
+//! drift result ([`Script::drift`]): `drifted`, `clean` for a
 //! success, and `unknown` for an uncertain result.
 
 mod image;
@@ -56,7 +56,7 @@ pub enum Scripted {
     Succeeded {
         outputs: Option<Value>,
     },
-    /// `verify` only: the resources no longer match the receipt.
+    /// `detect-drift` only: the resources no longer match the receipt.
     Drifted,
 }
 
@@ -104,21 +104,21 @@ impl Script {
             .and_then(VecDeque::pop_front)
     }
 
-    /// The scripted drift verdict of the fake's next `verify` of `unit`, or
-    /// `None` when none is queued and the fake decides itself. A scripted
-    /// failure is a verification error, which records no observation.
-    fn verification(&self, unit: &UnitName) -> DriverResult<Option<Drift>> {
-        Ok(match self.take(unit, DriverOperation::Verify) {
+    /// The scripted drift result of the fake's next `detect_drift` of
+    /// `unit`, or `None` when none is queued and the fake decides itself. A
+    /// scripted failure is a driver error, which records no drift.
+    fn drift(&self, unit: &UnitName) -> DriverResult<Option<Drift>> {
+        Ok(match self.take(unit, DriverOperation::DetectDrift) {
             None => None,
             Some(Scripted::Drifted) => Some(Drift::Drifted {
                 summary: "scripted drift".to_owned(),
             }),
             Some(Scripted::Succeeded { .. }) => Some(Drift::Clean),
             Some(Scripted::Uncertain) => Some(Drift::Unknown {
-                reason: "scripted unknown verify".to_owned(),
+                reason: "scripted unknown drift".to_owned(),
             }),
             Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. }) => {
-                return Err(DriverError::before_effects("scripted verify failure"));
+                return Err(DriverError::before_effects("scripted drift detection failure"));
             }
         })
     }
@@ -126,7 +126,7 @@ impl Script {
     /// The scripted outcome of a reconcile or teardown, when one is queued.
     /// A scripted success falls through to the fake's own behavior with
     /// replaced outputs, reported through `outputs`; a `drifted` script
-    /// only applies to `verify`, so it falls through unchanged.
+    /// only applies to `detect-drift`, so it falls through unchanged.
     fn outcome(&self, unit: &UnitName, operation: DriverOperation) -> ScriptedOutcome {
         match self.take(unit, operation) {
             None | Some(Scripted::Drifted) => ScriptedOutcome::Run { outputs: None },
@@ -387,18 +387,18 @@ mod tests {
         }
     }
 
-    fn drift_of(verification: DriverResult<Supported<nyl_core::orchestration::driver::Verification>>) -> Drift {
-        match verification.unwrap() {
-            Supported::Supported(verification) => verification.drift,
-            Supported::Unsupported => panic!("the fakes verify"),
+    fn drift_of(detection: DriverResult<Supported<nyl_core::orchestration::driver::DriftDetection>>) -> Drift {
+        match detection.unwrap() {
+            Supported::Supported(detection) => detection.drift,
+            Supported::Unsupported => panic!("the fakes detect drift"),
         }
     }
 
-    /// A scenario's `driver: {operation: verify, outcome: drifted}` step is
+    /// A scenario's `driver: {operation: detect-drift, outcome: drifted}` step is
     /// how tier 1 makes a fake unit drift; if the verdict never reached the
-    /// fakes' `verify`, drift scenarios would only ever see clean units.
+    /// fakes' `detect_drift`, drift scenarios would only ever see clean units.
     #[test]
-    fn test_scripted_drift_reaches_the_fakes_verify_once() {
+    fn test_scripted_drift_reaches_the_fakes_drift_detection_once() {
         let directory = TempDir::new().unwrap();
         let script = Script::new();
         let image = desired(
@@ -420,21 +420,21 @@ mod tests {
         for name in ["web-image", "network"] {
             script.push(
                 UnitName::new(name).unwrap(),
-                DriverOperation::Verify,
+                DriverOperation::DetectDrift,
                 &Scripted::Drifted,
                 1,
             );
         }
         let image_driver = FakeImage::new(script.clone());
-        let verify_image = || image_driver.verify(&context(&directory, &NoTools, None), &image, &receipt(&image));
-        let verify_network = || infra.verify(&context(&directory, &NoTools, None), &network, &receipt(&network));
-        assert!(matches!(drift_of(verify_image()), Drift::Drifted { .. }));
-        assert!(matches!(drift_of(verify_network()), Drift::Drifted { .. }));
+        let detect_image = || image_driver.detect_drift(&context(&directory, &NoTools, None), &image, &receipt(&image));
+        let detect_network = || infra.detect_drift(&context(&directory, &NoTools, None), &network, &receipt(&network));
+        assert!(matches!(drift_of(detect_image()), Drift::Drifted { .. }));
+        assert!(matches!(drift_of(detect_network()), Drift::Drifted { .. }));
         // Only the next call is scripted: afterwards each fake decides itself,
         // and the applied network still matches its state file.
-        assert_eq!(drift_of(verify_image()), Drift::Clean);
-        assert_eq!(drift_of(verify_network()), Drift::Clean);
-        // A drift script applies to verify only; a reconcile runs as usual.
+        assert_eq!(drift_of(detect_image()), Drift::Clean);
+        assert_eq!(drift_of(detect_network()), Drift::Clean);
+        // A drift script applies to drift detection only; a reconcile runs as usual.
         script.push(
             UnitName::new("web-image").unwrap(),
             DriverOperation::Reconcile,

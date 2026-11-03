@@ -174,7 +174,7 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Cancellation is an injected, cloneable flag (`shell::run::Cancellation`)
   that the command line's signal handler sets and tests set directly; the
   process runner shares it and forwards the signal to running tools. Only
-  `reconcile`, `verify`, and `recover` install the handler; the command line
+  `reconcile`, `detect-drift`, `attest`, and `recover` install the handler; the command line
   runs their orchestration on its own thread so the signal task stays free,
   and a second signal exits at once. Tier-1 tests cancel through the flag,
   and `orchestration_signal_test` sends SIGTERM to the real binary.

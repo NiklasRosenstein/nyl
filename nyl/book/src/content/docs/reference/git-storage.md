@@ -16,7 +16,7 @@ for orchestration.
 | --- | --- | --- |
 | Source repository | `nyl.toml` and every resource Nyl renders: releases, targets, environments, and units | People, through commits and pull requests. Nyl reads it, and orchestration renders units from a fresh checkout of the run's source commit. |
 | Publication destinations | Rendered Kubernetes trees for Argo CD | [`nyl publish-tree`](/nyl/reference/cli/publish-tree/); from M5 (planned), KubernetesPublication units |
-| State repositories | Each environment's desired and observed state and its coordination refs | Orchestration commands such as `reconcile`, `recover`, `verify`, and `nyl state` |
+| State repositories | Each environment's desired and observed state and its coordination refs | Orchestration commands such as `reconcile`, `recover`, `detect-drift`, and `nyl state` |
 
 All three can be one repository.
 
@@ -59,7 +59,7 @@ Nyl never force-pushes a state ref.
 
 Inside the refs, `state.yaml` records the location and its history,
 `desired/` the resolved environment and each unit's desired document, and
-`observed/` each unit's receipt, condition, artifacts, observations, and
+`observed/` each unit's receipt, condition, artifacts, drift record, and
 attestations. Each operation writes at most one commit per state ref.
 
 [`nyl state delete`](/nyl/reference/cli/state/#nyl-state-delete) keeps the

@@ -353,9 +353,9 @@ impl Harness {
             .remove(0)
     }
 
-    pub fn verify(&self) -> EnvironmentRunReport {
+    pub fn detect_drift(&self) -> EnvironmentRunReport {
         let job = self.job(&[], Cancellation::default());
-        self.run_with(&job, nyl_orchestration::shell::verify::verify)
+        self.run_with(&job, nyl_orchestration::shell::check::detect_drift)
             .environments
             .remove(0)
     }

@@ -8,8 +8,9 @@ use super::spec::{ImageContext, OciImageSpec};
 use base64::Engine;
 use nyl_core::constants::{API_VERSION_ARTIFACTS, API_VERSION_UNITS};
 use nyl_core::orchestration::driver::{
-    Capabilities, Change, Driver, DriverError, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope,
-    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, ToolExit, ToolInvocation, Verification,
+    Capabilities, Change, DriftDetection, Driver, DriverError, DriverResult, ExecutionContext, KeyInputs, Outcome,
+    OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, ToolExit,
+    ToolInvocation,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, Uid};
 use nyl_core::orchestration::state::{
@@ -501,7 +502,7 @@ impl Driver for OciImageDriver {
         Capabilities {
             plan: true,
             reconcile: true,
-            verify: true,
+            detect_drift: true,
             build: true,
             ..Capabilities::default()
         }
@@ -657,12 +658,12 @@ impl Driver for OciImageDriver {
             Err(outcome) => outcome,
         }))
     }
-    fn verify(
+    fn detect_drift(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
+    ) -> DriverResult<Supported<DriftDetection>> {
         let spec = parse(resolved(unit)?)?;
         let env = docker_env(ctx, &spec)?;
         let artifact = ctx
@@ -703,15 +704,11 @@ impl Driver for OciImageDriver {
             }
             _ => {
                 return Err(DriverError::before_effects(
-                    "cannot verify published image; check registry access",
+                    "cannot check the published image; check registry access",
                 ))
             }
         };
-        Ok(Supported::Supported(Verification {
-            drift,
-            observations: Vec::new(),
-            attestations: Vec::new(),
-        }))
+        Ok(Supported::Supported(drift.into()))
     }
     fn build(
         &self,
@@ -1056,8 +1053,8 @@ mod tests {
             stderr: b"manifest unknown".to_vec(),
         });
         assert!(matches!(
-            OciImageDriver.verify(&ctx, &desired, &receipt).unwrap(),
-            Supported::Supported(Verification {
+            OciImageDriver.detect_drift(&ctx, &desired, &receipt).unwrap(),
+            Supported::Supported(DriftDetection {
                 drift: Drift::Drifted { .. },
                 ..
             })
@@ -1071,7 +1068,7 @@ mod tests {
             stdout: Vec::new(),
             stderr: b"registry host not found: DNS lookup failed".to_vec(),
         });
-        assert!(OciImageDriver.verify(&ctx, &desired, &receipt).is_err());
+        assert!(OciImageDriver.detect_drift(&ctx, &desired, &receipt).is_err());
     }
     #[test]
     fn test_missing_docker_is_a_nonretryable_missing_tool_failure() {

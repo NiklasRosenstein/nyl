@@ -390,7 +390,7 @@ pub(crate) fn lifecycle_details(
 /// running unit and holder, and suggested next actions as warnings with fixes.
 /// `now` decides which leases and run refs are past their deadline (the
 /// units a dead run was executing read `uncertain`). With `drivers`, units
-/// with a current receipt show their drift observation
+/// with a current receipt show their drift record
 /// ([`crate::rules::drift::status_drift`]), which needs each unit's
 /// recovery policy.
 pub fn status(
@@ -471,8 +471,8 @@ pub fn status_with_readiness(
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
         if drivers.is_some() {
-            unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.observations.get(name));
-            // A current unit whose latest drift observation is `drifted` is
+            unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.drift.get(name));
+            // A current unit whose latest drift record is `drifted` is
             // work for the next reconcile: state `drifted`, exit 2.
             if unit.state == Some(UnitState::Current)
                 && unit.drift.as_ref().is_some_and(|drift| drift.result == "drifted")
@@ -1016,30 +1016,26 @@ mod tests {
         );
     }
 
-    /// Drift: a current unit whose latest drift observation is `drifted` is
+    /// Drift: a current unit whose latest drift record is `drifted` is
     /// work for the next reconcile: state `drifted`, exit 2.
     #[test]
     fn test_a_drifted_current_unit_is_drifted_and_exits_2() {
-        use nyl_core::orchestration::state::{Drift, Observation, ObservationKind, ObservationType, StateV1};
+        use nyl_core::orchestration::state::{Drift, DriftRecord, DriftRecordKind, StateV1};
         let mut snapshot = snapshot(&[("network", 1)]);
         let unit = snapshot.desired[&name("network")].unit.clone();
-        snapshot.observations.insert(
+        snapshot.drift.insert(
             name("network"),
-            BTreeMap::from([(
-                ObservationType::Drift,
-                Observation {
-                    api_version: StateV1,
-                    kind: ObservationKind,
-                    unit,
-                    observation_type: ObservationType::Drift,
-                    execution_key: hex_key('a'),
-                    at: at("00:10"),
-                    result: Drift::Drifted {
-                        summary: "changed outside Nyl".to_owned(),
-                    },
-                    details: serde_json::Value::Null,
+            DriftRecord {
+                api_version: StateV1,
+                kind: DriftRecordKind,
+                unit,
+                execution_key: hex_key('a'),
+                at: at("00:10"),
+                result: Drift::Drifted {
+                    summary: "changed outside Nyl".to_owned(),
                 },
-            )]),
+                details: serde_json::Value::Null,
+            },
         );
         let mut drivers = DriverSet::new();
         drivers.register(std::sync::Arc::new(crate::rules::fixtures::TestDriver {

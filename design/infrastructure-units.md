@@ -100,7 +100,7 @@ then changes the Dockerfile and rebuilds.
 | --- | --- |
 | plan | Reports whether the execution key changed and what would be built; no build runs |
 | reconcile | Build and push; record the artifact |
-| verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
+| detect drift | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
 | build | Supported: `nyl build <unit> [-e <env>]` builds from the current worktree and loads the image into the local Docker engine with `-- --load`, or pushes it with `-- --push`, which is safe because nothing consumes an image until a reference names it. The driver validates these arguments after `--`. It pushes only the spec's `tags` and driver `--tag` values, never the `nyl-` tag that identifies recorded executions |
 | teardown | Not supported: registry deletion differs between registries and may break consumers. The default `deletionPolicy` for this kind is therefore `Retain`, and an explicit `Teardown` is rejected. Removing the unit leaves the image in the registry and drops the unit from state without a tombstone; an EnvironmentTemplate's forced `Teardown` skips it the same way |
@@ -253,14 +253,14 @@ commit itself is excluded; the matched bytes stand for it.
 | --- | --- |
 | plan | `init` and `plan -lock=false`; reports the change summary and change digest; nothing is applied or recorded. For a `deleting` unit with teardown intent, `plan -destroy -lock=false` and the destroy plan's digest |
 | reconcile | Execution steps above |
-| verify | `plan -lock=false -detailed-exitcode` against the current desired document. Exit 0 is clean; exit 2 means applying would change something, reported as drift with the change summary |
+| detect drift | `plan -lock=false -detailed-exitcode` against the current desired document. Exit 0 is clean; exit 2 means applying would change something, reported as drift with the change summary |
 | inspect | Not supported; recovery is `converge` |
 | teardown | `plan -destroy -out=<planfile>`, then `apply`. For `bind: plan` units, the destroy plan's digest is compared with the approved digest from the execution context, and a mismatch returns `AwaitingApproval` without effects |
 | recovery | `converge`: the backend's state lock guards concurrent effects, and a new plan after an uncertain execution shows what is still missing |
 | exec | Interactive: `init` as in execution step 1, then `tofu` or `terraform` with the operator's arguments (see [Repair](#repair)) |
 | ownership scope | The backend configuration without credentials, canonicalized, with `key` and the workspace (`default` unless the spec selects one); two units claiming the same scope are rejected, across environments too |
 
-`plan` and `verify` only read, so they never take the backend's state lock and
+`plan` and drift detection only read, so they never take the backend's state lock and
 never collide with a running `reconcile`. A state lock left behind by a lost
 runner makes the next execution fail with the lock ID, as a non-retryable
 `ownership` failure. The operator holds the unit, releases the lock with
