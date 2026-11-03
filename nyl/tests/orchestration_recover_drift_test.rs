@@ -488,7 +488,7 @@ fn test_detect_drift_records_once_and_reports_drift() {
     assert!(!message.contains("Nyl-Requested-By"), "{message}");
     let drift = harness.show(OBSERVED, "observed/units/network/drift.yaml");
     assert!(
-        drift.contains("kind: Observation") && drift.contains("drift: clean"),
+        drift.contains("kind: DriftRecord") && drift.contains("drift: clean"),
         "{drift}"
     );
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
