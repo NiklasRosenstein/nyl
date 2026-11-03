@@ -1,7 +1,7 @@
-# Observed output: the publication's ingress address arrives after the
+# Observed value: the publication's ingress address arrives after the
 # publication, reaches its consumer, and changes without the publication
-# executing (design/orchestration-core.md, Observed outputs).
-contract: design/orchestration-core.md#observed-outputs
+# executing (design/orchestration-core.md, Observed values).
+contract: design/orchestration-core.md#observed-values
 milestone: M5
 tiers: [1]                            # the observer is scripted
 steps:

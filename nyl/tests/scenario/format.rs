@@ -191,7 +191,7 @@ pub enum DriverOperation {
     Reconcile,
     Verify,
     Teardown,
-    /// Reads the unit's observed outputs; `outputs` holds the values it
+    /// Reads the unit's observed values; `outputs` holds the values it
     /// reports. Executes from M5.
     Observe,
 }

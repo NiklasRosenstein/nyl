@@ -268,14 +268,14 @@ fn test_validate_fault_unit_rules() {
     assert!(validation_error(&fault("{point: waiting-lease}")).contains("only pause"));
 }
 
-/// Observe steps script observed outputs: they run from M5, are succeeded,
+/// Observe steps script observed values: they run from M5, are succeeded,
 /// pending, or failed, and a failed read names no failure category because
 /// it does not fail the unit.
 #[test]
 fn test_validate_observe_driver_steps() {
     let at_m5 = |driver: &str| {
         let text = format!(
-            "contract: design/orchestration-core.md#observed-outputs\nmilestone: M5\ntiers: [1]\nproject: ../_project\nsteps:\n  - driver: {driver}\n"
+            "contract: design/orchestration-core.md#observed-values\nmilestone: M5\ntiers: [1]\nproject: ../_project\nsteps:\n  - driver: {driver}\n"
         );
         let loaded = inline_scenario("inline/observe", &text);
         scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())

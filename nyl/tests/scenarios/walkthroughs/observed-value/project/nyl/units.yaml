@@ -11,8 +11,9 @@ spec:
   observations:
     ingressIp:
       type: string
-      resource: {apiVersion: v1, kind: Service, namespace: web, name: web}
-      pointer: /status/loadBalancer/ingress/0/ip
+      from:
+        resource: {apiVersion: v1, kind: Service, namespace: web, name: web}
+        pointer: /status/loadBalancer/ingress/0/ip
   timeout: 10m
 ---
 apiVersion: units.gitops.nyl/v1

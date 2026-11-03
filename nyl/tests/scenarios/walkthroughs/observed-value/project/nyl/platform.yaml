@@ -1,4 +1,4 @@
-# The observed-output walkthrough's project: one environment, dev, whose
+# The observed-value walkthrough's project: one environment, dev, whose
 # publication exposes the address a load balancer assigns to its Service.
 apiVersion: gitops.nyl/v1
 kind: GitRepository

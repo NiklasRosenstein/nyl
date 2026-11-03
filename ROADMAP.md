@@ -246,7 +246,7 @@ bindings are errors. Each binding selects exactly one source:
 | `fromFile` | Project file plus JSON Pointer | No |
 | `fromGit` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
 | `fromPublication` | State file in the target's own publication branch at the publication base commit | No |
-| `fromUnit` | Recorded public output, observed output, or published artifact field of a unit in the same environment | Yes (M5) |
+| `fromUnit` | Recorded public output, observed value, or published artifact field of a unit in the same environment | Yes (M5) |
 | `fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
 
 ```yaml
@@ -351,7 +351,7 @@ Cluster.
   persisted or referenceable; undeclared outputs are ignored, and a declared
   output the native tool marks sensitive must be declared sensitive. Credentials and private keys never enter
   desired state, receipts, public artifacts, or diagnostic transcripts.
-- Observed outputs are values a driver reads from the system a unit manages,
+- Observed values are values a driver reads from the system a unit manages,
   such as a load balancer address in a published Service's status, declared
   under `observations` and referenced with `fromUnit: {unit, observation}`.
   Executing the unit does not produce them and they can change while its
@@ -361,8 +361,9 @@ Cluster.
   executed the unit may wait for them up to `observationWait`, and a changed
   value changes the consumer's execution key, so the consumer executes again
   without the producer. Reading is a generic `observe` driver capability; the
-  driver decides when a value belongs to the current receipt. They are never
-  sensitive and never promoted.
+  driver decides when a value belongs to the current receipt, and owns each
+  value's `from` source. They are never sensitive, and promotion selectors do
+  not select them yet.
 - When upstream outputs are unavailable, retain the unresolved desired intent
   and resolve dependents as evidence arrives, without rereading unrelated
   mutable source. Each run is bounded to one source revision; the contract
@@ -380,7 +381,7 @@ Cluster.
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
   that requires a healthy deployment.
-- In observe mode, the publication unit's observed outputs read a field of a
+- In observe mode, the publication unit's observed values read a field of a
   resource its target renders, from the target's Cluster, once the
   Application owning that resource runs the current publication. Reading
   needs workload-cluster credentials that publication alone does not.
