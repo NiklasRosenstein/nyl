@@ -614,6 +614,12 @@ decisions about release history, pruning, and readiness.
 Preserve `nyl render`, `diff`, `apply`, `render-tree`, and `publish-tree` with their
 Kubernetes meanings. Release inputs extend them without new required flags.
 
+The pure Python `nyl` client invokes the installed CLI's single-file `render`
+entry point and inspects its emitted manifests. Rust owns configuration,
+validation, rendering, and caching; Python holds no orchestration state or
+render cache. Full-tree inspection requires a documented manifest inventory,
+because publication trees also contain ownership indexes and state files.
+
 `nyl comment upsert` publishes supplied Markdown as a sticky PR/MR comment on
 GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
 comment keys and authenticated account ownership require no orchestration state
