@@ -27,9 +27,7 @@ use nyl_core::orchestration::ports::{
     LocalDivergence, LogEntry, RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
     TransitionChanges,
 };
-use nyl_core::orchestration::state::{
-    DesiredUnit, Lease, Observation, ObservationType, ObservedUnit, Run, Signal, StateLocation,
-};
+use nyl_core::orchestration::state::{DesiredUnit, DriftRecord, Lease, ObservedUnit, Run, Signal, StateLocation};
 use nyl_git::GitAuth;
 
 use crate::require_local_branches;
@@ -457,19 +455,25 @@ fn per_unit<T: DeserializeOwned>(files: &Files, kind: &str) -> StateResult<BTree
     Ok(documents)
 }
 
-/// The latest observations by unit and type.
-fn observations(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>> {
-    Ok(per_unit::<Observation>(files, "observations")?
-        .into_iter()
-        .map(|(unit, documents)| {
-            let by_type = documents
-                .into_values()
-                .map(|observation| (observation.observation_type, observation))
-                .collect();
-            (unit, by_type)
-        })
-        .collect())
+/// The latest drift record of each unit, `observed/units/<unit>/drift.yaml`.
+fn drift(files: &Files) -> StateResult<BTreeMap<UnitName, DriftRecord>> {
+    let mut records = BTreeMap::new();
+    for (path, bytes) in files {
+        let Some(unit) = path
+            .strip_prefix("observed/units/")
+            .and_then(|rest| rest.strip_suffix(DRIFT_FILE))
+            .filter(|unit| !unit.contains('/'))
+        else {
+            continue;
+        };
+        let unit = UnitName::new(unit).map_err(|error| StateError::Corrupt(format!("{path}: {error}")))?;
+        records.insert(unit, from_yaml(path, bytes)?);
+    }
+    Ok(records)
 }
+
+/// The file name of a unit's drift record beneath `observed/units/<unit>`.
+const DRIFT_FILE: &str = "/drift.yaml";
 
 /// Replace a unit's directory of documents of one kind with `set`, or
 /// remove it for `None`.
@@ -503,12 +507,12 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         for (unit, set) in &changes.artifacts {
             replace_set(files, unit, "artifacts", set.as_ref().map(|set| set.iter()))?;
         }
-        for (unit, set) in &changes.observations {
-            let set = set.as_ref().map(|set| {
-                set.iter()
-                    .map(|(observation_type, document)| (observation_type.as_str(), document))
-            });
-            replace_set(files, unit, "observations", set)?;
+        for (unit, record) in &changes.drift {
+            let path = format!("observed/units/{unit}{DRIFT_FILE}");
+            match record {
+                Some(record) => files.insert(path, to_yaml(record)?),
+                None => files.remove(&path),
+            };
         }
         for (unit, set) in &changes.attestations {
             replace_set(files, unit, "attestations", set.as_ref().map(|set| set.iter()))?;
@@ -564,7 +568,7 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         desired: units(desired, "desired/units/")?,
         observed: units(observed, "observed/units/")?,
         artifacts: per_unit(observed, "artifacts")?,
-        observations: observations(observed)?,
+        drift: drift(observed)?,
         attestations: per_unit(observed, "attestations")?,
     })
 }

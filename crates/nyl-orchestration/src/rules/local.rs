@@ -147,7 +147,7 @@ fn replace<T: Clone + PartialEq>(
 
 /// The changes that make `current` hold `target`'s content: every document
 /// of `target` put, every document absent from it removed, including
-/// artifacts, observations, and attestations. `state.yaml` is carried
+/// artifacts, drift records, and attestations. `state.yaml` is carried
 /// forward, never restored: the caller appends the `state-restored` event.
 /// Admission is not part of a snapshot, so it is never restored.
 pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapshot) -> TransitionChanges {
@@ -161,7 +161,7 @@ pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapsh
         desired: replace(&current.desired, &target.desired),
         observed: replace(&current.observed, &target.observed),
         artifacts: replace(&current.artifacts, &target.artifacts),
-        observations: replace(&current.observations, &target.observations),
+        drift: replace(&current.drift, &target.drift),
         attestations: replace(&current.attestations, &target.attestations),
         ..TransitionChanges::default()
     }

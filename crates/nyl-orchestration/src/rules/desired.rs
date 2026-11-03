@@ -120,7 +120,7 @@ pub struct Desired {
 pub struct LifecycleWrite {
     /// The desired document to write; `None` removes the desired file.
     pub desired: Option<DesiredUnit>,
-    /// Whether the observed file goes, with the unit's observations and
+    /// Whether the observed file goes, with the unit's drift record and
     /// attestations: a retained tombstone embeds the receipt (its artifact
     /// files stay, Q12), and a removed or released unit, or one whose
     /// incarnation ended, leaves no observed state (its artifacts go too).

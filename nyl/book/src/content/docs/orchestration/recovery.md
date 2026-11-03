@@ -11,7 +11,7 @@ pipeline. Orchestration never loses a result it recorded and never guesses one
 it did not. This page explains how the next run takes over from a run that
 died, what an `uncertain` unit is, and how
 [`nyl recover`](/nyl/reference/cli/recover/) and
-[`nyl verify`](/nyl/reference/cli/verify/) help an operator settle it.
+[`nyl detect-drift`](/nyl/reference/cli/detect-drift/) help an operator settle it.
 
 ## Leases, run refs, and checkpoints
 
@@ -218,7 +218,7 @@ transition commit is pushed together with a check of the holder's own lease.
 The dead run's effects must be recorded before anything else writes state.
 So only an operation that imports the broken run takes the broken lease
 over: `nyl reconcile`, `nyl teardown`, or `nyl recover -e <env>`. Every other
-command that writes state, `nyl verify`, `nyl hold`, and the `nyl state`
+command that writes state, `nyl detect-drift`, `nyl attest`, `nyl hold`, and the `nyl state`
 commands included, exits 2 with `NYL-LEASE-BROKEN`, or waits under
 `--wait-lease`:
 
@@ -259,19 +259,20 @@ When state cannot be imported because it is missing or moved, `nyl recover`
 takes over and releases the broken lease so the state can be repaired. See
 [`nyl recover`](/nyl/reference/cli/recover/#importing-a-broken-run).
 
-## Verifying receipts
+## Detecting drift
 
-[`nyl verify -e <env>`](/nyl/reference/cli/verify/) asks each unit's driver
-whether what its current receipt describes still holds, without executing
-anything. It records the latest drift observation, a health observation when
-the driver reports one, and the attestations the driver reports, in one
-observed commit, and writes nothing when nothing changed. It never changes a
-receipt or a condition; `verify` exits 3 on drift so that a pipeline can
-alert on it.
+[`nyl detect-drift -e <env>`](/nyl/reference/cli/detect-drift/) asks each
+unit's driver whether what its current receipt describes still holds, without
+executing anything. It records each unit's drift record in one observed
+commit, and writes nothing when nothing changed. It never changes a receipt
+or a condition; `detect-drift` exits 3 on drift so that a pipeline can alert
+on it. Attestations, the evidence that dependents and promotion require, are
+separate: [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest)
+records them.
 
 ## Repairing drift
 
-A unit whose latest drift observation is `drifted` is `drifted` in
+A unit whose latest drift record is `drifted` is `drifted` in
 [`nyl status`](/nyl/reference/cli/status/), which exits 2 for it, and
 [`nyl plan`](/nyl/reference/cli/plan/) lists it as a unit that would execute:
 like a changed unit, it is work for the next reconcile.
@@ -279,8 +280,8 @@ like a changed unit, it is work for the next reconcile.
 - With the Environment's `driftRepair: converge`, the default, the next
   `nyl reconcile` executes every drifted unit whose recovery policy is
   `converge` again, and its transition commit lists it under `driftRepaired`.
-  The new receipt removes the drift observation in the same commit, so the
-  unit is not repaired again until `verify` finds new drift.
+  The new receipt removes the drift record in the same commit, so the
+  unit is not repaired again until `detect-drift` finds new drift.
 - A drifted unit that is not safe to re-run is reported `awaiting-approval`
   (exit 2) while the rest of the run continues. A matching
   `--approve <unit>` executes it and records the approval's identity.
@@ -291,7 +292,7 @@ like a changed unit, it is work for the next reconcile.
   records who asked and why under `reapplied`. A named unit that is not safe
   to re-run follows the approval rule above.
 
-`nyl verify`'s `NYL-VERIFY-DRIFT` warning says for each unit what the next
+`nyl detect-drift`'s `NYL-DRIFT-DETECTED` warning says for each unit what the next
 reconcile does with it.
 
 ## Recovery with local state
@@ -305,7 +306,7 @@ refuse to overwrite unpublished local work.
 - [Runs](/nyl/orchestration/runs/)
 - [Environments and state](/nyl/orchestration/environments-and-state/)
 - [Git storage](/nyl/reference/git-storage/)
-- [`nyl reconcile`](/nyl/reference/cli/reconcile/), [`nyl recover`](/nyl/reference/cli/recover/), [`nyl verify`](/nyl/reference/cli/verify/), [`nyl status`](/nyl/reference/cli/status/)
+- [`nyl reconcile`](/nyl/reference/cli/reconcile/), [`nyl recover`](/nyl/reference/cli/recover/), [`nyl detect-drift`](/nyl/reference/cli/detect-drift/), [`nyl status`](/nyl/reference/cli/status/)
 
 When a held-unit `nyl exec` command cannot start, Nyl restores the unit's prior
 observed state. A command that may have started retains its operator-modified

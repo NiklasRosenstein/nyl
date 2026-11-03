@@ -25,7 +25,7 @@ spec:
       printf '%s' '{"id":"vpc-one"}' > "$NYL_OUTPUTS"
   idempotent: true
   teardown: [sh, -c, 'true']
-  verify: [sh, -c, 'true']
+  detectDrift: [sh, -c, 'true']
   outputs:
     id: {type: string}
 "#;
@@ -37,7 +37,7 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   idempotent: true
-  verify: [sh, -c, 'true']
+  detectDrift: [sh, -c, 'true']
   values:
     network: {fromUnit: {environment: infra, unit: network, output: id}}
 "#;
@@ -118,7 +118,7 @@ fn test_cross_environment_first_run_blocks_then_chain_converges_and_verifies() {
     assert_eq!(again.exit, 0, "{}", again.stderr);
     assert_eq!(section(&again, "app")["units"]["app"]["result"], "current");
     assert!(section(&again, "app").get("commits").is_none());
-    let verified = harness.invoke(&["verify", "-g", "testing", "-o", "json"]);
+    let verified = harness.invoke(&["detect-drift", "-g", "testing", "-o", "json"]);
     assert_eq!(verified.exit, 0, "{}", verified.stderr);
     assert_eq!(verified.report["environments"].as_array().unwrap().len(), 2);
 }

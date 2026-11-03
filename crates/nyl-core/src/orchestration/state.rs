@@ -88,7 +88,7 @@ document_kind!(StateRecordKind, "StateRecord");
 document_kind!(EnvironmentRecordKind, "EnvironmentRecord");
 document_kind!(DesiredUnitKind, "DesiredUnit");
 document_kind!(ObservedUnitKind, "ObservedUnit");
-document_kind!(ObservationKind, "Observation");
+document_kind!(DriftRecordKind, "DriftRecord");
 document_kind!(AttestationKind, "Attestation");
 document_kind!(LeaseKind, "Lease");
 document_kind!(RunKind, "Run");
@@ -823,42 +823,26 @@ pub struct ArtifactUnit {
     pub uid: Uid,
 }
 
-/// `observed/units/<unit>/observations/<type>.yaml`.
+/// A unit's latest drift detection, `observed/units/<unit>/drift.yaml`:
+/// what `nyl detect-drift` found for the receipt whose execution key it
+/// names. Contract: [Drift](../../../../design/orchestration-core.md#drift).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Observation {
+pub struct DriftRecord {
     #[serde(rename = "apiVersion")]
     pub api_version: StateV1,
-    pub kind: ObservationKind,
+    pub kind: DriftRecordKind,
     pub unit: UnitIdentity,
-    #[serde(rename = "type")]
-    pub observation_type: ObservationType,
     #[serde(rename = "executionKey")]
     pub execution_key: ExecutionKey,
     pub at: Timestamp,
     pub result: Drift,
+    /// Driver-specific details, recorded and shown unchanged.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub details: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum ObservationType {
-    Drift,
-    Health,
-}
-
-impl ObservationType {
-    /// `drift` or `health`, as the document's `type` field names it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Drift => "drift",
-            Self::Health => "health",
-        }
-    }
-}
-
-/// The result of a drift verification.
+/// The result of a drift detection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "drift", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Drift {
@@ -907,7 +891,7 @@ pub enum Operation {
     Hold,
     Resume,
     Recover,
-    Verify,
+    DetectDrift,
     Attest,
     Exec,
     CiAdmit,
@@ -927,7 +911,7 @@ impl Operation {
             Self::Hold => "hold",
             Self::Resume => "resume",
             Self::Recover => "recover",
-            Self::Verify => "verify",
+            Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
             Self::Exec => "exec",
             Self::CiAdmit => "ci-admit",
@@ -1036,7 +1020,7 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
         ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
         ("artifact", schema::<ArtifactDocument>("Artifact")),
-        ("observation", schema::<Observation>("Observation")),
+        ("drift-record", schema::<DriftRecord>("DriftRecord")),
         ("attestation", schema::<Attestation>("Attestation")),
         ("lease", schema::<Lease>("Lease")),
         ("run", schema::<Run>("Run")),

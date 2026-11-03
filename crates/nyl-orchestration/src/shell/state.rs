@@ -467,7 +467,7 @@ fn move_holding(
                 desired: written(&source.desired),
                 observed: written(&source.observed),
                 artifacts: written(&source.artifacts),
-                observations: written(&source.observations),
+                drift: written(&source.drift),
                 attestations: written(&source.attestations),
                 ..TransitionChanges::default()
             };

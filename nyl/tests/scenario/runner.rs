@@ -309,7 +309,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 let operation = match step.operation {
                     StepOperation::Plan => DriverOperation::Plan,
                     StepOperation::Reconcile => DriverOperation::Reconcile,
-                    StepOperation::Verify => DriverOperation::Verify,
+                    StepOperation::DetectDrift => DriverOperation::DetectDrift,
                     StepOperation::Teardown => DriverOperation::Teardown,
                 };
                 let result = match step.outcome {
@@ -824,10 +824,10 @@ fn run_environment(report: &Value) -> Option<&Value> {
 }
 
 /// A unit's outcome name in a report or a summary entry: its `result`
-/// (reconcile, teardown), `state` (plan, status), or `verification` (verify),
+/// (reconcile, teardown), `state` (plan, status), or `check` (detect-drift, attest),
 /// as `UnitReport::outcome_name` orders them.
 fn outcome_of(unit: &Value) -> Option<&str> {
-    ["result", "state", "verification"]
+    ["result", "state", "check"]
         .iter()
         .find_map(|key| unit.get(*key).and_then(Value::as_str))
 }
@@ -1052,7 +1052,7 @@ pub fn invoke_in(
 }
 
 /// Each unit's outcome in a transition summary's `units:` block: its
-/// `result`, or a verify's `verification`; an operator action has none.
+/// `result`, or a check's `check`; an operator action has none.
 fn summary_units(summary: &Value) -> BTreeMap<String, String> {
     summary
         .get("units")

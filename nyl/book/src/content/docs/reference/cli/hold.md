@@ -95,7 +95,7 @@ released its lease, in a `hold` commit requested by you, so a delivered
 hold always takes effect.
 
 Only reconcile and teardown runs read signals. While another operation
-holds the lease, such as `nyl verify`, `nyl recover`, or a state
+holds the lease, such as `nyl detect-drift`, `nyl recover`, or a state
 operation, `nyl hold` exits 2 with `NYL-LEASE-HELD` like `resume`;
 `--wait-lease <duration>` waits for it instead.
 

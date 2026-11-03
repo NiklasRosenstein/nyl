@@ -6,8 +6,7 @@ promotion reads, and the [Release inputs contract](release-inputs.md), which
 defines the bindings promotion feeds.
 
 This contract defines PromotionPaths, PromotionRecords, how `nyl promote`
-chooses what to promote, and the attestations and health observations that
-evidence levels read. Promotion never observes anything itself and never
+chooses what to promote, and the attestations that evidence levels read. Promotion never observes anything itself and never
 promotes native tool state: it moves a proven source commit and selected
 values from one recorded state into another environment's desired state.
 
@@ -62,7 +61,7 @@ Each promotion replaces the path's record; Git history keeps earlier ones.
 | `from` | The source state: `{environment, run, desiredCommit, observedCommit}`, or for a target source `{target, repository, branch, commit}` |
 | `sourceCommit` | The source commit of that state, present when the path promotes the target's source or a value's lineage includes one |
 | `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `state` is present when a value-only path took the value from another state than `from` |
-| `evidence` | `{level, attestations: [{scope, name, result, at}], observations: […], override: {reason} \| null}` |
+| `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each Application's running publication and health |
 | `ignoredAttestations` | `[{scope, name, reason, by}]` from `--ignore-attestation` |
 | `excludedApplications` | The path's `coverage.excludeApplications` at promotion time |
 | `superseded` | `[{repository, commit, reason, by}]` from `--supersede` |
@@ -158,7 +157,7 @@ spec:
   With `evidence: published`, the same field adds requirements, so
   `attestations: {units: {kubernetes: [accepted]}}` means receipts plus
   `kubernetes`'s `accepted`. Validation rejects a unit the path does not cover
-  and a name its scope does not declare. Drift verification writes no receipt
+  and a name its scope does not declare. Drift detection writes no receipt
   and attests nothing.
 - A failing attestation for a state blocks its promotion on every path,
   whether or not the path requires it. A later passing attestation of the same
@@ -172,9 +171,10 @@ spec:
   what its consumer ran when it was attested.
 - `nyl promote` never observes anything itself: it reads only attestations
   recorded beforehand, so it runs from a workstation without cluster
-  credentials. Drivers record them during `reconcile` or `nyl verify -e
-  <env>`, typically in CI where Argo CD access exists, and `nyl attest`
-  records them from people and external systems. A path may set
+  credentials. Drivers record them during `reconcile` or when `nyl attest -e
+  <env>` asks them, typically in CI where Argo CD access exists, and
+  `nyl attest --name … --result …` records them from people and external
+  systems. A path may set
   `maxAttestationAge`, such as `1h`, beyond which a recorded attestation no
   longer counts. The attestations used are stored in the PromotionRecord.
 - Which states the values come from depends on the path:
@@ -538,7 +538,7 @@ spec:
   directly instead, with credentials for its cluster.
 - The PromotionRecord adds, per value, the source target, publication
   repository, branch, and commit, and the input digest to its lineage, plus the
-  observation that proved the set.
+  attestation details that proved the set.
 - `to` may be an environment or a target; a target keeps its records in its
   own source (see [Promoting into a target](#promoting-into-a-target)).
 
@@ -571,7 +571,7 @@ spec:
       sequence: 4                    # increases with every promotion into this target
       from: {target: dev, repository: https://git.example.com/deploy.git, branch: deploy/dev, commit: 9c1e…}
       values: {webImage: {value: registry.example.com/web@sha256:4f0c…, inputDigest: sha256:…}}
-      evidence: {level: attested, attestations: [dev/accepted, dev/healthy], observations: […]}
+      evidence: {level: attested, attestations: [dev/accepted, dev/healthy]}   # each with its details
       artifactsVerified: true
       superseded: []
       requested: {by: …, at: 2026-09-25T16:40:00Z, reason: …}
@@ -626,8 +626,8 @@ so every source writes the same record:
 | Source | When | Examples |
 | --- | --- | --- |
 | The driver, during `reconcile` | The apply itself proves it | A Terraform apply whose `check` blocks or health waits pass; a command unit that reports its result |
-| The driver, during `nyl verify` | Observed afterwards | A KubernetesPublication's `accepted` and `healthy` from Argo CD; configured probes for a unit such as an OpenTofu-managed ECS service |
-| External, through `nyl attest` | Someone or something else knows | A monitoring hook, a manual QA pass, an end-to-end job |
+| The driver, when `nyl attest -e <env>` asks | Observed afterwards | A KubernetesPublication's `accepted` and `healthy` from Argo CD; configured probes for a unit such as an OpenTofu-managed ECS service; a command unit's `attest` step |
+| External, through `nyl attest --name … --result …` | Someone or something else knows | A monitoring hook, a manual QA pass, an end-to-end job |
 
 - **Declared names.** A driver reports, from a unit's spec, which attestations
   it can produce: a KubernetesPublication in observe mode declares `accepted`
@@ -637,14 +637,17 @@ so every source writes the same record:
   `[{name: healthy, from: external}]` for a service nothing in Nyl can
   observe, and `Environment.spec.attestations: [qa]` declares environment-wide
   ones. No name is reserved; `healthy` is a convention of the drivers.
-- **`nyl attest`.** `nyl attest -e <env> [--unit <u>] --name <n> --result
+- **External attestations.** `nyl attest -e <env> [--unit <u>] --name <n> --result
   pass|fail [--reason …] [--url …]` records an attestation for the unit's
   current receipt, or without `--unit` for the environment's current state;
   `--state-revision` or `--revision` attests an earlier state. It refuses names
   the scope does not declare, so a typo cannot create evidence nobody
   requires. The attester is recorded like an approver, through the same
   identity and approval sources. `nyl attest --target <name>` writes to a
-  non-orchestrated target's `_nyl/observations/attestations/`.
+  non-orchestrated target's `_nyl/attestations/`. Without `--name`,
+  `nyl attest` asks the drivers instead (see the orchestration core
+  contract's [Attestations](orchestration-core.md#attestations)); that form
+  is implemented, the external form is not yet.
 - **Lifetime.** An attestation belongs to the receipt or state it names; a new
   receipt starts with its declared attestations pending. The newest
   attestation per name and receipt wins, and history keeps earlier ones.
@@ -665,26 +668,26 @@ same model and is not in the initial scope.
 
 - **Observer.** Nyl reads the target's generated Applications from the Argo CD
   control-plane Cluster through its local context. Health checks need
-  credentials for that Cluster, which publication does not, so observations
-  are recorded where those credentials exist, typically in CI, and decisions
-  read the recorded evidence.
-- **Where observations are recorded.** An orchestrated environment's
+  credentials for that Cluster, which publication does not, so attestations
+  are recorded where those credentials exist, typically in CI by
+  `nyl attest`, and decisions read the recorded evidence.
+- **Where attestations are recorded.** An orchestrated environment's
   publication units record into its observed state. A target without an
   environment records into its own publication branch:
-  `nyl verify --target <name>` writes `<prefix>/_nyl/observations/health.yaml`
-  with each Application's running revision, matched publication, and health,
-  and the target's `accepted` and `healthy` under `_nyl/observations/attestations/`.
-  - It commits only when that content changes or the previous observation is
+  `nyl attest --target <name>` writes the target's `accepted` and `healthy`
+  under `<prefix>/_nyl/attestations/`, whose details list each
+  Application's running revision, matched publication, and health.
+  - It commits only when that content changes or the previous attestation is
     older than a refresh interval, which keeps `maxAttestationAge` satisfiable
     without a commit per run.
-  - `_nyl/observations/` is a reserved path: never rendered, never removed by a
+  - `_nyl/attestations/` is a reserved path: never rendered, never removed by a
     publish, and neither owned nor unowned for reconciliation; a teardown of
-    the target removes it. No Argo CD Application sources it, and verify and
+    the target removes it. No Argo CD Application sources it, and attest and
     publish commits touch disjoint files, so the branch's retry rule covers
     concurrent writes.
-  - The branch history keeps older observations, so an older publication can
+  - The branch history keeps older attestations, so an older publication can
     be promoted or locked from recorded evidence.
-  - This adds no refs: observations live with the tree they describe.
+  - This adds no refs: attestations live with the tree they describe.
 - **Running revision.** Argo CD's Synced/OutOfSync status compares against the
   branch head, so an Application still running an older commit reports
   OutOfSync as soon as a newer publication changes its files. Nyl ignores it.
@@ -717,27 +720,27 @@ same model and is not in the initial scope.
   the target's source, coverage is every Application of every publication unit
   the target also selects, aggregated per unit as described above.
 - **Where Application data lives.** Only a `KubernetesPublication` unit knows
-  Applications, because it generated them. Its observation records every
-  Application's running revision and health, and the unit's `accepted` and
-  `healthy` attestations aggregate it for the matched publication; promotion
-  decisions use the attestations, and the per-Application list explains why a
+  Applications, because it generated them. Its `accepted` and `healthy`
+  attestations aggregate every Application's running revision and health for
+  the matched publication and list them in their details; promotion
+  decisions use the results, and the per-Application details explain why a
   unit fell short.
 - **Manual syncs.** For a path that promotes only values, Applications synced
   to different publications do not block promotion. Promotion blocks only when
   a covered Application runs a revision that matches no source publication, or
   does not meet the required attestation. A path that promotes the target's source also
   blocks on mixed revisions.
-- **Decision evidence is always recorded.** The observation behind every
-  promotion (time, Application, running revision, health) is stored in the
-  PromotionRecord, including one kept in a target's `spec.promotions`;
-  observations themselves are recorded in observed state or on the target's
-  publication branch.
-- **Observation history.** One observation proves what runs now. Promoting a
+- **Decision evidence is always recorded.** The attestations behind every
+  promotion, with their details (time, Application, running revision,
+  health), are stored in the PromotionRecord, including one kept in a
+  target's `spec.promotions`; the attestations themselves are recorded in
+  observed state or on the target's publication branch.
+- **Attestation history.** One attestation proves what runs now. Promoting a
   commit that no longer runs, requiring a minimum healthy duration, and
   guarding against Applications that flap between healthy and unhealthy need
-  observations over time; Argo CD does not reliably report how long an
-  Application has been healthy. The publication unit's observe mode records
-  them in an environment's observed state; periodic observation is part of
+  attestations over time; Argo CD does not reliably report how long an
+  Application has been healthy. Git history of the observed state keeps
+  every attestation `nyl attest` recorded; periodic attestation is part of
   continuous operation.
 - **Meaning.** Argo CD health means Kubernetes considers the resources ready,
   such as a completed Deployment rollout. It does not prove the application

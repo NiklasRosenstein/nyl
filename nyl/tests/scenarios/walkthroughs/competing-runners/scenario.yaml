@@ -63,7 +63,7 @@ steps:
 
   # Only reconcile, teardown, and recover take over a broken lease whose run
   # is not imported; verify refuses and names `nyl recover -e dev`.
-  - nyl: [verify, -e, dev]
+  - nyl: [detect-drift, -e, dev]
     exit: 2
     expect:
       codes: [NYL-LEASE-BROKEN]

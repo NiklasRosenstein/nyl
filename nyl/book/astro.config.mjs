@@ -215,7 +215,7 @@ export default defineConfig({
                   "reference/cli/build",
                   "reference/cli/reconcile",
                   "reference/cli/status",
-                  "reference/cli/verify",
+                  "reference/cli/detect-drift",
                   "reference/cli/teardown",
                   "reference/cli/hold",
                   "reference/cli/recover",

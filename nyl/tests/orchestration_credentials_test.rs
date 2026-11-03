@@ -1,4 +1,4 @@
-//! Credential admission on the same shell path used by execution and verify.
+//! Credential admission on the same shell path used by execution and drift detection.
 mod scenario;
 
 use nyl_core::orchestration::ports::SecretProvider;

@@ -58,7 +58,7 @@ pub enum UnitResult {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         recorded: bool,
     },
-    /// Current, but its latest drift observation is `drifted` and this run
+    /// Current, but its latest drift record is `drifted` and this run
     /// did not repair it (`driftRepair: manual`, or excluded by `--unit`).
     /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
     Drifted,

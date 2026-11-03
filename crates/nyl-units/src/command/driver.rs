@@ -24,9 +24,9 @@ use std::path::{Component, Path, PathBuf};
 
 use super::spec::{CommandSpec, KIND_COMMAND};
 use nyl_core::orchestration::driver::{
-    AttestationOutcome, Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
-    ExecutionContext, Inspection, KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies,
-    RecoveryPolicy, ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner, Verification,
+    AttestationOutcome, Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult,
+    ExecStatus, ExecutionContext, Inspection, KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport,
+    RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{
@@ -249,7 +249,13 @@ fn prepare(ctx: &StepContext<'_>, spec: &CommandSpec, step: &Step<'_>) -> Driver
     } else {
         None
     };
-    let attestations = if own_attestations(spec).is_empty() || step.operation == DriverOperation::Fingerprint {
+    // Drift detection reports drift only; attestations come from the
+    // reconcile and attest steps.
+    let attestations = if own_attestations(spec).is_empty()
+        || matches!(
+            step.operation,
+            DriverOperation::Fingerprint | DriverOperation::DetectDrift
+        ) {
         None
     } else {
         let path = directory.join("attestations.json");
@@ -388,9 +394,21 @@ fn read_attestations(spec: &CommandSpec, path: Option<&Path>) -> Vec<Attestation
                 name,
                 result,
                 reason: None,
+                details: Value::Null,
             })
         })
         .collect()
+}
+
+/// How a `detectDrift` or `attest` step ended other than as it reports.
+fn step_failure(exit: &ToolExit) -> String {
+    match exit {
+        ToolExit::Exited { code, .. } => format!("failed with exit code {code}"),
+        ToolExit::NotStarted { reason } => format!("could not start: {reason}"),
+        ToolExit::Signaled { signal } => format!("died from signal {signal}"),
+        ToolExit::DeadlineExceeded => "passed the unit's timeout and was terminated".to_owned(),
+        ToolExit::Cancelled => "was cancelled".to_owned(),
+    }
 }
 
 /// The outcome of a `command` or `teardown` step that did not exit 0.
@@ -445,7 +463,8 @@ impl Driver for CommandDriver {
         Capabilities {
             plan: true,
             reconcile: true,
-            verify: parsed.as_ref().is_some_and(|spec| spec.verify.is_some()),
+            detect_drift: parsed.as_ref().is_some_and(|spec| spec.detect_drift.is_some()),
+            attest: parsed.as_ref().is_some_and(|spec| spec.attest.is_some()),
             teardown: parsed.as_ref().is_some_and(|spec| spec.teardown.is_some()),
             ..Capabilities::default()
         }
@@ -622,19 +641,19 @@ impl Driver for CommandDriver {
         Ok(Supported::Supported(outcome))
     }
 
-    fn verify(
+    fn detect_drift(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         _receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
+    ) -> DriverResult<Supported<DriftDetection>> {
         let spec = resolved(unit)?;
-        let Some(argv) = &spec.verify else {
+        let Some(argv) = &spec.detect_drift else {
             return Ok(Supported::Unsupported);
         };
         let step = Step {
             argv,
-            operation: DriverOperation::Verify,
+            operation: DriverOperation::DetectDrift,
             inputs: serde_json::json!({"values": values_of(&spec)}),
             outputs: false,
         };
@@ -642,29 +661,39 @@ impl Driver for CommandDriver {
         let drift = match &ran.exit {
             ToolExit::Exited { code: 0, .. } => Drift::Clean,
             ToolExit::Exited { code: 2, .. } => Drift::Drifted {
-                summary: "verify reported drift (exit code 2)".to_owned(),
+                summary: "detectDrift reported drift (exit code 2)".to_owned(),
             },
-            ToolExit::Exited { code, .. } => Drift::Unknown {
-                reason: format!("verify failed with exit code {code}"),
-            },
-            ToolExit::NotStarted { reason } => Drift::Unknown {
-                reason: format!("verify could not start: {reason}"),
-            },
-            ToolExit::Signaled { signal } => Drift::Unknown {
-                reason: format!("verify died from signal {signal}"),
-            },
-            ToolExit::DeadlineExceeded => Drift::Unknown {
-                reason: "verify passed the unit's timeout and was terminated".to_owned(),
-            },
-            ToolExit::Cancelled => Drift::Unknown {
-                reason: "verify was cancelled".to_owned(),
+            other => Drift::Unknown {
+                reason: format!("detectDrift {}", step_failure(other)),
             },
         };
-        Ok(Supported::Supported(Verification {
-            drift,
-            observations: Vec::new(),
-            attestations: read_attestations(&spec, ran.prepared.attestations.as_deref()),
-        }))
+        Ok(Supported::Supported(drift.into()))
+    }
+
+    fn attest(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        _receipt: &Receipt,
+    ) -> DriverResult<Supported<Vec<AttestationOutcome>>> {
+        let spec = resolved(unit)?;
+        let Some(argv) = &spec.attest else {
+            return Ok(Supported::Unsupported);
+        };
+        let step = Step {
+            argv,
+            operation: DriverOperation::Attest,
+            inputs: serde_json::json!({"values": values_of(&spec)}),
+            outputs: false,
+        };
+        let ran = run(&execution_context(ctx, true), &spec, &step)?;
+        match &ran.exit {
+            ToolExit::Exited { code: 0, .. } => Ok(Supported::Supported(read_attestations(
+                &spec,
+                ran.prepared.attestations.as_deref(),
+            ))),
+            other => Err(DriverError::before_effects(format!("attest {}", step_failure(other)))),
+        }
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
@@ -841,12 +870,14 @@ mod tests {
         let driver = CommandDriver;
         let plain = serde_json::json!({"command": ["./run.sh"]});
         let full = serde_json::json!({
-            "command": ["./run.sh"], "verify": ["./verify.sh"], "teardown": ["./rm.sh"], "idempotent": true
+            "command": ["./run.sh"], "detectDrift": ["./drift.sh"], "attest": ["./smoke.sh"],
+            "attestations": [{"name": "smoke"}], "teardown": ["./rm.sh"], "idempotent": true
         });
         let capabilities = driver.capabilities(&plain);
-        assert!(capabilities.plan && capabilities.reconcile && !capabilities.verify && !capabilities.teardown);
+        assert!(capabilities.plan && capabilities.reconcile);
+        assert!(!capabilities.detect_drift && !capabilities.attest && !capabilities.teardown);
         let capabilities = driver.capabilities(&full);
-        assert!(capabilities.verify && capabilities.teardown);
+        assert!(capabilities.detect_drift && capabilities.attest && capabilities.teardown);
         assert_eq!(driver.recovery(&plain).execution, RecoveryPolicy::Manual);
         assert_eq!(driver.recovery(&full).execution, RecoveryPolicy::Converge);
         assert!(driver.validate_spec(&plain).is_ok());

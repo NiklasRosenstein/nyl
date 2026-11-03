@@ -1,4 +1,4 @@
-//! `nyl recover` and `nyl verify` in-process, in the scenario test world
+//! `nyl recover` and `nyl detect-drift` in-process, in the scenario test world
 //! with the walkthroughs' shared project: Git state in `project.git`, the
 //! fake kinds standing in for the OpenTofu, image, and publication units,
 //! and a fault injector to crash a run where a test needs a dead run.
@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use nyl::orchestration::run::{CommandOutcome, Wiring};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
-    Capabilities, Driver, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection, KeyInputs,
-    LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported, Verification,
+    Capabilities, DriftDetection, Driver, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection,
+    KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, RunId};
 use nyl_core::orchestration::ports::{Checkpoint, Clock as _, Transition, TransitionChanges};
@@ -25,8 +25,8 @@ use nyl_core::orchestration::state::{
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 use nyl_orchestration::run_report::EnvironmentRunReport;
+use nyl_orchestration::shell::check;
 use nyl_orchestration::shell::run::Cancellation;
-use nyl_orchestration::shell::verify;
 use nyl_orchestration::shell::Settings;
 use nyl_orchestration::testing::FakeClock;
 use nyl_units::fake::{FakeImage, FakeInfra, FakePublication, Scripted};
@@ -217,7 +217,7 @@ fn test_recover_exits_2_while_another_run_holds_the_lease() {
     assert_eq!(harness.tip(OBSERVED), observed);
 }
 
-/// A refused reconcile or verify reports no run: none exists until the
+/// A refused reconcile or detect-drift reports no run: none exists until the
 /// lease is held, so neither the table nor the JSON names a run ID, and
 /// the table shows the refusal instead of an empty unit list.
 #[test]
@@ -241,7 +241,7 @@ fn test_a_refused_run_reports_no_run_and_no_empty_unit_list() {
         .store
         .take_lease(&harness.location, &dev(), &lease, None)
         .unwrap();
-    for command in ["reconcile", "verify"] {
+    for command in ["reconcile", "detect-drift"] {
         let json = harness.invoke(&[command, "-e", "dev", "-o", "json"]);
         assert_eq!(json.exit, 2, "{}", json.stderr);
         let environment = &json.report["environments"][0];
@@ -444,13 +444,13 @@ fn test_accept_adopts_a_late_checkpoint_and_deletes_its_evidence_ref() {
     );
 }
 
-/// `verify` records a drift observation per verified unit in one observed
+/// `detect-drift` records a drift record per checked unit in one observed
 /// commit and releases the lease; units without a current receipt are
-/// reported (exit 2). An unchanged second verify writes nothing, a verify
+/// reported (exit 2). An unchanged second detect-drift writes nothing, a detect-drift
 /// after every unit has a receipt exits 0, and a change outside Nyl is
 /// recorded as drift (exit 3).
 #[test]
-fn test_verify_records_observations_once_and_reports_drift() {
+fn test_detect_drift_records_once_and_reports_drift() {
     let harness = Harness::new();
     harness.init();
     harness.script.push(
@@ -465,13 +465,13 @@ fn test_verify_records_observations_once_and_reports_drift() {
     assert_eq!(harness.reconcile(&[]).exit, 3);
     let reconciled = harness.tip(OBSERVED);
 
-    let partial = harness.invoke(&["verify", "-e", "dev", "-o", "json"]);
+    let partial = harness.invoke(&["detect-drift", "-e", "dev", "-o", "json"]);
     assert_eq!(partial.exit, 2, "{}", partial.stderr);
-    assert_eq!(unit_field(&partial.report, "network", "verification"), "clean");
-    assert_eq!(unit_field(&partial.report, "web-image", "verification"), "no-receipt");
-    assert_eq!(unit_field(&partial.report, "kubernetes", "verification"), "no-receipt");
-    assert!(partial.stderr.contains("NYL-VERIFY-NO-RECEIPT"), "{}", partial.stderr);
-    let verified = harness.tip(OBSERVED);
+    assert_eq!(unit_field(&partial.report, "network", "check"), "clean");
+    assert_eq!(unit_field(&partial.report, "web-image", "check"), "no-receipt");
+    assert_eq!(unit_field(&partial.report, "kubernetes", "check"), "no-receipt");
+    assert!(partial.stderr.contains("NYL-DRIFT-NO-RECEIPT"), "{}", partial.stderr);
+    let checked = harness.tip(OBSERVED);
     assert_eq!(
         git_output(
             &harness.world.bare(),
@@ -481,12 +481,12 @@ fn test_verify_records_observations_once_and_reports_drift() {
     );
     let message = harness.message(OBSERVED);
     assert!(
-        message.starts_with("nyl: verify dev (2 clean, 2 no-receipt)"),
+        message.starts_with("nyl: detect-drift dev (2 clean, 2 no-receipt)"),
         "{message}"
     );
-    assert!(message.contains("Nyl-Operation: verify"), "{message}");
+    assert!(message.contains("Nyl-Operation: detect-drift"), "{message}");
     assert!(!message.contains("Nyl-Requested-By"), "{message}");
-    let drift = harness.show(OBSERVED, "observed/units/network/observations/drift.yaml");
+    let drift = harness.show(OBSERVED, "observed/units/network/drift.yaml");
     assert!(
         drift.contains("kind: Observation") && drift.contains("drift: clean"),
         "{drift}"
@@ -494,31 +494,35 @@ fn test_verify_records_observations_once_and_reports_drift() {
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
 
     harness.clock.advance(Duration::from_mins(60));
-    let again = harness.invoke(&["verify", "-e", "dev"]);
+    let again = harness.invoke(&["detect-drift", "-e", "dev"]);
     assert_eq!(again.exit, 2, "{}", again.stderr);
-    assert_eq!(harness.tip(OBSERVED), verified, "an unchanged verify writes nothing");
+    assert_eq!(
+        harness.tip(OBSERVED),
+        checked,
+        "an unchanged detect-drift writes nothing"
+    );
 
     assert_eq!(harness.reconcile(&[]).exit, 0);
-    let clean = harness.invoke(&["verify", "-e", "dev", "-o", "json"]);
+    let clean = harness.invoke(&["detect-drift", "-e", "dev", "-o", "json"]);
     assert_eq!(clean.exit, 0, "{}", clean.stderr);
     for name in ["network", "database", "web-image", "kubernetes"] {
-        assert_eq!(unit_field(&clean.report, name, "verification"), "clean", "{name}");
+        assert_eq!(unit_field(&clean.report, name, "check"), "clean", "{name}");
     }
 
     // Someone changes the network's state outside Nyl.
     let backend = harness.world.scenario_tmp().join("tofu/dev-network.tfstate");
     std::fs::write(&backend, r#"{"inputs": {"cidr": "10.1.0.0/16"}, "outputs": {}}"#).unwrap();
-    let drifted = harness.invoke(&["verify", "-e", "dev", "--unit", "network", "-o", "json"]);
+    let drifted = harness.invoke(&["detect-drift", "-e", "dev", "--unit", "network", "-o", "json"]);
     assert_eq!(drifted.exit, 3, "{}", drifted.stderr);
-    assert_eq!(unit_field(&drifted.report, "network", "verification"), "drifted");
+    assert_eq!(unit_field(&drifted.report, "network", "check"), "drifted");
     assert_eq!(drifted.report["environments"][0]["units"].as_object().unwrap().len(), 1);
-    assert!(drifted.stderr.contains("NYL-VERIFY-DRIFT"), "{}", drifted.stderr);
+    assert!(drifted.stderr.contains("NYL-DRIFT-DETECTED"), "{}", drifted.stderr);
     assert!(harness
-        .show(OBSERVED, "observed/units/network/observations/drift.yaml")
+        .show(OBSERVED, "observed/units/network/drift.yaml")
         .contains("drift: drifted"));
 }
 
-/// What one `verify` call of a [`Recording`] driver saw.
+/// What one `detect-drift` call of a [`Recording`] driver saw.
 #[derive(Debug, Clone)]
 struct Seen {
     unit: String,
@@ -531,19 +535,19 @@ struct Seen {
     lease_deadline: Option<Timestamp>,
 }
 
-/// What every wrapped fake shares: the clock it advances during `verify`,
+/// What every wrapped fake shares: the clock it advances during `detect-drift`,
 /// how far per unit, and what each call saw.
 struct Recorder {
     clock: Arc<FakeClock>,
     bare: PathBuf,
     advance: Mutex<BTreeMap<String, Duration>>,
     seen: Mutex<Vec<Seen>>,
-    /// Cancelled by the first `verify` call, as a signal during it would.
+    /// Cancelled by the first `detect-drift` call, as a signal during it would.
     cancel: Mutex<Option<Cancellation>>,
     exec_failure: Mutex<Option<bool>>,
 }
 
-/// A fake kind that records what its `verify` calls see and lets time pass
+/// A fake kind that records what its `detect-drift` calls see and lets time pass
 /// during them, delegating everything to the fake it wraps.
 struct Recording {
     inner: Arc<dyn Driver>,
@@ -595,12 +599,12 @@ impl Driver for Recording {
     fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
         self.inner.reconcile(ctx, unit)
     }
-    fn verify(
+    fn detect_drift(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
+    ) -> DriverResult<Supported<DriftDetection>> {
         let name = unit.unit.name.to_string();
         self.recorder.seen.lock().unwrap().push(Seen {
             unit: name.clone(),
@@ -617,7 +621,7 @@ impl Driver for Recording {
         if let Some(cancellation) = self.recorder.cancel.lock().unwrap().as_ref() {
             cancellation.cancel(nyl_orchestration::shell::run::SIGTERM);
         }
-        self.inner.verify(ctx, unit, receipt)
+        self.inner.detect_drift(ctx, unit, receipt)
     }
     fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
         self.inner.inspect(ctx, unit)
@@ -651,7 +655,7 @@ impl Driver for Recording {
 }
 
 impl Harness {
-    /// A harness whose fake kinds record their `verify` calls.
+    /// A harness whose fake kinds record their `detect-drift` calls.
     fn recording() -> (Self, Arc<Recorder>) {
         let mut harness = Self::new();
         let recorder = Arc::new(Recorder {
@@ -682,29 +686,29 @@ impl Harness {
         (harness, recorder)
     }
 
-    /// `verify` through the shell's API on a fresh clone of `main`, with a
+    /// `detect-drift` through the shell's API on a fresh clone of `main`, with a
     /// concurrency limit the command line does not offer.
-    fn verify_with_concurrency(&self, concurrency: usize) -> EnvironmentRunReport {
-        self.verify_cancelled_by(concurrency, Cancellation::default())
+    fn detect_drift_with_concurrency(&self, concurrency: usize) -> EnvironmentRunReport {
+        self.detect_drift_cancelled_by(concurrency, Cancellation::default())
     }
 
-    /// [`Self::verify_with_concurrency`] with `cancellation`.
-    fn verify_cancelled_by(&self, concurrency: usize, cancellation: Cancellation) -> EnvironmentRunReport {
+    /// [`Self::detect_drift_with_concurrency`] with `cancellation`.
+    fn detect_drift_cancelled_by(&self, concurrency: usize, cancellation: Cancellation) -> EnvironmentRunReport {
         let mut job = self.job(&[], cancellation);
         job.request.concurrency = concurrency;
-        self.run_with(&job, verify::verify).environments.remove(0)
+        self.run_with(&job, check::detect_drift).environments.remove(0)
     }
 }
 
-/// With more units than the concurrency limit, verify's lease covers every
+/// With more units than the concurrency limit, detect-drift's lease covers every
 /// unit's deadline: a runner may take over an expired lease, so a unit
-/// still verifying past it would end the whole verify with a lost lease.
+/// still checking past it would end the whole detect-drift with a lost lease.
 #[test]
-fn test_verify_lease_covers_every_unit_deadline_across_batches() {
+fn test_detect_drift_lease_covers_every_unit_deadline_across_batches() {
     let (harness, recorder) = Harness::recording();
     harness.init();
     assert_eq!(harness.reconcile(&[]).exit, 0);
-    // Each verify takes 9 minutes, less than the shortest unit timeout
+    // Each detect-drift takes 9 minutes, less than the shortest unit timeout
     // (10m) but enough that later batches end past a lease sized once.
     for name in ["network", "database", "web-image", "kubernetes"] {
         recorder
@@ -714,13 +718,13 @@ fn test_verify_lease_covers_every_unit_deadline_across_batches() {
             .insert(name.to_owned(), Duration::from_mins(9));
     }
 
-    let report = harness.verify_with_concurrency(1);
+    let report = harness.detect_drift_with_concurrency(1);
     assert_eq!(report.exit.code(), 0, "{report:#?}");
     let seen = recorder.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 4, "{seen:#?}");
     let grace = Settings::default().lease_grace;
     for call in &seen {
-        let lease = call.lease_deadline.expect("verify holds the lease");
+        let lease = call.lease_deadline.expect("detect-drift holds the lease");
         assert!(
             grace.after(call.deadline) <= lease,
             "{}: unit deadline {} plus grace passes the lease deadline {lease}",
@@ -734,12 +738,12 @@ fn test_verify_lease_covers_every_unit_deadline_across_batches() {
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
 }
 
-/// A verify cancelled during a batch ("Runs and leases" item 7) starts no
+/// A detect-drift cancelled during a batch ("Runs and leases" item 7) starts no
 /// further batch, writes no observed commit, releases the lease, and exits
-/// 4 with `NYL-RUN-CANCELLED`, instead of verifying every unit after the
+/// 4 with `NYL-RUN-CANCELLED`, instead of checking every unit after the
 /// signal while CI waits to kill the job.
 #[test]
-fn test_cancelled_verify_starts_no_batch_and_records_nothing() {
+fn test_cancelled_detect_drift_starts_no_batch_and_records_nothing() {
     let (harness, recorder) = Harness::recording();
     harness.init();
     assert_eq!(harness.reconcile(&[]).exit, 0);
@@ -747,19 +751,23 @@ fn test_cancelled_verify_starts_no_batch_and_records_nothing() {
     let cancellation = Cancellation::new();
     *recorder.cancel.lock().unwrap() = Some(cancellation.clone());
 
-    let report = harness.verify_cancelled_by(1, cancellation);
+    let report = harness.detect_drift_cancelled_by(1, cancellation);
     assert_eq!(report.exit.code(), 4, "{report:#?}");
     let codes: Vec<Code> = report.errors.iter().map(|finding| finding.code).collect();
     assert_eq!(codes, [Code::RunCancelled], "{report:#?}");
     assert_eq!(recorder.seen.lock().unwrap().len(), 1, "one batch ran");
-    assert_eq!(harness.tip(OBSERVED), observed, "a cancelled verify records nothing");
+    assert_eq!(
+        harness.tip(OBSERVED),
+        observed,
+        "a cancelled detect-drift records nothing"
+    );
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
 }
 
-/// A verify that passes its unit's timeout is a failed `timeout`, exit 1,
+/// A detect-drift that passes its unit's timeout is a failed `timeout`, exit 1,
 /// not evidence of the unit's state: nothing is recorded for the unit.
 #[test]
-fn test_verify_past_its_timeout_fails_and_records_nothing() {
+fn test_detect_drift_past_its_timeout_fails_and_records_nothing() {
     let (harness, recorder) = Harness::recording();
     harness.init();
     assert_eq!(harness.reconcile(&[]).exit, 0);
@@ -770,20 +778,24 @@ fn test_verify_past_its_timeout_fails_and_records_nothing() {
         .unwrap()
         .insert("network".to_owned(), Duration::from_mins(61));
 
-    let outcome = harness.invoke(&["verify", "-e", "dev", "--unit", "network", "-o", "json"]);
+    let outcome = harness.invoke(&["detect-drift", "-e", "dev", "--unit", "network", "-o", "json"]);
     assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
     let error = &outcome.report["environments"][0]["errors"][0];
     assert_eq!(error["code"], "NYL-DRIVER-ERROR", "{}", outcome.stdout);
     assert!(error["message"].as_str().unwrap().contains("timeout"), "{error}");
-    assert_eq!(harness.tip(OBSERVED), observed, "a timed-out verify records nothing");
+    assert_eq!(
+        harness.tip(OBSERVED),
+        observed,
+        "a timed-out detect-drift records nothing"
+    );
 }
 
-/// A driver verifies in the project directory reconcile gave it for the
+/// A driver checks a unit in the project directory reconcile gave it for the
 /// unit's commit, found through `[project] previous_paths` after the
 /// project moved, not the entry checkout's directory applied to an older
 /// commit where it does not exist.
 #[test]
-fn test_verify_locates_a_moved_project_at_the_units_commit() {
+fn test_detect_drift_locates_a_moved_project_at_the_units_commit() {
     let (harness, recorder) = Harness::recording();
     harness.init();
     assert_eq!(harness.reconcile(&[]).exit, 0);
@@ -799,7 +811,7 @@ fn test_verify_locates_a_moved_project_at_the_units_commit() {
     git(&clone, &["commit", "--quiet", "-m", "Move the project to deploy/"]);
     git(&clone, &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
 
-    let outcome = harness.invoke_in(&["verify", "-e", "dev", "-o", "json"], "deploy", &NoFaults);
+    let outcome = harness.invoke_in(&["detect-drift", "-e", "dev", "-o", "json"], "deploy", &NoFaults);
     assert_eq!(outcome.exit, 0, "{}\n{}", outcome.stdout, outcome.stderr);
     let seen = recorder.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 4, "{seen:#?}");
@@ -1198,18 +1210,18 @@ impl FaultInjector for RecoverWhileWaiting<'_> {
     }
 }
 
-/// `verify` never imports, so a broken lease refuses it (exit 2,
+/// `detect-drift` never imports, so a broken lease refuses it (exit 2,
 /// `NYL-LEASE-BROKEN`, naming `nyl recover -e dev`); with `--wait-lease` it
 /// waits like for a held lease and proceeds once a recover imported the run.
 #[test]
-fn test_verify_refuses_a_broken_lease_and_waits_for_its_import() {
+fn test_detect_drift_refuses_a_broken_lease_and_waits_for_its_import() {
     let harness = Harness::new();
     harness.init();
     assert_eq!(harness.reconcile(&[]).exit, 0);
     harness.break_dead_holder(Operation::Reconcile);
     let observed = harness.tip(OBSERVED);
 
-    let refused = harness.invoke(&["verify", "-e", "dev", "-o", "json"]);
+    let refused = harness.invoke(&["detect-drift", "-e", "dev", "-o", "json"]);
     assert_eq!(refused.exit, 2, "{}", refused.stderr);
     assert_eq!(
         refused.report["environments"][0]["errors"][0]["code"],
@@ -1222,8 +1234,11 @@ fn test_verify_refuses_a_broken_lease_and_waits_for_its_import() {
         harness: &harness,
         recovered: Mutex::new(None),
     };
-    let waited = harness.invoke_with(&["verify", "-e", "dev", "--wait-lease", "10m", "-o", "json"], &injector);
-    let recovered = injector.recovered.lock().unwrap().take().expect("verify waited");
+    let waited = harness.invoke_with(
+        &["detect-drift", "-e", "dev", "--wait-lease", "10m", "-o", "json"],
+        &injector,
+    );
+    let recovered = injector.recovered.lock().unwrap().take().expect("detect-drift waited");
     assert_eq!(recovered.exit, 0, "{}", recovered.stderr);
     assert_eq!(waited.exit, 0, "{}", waited.stderr);
     assert!(harness.coordination_refs("").is_empty());

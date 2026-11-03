@@ -94,7 +94,7 @@ pub fn deliver(
         Holder::Run(record) => (record.run.clone(), record.runner.clone(), record.operation),
     };
     // Only a reconcile or teardown run reads hold signals: any other holder
-    // (verify, recover, a state operation) is a held lease, which the
+    // (detect-drift, attest, recover, a state operation) is a held lease, which the
     // invocation's own lease acquisition refuses or waits for.
     if action == SignalAction::Hold && !reads_signals(operation) {
         return Ok(Delivery::Direct);

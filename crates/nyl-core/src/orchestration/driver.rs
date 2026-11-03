@@ -74,11 +74,14 @@ pub enum Supported<T> {
 pub struct Capabilities {
     pub plan: bool,
     pub reconcile: bool,
-    pub verify: bool,
+    /// `nyl detect-drift` checks whether a current receipt still holds.
+    #[serde(rename = "detectDrift")]
+    pub detect_drift: bool,
     pub inspect: bool,
     pub teardown: bool,
-    /// `verify` records observations, such as Argo CD health.
-    pub observe: bool,
+    /// `nyl attest` asks the driver to attest current receipts, such as a
+    /// publication's Argo CD acceptance and health.
+    pub attest: bool,
     /// Whether the kind supports `nyl build`.
     pub build: bool,
     /// `plan` reports a change digest, so `bind: plan` is allowed.
@@ -175,13 +178,17 @@ pub struct PlanReport {
     pub blocked_by: Vec<String>,
 }
 
-/// An attestation a driver reports with its outcome or verification.
+/// An attestation a driver reports with a reconcile outcome or from `attest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AttestationOutcome {
     pub name: String,
     pub result: AttestationResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Driver-specific evidence behind the result, such as each Argo CD
+    /// Application's running publication and health; recorded unchanged.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
 }
 
 /// How a reconcile or teardown call ended.
@@ -229,14 +236,22 @@ pub enum Outcome {
     Uncertain { reason: String },
 }
 
-/// A drift verification.
+/// What a drift detection found for a current receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Verification {
+pub struct DriftDetection {
     pub drift: Drift,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub observations: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attestations: Vec<AttestationOutcome>,
+    /// Driver-specific details, recorded with the drift result unchanged.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
+}
+
+impl From<Drift> for DriftDetection {
+    fn from(drift: Drift) -> Self {
+        Self {
+            drift,
+            details: Value::Null,
+        }
+    }
 }
 
 /// The three results of the `inspect` recovery policy.
@@ -263,11 +278,12 @@ pub enum ExecStatus {
 
 /// The operation a driver call serves, as `NYL_OPERATION` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum DriverOperation {
     Plan,
     Reconcile,
-    Verify,
+    DetectDrift,
+    Attest,
     Inspect,
     Teardown,
     Fingerprint,
@@ -280,7 +296,8 @@ impl DriverOperation {
         match self {
             Self::Plan => "plan",
             Self::Reconcile => "reconcile",
-            Self::Verify => "verify",
+            Self::DetectDrift => "detect-drift",
+            Self::Attest => "attest",
             Self::Inspect => "inspect",
             Self::Teardown => "teardown",
             Self::Fingerprint => "fingerprint",
@@ -391,7 +408,7 @@ pub struct ExecutionContext<'a> {
     /// Who authors commits a driver writes, such as a publication's commit:
     /// the identity the command line resolved for state commits, with
     /// `now` as the commit time. `None` for operations that write nothing
-    /// (plan, verify); a driver that must commit without one fails before
+    /// (plan, detect-drift, attest); a driver that must commit without one fails before
     /// effects.
     pub commit_identity: Option<&'a CommitIdentity>,
     /// A cache directory of this invocation's workspace, for render caches;
@@ -548,12 +565,24 @@ pub trait Driver: Send + Sync {
     /// Plan an execution; for a `deleting` unit with teardown intent, its teardown, whose digest approvals bind.
     fn plan(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<PlanReport>>;
     fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>>;
-    fn verify(
+    /// Whether the current `receipt` still holds: `nyl detect-drift`.
+    fn detect_drift(
         &self,
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>>;
+    ) -> DriverResult<Supported<DriftDetection>>;
+    /// The attestations the kind produces for the current `receipt`:
+    /// `nyl attest`. Unsupported by default.
+    fn attest(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        receipt: &Receipt,
+    ) -> DriverResult<Supported<Vec<AttestationOutcome>>> {
+        let _ = (ctx, unit, receipt);
+        Ok(Supported::Unsupported)
+    }
     /// The `inspect` recovery policy's check; unsupported by default.
     fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
         let _ = (ctx, unit);

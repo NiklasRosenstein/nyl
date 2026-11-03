@@ -121,7 +121,7 @@ Local source paths stay relative to the directory containing `nyl.toml`, or
 worktree-rooted with `/`. Named image contexts may therefore read different
 commits and repositories in one build. Resolution records each field's commit
 and normalized path, and reads the same bytes when fingerprinting, planning,
-executing, verifying, and tearing down.
+executing, checking for drift or attesting, and tearing down.
 
 Image and infrastructure drivers declare the paths they read. Their private
 checkouts contain those paths, including declared local modules and variable
@@ -212,7 +212,7 @@ execution key alone decides: a producer recreated with a new identity and the
 same outputs leaves its consumers current, and a unit that must run again
 whenever a producer is recreated says so in its inputs, for example by
 reading an output that changes with every creation. A unit whose latest
-drift observation is `drifted` runs again too, as
+drift record is `drifted` runs again too, as
 [Recovery](/nyl/orchestration/recovery/#repairing-drift) describes.
 
 The execution key is a digest of everything that decides what the unit does:
@@ -410,13 +410,13 @@ remains in the lookup adapter and is never automatically admitted to unit tools.
 
 ## Multi-environment runs
 
-`plan`, `reconcile`, `status`, and `verify` accept repeated `-e`, a label
+`plan`, `reconcile`, `status`, `detect-drift`, and `attest` accept repeated `-e`, a label
 selector with `-l`, or an EnvironmentGroup with `-g`:
 
 ```bash
 nyl reconcile -e infra -e services
 nyl plan -l stage=production -o json
-nyl verify -g production
+nyl detect-drift -g production
 nyl reconcile -e infra -e services --unit infra/network --unit services/api
 ```
 

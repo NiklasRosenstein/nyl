@@ -92,7 +92,7 @@ removed after the driver finishes; secret values never enter execution keys.
 
 ## Verification and deletion
 
-`nyl verify` checks that the recorded digest reference still exists. A missing
+`nyl detect-drift` checks that the recorded digest reference still exists. A missing
 manifest is drift; authentication and transport failures are errors. Reconciliation
 can rebuild after drift or an interrupted execution because image builds declare
 `converge` recovery.

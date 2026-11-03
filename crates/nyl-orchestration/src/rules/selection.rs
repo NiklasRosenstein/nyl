@@ -19,7 +19,7 @@
 //!   awaits approval ([`Skipped::LocalApproval`]). Contract:
 //!   [Local runs](../../../../design/orchestration-core.md#local-runs).
 //! - A unit with a current receipt is a candidate again when
-//!   [`drift::repair`] says so: its latest drift observation of that receipt
+//!   [`drift::repair`] says so: its latest drift record of that receipt
 //!   is `drifted`, or `--reapply` names it. Under `driftRepair: manual` a
 //!   drifted unit that is not reapplied stays [`Skipped::Drifted`]. A
 //!   candidate whose execution recovery policy is `converge` is selected;
@@ -33,8 +33,8 @@ use nyl_core::orchestration::driver::{DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, Observation, ObservationType, ObservedUnit,
-    Provenance, Readiness,
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, DriftRecord, Lifecycle, ObservedUnit, Provenance,
+    Readiness,
 };
 use nyl_core::resources::environment::DriftRepair;
 
@@ -59,10 +59,10 @@ pub struct Candidates<'a> {
     pub local: Option<&'a BTreeSet<UnitName>>,
     /// Matching invocation approvals; when present these supersede legacy local names.
     pub approvals: Option<&'a BTreeMap<UnitName, ApprovalRecord>>,
-    /// The latest observations per unit and type (`nyl verify`'s drift
-    /// observations select drifted units again). Contract:
+    /// The latest drift record per unit (`nyl detect-drift`'s `drifted`
+    /// records select units again). Contract:
     /// [Drift](../../../../design/orchestration-core.md#drift).
-    pub observations: &'a BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    pub drift: &'a BTreeMap<UnitName, DriftRecord>,
     /// The environment's `driftRepair`, as rendered at S.
     pub drift_repair: DriftRepair,
     /// `nyl reconcile --unit <u>… --reapply`: the named units, to execute
@@ -118,7 +118,7 @@ pub enum Skipped {
     /// execution recovery policy is not `converge`. Reported as
     /// `awaiting-approval`.
     LocalApproval,
-    /// Current, its latest drift observation is `drifted`, and this run
+    /// Current, its latest drift record is `drifted`, and this run
     /// does not repair it (`driftRepair: manual`). Reported as `drifted`.
     /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
     Drifted,
@@ -331,13 +331,12 @@ mod tests {
     use super::*;
     use crate::rules::fixtures::*;
 
-    /// A drift observation of `desired`'s current receipt.
-    fn drift_observation(desired: &DesiredUnit, result: Drift) -> Observation {
-        Observation {
+    /// A drift record of `desired`'s current receipt.
+    fn drift_record(desired: &DesiredUnit, result: Drift) -> DriftRecord {
+        DriftRecord {
             api_version: nyl_core::orchestration::state::StateV1,
-            kind: nyl_core::orchestration::state::ObservationKind,
+            kind: nyl_core::orchestration::state::DriftRecordKind,
             unit: desired.unit.clone(),
-            observation_type: ObservationType::Drift,
             execution_key: desired.execution_key.clone().unwrap(),
             at: "2026-09-24T12:00:00Z".parse().unwrap(),
             result,
@@ -358,7 +357,7 @@ mod tests {
         attempted: BTreeSet<UnitName>,
         local: Option<BTreeSet<UnitName>>,
         approvals: Option<BTreeMap<UnitName, ApprovalRecord>>,
-        observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+        drift: BTreeMap<UnitName, DriftRecord>,
         drift_repair: DriftRepair,
         reapply: BTreeSet<UnitName>,
     }
@@ -374,7 +373,7 @@ mod tests {
                 attempted: BTreeSet::new(),
                 local: None,
                 approvals: None,
-                observations: BTreeMap::new(),
+                drift: BTreeMap::new(),
                 drift_repair: DriftRepair::default(),
                 reapply: BTreeSet::new(),
             }
@@ -389,13 +388,10 @@ mod tests {
             );
         }
 
-        /// Record a drift observation of `unit`'s current receipt.
+        /// Record a drift detection of `unit`'s current receipt.
         fn observe(&mut self, unit: &str, result: Drift) {
-            let observation = drift_observation(&self.desired[&name(unit)], result);
-            self.observations
-                .entry(name(unit))
-                .or_default()
-                .insert(ObservationType::Drift, observation);
+            let record = drift_record(&self.desired[&name(unit)], result);
+            self.drift.insert(name(unit), record);
         }
 
         fn add(&mut self, unit: &str, spec: Value) {
@@ -417,7 +413,7 @@ mod tests {
                 attempted: &self.attempted,
                 local: self.local.as_ref(),
                 approvals: self.approvals.as_ref(),
-                observations: &self.observations,
+                drift: &self.drift,
                 drift_repair: self.drift_repair,
                 reapply: &self.reapply,
             })
@@ -620,7 +616,7 @@ mod tests {
         assert!(batches(&[], 4).is_empty());
     }
 
-    /// Catches drift observations being ignored (an idempotent unit that
+    /// Catches drift records being ignored (an idempotent unit that
     /// drifted is never repaired), or a unit that is not safe to re-run
     /// executing without an approval.
     #[test]
@@ -663,11 +659,11 @@ mod tests {
         assert_eq!(skipped, BTreeMap::from([(name("converge"), Skipped::Drifted)]));
     }
 
-    /// Catches a stale observation re-running a unit: `unknown` drift, or
+    /// Catches a stale drift record re-running a unit: `unknown` drift, or
     /// `drifted` about another incarnation or another receipt, says nothing
     /// about the current receipt.
     #[test]
-    fn test_select_ignores_observations_that_do_not_say_the_current_receipt_drifted() {
+    fn test_select_ignores_drift_records_that_do_not_say_the_current_receipt_drifted() {
         let mut world = World::new();
         for unit in ["unknown", "incarnation", "key"] {
             world.current(unit, json!({"idempotent": true}));
@@ -680,20 +676,8 @@ mod tests {
         );
         world.observe("incarnation", drifted());
         world.observe("key", drifted());
-        let observations = &mut world.observations;
-        observations
-            .get_mut(&name("incarnation"))
-            .unwrap()
-            .get_mut(&ObservationType::Drift)
-            .unwrap()
-            .unit
-            .uid = Some(uid("earlier"));
-        observations
-            .get_mut(&name("key"))
-            .unwrap()
-            .get_mut(&ObservationType::Drift)
-            .unwrap()
-            .execution_key = key("earlier");
+        world.drift.get_mut(&name("incarnation")).unwrap().unit.uid = Some(uid("earlier"));
+        world.drift.get_mut(&name("key")).unwrap().execution_key = key("earlier");
         let (ready, skipped) = world.select(None);
         assert!(ready.is_empty(), "{ready:?}");
         assert!(
