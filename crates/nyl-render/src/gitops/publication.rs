@@ -1067,6 +1067,29 @@ spec:
     fn test_render_target_input_record_is_portable() {
         let (_publication, url) = publication_repository();
         let (first, second) = (project(&url), project(&url));
+        for directory in [&first, &second] {
+            let root = directory.path();
+            std::fs::create_dir(root.join("shared")).unwrap();
+            std::fs::write(root.join("shared/cluster.yaml"), "region: west\n").unwrap();
+            std::fs::write(root.join("shared/target.yaml"), "environment: dev\n").unwrap();
+            let path = root.join("nyl/platform.yaml");
+            let documents =
+                crate::yaml::parse_yaml_documents_k8s_compatible(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let documents = documents
+                .into_iter()
+                .map(|mut document| {
+                    if let Some(file) = match document["kind"].as_str() {
+                        Some("Cluster") => Some("../shared/cluster.yaml"),
+                        Some("DeploymentTarget") => Some("../shared/target.yaml"),
+                        _ => None,
+                    } {
+                        document["spec"]["valuesFrom"] = serde_json::json!([{"file":file}]);
+                    }
+                    crate::yaml::serialize_yaml_document(&document).unwrap()
+                })
+                .collect::<Vec<_>>();
+            std::fs::write(path, documents.join("---\n")).unwrap();
+        }
         let (first_cache, second_cache) = (TempDir::new().unwrap(), TempDir::new().unwrap());
         let inputs = snapshot("registry.test/web@sha256:abc");
         let one = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
@@ -1079,6 +1102,8 @@ spec:
         for key in [
             "/applications/web/release.yaml",
             "/nyl/nyl.toml",
+            "/shared/cluster.yaml",
+            "/shared/target.yaml",
             "@resource:DeploymentTarget/dev",
             "@cluster-contract-capabilities:dev",
             "@input:web/web/image",
@@ -1094,6 +1119,22 @@ spec:
         // A cached second render yields the same record.
         let again = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
         assert_eq!(again.input_record, one.input_record);
+
+        // Provenance covers file content even when the effective values stay equal.
+        std::fs::write(
+            first.path().join("shared/cluster.yaml"),
+            "# shared facts\nregion: west\n",
+        )
+        .unwrap();
+        let changed = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
+        assert_ne!(
+            changed.input_record["/shared/cluster.yaml"],
+            one.input_record["/shared/cluster.yaml"]
+        );
+        assert_eq!(
+            changed.input_record["@resource:Cluster/dev"],
+            one.input_record["@resource:Cluster/dev"]
+        );
     }
 
     /// The record's entries for files of remote sources.

@@ -23,6 +23,10 @@ example a local ApplicationGroup `spec.source.path`:
   `/applications/web`.
 - A path must stay inside the worktree and must not traverse a symbolic link.
 
+Cluster and DeploymentTarget [`spec.valuesFrom[].file`](/nyl/kubernetes-gitops/targets-and-clusters/#file-backed-values)
+paths use the resource's source directory as their relative base. Their `/`
+form uses the same Git worktree root.
+
 The two forms name the same directory only for one `nyl.toml` location, such as
 `nyl/nyl.toml` for the examples above. Relative paths move with `nyl.toml`:
 use them for Releases kept together with the configuration. Rooted paths do

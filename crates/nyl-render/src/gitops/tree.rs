@@ -636,6 +636,7 @@ async fn compile_target_tree_recording(
         cluster_path,
         argocd.cluster_path.clone(),
     ]);
+    inputs.extend(target_discovered.values_inputs.iter().cloned());
     for name in [cluster.metadata.name.as_str(), argocd.cluster.metadata.name.as_str()] {
         inputs.extend(super::resolve_cluster_contract(inventory, name)?.inputs);
     }
@@ -1101,6 +1102,9 @@ fn prepare_target_cache(
             .values()
             .filter(|resource| contract.inputs.contains(&resource.source_path))
         {
+            for path in &discovered.values_inputs {
+                recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+            }
             if let Some(GitOpsResource::Cluster(declared)) = &discovered.resource {
                 let mut declared = declared.clone();
                 declared.spec.live = None;
@@ -1111,7 +1115,7 @@ fn prepare_target_cache(
             }
         }
     }
-    record_target_control_dependencies(&mut recorder, inputs, groups)?;
+    record_target_control_dependencies(&mut recorder, inventory, inputs, groups)?;
     for prepared in groups {
         let members = prepared
             .source
@@ -1157,9 +1161,15 @@ fn prepare_target_cache(
 
 fn record_target_control_dependencies(
     recorder: &mut crate::render::cache::DependencyRecorder,
+    inventory: &GitOpsInventory,
     inputs: &TargetCacheInputs<'_>,
     groups: &[PreparedGroup],
 ) -> Result<()> {
+    if let Some(target) = inventory.get(GitOpsResourceKind::DeploymentTarget, &inputs.target.metadata.name) {
+        for path in &target.values_inputs {
+            recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+        }
+    }
     recorder.record_value("tree-render-options", &inputs.options)?;
     let mut effective_target = inputs.target.clone();
     effective_target.apply_defaults();
