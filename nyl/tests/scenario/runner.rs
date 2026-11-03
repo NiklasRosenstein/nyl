@@ -55,9 +55,10 @@ const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// The outcome keys of `expect` that name sets of units: each a
 /// `UnitResult::name` or `UnitState::name`, as `UnitReport::outcome_name`
 /// gives them.
-pub const OUTCOME_KEYS: [&str; 13] = [
+pub const OUTCOME_KEYS: [&str; 14] = [
     "executed",
     "current",
+    "ready",
     "blocked",
     "failed",
     "uncertain",
@@ -311,6 +312,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     StepOperation::Reconcile => DriverOperation::Reconcile,
                     StepOperation::DetectDrift => DriverOperation::DetectDrift,
                     StepOperation::Teardown => DriverOperation::Teardown,
+                    StepOperation::Observe => {
+                        return Err("observe steps run from M5, when the fake kinds observe".to_owned());
+                    }
                 };
                 let result = match step.outcome {
                     DriverOutcome::Succeeded => Scripted::Succeeded {
@@ -318,6 +322,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     },
                     DriverOutcome::Uncertain => Scripted::Uncertain,
                     DriverOutcome::Drifted => Scripted::Drifted,
+                    DriverOutcome::Pending => return Err("only observe steps are pending".to_owned()),
                     DriverOutcome::Failed => Scripted::Failed {
                         category: serde_json::from_value::<FailureCategory>(Value::String(
                             step.category.clone().unwrap_or_default(),
@@ -783,10 +788,11 @@ fn reads_summary(expect: &Expect) -> bool {
 }
 
 /// The outcome keys of `expect` with the sets they name, in [`OUTCOME_KEYS`] order.
-fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 13] {
+fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 14] {
     let sets = [
         &expect.executed,
         &expect.current,
+        &expect.ready,
         &expect.blocked,
         &expect.failed,
         &expect.uncertain,
@@ -805,12 +811,13 @@ fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 13] {
 /// The keys of `expect` that name a list of units in both the report and
 /// the transition summary: the expect key, the summary's and the report's
 /// key, and the expected list.
-fn list_keys(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 4] {
+fn list_keys(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 5] {
     [
         ("recovered", &expect.recovered),
         ("imported", &expect.imported),
         ("driftRepaired", &expect.drift_repaired),
         ("reapplied", &expect.reapplied),
+        ("observationsChanged", &expect.observations_changed),
     ]
 }
 
@@ -842,8 +849,9 @@ fn outcome_of(unit: &Value) -> Option<&str> {
 ///   wrote a transition commit whose `units:` block carries outcomes, the
 ///   newest such block; a state operation's actions (`hold`, `resume`)
 ///   carry none, so only its report is read.
-/// - `recovered`, `imported`, `driftRepaired`, and `reapplied` compare
-///   against the newest summary's list (`reapplied`'s `units`) and the
+/// - `recovered`, `imported`, `driftRepaired`, `reapplied`, and
+///   `observationsChanged` compare against the newest summary's list
+///   (`reapplied`'s `units`, `observationsChanged`'s units) and the
 ///   report's list of that name, missing meaning empty, in the run report
 ///   or a state operation's `details`.
 /// - `lease-broken` checks whether the newest summary records `leaseBroken`.
@@ -902,6 +910,8 @@ pub fn check_results(expect: &Expect, report: &Value, summaries: Option<&[Value]
                 newest.ok_or_else(|| format!("{key}: the step wrote no transition commit whose summary lists it"))?;
             let listed = match key {
                 "reapplied" => names(summary.pointer("/reapplied/units")),
+                // Per unit, the observations whose value changed.
+                "observationsChanged" => keys(summary.get(key)),
                 _ => names(summary.get(key)),
             };
             if listed != expected {
@@ -913,7 +923,11 @@ pub fn check_results(expect: &Expect, report: &Value, summaries: Option<&[Value]
         let reported = run_environment(report)
             .and_then(|environment| environment.get(key))
             .or_else(|| report.pointer(&format!("/details/{key}")));
-        let reported = names(reported);
+        let reported = if key == "observationsChanged" {
+            keys(reported)
+        } else {
+            names(reported)
+        };
         if reported != expected {
             return Err(format!("{key}: the report lists {reported:?} instead of {expected:?}"));
         }
@@ -1064,6 +1078,15 @@ fn summary_units(summary: &Value) -> BTreeMap<String, String> {
 }
 
 /// The unit names of a list, empty when it is absent.
+/// The keys of a map, such as the units of `observationsChanged`.
+fn keys(map: Option<&Value>) -> BTreeSet<String> {
+    map.and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 fn names(list: Option<&Value>) -> BTreeSet<String> {
     list.and_then(Value::as_array)
         .into_iter()
