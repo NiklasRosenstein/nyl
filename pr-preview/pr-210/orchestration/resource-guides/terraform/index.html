@@ -103,7 +103,7 @@ OpenTofu’s Docker provider. It includes setup, verification, and teardown.</p>
 under <code dir="auto">[units.Terraform]</code> or <code dir="auto">[units.OpenTofu]</code>; an explicit unit version wins.
 Without a pin, changing the installed tool does not force execution. Receipts
 record the executable version that ran.</p>
-<p><code dir="auto">nyl plan</code> and <code dir="auto">nyl verify</code> run native plans without the backend lock and apply
+<p><code dir="auto">nyl plan</code> and <code dir="auto">nyl detect-drift</code> run native plans without the backend lock and apply
 nothing. Plans include a digest of resource, move, import, and output changes.
 Sensitive values and known credentials are masked before summaries and digests;
 native JSON never enters the transcript. <code dir="auto">bind: plan</code> compares the reviewed

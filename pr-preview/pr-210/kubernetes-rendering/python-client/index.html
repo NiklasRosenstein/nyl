@@ -106,6 +106,8 @@ documents. It preserves the CLI’s quoted string scalars without YAML 1.1 coerc
 <p>Errors derive from <code dir="auto">NylError</code>. <code dir="auto">ExecutableNotFoundError</code>, <code dir="auto">RenderTimeoutError</code>, and
 <code dir="auto">RenderError</code> retain command arguments, stderr diagnostics, and an exit code when
 available. <code dir="auto">InvalidOutputError</code> reports parsing failures without manifest excerpts.
+Timeouts terminate Nyl and its renderer children: a process group on POSIX, or a
+process tree through Windows’ built-in <code dir="auto">taskkill</code>.
 <code dir="auto">ResourceNotFoundError</code> and <code dir="auto">AmbiguousResourceError</code> show resource identities.
 Representations omit manifest bodies, and execution errors omit stdout; stderr
 may still contain sensitive CLI diagnostics.</p>
