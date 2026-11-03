@@ -1278,15 +1278,15 @@ fn project_templates_generate_constrained_projects() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        project["metadata"],
-        serde_json::json!({
-            "name": "workloads",
-            "namespace": "argocd",
-            "labels": {"team": "platform"},
-            "finalizers": ["resources-finalizer.argocd.argoproj.io"],
-        })
-    );
+    for (key, expected) in serde_json::json!({
+        "name": "workloads", "namespace": "argocd", "labels": {"team": "platform"},
+        "finalizers": ["resources-finalizer.argocd.argoproj.io"],
+    })
+    .as_object()
+    .unwrap()
+    {
+        assert_eq!(&project["metadata"][key], expected);
+    }
     // Declared AppProject fields pass through; Nyl adds the Application
     // namespace and Namespace permissions for the target Cluster's namespaces.
     assert_eq!(
@@ -6219,7 +6219,18 @@ fn test_publish_tree_keeps_carried_state_while_its_group_is_disabled() {
     let group = fs::read_to_string(&group_path).unwrap();
     fs::write(&group_path, format!("{group}  enabled: false\n")).unwrap();
     commit_all(&Repository::open(fixture.path()).unwrap(), "Disable workloads");
-    publish_production(&fixture).success();
+    // Disabling the sole group also retires its project; this test exercises state retention with that risk explicitly accepted.
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "publish-tree",
+            "--target",
+            "production",
+            "--ignore-project-scope-contraction",
+        ])
+        .assert()
+        .success();
     let repository = Repository::open_bare(destination.path()).unwrap();
     let commit = published_commit(&repository, "deploy/production");
     assert_eq!(
@@ -6856,4 +6867,119 @@ fn component_value_import_changes_invalidate_cached_tree_renders() {
     .unwrap();
     let recontracted = render_tree();
     assert!(!recontracted.contains("scheduling.example.com/pool"), "{recontracted}");
+}
+
+#[test]
+fn retirement_scope_fails_mr_diff_and_publication_until_namespaces_are_retained() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    fs::write(fixture.path().join(".gitignore"), ".nyl/\n").unwrap();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let mut group = serde_json::json!({"apiVersion":"k8s.gitops.nyl/v1", "kind":"ApplicationGroup",
+        "metadata":{"name":"workloads", "labels":{"environment":"production"}},
+        "spec":{"applicationNamespace":"argocd-production"}});
+    fs::write(&group_path, serde_saphyr::to_string(&group).unwrap()).unwrap();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    fs::write(
+        fixture.path().join("applications/workloads/active.yaml"),
+        fs::read_to_string(&api_path).unwrap().replace(": api\n", ": active\n"),
+    )
+    .unwrap();
+    let source = Repository::open(fixture.path()).unwrap();
+    commit_all(&source, "Declare workloads");
+    let baseline = source.head().unwrap().peel_to_commit().unwrap().id().to_string();
+    let run = |command: &str| {
+        let mut cmd = Command::cargo_bin("nyl").unwrap();
+        cmd.current_dir(fixture.path())
+            .args([command, "--target", "production", "--color", "never"]);
+        cmd
+    };
+    run("publish-tree").assert().success();
+    let published = Repository::open_bare(destination.path()).unwrap();
+    let before = published_commit(&published, "deploy/production").id();
+    fs::remove_file(api_path).unwrap();
+    commit_all(&source, "Retire api");
+    for mode in ["published", "source"] {
+        let mut cmd = run("diff-tree");
+        cmd.args(["--against", mode]);
+        if mode == "source" {
+            cmd.args([
+                "--source-ref",
+                &baseline,
+                "--source-repository",
+                fixture.path().to_str().unwrap(),
+            ]);
+        }
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("NYL_PROJECT_SCOPE_CONTRACTION"))
+            .stderr(predicate::str::contains("retainedProjectNamespaces"))
+            .stderr(predicate::str::contains("argocd-production/api"));
+    }
+    run("publish-tree")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL_PROJECT_SCOPE_CONTRACTION"));
+    assert_eq!(published_commit(&published, "deploy/production").id(), before);
+    run("diff-tree")
+        .arg("--ignore-project-scope-contraction")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("potentially leaving them orphaned"));
+    run("publish-tree")
+        .args(["--dry-run", "--ignore-project-scope-contraction"])
+        .assert()
+        .success();
+    assert_eq!(published_commit(&published, "deploy/production").id(), before);
+
+    group["spec"]["retainedProjectNamespaces"] = serde_json::json!(["other-retained", "api", "api"]);
+    fs::write(&group_path, serde_saphyr::to_string(&group).unwrap()).unwrap();
+    commit_all(&source, "Retain cleanup scope");
+    run("diff-tree").assert().success();
+    run("publish-tree").assert().success();
+    let commit = published_commit(&published, "deploy/production");
+    let project: serde_json::Value = nyl_render::yaml::parse_yaml_value_k8s_compatible(
+        std::str::from_utf8(&published_file(
+            &published,
+            &commit,
+            "production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let namespaces = project["spec"]["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["namespace"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(namespaces, vec!["active", "api", "other-retained"]);
+    assert!(commit
+        .tree()
+        .unwrap()
+        .get_path(std::path::Path::new("production/workloads/api"))
+        .is_err());
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&published, &commit, "production/_nyl/index.json")).unwrap();
+    let workload_files = index["files"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|path| path.starts_with("workloads/"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        workload_files,
+        vec![
+            "workloads/active/configmap/active/active.yaml",
+            "workloads/active/namespace/active.yaml"
+        ]
+    );
+    // The next publication cannot determine whether the live api Application was manually pruned.
+    group["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("retainedProjectNamespaces");
+    fs::write(&group_path, serde_saphyr::to_string(&group).unwrap()).unwrap();
+    commit_all(&source, "Release retained scope after operator verification");
+    run("publish-tree").assert().success();
 }

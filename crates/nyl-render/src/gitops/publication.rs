@@ -370,6 +370,7 @@ pub fn prepare_target_publication(
             desired: &desired,
             index,
             options: rendered.reconcile.clone(),
+            ignore_project_scope_contraction: false,
             publication_base: rendered.publication_base.as_ref(),
             auth: &auth,
         },
@@ -455,6 +456,8 @@ pub struct TreePublication<'a> {
     /// The next ownership index; reconciliation records the file digests.
     pub index: RenderIndex,
     pub options: ReconcileOptions,
+    /// Explicitly accept cleanup scope contractions after operator review.
+    pub ignore_project_scope_contraction: bool,
     /// The branch head `fromPublication` bindings read, if any.
     pub publication_base: Option<&'a PublicationBase>,
     pub auth: &'a GitAuth,
@@ -495,6 +498,18 @@ pub fn prepare_publication(
     } else {
         checkout.path().join(request.path_prefix)
     };
+    let previous = super::reconcile::read_owned_publication(&output_root, &request.index, &request.options.release)?;
+    let previous = previous
+        .iter()
+        .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+        .collect();
+    super::project_scope::check_project_scope(
+        &previous,
+        request.desired,
+        request.path_prefix,
+        request.path_prefix,
+        request.ignore_project_scope_contraction,
+    )?;
     let index = reconcile_rendered_tree_with_options(
         &output_root,
         request.desired,

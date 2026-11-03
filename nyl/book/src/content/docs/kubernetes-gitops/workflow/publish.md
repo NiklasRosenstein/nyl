@@ -31,3 +31,12 @@ closed. Git credentials and protected-branch rules remain forge configuration.
 See [`publish-tree`](/nyl/reference/cli/publish-tree/) for all flags and the
 [security guide](/nyl/kubernetes-gitops/security/) for ownership and publication
 boundaries.
+
+## Application retirement
+
+Automatic catalog synchronization can run with manual pruning. AppProject updates
+still take effect independently of pruning, so retain cleanup scope before
+retiring Applications. `diff-tree` fails unsafe scope contractions in MR CI, and
+publication checks the same rule before committing or pushing. Follow
+[Retiring Applications safely](/nyl/kubernetes-gitops/resource-guides/application-group/#retiring-applications-safely),
+then verify live cascading deletion before releasing retained permissions.

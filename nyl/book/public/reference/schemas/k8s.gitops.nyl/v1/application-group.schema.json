@@ -406,6 +406,9 @@
               "not": {
                 "type": "null"
               }
+            },
+            "retainedProjectNamespaces": {
+              "maxItems": 0
             }
           },
           "required": [
@@ -537,6 +540,16 @@
           "$ref": "#/$defs/GitOpsReleaseCustomization",
           "default": {},
           "description": "Limits on per-release Application overrides. Releases cannot expand the generated project or namespace policy."
+        },
+        "retainedProjectNamespaces": {
+          "description": "Additional concrete namespaces whose cleanup scope the group-owned generated AppProject retains. Added to inferred or declared destinations on the target Cluster and to generated Namespace-management permissions; creates no resources and does not override deny rules or resource restrictions. Verify live cascading deletion before removing entries. Not supported with `projectRef`: retain scope in the owning AppProjectDefinition.",
+          "items": {
+            "maxLength": 63,
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+            "type": "string"
+          },
+          "type": "array"
         },
         "sharedNamespaces": {
           "additionalProperties": {

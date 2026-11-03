@@ -29,7 +29,7 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession, CATALOG_DIRECTORY,
 };
 
-const TARGET_CACHE_ACTION: &str = "target-provenance-v4";
+const TARGET_CACHE_ACTION: &str = "target-provenance-v5";
 
 /// Inputs admitted while compiling a rendered deployment tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -662,6 +662,8 @@ async fn compile_target_tree_recording(
     let mut helm_render_count = 0;
     let template_values = TemplateEngine::new().template_values();
 
+    let mut project_contexts = BTreeMap::new();
+    let mut group_sources = BTreeMap::new();
     for PreparedGroup {
         group_resource_path,
         group,
@@ -669,9 +671,18 @@ async fn compile_target_tree_recording(
         source,
     } in prepared_groups
     {
+        group_sources.insert(group.metadata.name.clone(), group_resource_path.clone());
         inputs.insert(group_resource_path.clone());
         inputs.extend(project.source_paths.iter().cloned());
         let argocd_project_name = project.name;
+        project_contexts.entry(argocd_project_name.clone()).or_insert_with(|| {
+            serde_json::json!({
+                "group": group.metadata.name, "source": group_resource_path,
+                "projectNamespace": argocd.resource.spec.namespace,
+                "cluster": cluster.metadata.name, "destination": cluster.spec.destination,
+                "generated": group.spec.project_ref.is_none(), "namespaceCreate": group.spec.namespace.create,
+            })
+        });
         match project.manifest {
             ProjectManifest::Fixed(manifest) => {
                 if emitted_projects.insert(project.catalog_id.clone()) {
@@ -891,6 +902,14 @@ async fn compile_target_tree_recording(
             annotations: workload.group.spec.annotations.clone(),
         })?;
         apply_release_application_override(&mut application, &workload.release, &workload.group)?;
+        let publication_context = serde_json::json!({
+            "group": workload.group.metadata.name,
+            "source": group_sources[&workload.group.metadata.name],
+            "projectNamespace": argocd.resource.spec.namespace,
+            "cluster": cluster.metadata.name, "destination": cluster.spec.destination,
+            "generated": workload.group.spec.project_ref.is_none(),
+        });
+        super::project_scope::annotate(&mut application, &publication_context)?;
         claim_application(
             &mut application_owners,
             &target.metadata.name,
@@ -958,6 +977,21 @@ async fn compile_target_tree_recording(
         catalog_manifests.push(application);
     }
     // The catalog uses the per-resource layout of every rendered Application.
+    for manifest in &mut catalog_manifests {
+        let project_name = if manifest["kind"] == "AppProject" {
+            manifest["metadata"]["name"].as_str()
+        } else {
+            manifest["spec"]["project"].as_str()
+        };
+        if let Some(context) = project_name.and_then(|name| project_contexts.get(name)) {
+            if manifest["metadata"]["annotations"]
+                .get(super::project_scope::CONTEXT_ANNOTATION)
+                .is_none()
+            {
+                super::project_scope::annotate(manifest, context)?;
+            }
+        }
+    }
     for (relative, bytes) in render_manifest_layout_with_provenance(&catalog_manifests, &HashMap::new())? {
         insert_file(&mut files, Path::new(CATALOG_DIRECTORY).join(relative), bytes)?;
     }
@@ -2396,6 +2430,7 @@ fn build_generated_project(
             destination: target_cluster.spec.destination.clone(),
             namespace_create: group.spec.namespace.create,
             declared_namespaces: destination_namespaces.clone(),
+            retained_namespaces: group.spec.retained_project_namespaces.iter().cloned().collect(),
         })),
         destination_namespaces,
     })
@@ -2411,6 +2446,7 @@ struct GeneratedProject {
     cluster: String,
     destination: ClusterDestination,
     namespace_create: bool,
+    retained_namespaces: BTreeSet<String>,
     /// Namespace patterns declared destinations admit on the target Cluster.
     declared_namespaces: Option<Vec<String>>,
 }
@@ -2477,10 +2513,14 @@ impl GeneratedProject {
     /// The AppProject manifest, with omitted fields derived from the group's usage.
     fn finish(&self, usage: &ProjectUsage, scopes: &ScopeResolver<'_>) -> Result<Value> {
         let mut spec = self.spec.clone();
+        let namespaces = usage
+            .namespaces
+            .union(&self.retained_namespaces)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if spec.destinations.is_none() {
             spec.destinations = Some(
-                usage
-                    .namespaces
+                namespaces
                     .iter()
                     .map(|namespace| AppProjectDestination {
                         server: self.destination.server.clone(),
@@ -2515,6 +2555,23 @@ impl GeneratedProject {
                     }
                 }
             }
+            if derive_cluster
+                && self.namespace_create
+                && !self.retained_namespaces.is_empty()
+                && !cluster_kinds
+                    .iter()
+                    .any(|pattern| pattern.group.is_empty() && pattern.kind == "Namespace")
+            {
+                cluster_kinds.extend(
+                    self.retained_namespaces
+                        .iter()
+                        .map(|namespace| AppProjectResourcePattern {
+                            group: String::new(),
+                            kind: "Namespace".to_owned(),
+                            name: Some(namespace.clone()),
+                        }),
+                );
+            }
             if derive_cluster {
                 spec.cluster_resource_whitelist = Some(cluster_kinds);
             }
@@ -2532,7 +2589,7 @@ impl GeneratedProject {
                 let namespaces = self
                     .declared_namespaces
                     .clone()
-                    .unwrap_or_else(|| usage.namespaces.iter().cloned().collect());
+                    .unwrap_or_else(|| namespaces.iter().cloned().collect());
                 for namespace in namespaces {
                     let permission = AppProjectResourcePattern {
                         group: String::new(),
@@ -2574,7 +2631,12 @@ fn generated_destinations(
             .map(|destination| destination.namespace.clone())
             .collect::<Vec<_>>()
     };
-    if let Some(namespace) = &group.spec.destination_namespace {
+    for namespace in group
+        .spec
+        .destination_namespace
+        .iter()
+        .chain(group.spec.retained_project_namespaces.iter().collect::<BTreeSet<_>>())
+    {
         if !namespace_matches_any(namespace, &target_namespaces(&destinations)) {
             destinations.push(AppProjectDestination {
                 server: cluster.server.clone(),
@@ -3453,6 +3515,7 @@ mod tests {
             },
             namespace_create: true,
             declared_namespaces: None,
+            retained_namespaces: BTreeSet::new(),
         }
     }
 
@@ -3474,6 +3537,66 @@ mod tests {
                 .iter()
                 .map(|(group, kind)| ((*group).to_owned(), (*kind).to_owned()))
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn test_retention_augments_inferred_and_declared_project_scope() {
+        let cluster = scoped_cluster();
+        let scopes = ScopeResolver::new(&cluster, []);
+        for declared in [false, true] {
+            let mut group: ApplicationGroup = serde_json::from_value(serde_json::json!({
+                "apiVersion":"k8s.gitops.nyl/v1", "kind":"ApplicationGroup", "metadata":{"name":"web"},
+                "spec":{"applicationNamespace":"argocd", "retainedProjectNamespaces":["retired", "retired"]}
+            }))
+            .unwrap();
+            if declared {
+                group.spec.project_template = Some(AppProjectTemplate {
+                    destinations: Some(vec![AppProjectDestination {
+                        server: cluster.spec.destination.server.clone(),
+                        name: None,
+                        namespace: "web".into(),
+                    }]),
+                    cluster_resource_whitelist: Some(vec![]),
+                    ..Default::default()
+                });
+            }
+            let argocd: ArgoCDInstance = serde_json::from_value(serde_json::json!({
+                "apiVersion":"k8s.gitops.nyl/v1", "kind":"ArgoCDInstance", "metadata":{"name":"control"},
+                "spec":{"clusterRef":{"name":"production"}, "namespace":"argocd"}
+            }))
+            .unwrap();
+            let repository = InlineGitRepository {
+                repo_url: "https://repo".into(),
+                publish_url: None,
+            };
+            let effective = build_generated_project(&group, &repository, &cluster, &argocd).unwrap();
+            let ProjectManifest::Generated(generated) = effective.manifest else {
+                panic!("expected generated project")
+            };
+            let manifest = generated.finish(&usage(&[("", "ConfigMap")]), &scopes).unwrap();
+            let namespaces = manifest["spec"]["destinations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["namespace"].as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(namespaces, BTreeSet::from(["web", "retired"]));
+            assert_eq!(manifest["spec"]["destinations"].as_array().unwrap().len(), 2);
+            assert!(manifest["spec"]["clusterResourceWhitelist"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["kind"] == "Namespace" && p["name"] == "retired"));
+            group.spec.retained_project_namespaces.clear();
+            let ProjectManifest::Generated(empty) = build_generated_project(&group, &repository, &cluster, &argocd)
+                .unwrap()
+                .manifest
+            else {
+                panic!("expected generated project")
+            };
+            let empty_manifest = empty.finish(&usage(&[("", "ConfigMap")]), &scopes).unwrap();
+            assert_eq!(empty_manifest["spec"]["destinations"].as_array().unwrap().len(), 1);
         }
     }
 

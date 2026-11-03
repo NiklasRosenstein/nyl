@@ -26,6 +26,8 @@ pub struct PublishTreeArgs {
     pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+    #[command(flatten)]
+    pub project_scope: nyl_render::gitops::project_scope::ProjectScopeArgs,
 
     #[command(flatten)]
     pub progress: TreeProgressArgs,
@@ -294,6 +296,7 @@ fn publish_compiled(
                 source_dirty,
             )?,
             options: compiled.reconcile_options(false),
+            ignore_project_scope_contraction: args.project_scope.ignore_project_scope_contraction,
             publication_base: compiled.publication_base.as_ref(),
             auth: &auth,
         },

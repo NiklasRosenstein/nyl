@@ -192,3 +192,73 @@ source coordinates and commit locks must remain statically parseable for
 - [Project structure and discovery](/nyl/kubernetes-gitops/project-structure/)
 - [Targets and cluster variation](/nyl/kubernetes-gitops/targets-and-clusters/)
 - [Trust and admission boundaries](/nyl/kubernetes-gitops/security/)
+
+## Retiring Applications safely
+
+Argo CD synchronizes AppProject permissions independently of Application pruning.
+Disabling automatic catalog pruning does not preserve those permissions. During
+cascading deletion, Argo CD skips managed resources outside the Application's
+current AppProject scope, which can leave resources orphaned even with a deletion
+finalizer. This filtering happens in
+[`getPermittedAppLiveObjects()` and `finalizeApplicationDeletion()`](https://github.com/argoproj/argo-cd/blob/master/controller/appcontroller.go).
+
+Keep cleanup namespaces in the group-owned generated project with one additive setting:
+
+```yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata:
+  name: workloads
+spec:
+  applicationNamespace: argocd
+  retainedProjectNamespaces:
+    - retired-service
+```
+
+`retainedProjectNamespaces` defaults to `[]`. It adds concrete Kubernetes namespace
+names to the existing inferred or explicit destinations on the target Cluster.
+Duplicates are removed deterministically. It participates in the existing generated
+Namespace-management permissions when namespace creation is enabled, and creates no
+Namespace, Release, or Application. Wildcards and invalid namespace names are rejected.
+The setting keeps project inference enabled and needs no complete `projectTemplate`.
+With `projectRef`, retain scope in the owning AppProjectDefinition instead; the
+retention setting is rejected for independently managed and external projects.
+
+Retention does not override explicit destination denies, resource blacklists, or
+other restrictions. If retiring a workload also removes the last inferred permission
+for one of its resource kinds, keep that permission explicitly in
+`projectTemplate.namespaceResourceWhitelist` or `clusterResourceWhitelist` as
+appropriate. Explicit whitelist fields retain their usual meaning: declare the full
+set the project needs. A change of cluster or project identity can also require
+retaining the original destination or project declaration.
+
+`diff-tree` and `publish-tree` fail with `NYL_PROJECT_SCOPE_CONTRACTION` when their
+baseline contains a cascading Application whose retiring resources lose effective
+project permission. The check uses target-owned catalog sources and rendered resources,
+including additional namespaces and Namespace objects. Equivalent wildcard permission
+is sufficient. Applications configured for orphan deletion do not require cascading
+cleanup. External project permissions absent from the catalog and live Argo CD
+cluster registration are outside the published snapshots the guard evaluates.
+
+For automatic catalog synchronization with manual Application pruning:
+
+1. Remove or replace the Application in source. Run `diff-tree` in MR CI to detect
+   simultaneous cleanup permission contractions.
+2. Add each reported namespace to `retainedProjectNamespaces`, preserving existing
+   entries, and retain any additional project permissions the diagnostic identifies.
+3. Publish. Let Argo CD synchronize the catalog and project permissions.
+4. Manually prune the retiring Application from the catalog, then complete any
+   required resource deletion confirmations.
+5. Verify live cascading deletion has completed before removing retention entries
+   and publishing the narrower project.
+
+**This is a publication-transition check, not confirmation of live deletion.** Once
+an Application is absent from the comparison baseline, the guard cannot establish
+whether its live deletion has completed. A successful publication does not prove
+there are no orphaned resources. Operators own that verification. Retained storage
+remains governed by its reclaim and deletion policies.
+
+The check needs no live Kubernetes access and keeps no durable retirement state.
+It does not change automatic pruning, finalizers, or deletion policies. For a
+reviewed exception, both commands accept `--ignore-project-scope-contraction` and
+print the findings as a warning; baseline integrity errors still fail.

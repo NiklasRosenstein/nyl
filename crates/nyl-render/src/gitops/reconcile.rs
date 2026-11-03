@@ -371,6 +371,51 @@ fn load_index(path: &Path) -> Result<Option<RenderIndex>> {
     parse_index(&fs::read(path)?, &path.display().to_string()).map(Some)
 }
 
+/// Read and verify the owned bytes of a publication baseline before mutation.
+/// An absent index denotes a first publication; malformed or modified baselines fail.
+pub fn read_owned_publication(
+    output_root: &Path,
+    expected: &RenderIndex,
+    released: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    validate_rendered_tree_owner(output_root, expected)?;
+    let Some(index) = load_index(&output_root.join(DEFAULT_INDEX_PATH))? else {
+        return Ok(BTreeMap::new());
+    };
+    read_indexed_files(output_root, &index, released)
+}
+
+/// Read and verify index-owned files, excluding state paths released from ownership.
+pub fn read_indexed_files(
+    output_root: &Path,
+    index: &RenderIndex,
+    released: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    for (relative, digest) in &index.files {
+        if released.contains(Path::new(relative)) {
+            continue;
+        }
+        nyl_core::resources::validate_relative_path("published owned path", relative, false, false)?;
+        let path = output_root.join(relative);
+        reject_symlink_components(output_root, &path)?;
+        let bytes = fs::read(&path).map_err(|error| {
+            NylError::config(format!(
+                "Published owned file {} is missing or unreadable: {error}",
+                path.display()
+            ))
+        })?;
+        if sha256_hex(&bytes) != *digest {
+            return Err(NylError::config(format!(
+                "Published owned file {} does not match its ownership index",
+                path.display()
+            )));
+        }
+        files.insert(PathBuf::from(relative), bytes);
+    }
+    Ok(files)
+}
+
 /// Parse and version-check ownership index bytes read from `origin`.
 pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
     let index: RenderIndex = serde_json::from_slice(bytes)

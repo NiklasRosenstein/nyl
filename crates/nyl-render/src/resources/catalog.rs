@@ -249,6 +249,12 @@ pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
 }
 
 pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties["retainedProjectNamespaces"]["items"] = json!({
+            "type": "string", "minLength": 1, "maxLength": 63,
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        });
+    }
     exclusive_fields(
         schema,
         &[
@@ -263,6 +269,7 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
         ],
         Some("Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders."),
     );
+    schema.get_mut("oneOf").unwrap()[0]["properties"]["retainedProjectNamespaces"] = json!({"maxItems": 0});
 }
 
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {

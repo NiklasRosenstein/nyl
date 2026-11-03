@@ -91,6 +91,20 @@ their line numbers and blob hashes refer to that content, not the stored files.
 nyl diff-tree --target production --raw --output rendered.diff
 ```
 
+## Cleanup permission guard
+
+Both published and source comparisons fail with `NYL_PROJECT_SCOPE_CONTRACTION`
+when retiring Applications or resources lose AppProject cleanup permissions. This
+runs over the complete target before catalog or Application view filtering, and
+fails independently of `--fail-on-diff`, so MR CI catches unsafe retirement.
+Use `--ignore-project-scope-contraction` to continue with a warning after reviewing
+the findings. Invalid or unreadable baselines still fail.
+
+The diagnostic identifies the affected Applications, group, project, cluster,
+namespace, and required additive retention or additional project permissions.
+See [Retiring Applications safely](/nyl/kubernetes-gitops/resource-guides/application-group/#retiring-applications-safely)
+for the operator workflow and the limit of comparing publication snapshots.
+
 ## Statistics and report exports
 
 The combined report includes validation results, comparison context, file and

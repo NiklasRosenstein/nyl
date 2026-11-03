@@ -2,9 +2,9 @@
   "cluster": "prod-eu-1",
   "dirty": true,
   "files": {
-    "_nyl/catalog/application.argoproj.io/argocd-production/api.yaml": "d3c8e5952a97d33d1afc320735976daf5a0501804b3c05721628244f75175879",
+    "_nyl/catalog/application.argoproj.io/argocd-production/api.yaml": "dfc477034be7be79b6c4c3b7bbf3c384d7377b9b2454e4ddef303865912682e5",
     "_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml": "3b21c37f389ff88515de5b5235f91494af801d11fb185b047b2bfaf696e2e0a1",
-    "_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml": "a27cc790b3900f7d0b4f1c14f16870c2ced56393d43d5e1e5cea7cade4d5657c",
+    "_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml": "2154b727f6d01d343dc52990053cefb5932cff90dc940c66a1ac0e33a31a48d5",
     "workloads/api/configmap/api/api.yaml": "9552e4dea7ac0110e5b82b09caaa2068ecae10b1cb5d089fa498e95e8827aa9a",
     "workloads/api/namespace/api.yaml": "f1ee8b63eb7ebc52e935178fcee6fb8c08c8f71bd2df9afa10f8534138cd8882"
   },
