@@ -155,7 +155,7 @@ same commit; detect drift again to check the new receipt. See
 attests for its spec, such as a <a href="/nyl/pr-preview/pr-207/orchestration/resource-guides/command/">Command unit</a>
 with an <code dir="auto">attest</code> step, in a checkout of the commit the unit executed, as
 <code dir="auto">detect-drift</code> does. It records each result as an attestation of the
-receipt under <code dir="auto">observed/units/&#x3C;unit>/attestations/&#x3C;name>.yaml</code>, with
+receipt under its name in <code dir="auto">observed/units/&#x3C;unit>/attestations.yaml</code>, with
 <code dir="auto">source: {driver: attest}</code> and the driver’s details, in one commit to the
 observed state ref; an attestation that only its time changed keeps the
 stored one, so a repeated <code dir="auto">attest</code> writes nothing. Units whose kind does not
