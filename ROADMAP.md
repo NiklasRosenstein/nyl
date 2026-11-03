@@ -164,7 +164,7 @@ Each built-in unit kind lives in one module of the `nyl-units` crate: its declar
 | Interfaces | One CLI and machine interface over the same operations and observations |
 
 Drivers are Rust implementations behind one internal trait with advertised
-capabilities (plan, reconcile, verify, inspect, teardown). The command unit is
+capabilities (plan, reconcile, detect drift, attest, inspect, teardown). The command unit is
 the extension point for tools without a dedicated driver. Every type crossing
 the trait is serializable, so plugin drivers (executables with their own unit
 API group, speaking a versioned JSON protocol) remain possible; the protocol
