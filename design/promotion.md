@@ -622,8 +622,8 @@ source target runs.
 
 Evidence beyond a receipt is an attestation: a named pass or
 fail result about one unit's current receipt, or about an environment's
-recorded state. It is recorded at `observed/units/<unit>/attestations/<name>.yaml`
-or `observed/attestations/<name>.yaml` with its result, time, details, and
+recorded state. It is recorded under its name in `observed/units/<unit>/attestations.yaml`
+or `observed/attestations.yaml` with its result, time, details, and
 source. The unit's driver, not Nyl's core, knows how its health is observed,
 so every source writes the same record:
 
@@ -648,7 +648,7 @@ so every source writes the same record:
   the scope does not declare, so a typo cannot create evidence nobody
   requires. The attester is recorded like an approver, through the same
   identity and approval sources. `nyl attest --target <name>` writes to a
-  non-orchestrated target's `_nyl/attestations/`. Without `--name`,
+  non-orchestrated target's `_nyl/attestations.yaml`. Without `--name`,
   `nyl attest` asks the drivers instead (see the orchestration core
   contract's [Attestations](orchestration-core.md#attestations)); that form
   is implemented, the external form is not yet.
@@ -679,12 +679,12 @@ same model and is not in the initial scope.
   publication units record into its observed state. A target without an
   environment records into its own publication branch:
   `nyl attest --target <name>` writes the target's `accepted` and `healthy`
-  under `<prefix>/_nyl/attestations/`, whose details list each
+  in `<prefix>/_nyl/attestations.yaml`, whose details list each
   Application's running revision, matched publication, and health.
   - It commits only when that content changes or the previous attestation is
     older than a refresh interval, which keeps `maxAttestationAge` satisfiable
     without a commit per run.
-  - `_nyl/attestations/` is a reserved path: never rendered, never removed by a
+  - `_nyl/attestations.yaml` is a reserved path: never rendered, never removed by a
     publish, and neither owned nor unowned for reconciliation; a teardown of
     the target removes it. No Argo CD Application sources it, and attest and
     publish commits touch disjoint files, so the branch's retry rule covers

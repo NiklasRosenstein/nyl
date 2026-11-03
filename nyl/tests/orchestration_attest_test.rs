@@ -82,9 +82,11 @@ fn test_attest_records_driver_attestations_of_current_receipts() {
         unit(&attested.report, "plain").is_null(),
         "a unit that cannot attest is left out"
     );
-    let record = harness
-        .shell
-        .show(OBSERVED, "observed/units/svc/attestations/smoke.yaml");
+    let record = harness.shell.show(OBSERVED, "observed/units/svc/attestations.yaml");
+    assert!(
+        record.contains("kind: AttestationRecord") && record.contains("smoke:"),
+        "{record}"
+    );
     assert!(record.contains("driver: attest"), "{record}");
     assert!(harness.shell.message(OBSERVED).starts_with("nyl: attest dev"));
 

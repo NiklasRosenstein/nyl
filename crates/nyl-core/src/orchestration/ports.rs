@@ -129,7 +129,7 @@ pub struct EnvironmentSnapshot {
     /// as `nyl detect-drift` writes it. Contract: [Drift](../../../../design/orchestration-core.md#drift).
     pub drift: BTreeMap<UnitName, DriftRecord>,
     /// Driver attestations by unit and name
-    /// (`observed/units/<unit>/attestations/<name>.yaml`).
+    /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 

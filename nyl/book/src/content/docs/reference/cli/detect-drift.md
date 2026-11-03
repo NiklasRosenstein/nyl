@@ -92,7 +92,7 @@ nyl attest -e prod --wait-lease 10m -o json
 attests for its spec, such as a [Command unit](/nyl/orchestration/resource-guides/command/)
 with an `attest` step, in a checkout of the commit the unit executed, as
 `detect-drift` does. It records each result as an attestation of the
-receipt under `observed/units/<unit>/attestations/<name>.yaml`, with
+receipt under its name in `observed/units/<unit>/attestations.yaml`, with
 `source: {driver: attest}` and the driver's details, in one commit to the
 observed state ref; an attestation that only its time changed keeps the
 stored one, so a repeated `attest` writes nothing. Units whose kind does not

@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
+    ArtifactDocument, AttestationRecord, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
     StateRecord,
 };
 use serde::de::DeserializeOwned;
@@ -185,12 +185,17 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
-            "attestation.v1.yaml",
+            "attestation-record.v1.yaml",
             json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "healthy",
+                "apiVersion": "gitops.nyl/v1", "kind": "AttestationRecord",
                 "unit": {"environment": "dev", "name": "kubernetes", "uid": UID},
-                "executionKey": KEY, "result": "pass", "at": "2026-09-25T16:40:00Z",
-                "source": {"driver": "attest"}, "reason": null
+                "attestations": {
+                    "accepted": {"executionKey": KEY, "result": "pass", "at": "2026-09-25T16:40:00Z",
+                                 "source": {"driver": "attest"}, "reason": null},
+                    "healthy": {"executionKey": KEY, "result": "fail", "at": "2026-09-25T16:40:00Z",
+                                "source": {"driver": "attest"}, "reason": "Degraded",
+                                "details": {"applications": {"web": {"health": "Degraded"}}}}
+                }
             }),
         ),
         (
@@ -266,7 +271,7 @@ fn render(name: &str, sample: &Value) -> String {
         "ObservedUnit" => typed::<ObservedUnit>(name, sample),
         "ContainerImage" => typed::<ArtifactDocument>(name, sample),
         "DriftRecord" => typed::<DriftRecord>(name, sample),
-        "Attestation" => typed::<Attestation>(name, sample),
+        "AttestationRecord" => typed::<AttestationRecord>(name, sample),
         "Lease" => typed::<Lease>(name, sample),
         "Run" => typed::<Run>(name, sample),
         "Signal" => typed::<Signal>(name, sample),

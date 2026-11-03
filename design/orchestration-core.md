@@ -1206,8 +1206,8 @@ observed/
   units/<unit>/artifacts/<name>.yaml         # artifacts of the latest receipt
   units/<unit>/drift.yaml                    # latest drift detection of the current receipt
   units/<unit>/observations.yaml             # latest observed values of the current receipt
-  units/<unit>/attestations/<name>.yaml      # latest attestation per name for the current receipt
-  attestations/<name>.yaml                   # environment-wide attestations for the current state
+  units/<unit>/attestations.yaml             # latest attestation per name for the current receipt
+  attestations.yaml                          # environment-wide attestations for the current state
 ```
 
 With separate refs, `desired/` exists only on the desired ref and `observed/`
@@ -1217,7 +1217,7 @@ names another.
 
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
-`ObservedUnit`, `DriftRecord`, `Attestation`, `Lease`, `Run`, and `Signal`, plus
+`ObservedUnit`, `DriftRecord`, `ObservationRecord`, `AttestationRecord`, `Lease`, `Run`, and `Signal`, plus
 `DeploymentAdmission` from M8; artifacts use their own
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
@@ -1238,7 +1238,7 @@ files cover every version, and a reader rejects a version it does not know.
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
 | `DriftRecord` | `observed/units/<unit>/drift.yaml` | `unit`, `executionKey`, `at`, `result` (`clean`, `drifted` with a summary, or `unknown` with a reason), driver-specific `details` (see [Drift](#drift)) |
 | `ObservationRecord` | `observed/units/<unit>/observations.yaml` | `unit`, `executionKey`, `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
-| `Attestation` | `observed/units/<unit>/attestations/<name>.yaml`, `observed/attestations/<name>.yaml` | See [Attestations](#attestations) |
+| `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml` | The latest attestation per name of one scope; see [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
 | `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
 | `Signal` | the signal ref | `run`, `unit`, `action` (`confirm-removed` or `hold`), `phase1Commit` (for `confirm-removed`), `by`, `identity`, `reason`, `at`, `from` |
@@ -1247,6 +1247,8 @@ Each unit has one desired file and at most one observed file, holding only the
 latest state. Earlier states exist in Git history, which is enough for audit
 and promotion: a consumer cites a producer's receipt by execution key and the
 observed commit that holds it, and promotion walks the history of one file.
+A unit's drift record and attestations are one file each too, keyed by name
+where several exist; `git blame` shows when each entry last changed.
 
 ### Desired unit
 
@@ -1389,16 +1391,18 @@ condition: null
 ### Attestations
 
 ```yaml
+# observed/units/kubernetes/attestations.yaml
 apiVersion: gitops.nyl/v1
-kind: Attestation
-name: healthy
-unit: {environment: dev, name: kubernetes, uid: 91c3…}   # absent for environment-wide attestations
-executionKey: sha256:…                # the receipt attested; environment-wide: the desired commit of the state
-result: pass                          # pass | fail
-at: 2026-09-25T16:40:00Z
-source: {driver: attest}              # or {driver: reconcile}, or {external: {by: alice, source: …, url: …}}
-reason: null
-details: {}                           # driver-specific, such as each Application's running publication
+kind: AttestationRecord
+unit: {environment: dev, name: kubernetes, uid: 91c3…}   # absent in observed/attestations.yaml
+attestations:
+  healthy:
+    executionKey: sha256:…            # the receipt attested; environment-wide: the desired commit of the state
+    result: pass                      # pass | fail
+    at: 2026-09-25T16:40:00Z
+    source: {driver: attest}          # or {driver: reconcile}, or {external: {by: alice, source: …, url: …}}
+    reason: null
+    details: {}                       # driver-specific, such as each Application's running publication
 ```
 
 - Drivers report the attestations a unit declares from its resolved spec,
