@@ -24,9 +24,9 @@ use std::path::{Component, Path, PathBuf};
 
 use super::spec::{CommandSpec, KIND_COMMAND};
 use nyl_core::orchestration::driver::{
-    AttestationOutcome, Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult,
-    ExecStatus, ExecutionContext, Inspection, KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport,
-    RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner,
+    AttestationCheck, AttestationOutcome, Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation,
+    DriverResult, ExecStatus, ExecutionContext, Inspection, KeyInputs, LocalPathField, Outcome, OwnershipScope,
+    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{
@@ -675,7 +675,7 @@ impl Driver for CommandDriver {
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         _receipt: &Receipt,
-    ) -> DriverResult<Supported<Vec<AttestationOutcome>>> {
+    ) -> DriverResult<Supported<AttestationCheck>> {
         let spec = resolved(unit)?;
         let Some(argv) = &spec.attest else {
             return Ok(Supported::Unsupported);
@@ -687,13 +687,14 @@ impl Driver for CommandDriver {
             outputs: false,
         };
         let ran = run(&execution_context(ctx, true), &spec, &step)?;
-        match &ran.exit {
-            ToolExit::Exited { code: 0, .. } => Ok(Supported::Supported(read_attestations(
-                &spec,
-                ran.prepared.attestations.as_deref(),
-            ))),
-            other => Err(DriverError::before_effects(format!("attest {}", step_failure(other)))),
-        }
+        Ok(Supported::Supported(match &ran.exit {
+            ToolExit::Exited { code: 0, .. } => AttestationCheck::Attested {
+                outcomes: read_attestations(&spec, ran.prepared.attestations.as_deref()),
+            },
+            other => AttestationCheck::Unknown {
+                reason: format!("attest {}", step_failure(other)),
+            },
+        }))
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {

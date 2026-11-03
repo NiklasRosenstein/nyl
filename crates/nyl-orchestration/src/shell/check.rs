@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{AttestationOutcome, DriftDetection, DriverSet, ExecutionContext, Supported};
+use nyl_core::orchestration::driver::{AttestationCheck, DriftDetection, DriverSet, ExecutionContext, Supported};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, TransitionChanges};
 use nyl_core::orchestration::state::{Attestation, DriftRecord, StateLocation};
@@ -484,7 +484,7 @@ fn check_unit(
                 Supported::Unsupported => Supported::Unsupported,
             }),
         Check::Attest => driver.attest(&ctx, unit, receipt).map(|supported| match supported {
-            Supported::Supported(outcomes) => Supported::Supported(Found::Attestations(outcomes)),
+            Supported::Supported(check) => Supported::Supported(Found::Attestations(check)),
             Supported::Unsupported => Supported::Unsupported,
         }),
     };
@@ -522,7 +522,14 @@ fn check_unit(
                 error: None,
             }
         }
-        Ok(Supported::Supported(Found::Attestations(outcomes))) => {
+        Ok(Supported::Supported(Found::Attestations(AttestationCheck::Unknown { reason }))) => Checked {
+            name: name.clone(),
+            records: None,
+            result: CheckResult::Unknown { reason: reason.clone() }.into(),
+            message: Some(reason),
+            error: None,
+        },
+        Ok(Supported::Supported(Found::Attestations(AttestationCheck::Attested { outcomes }))) => {
             let set = settle_attestations(
                 attestations(environment, unit, receipt, &outcomes, now),
                 snapshot.attestations.get(name),
@@ -553,7 +560,7 @@ fn check_unit(
 /// What a driver's check returned.
 enum Found {
     Drift(DriftDetection),
-    Attestations(Vec<AttestationOutcome>),
+    Attestations(AttestationCheck),
 }
 
 /// One unit report per planned unit, with its check result and warnings.

@@ -2607,7 +2607,7 @@ trait Driver {
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
     fn detect_drift(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<DriftDetection>>; // `nyl detect-drift`
-    fn attest(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Vec<AttestationOutcome>>>; // `nyl attest`; default Unsupported
+    fn attest(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<AttestationCheck>>; // `nyl attest`; default Unsupported
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
     fn teardown_settings(&self, unit: &DesiredUnit) -> Result<Supported<TeardownSettings>>; // readiness from the stored document; default Unsupported
@@ -2644,6 +2644,7 @@ enum Outcome {
 | `Outputs` | A JSON object of declared, non-sensitive outputs; Nyl validates it against the declarations and drops the rest before recording |
 | `Artifact` | An artifact document without `metadata.unit` and `executionKey`, which Nyl fills in |
 | `DriftDetection` | `drift`: `clean`, `drifted` with a summary, or `unknown` with a reason; driver-specific `details`, recorded unchanged |
+| `AttestationCheck` | `Attested { outcomes }`, or `Unknown { reason }` when the driver could not tell, such as an attest step that failed; an unknown check records nothing |
 | `AttestationOutcome` | `name`, `result` (`pass` or `fail`), an optional `reason`, and driver-specific `details` recorded unchanged, such as each Application's running publication and health |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
 | `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
@@ -2841,8 +2842,11 @@ spec:
   `NYL_ATTESTATIONS` as one JSON object of `pass` or `fail` per name; a
   declared name it leaves out stays pending, and undeclared names are
   ignored. `attest` gives the kind the `attest` capability and requires an
-  attestation without `from: external`; an `attest` step that does not exit
-  0 is a driver error that records nothing.
+  attestation without `from: external`. An `attest` step that does not exit
+  0 could not tell: the unit is `unknown` (`NYL-ATTEST-UNKNOWN`, exit 2) and
+  nothing is recorded, as `detectDrift` reports `unknown` for an exit other
+  than 0 or 2. Driver errors (exit 1) stay Nyl-side problems, such as a
+  checkout that failed.
 - There is no sandbox beyond the working directory and the environment; the
   command runs with the runner's permissions. Isolation such as containers is
   an M7 decision.
@@ -3062,7 +3066,7 @@ The table applies to each command as follows:
 | `reconcile`, `teardown` | As the table | As the table | As the table | As the table | As the table |
 | `plan` | The plan is complete, whatever changes it shows | Error, or `--fail-on-leaving` with a unit leaving | Incomplete: a unit is blocked, so its change cannot be planned | A driver's planning failed | — |
 | `detect-drift` | Every checked unit is clean | Error, including a check that passed its unit's deadline | A unit could not be checked: no current receipt, a kind that cannot detect drift, or `unknown` drift | Drift | — |
-| `attest` | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline or an attest step that failed | A unit could not be attested: no current receipt, or `--unit` named a unit whose kind does not attest | A failing attestation | — |
+| `attest` | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline | A unit could not be attested: no current receipt, `--unit` named a unit whose kind does not attest, or the driver could not tell (`unknown`) | A failing attestation | — |
 | `status` | Every unit is current | Error | As the table | A unit has a `failed` condition | A unit is `uncertain`, or a run lost its lease |
 | `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
 | `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |

@@ -460,9 +460,11 @@ fn test_detect_drift_maps_exit_codes_to_drift() {
 }
 
 /// Catches the attest step's results being lost, an undeclared name being
-/// recorded, or a failing step being taken as a set of attestations.
+/// recorded, or a failing step being taken as a set of attestations or as
+/// a Nyl-side error.
 #[test]
 fn test_attest_reads_declared_results_of_the_attest_step() {
+    use nyl_core::orchestration::driver::AttestationCheck;
     use nyl_core::orchestration::state::AttestationResult;
     let world = World::new();
     let tools = ProcessRunner::new();
@@ -474,14 +476,20 @@ fn test_attest_reads_declared_results_of_the_attest_step() {
         "nyl/smoke.sh",
         "test \"$NYL_OPERATION\" = attest\necho '{\"smoke\": \"fail\", \"other\": \"pass\"}' > \"$NYL_ATTESTATIONS\"",
     );
-    let Supported::Supported(outcomes) = CommandDriver.attest(&ctx, &unit, &receipt()).unwrap() else {
+    let Supported::Supported(AttestationCheck::Attested { outcomes }) =
+        CommandDriver.attest(&ctx, &unit, &receipt()).unwrap()
+    else {
         panic!("attest is supported with an attest step");
     };
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     assert_eq!(outcomes[0].name, "smoke");
     assert_eq!(outcomes[0].result, AttestationResult::Fail);
+    // A failing step could not tell: unknown, not a Nyl-side error.
     world.script("nyl/smoke.sh", "exit 1");
-    assert!(CommandDriver.attest(&ctx, &unit, &receipt()).is_err());
+    assert!(matches!(
+        CommandDriver.attest(&ctx, &unit, &receipt()).unwrap(),
+        Supported::Supported(AttestationCheck::Unknown { .. })
+    ));
     let without = desired(json!({"command": ["./run.sh"]}));
     assert_eq!(
         CommandDriver.attest(&ctx, &without, &receipt()).unwrap(),

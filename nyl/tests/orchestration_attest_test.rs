@@ -68,7 +68,8 @@ fn unit<'a>(report: &'a Value, name: &str) -> &'a Value {
 
 /// Catches attestations not reaching state, a unit that cannot attest
 /// making every `attest` incomplete, a repeated `attest` writing a commit
-/// only because time moved on, and a failing attestation passing CI.
+/// only because time moved on, a failing attestation passing CI, and a
+/// failing attest step being taken as an error or erasing recorded results.
 #[test]
 fn test_attest_records_driver_attestations_of_current_receipts() {
     let harness = Harness::reconciled();
@@ -96,6 +97,16 @@ fn test_attest_records_driver_attestations_of_current_receipts() {
     assert_eq!(failing.exit, 3, "{}", failing.stderr);
     assert_eq!(unit(&failing.report, "svc")["attestations"]["smoke"], "fail");
     assert!(failing.stderr.contains("NYL-ATTESTATION-FAILED"), "{}", failing.stderr);
+
+    // A step that cannot produce results is unknown: exit 2, and the
+    // recorded attestation of the receipt stays.
+    let tip = harness.shell.tip(OBSERVED);
+    std::fs::remove_file(harness.results.path().join("smoke.json")).unwrap();
+    let unknown = harness.shell.invoke(&["attest", "-e", "dev", "-o", "json"]);
+    assert_eq!(unknown.exit, 2, "{}", unknown.stderr);
+    assert_eq!(unit(&unknown.report, "svc")["check"], "unknown");
+    assert!(unknown.stderr.contains("NYL-ATTEST-UNKNOWN"), "{}", unknown.stderr);
+    assert_eq!(harness.shell.tip(OBSERVED), tip, "an unknown result records nothing");
 
     let named = harness
         .shell

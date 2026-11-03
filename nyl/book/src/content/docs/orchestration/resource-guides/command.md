@@ -190,7 +190,8 @@ command deployed. It writes one JSON object of `pass` or `fail` per declared
 name to `NYL_ATTESTATIONS`, such as `{"smoke": "pass"}`; a declared name it
 leaves out stays pending, and undeclared names are ignored. The `command`
 step can write the same file when the reconcile itself proves the result. An
-`attest` step that does not exit 0 records nothing.
+`attest` step that does not exit 0 makes the unit `unknown` and records
+nothing.
 
 ## See also
 

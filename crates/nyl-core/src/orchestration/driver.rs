@@ -245,6 +245,16 @@ pub struct DriftDetection {
     pub details: Value,
 }
 
+/// What an attestation check found for a current receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "attestation", rename_all = "kebab-case")]
+pub enum AttestationCheck {
+    /// The driver attested the receipt; a declared name it left out stays pending.
+    Attested { outcomes: Vec<AttestationOutcome> },
+    /// The driver could not tell, such as an attest step that failed; nothing is recorded.
+    Unknown { reason: String },
+}
+
 impl From<Drift> for DriftDetection {
     fn from(drift: Drift) -> Self {
         Self {
@@ -579,7 +589,7 @@ pub trait Driver: Send + Sync {
         ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         receipt: &Receipt,
-    ) -> DriverResult<Supported<Vec<AttestationOutcome>>> {
+    ) -> DriverResult<Supported<AttestationCheck>> {
         let _ = (ctx, unit, receipt);
         Ok(Supported::Unsupported)
     }

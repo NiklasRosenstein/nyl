@@ -97,8 +97,9 @@ receipt under `observed/units/<unit>/attestations/<name>.yaml`, with
 observed state ref; an attestation that only its time changed keeps the
 stored one, so a repeated `attest` writes nothing. Units whose kind does not
 attest are left out of the report; one named with `--unit` is reported
-`unsupported`. An attest step that fails is a driver error (`NYL-DRIVER-ERROR`,
-exit 1) that records nothing for the unit.
+`unsupported`. A driver that could not tell, such as an attest step that
+failed, reports the unit `unknown` (`NYL-ATTEST-UNKNOWN`, exit 2) and records
+nothing for it; the attestations recorded earlier stay.
 
 An attestation belongs to the receipt it names: a new receipt starts with
 its attestations pending until `attest` runs again, or until its reconcile
@@ -153,7 +154,7 @@ counts them, such as `nyl: detect-drift dev (3 clean, 1 drifted)` or
 | `NYL-ATTEST-NO-RECEIPT` | The unit has no current receipt to attest. Run `nyl reconcile`. |
 | `NYL-ATTEST-UNKNOWN` | The driver could not tell the results of the unit's attestations. Fix the cause and run `attest` again. |
 | `NYL-ATTEST-UNSUPPORTED` | `--unit` named a unit whose kind produces no attestations for its spec, such as a Command unit without an `attest` step. |
-| `NYL-DRIVER-ERROR` | The check could not run, for example because the unit's commit could not be checked out, its attest step failed, or it passed its `timeout` (the message reads `timeout: detect-drift passed …`). Fix the cause, or raise the unit's `timeout`, and run the command again. |
+| `NYL-DRIVER-ERROR` | The check could not run, for example because the unit's commit could not be checked out, or it passed its `timeout` (the message reads `timeout: detect-drift passed …`). Fix the cause, or raise the unit's `timeout`, and run the command again. |
 | `NYL-LEASE-BROKEN` | The lease was broken and its run is not imported yet. Run `nyl recover -e <env>`, then run the command again. |
 
 ## Exit codes
