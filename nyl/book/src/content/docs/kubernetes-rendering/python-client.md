@@ -5,7 +5,7 @@ description: Render and inspect Kubernetes manifests from Python tests.
 
 The `nyl` Python package exposes `NylClient` for rendering one source manifest
 through an installed Nyl executable and inspecting its resources. It requires
-Python 3.11+ and works independently of pytest.
+Python 3.11+.
 
 ```bash
 uv add nyl
@@ -13,10 +13,7 @@ uv add nyl
 ```
 
 [Install the Nyl executable](/nyl/start/getting-started/) separately. Put it on
-`PATH` or pass its path as `executable`. Installing or importing the Python package
-does not require the executable or Rust. Integration tests build the executable
-from the same checkout, currently CLI 0.5.9; matching version strings alone do not
-establish compatibility with other binaries.
+`PATH` or pass its path as `executable`. Tested with Nyl CLI 0.5.9.
 
 ## Test a rendered Release
 

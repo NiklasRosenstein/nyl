@@ -4,8 +4,7 @@
 manifests. Install it with `uv add nyl` or `pip install nyl`.
 
 Install the [Nyl CLI](https://niklasrosenstein.github.io/nyl/start/getting-started/)
-separately and put it on `PATH`, or pass its executable path. Installing and
-importing this package does not require the CLI, Rust, or pytest.
+separately and put it on `PATH`, or pass its executable path.
 
 ```python
 from nyl import NylClient
@@ -21,7 +20,6 @@ for container in deployment.containers(include_init=True):
     assert container.env.secret_ref("PGPASSWORD") == ("database-app", "password")
 ```
 
-Use this code in ordinary Python or in your own tests; no pytest plugin is needed.
 `namespace` is the authored namespace. Resources without one return `None`,
 even when the Release or Argo CD Application has a destination namespace.
 
@@ -94,10 +92,7 @@ They do not retain or automatically print stdout. YAML errors omit input excerpt
 resource and container representations include only identities. CLI diagnostics
 can contain sensitive information and should be handled accordingly.
 
-Compatibility is tested against a binary built from the same checkout, currently
-CLI **0.5.9**. Version strings alone do not establish compatibility with independently
-built binaries. CI runs the synthetic render without Kubernetes, remote charts, or
-production credentials. The package's version is available through
+Tested with Nyl CLI **0.5.9**. The package's version is available through
 `importlib.metadata.version("nyl")`.
 
 ## Development and releases
