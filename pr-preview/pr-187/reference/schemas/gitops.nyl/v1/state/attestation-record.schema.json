@@ -20,8 +20,41 @@
       ],
       "type": "object"
     },
-    "AttestationKind": {
-      "const": "Attestation"
+    "AttestationEntry": {
+      "additionalProperties": false,
+      "description": "One name's latest attestation in an [`AttestationRecord`].",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "details": true,
+        "executionKey": {
+          "description": "The receipt attested; environment-wide, the desired commit of the state.",
+          "type": "string"
+        },
+        "reason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/AttestationResult"
+        },
+        "source": true
+      },
+      "required": [
+        "executionKey",
+        "result",
+        "at",
+        "source"
+      ],
+      "type": "object"
+    },
+    "AttestationRecordKind": {
+      "const": "AttestationRecord"
     },
     "AttestationResult": {
       "enum": [
@@ -48,37 +81,20 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "An attestation of a receipt, or of an environment's state.",
+  "description": "The latest attestation per name of a unit's receipts,\n`observed/units/<unit>/attestations.yaml`, or of an environment's state,\n`observed/attestations.yaml`. One file per scope; `git blame` shows when\neach name last changed. Contract:\n[Attestations](../../../../design/orchestration-core.md#attestations).",
   "properties": {
     "apiVersion": {
       "$ref": "#/$defs/StateV1"
     },
-    "at": {
-      "format": "date-time",
-      "type": "string"
-    },
-    "details": true,
-    "executionKey": {
-      "description": "The receipt attested; environment-wide, the desired commit of the state.",
-      "type": "string"
+    "attestations": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AttestationEntry"
+      },
+      "type": "object"
     },
     "kind": {
-      "$ref": "#/$defs/AttestationKind"
+      "$ref": "#/$defs/AttestationRecordKind"
     },
-    "name": {
-      "type": "string"
-    },
-    "reason": {
-      "default": null,
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "result": {
-      "$ref": "#/$defs/AttestationResult"
-    },
-    "source": true,
     "unit": {
       "anyOf": [
         {
@@ -88,18 +104,14 @@
           "type": "null"
         }
       ],
-      "description": "Absent for an environment-wide attestation."
+      "description": "Absent for environment-wide attestations."
     }
   },
   "required": [
     "apiVersion",
     "kind",
-    "name",
-    "executionKey",
-    "result",
-    "at",
-    "source"
+    "attestations"
   ],
-  "title": "Attestation",
+  "title": "AttestationRecord",
   "type": "object"
 }

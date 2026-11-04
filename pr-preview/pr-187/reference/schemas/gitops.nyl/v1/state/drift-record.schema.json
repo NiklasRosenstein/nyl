@@ -1,7 +1,7 @@
 {
   "$defs": {
     "Drift": {
-      "description": "The result of a drift verification.",
+      "description": "The result of a drift detection.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -52,22 +52,15 @@
         }
       ]
     },
+    "DriftRecordKind": {
+      "const": "DriftRecord"
+    },
     "EnvironmentName": {
       "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
       "type": "string"
     },
     "ExecutionKey": {
       "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
-      "type": "string"
-    },
-    "ObservationKind": {
-      "const": "Observation"
-    },
-    "ObservationType": {
-      "enum": [
-        "drift",
-        "health"
-      ],
       "type": "string"
     },
     "StateV1": {
@@ -119,7 +112,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "`observed/units/<unit>/observations/<type>.yaml`.",
+  "description": "A unit's latest drift detection, `observed/units/<unit>/drift.yaml`:\nwhat `nyl detect-drift` found for the receipt whose execution key it\nnames. Contract: [Drift](../../../../design/orchestration-core.md#drift).",
   "properties": {
     "apiVersion": {
       "$ref": "#/$defs/StateV1"
@@ -128,18 +121,17 @@
       "format": "date-time",
       "type": "string"
     },
-    "details": true,
+    "details": {
+      "description": "Driver-specific details, recorded and shown unchanged."
+    },
     "executionKey": {
       "$ref": "#/$defs/ExecutionKey"
     },
     "kind": {
-      "$ref": "#/$defs/ObservationKind"
+      "$ref": "#/$defs/DriftRecordKind"
     },
     "result": {
       "$ref": "#/$defs/Drift"
-    },
-    "type": {
-      "$ref": "#/$defs/ObservationType"
     },
     "unit": {
       "$ref": "#/$defs/UnitIdentity"
@@ -149,11 +141,10 @@
     "apiVersion",
     "kind",
     "unit",
-    "type",
     "executionKey",
     "at",
     "result"
   ],
-  "title": "Observation",
+  "title": "DriftRecord",
   "type": "object"
 }
