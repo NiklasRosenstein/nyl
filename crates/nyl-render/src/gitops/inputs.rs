@@ -549,28 +549,38 @@ impl ResolvedTargetInputs {
     /// of the canonical JSON value.
     pub fn index_entries(&self) -> Result<BTreeMap<String, String>> {
         let mut entries = BTreeMap::new();
-        for (key, release) in &self.releases {
-            for (name, input) in &release.inputs {
-                entries.insert(format!("{INDEX_INPUT_PREFIX}{key}/{name}"), value_digest(&input.value)?);
-                if let InputOrigin::Git {
+        for key in self.releases.keys() {
+            entries.extend(self.release_index_entries(key)?);
+        }
+        Ok(entries)
+    }
+
+    /// The [`index_entries`](Self::index_entries) one Release contributes,
+    /// including the Git, publication, and carried-state evidence of its inputs.
+    pub fn release_index_entries(&self, key: &ReleaseKey) -> Result<BTreeMap<String, String>> {
+        let mut entries = BTreeMap::new();
+        let Some(release) = self.releases.get(key) else {
+            return Ok(entries);
+        };
+        for (name, input) in &release.inputs {
+            entries.insert(format!("{INDEX_INPUT_PREFIX}{key}/{name}"), value_digest(&input.value)?);
+            match &input.origin {
+                InputOrigin::Git {
                     url,
                     commit,
                     path,
                     blob_digest,
                     ..
-                } = &input.origin
-                {
+                } => {
                     entries.insert(format!("{INDEX_GIT_PREFIX}{url}@{commit}/{path}"), blob_digest.clone());
                 }
-                match &input.origin {
-                    InputOrigin::Publication { path, blob_digest, .. } => {
-                        entries.insert(format!("{INDEX_PUBLICATION_PREFIX}{path}"), blob_digest.clone());
-                    }
-                    InputOrigin::Carried { path, blob_digest, .. } => {
-                        entries.insert(format!("{INDEX_CARRIED_PREFIX}{path}"), blob_digest.clone());
-                    }
-                    _ => {}
+                InputOrigin::Publication { path, blob_digest, .. } => {
+                    entries.insert(format!("{INDEX_PUBLICATION_PREFIX}{path}"), blob_digest.clone());
                 }
+                InputOrigin::Carried { path, blob_digest, .. } => {
+                    entries.insert(format!("{INDEX_CARRIED_PREFIX}{path}"), blob_digest.clone());
+                }
+                _ => {}
             }
         }
         Ok(entries)
@@ -1069,8 +1079,23 @@ pub fn place_state_files(
     release_directories: &[PathBuf],
     files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
-    let carried = resolved.carried_files();
-    for path in resolved.state_paths.keys() {
+    validate_state_placement(&resolved.state_paths, release_directories, files)?;
+    Ok(resolved
+        .carried_files()
+        .into_iter()
+        .map(|(path, bytes)| (PathBuf::from(path), bytes))
+        .collect())
+}
+
+/// Validate every selected and retained state path against the complete candidate.
+/// Values indicate whether Nyl carries (and owns) the state file.
+/// See [`place_state_files`] for the placement contract.
+pub fn validate_state_placement(
+    state_paths: &BTreeMap<String, bool>,
+    release_directories: &[PathBuf],
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    for (path, carried) in state_paths {
         let relative = Path::new(path);
         if relative.starts_with("_nyl") {
             return Err(NylError::config(format!(
@@ -1081,31 +1106,20 @@ pub fn place_state_files(
             .iter()
             .find(|directory| relative.starts_with(directory))
         {
+            let directory = directory.to_string_lossy().replace('\\', "/");
             return Err(NylError::config(format!(
-                "fromPublication state file {path} lies inside workload Release directory {}, which its Argo CD Application syncs; choose a path outside every Release directory",
-                directory.display()
+                "fromPublication state file {path} lies inside workload Release directory {directory}, which its Argo CD Application syncs; choose a path outside every Release directory",
             )));
         }
-    }
-    for path in resolved.committed_state_paths() {
-        if files.contains_key(Path::new(&path)) {
-            return Err(NylError::config(format!(
-                "fromPublication state file {path} is a file this target renders; a committed state file must not be owned by the target"
-            )));
+        if files.contains_key(relative) {
+            return Err(NylError::config(if *carried {
+                format!("Carried fromPublication state file {path} collides with a rendered file")
+            } else {
+                format!("fromPublication state file {path} is a file this target renders; a committed state file must not be owned by the target")
+            }));
         }
     }
-    let mut state = BTreeMap::new();
-    for (path, bytes) in carried {
-        let path = PathBuf::from(&path);
-        if files.contains_key(&path) {
-            return Err(NylError::config(format!(
-                "Carried fromPublication state file {} collides with a rendered file",
-                path.display()
-            )));
-        }
-        state.insert(path, bytes);
-    }
-    Ok(state)
+    Ok(())
 }
 
 /// Add the `@`-prefixed digests of resolved inputs to the project file hashes.

@@ -278,7 +278,14 @@ async fn validate_targets(inventory: &nyl_render::gitops::GitOpsInventory) -> Re
             }
             target_options.orchestrated_inputs = Some(nyl_render::gitops::inputs::OrchestratedInputs::Placeholders);
         }
-        compiled.push(nyl_render::gitops::compile_target_tree_with_options(inventory, &target, target_options).await?);
+        compiled.push(
+            Box::pin(nyl_render::gitops::compile_target_tree_with_options(
+                inventory,
+                &target,
+                target_options,
+            ))
+            .await?,
+        );
     }
     nyl_render::gitops::validate_compiled_argocd_names(inventory, &compiled)
 }
