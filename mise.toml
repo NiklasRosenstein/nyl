@@ -15,6 +15,7 @@ sops = "3.13.3"
 helm = "4.3.1"
 kubectl = "1.37.1"
 node = "22"
+uv = "0.11.26"
 
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
@@ -59,6 +60,7 @@ run = "cargo build --profile dist"
 
 [tasks.check-all]
 description = "Run all checks"
+depends = ["python-check"]
 dir = "nyl"
 run = [
   "cargo fmt --all --check",
@@ -69,6 +71,38 @@ run = [
 [tasks.pre-commit]
 description = "Run pre-commit checks"
 depends = ["fmt-check", "lint", "test"]
+# The Rust tests use feature-enabled CLI artifacts; Python builds the production CLI.
+run = "mise run python-check"
+
+[tasks.python-sync]
+description = "Install locked Python development dependencies"
+dir = "python"
+run = "uv sync --locked"
+
+[tasks.python-test]
+description = "Test Python against a CLI built from this checkout"
+depends = ["python-sync"]
+dir = "python"
+run = [
+  "uv run --no-sync python scripts/version.py",
+  "uv run --no-sync pytest",
+]
+
+[tasks.python-check]
+description = "Check Python formatting, lint, types, packaging, and rendering"
+depends = ["python-test"]
+dir = "python"
+run = [
+  "uv run --no-sync ruff format --check .",
+  "uv run --no-sync ruff check .",
+  "uv run --no-sync mypy",
+]
+
+[tasks.python-build]
+description = "Build Python distributions with the Cargo-derived version"
+depends = ["python-sync"]
+dir = "python"
+run = ["uv run --no-sync python scripts/version.py", "uv build --no-sources"]
 
 [tasks.coverage]
 description = "Generate coverage report"
