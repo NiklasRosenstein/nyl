@@ -47,6 +47,15 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest after a successful apply; `0` keeps every revision, otherwise `N` must be at least `2`. Overrides `[release] history_limit` in [`nyl.toml`](/nyl/reference/configuration/#release-history)
 
+### Field Ownership Options
+
+- `--handoff[=<MANAGER>]` - Apply as field manager `MANAGER` (default
+  `argocd-controller`, Argo CD's server-side apply manager) instead of `nyl`, and
+  release the fields earlier applies made as `nyl`. Use it before Argo CD takes
+  over resources Nyl applied, and for any apply while Argo CD manages them; see
+  [Hand Over to Argo CD](/nyl/kubernetes-gitops/workflow/handoff/). The value
+  must be attached with `=`.
+
 ### Cluster Options
 
 - `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
@@ -107,7 +116,8 @@ dropping a namespace from a Release never deletes it and its contents
 unconfirmed. See [Pruning and deletion](/nyl/kubernetes-rendering/pipeline/#pruning-and-deletion).
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
-printed as soon as it completes, in completion order. The summary is followed by
+printed as soon as it completes, in completion order. With `--handoff`, a `↳`
+line follows each resource whose `nyl` fields were released. The summary is followed by
 the time spent in API discovery, validation, apply, and release bookkeeping.
 Nyl uses aggregated API discovery (two requests) when the API server supports it
 and falls back to per-group discovery otherwise; the timing line names the mode.
@@ -141,6 +151,9 @@ nyl apply --target production --context admin@production manifest.yaml
 
 # Keep only the ten most recent release revisions
 nyl apply --target production --history-limit 10 manifest.yaml
+
+# Hand the resources over to Argo CD before enabling its sync
+nyl apply --target production --handoff manifest.yaml
 ```
 
 ### Output

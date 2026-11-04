@@ -22,6 +22,13 @@ pub(crate) enum ApplyEvent<'a> {
         key: &'a ResourceKey,
         result: &'a Result<ApplyOutcome>,
     },
+    /// After a resource applied, a handoff released the fields `manager` owned
+    /// of it, or failed to.
+    OwnershipReleased {
+        key: &'a ResourceKey,
+        manager: &'a str,
+        result: &'a Result<()>,
+    },
     /// Pruning of `count` resources that are no longer desired begins.
     PruneStarted { count: usize },
     /// One pruned resource finished deleting.
@@ -84,12 +91,24 @@ pub(crate) struct ApplyReport<'a> {
     /// Successful outcomes in manifest order.
     pub(crate) outcomes: &'a [ApplyOutcome],
     pub(crate) failed_count: usize,
+    /// What a handoff released, when the apply handed off field ownership.
+    pub(crate) ownership: Option<OwnershipReport<'a>>,
     /// Resources that failed to prune; they stay recorded for the next apply to retry.
     pub(crate) prune_failed_count: usize,
     /// The recorded revision, unless the apply ran without release tracking.
     pub(crate) release: Option<&'a ReleaseState>,
     /// Phase durations, in the order the phases ran.
     pub(crate) timings: &'a [PhaseTiming],
+}
+
+/// The field ownership a handoff released.
+pub(crate) struct OwnershipReport<'a> {
+    /// The manager whose fields were released.
+    pub(crate) released_manager: &'a str,
+    /// Resources whose fields the manager owned and released.
+    pub(crate) released_count: usize,
+    /// Resources whose fields could not be released.
+    pub(crate) release_failed_count: usize,
 }
 
 /// Renders apply events and the final report to the terminal.
@@ -111,6 +130,24 @@ impl<'a> ApplyRenderer<'a> {
             } => println!("{}", self.outcome_line(outcome)),
             ApplyEvent::Applied { key, result: Err(e) } => {
                 let error_msg = format!("(failed to apply resource: {})", e);
+                println!("{} {} {}", "✗".red().bold(), key, error_msg.red());
+            }
+            ApplyEvent::OwnershipReleased {
+                key,
+                manager,
+                result: Ok(()),
+            } => println!(
+                "  {} released the fields {} applied to {}",
+                "↳".bright_black(),
+                manager,
+                key
+            ),
+            ApplyEvent::OwnershipReleased {
+                key,
+                manager,
+                result: Err(e),
+            } => {
+                let error_msg = format!("(applied, but failed to release the fields {} applied: {})", manager, e);
                 println!("{} {} {}", "✗".red().bold(), key, error_msg.red());
             }
             ApplyEvent::PruneStarted { count } => println!("\nPruning {} resources...", count),
@@ -180,6 +217,19 @@ impl<'a> ApplyRenderer<'a> {
         }
         if report.failed_count > 0 {
             parts.push(format!("{} failed", report.failed_count.to_string().red()));
+        }
+        if let Some(ownership) = &report.ownership {
+            parts.push(format!(
+                "{} released from {}",
+                ownership.released_count.to_string().cyan(),
+                ownership.released_manager
+            ));
+            if ownership.release_failed_count > 0 {
+                parts.push(format!(
+                    "{} failed to release",
+                    ownership.release_failed_count.to_string().red()
+                ));
+            }
         }
         if report.prune_failed_count > 0 {
             parts.push(format!(

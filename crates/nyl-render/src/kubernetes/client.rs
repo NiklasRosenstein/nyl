@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::{
+    kubernetes::field_manager::{has_applied_fields, ownership_release_body},
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
     NylError, Result,
 };
@@ -64,6 +65,15 @@ pub trait KubeClient: Send + Sync {
     /// - Run validation and admission webhooks
     /// - Return normalized resource without persisting
     async fn get_normalized_resource(&self, resource: &DynamicObject, field_manager: &str) -> Result<DynamicObject>;
+
+    /// Release every field `field_manager` owns through server-side apply on the
+    /// live object of `resource`, so fields other managers also own stay and
+    /// fields only it owned are removed.
+    ///
+    /// Returns whether the manager owned fields to release; a missing object or
+    /// one the manager never applied is left alone.
+    /// See [`crate::kubernetes::field_manager`].
+    async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool>;
 
     /// Refresh API discovery until every `required` kind is resolvable, or give up.
     ///
@@ -591,6 +601,33 @@ impl KubeClient for KubeRsClient {
         Ok(normalized)
     }
 
+    async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool> {
+        let name = resource.name_any();
+        let namespace = resource.namespace();
+        let gvk = crate::kubernetes::resource::extract_gvk(&serde_json::to_value(resource)?)?;
+        let Some(live) = self.get_resource(&gvk, namespace.as_deref(), &name).await? else {
+            return Ok(false);
+        };
+        if !has_applied_fields(&live, field_manager) {
+            return Ok(false);
+        }
+        let (ar, caps) = self.discover_api_resource(&gvk)?;
+        let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
+            let ns = namespace
+                .as_deref()
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
+            Api::namespaced_with(self.client.clone(), ns, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+        // The body names only the object and conflicts with no other manager, so
+        // the apply needs no force.
+        let body = ownership_release_body(resource);
+        api.patch(&name, &PatchParams::apply(field_manager), &Patch::Apply(&body))
+            .await?;
+        Ok(true)
+    }
+
     /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
     /// index or the attempts are exhausted.
     ///
@@ -738,6 +775,8 @@ fn aggregated_discovery_unsupported(err: &kube::Error) -> bool {
 /// Mock Kubernetes client for testing
 pub struct MockKubeClient {
     resources: Arc<Mutex<HashMap<ResourceKey, DynamicObject>>>,
+    /// Field managers that applied each object since it was added.
+    applied_managers: Arc<Mutex<HashMap<ResourceKey, std::collections::BTreeSet<String>>>>,
     kind_scope_overrides: Arc<Mutex<HashMap<String, bool>>>,
     default_namespace: String,
 }
@@ -752,6 +791,7 @@ impl MockKubeClient {
     pub fn with_default_namespace(default_namespace: impl Into<String>) -> Self {
         Self {
             resources: Arc::new(Mutex::new(HashMap::new())),
+            applied_managers: Arc::new(Mutex::new(HashMap::new())),
             kind_scope_overrides: Arc::new(Mutex::new(HashMap::new())),
             default_namespace: default_namespace.into(),
         }
@@ -761,6 +801,27 @@ impl MockKubeClient {
     pub fn add_resource(&self, key: ResourceKey, resource: DynamicObject) {
         let mut store = self.resources.lock().unwrap();
         store.insert(key, resource);
+    }
+
+    /// The field managers that hold applied fields of an object: those that
+    /// applied it through this client and the `Apply` entries of its stored
+    /// `managedFields`, less those released since.
+    pub fn applied_managers(&self, key: &ResourceKey) -> Vec<String> {
+        let mut managers = self
+            .applied_managers
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(object) = self.resources.lock().unwrap().get(key) {
+            for entry in object.metadata.managed_fields.iter().flatten() {
+                if let (Some(manager), Some("Apply")) = (&entry.manager, entry.operation.as_deref()) {
+                    managers.insert(manager.clone());
+                }
+            }
+        }
+        managers.into_iter().collect()
     }
 
     /// Get all resources in the mock store
@@ -906,7 +967,7 @@ impl KubeClient for MockKubeClient {
     async fn apply_resource(
         &self,
         resource: &DynamicObject,
-        _field_manager: &str,
+        field_manager: &str,
         dry_run: bool,
     ) -> Result<ApplyOutcome> {
         // Extract metadata
@@ -933,9 +994,19 @@ impl KubeClient for MockKubeClient {
             old_json != new_json
         });
 
-        // Only store if not dry run
+        // Only store if not dry run, keeping the ownership the live object records.
         if !dry_run {
-            store.insert(key.clone(), resource.clone());
+            let mut stored = resource.clone();
+            if let Some(old) = &existing {
+                stored.metadata.managed_fields.clone_from(&old.metadata.managed_fields);
+            }
+            store.insert(key.clone(), stored);
+            self.applied_managers
+                .lock()
+                .unwrap()
+                .entry(key.clone())
+                .or_default()
+                .insert(field_manager.to_string());
         }
 
         let base_outcome = if existing.is_none() {
@@ -1009,6 +1080,31 @@ impl KubeClient for MockKubeClient {
         // For testing, simply return the resource as-is
         // Tests can inject pre-normalized resources if needed
         Ok(resource.clone())
+    }
+
+    async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool> {
+        let gvk = crate::kubernetes::resource::extract_gvk(&serde_json::to_value(resource)?)?;
+        let key = ResourceKey {
+            gvk,
+            namespace: resource.namespace(),
+            name: resource.name_any(),
+        };
+        if !self
+            .applied_managers(&key)
+            .iter()
+            .any(|manager| manager == field_manager)
+        {
+            return Ok(false);
+        }
+        if let Some(managers) = self.applied_managers.lock().unwrap().get_mut(&key) {
+            managers.remove(field_manager);
+        }
+        if let Some(object) = self.resources.lock().unwrap().get_mut(&key) {
+            if let Some(entries) = object.metadata.managed_fields.as_mut() {
+                entries.retain(|entry| entry.manager.as_deref() != Some(field_manager));
+            }
+        }
+        Ok(true)
     }
 }
 

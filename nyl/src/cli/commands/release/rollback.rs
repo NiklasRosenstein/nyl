@@ -5,7 +5,7 @@ use dialoguer::Confirm;
 use crate::{
     cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
     cli::commands::apply::{
-        collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, ReleaseRecorder,
+        collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, HandoffArgs, ReleaseRecorder,
         DEFAULT_APPLY_CONCURRENCY,
     },
     cli::commands::cluster::load_target_kube_config,
@@ -55,9 +55,13 @@ pub struct RollbackArgs {
     /// Prune resources whose Argo CD sync option is `Prune=confirm` (see `nyl apply --confirm-prune`).
     #[arg(long)]
     pub confirm_prune: bool,
+
+    #[command(flatten)]
+    pub handoff: HandoffArgs,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
+    let ownership = args.handoff.ownership()?;
     // Read configuration before anything is recorded, so a broken nyl.toml fails
     // the rollback before it leaves a revision behind.
     let history_limit = match args.history_limit {
@@ -117,7 +121,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     // Sort resources into apply order (Argo CD's kind order), record the rollback as
     // a new revision before touching the cluster, and apply.
     ResourceOrdering::sort_by_priority(&mut manifests)?;
-    ensure_namespace_exists(&kube_client, &args.namespace).await?;
+    ensure_namespace_exists(&kube_client, &args.namespace, &ownership).await?;
     let recorder = ReleaseRecorder::reserve(
         &storage,
         &args.name,
@@ -144,6 +148,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
                 concurrency,
                 history_limit,
                 confirm_prune: args.confirm_prune,
+                ownership: &ownership,
             },
             &mut timings,
             &mut |event| renderer.event(event),

@@ -254,6 +254,10 @@ mod tests {
         ) -> Result<DynamicObject> {
             self.inner.get_normalized_resource(resource, field_manager).await
         }
+
+        async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool> {
+            self.inner.release_field_manager(resource, field_manager).await
+        }
     }
 
     #[async_trait]
@@ -314,6 +318,10 @@ mod tests {
             _field_manager: &str,
         ) -> Result<DynamicObject> {
             Ok(resource.clone())
+        }
+
+        async fn release_field_manager(&self, _resource: &DynamicObject, _field_manager: &str) -> Result<bool> {
+            Ok(false)
         }
     }
 

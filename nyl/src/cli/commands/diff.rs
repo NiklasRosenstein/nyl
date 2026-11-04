@@ -891,6 +891,10 @@ mod tests {
         ) -> Result<DynamicObject> {
             Ok(resource.clone())
         }
+
+        async fn release_field_manager(&self, _resource: &DynamicObject, _field_manager: &str) -> Result<bool> {
+            Ok(false)
+        }
     }
 
     #[tokio::test]
