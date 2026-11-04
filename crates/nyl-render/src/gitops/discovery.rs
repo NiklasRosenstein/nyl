@@ -304,21 +304,13 @@ fn discover_project_inventory(
             .map_or_else(|| settings.path.clone(), |relative| project_root.join(relative));
         normalize_absolute_path(&path)
     });
-    let worktree_visible_files = collect_git_visible_files(&repository, &repository_root)?;
-    let worktree_data_files = worktree_visible_files
-        .iter()
-        .filter(|path| {
-            let absolute = repository_root.join(path);
-            is_data_path(path)
-                && !output_subtree
-                    .as_ref()
-                    .is_some_and(|output| absolute.starts_with(output))
-                && !vendor_subtree
-                    .as_ref()
-                    .is_some_and(|vendor| absolute.starts_with(vendor))
-        })
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let worktree_visible_files = collect_git_visible_paths(&repository)?;
+    let worktree_data_files = collect_git_visible_data_files(
+        &worktree_visible_files,
+        &repository_root,
+        output_subtree.as_deref(),
+        vendor_subtree.as_deref(),
+    )?;
     let worktree_yaml_files = worktree_data_files
         .iter()
         .filter(|path| is_yaml_path(path))
@@ -373,10 +365,9 @@ fn discover_project_inventory(
     })
 }
 
-/// Git-visible regular files of the whole worktree, relative to its
-/// root: tracked files and untracked files that are not ignored, without
-/// submodules, symbolic links, or paths through them.
-fn collect_git_visible_files(repository: &Repository, repository_root: &Path) -> Result<BTreeSet<PathBuf>> {
+/// Git-visible candidate paths relative to the worktree root, without filesystem inspection.
+/// Callers validate existence, file type, and symlink boundaries for the paths they consume.
+fn collect_git_visible_paths(repository: &Repository) -> Result<BTreeSet<PathBuf>> {
     let mut repository_paths = BTreeSet::new();
     let index = repository.index().map_err(crate::git::GitError::from)?;
     for entry in index.iter() {
@@ -408,12 +399,28 @@ fn collect_git_visible_files(repository: &Repository, repository_root: &Path) ->
         }
     }
 
+    repository_paths.retain(|path| !has_dot_git_component(path));
+    Ok(repository_paths)
+}
+
+/// Git-visible YAML and JSON regular files outside the output and vendor subtrees.
+fn collect_git_visible_data_files(
+    repository_paths: &BTreeSet<PathBuf>,
+    repository_root: &Path,
+    output_subtree: Option<&Path>,
+    vendor_subtree: Option<&Path>,
+) -> Result<BTreeSet<PathBuf>> {
     let mut result = BTreeSet::new();
     for repository_relative in repository_paths {
-        if has_dot_git_component(&repository_relative) {
+        if !is_data_path(repository_relative) {
             continue;
         }
-        let absolute_path = repository_root.join(&repository_relative);
+        let absolute_path = repository_root.join(repository_relative);
+        if output_subtree.is_some_and(|output| absolute_path.starts_with(output))
+            || vendor_subtree.is_some_and(|vendor| absolute_path.starts_with(vendor))
+        {
+            continue;
+        }
         let Ok(metadata) = std::fs::symlink_metadata(&absolute_path) else {
             // A tracked file deleted from the worktree is not visible.
             continue;
@@ -421,7 +428,7 @@ fn collect_git_visible_files(repository: &Repository, repository_root: &Path) ->
         if !metadata.file_type().is_file() || contains_symlink_component(repository_root, &absolute_path)? {
             continue;
         }
-        result.insert(repository_relative);
+        result.insert(repository_relative.clone());
     }
     Ok(result)
 }

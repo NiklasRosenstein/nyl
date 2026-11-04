@@ -65,7 +65,7 @@ fn load(
     let relative = path
         .strip_prefix(&paths.worktree_root)
         .expect("import is inside the worktree");
-    if !visible_files.contains(relative) || path.starts_with(paths.project_root.join(".nyl/cache")) {
+    if !visible_files.contains(relative) || !path.is_file() || path.starts_with(paths.project_root.join(".nyl/cache")) {
         return Err(NylError::config(format!(
             "Values file {} is missing or is not an eligible Git-visible regular file; add the file to Git or remove its ignore rule, and keep it outside submodules and the project's .nyl/cache directory",
             path.display()
@@ -298,6 +298,13 @@ mod tests {
             panic!()
         };
         assert_eq!(cluster.spec.values["region"], "west");
+
+        std::fs::remove_file(temp.path().join("shared/config.data")).unwrap();
+        let error = discover(&temp, false).unwrap_err().to_string();
+        assert!(error.contains("not an eligible Git-visible regular file"), "{error}");
+        std::fs::create_dir(temp.path().join("shared/config.data")).unwrap();
+        let error = discover(&temp, false).unwrap_err().to_string();
+        assert!(error.contains("not an eligible Git-visible regular file"), "{error}");
     }
 
     #[cfg(unix)]
