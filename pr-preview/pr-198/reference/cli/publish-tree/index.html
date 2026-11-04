@@ -109,36 +109,30 @@ documents the configuration model.</p>
 <p>See the <a href="/nyl/pr-preview/pr-198/reference/cli/render-tree/#options-shared-by-the-tree-commands">options shared by the tree commands</a> for target selection, caching, secret inputs, progress,
 and validation.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="partial-publication">Partial publication</h2><a class="sl-anchor-link" href="#partial-publication"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Partial publication”</span></a></div>
-<p>Publish selected ApplicationGroups or individual Releases:</p>
-<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">publish-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--application-group</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">publish-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments/api</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">publish-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments/api</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments/worker</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--dry-run</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl publish-tree --target production --application-group paymentsnyl publish-tree --target production --release payments/apinyl publish-tree --target production --release payments/api --release payments/worker --dry-run"><div></div></button></div></figure></div>
-<p>Both selectors are repeatable and combine by union. Release names must be
-<code dir="auto">&#x3C;applicationGroup>/&#x3C;release></code> and require a literal Release <code dir="auto">metadata.name</code>,
-so selection does not evaluate other Release templates. Without selectors Nyl
-publishes the full target.</p>
-<p>Nyl renders the selection and reads the remaining manifests from a verified,
-pinned destination commit. Whole-tree ownership, Namespace, CRD, project, and
-configured manifest validation checks use the combined candidate. Unselected
-Release templates and inputs are not evaluated; static project discovery and
-control-resource validity still apply. The summary identifies the baseline,
-rendered/retained/removed Release counts, and changes to shared catalog artifacts.</p>
-<p>Selecting a group replaces its published membership and can remove Releases.
-Selecting one Release requires it to exist and preserves every other Release.
-Retained workloads and Applications keep their bytes and original provenance.
-When an update requires changing a retained owner or shared carried state,
-select the affected consumers too. Shared generated projects may change to admit
-the combined candidate’s namespaces and resource kinds.</p>
-<p>Run one full publication before using partial publication on an older tree.
-Partial publication requires version 3 ownership metadata and refuses missing or
-externally modified indexed files. Target-wide configuration changes require a
-full publication; group configuration changes require selecting the whole group.
-These publications update policy metadata even when manifest bytes are unchanged.
-Imperative <code dir="auto">[release] history_limit</code> does not affect publication compatibility.
-Selected and retained state files must remain outside every candidate Release
-directory and cannot overlap rendered files.
-A destination update during rendering fails publication; rerun to render against
-the new baseline. <code dir="auto">--dry-run</code> prepares the complete candidate without pushing.</p>
-<p>Partial trees can contain several source revisions. Their index records source
-and input digests per Release, without copying input values or defaults. The
-publication commit’s source trailer describes this
-operation, not every retained Release. A partial publication does not establish
-that the whole target matches that source revision.</p></div><footer class="sl-flex astro-ddtxxk7k"><div class="meta sl-flex astro-ddtxxk7k"></div><div class="pagination-links print:hidden astro-b5raizh3" dir="ltr"><a href="/nyl/pr-preview/pr-198/reference/cli/diff-tree/" rel="prev" class="astro-b5raizh3"><svg aria-hidden="true" class="astro-b5raizh3 astro-hkc32dio" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-b5raizh3">Previous<br class="astro-b5raizh3"><span class="link-title astro-b5raizh3">diff-tree</span></span></a><a href="/nyl/pr-preview/pr-198/reference/cli/comment/" rel="next" class="astro-b5raizh3"><svg aria-hidden="true" class="astro-b5raizh3 astro-hkc32dio" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-b5raizh3">Next<br class="astro-b5raizh3"><span class="link-title astro-b5raizh3">comment</span></span></a></div></footer></div></div></main></div></div></div></div></body></html>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">publish-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--application-group</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">publish-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments/api</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">payments/worker</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl publish-tree --target production --application-group paymentsnyl publish-tree --target production --release payments/api --release payments/worker"><div></div></button></div></figure></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">--application-group NAME</code></td><td>Replace the ApplicationGroup’s published Releases, including removals. Repeatable.</td></tr><tr><td><code dir="auto">--release GROUP/RELEASE</code></td><td>Replace one Release, given by its literal <code dir="auto">metadata.name</code>. Repeatable.</td></tr></tbody></table>
+<p>Selectors combine by union; without any, Nyl publishes the full target. The
+summary names the baseline commit, counts rendered, retained, and removed
+Releases, lists changed shared catalog artifacts, and lists new Releases in a
+touched group that the selection leaves unpublished. Publication commits add
+<code dir="auto">Nyl-Publication-Base</code> and <code dir="auto">Nyl-Publication-Selection</code> trailers.
+<a href="/nyl/pr-preview/pr-198/kubernetes-gitops/workflow/partial-publication/">Partial publication</a>
+explains retention, provenance, and the conditions that require a full
+publication.</p></div><footer class="sl-flex astro-ddtxxk7k"><div class="meta sl-flex astro-ddtxxk7k"></div><div class="pagination-links print:hidden astro-b5raizh3" dir="ltr"><a href="/nyl/pr-preview/pr-198/reference/cli/diff-tree/" rel="prev" class="astro-b5raizh3"><svg aria-hidden="true" class="astro-b5raizh3 astro-hkc32dio" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-b5raizh3">Previous<br class="astro-b5raizh3"><span class="link-title astro-b5raizh3">diff-tree</span></span></a><a href="/nyl/pr-preview/pr-198/reference/cli/comment/" rel="next" class="astro-b5raizh3"><svg aria-hidden="true" class="astro-b5raizh3 astro-hkc32dio" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-b5raizh3">Next<br class="astro-b5raizh3"><span class="link-title astro-b5raizh3">comment</span></span></a></div></footer></div></div></main></div></div></div></div></body></html>
