@@ -5,9 +5,9 @@ use std::ffi::OsString;
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
-    Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection,
-    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
-    Verification,
+    Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
+    ExecutionContext, Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    ResolutionContext, Supported,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, Receipt};
@@ -88,7 +88,7 @@ impl Driver for FakeImage {
         Capabilities {
             plan: true,
             reconcile: true,
-            verify: true,
+            detect_drift: true,
             build: true,
             ..Capabilities::default()
         }
@@ -200,18 +200,16 @@ impl Driver for FakeImage {
         }))
     }
 
-    fn verify(
+    fn detect_drift(
         &self,
         _ctx: &ExecutionContext<'_>,
         unit: &DesiredUnit,
         _receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
+    ) -> DriverResult<Supported<DriftDetection>> {
         // The fake registry never changes, so only a script makes it drift.
-        Ok(Supported::Supported(Verification {
-            drift: self.script.verification(&unit.unit.name)?.unwrap_or(Drift::Clean),
-            observations: Vec::new(),
-            attestations: Vec::new(),
-        }))
+        Ok(Supported::Supported(
+            self.script.drift(&unit.unit.name)?.unwrap_or(Drift::Clean).into(),
+        ))
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {

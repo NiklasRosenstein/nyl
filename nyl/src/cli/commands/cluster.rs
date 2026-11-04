@@ -452,7 +452,7 @@ fn replace_kubernetes_block(document: &str, info: &ClusterInfo) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use nyl_render::resources::GitOpsResourceIdentity;
     use nyl_render::validation::store;
@@ -763,6 +763,7 @@ mod tests {
             },
             static_labels: BTreeMap::new(),
             resource: None,
+            values_inputs: BTreeSet::new(),
         };
 
         update_cluster_document(

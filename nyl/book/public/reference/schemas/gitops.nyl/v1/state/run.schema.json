@@ -13,7 +13,7 @@
         "hold",
         "resume",
         "recover",
-        "verify",
+        "detect-drift",
         "attest",
         "exec",
         "ci-admit",

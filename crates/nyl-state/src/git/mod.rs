@@ -28,7 +28,7 @@ use nyl_core::orchestration::ports::{
     TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    DesiredUnit, Lease, Observation, ObservationType, ObservedUnit, Run, Signal, StateLocation,
+    Attestation, AttestationRecord, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation,
 };
 use nyl_git::GitAuth;
 
@@ -457,19 +457,51 @@ fn per_unit<T: DeserializeOwned>(files: &Files, kind: &str) -> StateResult<BTree
     Ok(documents)
 }
 
-/// The latest observations by unit and type.
-fn observations(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>> {
-    Ok(per_unit::<Observation>(files, "observations")?
+/// Each unit's document at `observed/units/<unit><file>`, such as its drift
+/// record (`/drift.yaml`).
+fn unit_files<T: DeserializeOwned>(files: &Files, file: &str) -> StateResult<BTreeMap<UnitName, T>> {
+    let mut documents = BTreeMap::new();
+    for (path, bytes) in files {
+        let Some(unit) = path
+            .strip_prefix("observed/units/")
+            .and_then(|rest| rest.strip_suffix(file))
+            .filter(|unit| !unit.contains('/'))
+        else {
+            continue;
+        };
+        let unit = UnitName::new(unit).map_err(|error| StateError::Corrupt(format!("{path}: {error}")))?;
+        documents.insert(unit, from_yaml(path, bytes)?);
+    }
+    Ok(documents)
+}
+
+/// Each unit's attestations by name, from its `attestations.yaml`.
+fn attestations(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<String, Attestation>>> {
+    Ok(unit_files::<AttestationRecord>(files, ATTESTATIONS_FILE)?
         .into_iter()
-        .map(|(unit, documents)| {
-            let by_type = documents
-                .into_values()
-                .map(|observation| (observation.observation_type, observation))
-                .collect();
-            (unit, by_type)
-        })
+        .map(|(unit, record)| (unit, record.into_set()))
         .collect())
 }
+
+/// Put or remove a unit's document at `observed/units/<unit><file>`.
+fn put_unit_file<T: Serialize>(
+    files: &mut Files,
+    unit: &UnitName,
+    file: &str,
+    document: Option<&T>,
+) -> StateResult<()> {
+    let path = format!("observed/units/{unit}{file}");
+    match document {
+        Some(document) => files.insert(path, to_yaml(document)?),
+        None => files.remove(&path),
+    };
+    Ok(())
+}
+
+/// The file name of a unit's drift record beneath `observed/units/<unit>`.
+const DRIFT_FILE: &str = "/drift.yaml";
+/// The file name of a unit's attestations beneath `observed/units/<unit>`.
+const ATTESTATIONS_FILE: &str = "/attestations.yaml";
 
 /// Replace a unit's directory of documents of one kind with `set`, or
 /// remove it for `None`.
@@ -503,15 +535,12 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         for (unit, set) in &changes.artifacts {
             replace_set(files, unit, "artifacts", set.as_ref().map(|set| set.iter()))?;
         }
-        for (unit, set) in &changes.observations {
-            let set = set.as_ref().map(|set| {
-                set.iter()
-                    .map(|(observation_type, document)| (observation_type.as_str(), document))
-            });
-            replace_set(files, unit, "observations", set)?;
+        for (unit, record) in &changes.drift {
+            put_unit_file(files, unit, DRIFT_FILE, record.as_ref())?;
         }
         for (unit, set) in &changes.attestations {
-            replace_set(files, unit, "attestations", set.as_ref().map(|set| set.iter()))?;
+            let record = set.as_ref().and_then(AttestationRecord::from_set);
+            put_unit_file(files, unit, ATTESTATIONS_FILE, record.as_ref())?;
         }
     }
     Ok(())
@@ -564,8 +593,8 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         desired: units(desired, "desired/units/")?,
         observed: units(observed, "observed/units/")?,
         artifacts: per_unit(observed, "artifacts")?,
-        observations: observations(observed)?,
-        attestations: per_unit(observed, "attestations")?,
+        drift: unit_files(observed, DRIFT_FILE)?,
+        attestations: attestations(observed)?,
     })
 }
 

@@ -60,7 +60,7 @@ under `[units.Terraform]` or `[units.OpenTofu]`; an explicit unit version wins.
 Without a pin, changing the installed tool does not force execution. Receipts
 record the executable version that ran.
 
-`nyl plan` and `nyl verify` run native plans without the backend lock and apply
+`nyl plan` and `nyl detect-drift` run native plans without the backend lock and apply
 nothing. Plans include a digest of resource, move, import, and output changes.
 Sensitive values and known credentials are masked before summaries and digests;
 native JSON never enters the transcript. `bind: plan` compares the reviewed

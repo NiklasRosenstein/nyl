@@ -268,6 +268,34 @@ fn test_validate_fault_unit_rules() {
     assert!(validation_error(&fault("{point: waiting-lease}")).contains("only pause"));
 }
 
+/// Observe steps script observed values: they run from M5, are succeeded,
+/// pending, or failed, and a failed read names no failure category because
+/// it does not fail the unit.
+#[test]
+fn test_validate_observe_driver_steps() {
+    let at_m5 = |driver: &str| {
+        let text = format!(
+            "contract: design/orchestration-core.md#observed-values\nmilestone: M5\ntiers: [1]\nproject: ../_project\nsteps:\n  - driver: {driver}\n"
+        );
+        let loaded = inline_scenario("inline/observe", &text);
+        scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
+    };
+    assert_eq!(
+        at_m5("{unit: kubernetes, operation: observe, outcome: pending}"),
+        Ok(())
+    );
+    assert_eq!(at_m5("{unit: kubernetes, operation: observe, outcome: failed}"), Ok(()));
+    let categorized =
+        at_m5("{unit: kubernetes, operation: observe, outcome: failed, category: credentials, retryable: true}");
+    assert!(categorized.unwrap_err().contains("other than observe's"));
+    let drifted = at_m5("{unit: kubernetes, operation: observe, outcome: drifted}");
+    assert!(drifted.unwrap_err().contains("succeeded, pending, or failed"));
+    let pending = validation_error("  - driver: {unit: network, operation: detect-drift, outcome: pending}\n");
+    assert!(pending.contains("only an observe outcome"), "{pending}");
+    let early = validation_error("  - driver: {unit: kubernetes, operation: observe, outcome: pending}\n");
+    assert!(early.contains("runs from M5"), "{early}");
+}
+
 /// A resume names an earlier paused step, once, and every paused step is resumed.
 #[test]
 fn test_validate_resume_ids() {
@@ -517,13 +545,16 @@ fn test_expect_accepts_part_five_keys_and_rejects_misspelt_ones() {
     }
 }
 
-/// A drift verdict scripts only `verify`; a file step stays inside
+/// A drift result scripts only `detect-drift`; a file step stays inside
 /// `%SCENARIO_TMP%`; and `nyl` arguments must parse with the real command
 /// line, so the boolean `--reapply` given a unit is caught up front.
 #[test]
 fn test_validate_part_five_steps_and_options() {
     let drifted = validation_error("  - driver: {unit: network, operation: reconcile, outcome: drifted}\n");
-    assert!(drifted.contains("only a verify outcome can be drifted"), "{drifted}");
+    assert!(
+        drifted.contains("only a detect-drift outcome can be drifted"),
+        "{drifted}"
+    );
     for (step, error) in [
         ("{path: ../outside, content: x}", "stay inside it"),
         ("{path: /etc/passwd, delete: true}", "stay inside it"),
@@ -568,7 +599,7 @@ fn test_validate_part_five_steps_and_options() {
     };
     assert_eq!(
         valid(concat!(
-            "  - driver: {unit: network, operation: verify, outcome: drifted}\n",
+            "  - driver: {unit: network, operation: detect-drift, outcome: drifted}\n",
             "  - file: {path: resources/network, content: changed}\n",
             "  - file: {path: resources/network, delete: true}\n",
         )),

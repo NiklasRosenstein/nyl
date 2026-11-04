@@ -49,10 +49,12 @@ pub struct DiscoveredGitOpsResource {
     /// Literal labels from the static resource envelope. Selection never
     /// depends on target rendering.
     pub static_labels: BTreeMap<String, String>,
-    /// Present when the source document is already a complete static resource.
+    /// Present when the source document is a complete static resource, with file-backed values resolved.
     /// Templatable ApplicationGroup and AppProjectDefinition specs are parsed
     /// only after a target context is selected.
     pub resource: Option<GitOpsResource>,
+    /// Imported values files, using portable project/worktree keys.
+    pub values_inputs: BTreeSet<PathBuf>,
 }
 
 /// Deterministic inventory of Git-visible YAML and GitOps resources.
@@ -302,12 +304,21 @@ fn discover_project_inventory(
             .map_or_else(|| settings.path.clone(), |relative| project_root.join(relative));
         normalize_absolute_path(&path)
     });
-    let worktree_data_files = collect_git_visible_data_files(
-        &repository,
-        &repository_root,
-        output_subtree.as_deref(),
-        vendor_subtree.as_deref(),
-    )?;
+    let worktree_visible_files = collect_git_visible_files(&repository, &repository_root)?;
+    let worktree_data_files = worktree_visible_files
+        .iter()
+        .filter(|path| {
+            let absolute = repository_root.join(path);
+            is_data_path(path)
+                && !output_subtree
+                    .as_ref()
+                    .is_some_and(|output| absolute.starts_with(output))
+                && !vendor_subtree
+                    .as_ref()
+                    .is_some_and(|vendor| absolute.starts_with(vendor))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let worktree_yaml_files = worktree_data_files
         .iter()
         .filter(|path| is_yaml_path(path))
@@ -339,6 +350,18 @@ fn discover_project_inventory(
         }
     }
 
+    let paths = ProjectPaths::new(project_root.clone(), repository_root.clone());
+    let mut invalid_keys = Vec::new();
+    for (key, discovered) in &mut resources {
+        match super::values::resolve_resource_values(&paths, &worktree_visible_files, discovered) {
+            Err(_) if invalid == InvalidResources::Skip => invalid_keys.push(key.clone()),
+            result => result?,
+        }
+    }
+    for key in invalid_keys {
+        resources.remove(&key);
+    }
+
     Ok(GitOpsInventory {
         project_root,
         worktree_root: repository_root,
@@ -350,16 +373,10 @@ fn discover_project_inventory(
     })
 }
 
-/// Git-visible YAML and JSON files of the whole worktree, relative to its
+/// Git-visible regular files of the whole worktree, relative to its
 /// root: tracked files and untracked files that are not ignored, without
-/// submodules, symbolic links, or paths through them, and without the output
-/// and vendor subtrees.
-fn collect_git_visible_data_files(
-    repository: &Repository,
-    repository_root: &Path,
-    output_subtree: Option<&Path>,
-    vendor_subtree: Option<&Path>,
-) -> Result<BTreeSet<PathBuf>> {
+/// submodules, symbolic links, or paths through them.
+fn collect_git_visible_files(repository: &Repository, repository_root: &Path) -> Result<BTreeSet<PathBuf>> {
     let mut repository_paths = BTreeSet::new();
     let index = repository.index().map_err(crate::git::GitError::from)?;
     for entry in index.iter() {
@@ -393,15 +410,10 @@ fn collect_git_visible_data_files(
 
     let mut result = BTreeSet::new();
     for repository_relative in repository_paths {
-        if has_dot_git_component(&repository_relative) || !is_data_path(&repository_relative) {
+        if has_dot_git_component(&repository_relative) {
             continue;
         }
         let absolute_path = repository_root.join(&repository_relative);
-        if output_subtree.is_some_and(|output| absolute_path.starts_with(output))
-            || vendor_subtree.is_some_and(|vendor| absolute_path.starts_with(vendor))
-        {
-            continue;
-        }
         let Ok(metadata) = std::fs::symlink_metadata(&absolute_path) else {
             // A tracked file deleted from the worktree is not visible.
             continue;
@@ -509,6 +521,7 @@ fn discover_document(
         identity,
         static_labels,
         resource,
+        values_inputs: BTreeSet::new(),
     };
     Ok(Some((key, discovered)))
 }
@@ -589,12 +602,14 @@ fn parse_complete_resource(document: &str, contextual_path: &Path) -> Result<Git
             contextual_path.display()
         )));
     }
-    parse_gitops_resource(&parsed_documents[0])?.ok_or_else(|| {
-        NylError::config(format!(
-            "Document {} advertises {API_VERSION_K8S_GITOPS} but is not a GitOps resource",
-            contextual_path.display()
-        ))
-    })
+    parse_gitops_resource(&parsed_documents[0])
+        .map_err(|error| NylError::config(format!("{}: {error}", contextual_path.display())))?
+        .ok_or_else(|| {
+            NylError::config(format!(
+                "Document {} advertises {API_VERSION_K8S_GITOPS} but is not a GitOps resource",
+                contextual_path.display()
+            ))
+        })
 }
 
 fn scan_static_identity(document: &str) -> Result<Option<GitOpsResourceIdentity>> {

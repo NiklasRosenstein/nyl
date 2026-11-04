@@ -1,0 +1,8 @@
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata:
+  name: web
+  labels: {app: web}
+spec:
+  applicationNamespace: argocd
+  source: {path: ../applications/web}   # beside nyl/

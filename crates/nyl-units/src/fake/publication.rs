@@ -45,9 +45,9 @@ use std::ffi::OsString;
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
-    Capabilities, Change, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection,
-    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
-    TeardownSettings, Verification,
+    Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
+    ExecutionContext, Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    ResolutionContext, Supported, TeardownSettings,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
 use nyl_core::orchestration::ports::CommitIdentity;
@@ -199,7 +199,7 @@ impl Driver for FakePublication {
             requires_committed_source: true,
             plan: true,
             reconcile: true,
-            verify: true,
+            detect_drift: true,
             teardown: true,
             ..Capabilities::default()
         }
@@ -391,17 +391,13 @@ impl Driver for FakePublication {
         }))
     }
 
-    fn verify(
+    fn detect_drift(
         &self,
         _ctx: &ExecutionContext<'_>,
         _unit: &DesiredUnit,
         _receipt: &Receipt,
-    ) -> DriverResult<Supported<Verification>> {
-        Ok(Supported::Supported(Verification {
-            drift: Drift::Clean,
-            observations: Vec::new(),
-            attestations: Vec::new(),
-        }))
+    ) -> DriverResult<Supported<DriftDetection>> {
+        Ok(Supported::Supported(Drift::Clean.into()))
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {

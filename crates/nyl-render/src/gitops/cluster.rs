@@ -18,7 +18,7 @@ pub struct EffectiveCluster {
     pub capabilities_source: String,
     /// Cluster whose schema snapshot supplies the CRD contract.
     pub schemas_source: String,
-    /// Source files traversed during resolution, relative to the project root.
+    /// Source files traversed during resolution, using portable project/worktree keys.
     pub inputs: BTreeSet<PathBuf>,
 }
 
@@ -52,6 +52,7 @@ fn resolve(inventory: &GitOpsInventory, name: &str, chain: &mut Vec<String>) -> 
         schemas_source: name.to_owned(),
         inputs: BTreeSet::from([discovered.source_path.clone()]),
     };
+    result.inputs.extend(discovered.values_inputs.iter().cloned());
     if let Some(snapshot) = complete_vendored_capabilities(inventory, name, &mut result.cluster)? {
         result.inputs.insert(snapshot);
     }

@@ -8,6 +8,9 @@
 //! - A path with a leading `/` resolves against the Git worktree root.
 //! - No path may leave the worktree or traverse a symbolic link.
 //!
+//! Cluster and DeploymentTarget `valuesFrom.file` imports use the resource's
+//! source directory as their relative base, with the same worktree boundary.
+//!
 //! Paths inside another repository's checkout, such as a remote
 //! ApplicationGroup source or a `fromGit` binding, are relative to that
 //! checkout and do not use this module.

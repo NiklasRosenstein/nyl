@@ -1,5 +1,5 @@
 //! Drift repair: which units with a current receipt execute again because
-//! their latest drift observation is `drifted` or `--reapply` forces them,
+//! their latest drift record is `drifted` or `--reapply` forces them,
 //! the `drifted` unit state, and the summary's `driftRepaired` and
 //! `reapplied`.
 //!
@@ -18,9 +18,9 @@
 //! - `nyl reconcile --unit <u>… --reapply --reason <text>` forces the named
 //!   units to execute although they are current; a non-converging named
 //!   unit follows the approval rule above and never fails the run.
-//! - A new receipt drops the unit's drift observation in the same commit.
+//! - A new receipt drops the unit's drift record in the same commit.
 //!
-//! - `nyl status` reports a current unit whose latest drift observation of
+//! - `nyl status` reports a current unit whose latest drift record of
 //!   its receipt is `drifted` as `drifted` ([`status_drift`]), whatever the
 //!   recovery policy and `driftRepair`.
 
@@ -28,9 +28,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
-use nyl_core::orchestration::state::{
-    Condition, DesiredUnit, Drift, EnvironmentRecord, Observation, ObservationType, ObservedUnit,
-};
+use nyl_core::orchestration::state::{Condition, DesiredUnit, Drift, DriftRecord, EnvironmentRecord, ObservedUnit};
 use nyl_core::resources::environment::{DriftRepair, Environment};
 
 use super::freshness::{receipt_is_current, same_incarnation};
@@ -46,7 +44,7 @@ pub fn drift_repair(environment: &Environment) -> DriftRepair {
 /// The `driftRepair` the environment's state records (`environment.yaml`,
 /// written by the last run from the S-rendered Environment with group
 /// defaults applied), else `converge`. Commands that render nothing, such
-/// as `nyl verify` and `nyl status`, read it here.
+/// as `nyl detect-drift` and `nyl status`, read it here.
 pub fn stored_drift_repair(record: Option<&EnvironmentRecord>) -> DriftRepair {
     record
         .and_then(|record| record.spec.get("driftRepair"))
@@ -57,7 +55,7 @@ pub fn stored_drift_repair(record: Option<&EnvironmentRecord>) -> DriftRepair {
 /// Why a unit with a current receipt was selected again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Repair {
-    /// Its latest drift observation is `drifted`, under `driftRepair: converge`
+    /// Its latest drift record is `drifted`, under `driftRepair: converge`
     /// and a `converge` recovery policy: listed under `driftRepaired`.
     Drift,
     /// `--reapply` forced it (a unit named with `--unit`): listed under `reapplied`.
@@ -65,7 +63,7 @@ pub enum Repair {
 }
 
 /// Why `desired`, whose receipt is current, is a candidate again: `--reapply`
-/// names it (that wins), or its latest drift observation of the current
+/// names it (that wins), or its latest drift record of the current
 /// receipt is `drifted`. `None` keeps it current. The caller,
 /// [`super::selection::select`], decides under `driftRepair` and the
 /// recovery policy whether a candidate is selected.
@@ -81,22 +79,20 @@ pub(crate) fn repair(
     if candidates.reapply.contains(name) {
         return Some(Repair::Reapply);
     }
-    let drift = latest_drift(desired, observed, candidates.observations.get(name))?;
+    let drift = latest_drift(desired, observed, candidates.drift.get(name))?;
     matches!(drift.result, Drift::Drifted { .. }).then_some(Repair::Drift)
 }
 
-/// The drift observation about `observed`'s receipt, which must be current
-/// for `desired`: an observation of another incarnation or another
-/// execution key no longer describes it.
+/// The drift record about `observed`'s receipt, which must be current
+/// for `desired`: a record of another incarnation or another execution
+/// key no longer describes it.
 fn latest_drift<'o>(
     desired: &DesiredUnit,
     observed: Option<&ObservedUnit>,
-    observations: Option<&'o BTreeMap<ObservationType, Observation>>,
-) -> Option<&'o Observation> {
+    record: Option<&'o DriftRecord>,
+) -> Option<&'o DriftRecord> {
     let receipt = observed?.receipt.as_ref()?;
-    observations?
-        .get(&ObservationType::Drift)
-        .filter(|drift| drift.unit.uid == desired.unit.uid && drift.execution_key == receipt.execution_key)
+    record.filter(|drift| drift.unit.uid == desired.unit.uid && drift.execution_key == receipt.execution_key)
 }
 
 /// Of the units [`super::selection::select`] made ready, those it selected
@@ -118,55 +114,43 @@ pub fn repairs(candidates: &Candidates<'_>, ready: &[UnitName]) -> BTreeMap<Unit
         .collect()
 }
 
-/// The observation changes of a transition: a unit whose receipt this run
-/// replaced loses the drift observation about the old receipt; its other
-/// observations stay. The value is the unit's complete remaining set, or
-/// `None` when nothing remains. Units whose observed file the transition
-/// removes lose every observation through the lifecycle changes, which the
-/// run path applies after these.
-pub fn observation_changes(
+/// The drift changes of a transition: a unit whose receipt this run
+/// replaced loses the drift record about the old receipt. Units whose
+/// observed file the transition removes lose their record through the
+/// lifecycle changes, which the run path applies after these.
+pub fn drift_changes(
     snapshot: &EnvironmentSnapshot,
     observed: &BTreeMap<UnitName, ObservedUnit>,
-) -> BTreeMap<UnitName, Option<BTreeMap<ObservationType, Observation>>> {
+) -> BTreeMap<UnitName, Option<DriftRecord>> {
     observed
         .iter()
         .filter(|(name, after)| {
             after.receipt.is_some()
                 && snapshot.observed.get(*name).and_then(|before| before.receipt.as_ref()) != after.receipt.as_ref()
+                && snapshot.drift.contains_key(*name)
         })
-        .filter_map(|(name, _)| {
-            let stored = snapshot.observations.get(name)?;
-            if !stored.contains_key(&ObservationType::Drift) {
-                return None;
-            }
-            let remaining: BTreeMap<_, _> = stored
-                .iter()
-                .filter(|(observation_type, _)| **observation_type != ObservationType::Drift)
-                .map(|(observation_type, observation)| (*observation_type, observation.clone()))
-                .collect();
-            Some((name.clone(), (!remaining.is_empty()).then_some(remaining)))
-        })
+        .map(|(name, _)| (name.clone(), None))
         .collect()
 }
 
 /// The drift attribute `status` and `get units -e` show for a unit with a
-/// current receipt: its latest drift observation's result (`clean`,
+/// current receipt: its latest drift record's result (`clean`,
 /// `drifted`, or `unknown`). A unit whose result is `drifted` has the unit
 /// state `drifted` ([`crate::run_report::UnitState::Drifted`]);
 /// `rules::unit_state` sets it from this attribute. `None` without a
-/// current receipt or without an observation of it. The state does not
+/// current receipt or without a drift record of it. The state does not
 /// depend on the recovery policy or `driftRepair`: a drifted unit is work
 /// for the next reconcile either way (repaired, awaiting approval, or
 /// awaiting `--reapply`).
 pub fn status_drift(
     desired: &DesiredUnit,
     observed: Option<&ObservedUnit>,
-    observations: Option<&BTreeMap<ObservationType, Observation>>,
+    record: Option<&DriftRecord>,
 ) -> Option<DriftAttribute> {
     if !receipt_is_current(desired, observed) {
         return None;
     }
-    let result = match latest_drift(desired, observed, observations)?.result {
+    let result = match latest_drift(desired, observed, record)?.result {
         Drift::Clean => "clean",
         Drift::Drifted { .. } => "drifted",
         Drift::Unknown { .. } => "unknown",
@@ -183,7 +167,7 @@ mod tests {
     use std::sync::Arc;
 
     use nyl_core::orchestration::ids::RunId;
-    use nyl_core::orchestration::state::{ObservationKind, Receipt, StateV1};
+    use nyl_core::orchestration::state::{DriftRecordKind, Receipt, StateV1};
     use proptest::prelude::*;
     use serde_json::{json, Value};
 
@@ -197,12 +181,11 @@ mod tests {
         drivers
     }
 
-    fn observation(desired: &DesiredUnit, observation_type: ObservationType, result: Drift) -> Observation {
-        Observation {
+    fn record(desired: &DesiredUnit, result: Drift) -> DriftRecord {
+        DriftRecord {
             api_version: StateV1,
-            kind: ObservationKind,
+            kind: DriftRecordKind,
             unit: desired.unit.clone(),
-            observation_type,
             execution_key: desired.execution_key.clone().unwrap(),
             at: "2026-09-24T12:00:00Z".parse().unwrap(),
             result,
@@ -216,12 +199,11 @@ mod tests {
         }
     }
 
-    /// One unit `unit` with a current receipt and `spec`, observed with
-    /// `drift` (and a clean health observation when `health`).
+    /// Units with a current receipt and `spec`, each with an optional drift record.
     struct World {
         desired: BTreeMap<UnitName, DesiredUnit>,
         observed: BTreeMap<UnitName, ObservedUnit>,
-        observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+        drift: BTreeMap<UnitName, DriftRecord>,
         drivers: DriverSet,
         drift_repair: DriftRepair,
         reapply: BTreeSet<UnitName>,
@@ -233,7 +215,7 @@ mod tests {
             Self {
                 desired: BTreeMap::new(),
                 observed: BTreeMap::new(),
-                observations: BTreeMap::new(),
+                drift: BTreeMap::new(),
                 drivers: drivers(),
                 drift_repair: DriftRepair::Converge,
                 reapply: BTreeSet::new(),
@@ -241,23 +223,10 @@ mod tests {
             }
         }
 
-        fn current(&mut self, unit: &str, spec: Value, drift: Option<Drift>, health: bool) {
+        fn current(&mut self, unit: &str, spec: Value, drift: Option<Drift>) {
             let document = desired(unit, "Command", spec.clone(), unit);
-            let mut stored = BTreeMap::new();
             if let Some(drift) = drift {
-                stored.insert(
-                    ObservationType::Drift,
-                    observation(&document, ObservationType::Drift, drift),
-                );
-            }
-            if health {
-                stored.insert(
-                    ObservationType::Health,
-                    observation(&document, ObservationType::Health, Drift::Clean),
-                );
-            }
-            if !stored.is_empty() {
-                self.observations.insert(name(unit), stored);
+                self.drift.insert(name(unit), record(&document, drift));
             }
             self.desired.insert(name(unit), document);
             self.observed.insert(
@@ -275,7 +244,7 @@ mod tests {
                 named: None,
                 attempted,
                 local: self.local.as_ref(),
-                observations: &self.observations,
+                drift: &self.drift,
                 drift_repair: self.drift_repair,
                 reapply: &self.reapply,
             })
@@ -286,13 +255,13 @@ mod tests {
             EnvironmentSnapshot {
                 desired: self.desired.clone(),
                 observed: self.observed.clone(),
-                observations: self.observations.clone(),
+                drift: self.drift.clone(),
                 ..EnvironmentSnapshot::default()
             }
         }
 
         /// Execute `unit` again: a new receipt of the same key by another
-        /// run, with [`observation_changes`] applied as the run path does.
+        /// run, with [`drift_changes`] applied as the run path does.
         fn repair(&mut self, unit: &str) {
             let snapshot = self.snapshot();
             let observed = self.observed.get_mut(&name(unit)).unwrap();
@@ -301,43 +270,33 @@ mod tests {
                 run: RunId::new(RUN_2).unwrap(),
                 ..receipt.clone()
             };
-            for (name, remaining) in observation_changes(&snapshot, &self.observed) {
-                match remaining {
-                    Some(remaining) => self.observations.insert(name, remaining),
-                    None => self.observations.remove(&name),
+            for (name, record) in drift_changes(&snapshot, &self.observed) {
+                match record {
+                    Some(record) => self.drift.insert(name, record),
+                    None => self.drift.remove(&name),
                 };
             }
         }
     }
 
-    /// Catches a repaired unit keeping the drift observation about its old
-    /// receipt (it would read `drifted` against the new one), losing its
-    /// other observations, or an unchanged unit losing its observation.
+    /// Catches a repaired unit keeping the drift record about its old
+    /// receipt (it would read `drifted` against the new one), or an
+    /// unchanged unit losing its record.
     #[test]
-    fn test_observation_changes_drop_drift_only_for_new_receipts() {
+    fn test_drift_changes_drop_records_only_for_new_receipts() {
         let mut world = World::new();
-        world.current("repaired", json!({}), Some(drifted()), true);
-        world.current("alone", json!({}), Some(drifted()), false);
-        world.current("unchanged", json!({}), Some(drifted()), true);
+        world.current("repaired", json!({}), Some(drifted()));
+        world.current("unchanged", json!({}), Some(drifted()));
+        world.current("unrecorded", json!({}), None);
         let snapshot = world.snapshot();
         let mut after = world.observed.clone();
-        for unit in ["repaired", "alone"] {
+        for unit in ["repaired", "unrecorded"] {
             let receipt = after.get_mut(&name(unit)).unwrap().receipt.as_mut().unwrap();
             receipt.run = RunId::new(RUN_2).unwrap();
         }
-        let changes = observation_changes(&snapshot, &after);
         assert_eq!(
-            changes,
-            BTreeMap::from([
-                (name("alone"), None),
-                (
-                    name("repaired"),
-                    Some(BTreeMap::from([(
-                        ObservationType::Health,
-                        world.observations[&name("repaired")][&ObservationType::Health].clone()
-                    )]))
-                ),
-            ])
+            drift_changes(&snapshot, &after),
+            BTreeMap::from([(name("repaired"), None)])
         );
     }
 
@@ -346,9 +305,9 @@ mod tests {
     #[test]
     fn test_repairs_classify_why_a_current_unit_was_selected() {
         let mut world = World::new();
-        world.current("drifted", json!({"idempotent": true}), Some(drifted()), false);
-        world.current("reapplied", json!({"idempotent": true}), Some(drifted()), false);
-        world.current("uncertain", json!({"idempotent": true}), Some(drifted()), false);
+        world.current("drifted", json!({"idempotent": true}), Some(drifted()));
+        world.current("reapplied", json!({"idempotent": true}), Some(drifted()));
+        world.current("uncertain", json!({"idempotent": true}), Some(drifted()));
         world.observed.get_mut(&name("uncertain")).unwrap().condition = Some(Condition::Uncertain {
             since: "2026-09-24T11:12:00Z".parse().unwrap(),
             run: run(RUN_1),
@@ -366,61 +325,52 @@ mod tests {
         );
     }
 
-    /// Catches `status` showing a stale observation's result, or none for
-    /// the current receipt's.
+    /// Catches `status` showing a stale record's result, or none for the
+    /// current receipt's.
     #[test]
-    fn test_status_drift_reports_the_current_receipts_observation() {
+    fn test_status_drift_reports_the_current_receipts_record() {
         let mut world = World::new();
-        world.current("clean", json!({}), Some(Drift::Clean), false);
-        world.current("drifted", json!({}), Some(drifted()), false);
-        world.current(
-            "unknown",
-            json!({}),
-            Some(Drift::Unknown { reason: "x".to_owned() }),
-            false,
-        );
-        world.current("unobserved", json!({}), None, true);
-        world.current("stale", json!({}), Some(drifted()), false);
+        world.current("clean", json!({}), Some(Drift::Clean));
+        world.current("drifted", json!({}), Some(drifted()));
+        world.current("unknown", json!({}), Some(Drift::Unknown { reason: "x".to_owned() }));
+        world.current("unchecked", json!({}), None);
+        world.current("stale", json!({}), Some(drifted()));
         world.desired.get_mut(&name("stale")).unwrap().execution_key = Some(key("changed"));
         let result = |unit: &str| {
             status_drift(
                 &world.desired[&name(unit)],
                 world.observed.get(&name(unit)),
-                world.observations.get(&name(unit)),
+                world.drift.get(&name(unit)),
             )
             .map(|drift| drift.result)
         };
         assert_eq!(result("clean").as_deref(), Some("clean"));
         assert_eq!(result("drifted").as_deref(), Some("drifted"));
         assert_eq!(result("unknown").as_deref(), Some("unknown"));
-        assert_eq!(result("unobserved"), None);
+        assert_eq!(result("unchecked"), None);
         assert_eq!(result("stale"), None);
     }
 
     proptest! {
         /// Catches a repaired unit being selected again on the strength of
-        /// the observation its repair answered: after a new receipt and the
-        /// observation changes, only a new `drifted` observation (or
-        /// `--reapply`) selects it again, whatever its policy, `driftRepair`,
-        /// approvals, and other observations.
+        /// the drift record its repair answered: after a new receipt and the
+        /// drift changes, only a new `drifted` record (or `--reapply`)
+        /// selects it again, whatever its policy, `driftRepair`, and
+        /// approvals.
         #[test]
         fn test_a_repair_is_not_selected_again_without_new_drift(
             idempotent in any::<bool>(),
             manual in any::<bool>(),
             approved in any::<bool>(),
-            health in any::<bool>(),
         ) {
             let mut world = World::new();
-            world.current("unit", json!({"idempotent": idempotent}), Some(drifted()), health);
+            world.current("unit", json!({"idempotent": idempotent}), Some(drifted()));
             world.drift_repair = if manual { DriftRepair::Manual } else { DriftRepair::Converge };
             world.local = approved.then(|| BTreeSet::from([name("unit")]));
             world.repair("unit");
             let skipped = world.with(&BTreeSet::new(), |candidates| select(candidates).1);
             prop_assert_eq!(skipped.get(&name("unit")), Some(&Skipped::Current));
-            prop_assert_eq!(
-                world.observations.get(&name("unit")).map(|stored| stored.contains_key(&ObservationType::Health)),
-                health.then_some(true)
-            );
+            prop_assert!(!world.drift.contains_key(&name("unit")));
         }
     }
 }

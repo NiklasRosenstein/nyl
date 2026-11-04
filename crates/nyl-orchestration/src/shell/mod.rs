@@ -4,6 +4,7 @@
 //! Decisions come from [`crate::rules`]; the shell reads snapshots, asks the
 //! rules, and writes what they decide.
 
+pub mod check;
 pub mod inspect;
 pub mod lease;
 pub mod lifecycle;
@@ -17,7 +18,6 @@ pub mod sources;
 pub mod state;
 pub mod teardown;
 pub mod tools;
-pub mod verify;
 
 use std::collections::BTreeMap;
 

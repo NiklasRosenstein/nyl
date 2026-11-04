@@ -13,6 +13,7 @@ pub mod reconcile;
 pub mod source_locks;
 pub mod tree;
 pub mod units;
+mod values;
 
 pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};
 pub use crate::render::{RenderSession, RenderedBundle};

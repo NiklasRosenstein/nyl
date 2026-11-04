@@ -44,7 +44,8 @@ pub struct ProjectScopeContraction {
     pub project: String,
     /// Target cluster and its recorded Argo CD destination.
     pub cluster: String,
-    /// Workload namespace, or the name of a managed Namespace.
+    /// Workload namespace, the name of a managed Namespace, or empty for
+    /// other cluster-scoped resources.
     pub namespace: String,
     /// Effective permissions that cleanup loses.
     pub permissions: BTreeSet<String>,
@@ -69,13 +70,17 @@ pub fn check_project_scope(
         use std::fmt::Write;
         writeln!(
             message,
-            "- Application(s) {}; ApplicationGroup {:?} ({}); AppProject {}; target cluster {}; namespace {:?}: {}. {}",
+            "- Application(s) {}; ApplicationGroup {:?} ({}); AppProject {}; target cluster {}; {}: {}. {}",
             finding.applications.into_iter().collect::<Vec<_>>().join(", "),
             finding.application_group,
             finding.source,
             finding.project,
             finding.cluster,
-            finding.namespace,
+            if finding.namespace.is_empty() {
+                "cluster-scoped resources".to_owned()
+            } else {
+                format!("namespace {:?}", finding.namespace)
+            },
             finding.permissions.into_iter().collect::<Vec<_>>().join(", "),
             finding.remedies.into_iter().collect::<Vec<_>>().join(" ")
         )
@@ -383,10 +388,9 @@ pub fn project_scope_contractions(
             .unwrap_or(&app["spec"]["destination"]);
         let destination_label = serde_json::to_string(destination)?;
         for resource in previous.retiring_resources(app, previous_prefix, &proposed, proposed_prefix)? {
+            // Empty for cluster-scoped kinds other than Namespace, which Argo CD
+            // permits by cluster resource lists alone.
             let namespace = cleanup_namespace(&resource);
-            if namespace.is_empty() {
-                continue;
-            }
             let before = denied_permissions(old_project, &resource, destination)?;
             if !before.is_empty() {
                 continue;
@@ -455,6 +459,10 @@ fn retention_remedy(
         return Ok("Retain the AppProject and its listed destination/resource permissions in the owning project declaration; restore the owning ApplicationGroup if needed. retainedProjectNamespaces applies only to group-owned generated projects.".to_owned());
     };
     let namespace = cleanup_namespace(resource);
+    if namespace.is_empty() {
+        let denied = denied_permissions(project, resource, destination)?;
+        return Ok(format!("Namespace retention cannot preserve cluster-scoped permissions: retain these in projectTemplate.clusterResourceWhitelist of ApplicationGroup {:?} ({}): {}.", context["group"].as_str().unwrap_or(group), context["source"].as_str().unwrap_or(source), denied.into_iter().collect::<Vec<_>>().join(", ")));
+    }
     let mut retained = project.clone();
     let mut destinations = list(project, "destinations").to_vec();
     let mut retained_destination = context["destination"].clone();
@@ -470,13 +478,17 @@ fn retention_remedy(
         retained["spec"]["clusterResourceWhitelist"] = whitelist.into();
     }
     let additional = denied_permissions(&retained, resource, destination)?;
+    let group = context["group"].as_str().unwrap_or(group);
+    let source = context["source"].as_str().unwrap_or(source);
+    // A surviving namespace that only loses a resource kind gains nothing from retention.
+    if field(resource, "/kind") != "Namespace" && destination_permitted(project, destination, namespace)? {
+        return Ok(format!("Namespace {namespace:?} remains in scope; retain these project permissions in projectTemplate of ApplicationGroup {group:?} ({source}): {}.", additional.into_iter().collect::<Vec<_>>().join(", ")));
+    }
     let extra = if additional.is_empty() {
         String::new()
     } else {
         format!(" Namespace retention alone is insufficient: also retain these project permissions in projectTemplate: {}. Preserve the original cluster destination and allow cleanup through explicit deny rules where applicable.", additional.into_iter().collect::<Vec<_>>().join(", "))
     };
-    let group = context["group"].as_str().unwrap_or(group);
-    let source = context["source"].as_str().unwrap_or(source);
     Ok(format!("Add {namespace:?} to spec.retainedProjectNamespaces on ApplicationGroup {group:?} ({source}; append to any existing entries).{extra}"))
 }
 
@@ -714,6 +726,36 @@ mod tests {
     }
 
     #[test]
+    fn test_cluster_scoped_retirement_needs_cluster_resource_permission() {
+        let cluster_role =
+            json!({"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"ClusterRole", "metadata":{"name":"reader"}});
+        let mut wide = project(&["retired"]);
+        wide["spec"]["clusterResourceWhitelist"] = json!([{"group":"rbac.authorization.k8s.io", "kind":"ClusterRole"}]);
+        let old = tree(wide.clone(), Some(app("example")), &[cluster_role]);
+        // The surviving project keeps the namespace but derives no ClusterRole permission.
+        let found = findings(&old, &tree(project(&["retired"]), None, &[]));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].namespace, "");
+        let error = check_project_scope(
+            &borrowed(&old),
+            &borrowed(&tree(project(&["retired"]), None, &[])),
+            "production",
+            "production",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        for expected in [
+            "cluster-scoped resources",
+            "rbac.authorization.k8s.io/ClusterRole \"reader\"",
+            "projectTemplate.clusterResourceWhitelist",
+        ] {
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        assert!(findings(&old, &tree(wide, None, &[])).is_empty());
+    }
+
+    #[test]
     fn test_equivalent_permissions_and_unchanged_scope_are_safe() {
         let old = tree(project(&["retired"]), Some(app("example")), &[resource("retired")]);
         for ns in ["retired", "*", "ret*", "{active,retired}", "{active,{old,retired}}"] {
@@ -826,6 +868,19 @@ mod tests {
             .remedies
             .iter()
             .any(|r| r.contains("insufficient") && r.contains("namespaceResourceWhitelist")));
+    }
+
+    #[test]
+    fn test_surviving_namespace_losing_a_kind_needs_only_the_kind_permission() {
+        let old = tree(project(&["retired"]), Some(app("example")), &[resource("retired")]);
+        let mut narrowed = project(&["retired"]);
+        narrowed["spec"]["namespaceResourceWhitelist"] = json!([]);
+        let found = findings(&old, &tree(narrowed, None, &[]));
+        assert_eq!(found.len(), 1);
+        assert!(found[0]
+            .remedies
+            .iter()
+            .all(|r| r.contains("remains in scope") && r.contains("namespaceResourceWhitelist")));
     }
 
     #[test]

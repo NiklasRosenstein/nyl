@@ -140,7 +140,7 @@ pub struct CommitStep {
 
 /// A change made outside Nyl to a file in the scenario's temporary
 /// directory, `%SCENARIO_TMP%`, such as the resources a Command unit's
-/// `verify` inspects: `content` writes the file, `delete: true` removes it.
+/// `detectDrift` step inspects: `content` writes the file, `delete: true` removes it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileStep {
@@ -185,12 +185,25 @@ pub struct DriverStep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum DriverOperation {
     Plan,
     Reconcile,
-    Verify,
+    DetectDrift,
     Teardown,
+    /// Reads the unit's observed values; `outputs` holds the values it
+    /// reports. Executes from M5.
+    Observe,
+}
+
+impl DriverOperation {
+    /// The first milestone whose harness executes this operation.
+    pub fn executes_from(self) -> Milestone {
+        match self {
+            Self::Observe => Milestone(5),
+            _ => Milestone(3),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -199,8 +212,10 @@ pub enum DriverOutcome {
     Succeeded,
     Failed,
     Uncertain,
-    /// `verify` only: the fake reports drift.
+    /// `detect-drift` only: the fake reports drift.
     Drifted,
+    /// `observe` only: the observations are not available yet.
+    Pending,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,6 +304,8 @@ pub struct CiExportStep {
 pub struct Expect {
     pub executed: Option<Vec<String>>,
     pub current: Option<Vec<String>>,
+    /// A plan or status report's `ready` units: work for the next reconcile.
+    pub ready: Option<Vec<String>>,
     pub blocked: Option<Vec<String>>,
     pub failed: Option<Vec<String>>,
     pub uncertain: Option<Vec<String>>,
@@ -308,6 +325,9 @@ pub struct Expect {
     /// The summary's `driftRepaired`, and the report's list of that name.
     #[serde(rename = "driftRepaired")]
     pub drift_repaired: Option<Vec<String>>,
+    /// The units of the summary's `observationsChanged`, and the report's.
+    #[serde(rename = "observationsChanged")]
+    pub observations_changed: Option<Vec<String>>,
     /// The units of the summary's `reapplied`, and the report's list.
     pub reapplied: Option<Vec<String>>,
     /// Whether the transition commit records a lease break (`leaseBroken`).
@@ -504,6 +524,16 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
     let mut scripted = false;
     for (index, step) in scenario.steps.iter().enumerate() {
         validate_step(step, directory, &mut ids).map_err(|error| format!("step {}: {error}", index + 1))?;
+        if let Some(driver) = &step.driver {
+            if driver.operation.executes_from() > scenario.milestone {
+                return Err(format!(
+                    "step {}: {:?} runs from {}, after the scenario's milestone",
+                    index + 1,
+                    driver.operation,
+                    driver.operation.executes_from()
+                ));
+            }
+        }
         // driver, fault, and pause steps are tier 1 by kind, and a step that
         // depends on one carries `tier: 1`. A scenario that also runs in tier 2
         // marks every checked step after the first such step, since the
@@ -642,14 +672,27 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
         }
         StepKind::Driver => {
             let driver = step.driver.as_ref().expect("kind");
-            if (driver.outcome == DriverOutcome::Failed) != (driver.category.is_some() && driver.retryable.is_some()) {
-                return Err("a failed driver outcome, and only that, names its category and retryable".to_owned());
+            let observe = driver.operation == DriverOperation::Observe;
+            // An observation that could not be read has a reason, never a
+            // failure category: it does not fail the unit.
+            let categorized = driver.outcome == DriverOutcome::Failed && !observe;
+            if categorized != (driver.category.is_some() && driver.retryable.is_some()) {
+                return Err(
+                    "a failed driver outcome other than observe's, and only that, names its category and retryable"
+                        .to_owned(),
+                );
+            }
+            if observe && matches!(driver.outcome, DriverOutcome::Uncertain | DriverOutcome::Drifted) {
+                return Err("an observe outcome is succeeded, pending, or failed".to_owned());
+            }
+            if (driver.outcome == DriverOutcome::Pending) && !observe {
+                return Err("only an observe outcome can be pending".to_owned());
             }
             if driver.times == Some(0) {
                 return Err("times must be at least 1".to_owned());
             }
-            if (driver.outcome == DriverOutcome::Drifted) && driver.operation != DriverOperation::Verify {
-                return Err("only a verify outcome can be drifted".to_owned());
+            if (driver.outcome == DriverOutcome::Drifted) && driver.operation != DriverOperation::DetectDrift {
+                return Err("only a detect-drift outcome can be drifted".to_owned());
             }
         }
         StepKind::Fault => {

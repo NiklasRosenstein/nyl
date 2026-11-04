@@ -119,6 +119,7 @@ export default defineConfig({
                 label: "Workflow",
                 items: [
                   "kubernetes-rendering/cli-workflows",
+                  "kubernetes-rendering/python-client",
                   "kubernetes-rendering/validation/manifest-validation",
                   "kubernetes-rendering/validation/kyverno-policies",
                   "kubernetes-rendering/renovate",
@@ -215,7 +216,7 @@ export default defineConfig({
                   "reference/cli/build",
                   "reference/cli/reconcile",
                   "reference/cli/status",
-                  "reference/cli/verify",
+                  "reference/cli/detect-drift",
                   "reference/cli/teardown",
                   "reference/cli/hold",
                   "reference/cli/recover",

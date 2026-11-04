@@ -71,6 +71,9 @@ pub struct ClusterSpec {
     /// Cluster facts merged recursively with target values; target values win.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
+    /// Plain YAML mapping files merged in declaration order before inline values. Paths are relative to this resource's source file, or `/`-rooted at the Git worktree; files must stay inside the worktree without traversing symlinks. Target imports and inline values override Cluster values.
+    #[serde(rename = "valuesFrom", default, skip_serializing_if = "Vec::is_empty")]
+    pub values_from: Vec<ValuesFromFile>,
     /// Local connection settings. Omitted from templates and render hashes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live: Option<ClusterLiveConfiguration>,
@@ -263,6 +266,9 @@ pub struct DeploymentTargetSpec {
     /// Target values recursively overlaid on Cluster values and exposed as template inputs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
+    /// Plain YAML mapping files merged in declaration order over Cluster values and before inline target values. Paths are relative to this resource's source file, or `/`-rooted at the Git worktree; files must stay inside the worktree without traversing symlinks.
+    #[serde(rename = "valuesFrom", default, skip_serializing_if = "Vec::is_empty")]
+    pub values_from: Vec<ValuesFromFile>,
     /// Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes.
     pub publication: GitPublication,
     /// Target-specific catalog Application settings. Unspecified policy inherits from the ArgoCDInstance.
@@ -271,6 +277,37 @@ pub struct DeploymentTargetSpec {
     /// Release input bindings, keyed by `<applicationGroup>/<release>` and then input name. Each binding sets exactly one source and replaces the Release default whole. Keys of selected but disabled groups are ignored; other keys must name a rendered Release and inputs it declares. Not visible to templates as `target.spec.releaseInputs`.
     #[serde(rename = "releaseInputs", default, skip_serializing_if = "BTreeMap::is_empty")]
     pub release_inputs: super::release_inputs::ReleaseInputBindings,
+}
+
+/// One ordinary configuration file contributing template values, without templating or recursive includes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ValuesFromFile {
+    /// Static, normalized path to exactly one YAML mapping document in a Git-visible regular file. Relative paths start at the resource's source directory; `/` starts at the Git worktree root. Leading `..` segments may reach outside the Nyl project, but never outside its worktree or through symlinks. Ignored untracked files, submodules, and the project's `.nyl/cache` directory are excluded.
+    pub file: String,
+    /// Mount the mapping under this literal values key. Omit to merge at the values root. Dots are literal characters, not path separators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl ValuesFromFile {
+    fn validate(&self) -> Result<()> {
+        validate_static_required("spec.valuesFrom[].file", &self.file)?;
+        nyl_core::local_path::validate_local_path("spec.valuesFrom[].file", &self.file).map_err(|_| {
+            CoreError::config(format!(
+                "spec.valuesFrom[].file must be a normalized path relative to the resource's source directory, \
+                 or start with '/' for the Git worktree root; got {:?}",
+                self.file
+            ))
+        })?;
+        if self.file.split('/').any(|segment| segment == ".git") {
+            return Err(CoreError::config("spec.valuesFrom[].file must not access Git metadata"));
+        }
+        if let Some(key) = &self.key {
+            validate_static_required("spec.valuesFrom[].key", key)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -996,6 +1033,9 @@ impl Cluster {
             &self.metadata,
         )?;
         self.spec.destination.validate()?;
+        for source in &self.spec.values_from {
+            source.validate()?;
+        }
         if let Some(reference) = &self.spec.api_contract_from {
             validate_static_required("spec.apiContractFrom.clusterRef.name", &reference.cluster_ref.name)?;
         }
@@ -1147,6 +1187,9 @@ impl DeploymentTarget {
             validate_static_required("spec.argocdRef.name", &reference.name)?;
         }
         self.spec.publication.validate()?;
+        for source in &self.spec.values_from {
+            source.validate()?;
+        }
         validate_relative_path(
             "spec.publication.pathPrefix",
             self.publication_path_prefix(),

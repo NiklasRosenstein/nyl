@@ -13,8 +13,8 @@ use serde_json::Value;
 
 use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
 use super::state::{
-    ArtifactDocument, Attestation, DesiredUnit, EnvironmentRecord, Lease, Observation, ObservationType, ObservedUnit,
-    Run, Signal, StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
+    StateLocation, StateRecord,
 };
 use super::time::{Duration, Timestamp};
 use crate::resources::environment::Environment;
@@ -125,12 +125,11 @@ pub struct EnvironmentSnapshot {
     pub observed: BTreeMap<UnitName, ObservedUnit>,
     /// Artifacts of the latest receipts, by unit and artifact name.
     pub artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
-    /// The latest observation per type, by unit
-    /// (`observed/units/<unit>/observations/<type>.yaml`), as `nyl verify`
-    /// writes them. Contract: [Commands](../../../../design/orchestration-core.md#commands).
-    pub observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    /// The latest drift detection per unit (`observed/units/<unit>/drift.yaml`),
+    /// as `nyl detect-drift` writes it. Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    pub drift: BTreeMap<UnitName, DriftRecord>,
     /// Driver attestations by unit and name
-    /// (`observed/units/<unit>/attestations/<name>.yaml`).
+    /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
@@ -145,11 +144,11 @@ pub struct TransitionChanges {
     pub observed: BTreeMap<UnitName, Option<ObservedUnit>>,
     /// The complete artifact set of a unit's latest receipt; `None` removes all.
     pub artifacts: BTreeMap<UnitName, Option<BTreeMap<String, ArtifactDocument>>>,
-    /// The complete set of a unit's latest observations, one per type;
-    /// `None` removes all. Written by `nyl verify`.
-    pub observations: BTreeMap<UnitName, Option<BTreeMap<ObservationType, Observation>>>,
+    /// A unit's latest drift detection; `None` removes it. Written by
+    /// `nyl detect-drift`, and removed with a new receipt.
+    pub drift: BTreeMap<UnitName, Option<DriftRecord>>,
     /// The complete set of a unit's driver attestations by name; `None`
-    /// removes all. Written by `nyl verify`.
+    /// removes all. Written by `nyl attest`, and by reconcile with a receipt.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
     /// Remove every file of the environment's state on both refs before
     /// applying the other changes: `state.yaml`, `desired/`, and `observed/`
@@ -175,7 +174,7 @@ impl TransitionChanges {
             && self.desired.is_empty()
             && self.observed.is_empty()
             && self.artifacts.is_empty()
-            && self.observations.is_empty()
+            && self.drift.is_empty()
             && self.attestations.is_empty()
     }
 }

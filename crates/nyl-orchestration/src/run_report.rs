@@ -1,4 +1,4 @@
-//! The typed report of `plan`, `reconcile`, `status`, and `verify`.
+//! The typed report of `plan`, `reconcile`, `status`, `teardown`, `detect-drift`, and `attest`.
 //!
 //! Contract: [Planning](../../../../design/orchestration-core.md#planning),
 //! [Inspection](../../../../design/orchestration-core.md#inspection) (the
@@ -29,8 +29,10 @@ pub enum ReportKind {
     PlanReport,
     ReconcileReport,
     StatusReport,
-    /// `nyl verify`: per unit its [`UnitVerification`].
-    VerifyReport,
+    /// `nyl detect-drift`: per unit its [`UnitCheck`].
+    DetectDriftReport,
+    /// `nyl attest`: per unit its [`UnitCheck`] with its attestations.
+    AttestReport,
     /// `nyl teardown`: per unit its [`UnitResult`], exit categories as for reconcile.
     TeardownReport,
 }
@@ -194,7 +196,7 @@ pub struct EnvironmentRunReport {
     /// the transition summary's `recovered`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recovered: Vec<UnitName>,
-    /// Units executed again because their latest drift observation was
+    /// Units executed again because their latest drift record was
     /// `drifted`: the transition summary's `driftRepaired`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub drift_repaired: Vec<UnitName>,
@@ -386,7 +388,7 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 | UnitResult::TearingDown { .. },
             ) => ExitCategory::Incomplete,
         },
-        ReportKind::VerifyReport => crate::rules::verification::unit_exit(unit),
+        ReportKind::DetectDriftReport | ReportKind::AttestReport => crate::rules::checks::unit_exit(unit),
         ReportKind::StatusReport => match (unit.state, unit.condition) {
             // A held or deleting unit with a condition exits by its
             // condition, which still needs a run or `nyl recover`.
@@ -484,9 +486,9 @@ pub struct UnitReport {
     /// not a stored condition, makes a plan exit 3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_error: Option<String>,
-    /// What `verify` found; `None` in other reports.
+    /// What `detect-drift` or `attest` found; `None` in other reports.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub verification: Option<UnitVerification>,
+    pub check: Option<UnitCheck>,
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -499,7 +501,7 @@ pub struct UnitReport {
     /// [Recovery](../../../../design/orchestration-core.md#recovery), holds on uncertain units.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<ConditionState>,
-    /// The latest drift observation of a unit with a current receipt
+    /// The latest drift record of a unit with a current receipt
     /// (status and `get units -e`). Contract: [Drift](../../../../design/orchestration-core.md#drift).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drift: Option<DriftAttribute>,
@@ -521,7 +523,7 @@ pub enum ConditionState {
     Failed,
 }
 
-/// A unit's latest drift observation, as status shows it.
+/// A unit's latest drift record, as status shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriftAttribute {
@@ -559,7 +561,7 @@ impl UnitReport {
             summary: None,
             blocked_by: Vec::new(),
             plan_error: None,
-            verification: None,
+            check: None,
             message: None,
             last_run: None,
             condition: None,
@@ -577,27 +579,23 @@ impl UnitReport {
             .as_ref()
             .map(UnitResult::name)
             .or_else(|| self.state.map(UnitState::name))
-            .or_else(|| {
-                self.verification
-                    .as_ref()
-                    .map(|verification| verification.result.name())
-            })
+            .or_else(|| self.check.as_ref().map(|check| check.result.name()))
     }
 }
 
-/// What `verify` found for one unit.
+/// What `detect-drift` or `attest` found for one unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UnitVerification {
+pub struct UnitCheck {
     #[serde(flatten)]
-    pub result: VerifyResult,
-    /// The driver's attestations of the current receipt, by name.
+    pub result: CheckResult,
+    /// The driver's attestations of the current receipt, by name (`attest`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub attestations: BTreeMap<String, AttestationResult>,
 }
 
-impl From<VerifyResult> for UnitVerification {
-    /// A verdict without attestations.
-    fn from(result: VerifyResult) -> Self {
+impl From<CheckResult> for UnitCheck {
+    /// A result without attestations.
+    fn from(result: CheckResult) -> Self {
         Self {
             result,
             attestations: BTreeMap::new(),
@@ -605,29 +603,34 @@ impl From<VerifyResult> for UnitVerification {
     }
 }
 
-/// The drift verdict of one unit's verification.
+/// The result of one unit's check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "verification", rename_all = "kebab-case")]
-pub enum VerifyResult {
+#[serde(tag = "check", rename_all = "kebab-case")]
+pub enum CheckResult {
+    /// `detect-drift`: the receipt still holds.
     Clean,
+    /// `detect-drift`: the resources no longer match the receipt.
     Drifted {
         summary: String,
     },
+    /// `attest`: the driver attested the receipt; the results are the attestations.
+    Attested,
     Unknown {
         reason: String,
     },
-    /// No current receipt to verify.
+    /// No current receipt to check.
     NoReceipt,
-    /// The kind cannot verify.
+    /// The kind cannot run the check.
     Unsupported,
 }
 
-impl VerifyResult {
+impl CheckResult {
     /// The kebab-case name, as reports serialize it.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Clean => "clean",
             Self::Drifted { .. } => "drifted",
+            Self::Attested => "attested",
             Self::Unknown { .. } => "unknown",
             Self::NoReceipt => "no-receipt",
             Self::Unsupported => "unsupported",
@@ -650,7 +653,7 @@ pub enum UnitState {
     PendingTeardown,
     TearingDown,
     Retained,
-    /// A current unit whose latest drift observation is `drifted`: work for
+    /// A current unit whose latest drift record is `drifted`: work for
     /// the next reconcile (status exits 2, plan lists it as executing).
     /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
     Drifted,

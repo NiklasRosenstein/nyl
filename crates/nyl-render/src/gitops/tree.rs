@@ -636,6 +636,7 @@ async fn compile_target_tree_recording(
         cluster_path,
         argocd.cluster_path.clone(),
     ]);
+    inputs.extend(target_discovered.values_inputs.iter().cloned());
     for name in [cluster.metadata.name.as_str(), argocd.cluster.metadata.name.as_str()] {
         inputs.extend(super::resolve_cluster_contract(inventory, name)?.inputs);
     }
@@ -671,13 +672,15 @@ async fn compile_target_tree_recording(
         source,
     } in prepared_groups
     {
-        group_sources.insert(group.metadata.name.clone(), group_resource_path.clone());
+        // Recorded in published bytes, so the separator must not depend on the platform.
+        let group_source = group_resource_path.to_string_lossy().replace('\\', "/");
+        group_sources.insert(group.metadata.name.clone(), group_source.clone());
         inputs.insert(group_resource_path.clone());
         inputs.extend(project.source_paths.iter().cloned());
         let argocd_project_name = project.name;
         project_contexts.entry(argocd_project_name.clone()).or_insert_with(|| {
             serde_json::json!({
-                "group": group.metadata.name, "source": group_resource_path,
+                "group": group.metadata.name, "source": group_source,
                 "projectNamespace": argocd.resource.spec.namespace,
                 "cluster": cluster.metadata.name, "destination": cluster.spec.destination,
                 "generated": group.spec.project_ref.is_none(), "namespaceCreate": group.spec.namespace.create,
@@ -1135,6 +1138,9 @@ fn prepare_target_cache(
             .values()
             .filter(|resource| contract.inputs.contains(&resource.source_path))
         {
+            for path in &discovered.values_inputs {
+                recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+            }
             if let Some(GitOpsResource::Cluster(declared)) = &discovered.resource {
                 let mut declared = declared.clone();
                 declared.spec.live = None;
@@ -1145,7 +1151,7 @@ fn prepare_target_cache(
             }
         }
     }
-    record_target_control_dependencies(&mut recorder, inputs, groups)?;
+    record_target_control_dependencies(&mut recorder, inventory, inputs, groups)?;
     for prepared in groups {
         let members = prepared
             .source
@@ -1191,9 +1197,15 @@ fn prepare_target_cache(
 
 fn record_target_control_dependencies(
     recorder: &mut crate::render::cache::DependencyRecorder,
+    inventory: &GitOpsInventory,
     inputs: &TargetCacheInputs<'_>,
     groups: &[PreparedGroup],
 ) -> Result<()> {
+    if let Some(target) = inventory.get(GitOpsResourceKind::DeploymentTarget, &inputs.target.metadata.name) {
+        for path in &target.values_inputs {
+            recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+        }
+    }
     recorder.record_value("tree-render-options", &inputs.options)?;
     let mut effective_target = inputs.target.clone();
     effective_target.apply_defaults();

@@ -71,14 +71,14 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
     let observed: ObservedUnit = serde_json::from_value(json!({"apiVersion": "gitops.nyl/v1", "kind": "ObservedUnit", "unit": unit.unit, "receipt": {"executionKey": unit.execution_key, "behaviorVersion": 1, "run": "00000000-0000-7000-8000-000000000002", "startedAt": "2026-10-28T12:00:00Z", "finishedAt": "2026-10-28T12:00:01Z"}, "condition": null})).unwrap();
     context.observed = Some(&observed);
     let receipt = observed.receipt.as_ref().unwrap();
-    let Supported::Supported(clean) = driver.verify(&context, &unit, receipt).unwrap() else {
-        panic!("native verify unsupported")
+    let Supported::Supported(clean) = driver.detect_drift(&context, &unit, receipt).unwrap() else {
+        panic!("native drift detection unsupported")
     };
     assert_eq!(clean.drift, Drift::Clean);
     let mut changed = spec.clone();
     changed["variables"]["name"] = json!("network-two");
-    let Supported::Supported(drift) = driver.verify(&context, &desired(&changed), receipt).unwrap() else {
-        panic!("native verify unsupported")
+    let Supported::Supported(drift) = driver.detect_drift(&context, &desired(&changed), receipt).unwrap() else {
+        panic!("native drift detection unsupported")
     };
     assert!(matches!(drift.drift, Drift::Drifted { .. }));
     let Supported::Supported(destroyed) = driver.teardown(&context, &unit).unwrap() else {
@@ -164,7 +164,7 @@ fn real_empty(driver: &TerraformDriver, count_zero: bool) {
     assert!(matches!(again, Outcome::Succeeded { .. }), "{again:?}");
     assert_eq!(bytes, std::fs::read(&state).unwrap());
     let Supported::Supported(clean) = driver
-        .verify(&context, &unit, observed.receipt.as_ref().unwrap())
+        .detect_drift(&context, &unit, observed.receipt.as_ref().unwrap())
         .unwrap()
     else {
         panic!("unsupported")
