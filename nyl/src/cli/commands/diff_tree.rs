@@ -41,6 +41,8 @@ pub struct DiffTreeArgs {
     pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+    #[command(flatten)]
+    pub project_scope: nyl_render::gitops::project_scope::ProjectScopeArgs,
 
     #[command(flatten)]
     pub progress: TreeProgressArgs,
@@ -324,8 +326,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             }
         }
         report.baseline(&baseline, &desired);
-        let selection = DiffSelection::from_args(args);
-        let comparison = comparison_files(&selection, &baseline, &desired)?;
+        let comparison = comparison_files(args, &baseline, &desired)?;
         TreeDiff::between(
             &comparison.base,
             &comparison.desired,
@@ -392,11 +393,19 @@ fn owned_copy(files: &nyl_render::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf,
 }
 
 fn comparison_files(
-    selection: &DiffSelection,
+    args: &DiffTreeArgs,
     baseline: &ResolvedBaseline,
     desired: &nyl_render::gitops::CompiledTargetTree,
 ) -> Result<ComparisonFiles> {
-    match selection {
+    nyl_render::gitops::project_scope::check_project_scope(
+        &baseline.files(),
+        &desired.owned_files(),
+        baseline.publication_path_prefix(desired),
+        desired.target.publication_path_prefix(),
+        desired.cluster.spec.kubernetes.as_ref(),
+        args.project_scope.ignore_project_scope_contraction,
+    )?;
+    match &DiffSelection::from_args(args) {
         DiffSelection::Tree => {
             let mut base = owned_copy(&baseline.files());
             // State files are owned plain files, shown as file diffs next to
@@ -768,25 +777,7 @@ pub(super) fn read_rendered_tree(
     reject_published_symlink(root, &index_path)?;
     let index =
         nyl_render::gitops::reconcile::parse_index(&std::fs::read(&index_path)?, &index_path.display().to_string())?;
-    let mut files = BTreeMap::new();
-    for (relative, expected_hash) in &index.files {
-        nyl_core::resources::validate_relative_path("published owned path", relative, false, false)?;
-        let path = root.join(relative);
-        reject_published_symlink(root, &path)?;
-        let bytes = std::fs::read(&path).map_err(|error| {
-            NylError::config(format!(
-                "Published owned file {} is missing or unreadable: {error}",
-                path.display()
-            ))
-        })?;
-        if nyl_core::digest::sha256_hex(&bytes) != *expected_hash {
-            return Err(NylError::config(format!(
-                "Published owned file {} does not match its ownership index",
-                path.display()
-            )));
-        }
-        files.insert(PathBuf::from(relative), bytes);
-    }
+    let files = nyl_render::gitops::reconcile::read_indexed_files(root, &index, &BTreeSet::new())?;
     Ok(PublishedRenderedTree {
         files,
         index: Some(index),

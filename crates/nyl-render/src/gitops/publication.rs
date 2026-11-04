@@ -135,6 +135,9 @@ pub struct RenderedTarget {
     /// The publication branch head the render's `fromPublication` bindings
     /// read; publishing verifies the branch is still there.
     pub publication_base: Option<PublicationBase>,
+    /// The target Cluster's recorded Kubernetes capabilities, which the
+    /// cleanup-scope check uses to resolve resource scope.
+    pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
 }
 
 /// Render `request.target` at `request.worktree` with `request.inputs` as
@@ -232,6 +235,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         cacheable,
         reconcile: compiled.reconcile_options(false),
         publication_base: compiled.publication_base.clone(),
+        cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
     })
 }
 
@@ -397,6 +401,8 @@ pub fn prepare_target_publication(
             desired: &desired,
             index,
             options: rendered.reconcile.clone(),
+            ignore_project_scope_contraction: false,
+            cluster_kubernetes: rendered.cluster_kubernetes.as_ref(),
             publication_base: rendered.publication_base.as_ref(),
             auth: &auth,
         },
@@ -482,6 +488,11 @@ pub struct TreePublication<'a> {
     /// The next ownership index; reconciliation records the file digests.
     pub index: RenderIndex,
     pub options: ReconcileOptions,
+    /// Explicitly accept cleanup scope contractions after operator review.
+    pub ignore_project_scope_contraction: bool,
+    /// The target Cluster's recorded Kubernetes capabilities, which resolve
+    /// the scope of resources published without a namespace.
+    pub cluster_kubernetes: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
     /// The branch head `fromPublication` bindings read, if any.
     pub publication_base: Option<&'a PublicationBase>,
     pub auth: &'a GitAuth,
@@ -524,21 +535,29 @@ pub fn prepare_publication(
     } else {
         checkout.path().join(request.path_prefix)
     };
-    let previous = previously_owned_files(&output_root);
     let index = reconcile_rendered_tree_with_options(
         &output_root,
         request.desired,
         request.index.clone(),
         request.options.clone(),
     )?;
-    let changed = super::changed_applications(
-        &previous
-            .iter()
-            .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
-            .collect(),
+    // Reconciliation verified the baseline's owned files, so the scope check
+    // and the change summary read them once from the branch head; nothing is
+    // committed if the check fails.
+    let previous_files = published_owned_files(&repository, expected, request.path_prefix, &request.options.release)?;
+    let previous: DesiredFiles<'_> = previous_files
+        .iter()
+        .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+        .collect();
+    super::project_scope::check_project_scope(
+        &previous,
         request.desired,
         request.path_prefix,
-    );
+        request.path_prefix,
+        request.cluster_kubernetes,
+        request.ignore_project_scope_contraction,
+    )?;
+    let changed = super::changed_applications(&previous, request.desired, request.path_prefix);
     let message = with_changed_applications(message, &changed);
     let commit = commit_worktree(&repository, request.branch, &output_root, &message, || author()?.git())?;
     Ok(PreparedPublication {
@@ -552,31 +571,53 @@ pub fn prepare_publication(
     })
 }
 
-/// The files the ownership index beneath `output_root` records, as they are
-/// on disk before reconciliation. A missing or unreadable index or file is
-/// left out: the result only describes the change, and reconciliation
-/// enforces ownership.
-fn previously_owned_files(output_root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    let index_path = output_root.join(DEFAULT_INDEX_PATH);
-    let Some(index) = std::fs::read(&index_path)
-        .ok()
-        .and_then(|bytes| parse_index(&bytes, &index_path.display().to_string()).ok())
-    else {
-        return BTreeMap::new();
+/// The files the ownership index of the publication at `head` owns beneath
+/// `prefix`, read from that commit, except paths released from ownership.
+/// Owned files absent from the commit are skipped, as reconciliation allows.
+fn published_owned_files(
+    repository: &Repository,
+    head: Option<Oid>,
+    prefix: &str,
+    released: &std::collections::BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let Some(head) = head else {
+        return Ok(BTreeMap::new());
     };
-    index
-        .files
-        .keys()
-        .filter_map(|path| {
-            let path = PathBuf::from(path);
-            let file = output_root.join(&path);
-            std::fs::symlink_metadata(&file)
-                .is_ok_and(|metadata| metadata.is_file())
-                .then(|| std::fs::read(&file).ok())
-                .flatten()
-                .map(|bytes| (path, bytes))
-        })
-        .collect()
+    let tree = repository
+        .find_commit(head)
+        .and_then(|commit| commit.tree())
+        .map_err(crate::git::GitError::from)?;
+    let read = |relative: &str| -> Result<Option<Vec<u8>>> {
+        let path = match prefix.trim_end_matches('/') {
+            "" => relative.to_owned(),
+            prefix => format!("{prefix}/{relative}"),
+        };
+        match tree.get_path(Path::new(&path)) {
+            Ok(entry) => {
+                let blob = entry
+                    .to_object(repository)
+                    .and_then(|object| object.peel_to_blob())
+                    .map_err(crate::git::GitError::from)?;
+                Ok(Some(blob.content().to_vec()))
+            }
+            Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(error) => Err(crate::git::GitError::from(error).into()),
+        }
+    };
+    let Some(index) = read(DEFAULT_INDEX_PATH)? else {
+        return Ok(BTreeMap::new());
+    };
+    let index = parse_index(&index, DEFAULT_INDEX_PATH)?;
+    let mut files = BTreeMap::new();
+    for relative in index.files.keys() {
+        if released.contains(Path::new(relative)) {
+            continue;
+        }
+        if let Some(bytes) = read(relative)? {
+            files.insert(PathBuf::from(relative), bytes);
+        }
+    }
+    Ok(files)
 }
 
 /// `message` with a `Changed applications:` paragraph listing `applications`,
@@ -953,6 +994,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use serde_json::json;
+    use std::fs;
     use tempfile::TempDir;
 
     const RELEASE: &str = r"apiVersion: k8s.nyl/v1
@@ -1121,6 +1163,52 @@ spec:
             })
             .map(|(_, bytes)| String::from_utf8(bytes.clone()).unwrap())
             .expect("the Deployment is rendered beneath web/")
+    }
+
+    #[test]
+    fn test_published_owned_files_skip_missing_and_released_paths() {
+        let directory = TempDir::new().unwrap();
+        let repository = Repository::init(directory.path()).unwrap();
+        let mut index = RenderIndex::new(
+            "production".into(),
+            "production".into(),
+            RenderIndexPublication {
+                repository: "deploy".into(),
+                revision: "deploy".into(),
+                path_prefix: "production".into(),
+            },
+            None,
+            false,
+            BTreeMap::new(),
+        );
+        for path in ["apps/kept.yaml", "apps/deleted.yaml", "state/released.json"] {
+            index.files.insert(path.into(), "digest".into());
+        }
+        let root = directory.path().join("production");
+        fs::create_dir_all(root.join("_nyl")).unwrap();
+        fs::create_dir_all(root.join("apps")).unwrap();
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::write(root.join("_nyl/index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+        fs::write(root.join("apps/kept.yaml"), "kept\n").unwrap();
+        fs::write(root.join("state/released.json"), "{}\n").unwrap();
+        let mut staged = repository.index().unwrap();
+        staged.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
+        let tree = repository.find_tree(staged.write_tree().unwrap()).unwrap();
+        let signature = git2::Signature::now("Tests", "tests@example.invalid").unwrap();
+        let head = repository
+            .commit(Some("HEAD"), &signature, &signature, "publish", &tree, &[])
+            .unwrap();
+
+        // An owned file deleted outside Nyl is skipped, as reconciliation allows.
+        let released = std::collections::BTreeSet::from([PathBuf::from("state/released.json")]);
+        let files = published_owned_files(&repository, Some(head), "production", &released).unwrap();
+        assert_eq!(
+            files,
+            BTreeMap::from([(PathBuf::from("apps/kept.yaml"), b"kept\n".to_vec())])
+        );
+        assert!(published_owned_files(&repository, None, "production", &released)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -878,6 +878,49 @@ pub fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
     }
 }
 
+/// The fixed scope of a built-in Kubernetes kind; `None` for any other kind.
+pub fn builtin_scope(group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
+    let gvk = GroupVersionKind {
+        group: group.to_owned(),
+        version: String::new(),
+        kind: kind.to_owned(),
+    };
+    if is_known_cluster_scoped_gvk(&gvk) {
+        return Some(crate::resources::ResourceScope::Cluster);
+    }
+    let namespaced = match group {
+        "" => matches!(
+            kind,
+            "ConfigMap"
+                | "Endpoints"
+                | "Event"
+                | "LimitRange"
+                | "PersistentVolumeClaim"
+                | "Pod"
+                | "PodTemplate"
+                | "ReplicationController"
+                | "ResourceQuota"
+                | "Secret"
+                | "Service"
+                | "ServiceAccount"
+        ),
+        "apps" => matches!(
+            kind,
+            "ControllerRevision" | "DaemonSet" | "Deployment" | "ReplicaSet" | "StatefulSet"
+        ),
+        "batch" => matches!(kind, "CronJob" | "Job"),
+        "autoscaling" => kind == "HorizontalPodAutoscaler",
+        "policy" => kind == "PodDisruptionBudget",
+        "networking.k8s.io" => matches!(kind, "Ingress" | "NetworkPolicy"),
+        "rbac.authorization.k8s.io" => matches!(kind, "Role" | "RoleBinding"),
+        "coordination.k8s.io" => kind == "Lease",
+        "discovery.k8s.io" => kind == "EndpointSlice",
+        "events.k8s.io" => kind == "Event",
+        _ => false,
+    };
+    namespaced.then_some(crate::resources::ResourceScope::Namespaced)
+}
+
 fn api_service_api_resource() -> ApiResource {
     ApiResource {
         group: "apiregistration.k8s.io".to_string(),

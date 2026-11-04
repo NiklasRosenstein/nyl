@@ -62,6 +62,18 @@ Nyl-Deployment-Target: production
 Nyl-Cluster: prod-eu-1
 ```
 
+Before creating a publication commit, Nyl checks the exact indexed baseline for
+AppProject cleanup permission contractions affecting retiring Applications and
+resources. An unsafe transition fails with `NYL_PROJECT_SCOPE_CONTRACTION` before
+any commit or push, including with `--dry-run`. A first publication has no
+retirement transition. `--ignore-project-scope-contraction` explicitly continues
+with a warning; it does not bypass baseline integrity checks. `diff-tree` runs
+the same analysis for MR CI, including source comparisons.
+
+See [Retiring Applications safely](/nyl/kubernetes-gitops/resource-guides/application-group/#retiring-applications-safely)
+for `retainedProjectNamespaces` and manual pruning. Operators must verify live
+deletion before removing retention entries; this guard only compares snapshots.
+
 Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
 `NYL_GIT_AUTHOR_NAME` and `NYL_GIT_AUTHOR_EMAIL` for a Nyl-specific override.

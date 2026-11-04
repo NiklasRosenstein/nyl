@@ -67,12 +67,12 @@ pub async fn execute(args: VendorArgs) -> Result<()> {
         .await;
     }
     let path = args.path.clone();
-    sync(VendorRenderArgs {
+    Box::pin(sync(VendorRenderArgs {
         path: args.path,
         target: args.target,
         refresh: args.refresh,
         progress: args.progress,
-    })
+    }))
     .await?;
     if args.prune {
         prune(&path)?;

@@ -1,6 +1,8 @@
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
+  annotations:
+    nyl.niklasrosenstein.github.com/publication-context: "{\"cluster\":\"prod-eu-1\",\"destination\":{\"server\":\"https://kubernetes.default.svc\"},\"generated\":false,\"group\":\"workloads\",\"namespaceCreate\":true,\"projectNamespace\":\"argocd\",\"source\":\"config/application-groups/workloads.yaml\"}"
   name: workloads
   namespace: argocd
 spec:

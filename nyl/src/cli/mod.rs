@@ -160,7 +160,7 @@ impl Cli {
             Commands::Init(args) => commands::init::execute(*args).await,
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
-            Commands::Vendor(args) => commands::vendor::execute(args).await,
+            Commands::Vendor(args) => Box::pin(commands::vendor::execute(args)).await,
             Commands::Exec(_)
             | Commands::Build(_)
             | Commands::Get(_)
