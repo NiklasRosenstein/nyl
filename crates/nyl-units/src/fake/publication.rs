@@ -109,6 +109,8 @@ impl FakePublication {
         let target = required_str(spec, "/target")?;
         let inputs = Self::snapshot(spec)?;
         render_target(&TargetRender {
+            selection: nyl_render::gitops::tree::partial::PublicationSelection::default(),
+            publication_base: None,
             worktree,
             project_dir,
             target,

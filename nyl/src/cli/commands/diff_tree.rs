@@ -310,7 +310,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             "Validation is not enabled in project configuration"
         },
     );
-    let compared = async {
+    let compared = Box::pin(async {
         // A source baseline reads the same publication state, so the diff
         // shows only what the source change causes. A baseline that
         // publishes elsewhere reads its own publication instead.
@@ -338,7 +338,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             &comparison.desired,
             if args.raw { DiffMode::Raw } else { DiffMode::Normalized },
         )
-    }
+    })
     .await;
     report.render = Some(cache.stats());
     match compared {
@@ -366,7 +366,7 @@ async fn resolve_baseline(
                 .source_ref
                 .as_deref()
                 .ok_or_else(|| NylError::config("--source-ref is required with --against source"))?;
-            let baseline = source_derived_tree(
+            let baseline = Box::pin(source_derived_tree(
                 inventory,
                 &args.source_project_path,
                 args.source_repository.as_deref(),
@@ -375,7 +375,7 @@ async fn resolve_baseline(
                 cache,
                 args.progress,
                 options,
-            )
+            ))
             .await?;
             Ok(ResolvedBaseline::Source(Box::new(baseline)))
         }
@@ -895,14 +895,8 @@ pub(super) fn read_rendered_tree(
         });
     }
     reject_published_symlink(root, &index_path)?;
-    let index: RenderIndex = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-    if index.version != nyl_render::gitops::reconcile::RENDER_INDEX_VERSION {
-        return Err(NylError::config(format!(
-            "Published ownership index {} uses unsupported version {}",
-            index_path.display(),
-            index.version
-        )));
-    }
+    let index =
+        nyl_render::gitops::reconcile::parse_index(&std::fs::read(&index_path)?, &index_path.display().to_string())?;
     let mut files = BTreeMap::new();
     for (relative, expected_hash) in &index.files {
         nyl_core::resources::validate_relative_path("published owned path", relative, false, false)?;
@@ -1153,6 +1147,8 @@ mod tests {
         }))
         .unwrap();
         let baseline = nyl_render::gitops::CompiledTargetTree {
+            publication_snapshot: None,
+            publication_report: nyl_render::gitops::tree::partial::PublicationReport::default(),
             provenance: BTreeMap::new(),
             target: target.clone(),
             cluster,

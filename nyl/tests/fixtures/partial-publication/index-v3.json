@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "target": "production",
+  "cluster": "prod-eu-1",
+  "publication": {
+    "repository": "deploy",
+    "revision": "deploy/production",
+    "pathPrefix": "production"
+  },
+  "dirty": false,
+  "inputs": {},
+  "files": {},
+  "compilation": {
+    "version": 1,
+    "controlDigest": "sha256-example",
+    "groups": {},
+    "releases": {},
+    "bindings": {}
+  }
+}
