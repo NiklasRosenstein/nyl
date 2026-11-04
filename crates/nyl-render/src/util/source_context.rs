@@ -7,6 +7,32 @@
 use crate::error::{NylError, Result};
 use std::path::PathBuf;
 
+/// Parse a typed resource from a loaded document.
+///
+/// The error names the offending field path, classifies the failure, and
+/// carries the same fix hint as parsing from a file, so every entry point that
+/// deserializes a resource reports it the same way.
+pub fn parse_resource<T>(value: &serde_json::Value, kind: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_path_to_error::deserialize(value.clone()).map_err(|error| {
+        let path = error.path().to_string();
+        let error_msg = error.into_inner().to_string();
+        let classification = SourceContext::classify_error(&error_msg);
+        let location = if path.is_empty() || path == "." {
+            String::new()
+        } else {
+            format!(" at `{path}`")
+        };
+        NylError::ResourceParse {
+            kind: kind.to_string(),
+            message: format!("{classification}{location}: {error_msg}"),
+            hint: SourceContext::generate_hint(&error_msg),
+        }
+    })
+}
+
 /// Tracks the source file context for parsing operations
 #[derive(Debug, Clone)]
 pub struct SourceContext {

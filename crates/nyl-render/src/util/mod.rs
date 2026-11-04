@@ -7,7 +7,7 @@ pub mod project_path;
 pub mod source_context;
 
 pub use fs::{find_config_file, path_for_display, resolve_path, resolve_paths};
-pub use source_context::SourceContext;
+pub use source_context::{parse_resource, SourceContext};
 
 /// Style one value without changing process-wide color policy.
 pub fn ansi_style(value: impl std::fmt::Display, code: &str, enabled: bool) -> String {

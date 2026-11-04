@@ -69,6 +69,15 @@ pub enum NylError {
         hint: String,
     },
 
+    /// A loaded document does not match its resource type. The source file is
+    /// attached by the caller's render provenance.
+    #[error("Invalid {kind}: {message}\nHint: {hint}")]
+    ResourceParse {
+        kind: String,
+        message: String,
+        hint: String,
+    },
+
     #[error("Git error: {0}")]
     Git(#[from] crate::git::GitError),
 
