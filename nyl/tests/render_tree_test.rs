@@ -13,8 +13,9 @@ fn read_tree(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .map(Result::unwrap)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| {
-            let path = entry.path().strip_prefix(root).unwrap().to_path_buf();
-            (path, fs::read(entry.path()).unwrap())
+            let relative = entry.path().strip_prefix(root).unwrap();
+            let path = relative.to_string_lossy().replace('\\', "/");
+            (PathBuf::from(path), fs::read(entry.path()).unwrap())
         })
         .collect()
 }
