@@ -463,6 +463,20 @@ pub struct ApplicationGroupSpec {
     /// Additional concrete namespaces whose cleanup scope the group-owned generated AppProject retains. Added to inferred or declared destinations on the target Cluster and to generated Namespace-management permissions; creates no resources and does not override deny rules or resource restrictions. Verify live cascading deletion before removing entries. Not supported with `projectRef`: retain scope in the owning AppProjectDefinition.
     #[serde(rename = "retainedProjectNamespaces", default, skip_serializing_if = "Vec::is_empty")]
     pub retained_project_namespaces: Vec<String>,
+    /// Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains. Appended to the derived or declared `namespaceResourceWhitelist`; does not override `namespaceResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.
+    #[serde(
+        rename = "retainedNamespaceResourceWhitelist",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub retained_namespace_resource_whitelist: Vec<AppProjectResourcePattern>,
+    /// Additional cluster-scoped resources whose cleanup permission the group-owned generated AppProject retains, optionally by name. Appended to the derived or declared `clusterResourceWhitelist`; does not override `clusterResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.
+    #[serde(
+        rename = "retainedClusterResourceWhitelist",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub retained_cluster_resource_whitelist: Vec<AppProjectResourcePattern>,
     /// Namespace containing generated Argo CD Applications.
     #[serde(rename = "applicationNamespace")]
     pub application_namespace: String,
@@ -1283,6 +1297,53 @@ impl AppProjectDefinition {
 }
 
 impl ApplicationGroup {
+    /// Retained cleanup scope belongs to the group-owned generated AppProject.
+    fn validate_retained_scope(&self) -> Result<()> {
+        if self.spec.project_ref.is_some() {
+            for (field, retained) in [
+                (
+                    "retainedProjectNamespaces",
+                    !self.spec.retained_project_namespaces.is_empty(),
+                ),
+                (
+                    "retainedNamespaceResourceWhitelist",
+                    !self.spec.retained_namespace_resource_whitelist.is_empty(),
+                ),
+                (
+                    "retainedClusterResourceWhitelist",
+                    !self.spec.retained_cluster_resource_whitelist.is_empty(),
+                ),
+            ] {
+                if retained {
+                    return Err(CoreError::config(format!(
+                        "spec.{field} requires a group-owned generated AppProject; with spec.projectRef retain cleanup scope in the owning AppProjectDefinition declaration"
+                    )));
+                }
+            }
+        }
+        for (field, patterns) in [
+            (
+                "retainedNamespaceResourceWhitelist",
+                &self.spec.retained_namespace_resource_whitelist,
+            ),
+            (
+                "retainedClusterResourceWhitelist",
+                &self.spec.retained_cluster_resource_whitelist,
+            ),
+        ] {
+            for pattern in patterns {
+                validate_required(&format!("spec.{field}[].kind"), &pattern.kind)?;
+            }
+        }
+        for namespace in &self.spec.retained_project_namespaces {
+            super::release::validate_namespace_name(
+                "spec.retainedProjectNamespaces[] (concrete namespace; wildcards are not allowed)",
+                namespace,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_envelope(
             self.api_version.as_str(),
@@ -1304,17 +1365,7 @@ impl ApplicationGroup {
             // Neither declares the implied project: this group's own least-privilege AppProject.
             (None, None) => {}
         }
-        if !self.spec.retained_project_namespaces.is_empty() && self.spec.project_ref.is_some() {
-            return Err(CoreError::config(
-                "spec.retainedProjectNamespaces requires a group-owned generated AppProject; with spec.projectRef retain cleanup scope in the owning AppProjectDefinition declaration",
-            ));
-        }
-        for namespace in &self.spec.retained_project_namespaces {
-            super::release::validate_namespace_name(
-                "spec.retainedProjectNamespaces[] (concrete namespace; wildcards are not allowed)",
-                namespace,
-            )?;
-        }
+        self.validate_retained_scope()?;
         validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
         if let Some(namespace) = &self.spec.destination_namespace {
             super::release::validate_namespace_name("spec.destinationNamespace", namespace)?;
@@ -1797,6 +1848,25 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn test_retained_resource_whitelists_require_a_generated_project() {
+        let mut value = application_group();
+        value["spec"]["retainedClusterResourceWhitelist"] =
+            json!([{"group": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "reader"}]);
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("spec.retainedClusterResourceWhitelist requires a group-owned generated AppProject"));
+        value["spec"].as_object_mut().unwrap().remove("projectRef");
+        value["spec"]["retainedNamespaceResourceWhitelist"] = json!([{"group": "batch", "kind": "CronJob"}]);
+        assert!(parse_gitops_resource(&value).is_ok());
+        value["spec"]["retainedNamespaceResourceWhitelist"] = json!([{"group": "batch", "kind": ""}]);
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("retainedNamespaceResourceWhitelist[].kind"));
     }
 
     #[test]

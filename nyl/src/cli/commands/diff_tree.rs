@@ -409,6 +409,7 @@ fn comparison_files(
         &desired.owned_files(),
         baseline.publication_path_prefix(desired),
         desired.target.publication_path_prefix(),
+        desired.cluster.spec.kubernetes.as_ref(),
         args.project_scope.ignore_project_scope_contraction,
     )?;
     match &DiffSelection::from_args(args) {

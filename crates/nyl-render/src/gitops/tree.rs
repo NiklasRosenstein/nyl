@@ -2443,6 +2443,8 @@ fn build_generated_project(
             namespace_create: group.spec.namespace.create,
             declared_namespaces: destination_namespaces.clone(),
             retained_namespaces: group.spec.retained_project_namespaces.iter().cloned().collect(),
+            retained_namespaced_kinds: group.spec.retained_namespace_resource_whitelist.clone(),
+            retained_cluster_kinds: group.spec.retained_cluster_resource_whitelist.clone(),
         })),
         destination_namespaces,
     })
@@ -2459,6 +2461,9 @@ struct GeneratedProject {
     destination: ClusterDestination,
     namespace_create: bool,
     retained_namespaces: BTreeSet<String>,
+    /// Cleanup permissions appended to the namespaced and cluster resource whitelists.
+    retained_namespaced_kinds: Vec<AppProjectResourcePattern>,
+    retained_cluster_kinds: Vec<AppProjectResourcePattern>,
     /// Namespace patterns declared destinations admit on the target Cluster.
     declared_namespaces: Option<Vec<String>>,
 }
@@ -2614,12 +2619,34 @@ impl GeneratedProject {
                 }
             }
         }
+        // Retained cleanup permissions are additive to derived and declared whitelists alike.
+        append_retained(&mut spec.namespace_resource_whitelist, &self.retained_namespaced_kinds);
+        append_retained(&mut spec.cluster_resource_whitelist, &self.retained_cluster_kinds);
         Ok(serde_json::json!({
             "apiVersion": "argoproj.io/v1alpha1",
             "kind": "AppProject",
             "metadata": self.metadata,
             "spec": serde_json::to_value(spec)?,
         }))
+    }
+}
+
+/// Append retained patterns a whitelist lacks, unless it admits every resource.
+fn append_retained(whitelist: &mut Option<Vec<AppProjectResourcePattern>>, retained: &[AppProjectResourcePattern]) {
+    if retained.is_empty() {
+        return;
+    }
+    let whitelist = whitelist.get_or_insert_with(Vec::new);
+    let permits_every_resource = whitelist.iter().any(|pattern| {
+        pattern.group == PERMISSIVE_PATTERN && pattern.kind == PERMISSIVE_PATTERN && pattern.name.is_none()
+    });
+    if permits_every_resource {
+        return;
+    }
+    for pattern in retained {
+        if !whitelist.contains(pattern) {
+            whitelist.push(pattern.clone());
+        }
     }
 }
 
@@ -3528,6 +3555,8 @@ mod tests {
             namespace_create: true,
             declared_namespaces: None,
             retained_namespaces: BTreeSet::new(),
+            retained_namespaced_kinds: Vec::new(),
+            retained_cluster_kinds: Vec::new(),
         }
     }
 
@@ -3559,7 +3588,9 @@ mod tests {
         for declared in [false, true] {
             let mut group: ApplicationGroup = serde_json::from_value(serde_json::json!({
                 "apiVersion":"k8s.gitops.nyl/v1", "kind":"ApplicationGroup", "metadata":{"name":"web"},
-                "spec":{"applicationNamespace":"argocd", "retainedProjectNamespaces":["retired", "retired"]}
+                "spec":{"applicationNamespace":"argocd", "retainedProjectNamespaces":["retired", "retired"],
+                    "retainedNamespaceResourceWhitelist":[{"group":"batch", "kind":"CronJob"}, {"group":"", "kind":"ConfigMap"}],
+                    "retainedClusterResourceWhitelist":[{"group":"rbac.authorization.k8s.io", "kind":"ClusterRole", "name":"reader"}]}
             }))
             .unwrap();
             if declared {
@@ -3595,6 +3626,17 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             assert_eq!(namespaces, BTreeSet::from(["web", "retired"]));
             assert_eq!(manifest["spec"]["destinations"].as_array().unwrap().len(), 2);
+            // Retained kinds join the derived namespaced list without duplicating rendered ones.
+            assert_eq!(
+                manifest["spec"]["namespaceResourceWhitelist"],
+                serde_json::json!([{"group":"", "kind":"ConfigMap"}, {"group":"batch", "kind":"CronJob"}])
+            );
+            assert!(manifest["spec"]["clusterResourceWhitelist"]
+                .as_array()
+                .unwrap()
+                .contains(
+                    &serde_json::json!({"group":"rbac.authorization.k8s.io", "kind":"ClusterRole", "name":"reader"})
+                ));
             assert!(manifest["spec"]["clusterResourceWhitelist"]
                 .as_array()
                 .unwrap()

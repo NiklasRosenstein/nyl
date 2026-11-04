@@ -130,6 +130,9 @@ pub struct RenderedTarget {
     /// The publication branch head the render's `fromPublication` bindings
     /// read; publishing verifies the branch is still there.
     pub publication_base: Option<PublicationBase>,
+    /// The target Cluster's recorded Kubernetes capabilities, which the
+    /// cleanup-scope check uses to resolve resource scope.
+    pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
 }
 
 /// Render `request.target` at `request.worktree` with `request.inputs` as
@@ -224,6 +227,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         cacheable,
         reconcile: compiled.reconcile_options(false),
         publication_base: compiled.publication_base.clone(),
+        cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
     })
 }
 
@@ -371,6 +375,7 @@ pub fn prepare_target_publication(
             index,
             options: rendered.reconcile.clone(),
             ignore_project_scope_contraction: false,
+            cluster_kubernetes: rendered.cluster_kubernetes.as_ref(),
             publication_base: rendered.publication_base.as_ref(),
             auth: &auth,
         },
@@ -458,6 +463,9 @@ pub struct TreePublication<'a> {
     pub options: ReconcileOptions,
     /// Explicitly accept cleanup scope contractions after operator review.
     pub ignore_project_scope_contraction: bool,
+    /// The target Cluster's recorded Kubernetes capabilities, which resolve
+    /// the scope of resources published without a namespace.
+    pub cluster_kubernetes: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
     /// The branch head `fromPublication` bindings read, if any.
     pub publication_base: Option<&'a PublicationBase>,
     pub auth: &'a GitAuth,
@@ -508,6 +516,7 @@ pub fn prepare_publication(
         request.desired,
         request.path_prefix,
         request.path_prefix,
+        request.cluster_kubernetes,
         request.ignore_project_scope_contraction,
     )?;
     let index = reconcile_rendered_tree_with_options(

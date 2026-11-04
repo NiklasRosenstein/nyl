@@ -269,7 +269,13 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
         ],
         Some("Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders."),
     );
-    schema.get_mut("oneOf").unwrap()[0]["properties"]["retainedProjectNamespaces"] = json!({"maxItems": 0});
+    for field in [
+        "retainedProjectNamespaces",
+        "retainedNamespaceResourceWhitelist",
+        "retainedClusterResourceWhitelist",
+    ] {
+        schema.get_mut("oneOf").unwrap()[0]["properties"][field] = json!({"maxItems": 0});
+    }
 }
 
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {

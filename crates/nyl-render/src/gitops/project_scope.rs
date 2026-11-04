@@ -11,6 +11,8 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use super::{DesiredFiles, CATALOG_DIRECTORY};
+use crate::kubernetes::prune::{delete_decision, prune_decision, PruneDecision, SYNC_OPTIONS_ANNOTATION};
+use crate::resources::{ClusterKubernetesCapabilities, ResourceScope};
 use crate::{NylError, Result};
 
 pub(crate) const CONTEXT_ANNOTATION: &str = "nyl.niklasrosenstein.github.com/publication-context";
@@ -59,9 +61,10 @@ pub fn check_project_scope(
     proposed: &DesiredFiles<'_>,
     previous_prefix: &str,
     proposed_prefix: &str,
+    capabilities: Option<&ClusterKubernetesCapabilities>,
     ignore: bool,
 ) -> Result<()> {
-    let findings = project_scope_contractions(previous, proposed, previous_prefix, proposed_prefix)?;
+    let findings = project_scope_contractions(previous, proposed, previous_prefix, proposed_prefix, capabilities)?;
     if findings.is_empty() {
         return Ok(());
     }
@@ -279,12 +282,16 @@ impl<'a> Snapshot<'a> {
         Ok(project)
     }
 
+    /// Resources leaving `app`, each with the namespace Argo CD manages it in.
+    /// Resources Argo CD intentionally leaves in place need no cleanup permission:
+    /// `Delete=false` when the Application goes, `Prune=false` when it stays.
     fn retiring_resources(
         &self,
         app: &Value,
         prefix: &str,
         next: &Snapshot<'_>,
         next_prefix: &str,
+        scopes: &Scopes<'_>,
     ) -> Result<Vec<Value>> {
         let new_app = next.applications.get(&identity(app));
         let same_cluster = new_app.is_some_and(|new| {
@@ -292,23 +299,35 @@ impl<'a> Snapshot<'a> {
                 && new["spec"]["destination"]["name"] == app["spec"]["destination"]["name"]
         });
         let remaining = if same_cluster {
-            next.resources(new_app.unwrap(), next_prefix)?
+            next.resources(new_app.unwrap(), next_prefix, scopes)?
         } else {
             BTreeMap::new()
         };
-        let mut resources = self.resources(app, prefix)?;
+        let mut resources = self.resources(app, prefix, scopes)?;
         // An empty Application still has declared destination scope.
         if resources.is_empty() && !same_cluster {
             resources.insert(String::new(), json!({"apiVersion":"v1", "kind":"", "metadata":{"namespace": app["spec"]["destination"]["namespace"]}}));
         }
+        // A surviving Application on the same cluster prunes; otherwise Argo CD deletes.
+        let retained = |resource: &Value| {
+            let annotations = resource["metadata"]["annotations"][SYNC_OPTIONS_ANNOTATION]
+                .as_str()
+                .map(|options| BTreeMap::from([(SYNC_OPTIONS_ANNOTATION.to_owned(), options.to_owned())]));
+            let decision = if same_cluster { prune_decision } else { delete_decision };
+            decision(annotations.as_ref(), true) == PruneDecision::Retain
+        };
         Ok(resources
             .into_iter()
-            .filter(|(key, _)| !remaining.contains_key(key))
+            .filter(|(key, resource)| !remaining.contains_key(key) && !retained(resource))
             .map(|(_, resource)| resource)
             .collect())
     }
 
-    fn resources(&self, app: &Value, prefix: &str) -> Result<BTreeMap<String, Value>> {
+    /// Rendered resources of `app` by identity in their effective namespace.
+    /// A namespaced resource without `metadata.namespace` lives in the
+    /// Application's destination namespace; one of unknown scope is compared
+    /// under both readings, so neither can hide a contraction.
+    fn resources(&self, app: &Value, prefix: &str, scopes: &Scopes<'_>) -> Result<BTreeMap<String, Value>> {
         let source = field(app, "/spec/source/path");
         nyl_core::resources::validate_relative_path("catalog Application spec.source.path", source, false, false)?;
         let root = Path::new(source).strip_prefix(prefix).map_err(|_| {
@@ -320,9 +339,74 @@ impl<'a> Snapshot<'a> {
         let mut resources = BTreeMap::new();
         for (path, bytes) in self.files.iter().filter(|(path, _)| path.starts_with(root)) {
             let resource = parse(path, bytes)?;
+            if field(&resource, "/metadata/namespace").is_empty() && !is_namespace(&resource) {
+                let api = field(&resource, "/apiVersion");
+                let group = api.split_once('/').map_or("", |(group, _)| group);
+                let scope = scopes.scope(group, field(&resource, "/kind"));
+                if scope != Some(ResourceScope::Namespaced) {
+                    resources.insert(resource_identity(&resource), resource.clone());
+                }
+                if scope != Some(ResourceScope::Cluster) {
+                    let mut namespaced = resource;
+                    namespaced["metadata"]["namespace"] = app["spec"]["destination"]["namespace"].clone();
+                    resources.insert(resource_identity(&namespaced), namespaced);
+                }
+                continue;
+            }
             resources.insert(resource_identity(&resource), resource);
         }
         Ok(resources)
+    }
+}
+
+fn is_namespace(resource: &Value) -> bool {
+    field(resource, "/apiVersion") == "v1" && field(resource, "/kind") == "Namespace"
+}
+
+/// Resource scope from the target Cluster's recorded capabilities and the
+/// CustomResourceDefinitions either snapshot renders.
+struct Scopes<'a> {
+    rendered: BTreeMap<(String, String), ResourceScope>,
+    capabilities: Option<&'a ClusterKubernetesCapabilities>,
+}
+
+impl<'a> Scopes<'a> {
+    fn new(snapshots: [&DesiredFiles<'_>; 2], capabilities: Option<&'a ClusterKubernetesCapabilities>) -> Self {
+        let mut rendered = BTreeMap::new();
+        for (path, bytes) in snapshots.into_iter().flat_map(|files| files.iter()) {
+            if path.extension().is_none_or(|extension| extension != "yaml") {
+                continue;
+            }
+            let Ok(resource) = parse(path, bytes) else {
+                continue;
+            };
+            if field(&resource, "/kind") != "CustomResourceDefinition" {
+                continue;
+            }
+            let scope = match field(&resource, "/spec/scope") {
+                "Cluster" => ResourceScope::Cluster,
+                "Namespaced" => ResourceScope::Namespaced,
+                _ => continue,
+            };
+            rendered.insert(
+                (
+                    field(&resource, "/spec/group").to_owned(),
+                    field(&resource, "/spec/names/kind").to_owned(),
+                ),
+                scope,
+            );
+        }
+        Self { rendered, capabilities }
+    }
+
+    fn scope(&self, group: &str, kind: &str) -> Option<ResourceScope> {
+        self.rendered
+            .get(&(group.to_owned(), kind.to_owned()))
+            .copied()
+            .or_else(|| {
+                self.capabilities
+                    .and_then(|capabilities| capabilities.scope_of(group, kind))
+            })
     }
 }
 
@@ -340,7 +424,9 @@ pub fn project_scope_contractions(
     proposed: &DesiredFiles<'_>,
     previous_prefix: &str,
     proposed_prefix: &str,
+    capabilities: Option<&ClusterKubernetesCapabilities>,
 ) -> Result<Vec<ProjectScopeContraction>> {
+    let scopes = Scopes::new([previous, proposed], capabilities);
     let previous = Snapshot::new(previous)?;
     let proposed = Snapshot::new(proposed)?;
     let mut findings: BTreeMap<(String, String, String, String), ProjectScopeContraction> = BTreeMap::new();
@@ -387,7 +473,7 @@ pub fn project_scope_contractions(
             .filter(|v| !v.is_null())
             .unwrap_or(&app["spec"]["destination"]);
         let destination_label = serde_json::to_string(destination)?;
-        for resource in previous.retiring_resources(app, previous_prefix, &proposed, proposed_prefix)? {
+        for resource in previous.retiring_resources(app, previous_prefix, &proposed, proposed_prefix, &scopes)? {
             // Empty for cluster-scoped kinds other than Namespace, which Argo CD
             // permits by cluster resource lists alone.
             let namespace = cleanup_namespace(&resource);
@@ -440,13 +526,15 @@ fn cascading(app: &Value) -> bool {
 }
 
 fn cleanup_namespace(resource: &Value) -> &str {
-    if field(resource, "/apiVersion") == "v1" && field(resource, "/kind") == "Namespace" {
+    if is_namespace(resource) {
         field(resource, "/metadata/name")
     } else {
         field(resource, "/metadata/namespace")
     }
 }
 
+/// The additive retention settings that restore `resource`'s cleanup permission
+/// in a group-owned generated project, and whatever they cannot restore.
 fn retention_remedy(
     project: Option<&Value>,
     context: &Value,
@@ -456,40 +544,77 @@ fn retention_remedy(
     source: &str,
 ) -> Result<String> {
     let Some(project) = project.filter(|_| context["generated"] == true) else {
-        return Ok("Retain the AppProject and its listed destination/resource permissions in the owning project declaration; restore the owning ApplicationGroup if needed. retainedProjectNamespaces applies only to group-owned generated projects.".to_owned());
+        return Ok("Retain the AppProject and its listed destination/resource permissions in the owning project declaration; restore the owning ApplicationGroup if needed. The retained* ApplicationGroup settings apply only to group-owned generated projects.".to_owned());
     };
-    let namespace = cleanup_namespace(resource);
-    if namespace.is_empty() {
-        let denied = denied_permissions(project, resource, destination)?;
-        return Ok(format!("Namespace retention cannot preserve cluster-scoped permissions: retain these in projectTemplate.clusterResourceWhitelist of ApplicationGroup {:?} ({}): {}.", context["group"].as_str().unwrap_or(group), context["source"].as_str().unwrap_or(source), denied.into_iter().collect::<Vec<_>>().join(", ")));
-    }
-    let mut retained = project.clone();
-    let mut destinations = list(project, "destinations").to_vec();
-    let mut retained_destination = context["destination"].clone();
-    retained_destination["namespace"] = namespace.into();
-    destinations.push(retained_destination);
-    retained["spec"]["destinations"] = destinations.into();
-    if field(resource, "/kind") == "Namespace"
-        && field(resource, "/apiVersion") == "v1"
-        && context["namespaceCreate"] == true
-    {
-        let mut whitelist = list(project, "clusterResourceWhitelist").to_vec();
-        whitelist.push(json!({"group":"", "kind":"Namespace", "name":namespace}));
-        retained["spec"]["clusterResourceWhitelist"] = whitelist.into();
-    }
-    let additional = denied_permissions(&retained, resource, destination)?;
     let group = context["group"].as_str().unwrap_or(group);
     let source = context["source"].as_str().unwrap_or(source);
-    // A surviving namespace that only loses a resource kind gains nothing from retention.
-    if field(resource, "/kind") != "Namespace" && destination_permitted(project, destination, namespace)? {
-        return Ok(format!("Namespace {namespace:?} remains in scope; retain these project permissions in projectTemplate of ApplicationGroup {group:?} ({source}): {}.", additional.into_iter().collect::<Vec<_>>().join(", ")));
+    let namespace = cleanup_namespace(resource);
+    let mut retained = project.clone();
+    let mut steps = Vec::new();
+    // Namespace retention restores the destination and, with namespace
+    // creation, the generated Namespace permission.
+    let namespace_create = context["namespaceCreate"] == true;
+    let retain_namespace = if is_namespace(resource) {
+        namespace_create && !denied_permissions(project, resource, destination)?.is_empty()
+    } else {
+        !namespace.is_empty() && !destination_permitted(project, destination, namespace)?
+    };
+    if retain_namespace {
+        let mut destinations = list(project, "destinations").to_vec();
+        let mut retained_destination = context["destination"].clone();
+        retained_destination["namespace"] = namespace.into();
+        destinations.push(retained_destination);
+        retained["spec"]["destinations"] = destinations.into();
+        if is_namespace(resource) {
+            push_pattern(
+                &mut retained,
+                "clusterResourceWhitelist",
+                json!({"group":"", "kind":"Namespace", "name":namespace}),
+            );
+        }
+        steps.push(format!("add {namespace:?} to spec.retainedProjectNamespaces"));
     }
-    let extra = if additional.is_empty() {
+    // Kind retention restores a whitelist entry; it cannot lift a blacklist.
+    let kind = field(resource, "/kind");
+    let cluster_scoped = field(resource, "/metadata/namespace").is_empty();
+    let (whitelist, setting) = if cluster_scoped {
+        ("clusterResourceWhitelist", "retainedClusterResourceWhitelist")
+    } else {
+        ("namespaceResourceWhitelist", "retainedNamespaceResourceWhitelist")
+    };
+    let denied = denied_permissions(&retained, resource, destination)?;
+    if !kind.is_empty() && !denied.is_empty() && retained["spec"][whitelist].is_array() {
+        let api = field(resource, "/apiVersion");
+        let mut pattern = json!({"group": api.split_once('/').map_or("", |(group, _)| group), "kind": kind});
+        if cluster_scoped {
+            pattern["name"] = field(resource, "/metadata/name").into();
+        }
+        let mut candidate = retained.clone();
+        push_pattern(&mut candidate, whitelist, pattern.clone());
+        if denied_permissions(&candidate, resource, destination)?.len() < denied.len() {
+            retained = candidate;
+            steps.push(format!("add {pattern} to spec.{setting}"));
+        }
+    }
+    let remaining = denied_permissions(&retained, resource, destination)?;
+    let extra = if remaining.is_empty() {
         String::new()
     } else {
-        format!(" Namespace retention alone is insufficient: also retain these project permissions in projectTemplate: {}. Preserve the original cluster destination and allow cleanup through explicit deny rules where applicable.", additional.into_iter().collect::<Vec<_>>().join(", "))
+        format!(" Retention settings cannot restore: {}. Lift the deny rule or keep the original cluster destination in projectTemplate until cleanup completes.", remaining.into_iter().collect::<Vec<_>>().join(", "))
     };
-    Ok(format!("Add {namespace:?} to spec.retainedProjectNamespaces on ApplicationGroup {group:?} ({source}; append to any existing entries).{extra}"))
+    if steps.is_empty() {
+        return Ok(format!("On ApplicationGroup {group:?} ({source}):{extra}"));
+    }
+    Ok(format!(
+        "On ApplicationGroup {group:?} ({source}), {} (append to any existing entries).{extra}",
+        steps.join(" and ")
+    ))
+}
+
+fn push_pattern(project: &mut Value, list_name: &str, pattern: Value) {
+    let mut patterns = list(project, list_name).to_vec();
+    patterns.push(pattern);
+    project["spec"][list_name] = patterns.into();
 }
 
 fn list<'a>(project: &'a Value, name: &str) -> &'a [Value] {
@@ -693,7 +818,7 @@ mod tests {
     }
 
     fn findings(old: &BTreeMap<PathBuf, Vec<u8>>, new: &BTreeMap<PathBuf, Vec<u8>>) -> Vec<ProjectScopeContraction> {
-        project_scope_contractions(&borrowed(old), &borrowed(new), "production", "production").unwrap()
+        project_scope_contractions(&borrowed(old), &borrowed(new), "production", "production", None).unwrap()
     }
 
     #[test]
@@ -703,9 +828,16 @@ mod tests {
         let found = findings(&old, &new);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].applications, BTreeSet::from(["apps/example".to_owned()]));
-        let error = check_project_scope(&borrowed(&old), &borrowed(&new), "production", "production", false)
-            .unwrap_err()
-            .to_string();
+        let error = check_project_scope(
+            &borrowed(&old),
+            &borrowed(&new),
+            "production",
+            "production",
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         for expected in [
             "NYL_PROJECT_SCOPE_CONTRACTION",
             "workloads",
@@ -720,7 +852,7 @@ mod tests {
         ] {
             assert!(error.contains(expected), "{expected}: {error}");
         }
-        check_project_scope(&borrowed(&old), &borrowed(&new), "production", "production", true).unwrap();
+        check_project_scope(&borrowed(&old), &borrowed(&new), "production", "production", None, true).unwrap();
         let retained = tree(project(&["active", "retired"]), None, &[]);
         assert!(findings(&old, &retained).is_empty());
     }
@@ -741,6 +873,7 @@ mod tests {
             &borrowed(&tree(project(&["retired"]), None, &[])),
             "production",
             "production",
+            None,
             false,
         )
         .unwrap_err()
@@ -748,7 +881,7 @@ mod tests {
         for expected in [
             "cluster-scoped resources",
             "rbac.authorization.k8s.io/ClusterRole \"reader\"",
-            "projectTemplate.clusterResourceWhitelist",
+            r#"add {"group":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"reader"} to spec.retainedClusterResourceWhitelist"#,
         ] {
             assert!(error.contains(expected), "{expected}: {error}");
         }
@@ -852,10 +985,9 @@ mod tests {
         assert_eq!(findings(&old, &tree(narrowed.clone(), None, &[])).len(), 1);
         narrowed["spec"]["clusterResourceBlacklist"] = json!([{"group":"", "kind":"Namespace", "name":"retired"}]);
         let found = findings(&old, &tree(narrowed, None, &[]));
-        assert!(found[0]
-            .remedies
-            .iter()
-            .any(|r| r.contains("insufficient") && r.contains("clusterResourceBlacklist")));
+        assert!(found[0].remedies.iter().any(|r| r.contains("retainedProjectNamespaces")
+            && r.contains("cannot restore")
+            && r.contains("clusterResourceBlacklist")));
         let old = tree(project(&["retired"]), Some(app("example")), &[resource("retired")]);
         let mut denied = project(&["*"]);
         denied["spec"]["destinations"]
@@ -864,10 +996,9 @@ mod tests {
             .push(json!({"server":"https://cluster", "namespace":"!retired"}));
         denied["spec"]["namespaceResourceWhitelist"] = json!([]);
         let found = findings(&old, &tree(denied, None, &[]));
-        assert!(found[0]
-            .remedies
-            .iter()
-            .any(|r| r.contains("insufficient") && r.contains("namespaceResourceWhitelist")));
+        assert!(found[0].remedies.iter().any(|r| r.contains("retainedProjectNamespaces")
+            && r.contains(r#"add {"group":"","kind":"ConfigMap"} to spec.retainedNamespaceResourceWhitelist"#)
+            && r.contains("cannot restore: destination namespace permission revoked")));
     }
 
     #[test]
@@ -880,7 +1011,69 @@ mod tests {
         assert!(found[0]
             .remedies
             .iter()
-            .all(|r| r.contains("remains in scope") && r.contains("namespaceResourceWhitelist")));
+            .all(|r| !r.contains("retainedProjectNamespaces")
+                && r.contains(r#"add {"group":"","kind":"ConfigMap"} to spec.retainedNamespaceResourceWhitelist"#)));
+    }
+
+    #[test]
+    fn test_unnamespaced_resources_resolve_to_the_destination_namespace() {
+        let config_map = json!({"apiVersion":"v1", "kind":"ConfigMap", "metadata":{"name":"example"}});
+        let old = tree(
+            project(&["retired"]),
+            Some(app("example")),
+            std::slice::from_ref(&config_map),
+        );
+        // Retirement: the implicit namespace is the Application's destination.
+        let found = findings(&old, &tree(project(&["active"]), None, &[]));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].namespace, "retired");
+        // A destination move retires the resource from its old namespace.
+        let mut moved = app("example");
+        moved["spec"]["destination"]["namespace"] = "active".into();
+        let new = tree(project(&["active"]), Some(moved), &[config_map]);
+        let found = findings(&old, &new);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].namespace, "retired");
+    }
+
+    #[test]
+    fn test_unknown_scope_is_checked_under_both_readings() {
+        let widget = json!({"apiVersion":"example.com/v1", "kind":"Widget", "metadata":{"name":"example"}});
+        let mut wide = project(&["retired"]);
+        wide["spec"]["clusterResourceWhitelist"] = json!([{"group":"example.com", "kind":"Widget"}]);
+        let old = tree(wide, Some(app("example")), std::slice::from_ref(&widget));
+        // Unknown scope: the cluster reading the old project permitted contracts.
+        let found = findings(&old, &tree(project(&["retired"]), None, &[]));
+        assert!(found.iter().any(|f| f.namespace.is_empty()), "{found:?}");
+        // A CRD in either snapshot settles the scope as namespaced, which the
+        // retained namespace and permissive namespaced whitelist still permit.
+        let crd = json!({"apiVersion":"apiextensions.k8s.io/v1", "kind":"CustomResourceDefinition",
+            "metadata":{"name":"widgets.example.com"},
+            "spec":{"group":"example.com", "scope":"Namespaced", "names":{"kind":"Widget"}}});
+        let mut retained = project(&["retired"]);
+        retained["spec"]["namespaceResourceWhitelist"] = json!([{"group":"*", "kind":"*"}]);
+        let mut new = tree(retained, None, &[]);
+        new.insert(PathBuf::from("crds/widget.yaml"), serde_json::to_vec(&crd).unwrap());
+        let found = findings(&old, &new);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn test_resources_argo_cd_retains_need_no_cleanup_permission() {
+        let mut kept = resource("retired");
+        kept["metadata"]["annotations"] = json!({SYNC_OPTIONS_ANNOTATION: "ServerSideApply=true, Delete=false"});
+        let old = tree(project(&["retired"]), Some(app("example")), &[kept.clone()]);
+        assert!(findings(&old, &tree(project(&["active"]), None, &[])).is_empty());
+        // A surviving Application prunes, so only Prune=false keeps it.
+        let narrowed = || {
+            let mut narrowed = project(&["retired"]);
+            narrowed["spec"]["namespaceResourceWhitelist"] = json!([]);
+            narrowed
+        };
+        assert_eq!(findings(&old, &tree(narrowed(), Some(app("example")), &[])).len(), 1);
+        kept["metadata"]["annotations"] = json!({SYNC_OPTIONS_ANNOTATION: "Prune=false"});
+        let old = tree(project(&["retired"]), Some(app("example")), &[kept]);
+        assert!(findings(&old, &tree(narrowed(), Some(app("example")), &[])).is_empty());
     }
 
     #[test]
@@ -917,9 +1110,16 @@ mod tests {
     fn test_invalid_catalog_is_actionable_even_with_ignore() {
         let mut old = tree(project(&["retired"]), Some(app("example")), &[resource("retired")]);
         old.insert(PathBuf::from("_nyl/catalog/project.yaml"), b"not: [valid".to_vec());
-        let error = check_project_scope(&borrowed(&old), &DesiredFiles::new(), "production", "production", true)
-            .unwrap_err()
-            .to_string();
+        let error = check_project_scope(
+            &borrowed(&old),
+            &DesiredFiles::new(),
+            "production",
+            "production",
+            None,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("Invalid rendered manifest _nyl/catalog/project.yaml"));
     }
     #[test]
@@ -930,9 +1130,16 @@ mod tests {
         annotate(&mut application, &provenance).unwrap();
         let mut old = tree(project(&["retired"]), Some(application), &[resource("retired")]);
         old.remove(Path::new("_nyl/catalog/project.yaml"));
-        let error = check_project_scope(&borrowed(&old), &DesiredFiles::new(), "production", "production", true)
-            .unwrap_err()
-            .to_string();
+        let error = check_project_scope(
+            &borrowed(&old),
+            &DesiredFiles::new(),
+            "production",
+            "production",
+            None,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("missing generated AppProject"), "{error}");
     }
 
@@ -969,6 +1176,7 @@ mod tests {
             publication_base: None,
             auth: &auth,
             ignore_project_scope_contraction: false,
+            cluster_kubernetes: None,
         };
         let baseline = prepare_publication(&request, "baseline", || {
             Ok(PublicationAuthor {
