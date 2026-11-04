@@ -54,3 +54,24 @@ documents the configuration model.
 
 See the [options shared by the tree commands](/nyl/reference/cli/render-tree/#options-shared-by-the-tree-commands) for target selection, caching, secret inputs, progress,
 and validation.
+
+## Partial publication
+
+```bash
+nyl publish-tree --target production --application-group payments
+nyl publish-tree --target production --release payments/api --release payments/worker
+```
+
+| Option | Description |
+| --- | --- |
+| `--application-group NAME` | Replace the ApplicationGroup's published Releases, including removals. Repeatable. |
+| `--release GROUP/RELEASE` | Replace one Release, given by its literal `metadata.name`. Repeatable. |
+
+Selectors combine by union; without any, Nyl publishes the full target. The
+summary names the baseline commit, counts rendered, retained, and removed
+Releases, lists changed shared catalog artifacts, and lists new Releases in a
+touched group that the selection leaves unpublished. Publication commits add
+`Nyl-Publication-Base` and `Nyl-Publication-Selection` trailers.
+[Partial publication](/nyl/kubernetes-gitops/workflow/partial-publication/)
+explains retention, provenance, and the conditions that require a full
+publication.
