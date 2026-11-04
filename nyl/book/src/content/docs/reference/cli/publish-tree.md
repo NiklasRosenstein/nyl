@@ -42,6 +42,25 @@ The completion summary names the destination repository, branch, and resulting
 commit. Publication commit messages carry `Nyl-Source-Repository`,
 `Nyl-Source-Commit`, `Nyl-Deployment-Target`, and `Nyl-Cluster` provenance
 trailers. `--message` replaces the subject while retaining those trailers.
+Above the trailers, a `Changed applications:` paragraph lists each generated
+Argo CD Application, as `NAMESPACE/NAME`, whose catalog manifest or deployed
+files the commit adds, modifies, or removes. Changes to other catalog files,
+such as AppProjects, list the catalog Application. The paragraph is omitted
+when no Application changes, for example when only state files do.
+Orchestrated publications list the same paragraph.
+
+```text
+Render deployment target production
+
+Changed applications:
+- argocd/api
+- argocd/production-catalog
+
+Nyl-Source-Repository: https://github.com/example/platform.git
+Nyl-Source-Commit: 3e7b0c1d9a4f5e6b7c8d9e0f1a2b3c4d5e6f7a8b
+Nyl-Deployment-Target: production
+Nyl-Cluster: prod-eu-1
+```
 
 Before creating a publication commit, Nyl checks the exact indexed baseline for
 AppProject cleanup permission contractions affecting retiring Applications and

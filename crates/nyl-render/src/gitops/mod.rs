@@ -1,5 +1,6 @@
 //! Project discovery and compilation support for Kubernetes GitOps workflows.
 
+pub mod applications;
 pub mod argocd;
 pub mod direct;
 pub mod direct_inputs;
@@ -17,6 +18,7 @@ mod values;
 
 pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};
 pub use crate::render::{RenderSession, RenderedBundle};
+pub use applications::{changed_applications, derive_application_views, ApplicationView};
 pub(crate) use argocd::merge_sync_options;
 pub use argocd::{build_directory_application, DirectoryApplicationInput};
 pub use discovery::{
