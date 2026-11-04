@@ -610,7 +610,7 @@ fn parse_complete_resource(document: &str, contextual_path: &Path) -> Result<Git
         )));
     }
     parse_gitops_resource(&parsed_documents[0])
-        .map_err(|error| NylError::config(format!("{}: {error}", contextual_path.display())))?
+        .map_err(|error| NylError::from_core_at(error, contextual_path.display()))?
         .ok_or_else(|| {
             NylError::config(format!(
                 "Document {} advertises {API_VERSION_K8S_GITOPS} but is not a GitOps resource",
@@ -1050,8 +1050,13 @@ spec:
         let error = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue())
             .unwrap_err()
             .to_string();
-        assert!(error.contains("unknown field"));
-        assert!(error.contains("DeploymentTarget"));
+        assert!(
+            error.starts_with(
+                "Resource validation error in invalid.yaml#document-1: Invalid DeploymentTarget: Unknown field at `spec.unknown`"
+            ),
+            "{error}"
+        );
+        assert_eq!(error.matches("Hint:").count(), 1, "{error}");
     }
 
     #[test]

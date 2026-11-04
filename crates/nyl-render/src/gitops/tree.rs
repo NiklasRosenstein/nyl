@@ -2989,13 +2989,24 @@ pub(super) fn render_effective_control(
             discovered.document_index
         )));
     }
-    let effective = crate::resources::parse_gitops_resource(&documents[0])?.ok_or_else(|| {
-        NylError::config(format!(
-            "GitOps resource {} document {} does not retain its static envelope after target rendering",
-            discovered.source_path.display(),
-            discovered.document_index
-        ))
-    })?;
+    let effective = crate::resources::parse_gitops_resource(&documents[0])
+        .map_err(|error| {
+            NylError::from_core_at(
+                error,
+                format!(
+                    "{}#document-{}",
+                    discovered.source_path.display(),
+                    discovered.document_index
+                ),
+            )
+        })?
+        .ok_or_else(|| {
+            NylError::config(format!(
+                "GitOps resource {} document {} does not retain its static envelope after target rendering",
+                discovered.source_path.display(),
+                discovered.document_index
+            ))
+        })?;
     let effective_identity = match &effective {
         GitOpsResource::GitRepository(resource) => (GitOpsResourceKind::GitRepository, &resource.metadata.name),
         GitOpsResource::Cluster(resource) => (GitOpsResourceKind::Cluster, &resource.metadata.name),

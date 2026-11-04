@@ -301,7 +301,7 @@ pub(crate) async fn generate_resource(
 
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render
-        let chart: HelmChart = crate::util::parse_resource(resource, "HelmChart")?;
+        let chart: HelmChart = nyl_core::resources::parse_resource(resource, "HelmChart")?;
         let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
 
         Ok(apply_parent_tracking_annotations(
@@ -331,7 +331,7 @@ pub(crate) async fn generate_resource(
             .is_some()
     {
         // Parse as Component and render via the existing Helm path
-        let mut component: NylComponent = crate::util::parse_resource(resource, "Component")?;
+        let mut component: NylComponent = nyl_core::resources::parse_resource(resource, "Component")?;
         if let Some(target) = config.get_alias_target_for_kind(&component.api_version, &component.kind) {
             component.kind = target.to_string();
         }
