@@ -371,20 +371,6 @@ fn load_index(path: &Path) -> Result<Option<RenderIndex>> {
     parse_index(&fs::read(path)?, &path.display().to_string()).map(Some)
 }
 
-/// Read and verify the owned bytes of a publication baseline before mutation.
-/// An absent index denotes a first publication; malformed or modified baselines fail.
-pub fn read_owned_publication(
-    output_root: &Path,
-    expected: &RenderIndex,
-    released: &BTreeSet<PathBuf>,
-) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
-    validate_rendered_tree_owner(output_root, expected)?;
-    let Some(index) = load_index(&output_root.join(DEFAULT_INDEX_PATH))? else {
-        return Ok(BTreeMap::new());
-    };
-    read_indexed_files(output_root, &index, released)
-}
-
 /// Read and verify index-owned files, excluding state paths released from ownership.
 pub fn read_indexed_files(
     output_root: &Path,

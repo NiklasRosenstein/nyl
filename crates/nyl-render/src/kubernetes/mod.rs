@@ -11,7 +11,7 @@ pub mod prune;
 mod resource;
 mod state;
 
-pub use client::is_known_cluster_scoped_gvk;
+pub use client::{builtin_scope, is_known_cluster_scoped_gvk};
 pub use client::{DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
 pub use diff::DiffEngine;
 pub use ordering::ResourceOrdering;

@@ -2487,13 +2487,22 @@ impl ProjectUsage {
 }
 
 /// Resource scopes known for a target: CRDs it renders, then the Cluster's capabilities.
-struct ScopeResolver<'a> {
+/// Resource scope from rendered CustomResourceDefinitions and a Cluster's
+/// recorded Kubernetes capabilities.
+pub(super) struct ScopeResolver<'a> {
     rendered: BTreeMap<(String, String), crate::resources::ResourceScope>,
     capabilities: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
 }
 
 impl<'a> ScopeResolver<'a> {
     fn new<'m>(cluster: &'a Cluster, manifests: impl IntoIterator<Item = &'m Value>) -> Self {
+        Self::with_capabilities(cluster.spec.kubernetes.as_ref(), manifests)
+    }
+
+    pub(super) fn with_capabilities<'m>(
+        capabilities: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
+        manifests: impl IntoIterator<Item = &'m Value>,
+    ) -> Self {
         let mut rendered = BTreeMap::new();
         for manifest in manifests {
             if manifest.get("kind").and_then(Value::as_str) != Some("CustomResourceDefinition") {
@@ -2509,13 +2518,10 @@ impl<'a> ScopeResolver<'a> {
                 rendered.insert((group.to_owned(), kind.to_owned()), scope);
             }
         }
-        Self {
-            rendered,
-            capabilities: cluster.spec.kubernetes.as_ref(),
-        }
+        Self { rendered, capabilities }
     }
 
-    fn scope(&self, group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
+    pub(super) fn scope(&self, group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
         self.rendered
             .get(&(group.to_owned(), kind.to_owned()))
             .copied()

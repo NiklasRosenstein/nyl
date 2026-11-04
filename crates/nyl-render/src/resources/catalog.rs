@@ -254,6 +254,9 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
             "type": "string", "minLength": 1, "maxLength": 63,
             "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
         });
+        let items = properties["retainedNamespaceResourceWhitelist"]["items"].take();
+        properties["retainedNamespaceResourceWhitelist"]["items"] =
+            json!({"allOf": [items, {"not": {"required": ["name"]}}]});
     }
     exclusive_fields(
         schema,

@@ -239,7 +239,8 @@ and `retainedClusterResourceWhitelist` keep such permissions: their entries take
 form of the AppProject `namespaceResourceWhitelist` and `clusterResourceWhitelist`
 entries and are appended to the derived or declared lists, without duplicates. A
 list that already admits every resource is left as is. Cluster entries can name one
-object. Like `retainedProjectNamespaces`, they are rejected with `projectRef`.
+object; namespaced entries cannot, because Argo CD's namespaced resource permissions
+apply to a whole kind. Like `retainedProjectNamespaces`, they are rejected with `projectRef`.
 
 Retention does not override explicit destination denies, resource blacklists, or
 other restrictions. A change of cluster or project identity can also require
@@ -252,9 +253,9 @@ including additional namespaces, Namespace objects, and other cluster-scoped
 resources such as ClusterRoles and CRDs, which Argo CD permits by the cluster
 resource lists alone. A resource rendered without `metadata.namespace` is checked in
 its Application's destination namespace, so moving the destination retires it from
-the old one. The Cluster's [recorded capabilities](/nyl/kubernetes-gitops/resource-guides/cluster/)
-and CRDs in either publication tell namespaced kinds from cluster-scoped ones; a kind
-of unknown scope is checked both ways. The diagnostic names the retention entries
+the old one. The Cluster's [recorded capabilities](/nyl/kubernetes-gitops/resource-guides/cluster/),
+CRDs in either publication, and the fixed scopes of built-in Kubernetes kinds tell namespaced kinds from cluster-scoped ones; any other kind of unknown scope is
+checked both ways. The diagnostic names the retention entries
 that restore each permission and anything they cannot restore. Equivalent wildcard
 permission is sufficient. Resources Argo CD intentionally leaves in place need no
 cleanup permission: `Delete=false` in their `argocd.argoproj.io/sync-options` when

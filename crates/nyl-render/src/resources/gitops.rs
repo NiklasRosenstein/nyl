@@ -463,7 +463,7 @@ pub struct ApplicationGroupSpec {
     /// Additional concrete namespaces whose cleanup scope the group-owned generated AppProject retains. Added to inferred or declared destinations on the target Cluster and to generated Namespace-management permissions; creates no resources and does not override deny rules or resource restrictions. Verify live cascading deletion before removing entries. Not supported with `projectRef`: retain scope in the owning AppProjectDefinition.
     #[serde(rename = "retainedProjectNamespaces", default, skip_serializing_if = "Vec::is_empty")]
     pub retained_project_namespaces: Vec<String>,
-    /// Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains. Appended to the derived or declared `namespaceResourceWhitelist`; does not override `namespaceResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.
+    /// Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains, by `group` and `kind` (`name` is not supported). Appended to the derived or declared `namespaceResourceWhitelist`; does not override `namespaceResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.
     #[serde(
         rename = "retainedNamespaceResourceWhitelist",
         default,
@@ -1335,6 +1335,18 @@ impl ApplicationGroup {
                 validate_required(&format!("spec.{field}[].kind"), &pattern.kind)?;
             }
         }
+        // Argo CD's namespaced whitelist holds group and kind only; a name would
+        // be dropped and silently admit the whole kind.
+        if self
+            .spec
+            .retained_namespace_resource_whitelist
+            .iter()
+            .any(|pattern| pattern.name.is_some())
+        {
+            return Err(CoreError::config(
+                "spec.retainedNamespaceResourceWhitelist[].name is not supported: Argo CD namespaced resource permissions apply to a whole kind",
+            ));
+        }
         for namespace in &self.spec.retained_project_namespaces {
             super::release::validate_namespace_name(
                 "spec.retainedProjectNamespaces[] (concrete namespace; wildcards are not allowed)",
@@ -1862,6 +1874,12 @@ mod tests {
         value["spec"].as_object_mut().unwrap().remove("projectRef");
         value["spec"]["retainedNamespaceResourceWhitelist"] = json!([{"group": "batch", "kind": "CronJob"}]);
         assert!(parse_gitops_resource(&value).is_ok());
+        value["spec"]["retainedNamespaceResourceWhitelist"] =
+            json!([{"group": "batch", "kind": "CronJob", "name": "nightly"}]);
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("retainedNamespaceResourceWhitelist[].name is not supported"));
         value["spec"]["retainedNamespaceResourceWhitelist"] = json!([{"group": "batch", "kind": ""}]);
         assert!(parse_gitops_resource(&value)
             .unwrap_err()

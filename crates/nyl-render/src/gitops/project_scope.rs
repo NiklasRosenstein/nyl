@@ -10,6 +10,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use super::tree::ScopeResolver;
 use super::{DesiredFiles, CATALOG_DIRECTORY};
 use crate::kubernetes::prune::{delete_decision, prune_decision, PruneDecision, SYNC_OPTIONS_ANNOTATION};
 use crate::resources::{ClusterKubernetesCapabilities, ResourceScope};
@@ -340,9 +341,7 @@ impl<'a> Snapshot<'a> {
         for (path, bytes) in self.files.iter().filter(|(path, _)| path.starts_with(root)) {
             let resource = parse(path, bytes)?;
             if field(&resource, "/metadata/namespace").is_empty() && !is_namespace(&resource) {
-                let api = field(&resource, "/apiVersion");
-                let group = api.split_once('/').map_or("", |(group, _)| group);
-                let scope = scopes.scope(group, field(&resource, "/kind"));
+                let scope = scopes.scope(api_group(&resource), field(&resource, "/kind"));
                 if scope != Some(ResourceScope::Namespaced) {
                     resources.insert(resource_identity(&resource), resource.clone());
                 }
@@ -363,57 +362,49 @@ fn is_namespace(resource: &Value) -> bool {
     field(resource, "/apiVersion") == "v1" && field(resource, "/kind") == "Namespace"
 }
 
-/// Resource scope from the target Cluster's recorded capabilities and the
-/// CustomResourceDefinitions either snapshot renders.
+/// Resource scope for the comparison: CRDs either snapshot renders, then the
+/// target Cluster's recorded capabilities, then built-in Kubernetes kinds.
 struct Scopes<'a> {
-    rendered: BTreeMap<(String, String), ResourceScope>,
-    capabilities: Option<&'a ClusterKubernetesCapabilities>,
+    resolver: ScopeResolver<'a>,
 }
 
 impl<'a> Scopes<'a> {
     fn new(snapshots: [&DesiredFiles<'_>; 2], capabilities: Option<&'a ClusterKubernetesCapabilities>) -> Self {
-        let mut rendered = BTreeMap::new();
-        for (path, bytes) in snapshots.into_iter().flat_map(|files| files.iter()) {
-            if path.extension().is_none_or(|extension| extension != "yaml") {
-                continue;
-            }
-            let Ok(resource) = parse(path, bytes) else {
-                continue;
-            };
-            if field(&resource, "/kind") != "CustomResourceDefinition" {
-                continue;
-            }
-            let scope = match field(&resource, "/spec/scope") {
-                "Cluster" => ResourceScope::Cluster,
-                "Namespaced" => ResourceScope::Namespaced,
-                _ => continue,
-            };
-            rendered.insert(
-                (
-                    field(&resource, "/spec/group").to_owned(),
-                    field(&resource, "/spec/names/kind").to_owned(),
-                ),
-                scope,
-            );
+        const CRD_MARKER: &[u8] = b"CustomResourceDefinition";
+        // Only CRDs carry scope; skip parsing every other manifest.
+        let crds = snapshots
+            .into_iter()
+            .flat_map(|files| files.iter())
+            .filter(|(_, bytes)| bytes.windows(CRD_MARKER.len()).any(|window| window == CRD_MARKER))
+            .filter_map(|(path, bytes)| parse(path, bytes).ok())
+            .filter(|resource| field(resource, "/kind") == "CustomResourceDefinition")
+            .collect::<Vec<_>>();
+        Self {
+            resolver: ScopeResolver::with_capabilities(capabilities, crds.iter()),
         }
-        Self { rendered, capabilities }
     }
 
     fn scope(&self, group: &str, kind: &str) -> Option<ResourceScope> {
-        self.rendered
-            .get(&(group.to_owned(), kind.to_owned()))
-            .copied()
-            .or_else(|| {
-                self.capabilities
-                    .and_then(|capabilities| capabilities.scope_of(group, kind))
-            })
+        self.resolver
+            .scope(group, kind)
+            .or_else(|| crate::kubernetes::builtin_scope(group, kind))
     }
 }
 
+/// The API group of a resource's `apiVersion`, `""` for the core group.
+fn api_group(resource: &Value) -> &str {
+    field(resource, "/apiVersion")
+        .split_once('/')
+        .map_or("", |(group, _)| group)
+}
+
 fn resource_identity(resource: &Value) -> String {
-    let api = field(resource, "/apiVersion");
-    let group = api.split_once('/').map_or("", |(group, _)| group);
-    format!("{group}/{}/{}", field(resource, "/kind"), identity(resource))
+    format!(
+        "{}/{}/{}",
+        api_group(resource),
+        field(resource, "/kind"),
+        identity(resource)
+    )
 }
 
 /// Compare effective cleanup permission for resources leaving each Application.
@@ -584,8 +575,7 @@ fn retention_remedy(
     };
     let denied = denied_permissions(&retained, resource, destination)?;
     if !kind.is_empty() && !denied.is_empty() && retained["spec"][whitelist].is_array() {
-        let api = field(resource, "/apiVersion");
-        let mut pattern = json!({"group": api.split_once('/').map_or("", |(group, _)| group), "kind": kind});
+        let mut pattern = json!({"group": api_group(resource), "kind": kind});
         if cluster_scoped {
             pattern["name"] = field(resource, "/metadata/name").into();
         }
@@ -625,8 +615,7 @@ fn denied_permissions(project: &Value, resource: &Value, destination: &Value) ->
     let mut denied = BTreeSet::new();
     let namespace = field(resource, "/metadata/namespace");
     let kind = field(resource, "/kind");
-    let api = field(resource, "/apiVersion");
-    let group = api.split_once('/').map_or("", |(group, _)| group);
+    let group = api_group(resource);
     if !kind.is_empty() {
         let (allow, deny) = if namespace.is_empty() {
             ("clusterResourceWhitelist", "clusterResourceBlacklist")
@@ -1055,6 +1044,20 @@ mod tests {
         let mut new = tree(retained, None, &[]);
         new.insert(PathBuf::from("crds/widget.yaml"), serde_json::to_vec(&crd).unwrap());
         let found = findings(&old, &new);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn test_builtin_kinds_are_checked_only_in_their_own_scope() {
+        // A permissive cluster whitelist narrowed to nothing must not flag a
+        // namespaced built-in kind as a cluster-scoped contraction.
+        let config_map = json!({"apiVersion":"v1", "kind":"ConfigMap", "metadata":{"name":"example"}});
+        let mut wide = project(&["retired", "active"]);
+        wide["spec"]["clusterResourceWhitelist"] = json!([{"group":"*", "kind":"*"}]);
+        let old = tree(wide, Some(app("example")), &[config_map]);
+        let mut narrowed = project(&["retired", "active"]);
+        narrowed["spec"]["clusterResourceWhitelist"] = json!([]);
+        let found = findings(&old, &tree(narrowed, None, &[]));
         assert!(found.is_empty(), "{found:?}");
     }
 
