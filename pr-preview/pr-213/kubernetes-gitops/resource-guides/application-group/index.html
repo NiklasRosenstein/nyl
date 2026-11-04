@@ -226,8 +226,8 @@ cascading deletion, Argo CD skips managed resources outside the Application’s
 current AppProject scope, which can leave resources orphaned even with a deletion
 finalizer. This filtering happens in
 <a href="https://github.com/argoproj/argo-cd/blob/master/controller/appcontroller.go"><code dir="auto">getPermittedAppLiveObjects()</code> and <code dir="auto">finalizeApplicationDeletion()</code></a>.</p>
-<p>Keep cleanup namespaces in the group-owned generated project with one additive setting:</p>
-<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="yaml"><code><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">apiVersion</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">k8s.gitops.nyl/v1</span></div></div><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">kind</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">ApplicationGroup</span></div></div><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">metadata</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">name</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">workloads</span></div></div><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">spec</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">applicationNamespace</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">argocd</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">retainedProjectNamespaces</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#ECC48D;--1:#3B61B0">retired-service</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="apiVersion: k8s.gitops.nyl/v1kind: ApplicationGroupmetadata:  name: workloadsspec:  applicationNamespace: argocd  retainedProjectNamespaces:    - retired-service"><div></div></button></div></figure></div>
+<p>Keep cleanup scope in the group-owned generated project with additive settings:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="yaml"><code><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">apiVersion</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">k8s.gitops.nyl/v1</span></div></div><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">kind</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">ApplicationGroup</span></div></div><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">metadata</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">name</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">workloads</span></div></div><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">spec</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">applicationNamespace</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">argocd</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">retainedProjectNamespaces</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#ECC48D;--1:#3B61B0">retired-service</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">retainedNamespaceResourceWhitelist</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#7FDBCA;--1:#111111">group</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">batch</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">kind</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">CronJob</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">retainedClusterResourceWhitelist</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#7FDBCA;--1:#111111">group</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">rbac.authorization.k8s.io</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">kind</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">ClusterRole</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">name</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">retired-service-reader</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="apiVersion: k8s.gitops.nyl/v1kind: ApplicationGroupmetadata:  name: workloadsspec:  applicationNamespace: argocd  retainedProjectNamespaces:    - retired-service  retainedNamespaceResourceWhitelist:    - group: batch      kind: CronJob  retainedClusterResourceWhitelist:    - group: rbac.authorization.k8s.io      kind: ClusterRole      name: retired-service-reader"><div></div></button></div></figure></div>
 <p><code dir="auto">retainedProjectNamespaces</code> defaults to <code dir="auto">[]</code>. It adds concrete Kubernetes namespace
 names to the existing inferred or explicit destinations on the target Cluster.
 Duplicates are removed deterministically. It participates in the existing generated
@@ -236,29 +236,42 @@ Namespace, Release, or Application. Wildcards and invalid namespace names are re
 The setting keeps project inference enabled and needs no complete <code dir="auto">projectTemplate</code>.
 With <code dir="auto">projectRef</code>, retain scope in the owning AppProjectDefinition instead; the
 retention setting is rejected for independently managed and external projects.</p>
+<p>A generated project derives its resource whitelists from the kinds the group
+renders, so removing the last resource of a kind narrows the whitelist in the same
+publication, whether its Application retires or keeps running. Argo CD then neither
+prunes nor deletes the live resources of that kind. <code dir="auto">retainedNamespaceResourceWhitelist</code>
+and <code dir="auto">retainedClusterResourceWhitelist</code> keep such permissions: their entries take the
+form of the AppProject <code dir="auto">namespaceResourceWhitelist</code> and <code dir="auto">clusterResourceWhitelist</code>
+entries and are appended to the derived or declared lists, without duplicates. A
+list that already admits every resource is left as is. Cluster entries can name one
+object. Like <code dir="auto">retainedProjectNamespaces</code>, they are rejected with <code dir="auto">projectRef</code>.</p>
 <p>Retention does not override explicit destination denies, resource blacklists, or
-other restrictions. If retiring a workload also removes the last inferred permission
-for one of its resource kinds, keep that permission explicitly in
-<code dir="auto">projectTemplate.namespaceResourceWhitelist</code> or <code dir="auto">clusterResourceWhitelist</code> as
-appropriate. Explicit whitelist fields retain their usual meaning: declare the full
-set the project needs. A change of cluster or project identity can also require
+other restrictions. A change of cluster or project identity can also require
 retaining the original destination or project declaration.</p>
 <p><code dir="auto">diff-tree</code> and <code dir="auto">publish-tree</code> fail with <code dir="auto">NYL_PROJECT_SCOPE_CONTRACTION</code> when their
 baseline contains a cascading Application whose retiring resources lose effective
 project permission. The check uses target-owned catalog sources and rendered resources,
 including additional namespaces, Namespace objects, and other cluster-scoped
 resources such as ClusterRoles and CRDs, which Argo CD permits by the cluster
-resource lists alone. Namespace retention cannot keep a cluster-scoped kind; the
-diagnostic names the <code dir="auto">clusterResourceWhitelist</code> entries to retain. Equivalent wildcard permission
-is sufficient. Applications configured for orphan deletion do not require cascading
+resource lists alone. A resource rendered without <code dir="auto">metadata.namespace</code> is checked in
+its Application’s destination namespace, so moving the destination retires it from
+the old one. The Cluster’s <a href="/nyl/pr-preview/pr-213/kubernetes-gitops/resource-guides/cluster/">recorded capabilities</a>
+and CRDs in either publication tell namespaced kinds from cluster-scoped ones; a kind
+of unknown scope is checked both ways. The diagnostic names the retention entries
+that restore each permission and anything they cannot restore. Equivalent wildcard
+permission is sufficient. Resources Argo CD intentionally leaves in place need no
+cleanup permission: <code dir="auto">Delete=false</code> in their <code dir="auto">argocd.argoproj.io/sync-options</code> when
+their Application is deleted, <code dir="auto">Prune=false</code> when a running Application stops
+rendering them. Applications configured for orphan deletion do not require cascading
 cleanup. External project permissions absent from the catalog and live Argo CD
 cluster registration are outside the published snapshots the guard evaluates.</p>
 <p>For automatic catalog synchronization with manual Application pruning:</p>
 <ol>
 <li>Remove or replace the Application in source. Run <code dir="auto">diff-tree</code> in MR CI to detect
 simultaneous cleanup permission contractions.</li>
-<li>Add each reported namespace to <code dir="auto">retainedProjectNamespaces</code>, preserving existing
-entries, and retain any additional project permissions the diagnostic identifies.</li>
+<li>Add the reported entries to <code dir="auto">retainedProjectNamespaces</code>,
+<code dir="auto">retainedNamespaceResourceWhitelist</code>, and <code dir="auto">retainedClusterResourceWhitelist</code>,
+preserving existing entries.</li>
 <li>Publish. Let Argo CD synchronize the catalog and project permissions.</li>
 <li>Manually prune the retiring Application from the catalog, then complete any
 required resource deletion confirmations.</li>

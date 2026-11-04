@@ -407,6 +407,12 @@
                 "type": "null"
               }
             },
+            "retainedClusterResourceWhitelist": {
+              "maxItems": 0
+            },
+            "retainedNamespaceResourceWhitelist": {
+              "maxItems": 0
+            },
             "retainedProjectNamespaces": {
               "maxItems": 0
             }
@@ -540,6 +546,20 @@
           "$ref": "#/$defs/GitOpsReleaseCustomization",
           "default": {},
           "description": "Limits on per-release Application overrides. Releases cannot expand the generated project or namespace policy."
+        },
+        "retainedClusterResourceWhitelist": {
+          "description": "Additional cluster-scoped resources whose cleanup permission the group-owned generated AppProject retains, optionally by name. Appended to the derived or declared `clusterResourceWhitelist`; does not override `clusterResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.",
+          "items": {
+            "$ref": "#/$defs/AppProjectResourcePattern"
+          },
+          "type": "array"
+        },
+        "retainedNamespaceResourceWhitelist": {
+          "description": "Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains. Appended to the derived or declared `namespaceResourceWhitelist`; does not override `namespaceResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.",
+          "items": {
+            "$ref": "#/$defs/AppProjectResourcePattern"
+          },
+          "type": "array"
         },
         "retainedProjectNamespaces": {
           "description": "Additional concrete namespaces whose cleanup scope the group-owned generated AppProject retains. Added to inferred or declared destinations on the target Cluster and to generated Namespace-management permissions; creates no resources and does not override deny rules or resource restrictions. Verify live cascading deletion before removing entries. Not supported with `projectRef`: retain scope in the owning AppProjectDefinition.",

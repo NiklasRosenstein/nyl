@@ -475,6 +475,46 @@
 <p><a id="field-spec.releaseCustomization.deniedPaths%5B%5D"></a></p>
 <h3 id="specreleasecustomizationdeniedpaths-1">spec.releaseCustomization.deniedPaths[]</h3>
 <p><strong>Required</strong> · string</p>
+<p><a id="field-spec.retainedClusterResourceWhitelist"></a></p>
+<h3 id="specretainedclusterresourcewhitelist">spec.retainedClusterResourceWhitelist</h3>
+<p><strong>Optional</strong> · array</p>
+<p>Additional cluster-scoped resources whose cleanup permission the group-owned generated AppProject retains, optionally by name. Appended to the derived or declared <code>clusterResourceWhitelist</code>; does not override <code>clusterResourceBlacklist</code>. Verify live cleanup before removing entries. Not supported with <code>projectRef</code>.</p>
+<p><a id="field-spec.retainedClusterResourceWhitelist%5B%5D"></a></p>
+<h3 id="specretainedclusterresourcewhitelist-1">spec.retainedClusterResourceWhitelist[]</h3>
+<p><strong>Required</strong> · object</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.retainedClusterResourceWhitelist%5B%5D.group"></a></p>
+<h3 id="specretainedclusterresourcewhitelistgroup">spec.retainedClusterResourceWhitelist[].group</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes API group pattern, such as <code>apiextensions.k8s.io</code> or <code>*</code>.</p>
+<p><a id="field-spec.retainedClusterResourceWhitelist%5B%5D.kind"></a></p>
+<h3 id="specretainedclusterresourcewhitelistkind">spec.retainedClusterResourceWhitelist[].kind</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes resource kind pattern.</p>
+<p><a id="field-spec.retainedClusterResourceWhitelist%5B%5D.name"></a></p>
+<h3 id="specretainedclusterresourcewhitelistname">spec.retainedClusterResourceWhitelist[].name</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Optional resource name pattern.</p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist"></a></p>
+<h3 id="specretainednamespaceresourcewhitelist">spec.retainedNamespaceResourceWhitelist</h3>
+<p><strong>Optional</strong> · array</p>
+<p>Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains. Appended to the derived or declared <code>namespaceResourceWhitelist</code>; does not override <code>namespaceResourceBlacklist</code>. Verify live cleanup before removing entries. Not supported with <code>projectRef</code>.</p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D"></a></p>
+<h3 id="specretainednamespaceresourcewhitelist-1">spec.retainedNamespaceResourceWhitelist[]</h3>
+<p><strong>Required</strong> · object</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D.group"></a></p>
+<h3 id="specretainednamespaceresourcewhitelistgroup">spec.retainedNamespaceResourceWhitelist[].group</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes API group pattern, such as <code>apiextensions.k8s.io</code> or <code>*</code>.</p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D.kind"></a></p>
+<h3 id="specretainednamespaceresourcewhitelistkind">spec.retainedNamespaceResourceWhitelist[].kind</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes resource kind pattern.</p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D.name"></a></p>
+<h3 id="specretainednamespaceresourcewhitelistname">spec.retainedNamespaceResourceWhitelist[].name</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Optional resource name pattern.</p>
 <p><a id="field-spec.retainedProjectNamespaces"></a></p>
 <h3 id="specretainedprojectnamespaces">spec.retainedProjectNamespaces</h3>
 <p><strong>Optional</strong> · array</p>
