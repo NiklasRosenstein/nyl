@@ -26,6 +26,10 @@ sanitized Cluster as `cluster`; the `live` block is omitted. Kubernetes
 capabilities are committed so CI can render deterministically without cluster
 access.
 
+`spec.valuesFrom` loads plain YAML mapping files before inline `spec.values`.
+See [file-backed values](/nyl/kubernetes-gitops/targets-and-clusters/#file-backed-values)
+for paths, merge order, and examples.
+
 `live.context` does not participate in render hashes and is never exposed to
 templates or generated manifests.
 

@@ -15,6 +15,11 @@ The target's Cluster supplies the generated Argo CD destination. Cluster and
 target values merge recursively, with target values winning at conflicting
 leaves.
 
+`spec.valuesFrom` loads plain YAML mapping files over Cluster values and before
+inline target values. See
+[file-backed values](/nyl/kubernetes-gitops/targets-and-clusters/#file-backed-values)
+for paths, merge order, and examples.
+
 By default, Nyl emits `<target>-catalog` beneath
 `_nyl/catalog/application.argoproj.io/<argocd-namespace>/`. It recursively syncs the
 target's `_nyl/catalog` directory. Set `catalogApplication.enabled: false` only

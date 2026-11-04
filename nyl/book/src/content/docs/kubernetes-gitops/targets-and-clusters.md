@@ -28,16 +28,96 @@ by the same Argo CD installation. Explicit instances require explicit
 
 ## Value overlays
 
-Nyl merges Cluster values with target values recursively. Target values win at
-each conflicting leaf:
+Nyl merges file imports and inline values recursively, in this order from lowest
+to highest precedence:
 
 ```text
-Cluster.spec.values < DeploymentTarget.spec.values
+Cluster.spec.valuesFrom < Cluster.spec.values < DeploymentTarget.spec.valuesFrom < DeploymentTarget.spec.values
 ```
 
 Cluster values describe facts such as region, architecture, storage class, and
 ingress implementation. Target values describe deployment intent such as the
 environment or rollout configuration.
+
+### File-backed values
+
+Both resources accept `spec.valuesFrom`, a list of plain YAML mapping files.
+Imports apply in declaration order, with later files winning; inline `values`
+override imports within each resource. An optional `key` mounts the mapping under
+one literal values key. Omitting it merges the mapping at the values root.
+
+For example, with `nyl.toml` in `nyl/`, a target can read a shared file elsewhere
+in the same repository:
+
+```yaml
+# nyl/config/targets/production.yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: production
+spec:
+  clusterRef: {name: primary}
+  valuesFrom:
+    - file: ../../../shared/platform.yaml
+      key: platform
+    - file: /shared/production.yaml
+  values:
+    platform:
+      backup:
+        retentionDays: 14
+  publication:
+    repository: {repoURL: 'https://github.com/example/deploy.git'}
+    revision: deploy
+```
+
+```yaml
+# shared/platform.yaml
+labels:
+  team: engineering
+backup:
+  retentionDays: 30
+```
+
+```yaml
+# shared/production.yaml
+platform:
+  labels:
+    environment: production
+```
+
+Templates read `values.platform.labels.team` as `engineering` and
+`values.platform.backup.retentionDays` as `14`. The same file can also be
+imported by a Cluster or read directly by another tool.
+
+Objects merge recursively. Arrays, scalars, and `null` replace the earlier value
+whole; `null` remains a value, rather than deleting the key. An empty array or
+empty string replaces the earlier value. An empty object merges without removing
+existing object keys, and replaces a non-object with an empty object. An omitted
+`values` block or `values: {}` adds no overrides. `key` is a literal key, so
+`key: platform.backup` creates one key containing a dot.
+
+Unlike other [local paths](/nyl/reference/configuration/#local-paths), relative
+`valuesFrom.file` paths resolve from the directory containing the resource's
+source YAML file, independently of the working directory. A leading `/` resolves
+from the Git worktree root. Paths must be normalized, may use leading `..`
+segments, and must stay inside that worktree without traversing symbolic links
+or accessing `.git` metadata. Files may live outside the directory containing
+`nyl.toml`.
+
+Imports follow Git visibility: tracked files and non-ignored untracked regular
+files are eligible. Ignored untracked files, submodules, and the project's
+`.nyl/cache` are excluded. There is no filename-extension restriction.
+
+Each file must contain exactly one mapping document; an empty file, scalar,
+array, `null` root, or multiple documents is an error. Nyl reads these as
+ordinary configuration without templating or recursive imports. Quoted template
+expressions remain literal strings. Loading imports needs no network or cluster
+access, and does not grant access to secrets or process environment.
+
+Imported files participate in render caching, ownership-index input digests, and
+publication provenance. Commit them alongside the resource declarations:
+`publish-tree` verifies the rendered target against the committed source before
+attributing output to it. See [Publishing](/nyl/kubernetes-gitops/workflow/publish/).
 
 The effective target and a sanitized Cluster are available to templates as
 `target` and `cluster`; `Cluster.spec.live` is omitted. Merged values remain

@@ -6857,3 +6857,179 @@ fn component_value_import_changes_invalidate_cached_tree_renders() {
     let recontracted = render_tree();
     assert!(!recontracted.contains("scheduling.example.com/pool"), "{recontracted}");
 }
+
+#[test]
+fn file_backed_values_reach_tree_and_direct_renders_with_warm_caches() {
+    let fixture = fixture();
+    let project = fixture.path().join("nyl");
+    fs::create_dir(&project).unwrap();
+    for path in ["nyl.toml", "config", "applications"] {
+        fs::rename(fixture.path().join(path), project.join(path)).unwrap();
+    }
+    let shared = fixture.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::write(shared.join("cluster.yaml"), "region: west\n").unwrap();
+    fs::write(shared.join("platform.yaml"), "environment: first\n").unwrap();
+    for (path, source) in [
+        ("config/clusters/prod-eu-1.yaml", "{file: ../../../shared/cluster.yaml}"),
+        (
+            "config/targets/production.yaml",
+            "{file: ../../../shared/platform.yaml, key: platform}",
+        ),
+    ] {
+        let path = project.join(path);
+        let contents = fs::read_to_string(&path)
+            .unwrap()
+            .replace("spec:\n", &format!("spec:\n  valuesFrom: [{source}]\n"));
+        fs::write(path, contents).unwrap();
+    }
+    let release_path = project.join("applications/workloads/api.yaml");
+    fs::write(
+        &release_path,
+        fs::read_to_string(&release_path).unwrap().replace(
+            "{{ values.environment }}",
+            "{{ values.platform.environment }}-{{ values.region }}",
+        ),
+    )
+    .unwrap();
+    let cache = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let tree = |cwd: &std::path::Path| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(cwd)
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--offline", "--target", "production", "--output-dir"])
+            .arg(output.path())
+            .assert()
+            .success();
+        read_tree(output.path())
+    };
+    let first = tree(&project);
+    assert!(read_resources(output.path()).contains("environment: first-west"));
+    assert_eq!(tree(&project.join("config/targets")), first);
+    let index: serde_json::Value =
+        serde_json::from_slice(&first[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+    for path in ["/shared/cluster.yaml", "/shared/platform.yaml"] {
+        assert!(index["inputs"][path].is_string(), "{index}");
+    }
+
+    for (args, expected) in [
+        (
+            vec![
+                "render",
+                "--offline",
+                "--target",
+                "production",
+                "applications/workloads/api.yaml",
+            ],
+            "environment: first-west",
+        ),
+        (
+            vec![
+                "render",
+                "--offline",
+                "--release-only",
+                "--target",
+                "production",
+                "applications/workloads/api.yaml",
+            ],
+            "environment: first-west",
+        ),
+        (vec!["validate"], "GitOps configuration is valid"),
+    ] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(&project)
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(expected));
+    }
+    fs::write(shared.join("platform.yaml"), "environment: second\n").unwrap();
+    fs::write(shared.join("cluster.yaml"), "region: east\n").unwrap();
+    let second = tree(&project.join("config"));
+    assert!(read_resources(output.path()).contains("environment: second-east"));
+    assert_eq!(tree(&project), second);
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(&project)
+        .env("NYL_CACHE_DIR", cache.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args([
+            "render",
+            "--offline",
+            "--release-only",
+            "--target",
+            "production",
+            "applications/workloads/api.yaml",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("environment: second-east"));
+
+    fs::write(project.join("nyl.toml"), "[vendor]\nmode='preferred'\n").unwrap();
+    for args in [vec!["vendor"], vec!["vendor", "--check"]] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(&project)
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Vendor snapshot"));
+    }
+}
+
+#[test]
+fn file_backed_values_enforce_publication_reproducibility() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    let data = fixture.path().join("shared.yaml");
+    fs::write(&data, "environment: committed\n").unwrap();
+    let target = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target,
+        fs::read_to_string(&target).unwrap().replace(
+            "  values:\n    environment: production\n",
+            "  valuesFrom: [{file: ../../shared.yaml}]\n",
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Declare shared values");
+    let publish = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["publish-tree", "--target", "production"])
+            .assert()
+    };
+    publish().success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let committed = published_commit(&repository, "deploy/production").id();
+    fs::write(&data, "environment: uncommitted\n").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "published",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+  environment: uncommitted"));
+    publish()
+        .failure()
+        .stderr(predicate::str::contains("Local changes affect deployment target"));
+    assert_eq!(published_commit(&repository, "deploy/production").id(), committed);
+}
