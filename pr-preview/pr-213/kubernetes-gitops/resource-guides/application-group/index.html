@@ -246,7 +246,10 @@ retaining the original destination or project declaration.</p>
 <p><code dir="auto">diff-tree</code> and <code dir="auto">publish-tree</code> fail with <code dir="auto">NYL_PROJECT_SCOPE_CONTRACTION</code> when their
 baseline contains a cascading Application whose retiring resources lose effective
 project permission. The check uses target-owned catalog sources and rendered resources,
-including additional namespaces and Namespace objects. Equivalent wildcard permission
+including additional namespaces, Namespace objects, and other cluster-scoped
+resources such as ClusterRoles and CRDs, which Argo CD permits by the cluster
+resource lists alone. Namespace retention cannot keep a cluster-scoped kind; the
+diagnostic names the <code dir="auto">clusterResourceWhitelist</code> entries to retain. Equivalent wildcard permission
 is sufficient. Applications configured for orphan deletion do not require cascading
 cleanup. External project permissions absent from the catalog and live Argo CD
 cluster registration are outside the published snapshots the guard evaluates.</p>

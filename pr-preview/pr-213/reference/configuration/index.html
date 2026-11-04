@@ -88,6 +88,9 @@ may begin with <code dir="auto">..</code> segments that deliberately leave it, s
 <code dir="auto">/applications/web</code>.</li>
 <li>A path must stay inside the worktree and must not traverse a symbolic link.</li>
 </ul>
+<p>Cluster and DeploymentTarget <a href="/nyl/pr-preview/pr-213/kubernetes-gitops/targets-and-clusters/#file-backed-values"><code dir="auto">spec.valuesFrom[].file</code></a>
+paths use the resource’s source directory as their relative base. Their <code dir="auto">/</code>
+form uses the same Git worktree root.</p>
 <p>The two forms name the same directory only for one <code dir="auto">nyl.toml</code> location, such as
 <code dir="auto">nyl/nyl.toml</code> for the examples above. Relative paths move with <code dir="auto">nyl.toml</code>:
 use them for Releases kept together with the configuration. Rooted paths do
