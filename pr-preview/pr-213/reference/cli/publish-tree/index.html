@@ -98,7 +98,16 @@ repository’s default branch.
 The completion summary names the destination repository, branch, and resulting
 commit. Publication commit messages carry <code dir="auto">Nyl-Source-Repository</code>,
 <code dir="auto">Nyl-Source-Commit</code>, <code dir="auto">Nyl-Deployment-Target</code>, and <code dir="auto">Nyl-Cluster</code> provenance
-trailers. <code dir="auto">--message</code> replaces the subject while retaining those trailers.</p>
+trailers. <code dir="auto">--message</code> replaces the subject while retaining those trailers.
+Above the trailers, a <code dir="auto">Changed applications:</code> paragraph lists each generated
+Argo CD Application, as <code dir="auto">NAMESPACE/NAME</code>, whose catalog manifest or deployed
+files the commit adds, modifies, or removes. Changes to other catalog files,
+such as AppProjects, list the catalog Application. The paragraph is omitted
+when no Application changes, for example when only state files do.
+Orchestrated publications list the same paragraph.</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Render deployment target production</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Changed applications:</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">- argocd/api</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">- argocd/production-catalog</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Nyl-Source-Repository: https://github.com/example/platform.git</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Nyl-Source-Commit: 3e7b0c1d9a4f5e6b7c8d9e0f1a2b3c4d5e6f7a8b</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Nyl-Deployment-Target: production</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Nyl-Cluster: prod-eu-1</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="Render deployment target productionChanged applications:- argocd/api- argocd/production-catalogNyl-Source-Repository: https://github.com/example/platform.gitNyl-Source-Commit: 3e7b0c1d9a4f5e6b7c8d9e0f1a2b3c4d5e6f7a8bNyl-Deployment-Target: productionNyl-Cluster: prod-eu-1"><div></div></button></div></figure></div>
 <p>Before creating a publication commit, Nyl checks the exact indexed baseline for
 AppProject cleanup permission contractions affecting retiring Applications and
 resources. An unsafe transition fails with <code dir="auto">NYL_PROJECT_SCOPE_CONTRACTION</code> before
