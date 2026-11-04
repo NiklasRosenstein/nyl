@@ -549,28 +549,38 @@ impl ResolvedTargetInputs {
     /// of the canonical JSON value.
     pub fn index_entries(&self) -> Result<BTreeMap<String, String>> {
         let mut entries = BTreeMap::new();
-        for (key, release) in &self.releases {
-            for (name, input) in &release.inputs {
-                entries.insert(format!("{INDEX_INPUT_PREFIX}{key}/{name}"), value_digest(&input.value)?);
-                if let InputOrigin::Git {
+        for key in self.releases.keys() {
+            entries.extend(self.release_index_entries(key)?);
+        }
+        Ok(entries)
+    }
+
+    /// The [`index_entries`](Self::index_entries) one Release contributes,
+    /// including the Git, publication, and carried-state evidence of its inputs.
+    pub fn release_index_entries(&self, key: &ReleaseKey) -> Result<BTreeMap<String, String>> {
+        let mut entries = BTreeMap::new();
+        let Some(release) = self.releases.get(key) else {
+            return Ok(entries);
+        };
+        for (name, input) in &release.inputs {
+            entries.insert(format!("{INDEX_INPUT_PREFIX}{key}/{name}"), value_digest(&input.value)?);
+            match &input.origin {
+                InputOrigin::Git {
                     url,
                     commit,
                     path,
                     blob_digest,
                     ..
-                } = &input.origin
-                {
+                } => {
                     entries.insert(format!("{INDEX_GIT_PREFIX}{url}@{commit}/{path}"), blob_digest.clone());
                 }
-                match &input.origin {
-                    InputOrigin::Publication { path, blob_digest, .. } => {
-                        entries.insert(format!("{INDEX_PUBLICATION_PREFIX}{path}"), blob_digest.clone());
-                    }
-                    InputOrigin::Carried { path, blob_digest, .. } => {
-                        entries.insert(format!("{INDEX_CARRIED_PREFIX}{path}"), blob_digest.clone());
-                    }
-                    _ => {}
+                InputOrigin::Publication { path, blob_digest, .. } => {
+                    entries.insert(format!("{INDEX_PUBLICATION_PREFIX}{path}"), blob_digest.clone());
                 }
+                InputOrigin::Carried { path, blob_digest, .. } => {
+                    entries.insert(format!("{INDEX_CARRIED_PREFIX}{path}"), blob_digest.clone());
+                }
+                _ => {}
             }
         }
         Ok(entries)

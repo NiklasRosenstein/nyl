@@ -11,7 +11,9 @@ repeatable and combine by union. With neither option the complete target is
 compiled. Unknown selectors fail. A group selection replaces its membership,
 including removed or disabled Releases. An individual Release must still exist;
 removal requires selecting its group. Individual selection requires a literal
-Release `metadata.name`; select the group for templated names. A removed or disabled group can be selected
+Release `metadata.name`; select the group for templated names. A new Release
+of a group touched only by Release selectors that is neither selected nor
+published stays unpublished, and the report lists it as skipped. A removed or disabled group can be selected
 by its published identity.
 
 The shared compiler pins the destination branch, verifies the ownership index
@@ -41,7 +43,8 @@ input evidence, group/control fingerprints, and declared state bindings.
 Input defaults and binding values are never copied into metadata; only state
 references and input digests are recorded. Manifest bytes remain in the indexed
 files, not in the metadata. Retained
-entries keep their original source revision and input evidence. A mixed tree
+entries keep their original source revision and input evidence, including the
+input, Git, publication, and carried-state digests the index records for them. A mixed tree
 has no target-wide `sourceCommit`; commit trailers identify the operation's
 source revision, baseline, and selection.
 
@@ -71,8 +74,8 @@ publish.
 `TreeRenderOptions.selection` and `TargetRender.selection` carry the same typed
 replacement authority. `TargetRender.publication_base` can pin the destination
 alongside an orchestrator's resolved input snapshot. The compiler returns a
-`PublicationReport` naming the baseline, rendered/retained/removed Releases, and
-changed shared artifacts. Publication uses the existing target-wide transaction
+`PublicationReport` naming the baseline, rendered/retained/removed/skipped
+Releases, and changed shared artifacts. Publication uses the existing target-wide transaction
 and compare-and-swap; separate selections do not create separate ownership
 boundaries or authorize concurrent overwrites.
 

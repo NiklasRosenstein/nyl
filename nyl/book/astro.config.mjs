@@ -151,6 +151,7 @@ export default defineConfig({
                   "kubernetes-gitops/workflow/render",
                   "kubernetes-gitops/workflow/diff",
                   "kubernetes-gitops/workflow/publish",
+                  "kubernetes-gitops/workflow/partial-publication",
                   "kubernetes-gitops/workflow/move-publication",
                 ],
               },

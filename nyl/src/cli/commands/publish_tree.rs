@@ -228,19 +228,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         (&inventory, &compiled, dirty)
     };
     nyl_render::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
-    if !compiled.publication_report.selection.is_full() {
-        let report = &compiled.publication_report;
-        println!(
-            "Partial publication at {}: {} rendered, {} retained, {} removed",
-            report.baseline_commit.as_deref().unwrap_or("none"),
-            report.rendered_releases.len(),
-            report.retained_releases.len(),
-            report.removed_releases.len()
-        );
-        for path in &report.changed_shared_files {
-            println!("  Shared artifact: {}", path.display());
-        }
-    }
+    print_partial_summary(&compiled.publication_report);
     publish_compiled(
         &args,
         publication_inventory,
@@ -567,6 +555,26 @@ fn publication_current_commit(
         })
         .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
     Ok((index.files == desired).then_some(published_commit))
+}
+
+/// The summary of a partial publication; a full publication prints none.
+fn print_partial_summary(report: &nyl_render::gitops::tree::partial::PublicationReport) {
+    if report.selection.is_full() {
+        return;
+    }
+    println!(
+        "Partial publication at {}: {} rendered, {} retained, {} removed",
+        report.baseline_commit.as_deref().unwrap_or("none"),
+        report.rendered_releases.len(),
+        report.retained_releases.len(),
+        report.removed_releases.len()
+    );
+    for path in &report.changed_shared_files {
+        println!("  Shared artifact: {}", path.display());
+    }
+    for release in &report.skipped_releases {
+        println!("  Not published (unselected new Release): {release}");
+    }
 }
 
 fn source_repository_url(repository: &Repository) -> Option<String> {

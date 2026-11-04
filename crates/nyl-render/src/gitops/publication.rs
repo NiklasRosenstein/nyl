@@ -311,7 +311,7 @@ pub fn target_render_index(
         inputs.clone(),
     );
     if let Some(snapshot) = &compiled.publication_snapshot {
-        index.version = 3;
+        index.version = super::reconcile::COMPILED_RENDER_INDEX_VERSION;
         index.compilation = Some(super::tree::partial::stamp_snapshot(
             snapshot,
             source_commit.as_deref(),

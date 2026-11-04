@@ -535,7 +535,7 @@ async fn compile_target_tree_recording(
             )?,
         })
     };
-    let baseline = partial_base
+    let mut baseline = partial_base
         .as_ref()
         .map(|base| {
             partial::load_baseline(
@@ -571,6 +571,7 @@ async fn compile_target_tree_recording(
         }
     }
     let mut group_digests = BTreeMap::new();
+    let mut skipped_releases = BTreeSet::new();
     let mut prepared_groups = Vec::new();
     for (group_resource_path, group) in groups {
         let project = resolve_effective_group_project(
@@ -603,25 +604,24 @@ async fn compile_target_tree_recording(
                 cache,
             )?
         } else {
-            ResolvedGroupSource {
-                root: inventory.project_root.clone(),
-                provenance_root: PathBuf::new(),
-                candidate_files: Vec::new(),
-                files: Vec::new(),
-                renderer_mode: RendererConfigMode::Central,
-                source_session: None,
-                remote: false,
-                provenance_inputs: Vec::new(),
-                repository: None,
-            }
+            ResolvedGroupSource::empty(inventory.project_root.clone())
         };
-        if !selection.is_full() {
+        if !selection.is_full() && !selection.application_groups.contains(&group.metadata.name) {
             source.files.retain(|file| {
-                selection.application_groups.contains(&group.metadata.name)
-                    || file
-                        .name
-                        .as_ref()
-                        .is_some_and(|name| selection.includes(&group.metadata.name, name))
+                let Some(name) = &file.name else {
+                    return false;
+                };
+                if selection.includes(&group.metadata.name, name) {
+                    return true;
+                }
+                let key = format!("{}/{name}", group.metadata.name);
+                if baseline
+                    .as_ref()
+                    .is_some_and(|base| !base.snapshot.releases.contains_key(&key))
+                {
+                    skipped_releases.insert(key);
+                }
+                false
             });
         }
         if let Some(session) = &mut source.source_session {
@@ -801,7 +801,7 @@ async fn compile_target_tree_recording(
     let mut workload_owners = HashMap::new();
     let mut application_owners = BTreeMap::<(String, String), ApplicationOwner>::new();
     let mut pending_workloads = baseline
-        .as_ref()
+        .as_mut()
         .map(|base| base.retained_workloads(&selection))
         .transpose()?
         .unwrap_or_default();
@@ -1148,7 +1148,7 @@ async fn compile_target_tree_recording(
         .map(PathBuf::from)
         .collect::<BTreeSet<_>>();
     let mut publication_snapshot = partial::PublicationSnapshot {
-        version: 1,
+        version: partial::COMPILATION_METADATA_VERSION,
         control_digest,
         groups: group_digests,
         releases: BTreeMap::new(),
@@ -1204,12 +1204,18 @@ async fn compile_target_tree_recording(
             .as_ref()
             .and_then(|base| base.snapshot.releases.get(&key))
             .filter(|_| !selection.includes(&workload.group.metadata.name, &workload.release.metadata.name));
-        publication_snapshot.releases.insert(
-            key,
-            retained
-                .cloned()
-                .unwrap_or_else(|| partial::snapshot_release(workload, &files)),
-        );
+        let release = match retained {
+            Some(retained) => retained.clone(),
+            None => partial::snapshot_release(
+                workload,
+                &files,
+                release_inputs.release_index_entries(&ReleaseKey {
+                    group: workload.group.metadata.name.clone(),
+                    release: workload.release.metadata.name.clone(),
+                })?,
+            ),
+        };
+        publication_snapshot.releases.insert(key, release);
     }
     publication_snapshot
         .bindings
@@ -1217,14 +1223,7 @@ async fn compile_target_tree_recording(
     // Retained bytes are part of the candidate, including their original input evidence.
     let mut input_digests = input_digests;
     if let Some(base) = &baseline {
-        for (key, digest) in &base.index.inputs {
-            if let Some(release_input) = key.strip_prefix(super::inputs::INDEX_INPUT_PREFIX) {
-                let parts = release_input.split('/').collect::<Vec<_>>();
-                if parts.len() >= 3 && !selection.includes(parts[0], parts[1]) {
-                    input_digests.insert(key.clone(), digest.clone());
-                }
-            }
-        }
+        input_digests.extend(base.retained_input_digests(&selection));
     }
 
     let provenance = files
@@ -1253,6 +1252,7 @@ async fn compile_target_tree_recording(
         .collect::<Result<BTreeMap<_, _>>>()?;
     let publication_report = partial::report(
         &selection,
+        skipped_releases,
         baseline.as_ref(),
         publication_base.as_ref(),
         &publication_snapshot,
@@ -3032,6 +3032,23 @@ struct ResolvedGroupSource {
     repository: Option<nyl_core::resources::ReadGitRepository>,
 }
 
+impl ResolvedGroupSource {
+    /// A source without Release files, for groups a partial selection leaves untouched.
+    fn empty(root: PathBuf) -> Self {
+        Self {
+            root,
+            provenance_root: PathBuf::new(),
+            candidate_files: Vec::new(),
+            files: Vec::new(),
+            renderer_mode: RendererConfigMode::Central,
+            source_session: None,
+            remote: false,
+            provenance_inputs: Vec::new(),
+            repository: None,
+        }
+    }
+}
+
 struct StaticReleaseFile {
     path: PathBuf,
     name: Option<String>,
@@ -3858,19 +3875,13 @@ mod tests {
             std::fs::write(path, "---\n").unwrap();
         }
         let source = ResolvedGroupSource {
-            provenance_root: PathBuf::new(),
-            root: temporary.path().to_path_buf(),
             candidate_files: vec![entry.clone(), included.clone(), ignored.clone()],
             files: vec![StaticReleaseFile {
                 path: entry.clone(),
                 name: Some("test".to_string()),
                 inputs: BTreeMap::new(),
             }],
-            renderer_mode: RendererConfigMode::Central,
-            source_session: None,
-            remote: false,
-            provenance_inputs: Vec::new(),
-            repository: None,
+            ..ResolvedGroupSource::empty(temporary.path().to_path_buf())
         };
         let claimed = BTreeSet::from([manifest_path_identity(&entry), manifest_path_identity(&included)]);
 

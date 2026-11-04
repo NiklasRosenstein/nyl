@@ -366,7 +366,7 @@ async fn resolve_baseline(
                 .source_ref
                 .as_deref()
                 .ok_or_else(|| NylError::config("--source-ref is required with --against source"))?;
-            let baseline = source_derived_tree(
+            let baseline = Box::pin(source_derived_tree(
                 inventory,
                 &args.source_project_path,
                 args.source_repository.as_deref(),
@@ -375,7 +375,7 @@ async fn resolve_baseline(
                 cache,
                 args.progress,
                 options,
-            )
+            ))
             .await?;
             Ok(ResolvedBaseline::Source(Box::new(baseline)))
         }

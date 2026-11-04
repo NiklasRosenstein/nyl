@@ -6,6 +6,9 @@ use super::*;
 use crate::gitops::inputs::{GitBlobSource, PublicationBase};
 use crate::gitops::reconcile::{parse_index, RenderIndex, DEFAULT_INDEX_PATH};
 
+/// Version of the compilation metadata carried in compiled ownership indexes.
+pub const COMPILATION_METADATA_VERSION: u32 = 1;
+
 /// Explicit replacement authority inside one DeploymentTarget.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -60,6 +63,9 @@ pub struct PublicationReport {
     pub rendered_releases: BTreeSet<String>,
     pub retained_releases: BTreeSet<String>,
     pub removed_releases: BTreeSet<String>,
+    /// Releases declared in a touched group that are neither selected nor
+    /// published, so this publication leaves them out.
+    pub skipped_releases: BTreeSet<String>,
     pub changed_shared_files: BTreeSet<PathBuf>,
 }
 
@@ -110,6 +116,8 @@ pub(super) struct Baseline {
     pub index: RenderIndex,
     pub snapshot: PublicationSnapshot,
     pub files: BTreeMap<PathBuf, Vec<u8>>,
+    /// Parsed documents of retained Release files, filled by `retained_workloads`.
+    documents: BTreeMap<PathBuf, Vec<Value>>,
 }
 
 fn full_publish(detail: impl std::fmt::Display) -> NylError {
@@ -223,7 +231,7 @@ pub(super) fn load_baseline(
             .ok_or_else(|| full_publish("the destination has a legacy ownership index"))?,
     )
     .map_err(|error| full_publish(format!("invalid compilation metadata: {error}")))?;
-    if snapshot.version != 1 {
+    if snapshot.version != COMPILATION_METADATA_VERSION {
         return Err(full_publish("unsupported compilation metadata version"));
     }
     let mut files = BTreeMap::new();
@@ -248,11 +256,42 @@ pub(super) fn load_baseline(
             }
         }
     }
-    Ok(Baseline { index, snapshot, files })
+    Ok(Baseline {
+        index,
+        snapshot,
+        files,
+        documents: BTreeMap::new(),
+    })
 }
 
 impl Baseline {
-    pub(super) fn retained_workloads(&self, selection: &PublicationSelection) -> Result<Vec<PendingWorkload>> {
+    pub(super) fn retained_workloads(&mut self, selection: &PublicationSelection) -> Result<Vec<PendingWorkload>> {
+        let mut workloads = Vec::new();
+        for release in self.snapshot.releases.values() {
+            if selection.includes(
+                &release.workload.group.metadata.name,
+                &release.workload.release.metadata.name,
+            ) {
+                continue;
+            }
+            let mut workload = release.workload.clone();
+            for path in &release.files {
+                let documents =
+                    serde_saphyr::from_multiple::<Value>(std::str::from_utf8(&self.files[path]).map_err(full_publish)?)
+                        .map_err(NylError::Yaml)?;
+                workload.manifests.extend(documents.iter().cloned());
+                self.documents.insert(path.clone(), documents);
+            }
+            workload.manifest_provenance = release.origins.iter().cloned().collect();
+            workload.release_provenance.clone_from(&release.release_origin);
+            workloads.push(workload);
+        }
+        Ok(workloads)
+    }
+
+    /// Index evidence of retained Releases: their original input, Git,
+    /// publication, and carried-state digests.
+    pub(super) fn retained_input_digests(&self, selection: &PublicationSelection) -> BTreeMap<String, String> {
         self.snapshot
             .releases
             .values()
@@ -262,20 +301,9 @@ impl Baseline {
                     &release.workload.release.metadata.name,
                 )
             })
-            .map(|release| {
-                let mut workload = release.workload.clone();
-                for path in &release.files {
-                    workload.manifests.extend(
-                        serde_saphyr::from_multiple::<Value>(
-                            std::str::from_utf8(&self.files[path]).map_err(full_publish)?,
-                        )
-                        .map_err(NylError::Yaml)?,
-                    );
-                }
-                workload.manifest_provenance = release.origins.iter().cloned().collect();
-                workload.release_provenance.clone_from(&release.release_origin);
-                Ok(workload)
-            })
+            .flat_map(|release| release.inputs.iter())
+            .filter(|(name, _)| name.starts_with('@'))
+            .map(|(name, digest)| (name.clone(), digest.clone()))
             .collect()
     }
 
@@ -296,7 +324,7 @@ impl Baseline {
             if actual != release.files
                 || actual
                     .iter()
-                    .any(|path| !same_documents(&files[path], &self.files[path]))
+                    .any(|path| !same_documents(&files[path], &self.documents[path]))
             {
                 return Err(NylError::config(format!(
                     "Partial publication would modify retained Release {key}; select it as well"
@@ -309,8 +337,8 @@ impl Baseline {
                 "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
                 "metadata": {"name": release.workload.application_name, "namespace": release.workload.group.spec.application_namespace}
             });
-            let key = crate::kubernetes::ResourceKey::from_json_value(&application)?;
-            let path = PathBuf::from(CATALOG_DIRECTORY).join(crate::gitops::resource_path(&key)?);
+            let application_key = crate::kubernetes::ResourceKey::from_json_value(&application)?;
+            let path = PathBuf::from(CATALOG_DIRECTORY).join(crate::gitops::resource_path(&application_key)?);
             if !self.files.contains_key(&path) || files.get(&path) != self.files.get(&path) {
                 return Err(NylError::config(format!(
                     "Partial publication would modify retained Application of {key}; select its Release as well"
@@ -321,7 +349,13 @@ impl Baseline {
     }
 }
 
-pub(super) fn snapshot_release(workload: &PendingWorkload, files: &BTreeMap<PathBuf, Vec<u8>>) -> PublishedRelease {
+/// `index_entries` are the Release's own `@`-prefixed ownership-index entries;
+/// project file digests are stamped at publication.
+pub(super) fn snapshot_release(
+    workload: &PendingWorkload,
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+    index_entries: BTreeMap<String, String>,
+) -> PublishedRelease {
     let mut origins = workload
         .manifest_provenance
         .iter()
@@ -346,6 +380,7 @@ pub(super) fn snapshot_release(workload: &PendingWorkload, files: &BTreeMap<Path
             .input_paths
             .iter()
             .map(|path| (path.to_string_lossy().replace('\\', "/"), String::new()))
+            .chain(index_entries)
             .collect(),
     }
 }
@@ -358,13 +393,18 @@ pub fn stamp_snapshot(
     inputs: &BTreeMap<String, String>,
 ) -> Result<Value> {
     let mut snapshot = snapshot.clone();
-    for (key, release) in &mut snapshot.releases {
+    for release in snapshot.releases.values_mut() {
         if release.source_commit.is_some() {
             continue;
         }
         release.source_commit = source_commit.map(ToOwned::to_owned);
         release.dirty = dirty;
+        // `@` entries carry their digests from compilation; project files are
+        // stamped with the digest this publication records.
         release.inputs.retain(|path, digest| {
+            if path.starts_with('@') {
+                return true;
+            }
             if let Some(value) = inputs.get(path) {
                 digest.clone_from(value);
                 true
@@ -372,30 +412,13 @@ pub fn stamp_snapshot(
                 false
             }
         });
-        let prefix = format!("{}{}{}", crate::gitops::inputs::INDEX_INPUT_PREFIX, key, "/");
-        release.inputs.extend(
-            inputs
-                .range(prefix.clone()..)
-                .take_while(|(name, _)| name.starts_with(&prefix))
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        for source in snapshot.bindings.get(key).into_iter().flatten() {
-            for prefix in [
-                crate::gitops::inputs::INDEX_PUBLICATION_PREFIX,
-                crate::gitops::inputs::INDEX_CARRIED_PREFIX,
-            ] {
-                let name = format!("{prefix}{}", source.path);
-                if let Some(digest) = inputs.get(&name) {
-                    release.inputs.insert(name, digest.clone());
-                }
-            }
-        }
     }
     Ok(serde_json::to_value(snapshot)?)
 }
 
 pub(super) fn report(
     selection: &PublicationSelection,
+    skipped_releases: BTreeSet<String>,
     baseline: Option<&Baseline>,
     base: Option<&PublicationBase>,
     snapshot: &PublicationSnapshot,
@@ -404,6 +427,7 @@ pub(super) fn report(
     let mut report = PublicationReport {
         selection: selection.clone(),
         baseline_commit: base.and_then(|base| base.commit.clone()),
+        skipped_releases,
         ..PublicationReport::default()
     };
     for (key, release) in &snapshot.releases {
@@ -438,16 +462,11 @@ pub(super) fn report(
     report
 }
 
-fn same_documents(left: &[u8], right: &[u8]) -> bool {
-    let parse = |bytes: &[u8]| {
-        std::str::from_utf8(bytes)
-            .ok()
-            .and_then(|text| serde_saphyr::from_multiple::<Value>(text).ok())
-    };
-    match (parse(left), parse(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
-    }
+fn same_documents(candidate: &[u8], baseline: &[Value]) -> bool {
+    std::str::from_utf8(candidate)
+        .ok()
+        .and_then(|text| serde_saphyr::from_multiple::<Value>(text).ok())
+        .is_some_and(|documents| documents == baseline)
 }
 
 fn release_paths(files: &BTreeMap<PathBuf, Vec<u8>>, directory: &Path) -> BTreeSet<PathBuf> {

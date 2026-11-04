@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{NylError, Result};
 
+/// Index version without compilation metadata, written by `render-tree`.
 pub const RENDER_INDEX_VERSION: u32 = 2;
+/// Index version carrying per-Release compilation metadata, written by publications.
+pub const COMPILED_RENDER_INDEX_VERSION: u32 = 3;
 pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
 const TRANSACTION_PATH: &str = "_nyl/transaction.json";
 
@@ -395,13 +398,13 @@ fn load_index(path: &Path) -> Result<Option<RenderIndex>> {
 pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
     let index: RenderIndex = serde_json::from_slice(bytes)
         .map_err(|error| NylError::config(format!("Invalid rendered ownership index {origin}: {error}")))?;
-    if !matches!(index.version, 2 | 3) {
+    if index.version != RENDER_INDEX_VERSION && index.version != COMPILED_RENDER_INDEX_VERSION {
         return Err(NylError::config(format!(
             "Unsupported rendered ownership index version {} in {origin}",
             index.version
         )));
     }
-    if (index.version == 3) != index.compilation.is_some() {
+    if (index.version == COMPILED_RENDER_INDEX_VERSION) != index.compilation.is_some() {
         return Err(NylError::config(
             "Rendered index compilation metadata does not match its version",
         ));

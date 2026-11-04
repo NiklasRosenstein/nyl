@@ -6974,17 +6974,18 @@ fn partial_publication_rejects_conflicts_with_retained_resources() {
     let (fixture, _destination, _seed, _) = publication_fixture();
     add_partial_worker(&fixture);
     publish_production(&fixture).success();
-    let path = fixture.path().join("applications/workloads/api.yaml");
-    fs::write(&path, "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: api, namespace: api}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: worker, namespace: worker}\n").unwrap();
-    let source = fs::read_to_string(&path).unwrap().replace(
-        "metadata: {name: api, namespace: api}",
-        "metadata: {name: api, namespace: worker}",
-    );
-    fs::write(path, source).unwrap();
+    // The selected Release claims the retained worker Release's namespace.
+    fs::write(
+        fixture.path().join("applications/workloads/api.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: api, namespace: worker}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: worker, namespace: worker}\n",
+    )
+    .unwrap();
     commit_all(&Repository::open(fixture.path()).unwrap(), "Conflict with worker");
     scoped_publish(&fixture, &["--release", "workloads/api"])
         .failure()
-        .stderr(predicate::str::contains("owned by more than one").or(predicate::str::contains("sharedNamespaces")));
+        .stderr(predicate::str::contains(
+            "Namespace \"worker\" is consumed by multiple workload Applications [workloads/worker, workloads/api]",
+        ));
 }
 
 #[test]
@@ -7632,4 +7633,49 @@ fn file_backed_values_enforce_publication_reproducibility() {
         .failure()
         .stderr(predicate::str::contains("Local changes affect deployment target"));
     assert_eq!(published_commit(&repository, "deploy/production").id(), committed);
+}
+
+#[test]
+fn partial_publication_keeps_input_evidence_of_retained_releases() {
+    let (fixture, destination, _, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    add_partial_worker(&fixture);
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    fs::write(fixture.path().join("build/images.json"), r#"{"api":"v1"}"#).unwrap();
+    publish_production(&fixture).success();
+    let index = |destination: &TempDir| -> serde_json::Value {
+        serde_json::from_slice(&publication_files(destination)[&PathBuf::from("production/_nyl/index.json")]).unwrap()
+    };
+    let before = index(&destination);
+    let evidence = before["inputs"]["@carried/state/images.json"].clone();
+    assert!(evidence.is_string(), "{before}");
+    let worker = fixture.path().join("applications/workloads/worker.yaml");
+    fs::write(&worker, fs::read_to_string(&worker).unwrap().replace("old", "new")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Update worker");
+    scoped_publish(&fixture, &["--release", "workloads/worker"]).success();
+    let after = index(&destination);
+    assert_eq!(after["inputs"]["@carried/state/images.json"], evidence);
+    assert_eq!(
+        after["compilation"]["releases"]["workloads/api"]["inputs"]["@carried/state/images.json"],
+        evidence
+    );
+}
+
+#[test]
+fn partial_publication_reports_unselected_new_releases() {
+    let (fixture, destination, _, _) = publication_fixture();
+    publish_production(&fixture).success();
+    add_partial_worker(&fixture);
+    change_partial_api(&fixture);
+    scoped_publish(&fixture, &["--release", "workloads/api"])
+        .success()
+        .stdout(predicate::str::contains(
+            "Not published (unselected new Release): workloads/worker",
+        ));
+    assert!(!publication_files(&destination)
+        .keys()
+        .any(|path| path.starts_with("production/workloads/worker")));
 }
