@@ -555,9 +555,20 @@
           "type": "array"
         },
         "retainedNamespaceResourceWhitelist": {
-          "description": "Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains. Appended to the derived or declared `namespaceResourceWhitelist`; does not override `namespaceResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.",
+          "description": "Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains, by `group` and `kind` (`name` is not supported). Appended to the derived or declared `namespaceResourceWhitelist`; does not override `namespaceResourceBlacklist`. Verify live cleanup before removing entries. Not supported with `projectRef`.",
           "items": {
-            "$ref": "#/$defs/AppProjectResourcePattern"
+            "allOf": [
+              {
+                "$ref": "#/$defs/AppProjectResourcePattern"
+              },
+              {
+                "not": {
+                  "required": [
+                    "name"
+                  ]
+                }
+              }
+            ]
           },
           "type": "array"
         },

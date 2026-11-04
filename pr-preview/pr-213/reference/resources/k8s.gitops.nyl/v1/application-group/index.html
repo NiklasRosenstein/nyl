@@ -498,23 +498,33 @@
 <p><a id="field-spec.retainedNamespaceResourceWhitelist"></a></p>
 <h3 id="specretainednamespaceresourcewhitelist">spec.retainedNamespaceResourceWhitelist</h3>
 <p><strong>Optional</strong> · array</p>
-<p>Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains. Appended to the derived or declared <code>namespaceResourceWhitelist</code>; does not override <code>namespaceResourceBlacklist</code>. Verify live cleanup before removing entries. Not supported with <code>projectRef</code>.</p>
+<p>Additional namespaced resource kinds whose cleanup permission the group-owned generated AppProject retains, by <code>group</code> and <code>kind</code> (<code>name</code> is not supported). Appended to the derived or declared <code>namespaceResourceWhitelist</code>; does not override <code>namespaceResourceBlacklist</code>. Verify live cleanup before removing entries. Not supported with <code>projectRef</code>.</p>
 <p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D"></a></p>
 <h3 id="specretainednamespaceresourcewhitelist-1">spec.retainedNamespaceResourceWhitelist[]</h3>
-<p><strong>Required</strong> · object</p>
+<p><strong>Required</strong> · any value</p>
+<details><summary>Validation constraints</summary>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">allOf</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">$ref</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"#/$defs/AppProjectResourcePattern"</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">not</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">      required</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#9ECBFF">name</span></span></code></pre>
+</details>
+<details><summary>Variant 1</summary>
+<p><strong>Type:</strong> object</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D.group"></a></p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D%5BallOf-1%5D.group"></a></p>
 <h3 id="specretainednamespaceresourcewhitelistgroup">spec.retainedNamespaceResourceWhitelist[].group</h3>
 <p><strong>Required</strong> · string</p>
 <p>Kubernetes API group pattern, such as <code>apiextensions.k8s.io</code> or <code>*</code>.</p>
-<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D.kind"></a></p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D%5BallOf-1%5D.kind"></a></p>
 <h3 id="specretainednamespaceresourcewhitelistkind">spec.retainedNamespaceResourceWhitelist[].kind</h3>
 <p><strong>Required</strong> · string</p>
 <p>Kubernetes resource kind pattern.</p>
-<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D.name"></a></p>
+<p><a id="field-spec.retainedNamespaceResourceWhitelist%5B%5D%5BallOf-1%5D.name"></a></p>
 <h3 id="specretainednamespaceresourcewhitelistname">spec.retainedNamespaceResourceWhitelist[].name</h3>
 <p><strong>Optional</strong> · string or null</p>
 <p>Optional resource name pattern.</p>
+</details>
 <p><a id="field-spec.retainedProjectNamespaces"></a></p>
 <h3 id="specretainedprojectnamespaces">spec.retainedProjectNamespaces</h3>
 <p><strong>Optional</strong> · array</p>
