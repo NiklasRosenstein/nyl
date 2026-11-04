@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use crate::cli::{
-    apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, Phase, PhaseTiming},
+    apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, OwnershipReport, Phase, PhaseTiming},
     commands::render::{
         run_render_preflight, ClusterClientRequirement, DiscoveryProgress, RenderOptions, RenderPreflightOptions,
     },
@@ -17,6 +17,7 @@ use crate::cli::{
 use nyl_render::{
     kubernetes::{
         enforce_release_history_limit,
+        field_manager::{FieldOwnership, ARGOCD_FIELD_MANAGER},
         prune::{prune_decision, PruneDecision},
         ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseState,
         ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
@@ -75,6 +76,33 @@ pub struct ApplyArgs {
         value_parser = nyl_render::config::parse_release_history_limit
     )]
     pub history_limit: Option<u32>,
+
+    #[command(flatten)]
+    pub handoff: HandoffArgs,
+}
+
+/// Field ownership options shared by the commands that apply a release.
+#[derive(Args, Debug, Default)]
+pub struct HandoffArgs {
+    /// Apply as field manager MANAGER (default `argocd-controller`) and release
+    /// the fields Nyl applied as `nyl` before, so a later Argo CD sync can remove
+    /// fields dropped from the source. Use it before Argo CD takes over a
+    /// resource Nyl applied, and for any apply while Argo CD manages it.
+    #[arg(
+        long,
+        value_name = "MANAGER",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ARGOCD_FIELD_MANAGER
+    )]
+    pub handoff: Option<String>,
+}
+
+impl HandoffArgs {
+    /// The field ownership these options select.
+    pub(crate) fn ownership(&self) -> Result<FieldOwnership> {
+        FieldOwnership::from_handoff(self.handoff.as_deref())
+    }
 }
 
 /// Default bound on concurrent apply and prune requests.
@@ -83,6 +111,7 @@ pub(crate) const DEFAULT_APPLY_CONCURRENCY: u16 = 8;
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     args.common.validation.check_complete(args.append_release)?;
+    let ownership = args.handoff.ownership()?;
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
@@ -168,7 +197,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let renderer = ApplyRenderer::new(&duplicates);
     let recorder = match &release_identity {
         Some((release_name, release_namespace)) => {
-            ensure_namespace_exists(&kube_client, release_namespace).await?;
+            ensure_namespace_exists(&kube_client, release_namespace, &ownership).await?;
             tracing::info!("Recording release {release_name} in namespace {release_namespace}");
             Some(
                 ReleaseRecorder::reserve(
@@ -190,25 +219,26 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     //    revision, prune resources no longer desired, and supersede the previous one.
     let Some(recorder) = recorder else {
         let apply_started = Instant::now();
-        let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests, concurrency, &mut |event| {
-            renderer.event(event);
-        })
+        let apply_result = apply_sorted_manifests(
+            &kube_client,
+            &desired_manifests,
+            &ownership,
+            concurrency,
+            &mut |event| {
+                renderer.event(event);
+            },
+        )
         .await?;
         timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
         renderer.summary(&ApplyReport {
             outcomes: &apply_result.outcomes,
             failed_count: apply_result.failed_count,
+            ownership: apply_result.ownership_report(),
             prune_failed_count: 0,
             release: None,
             timings: &timings,
         });
-        if apply_result.failed_count > 0 {
-            return Err(NylError::Other(format!(
-                "Apply completed with {} resource(s) failed to apply",
-                apply_result.failed_count
-            )));
-        }
-        return Ok(());
+        return apply_result.error("Apply").map_or(Ok(()), Err);
     };
 
     let history_limit = args
@@ -223,6 +253,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                 concurrency,
                 history_limit,
                 confirm_prune: args.confirm_prune,
+                ownership: &ownership,
             },
             &mut timings,
             &mut |event| renderer.event(event),
@@ -252,6 +283,46 @@ pub(crate) struct ApplyExecutionResult {
     pub(crate) outcomes: Vec<ApplyOutcome>,
     pub(crate) failed_count: usize,
     pub(crate) resource_keys: Vec<ResourceKey>,
+    /// The manager whose fields a handoff released, if the apply handed off.
+    pub(crate) released_manager: Option<String>,
+    /// Applied resources whose released manager owned fields that are now released.
+    pub(crate) released_count: usize,
+    /// Applied resources whose released manager's fields could not be released.
+    pub(crate) release_failed_count: usize,
+}
+
+impl ApplyExecutionResult {
+    /// What the apply's handoff released, for the summary.
+    pub(crate) fn ownership_report(&self) -> Option<OwnershipReport<'_>> {
+        self.released_manager.as_deref().map(|manager| OwnershipReport {
+            released_manager: manager,
+            released_count: self.released_count,
+            release_failed_count: self.release_failed_count,
+        })
+    }
+
+    /// The command's error when anything failed to apply or to release.
+    pub(crate) fn error(&self, command: &str) -> Option<NylError> {
+        apply_error(command, self, 0)
+    }
+}
+
+/// The error of a command whose apply, handoff release, or prune failed.
+fn apply_error(command: &str, apply: &ApplyExecutionResult, prune_failed: usize) -> Option<NylError> {
+    let mut failures = Vec::new();
+    if apply.failed_count > 0 {
+        failures.push(format!("{} resource(s) failed to apply", apply.failed_count));
+    }
+    if apply.release_failed_count > 0 {
+        failures.push(format!(
+            "{} resource(s) failed to release field ownership",
+            apply.release_failed_count
+        ));
+    }
+    if prune_failed > 0 {
+        failures.push(format!("{prune_failed} failed to prune"));
+    }
+    (!failures.is_empty()).then(|| NylError::Other(format!("{command} completed with {}", failures.join(" and "))))
 }
 
 /// Whether each kind is namespaced, so keys can be compared by [`ObjectIdentity`].
@@ -722,7 +793,7 @@ impl<'s> ReleaseRecorder<'s> {
         client: &dyn KubeClient,
         manifests: &[serde_json::Value],
         scopes: &mut ObjectScopes,
-        settings: ApplySettings,
+        settings: ApplySettings<'_>,
         timings: &mut Vec<PhaseTiming>,
         on_event: &mut ApplyEventSink<'_>,
     ) -> Result<ReleaseRun> {
@@ -739,7 +810,8 @@ impl<'s> ReleaseRecorder<'s> {
         };
         let work = async {
             let apply_started = Instant::now();
-            let apply = apply_sorted_manifests(client, manifests, settings.concurrency, &mut track).await?;
+            let apply =
+                apply_sorted_manifests(client, manifests, settings.ownership, settings.concurrency, &mut track).await?;
             timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
 
             let release_started = Instant::now();
@@ -802,7 +874,7 @@ impl<'s> ReleaseRecorder<'s> {
         client: &dyn KubeClient,
         apply_result: &ApplyExecutionResult,
         scopes: &mut ObjectScopes,
-        settings: ApplySettings,
+        settings: ApplySettings<'_>,
         on_event: &mut ApplyEventSink<'_>,
         completed: &AtomicBool,
     ) -> Result<(ReleaseState, usize)> {
@@ -872,13 +944,15 @@ impl<'s> ReleaseRecorder<'s> {
 
 /// How a release is applied and recorded.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ApplySettings {
+pub(crate) struct ApplySettings<'a> {
     /// Maximum number of resources applied or pruned at the same time.
     pub(crate) concurrency: usize,
     /// Revisions to keep after a successful apply; 0 keeps every revision.
     pub(crate) history_limit: u32,
     /// `--confirm-prune`: prune resources whose sync option is `Prune=confirm`.
     pub(crate) confirm_prune: bool,
+    /// The field manager resources are applied as, and the one a handoff releases.
+    pub(crate) ownership: &'a FieldOwnership,
 }
 
 /// Split the resources to prune by their live Argo CD `Prune` sync option
@@ -975,6 +1049,7 @@ impl ReleaseRun {
         ApplyReport {
             outcomes: &self.apply.outcomes,
             failed_count: self.apply.failed_count,
+            ownership: self.apply.ownership_report(),
             prune_failed_count: self.prune_failed_count,
             release: Some(&self.release),
             timings,
@@ -983,12 +1058,7 @@ impl ReleaseRun {
 
     /// The command's error when anything failed to apply or prune.
     pub(crate) fn error(&self, command: &str) -> Option<NylError> {
-        let (failed, pruned) = (self.apply.failed_count, self.prune_failed_count);
-        (failed > 0 || pruned > 0).then(|| {
-            NylError::Other(format!(
-                "{command} completed with {failed} resource(s) failed to apply and {pruned} failed to prune"
-            ))
-        })
+        apply_error(command, &self.apply, self.prune_failed_count)
     }
 }
 
@@ -1021,6 +1091,7 @@ fn append_keys(previous: &[ResourceKey], current: &[ResourceKey], scopes: &Objec
 pub(crate) async fn apply_sorted_manifests(
     client: &dyn KubeClient,
     manifests: &[serde_json::Value],
+    ownership: &FieldOwnership,
     concurrency: usize,
     on_event: &mut ApplyEventSink<'_>,
 ) -> Result<ApplyExecutionResult> {
@@ -1034,6 +1105,8 @@ pub(crate) async fn apply_sorted_manifests(
     );
 
     let mut results: Vec<Option<Result<ApplyOutcome>>> = (0..manifests.len()).map(|_| None).collect();
+    let mut released_count = 0;
+    let mut release_failed_count = 0;
     // API groups registered by CRDs or APIServices applied so far and not yet
     // confirmed in discovery.
     let mut registered_groups: HashSet<String> = HashSet::new();
@@ -1060,12 +1133,33 @@ pub(crate) async fn apply_sorted_manifests(
         run_concurrently(
             batch,
             concurrency,
-            |index| apply_manifest(client, &manifests[index]),
-            |index, result| {
+            |index| apply_manifest(client, &manifests[index], ownership),
+            |index, (result, release)| {
                 on_event(ApplyEvent::Applied {
                     key: &keys[index],
                     result: &result,
                 });
+                if let (Some(release), Some(manager)) = (release, ownership.released_manager()) {
+                    match release {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            released_count += 1;
+                            on_event(ApplyEvent::OwnershipReleased {
+                                key: &keys[index],
+                                manager,
+                                result: &Ok(()),
+                            });
+                        }
+                        Err(err) => {
+                            release_failed_count += 1;
+                            on_event(ApplyEvent::OwnershipReleased {
+                                key: &keys[index],
+                                manager,
+                                result: &Err(err),
+                            });
+                        }
+                    }
+                }
                 if result.is_ok() {
                     if let Some(group) = registered_api_group(&keys[index], &manifests[index]) {
                         registered_groups.insert(group);
@@ -1094,6 +1188,9 @@ pub(crate) async fn apply_sorted_manifests(
         outcomes,
         failed_count,
         resource_keys,
+        released_manager: ownership.released_manager().map(str::to_string),
+        released_count,
+        release_failed_count,
     })
 }
 
@@ -1121,13 +1218,24 @@ pub(crate) fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<Strin
     Ok(yaml_parts.join("---\n"))
 }
 
-/// Apply a single manifest
-async fn apply_manifest(client: &dyn KubeClient, manifest: &serde_json::Value) -> Result<ApplyOutcome> {
-    // Convert JSON to DynamicObject
-    let resource: DynamicObject = serde_json::from_value(manifest.clone())?;
-
-    // Apply using client
-    client.apply_resource(&resource, "nyl", false).await
+/// Apply a single manifest as the ownership's manager, then release what the
+/// manager a handoff replaces owns. The release result is `None` unless the
+/// apply succeeded and the ownership hands off.
+async fn apply_manifest(
+    client: &dyn KubeClient,
+    manifest: &serde_json::Value,
+    ownership: &FieldOwnership,
+) -> (Result<ApplyOutcome>, Option<Result<bool>>) {
+    let resource: DynamicObject = match serde_json::from_value(manifest.clone()) {
+        Ok(resource) => resource,
+        Err(err) => return (Err(err.into()), None),
+    };
+    let outcome = client.apply_resource(&resource, ownership.manager(), false).await;
+    let release = match (&outcome, ownership.released_manager()) {
+        (Ok(_), Some(released)) => Some(client.release_field_manager(&resource, released).await),
+        _ => None,
+    };
+    (outcome, release)
 }
 
 /// Print a warning trace about duplicate resources
@@ -1147,7 +1255,11 @@ pub(crate) fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) 
 }
 
 /// Ensure a namespace exists, creating it if necessary
-pub(crate) async fn ensure_namespace_exists(client: &dyn KubeClient, namespace: &str) -> Result<()> {
+pub(crate) async fn ensure_namespace_exists(
+    client: &dyn KubeClient,
+    namespace: &str,
+    ownership: &FieldOwnership,
+) -> Result<()> {
     use serde_json::json;
 
     // Build namespace GVK
@@ -1171,7 +1283,7 @@ pub(crate) async fn ensure_namespace_exists(client: &dyn KubeClient, namespace: 
         }))?;
 
         // Apply the namespace
-        client.apply_resource(&ns_resource, "nyl", false).await?;
+        client.apply_resource(&ns_resource, ownership.manager(), false).await?;
 
         tracing::info!("Created namespace '{}'", namespace);
 
@@ -1374,6 +1486,10 @@ mod tests {
             self.inner.get_normalized_resource(resource, manager).await
         }
 
+        async fn release_field_manager(&self, resource: &DynamicObject, manager: &str) -> Result<bool> {
+            self.inner.release_field_manager(resource, manager).await
+        }
+
         async fn is_kind_removed(&self, gvk: &GroupVersionKind) -> Result<bool> {
             Ok(gvk.kind == self.removed_kind && self.kind_gone)
         }
@@ -1405,7 +1521,7 @@ mod tests {
 
         let started = tokio::time::Instant::now();
         let mut reported_at = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |_| {
+        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {
             reported_at.push(started.elapsed());
         })
         .await
@@ -1428,13 +1544,85 @@ mod tests {
         assert_eq!(result.failed_count, 0);
     }
 
+    /// A handoff applies as the receiving manager and releases the fields an
+    /// earlier `nyl apply` left, so a later Argo CD sync can remove fields
+    /// dropped from the source; objects Nyl never applied are left alone.
+    #[tokio::test]
+    async fn test_apply_sorted_manifests_handoff_releases_nyl_ownership() {
+        let client = nyl_render::kubernetes::MockKubeClient::new();
+        let manifests = config_maps(2);
+        let bootstrapped = ResourceKey::from_json_value(&manifests[0]).unwrap();
+        let fresh = ResourceKey::from_json_value(&manifests[1]).unwrap();
+        let mut live = manifests[0].clone();
+        live["metadata"]["managedFields"] = json!([{"manager": "nyl", "operation": "Apply"}]);
+        client.add_resource(bootstrapped.clone(), serde_json::from_value(live).unwrap());
+        let ownership = FieldOwnership::from_handoff(Some(ARGOCD_FIELD_MANAGER)).unwrap();
+
+        let mut released = Vec::new();
+        let result = apply_sorted_manifests(&client, &manifests, &ownership, 8, &mut |event| {
+            if let ApplyEvent::OwnershipReleased {
+                key,
+                manager,
+                result: Ok(()),
+            } = event
+            {
+                released.push((key.clone(), manager.to_string()));
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(released, vec![(bootstrapped.clone(), "nyl".to_string())]);
+        assert_eq!((result.released_count, result.release_failed_count), (1, 0));
+        assert_eq!(client.applied_managers(&bootstrapped), vec![ARGOCD_FIELD_MANAGER]);
+        assert_eq!(client.applied_managers(&fresh), vec![ARGOCD_FIELD_MANAGER]);
+        assert!(result.error("Apply").is_none());
+    }
+
+    /// Without a handoff Nyl applies as `nyl` and releases nothing.
+    #[tokio::test]
+    async fn test_apply_sorted_manifests_applies_as_nyl_by_default() {
+        let client = nyl_render::kubernetes::MockKubeClient::new();
+        let manifests = config_maps(1);
+        let key = ResourceKey::from_json_value(&manifests[0]).unwrap();
+
+        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(client.applied_managers(&key), vec!["nyl"]);
+        assert!(result.ownership_report().is_none());
+    }
+
+    /// `--handoff` alone hands over to Argo CD, a value names the manager, and the
+    /// option never takes the positional file as its value.
+    #[test]
+    fn test_handoff_option_parsing() {
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            let cli = crate::cli::Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).unwrap();
+            match cli.command {
+                crate::cli::Commands::Apply(apply) => (apply.handoff.handoff, apply.common.path),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(parse(&["apply", "release.yaml"]).0, None);
+        let (manager, path) = parse(&["apply", "--handoff", "release.yaml"]);
+        assert_eq!(manager.as_deref(), Some(ARGOCD_FIELD_MANAGER));
+        assert_eq!(path, "release.yaml");
+        assert_eq!(
+            parse(&["apply", "--handoff=flux", "release.yaml"]).0.as_deref(),
+            Some("flux")
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_apply_sorted_manifests_concurrency_one_is_serial() {
         let client = LatencyClient::new("");
         let manifests = config_maps(4);
 
         let started = tokio::time::Instant::now();
-        apply_sorted_manifests(&client, &manifests, 1, &mut |_| {})
+        apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 1, &mut |_| {})
             .await
             .unwrap();
 
@@ -1456,7 +1644,7 @@ mod tests {
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
 
-        apply_sorted_manifests(&client, &manifests, 8, &mut |_| {})
+        apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
             .await
             .unwrap();
 
@@ -1477,7 +1665,7 @@ mod tests {
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
 
-        apply_sorted_manifests(&client, &manifests, 8, &mut |_| {})
+        apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
             .await
             .unwrap();
 
@@ -1493,7 +1681,7 @@ mod tests {
         let manifests = config_maps(3);
 
         let mut failures = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |event| {
+        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |event| {
             if let ApplyEvent::Applied { key, result: Err(_) } = event {
                 failures.push(key.name.clone());
             }
@@ -1925,13 +2113,16 @@ mod tests {
         assert!(failed.is_empty());
     }
 
-    fn settings(history_limit: u32) -> ApplySettings {
+    fn settings(history_limit: u32) -> ApplySettings<'static> {
         ApplySettings {
             concurrency: 8,
             history_limit,
             confirm_prune: false,
+            ownership: &NYL_OWNERSHIP,
         }
     }
+
+    static NYL_OWNERSHIP: FieldOwnership = FieldOwnership::Nyl;
 
     /// A deployed apply deletes the oldest revisions beyond the history limit.
     #[tokio::test(start_paused = true)]

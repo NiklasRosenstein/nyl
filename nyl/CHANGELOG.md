@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `nyl apply --handoff[=MANAGER]` and `nyl release rollback --handoff` apply as
+  `MANAGER` (default `argocd-controller`, Argo CD's server-side apply manager)
+  instead of `nyl` and release the fields earlier applies made as `nyl`, so an
+  Argo CD sync enabled after a bootstrap, iteration, or break-glass apply can
+  remove fields dropped from the source instead of failing on leftovers such as
+  a `valueFrom` next to its replacing `value`. The new
+  [Hand Over to Argo CD](https://niklasrosenstein.github.io/nyl/kubernetes-gitops/workflow/handoff/)
+  page explains these conflicts and how to resolve them.
 - Orchestration deletes units, holds them, and repairs drift (M3 part 5).
   Units that leave an environment become `pending-teardown` until
   `nyl reconcile --allow-teardown`, `retained` tombstones under

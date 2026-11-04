@@ -85,6 +85,9 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
   history_limit` in [`nyl.toml`](/nyl/reference/configuration/#release-history).
 - `--confirm-prune` - Also prune resources whose sync option is `Prune=confirm`,
   as with [`nyl apply`](/nyl/reference/cli/apply/#release-options).
+- `--handoff[=<MANAGER>]` - Apply as `MANAGER` (default `argocd-controller`) and
+  release the fields applied as `nyl`, as with
+  [`nyl apply`](/nyl/reference/cli/apply/#field-ownership-options).
 
 #### Examples
 

@@ -6,6 +6,7 @@
 /// - Resource validation
 mod client;
 mod diff;
+pub mod field_manager;
 mod ordering;
 pub mod prune;
 mod resource;
