@@ -230,6 +230,13 @@
           "additionalProperties": true,
           "description": "Cluster facts merged recursively with target values; target values win.",
           "type": "object"
+        },
+        "valuesFrom": {
+          "description": "Plain YAML mapping files merged in declaration order before inline values. Paths are relative to this resource's source file, or `/`-rooted at the Git worktree; files must stay inside the worktree without traversing symlinks. Target imports and inline values override Cluster values.",
+          "items": {
+            "$ref": "#/$defs/ValuesFromFile"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -275,6 +282,27 @@
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "ValuesFromFile": {
+      "additionalProperties": false,
+      "description": "One ordinary configuration file contributing template values, without templating or recursive includes.",
+      "properties": {
+        "file": {
+          "description": "Static, normalized path to exactly one YAML mapping document in a Git-visible regular file. Relative paths start at the resource's source directory; `/` starts at the Git worktree root. Leading `..` segments may reach outside the Nyl project, but never outside its worktree or through symlinks. Ignored untracked files, submodules, and the project's `.nyl/cache` directory are excluded.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Mount the mapping under this literal values key. Omit to merge at the values root. Dots are literal characters, not path separators.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
       ],
       "type": "object"
     }
