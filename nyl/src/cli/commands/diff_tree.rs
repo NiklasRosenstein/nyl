@@ -11,8 +11,8 @@ use git2::Repository;
 use nyl_render::git::GitManager;
 use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{
-    compile_target_tree_cached_with_observer_and_options, resolve_deployment_target_name, resource_path, GitOpsCache,
-    RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
+    compile_target_tree_cached_with_observer_and_options, derive_application_views, resolve_deployment_target_name,
+    ApplicationView, GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
 };
 use nyl_render::util::project_path::{locate_checkout_project, ProjectLocation};
 use nyl_render::{NylError, Result};
@@ -169,13 +169,6 @@ impl DiffSelection {
             Self::Tree
         }
     }
-}
-
-#[derive(Debug)]
-struct ApplicationView {
-    catalog_file: PathBuf,
-    payload_path: PathBuf,
-    catalog_application: bool,
 }
 
 struct ComparisonFiles {
@@ -492,128 +485,6 @@ fn validate_application_selector(selector: &str) -> Result<()> {
         return Err(NylError::config(format!(
             "--application {selector:?} must use NAMESPACE/NAME"
         )));
-    }
-    Ok(())
-}
-
-fn derive_application_views(
-    files: &nyl_render::gitops::DesiredFiles<'_>,
-    publication_path_prefix: &str,
-) -> Result<BTreeMap<String, ApplicationView>> {
-    let mut views = BTreeMap::new();
-    for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(CATALOG_DIRECTORY)) {
-        let text = std::str::from_utf8(bytes).map_err(|error| {
-            NylError::config(format!(
-                "Generated catalog file {} is not UTF-8: {error}",
-                path.display()
-            ))
-        })?;
-        let manifest = nyl_render::yaml::parse_yaml_value_k8s_compatible(text).map_err(|error| {
-            NylError::config(format!(
-                "Failed to parse generated catalog file {}: {error}",
-                path.display()
-            ))
-        })?;
-        if manifest.get("apiVersion").and_then(serde_json::Value::as_str) != Some("argoproj.io/v1alpha1")
-            || manifest.get("kind").and_then(serde_json::Value::as_str) != Some("Application")
-        {
-            continue;
-        }
-        let namespace = required_application_string(&manifest, "/metadata/namespace", path)?;
-        let name = required_application_string(&manifest, "/metadata/name", path)?;
-        let identity = format!("{namespace}/{name}");
-        let key = nyl_render::kubernetes::ResourceKey::from_json_value(&manifest)?;
-        let expected = Path::new(CATALOG_DIRECTORY).join(resource_path(&key)?);
-        // Publications rendered before the per-resource catalog layout stored
-        // Applications at applications/<namespace>/<name>.yaml; they remain
-        // readable as a comparison baseline.
-        let legacy = Path::new(CATALOG_DIRECTORY)
-            .join("applications")
-            .join(namespace)
-            .join(format!("{name}.yaml"));
-        if *path != expected && *path != legacy {
-            return Err(NylError::config(format!(
-                "Generated Argo CD Application {identity:?} is at {}, expected {}",
-                nyl_core::resources::relative_path_to_posix("generated catalog path", path)?,
-                nyl_core::resources::relative_path_to_posix("generated catalog path", &expected)?
-            )));
-        }
-        let rendered_path = required_application_string(&manifest, "/spec/source/path", path)?;
-        nyl_core::resources::validate_relative_path(
-            "generated Application spec.source.path",
-            rendered_path,
-            false,
-            false,
-        )?;
-        let payload_path = strip_publication_prefix(rendered_path, publication_path_prefix, path)?;
-        let view = ApplicationView {
-            catalog_file: path.to_path_buf(),
-            catalog_application: payload_path == Path::new(CATALOG_DIRECTORY),
-            payload_path,
-        };
-        if views.insert(identity.clone(), view).is_some() {
-            return Err(NylError::config(format!(
-                "Generated Argo CD Application identity {identity:?} occurs more than once"
-            )));
-        }
-    }
-    validate_application_payloads(&views)?;
-    Ok(views)
-}
-
-fn required_application_string<'a>(application: &'a serde_json::Value, pointer: &str, path: &Path) -> Result<&'a str> {
-    application
-        .pointer(pointer)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            NylError::config(format!(
-                "Generated Argo CD Application {} field {} must be a string",
-                path.display(),
-                pointer.trim_start_matches('/')
-            ))
-        })
-}
-
-fn strip_publication_prefix(rendered_path: &str, path_prefix: &str, catalog_file: &Path) -> Result<PathBuf> {
-    let rendered_path = Path::new(rendered_path);
-    let payload = if path_prefix.is_empty() {
-        rendered_path
-    } else {
-        rendered_path.strip_prefix(path_prefix).map_err(|_| {
-            NylError::config(format!(
-                "Generated Argo CD Application {} source path {} is outside publication path prefix {:?}",
-                catalog_file.display(),
-                rendered_path.display(),
-                path_prefix
-            ))
-        })?
-    };
-    if payload.as_os_str().is_empty() {
-        return Err(NylError::config(format!(
-            "Generated Argo CD Application {} source path resolves to the publication root",
-            catalog_file.display()
-        )));
-    }
-    nyl_core::resources::relative_path_to_posix("generated Application payload path", payload)?;
-    Ok(payload.to_path_buf())
-}
-
-fn validate_application_payloads(views: &BTreeMap<String, ApplicationView>) -> Result<()> {
-    let workloads = views
-        .iter()
-        .filter(|(_, view)| !view.catalog_application)
-        .collect::<Vec<_>>();
-    for (index, (left_identity, left)) in workloads.iter().enumerate() {
-        for (right_identity, right) in workloads.iter().skip(index + 1) {
-            if left.payload_path.starts_with(&right.payload_path) || right.payload_path.starts_with(&left.payload_path)
-            {
-                return Err(NylError::config(format!(
-                    "Generated Argo CD Applications {left_identity:?} and {right_identity:?} have overlapping payload paths {} and {}",
-                    left.payload_path.display(),
-                    right.payload_path.display()
-                )));
-            }
-        }
     }
     Ok(())
 }
@@ -1016,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_application_views_from_generated_catalog() {
+    fn application_comparison_selects_workloads_by_default() {
         let files = BTreeMap::from([
             (
                 PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/api.yaml"),
@@ -1035,11 +906,6 @@ mod tests {
                 b"kind: ConfigMap\n".to_vec(),
             ),
         ]);
-
-        let views = derive_application_views(&borrowed(&files), "production").unwrap();
-        assert_eq!(views["argocd/api"].payload_path, Path::new("workloads/api"));
-        assert!(!views["argocd/api"].catalog_application);
-        assert!(views["argocd/production-catalog"].catalog_application);
 
         let comparison = application_comparison_files(
             &BTreeSet::new(),
@@ -1073,51 +939,6 @@ mod tests {
         assert!(comparison.base.contains_key(Path::new(
             "_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml"
         )));
-    }
-
-    #[test]
-    fn application_views_accept_legacy_baselines_and_reject_misplaced_applications() {
-        let legacy = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/applications/argocd/api.yaml"),
-            application_yaml("argocd", "api", "production/workloads/api"),
-        )]);
-        let views = derive_application_views(&borrowed(&legacy), "production").unwrap();
-        assert_eq!(views["argocd/api"].payload_path, Path::new("workloads/api"));
-
-        let misplaced = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/web.yaml"),
-            application_yaml("argocd", "api", "production/workloads/api"),
-        )]);
-        let error = derive_application_views(&borrowed(&misplaced), "production").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("expected _nyl/catalog/application.argoproj.io/argocd/api.yaml"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn rejects_ambiguous_or_escaping_application_payloads() {
-        let overlapping = BTreeMap::from([
-            (
-                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/parent.yaml"),
-                application_yaml("argocd", "parent", "production/workloads"),
-            ),
-            (
-                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/child.yaml"),
-                application_yaml("argocd", "child", "production/workloads/child"),
-            ),
-        ]);
-        let error = derive_application_views(&borrowed(&overlapping), "production").unwrap_err();
-        assert!(error.to_string().contains("overlapping payload paths"));
-
-        let escaping = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/api.yaml"),
-            application_yaml("argocd", "api", "another-target/workloads/api"),
-        )]);
-        let error = derive_application_views(&borrowed(&escaping), "production").unwrap_err();
-        assert!(error.to_string().contains("outside publication path prefix"));
     }
 
     #[test]

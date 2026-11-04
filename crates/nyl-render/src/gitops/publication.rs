@@ -500,7 +500,9 @@ pub struct PreparedPublication {
 }
 
 /// Check out `request.branch`, reconcile the tree beneath its prefix, and
-/// commit it with `message`, authored by what `author` returns. An unchanged tree
+/// commit it with `message`, authored by what `author` returns. The message
+/// lists the generated Applications whose files the commit changes, see
+/// [`with_changed_applications`]. An unchanged tree
 /// makes no commit and never calls `author`, so publishing it needs no
 /// identity.
 pub fn prepare_publication(
@@ -522,13 +524,23 @@ pub fn prepare_publication(
     } else {
         checkout.path().join(request.path_prefix)
     };
+    let previous = previously_owned_files(&output_root);
     let index = reconcile_rendered_tree_with_options(
         &output_root,
         request.desired,
         request.index.clone(),
         request.options.clone(),
     )?;
-    let commit = commit_worktree(&repository, request.branch, &output_root, message, || author()?.git())?;
+    let changed = super::changed_applications(
+        &previous
+            .iter()
+            .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+            .collect(),
+        request.desired,
+        request.path_prefix,
+    );
+    let message = with_changed_applications(message, &changed);
+    let commit = commit_worktree(&repository, request.branch, &output_root, &message, || author()?.git())?;
     Ok(PreparedPublication {
         repository,
         push_url: request.push_url.to_owned(),
@@ -538,6 +550,60 @@ pub fn prepare_publication(
         index,
         _checkout: checkout,
     })
+}
+
+/// The files the ownership index beneath `output_root` records, as they are
+/// on disk before reconciliation. A missing or unreadable index or file is
+/// left out: the result only describes the change, and reconciliation
+/// enforces ownership.
+fn previously_owned_files(output_root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let index_path = output_root.join(DEFAULT_INDEX_PATH);
+    let Some(index) = std::fs::read(&index_path)
+        .ok()
+        .and_then(|bytes| parse_index(&bytes, &index_path.display().to_string()).ok())
+    else {
+        return BTreeMap::new();
+    };
+    index
+        .files
+        .keys()
+        .filter_map(|path| {
+            let path = PathBuf::from(path);
+            let file = output_root.join(&path);
+            std::fs::symlink_metadata(&file)
+                .is_ok_and(|metadata| metadata.is_file())
+                .then(|| std::fs::read(&file).ok())
+                .flatten()
+                .map(|bytes| (path, bytes))
+        })
+        .collect()
+}
+
+/// `message` with a `Changed applications:` paragraph listing `applications`,
+/// one `- NAMESPACE/NAME` line each. It goes before a final paragraph of Git
+/// trailers, such as publish-tree's `Nyl-*` provenance, so they stay
+/// trailers, and otherwise at the end. No Applications leave the message as
+/// it is.
+pub fn with_changed_applications(message: &str, applications: &[String]) -> String {
+    if applications.is_empty() {
+        return message.to_owned();
+    }
+    let message = message.trim_end();
+    let mut list = String::from("Changed applications:");
+    for application in applications {
+        list.push_str("\n- ");
+        list.push_str(application);
+    }
+    match message.rsplit_once("\n\n") {
+        Some((body, trailers)) if trailers.lines().all(is_trailer_line) => format!("{body}\n\n{list}\n\n{trailers}"),
+        _ => format!("{message}\n\n{list}"),
+    }
+}
+
+/// Whether `line` has Git's `Token: value` trailer form.
+fn is_trailer_line(line: &str) -> bool {
+    line.split_once(": ")
+        .is_some_and(|(token, _)| !token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
 impl PreparedPublication {
@@ -867,6 +933,23 @@ fn fetch_branch(repository: &Repository, url: &str, branch: &str, auth: &GitAuth
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_with_changed_applications_keeps_trailers_last() {
+        let applications = ["argocd/api".to_owned(), "argocd/web".to_owned()];
+        assert_eq!(
+            super::with_changed_applications(
+                "Render deployment target production\n\nNyl-Source-Commit: 0123\nNyl-Cluster: prod",
+                &applications
+            ),
+            "Render deployment target production\n\nChanged applications:\n- argocd/api\n- argocd/web\n\nNyl-Source-Commit: 0123\nNyl-Cluster: prod"
+        );
+        assert_eq!(
+            super::with_changed_applications("nyl: publish dev/kubernetes\n\nExplains the change.\n", &applications),
+            "nyl: publish dev/kubernetes\n\nExplains the change.\n\nChanged applications:\n- argocd/api\n- argocd/web"
+        );
+        assert_eq!(super::with_changed_applications("nyl: publish", &[]), "nyl: publish");
+    }
+
     use super::*;
     use chrono::TimeZone;
     use serde_json::json;
@@ -1376,7 +1459,10 @@ spec:
         assert_eq!(commit.author().when().seconds(), 1_700_000_000);
         assert_eq!(commit.committer().name().unwrap(), "Nyl Orchestration");
         assert_eq!(commit.committer().when().seconds(), 1_700_000_000);
-        assert_eq!(commit.message().unwrap(), "nyl: publish dev/kubernetes");
+        assert_eq!(
+            commit.message().unwrap(),
+            "nyl: publish dev/kubernetes\n\nChanged applications:\n- argocd/dev-catalog\n- argocd/web"
+        );
 
         let index_blob = commit
             .tree()
