@@ -14,15 +14,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, RunId};
 use nyl_core::orchestration::ports::{Clock, EnvironmentSnapshot, Transition, TransitionChanges};
+use nyl_core::orchestration::progress::UnitResult;
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, Condition, DeletionReason, DesiredUnit, Hold, Lease, LeaseKind, Lifecycle, Observation,
-    ObservationType, Operation, Signal, SignalAction, SignalKind, StateV1, TeardownProgress,
+    ApprovalIdentity, Condition, DeletionReason, DesiredUnit, DriftRecord, Hold, Lease, LeaseKind, Lifecycle,
+    Operation, Signal, SignalAction, SignalKind, StateV1, TeardownProgress,
 };
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::fault::{FaultPoint, NoFaults};
 use nyl_orchestration::rules::lifecycle::{transition, Event, Next};
 use nyl_orchestration::rules::recovery::RecoverAction;
-use nyl_orchestration::run_report::{EnvironmentRunReport, UnitResult};
+use nyl_orchestration::run_report::EnvironmentRunReport;
 use nyl_orchestration::shell::recover;
 use nyl_orchestration::shell::run::{Cancellation, RunMode, TeardownTarget};
 use nyl_orchestration::shell::state::Requested;
@@ -473,7 +474,7 @@ fn test_teardown_all_honours_retain_and_holds_the_ownership_set() {
         ),
     ));
     assert_eq!(harness.reconcile(&[]).exit.code(), 0);
-    let report = teardown(&harness, TeardownTarget::All, |_| {});
+    let report = teardown(&harness, TeardownTarget::All, |job| job.request.reason = None);
     assert_eq!(report.exit.code(), 0, "{report:#?}");
     assert_eq!(outcome(&report, "removed"), set(&["svc"]));
     assert_eq!(outcome(&report, "released"), set(&["img", "keep"]));
@@ -486,10 +487,23 @@ fn test_teardown_all_honours_retain_and_holds_the_ownership_set() {
     let snapshot = harness.snapshot();
     for name in ["svc", "img", "keep"] {
         let document = &snapshot.desired[&unit(name)];
-        assert!(matches!(document.lifecycle, Lifecycle::Held { .. }), "{name}");
+        let Lifecycle::Held { hold, .. } = &document.lifecycle else {
+            panic!("{name} is held")
+        };
+        assert_eq!(
+            hold.reason.as_deref(),
+            Some("teardown requested; automatic recreation is suspended")
+        );
         assert_eq!(document.unit.uid, None, "{name}");
     }
     assert!(snapshot.observed.is_empty());
+    let report = harness.reconcile(&[]);
+    let held = &report.units[&unit("img")];
+    assert!(held.no_instance);
+    assert!(held
+        .warnings
+        .iter()
+        .any(|warning| warning.message.contains("automatic recreation is suspended")));
 }
 
 /// Holds: a held unit's consumers resolve against its receipt, so a
@@ -597,19 +611,18 @@ fn test_an_adopted_unit_no_longer_selected_is_pending_teardown() {
     assert!(snapshot.desired[&unit("beta")].unit.uid.is_some());
 }
 
-/// Removing a unit drops its observations and attestations with its
+/// Removing a unit drops its drift record and attestations with its
 /// observed file, so nothing of the old incarnation is left behind.
 #[test]
-fn test_removing_a_unit_drops_its_observations() {
+fn test_removing_a_unit_drops_its_drift_record() {
     let (_project, harness) = harness_with(&command_unit("svc", "true", Some("true"), ""));
     assert_eq!(harness.reconcile(&[]).exit.code(), 0);
     let snapshot = harness.snapshot();
     let observed = &snapshot.observed[&unit("svc")];
-    let observation = Observation {
+    let record = DriftRecord {
         api_version: StateV1,
-        kind: nyl_core::orchestration::state::ObservationKind,
+        kind: nyl_core::orchestration::state::DriftRecordKind,
         unit: observed.unit.clone(),
-        observation_type: ObservationType::Drift,
         execution_key: observed.receipt.as_ref().unwrap().execution_key.clone(),
         at: harness.clock.now(),
         result: serde_json::from_value(serde_json::json!({"drift": "drifted", "summary": "changed"})).unwrap(),
@@ -618,19 +631,16 @@ fn test_removing_a_unit_drops_its_observations() {
     put(
         &harness,
         TransitionChanges {
-            observations: BTreeMap::from([(
-                unit("svc"),
-                Some(BTreeMap::from([(ObservationType::Drift, observation)])),
-            )]),
+            drift: BTreeMap::from([(unit("svc"), Some(record))]),
             ..TransitionChanges::default()
         },
     );
-    assert!(harness.snapshot().observations.contains_key(&unit("svc")));
+    assert!(harness.snapshot().drift.contains_key(&unit("svc")));
     remove_units(&harness);
     let report = reconcile_allowing(&harness, false);
     assert_eq!(outcome(&report, "removed"), set(&["svc"]), "{report:#?}");
     let snapshot = harness.snapshot();
-    assert!(!snapshot.observations.contains_key(&unit("svc")));
+    assert!(!snapshot.drift.contains_key(&unit("svc")));
     assert!(!snapshot.observed.contains_key(&unit("svc")));
 }
 

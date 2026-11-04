@@ -33,8 +33,8 @@ steps:
     expect:
       current: [network, web-image, seed, database, kubernetes]
       get:
-        args: [get, output, database/host, -e, dev]
-        value: database-host-a25df1b916da
+        args: [get, output, database/connection, -e, dev, --pointer, /port]
+        value: 5432
   - nyl: [reconcile, -e, dev]
     exit: 0
     expect:

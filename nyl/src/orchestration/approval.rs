@@ -163,11 +163,14 @@ fn hook(
             env,
             stdin: None,
             timeout: Some(std::time::Duration::from_secs(30)),
+            private_stdout: false,
+            forward_stdout: false,
+            interactive: false,
             masked: Vec::new(),
         })
         .map_err(|_| failure(format!("approval lookup {:?} could not start", lookup[0])))?;
     match outcome {
-        nyl_core::orchestration::driver::ToolExit::Exited { code: 0, stdout } => lookup_record(&stdout, &lookup[0]),
+        nyl_core::orchestration::driver::ToolExit::Exited { code: 0, stdout, .. } => lookup_record(&stdout, &lookup[0]),
         _ => Err(failure(format!(
             "approval lookup {:?} failed, timed out, or was cancelled",
             lookup[0]

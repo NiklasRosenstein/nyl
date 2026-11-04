@@ -1,4 +1,4 @@
-//! `nyl state` and `nyl lease`: create, move, forget, reset, and restore
+//! `nyl state` and `nyl lease`: create, move, forget, and delete
 //! environment state, and declare a lease holder gone.
 
 use std::collections::BTreeSet;
@@ -18,10 +18,10 @@ use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
-use crate::gitops::discover_gitops_inventory;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use nyl_render::gitops::discover_gitops_inventory;
+use nyl_render::{NylError, Result};
 
 /// Output format of state commands.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -70,7 +70,7 @@ pub struct StateArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum StateCommand {
-    /// Create state at the environment's configured location.
+    /// Create state at the configured location, initializing a missing local repository as bare.
     Init {
         #[command(flatten)]
         common: Common,
@@ -107,11 +107,11 @@ pub enum StateCommand {
         #[arg(long)]
         unit: String,
     },
-    /// Drop this clone's local transitions and follow the remote state again.
+    /// Discard accepted local receipts and follow the configured remote state.
     Reset {
         #[command(flatten)]
         common: Common,
-        /// Reset the clone's local state branches (required: reset never changes remote state).
+        /// Reset local state (required: reset never changes remote state).
         #[arg(long, required = true)]
         local: bool,
         /// Forget the local receipts of these units, which the remote does not reflect (repeatable, or comma-separated).
@@ -143,8 +143,7 @@ pub enum StateCommand {
         #[arg(long, requires = "teardown")]
         source: Option<String>,
     },
-    /// Restore remote state to an earlier commit's content with forward commits,
-    /// after local transitions were pushed by hand.
+    /// Restore historical state content with forward commits.
     Restore {
         #[command(flatten)]
         common: Common,
@@ -167,6 +166,9 @@ pub enum LeaseCommand {
     Break {
         #[command(flatten)]
         common: Common,
+        /// Break the lease in the local state repository without contacting the remote.
+        #[arg(long)]
+        local: bool,
     },
 }
 
@@ -175,14 +177,14 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
     match &args.command {
         StateCommand::Init { common, fresh } => {
             let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
+            run(common, wiring, Operation::StateInit.as_str(), None, false, |ctx| {
                 state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested)
             })
         }
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
             let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateForget.as_str(), None, |ctx| {
+            run(common, wiring, Operation::StateForget.as_str(), None, false, |ctx| {
                 state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
             })
         }
@@ -193,7 +195,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             discard_all,
         } => {
             let discard = discard_option(discard, *discard_all)?;
-            run(common, wiring, "state-reset", None, |ctx| {
+            run(common, wiring, "state-reset", None, false, |ctx| {
                 state::reset(ctx.context, &ctx.environment, ctx.location, discard.as_ref())
             })
         }
@@ -219,7 +221,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 ))
             })?;
             let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateRestore.as_str(), None, |ctx| {
+            run(common, wiring, Operation::StateRestore.as_str(), None, false, |ctx| {
                 state::restore(ctx.context, &ctx.environment, ctx.location, &to, &requested)
             })
         }
@@ -252,7 +254,7 @@ fn run_move(
     from: Option<&String>,
     [desired_ref, observed_ref, state_path, coordination_refs]: [Option<&String>; 4],
 ) -> Result<CommandOutcome> {
-    let inventory = discover_gitops_inventory(&common.path, None)?;
+    let inventory = discover_gitops_inventory(&common.path, None, crate::resource_catalogue())?;
     // The old repository and, unless it is this clone's branches, how to reach it.
     let from = from
         .map(|from| -> Result<_> {
@@ -260,7 +262,7 @@ fn run_move(
                 StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
                 name if !name.contains(':') && !name.contains('/') => {
                     let (repository, _) = inventory.resolve_git_repository(
-                        Some(&crate::resources::LocalReference { name: name.to_owned() }),
+                        Some(&nyl_core::resources::LocalReference { name: name.to_owned() }),
                         None,
                     )?;
                     (
@@ -272,7 +274,7 @@ fn run_move(
                     )
                 }
                 url => (
-                    crate::util::credential_free_url(url),
+                    nyl_render::util::credential_free_url(url),
                     Some(Endpoint {
                         read: url.to_owned(),
                         write: None,
@@ -285,7 +287,7 @@ fn run_move(
         .as_ref()
         .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
     let requested = requested(common, wiring);
-    run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
+    run(common, wiring, Operation::StateMove.as_str(), extra, false, |ctx| {
         let location = ctx.location;
         let mut old = location.clone();
         if let Some((repository, _)) = &from {
@@ -310,7 +312,7 @@ fn run_move(
 /// Run a `nyl lease` command in-process with `wiring`.
 pub fn run_lease(args: &LeaseArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
-        LeaseCommand::Break { common } => run(common, wiring, "lease-break", None, |ctx| {
+        LeaseCommand::Break { common, local } => run(common, wiring, "lease-break", None, *local, |ctx| {
             state::break_lease(ctx.context, &ctx.environment, ctx.location, common.reason.clone())
         }),
     }
@@ -358,6 +360,7 @@ pub(crate) fn run(
     wiring: &Wiring<'_>,
     operation_name: &'static str,
     extra_endpoint: Option<(String, Endpoint)>,
+    offline: bool,
     operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
 ) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
@@ -377,14 +380,48 @@ pub(crate) fn run(
         Ok(identity) => identity,
         Err(finding) => return Ok(refused(finding)),
     };
-    let mut store = session.store(Some(CommitAuthor {
+    let author = Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
-    }))?;
+    });
+    let mut store = if offline {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
+    if operation_name == "state-reset" {
+        let path = store.repository_path(&resolved.location);
+        store = store.with_local_view(path).allow_pending();
+    }
+    if operation_name == "state-init" {
+        let path = store.repository_path(&resolved.location);
+        let direct = resolved.endpoint.as_ref().is_some_and(|endpoint| {
+            endpoint.read.starts_with("file://")
+                || std::path::Path::new(&endpoint.read).is_absolute()
+                || std::path::Path::new(&endpoint.read).starts_with(".")
+        });
+        if direct && !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            git2::Repository::init_bare(&path).map_err(|error| {
+                NylError::config(format!(
+                    "cannot initialize state repository {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
     if let Some((repository, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.
         if repository != resolved.location.repository {
-            store = store.with_endpoint(repository, endpoint);
+            store = crate::orchestration::project::configure_repository(
+                &session.inventory,
+                resolved,
+                store,
+                &repository,
+                endpoint,
+            )?;
         }
     }
     let context = session.context(&store, wiring, Some(identity.to_string()));
@@ -393,6 +430,16 @@ pub(crate) fn run(
         environment: resolved.name.clone(),
         location: &resolved.location,
     });
+    if operation_name == "state-init" {
+        report.details.insert(
+            "stateRepository".to_owned(),
+            serde_json::json!(resolved.location.repository),
+        );
+        report.details.insert(
+            "stateLocalPath".to_owned(),
+            serde_json::json!(store.repository_path(&resolved.location).display().to_string()),
+        );
+    }
     let mut warnings = resolved.warnings.clone();
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
@@ -423,6 +470,7 @@ fn run_delete(
             target: TeardownTarget::All,
         },
         lifecycle,
+        false,
         source,
         Some(approval),
         |context, request| nyl_orchestration::shell::teardown::state_delete(context, request, teardown),
@@ -437,6 +485,7 @@ pub(crate) fn run_lifecycle(
     operation_name: &'static str,
     mode: RunMode,
     lifecycle: LifecycleOptions,
+    offline: bool,
     source: Option<&str>,
     approval: Option<&crate::orchestration::approval::ApprovalArgs>,
     operation: impl FnOnce(
@@ -482,10 +531,15 @@ pub(crate) fn run_lifecycle(
             Err(finding) => return Ok(refused(finding)),
         };
     }
-    let store = session.store(Some(CommitAuthor {
+    let author = Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
-    }))?;
+    });
+    let store = if offline {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
     let mut report = match session.run_with(wiring, &store, Some(&identity), &request, operation) {
         Ok(report) => report,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
@@ -512,9 +566,19 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
                 Outcome::Unchanged => "unchanged",
                 Outcome::Refused => "refused",
             };
+            let status = match report.outcome {
+                Outcome::Done => crate::cli::presentation::styled(status, crate::cli::presentation::Style::Success),
+                Outcome::Refused => crate::cli::presentation::styled(status, crate::cli::presentation::Style::Failure),
+                Outcome::Unchanged => status.to_owned(),
+            };
             let _ = writeln!(stdout, "{} {}: {status}", report.operation, report.environment);
             for (side, commit) in &report.commits {
-                let _ = writeln!(stdout, "  {side}: {commit}");
+                let _ = writeln!(
+                    stdout,
+                    "  {} {}",
+                    crate::cli::presentation::styled(&format!("{side}:"), crate::cli::presentation::Style::Dim),
+                    crate::cli::presentation::styled(commit.as_ref(), crate::cli::presentation::Style::Dim)
+                );
             }
             for (key, value) in &report.details {
                 if key == "teardown" {
@@ -524,7 +588,11 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
                     continue;
                 }
                 let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
-                let _ = writeln!(stdout, "  {key}: {value}");
+                let _ = writeln!(
+                    stdout,
+                    "  {} {value}",
+                    crate::cli::presentation::styled(&format!("{key}:"), crate::cli::presentation::Style::Dim)
+                );
             }
         }
     }
@@ -546,8 +614,45 @@ pub(crate) fn render(report: &StateOperationReport, output: Output) -> CommandOu
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
+    use nyl_core::orchestration::codes::{Code, Finding};
+    use nyl_core::orchestration::ids::EnvironmentName;
+    use nyl_orchestration::report::StateOperationReport;
 
+    use super::{render, Output};
     use crate::cli::Cli;
+
+    #[test]
+    fn test_render_diagnostics_are_separate_blocks() {
+        let mut report = StateOperationReport::new(EnvironmentName::new("local").unwrap(), "state-init")
+            .refused(Finding::new(Code::StateDeleted, "state was deleted", "use --fresh"));
+        report.details.insert("location".into(), "repository".into());
+        let text = render(&report, Output::Text);
+        assert_eq!(text.stdout, "state-init local: refused\n  location: repository\n");
+        assert_eq!(
+            text.stderr,
+            "\nerror  state was deleted\n\n  Action  use --fresh\n\n  NYL-STATE-DELETED\n"
+        );
+
+        report
+            .warnings
+            .push(Finding::new(Code::DriverError, "warning one", "fix one"));
+        report
+            .warnings
+            .push(Finding::new(Code::DriverError, "warning two", "fix two"));
+        report
+            .errors
+            .push(Finding::new(Code::DriverError, "error two", "fix three"));
+        let json = render(&report, Output::Json);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json.stdout).unwrap(),
+            json.report
+        );
+        assert_eq!(json.stderr, "\nwarning  warning one\n\n  Action  fix one\n\n  NYL-DRIVER-ERROR\n\nwarning  warning two\n\n  Action  fix two\n\n  NYL-DRIVER-ERROR\n\nerror  state was deleted\n\n  Action  use --fresh\n\n  NYL-STATE-DELETED\n\nerror  error two\n\n  Action  fix three\n\n  NYL-DRIVER-ERROR\n");
+
+        report.warnings.clear();
+        report.errors.clear();
+        assert!(render(&report, Output::Text).stderr.is_empty());
+    }
 
     fn parses(args: &[&str]) -> bool {
         Cli::try_parse_from(std::iter::once("nyl").chain(args.iter().copied())).is_ok()

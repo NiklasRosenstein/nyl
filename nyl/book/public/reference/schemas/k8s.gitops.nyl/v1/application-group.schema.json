@@ -348,7 +348,7 @@
         "repository": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InlineGitRepository"
+              "$ref": "#/$defs/ReadGitRepository"
             },
             {
               "type": "null"
@@ -635,7 +635,7 @@
           "type": "object"
         },
         "name": {
-          "description": "Project-local identity. Must be a Kubernetes DNS subdomain and remain static during discovery.",
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
           "type": "string"
         }
       },
@@ -666,26 +666,6 @@
           "type": "array"
         }
       },
-      "type": "object"
-    },
-    "InlineGitRepository": {
-      "additionalProperties": false,
-      "properties": {
-        "publishURL": {
-          "description": "Optional Git write URL. Publication uses `repoURL` when omitted.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "repoURL": {
-          "description": "Credential-free Git read URL used by renderers and generated Applications.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "repoURL"
-      ],
       "type": "object"
     },
     "LocalReference": {
@@ -740,6 +720,20 @@
           "type": "string"
         }
       ]
+    },
+    "ReadGitRepository": {
+      "additionalProperties": false,
+      "description": "Credential-free coordinates for a repository that is only read.",
+      "properties": {
+        "repoURL": {
+          "description": "Git read URL. Source checkouts never publish to this repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
     },
     "RendererConfig": {
       "additionalProperties": false,
@@ -851,7 +845,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Selects Kubernetes Releases and defines their Argo CD Application, project, and namespace policies.\n\nLiteral metadata labels participate in target selection; the spec is rendered afterward. This is compiler configuration, not a workload manifest.\n\n## When needed\n\nRequired to select Release entry files and generate their workload Applications in rendered GitOps.\n\n## If omitted\n\nNyl does not infer groups from directories or Release files. Without a selected, enabled ApplicationGroup, a target emits no workload Applications. Direct file rendering does not require an ApplicationGroup.",
+  "description": "Selects Kubernetes Releases and defines their Argo CD Application, project, and namespace policies.\n\nLiteral metadata labels participate in target selection; the spec is rendered afterward. This is compiler configuration, not a workload manifest.\n\n## When needed\n\nRequired to select Release entry files and generate their workload Applications in Kubernetes GitOps.\n\n## If omitted\n\nNyl does not infer groups from directories or Release files. Without a selected, enabled ApplicationGroup, a target emits no workload Applications. Direct file rendering does not require an ApplicationGroup.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",

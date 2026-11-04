@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use nyl::validation::store;
+use nyl_render::validation::store;
 use predicates::prelude::*;
 use serde_json::json;
 use tempfile::TempDir;
@@ -43,7 +43,7 @@ fn project() -> TempDir {
             "versions": [{"name": "v1", "served": true, "storage": true, "schema": {"openAPIV3Schema": {
                 "type": "object", "properties": {"spec": {"type": "object", "properties": {"count": {"type": "integer"}}}}}}}]}
     });
-    let capabilities = nyl::resources::ClusterKubernetesCapabilities {
+    let capabilities = nyl_render::resources::ClusterKubernetesCapabilities {
         kube_version: Some("1.31.4".into()),
         api_versions: vec!["v1".into()],
         cluster_scoped_kinds: Vec::new(),
@@ -126,11 +126,11 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
 
 /// The pinned kubeconform URL of a core/v1 kind for the fixture's Kubernetes version.
 fn pinned_url(kind: &str, strict: bool) -> String {
-    let settings = nyl::validation::KubeconformSettings {
+    let settings = nyl_render::validation::KubeconformSettings {
         strict,
         ..Default::default()
     };
-    nyl::validation::builtin_url(&settings, &format!("v1/{kind}"), "1.31.4").unwrap()
+    nyl_render::validation::builtin_url(&settings, &format!("v1/{kind}"), "1.31.4").unwrap()
 }
 
 /// Make built-in schemas available without the network: ConfigMap as a vendored

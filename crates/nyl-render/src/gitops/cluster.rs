@@ -18,7 +18,7 @@ pub struct EffectiveCluster {
     pub capabilities_source: String,
     /// Cluster whose schema snapshot supplies the CRD contract.
     pub schemas_source: String,
-    /// Source files traversed during resolution, relative to the project root.
+    /// Source files traversed during resolution, using portable project/worktree keys.
     pub inputs: BTreeSet<PathBuf>,
 }
 
@@ -52,6 +52,7 @@ fn resolve(inventory: &GitOpsInventory, name: &str, chain: &mut Vec<String>) -> 
         schemas_source: name.to_owned(),
         inputs: BTreeSet::from([discovered.source_path.clone()]),
     };
+    result.inputs.extend(discovered.values_inputs.iter().cloned());
     if let Some(snapshot) = complete_vendored_capabilities(inventory, name, &mut result.cluster)? {
         result.inputs.insert(snapshot);
     }
@@ -146,7 +147,8 @@ mod tests {
         cluster(directory.path(), "staging", None, "");
         cluster(directory.path(), "production", Some("all"), "staging");
         cluster(directory.path(), "separate", Some("schemas"), "production");
-        let inventory = super::super::discover_gitops_inventory(directory.path(), None).unwrap();
+        let inventory =
+            super::super::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
         let production = resolve_cluster_contract(&inventory, "production").unwrap();
         assert_eq!(production.capabilities_source, "staging");
         assert_eq!(production.schemas_source, "staging");
@@ -192,13 +194,15 @@ mod tests {
     fn test_inheritance_rejects_missing_sources_and_cycles() {
         let directory = fixture();
         cluster(directory.path(), "production", Some("all"), "staging");
-        let inventory = super::super::discover_gitops_inventory(directory.path(), None).unwrap();
+        let inventory =
+            super::super::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
         assert!(resolve_cluster_contract(&inventory, "production")
             .unwrap_err()
             .to_string()
             .contains("production -> staging"));
         cluster(directory.path(), "staging", Some("schemas"), "production");
-        let inventory = super::super::discover_gitops_inventory(directory.path(), None).unwrap();
+        let inventory =
+            super::super::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
         assert!(resolve_cluster_contract(&inventory, "production")
             .unwrap_err()
             .to_string()

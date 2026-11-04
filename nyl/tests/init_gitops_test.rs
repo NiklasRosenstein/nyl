@@ -2,7 +2,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use git2::Repository;
-use nyl::config::{ProjectConfig, VendorMode};
+use nyl_render::config::{ProjectConfig, VendorMode};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -37,7 +37,7 @@ fn initializes_simple_gitops_project_from_detected_repository() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Initialized rendered GitOps configuration at gitops.yaml",
+            "Initialized Kubernetes GitOps configuration at gitops.yaml",
         ));
 
     assert!(repository.path().join("nyl.toml").is_file());
@@ -132,7 +132,7 @@ fn records_the_requested_vendor_policy_in_the_generated_project_config() {
         .assert()
         .success();
 
-    let config = ProjectConfig::load(Some(repository.path().join("nyl.toml"))).unwrap();
+    let config = ProjectConfig::load(Some(repository.path().join("nyl.toml")), nyl::resource_catalogue()).unwrap();
     assert_eq!(config.vendor().map(|vendor| vendor.mode), Some(VendorMode::Required));
 
     // The policy of an existing project configuration is never rewritten.
@@ -165,7 +165,7 @@ fn minimal_mode_records_the_requested_vendor_policy() {
         .assert()
         .success();
 
-    let config = ProjectConfig::load(Some(project.join("nyl.toml"))).unwrap();
+    let config = ProjectConfig::load(Some(project.join("nyl.toml")), nyl::resource_catalogue()).unwrap();
     assert_eq!(config.vendor().map(|vendor| vendor.mode), Some(VendorMode::Preferred));
     assert_eq!(
         config.vendor().map(|vendor| vendor.path.clone()),

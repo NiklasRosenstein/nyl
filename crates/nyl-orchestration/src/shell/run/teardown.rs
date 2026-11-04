@@ -17,6 +17,12 @@ use nyl_core::orchestration::state::{
     DeletionIntent, DeletionReason, Hold, Request, TeardownProgress, TeardownWaiting,
 };
 
+fn hold_reason(reason: Option<&str>) -> String {
+    reason
+        .unwrap_or("teardown requested; automatic recreation is suspended")
+        .to_owned()
+}
+
 /// The lifecycle state of one run: the stored desired documents as the run
 /// leaves them, what it writes, and what it reports.
 #[derive(Debug, Default)]
@@ -27,7 +33,7 @@ pub(super) struct Life {
     pub(super) desired: BTreeMap<UnitName, DesiredUnit>,
     /// The desired files the lifecycle changes write (`None` removes one).
     pub(super) writes: BTreeMap<UnitName, Option<DesiredUnit>>,
-    /// Units whose observed file, observations, and attestations go.
+    /// Units whose observed file, drift record, and attestations go.
     pub(super) cleared: BTreeSet<UnitName>,
     /// The results of leaving units, and of held units a hold signal or a
     /// teardown request reached.
@@ -119,7 +125,7 @@ impl Life {
                     Hold {
                         since: requested.at,
                         by: requested.by.clone(),
-                        reason: requested.reason.clone(),
+                        reason: Some(hold_reason(requested.reason.as_deref())),
                         pending: None,
                     },
                 );
@@ -203,8 +209,7 @@ fn held_pending(unit: &DesiredUnit) -> (Option<CommitId>, bool) {
     }
 }
 
-/// The report of a held unit: what its hold keeps from applying, and
-/// `NYL-UNIT-HELD` when that is anything.
+/// The report of a held unit and what its hold keeps from applying.
 pub(super) fn held_report(
     environment: &EnvironmentName,
     name: &UnitName,
@@ -218,25 +223,7 @@ pub(super) fn held_report(
         teardown,
         recorded,
     });
-    entry.pending.clone_from(&pending);
-    if pending.is_some() || teardown {
-        let (what, then) = match (pending.as_ref(), teardown) {
-            (Some(commit), true) => (
-                format!("the changes of source commit {commit} and a pending teardown"),
-                "to apply them; the next reconcile or teardown carries the teardown out",
-            ),
-            (Some(commit), false) => (format!("the changes of source commit {commit}"), "to apply them"),
-            (None, _) => (
-                "a pending teardown".to_owned(),
-                "and the next reconcile or teardown carries it out",
-            ),
-        };
-        entry.warnings.push(Finding::new(
-            Code::UnitHeld,
-            format!("unit {name} of {environment} is held; the hold keeps {what} from applying"),
-            format!("lift the hold with `nyl resume -e {environment} --unit {name}` {then}"),
-        ));
-    }
+    crate::rules::unit_state::lifecycle_details(environment, name, unit, None, &mut entry);
     entry
 }
 
@@ -286,6 +273,7 @@ struct Call {
     outcome: DriverResult<Supported<Outcome>>,
     deadline: Timestamp,
     finished: Timestamp,
+    progress: nyl_core::orchestration::progress::UnitProgress,
     killed: bool,
     /// The unit's files could not be checked out: nothing ran.
     unavailable: Option<String>,
@@ -338,6 +326,7 @@ impl Reconcile<'_, '_, '_> {
             // Run one batch, then read holds and plan again from its outcomes.
             let concurrency = self.session.request.concurrency.max(1);
             let batch: Vec<_> = plan.wave.into_iter().take(concurrency).collect();
+            self.report.order_units(batch.iter().cloned());
             for name in &batch {
                 if let Some(units) = plan.external_overrides.get(name) {
                     life.details.external_dependents.insert(name.clone(), units.clone());
@@ -561,7 +550,7 @@ impl Reconcile<'_, '_, '_> {
         });
         if !calls.is_empty() {
             let now = context.base.clock.now();
-            let longest = longest_timeout(calls.iter().map(|(_, unit, _)| unit));
+            let longest = longest_timeout(context.drivers, calls.iter().map(|(_, unit, _)| unit));
             let names: Vec<UnitName> = calls.iter().map(|(name, _, _)| name.clone()).collect();
             self.phase(names, lease::deadline(context.base, now, longest), &[])?;
             let results = {
@@ -629,8 +618,33 @@ impl Reconcile<'_, '_, '_> {
 
     /// Record one teardown outcome; `true` when the unit now waits under its
     /// `teardownWait`.
-    #[allow(clippy::too_many_lines)] // One outcome table: success, failure, uncertainty, wait, release.
     fn settle(
+        &mut self,
+        life: &mut Life,
+        unit: &DesiredUnit,
+        call: Call,
+        observed: &mut BTreeMap<UnitName, ObservedUnit>,
+        artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    ) -> Result<bool, Ending> {
+        let progress = call.progress.clone();
+        let finished = call.finished;
+        let ending = self.settle_unit(life, unit, call, observed, artifacts);
+        if let Some(entry) = life.results.get(&unit.unit.name) {
+            if let Some(result) = &entry.result {
+                crate::shell::progress::Progress::finish_event(
+                    self.context(),
+                    progress,
+                    finished,
+                    result,
+                    entry.message.as_deref(),
+                );
+            }
+        }
+        ending
+    }
+
+    #[allow(clippy::too_many_lines)] // One outcome table: success, failure, uncertainty, wait, release.
+    fn settle_unit(
         &mut self,
         life: &mut Life,
         unit: &DesiredUnit,
@@ -687,9 +701,13 @@ impl Reconcile<'_, '_, '_> {
         };
         let outcome = match outcome {
             // A teardown that ran past its deadline may have left anything.
-            Outcome::Succeeded { .. } | Outcome::Failed { .. } if call.finished > call.deadline => Outcome::Uncertain {
-                reason: "the teardown passed the unit's timeout".to_owned(),
-            },
+            Outcome::Succeeded { .. } | Outcome::Failed { .. } | Outcome::RetryRequired { .. }
+                if call.finished > call.deadline =>
+            {
+                Outcome::Uncertain {
+                    reason: "the teardown passed the unit's timeout".to_owned(),
+                }
+            }
             outcome => outcome,
         };
         // The driver's teardown started: the teardown is in progress (Q8).
@@ -743,6 +761,25 @@ impl Reconcile<'_, '_, '_> {
                     self.fail_fast(life, name);
                     return Ok(false);
                 }
+                Outcome::RetryRequired {
+                    category,
+                    message,
+                    context,
+                } => (
+                    UnitResult::Failed {
+                        category,
+                        retryable: false,
+                    },
+                    Some(message.clone()),
+                    condition(Event::RetryRequired {
+                        since,
+                        run,
+                        category,
+                        message,
+                        context,
+                    }),
+                    false,
+                ),
                 Outcome::Failed {
                     category,
                     retryable,
@@ -887,7 +924,7 @@ impl Reconcile<'_, '_, '_> {
             let strategy = crate::rules::teardown_wait::strategy(spec);
             let now = context.base.clock.now();
             let end = crate::rules::teardown_wait::ends(strategy, &waiting)
-                .unwrap_or_else(|| unit_timeout(&unit).after(now))
+                .unwrap_or_else(|| unit_timeout(context.drivers, &unit).after(now))
                 .max(now);
             let lease_deadline = context.base.settings.lease_grace.after(end);
             self.phase(vec![name.clone()], lease_deadline, &[])?;
@@ -956,7 +993,7 @@ impl Reconcile<'_, '_, '_> {
         let now = context.base.clock.now();
         self.phase(
             vec![name.clone()],
-            lease::deadline(context.base, now, unit_timeout(&unit)),
+            lease::deadline(context.base, now, unit_timeout(context.drivers, &unit)),
             &[],
         )?;
         let environment = self.environment().clone();
@@ -1115,7 +1152,17 @@ fn run_jobs(
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
             .into_iter()
-            .map(|job| scope.spawn(move || call(context, slots, environment, project_dir, job)))
+            .map(|job| {
+                let progress = crate::shell::progress::Progress::for_unit(
+                    context,
+                    environment,
+                    job.unit,
+                    Operation::Teardown,
+                    None,
+                )
+                .into_event();
+                scope.spawn(move || call(context, slots, environment, project_dir, job, &progress))
+            })
             .collect();
         handles.into_iter().map(join).collect()
     })
@@ -1128,15 +1175,17 @@ fn call(
     environment: &EnvironmentName,
     project_dir: &str,
     job: Job<'_>,
+    progress: &nyl_core::orchestration::progress::UnitProgress,
 ) -> Call {
     let name = job.unit.unit.name.clone();
     let now = context.base.clock.now();
-    let deadline = unit_timeout(job.unit).after(now);
+    let deadline = unit_timeout(context.drivers, job.unit).after(now);
     let finish = |outcome: DriverResult<Supported<Outcome>>, killed: bool| Call {
         name: name.clone(),
         outcome,
         deadline,
         finished: context.base.clock.now(),
+        progress: progress.clone(),
         killed,
         unavailable: None,
     };
@@ -1152,9 +1201,18 @@ fn call(
     let temp_dir = job.directory.join("tmp");
     let worktree = std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", job.directory.display()))
-        .and_then(|()| slots.checkout(context.sources, job.slot, &job.commit));
-    let worktree = match worktree {
-        Ok(worktree) => worktree,
+        .and_then(|()| {
+            slots.checkout_unit(
+                context.sources,
+                job.slot,
+                &job.commit,
+                driver,
+                job.unit.resolved_spec.as_ref().unwrap_or(&job.unit.spec),
+                project_dir,
+            )
+        });
+    let (worktree, source_roots) = match worktree {
+        Ok(roots) => roots,
         Err(message) => {
             let _ = std::fs::remove_dir_all(&job.directory);
             return Call {
@@ -1163,7 +1221,7 @@ fn call(
             };
         }
     };
-    let env = match execution_env(context, &job.unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &job.unit.spec) {
         Ok(env) => env,
         Err(message) => {
             let _ = std::fs::remove_dir_all(&job.directory);
@@ -1183,7 +1241,20 @@ fn call(
         }
     };
     let _ = context.base.faults.at(FaultPoint::Executing, Some(&name));
+    let tools = crate::shell::tools::UnitRunner {
+        tools: context.tools,
+        unit: UnitAddress::new(environment.clone(), name.clone()),
+    };
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: &tools,
+        clock: context.base.clock,
+        deadline,
+    };
     let execution = ExecutionContext {
+        secrets,
+        interactive: false,
+        artifacts: BTreeMap::new(),
+        source_roots,
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Teardown,
         project_dir: project_path(&worktree, project_dir),
@@ -1194,7 +1265,7 @@ fn call(
         deadline,
         now,
         observed: job.observed,
-        tools: context.tools,
+        tools: &budget,
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: job.completion,
@@ -1261,7 +1332,7 @@ pub(super) fn mark_teardowns(
         let hold = (request.lifecycle.hold || (all && in_set)).then(|| Hold {
             since: now,
             by: context.base.requested_by.clone(),
-            reason: request.reason.clone(),
+            reason: Some(hold_reason(request.reason.as_deref())),
             pending: None,
         });
         let capable = !unit.is_held_marker()
@@ -1324,7 +1395,9 @@ pub(super) fn mark_teardowns(
                         observed.insert(
                             name.clone(),
                             ObservedUnit {
-                                api_version: StateV1,
+                                api_version: nyl_core::orchestration::state::StateV1,
+                                operator_modified: None,
+                                retry: None,
                                 kind: nyl_core::orchestration::state::ObservedUnitKind,
                                 unit: unit.unit.clone(),
                                 receipt: Some(receipt),
@@ -1358,4 +1431,12 @@ pub(super) fn mark_teardowns(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hold_reason_tests {
+    #[test]
+    fn test_preserves_requested_reason() {
+        assert_eq!(super::hold_reason(Some("maintenance")), "maintenance");
+    }
 }

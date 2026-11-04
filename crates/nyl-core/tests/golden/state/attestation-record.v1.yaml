@@ -1,0 +1,25 @@
+apiVersion: gitops.nyl/v1
+kind: AttestationRecord
+unit:
+  environment: dev
+  name: kubernetes
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+attestations:
+  accepted:
+    executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+    result: pass
+    at: "2026-09-25T16:40:00Z"
+    source:
+      driver: attest
+    reason: null
+  healthy:
+    executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+    result: fail
+    at: "2026-09-25T16:40:00Z"
+    source:
+      driver: attest
+    reason: Degraded
+    details:
+      applications:
+        web:
+          health: Degraded

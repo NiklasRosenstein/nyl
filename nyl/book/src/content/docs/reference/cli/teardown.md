@@ -36,6 +36,8 @@ transition commit per state ref with the operation `teardown` and the
   still depends on waits for it, `pending-teardown`, exit 2.
 - `--all`: every unit, consumers first. Units still in the ownership set are
   held afterwards, without an incarnation, so nothing recreates them.
+  The hold records the supplied reason, or `teardown requested; automatic
+  recreation is suspended` when none is supplied.
   `--all` honours `deletionPolicy: Retain`: Retain units and retained
   tombstones are released, and so are units whose kind cannot tear down,
   such as an `OciImage`. A released unit's resources stay in place and the
@@ -52,13 +54,16 @@ transition commit per state ref with the operation `teardown` and the
   teardown applies the hold.
 
 ```console
-$ nyl teardown -e dev --unit worker --hold --reason rotate the worker
-removed worker
+$ nyl teardown -e dev --unit worker --hold --reason "rotate the worker"
+[dev/worker] starting Command (teardown)
+[dev/worker] removed worker
+[dev/worker] removed in 0.0s
 UNIT    KIND     RESULT   DETAIL
 worker  Command  removed
-run: 01a17ac1-500c-78e8-b8fb-c969e048c5e9
-desired: 9814c8340010cbe310ccd53887148ff5930e5ff7
-observed: 1313296c5fff4adec9bc761c42af4c666d67673b
+
+  run:      01a18581-0ea6-7282-9a50-7efce0a0c17e
+  desired:  6eeccb9e675d2e8c6ae5cd1fcda3944afa50c191
+  observed: f438cd48245c94da2a00a27bcb711dc4258914e0
 ```
 
 A unit that needs a manual approval is reported `awaiting-approval` until
@@ -77,14 +82,8 @@ request on its held desired file, tears nothing down, and exits 0, reporting
 the unit `held` with a pending teardown. After `nyl resume`, the next
 `reconcile` or `teardown` carries the request out as an explicit teardown.
 
-```console
-$ nyl teardown -e dev --unit config --reason replace config
-UNIT    KIND     RESULT  DETAIL
-config  Command  held
-run: 01a17ac9-068c-7804-b8ec-12a293ec3f77
-desired: c61ce895d31795f4dd681bc8fb50101a1f4ea7b8
-warning NYL-UNIT-HELD (config): unit config of dev is held; the hold keeps a pending teardown from applying
-  fix: lift the hold with `nyl resume -e dev --unit config` and the next reconcile or teardown carries it out
+```sh
+nyl teardown -e dev --unit config --reason 'replace config'
 ```
 
 ### Order and waits

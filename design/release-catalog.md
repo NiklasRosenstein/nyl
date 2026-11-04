@@ -2,7 +2,7 @@
 
 **Status:** proposal, slices R8 to R11 of milestone M9. Nothing here exists
 yet. Progress is tracked on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 It builds on [Release inputs](release-inputs.md) and
 [domain resource collections](domain-resources.md), and changes neither for
 projects that do not use it.

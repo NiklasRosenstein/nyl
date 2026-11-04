@@ -21,16 +21,18 @@ pub use session::{RenderPathMode, RenderRequest, RenderSession, RenderedBundle};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProjectConfig, StripEmptyMetadataLabelsMode};
-    use crate::constants::API_VERSION_K8S_GITOPS;
+    use crate::config::ProjectConfig;
     use crate::resources::{Release, ReleaseArgoCdSpec, ReleaseMetadata, ReleaseSpec, RemoteManifest};
     use crate::template::TemplateContext;
     use crate::NylError;
+    use nyl_core::constants::API_VERSION_K8S_GITOPS;
+    use nyl_core::settings::StripEmptyMetadataLabelsMode;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     fn test_project_config() -> ProjectConfig {
         ProjectConfig {
+            resource_catalogue: crate::config::test_catalogue(),
             file: None,
             config: crate::config::ProjectFile::default(),
         }
@@ -141,7 +143,7 @@ metadata:
 
     #[test]
     fn test_add_parent_annotations() {
-        use crate::constants::{
+        use nyl_core::constants::{
             ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
         };
 
@@ -282,7 +284,7 @@ metadata:
 
     #[test]
     fn test_add_parent_annotations_without_namespace() {
-        use crate::constants::{
+        use nyl_core::constants::{
             ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
         };
 
@@ -320,7 +322,7 @@ metadata:
 
     #[test]
     fn test_add_parent_annotations_preserves_existing() {
-        use crate::constants::ANNOTATION_PARENT_API_VERSION;
+        use nyl_core::constants::ANNOTATION_PARENT_API_VERSION;
 
         // Test that existing annotations are preserved
         let mut manifest = serde_json::json!({
@@ -355,7 +357,7 @@ metadata:
 
     #[test]
     fn test_apply_parent_tracking_annotations_remote_manifest() {
-        use crate::constants::{ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE};
+        use nyl_core::constants::{ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE};
 
         let manifests = vec![serde_json::json!({
             "apiVersion": "v1",

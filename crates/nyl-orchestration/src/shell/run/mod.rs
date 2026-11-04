@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{
-    DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, ResolutionContext, Supported, ToolRunner,
+    Driver, DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, ResolutionContext, Supported, ToolRunner,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
@@ -87,10 +87,11 @@ use crate::rules::sources::{
 use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::teardown::TeardownOptions;
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
-use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
+use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitState};
 use crate::transition::Trailers;
 pub use cancel::{Cancellation, SIGINT, SIGTERM};
 use execute::{execute_batch, Execution};
+use nyl_core::orchestration::progress::UnitResult;
 use slots::Slots;
 
 mod cancel;
@@ -109,6 +110,8 @@ pub struct RunContext<'a> {
     pub renderer: &'a dyn SourceRenderer,
     pub drivers: &'a DriverSet,
     pub tools: &'a dyn ToolRunner,
+    /// Live unit events; absent for callers that only consume the final report.
+    pub progress: Option<&'a dyn nyl_core::orchestration::progress::ProgressObserver>,
     /// A directory this invocation owns: pinned worktrees and per-execution
     /// temp dirs are created beneath it.
     pub workspace: &'a Path,
@@ -257,12 +260,11 @@ pub struct RunRequest {
     pub approvals: crate::rules::approval::Approvals,
     /// `--source <rev>`.
     pub source_override: Option<String>,
+    /// An explicit working-file snapshot; state publication is unchanged.
+    pub worktree_source: Option<nyl_core::orchestration::ports::WorktreeSnapshot>,
     /// `--wait-lease`.
     pub wait: Option<Duration>,
-    /// `--local`: the run continues from the clone's local state branches
-    /// and commits there with `Nyl-Local: true`; the command line passes a
-    /// [`super::local::LocalStore`] as the context's store. `None` for an
-    /// ordinary run. Contract: [Local runs](../../../../../design/orchestration-core.md#local-runs).
+    /// Optional execution approvals for a local run.
     pub local: Option<super::local::LocalRun>,
     /// Set by the command line's SIGINT/SIGTERM handler; never set by
     /// default. Contract: [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases), item 7.
@@ -378,8 +380,8 @@ struct Session<'r, 'a> {
     /// This operation's own directory beneath the workspace.
     directory: PathBuf,
     default_branch: OnceCell<Result<String, Finding>>,
-    revisions: RefCell<BTreeMap<String, CommitId>>,
-    pins: RefCell<BTreeSet<(CommitId, String)>>,
+    revisions: RefCell<BTreeMap<(SourceRepository, String), CommitId>>,
+    pins: RefCell<BTreeSet<(SourceRepository, CommitId, String)>>,
     /// Read-only worktrees of effective commits, for key inputs.
     worktrees: RefCell<BTreeMap<CommitId, PathBuf>>,
     /// Key inputs per unit, by the resolved spec and commit they were read for.
@@ -578,29 +580,79 @@ impl<'r, 'a> Session<'r, 'a> {
     /// Check a locked commit against [`pin_refs`], which
     /// `allowUnprotectedSource` never waives; once per commit and revision.
     fn check_pin(&self, commit: &CommitId, revision: &str) -> Result<(), Finding> {
-        let key = (commit.clone(), revision.to_owned());
+        self.check_source_pin(&SourceRepository::This, commit, revision)
+    }
+
+    fn check_source_pin(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        revision: &str,
+    ) -> Result<(), Finding> {
+        let key = (repository.clone(), commit.clone(), revision.to_owned());
         if self.pins.borrow().contains(&key) {
             return Ok(());
         }
-        let default = self.default_branch()?;
+        let default = if *repository == SourceRepository::This {
+            self.default_branch()?
+        } else {
+            self.context
+                .sources
+                .default_branch(repository)
+                .map_err(|error| source_unavailable(&error.to_string()))?
+        };
         let refs = pin_refs(&self.request.entry, &default, Some(revision));
-        self.check_reachable(commit, &refs)?;
+        match self.context.sources.reachable_from(repository, commit, &refs) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(unreachable(commit, &refs)),
+            Err(error) => return Err(source_unavailable(&error.to_string())),
+        }
         self.pins.borrow_mut().insert(key);
         Ok(())
     }
 
-    /// The commit a revision of this repository names, read once per run.
     fn resolve_revision(&self, revision: &str) -> Result<CommitId, Finding> {
-        if let Some(commit) = self.revisions.borrow().get(revision) {
+        self.resolve_source_revision(&SourceRepository::This, revision)
+    }
+
+    fn resolve_source_revision(&self, repository: &SourceRepository, revision: &str) -> Result<CommitId, Finding> {
+        let key = (repository.clone(), revision.to_owned());
+        if let Some(commit) = self.revisions.borrow().get(&key) {
             return Ok(commit.clone());
         }
         let commit = self
             .context
             .sources
-            .resolve_revision(&SourceRepository::This, revision)
+            .resolve_revision(repository, revision)
             .map_err(|error| source_unavailable(&format!("cannot resolve revision {revision:?}: {error}")))?;
-        self.revisions.borrow_mut().insert(revision.to_owned(), commit.clone());
+        self.revisions.borrow_mut().insert(key, commit.clone());
         Ok(commit)
+    }
+
+    fn resolve_source_locks(
+        &self,
+        locks: &[crate::rules::sources::SourceLock],
+    ) -> Result<BTreeMap<(SourceRepository, String), CommitId>, Finding> {
+        let mut revisions = BTreeMap::new();
+        for lock in locks {
+            let commit = if let Some(commit) = &lock.commit {
+                self.check_source_pin(&lock.repository, commit, &lock.revision)?;
+                commit.clone()
+            } else {
+                let commit = self.resolve_source_revision(&lock.repository, &lock.revision)?;
+                revisions.insert((lock.repository.clone(), lock.revision.clone()), commit.clone());
+                commit
+            };
+            if self
+                .context
+                .sources
+                .is_worktree_snapshot(&commit)
+                .map_err(|error| source_unavailable(&error.to_string()))?
+            {
+                return Err(source_unavailable("explicit unit source revisions cannot select worktree snapshots; pin committed source or use an unpinned local path with --worktree"));
+            }
+        }
+        Ok(revisions)
     }
 
     /// A read-only worktree of `commit` for key inputs, created once.
@@ -627,6 +679,20 @@ impl<'r, 'a> Session<'r, 'a> {
     /// reachability. An Environment `source.revision`+`commit` lock is also
     /// checked against [`pin_refs`].
     fn source_commit(&self) -> Result<(SourceRequest, CommitId), Finding> {
+        if let Some(snapshot) = &self.request.worktree_source {
+            if self.request.source_override.is_some() {
+                return Err(source_unavailable("--worktree and --source are mutually exclusive"));
+            }
+            if !self
+                .context
+                .sources
+                .is_worktree_snapshot(&snapshot.commit)
+                .map_err(|error| source_unavailable(&error.to_string()))?
+            {
+                return Err(source_unavailable("the worktree source is not an archived snapshot"));
+            }
+            return Ok((SourceRequest::Worktree(snapshot.clone()), snapshot.commit.clone()));
+        }
         let entry = &self.request.entry;
         if let Some(finding) = unsupported_source(entry) {
             return Err(finding);
@@ -637,6 +703,7 @@ impl<'r, 'a> Session<'r, 'a> {
             self.request.source_override.as_deref(),
         );
         let commit = match &request {
+            SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
             SourceRequest::Entry(commit) => commit.clone(),
             SourceRequest::Revision(revision) | SourceRequest::Override(revision) => self.resolve_revision(revision)?,
             SourceRequest::Commit { revision, commit } => {
@@ -644,6 +711,16 @@ impl<'r, 'a> Session<'r, 'a> {
                 commit.clone()
             }
         };
+        if self
+            .context
+            .sources
+            .is_worktree_snapshot(&commit)
+            .map_err(|error| source_unavailable(&error.to_string()))?
+        {
+            return Err(source_unavailable(
+                "a worktree snapshot requires --worktree; select committed source for an ordinary run",
+            ));
+        }
         if entry.spec.allow_unprotected_source != Some(true) {
             let default = self.default_branch()?;
             if let Some(refs) = run_source_refs(entry, &default) {
@@ -676,6 +753,28 @@ impl<'r, 'a> Session<'r, 'a> {
             &mut || self.base().ids.uid(),
         );
         let mut errors = desired.errors.clone();
+        if request.choice().is_worktree() {
+            for (name, unit) in &rendered.units {
+                let Some(spec) = unit
+                    .spec
+                    .as_ref()
+                    .filter(|spec| spec.get("enabled").and_then(Value::as_bool) != Some(false))
+                else {
+                    continue;
+                };
+                if unit.selected
+                    && self
+                        .context
+                        .drivers
+                        .get(&unit.envelope.api_version, &unit.envelope.kind)
+                        .is_some_and(|driver| driver.capabilities(spec).requires_committed_source)
+                {
+                    errors.push(source_unavailable(&format!(
+                        "unit {name} requires committed source; commit the source and reconcile without --worktree"
+                    )));
+                }
+            }
+        }
         for name in self.request.approvals.units.keys() {
             if !desired.units.contains_key(name)
                 && !desired.held.contains_key(name)
@@ -867,6 +966,7 @@ impl<'r, 'a> Session<'r, 'a> {
                     &mut spec,
                     &prepared.source_commit,
                     &prepared.rendered.project_dir,
+                    &prepared.rendered.repositories,
                 ) {
                     Ok(keyed) => {
                         unit.attestations = keyed.attestations;
@@ -904,6 +1004,7 @@ impl<'r, 'a> Session<'r, 'a> {
 
     /// Pin the unit's Git source fields in `spec`, root its other local path
     /// fields at the worktree, check them out, and compute its execution key.
+    #[allow(clippy::too_many_lines)] // One resolution owns its source checks and execution-key inputs.
     fn key(
         &self,
         name: &UnitName,
@@ -911,6 +1012,7 @@ impl<'r, 'a> Session<'r, 'a> {
         spec: &mut Value,
         source_commit: &CommitId,
         project_dir: &str,
+        repositories: &BTreeMap<String, String>,
     ) -> Result<Keyed, Finding> {
         let driver = self
             .context
@@ -931,19 +1033,23 @@ impl<'r, 'a> Session<'r, 'a> {
             )
         };
         let fields = driver.source_fields(spec);
+        crate::rules::sources::resolve_repository_refs(spec, &fields, repositories).map_err(invalid)?;
         let locks = source_revisions(spec, &fields).map_err(invalid)?;
-        let mut revisions = BTreeMap::new();
-        for lock in &locks {
-            if let Some(commit) = &lock.commit {
-                self.check_pin(commit, &lock.revision)?;
-            } else {
-                let commit = self.resolve_revision(&lock.revision)?;
-                revisions.insert((lock.repository.clone(), lock.revision.clone()), commit);
-            }
-        }
+        let revisions = self.resolve_source_locks(&locks)?;
         pin_source_fields(spec, &fields, project_dir, source_commit, &revisions).map_err(invalid)?;
-        root_local_paths(spec, &driver.local_path_fields(spec), project_dir).map_err(invalid)?;
+        let primary_remote = fields
+            .first()
+            .and_then(|field| crate::rules::sources::git_source(spec, field).ok().flatten())
+            .is_some_and(|source| source.is_remote());
+        root_local_paths(
+            spec,
+            &driver.local_path_fields(spec),
+            if primary_remote { "/" } else { project_dir },
+        )
+        .map_err(invalid)?;
         let commit = effective_commit(spec, &fields, source_commit).map_err(invalid)?;
+        crate::shell::sources::validate_local_inputs(self.context.sources, driver, spec, source_commit)
+            .map_err(invalid)?;
 
         let cached = self
             .keys
@@ -955,15 +1061,32 @@ impl<'r, 'a> Session<'r, 'a> {
             inputs
         } else {
             let worktree = self.resolution_worktree(&commit)?;
+            let source_roots = crate::shell::sources::prepare_source_roots(
+                self.context.sources,
+                driver,
+                spec,
+                source_commit,
+                project_dir,
+                &self.directory.join(format!("key-sources-{name}")),
+                Some((&worktree, &commit)),
+            )
+            .map_err(invalid)?;
             let now = self.base().clock.now();
+            let deadline = resolution_deadline(&self.base().settings, now, self.lease_deadline.get());
+            let tools = crate::shell::tools::DeadlineRunner {
+                tools: self.context.tools,
+                clock: self.base().clock,
+                deadline,
+            };
             let context = ResolutionContext {
+                source_roots,
                 environment: self.environment().clone(),
                 project_dir: project_path(&worktree, project_dir),
                 worktree,
                 env: admitted_env(self.context.process_env, &unit.spec),
-                deadline: resolution_deadline(&self.base().settings, now, self.lease_deadline.get()),
+                deadline,
                 now,
-                tools: self.context.tools,
+                tools: &tools,
                 cache_dir: self.context.cache_dir(),
             };
             let inputs = driver.execution_key_inputs(&context, spec).map_err(|error| {
@@ -1074,8 +1197,12 @@ pub(crate) fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value)
 /// Resolve explicit credentials for a driver call, never for fingerprinting.
 /// A missing admitted variable fails before tools start; error messages name
 /// keys only, never values or provider error payloads.
-pub(crate) fn execution_env(context: &RunContext<'_>, spec: &Value) -> Result<BTreeMap<String, String>, String> {
-    let mut env = admitted_env(context.process_env, spec);
+pub fn execution_environment(
+    process_env: &BTreeMap<String, String>,
+    provider: Option<&dyn nyl_core::orchestration::ports::SecretProvider>,
+    spec: &Value,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut env = admitted_env(process_env, spec);
     for name in spec
         .pointer("/env/passthrough")
         .and_then(Value::as_array)
@@ -1083,7 +1210,7 @@ pub(crate) fn execution_env(context: &RunContext<'_>, spec: &Value) -> Result<BT
         .flatten()
         .filter_map(Value::as_str)
     {
-        if !context.process_env.contains_key(name) {
+        if !process_env.contains_key(name) {
             return Err(format!("credentials: admitted variable {name:?} is missing"));
         }
     }
@@ -1092,8 +1219,7 @@ pub(crate) fn execution_env(context: &RunContext<'_>, spec: &Value) -> Result<BT
             let key = key
                 .as_str()
                 .ok_or_else(|| format!("credentials: invalid secret key for {name:?}"))?;
-            let value = context
-                .secrets
+            let value = provider
                 .and_then(|provider| provider.get(key).ok())
                 .ok_or_else(|| format!("credentials: secret {key:?} for {name:?} is unavailable"))?;
             env.insert(
@@ -1108,6 +1234,39 @@ pub(crate) fn execution_env(context: &RunContext<'_>, spec: &Value) -> Result<BT
     Ok(env)
 }
 
+/// Resolve common and driver-declared credentials without interpreting private spec fields.
+#[allow(clippy::type_complexity)] // Environment values and driver provider-key values have distinct consumers.
+pub fn driver_credentials(
+    process_env: &BTreeMap<String, String>,
+    provider: Option<&dyn nyl_core::orchestration::ports::SecretProvider>,
+    driver: &dyn Driver,
+    spec: &Value,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String> {
+    let mut env = driver.credential_environment(spec, process_env);
+    env.extend(execution_environment(process_env, provider, spec)?);
+    let mut secrets = BTreeMap::new();
+    for key in driver.secret_refs(spec)? {
+        if secrets.contains_key(&key) {
+            continue;
+        }
+        let value = provider
+            .and_then(|provider| provider.get(&key).ok())
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| format!("credentials: driver secret {key:?} is unavailable or not a string"))?;
+        secrets.insert(key, value);
+    }
+    Ok((env, secrets))
+}
+
+#[allow(clippy::type_complexity)] // Keep common environment and driver credentials distinct.
+pub(crate) fn execution_credentials(
+    context: &RunContext<'_>,
+    driver: &dyn Driver,
+    spec: &Value,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String> {
+    driver_credentials(context.process_env, context.secrets, driver, spec)
+}
+
 /// The directory of `nyl.toml` inside a worktree, from its worktree-rooted form.
 pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
     let relative = project_dir.trim_matches('/');
@@ -1119,12 +1278,12 @@ pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
 }
 
 /// The longest timeout of `units`, which a phase running them needs.
-pub(crate) fn longest_timeout<'u>(units: impl Iterator<Item = &'u DesiredUnit>) -> Duration {
-    units.map(unit_timeout).max().unwrap_or_default()
+pub(crate) fn longest_timeout<'u>(drivers: &DriverSet, units: impl Iterator<Item = &'u DesiredUnit>) -> Duration {
+    units.map(|unit| unit_timeout(drivers, unit)).max().unwrap_or_default()
 }
 
 /// A unit's `timeout`, else its kind's default from the contract's Defaults.
-pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
+pub fn unit_timeout(drivers: &DriverSet, unit: &DesiredUnit) -> Duration {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     if let Some(timeout) = spec
         .get("timeout")
@@ -1132,11 +1291,9 @@ pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
     {
         return timeout;
     }
-    match unit.unit.kind.as_str() {
-        "Terraform" | "OpenTofu" | "OciImage" => Duration::from_mins(60),
-        "KubernetesPublication" => Duration::from_mins(10),
-        _ => Duration::from_mins(30),
-    }
+    drivers
+        .get(&unit.unit.api_version, &unit.unit.kind)
+        .map_or_else(|| Duration::from_mins(30), Driver::default_timeout)
 }
 
 /// The declared outputs of a unit's spec.
@@ -1237,6 +1394,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             return;
         }
     };
+    report.order_units(prepared.order.iter().cloned());
     report.source_commit = Some(prepared.source_commit.clone());
     report.leaving.clone_from(&prepared.desired.leaving);
     if !report.leaving.is_empty() {
@@ -1280,7 +1438,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         attempted: &attempted,
         local: request.local.as_ref().map(|local| &local.approve),
         approvals: None,
-        observations: &snapshot.observations,
+        drift: &snapshot.drift,
         drift_repair: drift::drift_repair(&prepared.rendered.environment),
         // `nyl plan` has no `--reapply`.
         reapply: &BTreeSet::new(),
@@ -1651,18 +1809,23 @@ fn plan_unit(
     let directory = session.execution_directory(name);
     let temp_dir = directory.join("tmp");
     // Planning is sequential, so it always uses the first slot.
-    let worktree = match session.slots.checkout(context.sources, 0, commit) {
-        Ok(worktree) => worktree,
-        Err(message) => {
-            entry.plan_error = Some(message);
-            return;
-        }
-    };
+    let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+    let (worktree, source_roots) =
+        match session
+            .slots
+            .checkout_unit(context.sources, 0, commit, driver, spec, project_dir)
+        {
+            Ok(roots) => roots,
+            Err(message) => {
+                entry.plan_error = Some(message);
+                return;
+            }
+        };
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;
     }
-    let env = match execution_env(context, &unit.spec) {
+    let (env, secrets) = match execution_credentials(context, driver, &unit.spec) {
         Ok(env) => env,
         Err(message) => {
             entry.plan_error = Some(message);
@@ -1671,7 +1834,16 @@ fn plan_unit(
         }
     };
     let now = context.base.clock.now();
+    let budget = crate::shell::tools::DeadlineRunner {
+        tools: context.tools,
+        clock: context.base.clock,
+        deadline: unit_timeout(context.drivers, unit).after(now),
+    };
     let execution = ExecutionContext {
+        secrets,
+        interactive: false,
+        artifacts: BTreeMap::new(),
+        source_roots,
         unit: UnitAddress::new(session.environment().clone(), name.clone()),
         operation: DriverOperation::Plan,
         project_dir: project_path(&worktree, project_dir),
@@ -1679,10 +1851,10 @@ fn plan_unit(
         temp_dir,
         env,
         approved_digest: None,
-        deadline: unit_timeout(unit).after(now),
+        deadline: unit_timeout(context.drivers, unit).after(now),
         now,
         observed,
-        tools: context.tools,
+        tools: &budget,
         commit_identity: context.commit_identity,
         cache_dir: session.context.cache_dir(),
         teardown_wait: None,
@@ -1798,7 +1970,9 @@ fn adopt_tombstones(
             observed.insert(
                 name.clone(),
                 ObservedUnit {
-                    api_version: StateV1,
+                    api_version: nyl_core::orchestration::state::StateV1,
+                    operator_modified: None,
+                    retry: None,
                     kind: nyl_core::orchestration::state::ObservedUnitKind,
                     unit: unit.unit.clone(),
                     receipt: Some(receipt),
@@ -2100,6 +2274,25 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let source_commit = prepared.source_commit.clone();
         self.report.source_commit = Some(source_commit.clone());
         self.record.source_commit = Some(source_commit.clone());
+        if let Some(snapshot) = &request.worktree_source {
+            let storage = if request.local.is_some() {
+                "this clone's local state history"
+            } else {
+                "the configured state repository"
+            };
+            self.report.warnings.push(
+                Finding::new(
+                    Code::SourceWorktree,
+                    format!("running immutable worktree snapshot {} based on {}; Git-visible working files are retained in {storage}", snapshot.commit, snapshot.base),
+                    "commit source changes and reconcile without --worktree for committed-source evidence",
+                )
+                .with_title("Running a worktree snapshot")
+                .with_detail("Snapshot", snapshot.commit.to_string())
+                .with_detail("Base", snapshot.base.to_string())
+                .with_detail("Storage", storage)
+                .with_action("Action", "Commit source changes and reconcile without --worktree for committed-source evidence."),
+            );
+        }
         self.report.leaving.clone_from(&prepared.desired.leaving);
         if !self.report.leaving.is_empty() {
             let warning = leaving_warning(&environment, &self.report.leaving);
@@ -2248,7 +2441,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
-                observations: &snapshot.observations,
+                drift: &snapshot.drift,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
             };
@@ -2291,7 +2484,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     break;
                 }
                 let now = context.base.clock.now();
-                let longest = longest_timeout(batch.iter().map(|unit| &resolved.units[unit]));
+                let longest = longest_timeout(context.drivers, batch.iter().map(|unit| &resolved.units[unit]));
                 // Units whose uid this run generated go on the run ref before
                 // they start, so a run taking over adopts them.
                 let new: Vec<DesiredUnit> = batch
@@ -2310,6 +2503,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
                 created.extend(new.into_iter().map(|unit| unit.unit.name));
                 let approvals = local_approvals(session, &resolved, &batch);
+                self.report.order_units(batch.iter().cloned());
                 let results = execute_batch(
                     session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, snapshot, &approvals,
                 );
@@ -2426,7 +2620,19 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 .units
                 .get(&recover.unit)
                 .or_else(|| taking.unresolved.get(&recover.unit));
-            match super::recover::after_import(&environment, recover, desired, &mut observed, &mut artifacts, &runs) {
+            match super::recover::after_import(
+                &environment,
+                recover,
+                desired,
+                &mut observed,
+                &mut artifacts,
+                &runs,
+                &nyl_core::orchestration::state::Request {
+                    by: context.base.requested_by.clone(),
+                    at: context.base.clock.now(),
+                    reason: request.reason.clone(),
+                },
+            ) {
                 Ok(entry) => recover_entry = Some((recover.unit.clone(), entry)),
                 Err(finding) => {
                     self.report.errors.push(finding);
@@ -2509,7 +2715,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .local
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
-                observations: &snapshot.observations,
+                drift: &snapshot.drift,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
@@ -2528,8 +2734,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             entry.receipt = Some(receipt_state(Some(unit), current));
             entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
             entry.blocked_by = blocked_by(unit);
+            entry.receipt_nyl_version =
+                crate::rules::unit_state::receipt_nyl_version(unit, current, &context.base.version);
             if let Some(execution) = executions.get(name) {
                 entry.result = Some(execution.result.clone());
+                entry.execution_reason = Some(execution.reason);
                 entry.change_digest.clone_from(&execution.change_digest);
                 entry.approval.clone_from(&execution.approval);
                 entry.message.clone_from(&execution.message);
@@ -2584,6 +2793,13 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 self.report.units.insert(name, entry);
             }
         }
+        for (name, entry) in &mut self.report.units {
+            if matches!(entry.result, Some(UnitResult::Held { .. })) || entry.state == Some(UnitState::Held) {
+                entry.receipt_nyl_version = life.desired.get(name).and_then(|unit| {
+                    crate::rules::unit_state::receipt_nyl_version(unit, observed.get(name), &context.base.version)
+                });
+            }
+        }
         if let Some(stopped) = &life.stopped {
             self.report.warnings.push(stopped_warning(&environment, stopped));
         }
@@ -2618,6 +2834,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
+        self.report.order_units(
+            prepared
+                .order
+                .iter()
+                .filter(|name| self.report.units.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         let mut summary = self.report.transition_summary(request.mode.operation());
         if let RunMode::Recover { .. } = &request.mode {
             // A recover executes nothing: its summary lists what it imported
@@ -2786,6 +3010,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
+        if let Ok(graph) = extract(&environment, &request.entry_commit, &stored) {
+            self.report.order_units(
+                crate::rules::graph::teardown_order(&graph)
+                    .into_iter()
+                    .filter(|name| self.report.units.contains_key(name))
+                    .collect::<Vec<_>>(),
+            );
+        }
         let mut summary = self.report.transition_summary(request.mode.operation());
         life.details.insert_into(&mut summary.details);
         self.commit(snapshot, &leftovers, &observed, changes, summary, None)
@@ -2864,7 +3096,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     }
 
     /// The observed side of the transition: changed and removed observed
-    /// documents, artifact sets, and the observations and attestations of
+    /// documents, artifact sets, and the drift records and attestations of
     /// units whose receipt was replaced or whose state was removed.
     fn observed_changes(
         snapshot: &EnvironmentSnapshot,
@@ -2888,13 +3120,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.artifacts.insert(name.clone(), after.cloned());
             }
         }
-        // A new receipt replaces the one a drift observation was about.
-        changes
-            .observations
-            .extend(drift::observation_changes(snapshot, observed));
+        // A new receipt replaces the one a drift record was about.
+        changes.drift.extend(drift::drift_changes(snapshot, observed));
         for name in &life.cleared {
-            if snapshot.observations.contains_key(name) {
-                changes.observations.insert(name.clone(), None);
+            if snapshot.drift.contains_key(name) {
+                changes.drift.insert(name.clone(), None);
             }
             if snapshot.attestations.contains_key(name) {
                 changes.attestations.insert(name.clone(), None);
@@ -2931,6 +3161,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
         if let Some(revision) = &request.source_override {
             summary.details.insert("sourceOverride".to_owned(), json!(revision));
+        }
+        if let Some(snapshot) = &request.worktree_source {
+            summary.details.insert(
+                "worktreeSource".to_owned(),
+                json!({"base": snapshot.base, "commit": snapshot.commit, "revision": snapshot.revision}),
+            );
         }
         let trailers = Trailers {
             source_commit,
@@ -3434,6 +3670,54 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_timeout_uses_the_registered_driver_and_explicit_override() {
+        let mut drivers = DriverSet::new();
+        drivers.register(std::sync::Arc::new(crate::rules::fixtures::TestDriver {
+            kind: "OtherUnit",
+        }));
+        let mut unit = crate::rules::fixtures::desired("service", "OtherUnit", json!({}), "key");
+        assert_eq!(unit_timeout(&drivers, &unit), Duration::from_mins(17));
+        unit.resolved_spec = Some(json!({"timeout":"9s"}));
+        assert_eq!(unit_timeout(&drivers, &unit), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn test_driver_credentials_admit_only_declared_inputs_and_hide_provider_errors() {
+        struct Provider;
+        impl nyl_core::orchestration::ports::SecretProvider for Provider {
+            fn get(&self, key: &str) -> Result<Value, String> {
+                if key == "token" {
+                    Ok(json!("secret-value"))
+                } else {
+                    Err("private provider payload".to_owned())
+                }
+            }
+        }
+        let driver = crate::rules::fixtures::TestDriver { kind: "OpaqueUnit" };
+        let process = BTreeMap::from([
+            ("EXPLICIT".to_owned(), "location".to_owned()),
+            ("UNDECLARED".to_owned(), "hidden".to_owned()),
+        ]);
+        let spec = json!({"secretRefs":["token"],"credentialVariable":"EXPLICIT"});
+        let (env, secrets) = driver_credentials(&process, Some(&Provider), &driver, &spec).unwrap();
+        assert_eq!(env, BTreeMap::from([("EXPLICIT".to_owned(), "location".to_owned())]));
+        assert_eq!(
+            secrets,
+            BTreeMap::from([("token".to_owned(), "secret-value".to_owned())])
+        );
+        let mut explicit = spec.clone();
+        explicit["env"] = json!({"secrets":{"EXPLICIT":"token"}});
+        let (env, _) = driver_credentials(&process, Some(&Provider), &driver, &explicit).unwrap();
+        assert_eq!(env["EXPLICIT"], "secret-value");
+        let error =
+            driver_credentials(&process, Some(&Provider), &driver, &json!({"secretRefs":["missing"]})).unwrap_err();
+        assert_eq!(
+            error,
+            "credentials: driver secret \"missing\" is unavailable or not a string"
+        );
+    }
 
     fn environment(spec: &Value) -> Environment {
         serde_json::from_value(json!({

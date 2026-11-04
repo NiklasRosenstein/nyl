@@ -5,8 +5,10 @@ use kube::Client;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::{
-    cli::commands::cluster::{load_cluster_kube_config, resolve_target_cluster_from_inventory, ResolvedTargetCluster},
+use crate::cli::commands::cluster::{
+    load_cluster_kube_config, resolve_target_cluster_from_inventory, ResolvedTargetCluster,
+};
+use nyl_render::{
     config::ProjectConfig,
     gitops::{discover_gitops_inventory, resolve_deployment_target_name},
     kubernetes::{KubeRsClient, ResourceKey},
@@ -20,7 +22,7 @@ use crate::{
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct RenderOptions {
     #[command(flatten)]
-    pub validation: crate::validation::ValidationArgs,
+    pub validation: nyl_render::validation::ValidationArgs,
     /// Path to the manifest file
     #[arg(value_name = "FILE")]
     pub path: String,
@@ -149,7 +151,7 @@ pub struct RenderPreflightResult {
     pub project_config: ProjectConfig,
     pub project_root: PathBuf,
     pub manifests: Vec<serde_json::Value>,
-    pub provenance: HashMap<ResourceKey, crate::render::Provenance>,
+    pub provenance: HashMap<ResourceKey, nyl_render::render::Provenance>,
     pub release: Option<Release>,
     /// The namespace Argo CD's destination gives resources that set none.
     pub destination_namespace: Option<String>,
@@ -175,7 +177,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
     let (project_config, project_root, resolved_target, inventory) =
         if options.common.target.is_some() || target_required {
-            let inventory = discover_gitops_inventory(&current_dir, None)?;
+            let inventory = discover_gitops_inventory(&current_dir, None, crate::resource_catalogue())?;
             let target_name = resolve_deployment_target_name(&inventory, options.common.target.as_deref())?;
             let resolved_target = resolve_target_cluster_from_inventory(&inventory, &target_name)?;
             (
@@ -185,7 +187,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 Some(inventory),
             )
         } else {
-            let project_config = ProjectConfig::load_with_warning(None)?;
+            let project_config = ProjectConfig::load_with_warning(None, crate::resource_catalogue())?;
             let project_root = project_config
                 .file
                 .as_deref()
@@ -235,8 +237,8 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .as_deref()
         .and_then(Path::parent)
         .or_else(|| path.is_absolute().then(|| path.parent()).flatten());
-    let direct_inputs = crate::gitops::direct_inputs::resolve_direct_inputs(
-        &crate::gitops::direct_inputs::DirectInputContext {
+    let direct_inputs = nyl_render::gitops::direct_inputs::resolve_direct_inputs(
+        &nyl_render::gitops::direct_inputs::DirectInputContext {
             project_root: &project_root,
             project_config: &project_config,
             target: inventory
@@ -244,13 +246,13 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 .zip(resolved_target.as_ref())
                 .map(|(inventory, resolved)| (inventory, &resolved.target)),
             cache: Some(&render_cache),
-            publication_read: crate::gitops::inputs::PublicationRead::from_offline(options.offline),
+            publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(options.offline),
         },
         path,
-        &crate::gitops::direct_inputs::DirectInputSelection {
+        &nyl_render::gitops::direct_inputs::DirectInputSelection {
             application_group: options.common.application_group.clone(),
             defaults_only: options.common.defaults_only,
-            overrides: crate::gitops::direct_inputs::parse_overrides(
+            overrides: nyl_render::gitops::direct_inputs::parse_overrides(
                 options.common.inputs_file.as_deref(),
                 &options.common.inputs,
             )?,
@@ -264,7 +266,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     }
     let input_values = direct_inputs
         .as_ref()
-        .map(crate::gitops::direct_inputs::DirectInputs::values);
+        .map(nyl_render::gitops::direct_inputs::DirectInputs::values);
     let mut request = RenderRequest::new(path, provenance_root);
     request.inputs = input_values.as_ref();
     request.path_mode = RenderPathMode::AsProvided;
@@ -274,7 +276,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.strip_empty_metadata_labels_default = false;
     let rendered = session.render(request).await?;
     if let (Some(inputs), Some(release)) = (&direct_inputs, &rendered.release) {
-        crate::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
+        nyl_render::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
     }
     let mut protected = rendered.inputs.clone();
     protected.extend(project_config.file.iter().cloned());
@@ -283,21 +285,21 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     protected.extend(
         direct_inputs
             .iter()
-            .flat_map(crate::gitops::direct_inputs::DirectInputs::files),
+            .flat_map(nyl_render::gitops::direct_inputs::DirectInputs::files),
     );
     options.common.validation.validate_outputs(
         false,
         &protected,
         &[
             project_root.join(".nyl"),
-            crate::validation::store::vendor_root(&project_root, &project_config)?,
+            nyl_render::validation::store::vendor_root(&project_root, &project_config)?,
         ],
     )?;
     let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
     let release = rendered.release.clone();
     let duplicates = rendered.duplicates;
-    let workload = crate::gitops::direct::resolve_direct_workload(
-        crate::gitops::direct::DirectWorkloadRequest {
+    let workload = nyl_render::gitops::direct::resolve_direct_workload(
+        nyl_render::gitops::direct::DirectWorkloadRequest {
             target: inventory
                 .as_ref()
                 .zip(resolved_target.as_ref())
@@ -314,18 +316,18 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 || options.common.track_parent
                 || options.common.max_depth != RenderRequest::new(path, provenance_root).max_depth,
             scope: if options.common.release_only {
-                crate::gitops::direct::DirectScope::Release
+                nyl_render::gitops::direct::DirectScope::Release
             } else {
-                crate::gitops::direct::DirectScope::Target
+                nyl_render::gitops::direct::DirectScope::Target
             },
             cache: Some(&render_cache),
-            tree_options: crate::gitops::TreeRenderOptions {
+            tree_options: nyl_render::gitops::TreeRenderOptions {
                 allow_secret_inputs: options.common.allow_secret_inputs,
-                publication_read: crate::gitops::inputs::PublicationRead::from_offline(options.offline),
-                ..crate::gitops::TreeRenderOptions::default()
+                publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(options.offline),
+                ..nyl_render::gitops::TreeRenderOptions::default()
             },
         },
-        crate::gitops::direct::DirectRender {
+        nyl_render::gitops::direct::DirectRender {
             manifests: rendered.manifests,
             manifest_provenance: rendered.manifest_provenance,
             release: rendered.release,
@@ -376,7 +378,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
     if args.context.is_some() {
-        crate::util::deprecation::warn_deprecated_flag(
+        nyl_render::util::deprecation::warn_deprecated_flag(
             "nyl render --context",
             "nyl render never connects to Kubernetes; remove the flag",
         );
@@ -404,7 +406,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     }
 
     let output = prepare_manifests_for_output(&preflight.manifests, preflight.strip_empty_metadata_labels);
-    let validation = crate::validation::validate_manifest_input(
+    let validation = nyl_render::validation::validate_manifest_input(
         &args.common.validation,
         &preflight.project_config,
         &preflight.project_root,
@@ -413,7 +415,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
         args.kube_version.as_deref(),
-        crate::validation::ManifestValidationInput {
+        nyl_render::validation::ManifestValidationInput {
             manifests: &output,
             source: &args.common.path,
             provenance: &preflight.provenance,
@@ -439,7 +441,7 @@ fn output_manifests(
                 if i > 0 {
                     println!("---");
                 }
-                let yaml = crate::yaml::serialize_yaml_value(manifest).map_err(NylError::YamlEmit)?;
+                let yaml = nyl_render::yaml::serialize_yaml_value(manifest).map_err(NylError::YamlEmit)?;
                 print!("{}", yaml);
             }
         }

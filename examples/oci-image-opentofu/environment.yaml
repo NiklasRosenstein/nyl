@@ -1,0 +1,15 @@
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: local
+spec:
+  unitSelector:
+    matchLabels:
+      example: oci-image-opentofu
+  allowUnprotectedSource: true
+  state:
+    repository:
+      repoURL: file:///tmp/nyl-oci-image-opentofu/state.git
+  values:
+    # Use an absolute path that survives Nyl's disposable source checkouts.
+    statePath: /tmp/nyl-oci-image-opentofu/terraform.tfstate

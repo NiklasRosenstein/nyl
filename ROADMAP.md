@@ -3,7 +3,7 @@
 ## Purpose and use
 
 This roadmap frames Nyl's expansion from Kubernetes manifest generation and
-rendered GitOps into GitOps orchestration across infrastructure tools: container
+Kubernetes GitOps into GitOps orchestration across infrastructure tools: container
 image builds, Terraform/OpenTofu configurations, and Kubernetes manifests
 rendered from their outputs. It guides work across milestones; it is not a
 complete specification, a release schedule, or a commitment to every proposed
@@ -11,7 +11,7 @@ interface.
 
 Nyl implements the orchestration semantics natively, in Rust, as one tool with
 one state model. Every orchestration capability is additive: existing commands,
-resources, and rendered GitOps behavior keep their meaning, and a project that
+resources, and Kubernetes GitOps behavior keep their meaning, and a project that
 never declares an orchestration resource never needs to understand one.
 
 Key architectural departures require a focused second check against evidence and
@@ -23,13 +23,13 @@ working instructions.
 This file records direction. Progress, the next step, and each milestone's
 items and exit criterion are tracked in the documentation, on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/) and the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/), generated from
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/), generated from
 [`nyl/book/src/lib/roadmaps/`](nyl/book/src/lib/roadmaps/).
 
 ## Progress and next step
 
-Orchestration and the interfaces below are planned capabilities, not claims
-about Nyl's current CLI. Status, progress, and the next step are on the
+The interfaces below describe the current direction, including planned
+capabilities. Status, progress, and the next step are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/). Milestone identifiers stay
 stable for references from issues and pull requests:
 
@@ -43,7 +43,7 @@ stable for references from issues and pull requests:
 | M6 | Promotion paths |
 | M7 | Continuous operation and scope decision |
 | M8 | Provider-neutral CI execution and first GitLab adapter |
-| M9 | Domain resource collections for units and Releases |
+| M9 | Domain modeling for units and Releases |
 
 ## Product direction
 
@@ -75,18 +75,26 @@ exact values proven in one environment to the next.
 - **Pinned evidence.** Every value that reaches an effect is traceable to an
   exact source commit, state revision, or recorded unit result.
 
+Native tool policy belongs to drivers. The engine coordinates generic ownership
+claims, driver-declared defaults and source requirements, and reasoned retry
+acknowledgements. Drivers canonicalize resource identities and validate their
+own non-secret retry context; shared orchestration and state storage do not
+interpret tool names, backend details, or diagnostic messages. M4 supplies and
+exercises this boundary for image and infrastructure drivers; M5 uses the same
+contract for publication.
+
 ### Initial scope
 
 - Declared, typed Release inputs bound to static values, project files, pinned
   external Git state, or state in the target's own publication branch.
 - Units with declared inputs, public outputs, and artifact descriptors; a
   constrained command unit; container image and Terraform units; a Kubernetes
-  publication unit over the existing rendered GitOps path.
+  publication unit over the existing Kubernetes GitOps path.
 - Dependency-aware execution with typed references to recorded outputs.
 - Unit identity, execution coordination, evidence freshness, and recovery.
 - Explicit promotion paths between environments with recorded lineage.
 - Consistent local and CI commands for planning, reconciliation, inspection,
-  verification, promotion, and deletion intent.
+  drift detection, attestation, promotion, and deletion intent.
 - An opt-in CI adapter exposing named units as individual jobs from Nyl's
   dependency graph, with Nyl retaining readiness and lifecycle decisions.
 
@@ -142,6 +150,8 @@ recovery; they are not implied by graph export.
 
 ## Architectural frame
 
+Each built-in unit kind lives in one module of the `nyl-units` crate: its declaration, validation, schema descriptor, and driver, so a kind's rules are not split across crates. Resources likewise live with the layer that owns them: `nyl-core` holds the `gitops.nyl/v1` resources orchestration reads, and `nyl-render` the Kubernetes rendering and Kubernetes GitOps resources. The CLI combines the descriptors of all three into one catalogue for discovery, rendering, schema, and editor workflows; drivers own native execution and orchestration remains generic.
+
 ### Layers
 
 | Layer | Responsibility |
@@ -154,7 +164,7 @@ recovery; they are not implied by graph export.
 | Interfaces | One CLI and machine interface over the same operations and observations |
 
 Drivers are Rust implementations behind one internal trait with advertised
-capabilities (plan, reconcile, verify, inspect, teardown). The command unit is
+capabilities (plan, reconcile, detect drift, attest, inspect, teardown). The command unit is
 the extension point for tools without a dedicated driver. Every type crossing
 the trait is serializable, so plugin drivers (executables with their own unit
 API group, speaking a versioned JSON protocol) remain possible; the protocol
@@ -236,7 +246,7 @@ bindings are errors. Each binding selects exactly one source:
 | `fromFile` | Project file plus JSON Pointer | No |
 | `fromGit` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
 | `fromPublication` | State file in the target's own publication branch at the publication base commit | No |
-| `fromUnit` | Recorded public output or published artifact field of a unit in the same environment | Yes (M5) |
+| `fromUnit` | Recorded public output, observed value, or published artifact field of a unit in the same environment | Yes (M5) |
 | `fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
 
 ```yaml
@@ -341,6 +351,20 @@ Cluster.
   persisted or referenceable; undeclared outputs are ignored, and a declared
   output the native tool marks sensitive must be declared sensitive. Credentials and private keys never enter
   desired state, receipts, public artifacts, or diagnostic transcripts.
+- Observed values are values a driver reads from the system a unit manages,
+  such as a load balancer address in a published Service's status, declared
+  under `observations` and referenced with `fromUnit: {unit, observation}`.
+  Executing the unit does not produce them and they can change while its
+  execution key stays the same, so they are observations of the current
+  receipt in observed state, not receipt outputs. `reconcile` and
+  `nyl observe` re-observe them even when the unit is otherwise current, a run
+  that executed the unit may wait for them up to `observationWait`, and a
+  changed value changes the consumer's execution key: the consumer is `ready`
+  and the next reconcile executes it, without the producer. `nyl observe`
+  exists for jobs that hold the read credentials a reconcile may lack. Reading is a generic `observe` driver capability; the
+  driver decides when a value belongs to the current receipt, and owns each
+  value's `from` source. They are never sensitive, and promotion selectors do
+  not select them yet.
 - When upstream outputs are unavailable, retain the unresolved desired intent
   and resolve dependents as evidence arrives, without rereading unrelated
   mutable source. Each run is bounded to one source revision; the contract
@@ -358,6 +382,10 @@ Cluster.
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
   that requires a healthy deployment.
+- In observe mode, the publication unit's observed values read a field of a
+  resource its target renders, from the target's Cluster, once the
+  Application owning that resource runs the current publication. Reading
+  needs workload-cluster credentials that publication alone does not.
 
 **Command unit (M3).** A constrained escape hatch for tools without a driver:
 
@@ -383,8 +411,9 @@ never parsed. Only declared outputs are recorded, and outputs declared
 `sensitive` are validated but never persisted. Nyl cannot check idempotency
 for identical inputs, so `idempotent: true` is the author's claim, and an
 interrupted run is uncertain completion. An optional
-`verify` command exits with a documented clean, drift, or error status and
-records no receipt. The process starts from an empty environment plus declared
+`detectDrift` command exits with a documented clean, drift, or error status and
+records no receipt, and an optional `attest` command writes the unit's own
+attestations for `nyl attest`. The process starts from an empty environment plus declared
 runner variables and secrets from the project's secrets provider, which are
 masked in transcripts; there is no further sandbox. An interrupted command is
 re-run only when it declares `idempotent: true`, otherwise it waits for an
@@ -402,14 +431,14 @@ must be reachable from a protected ref or its lock's own branch; run source
 commits must be reachable too, unless an environment opts into unprotected
 sources.
 
-### Domain resource collections (M9, proposed)
+### Domain modeling (M9, proposed)
 
-Teams declare typed domain resources, such as AWS accounts or GitHub teams, in
+Teams declare typed resources, such as AWS accounts or GitHub teams, in
 paths they own, and explicitly registered units consume them as a tool-neutral
 bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
-the [domain resources design](design/domain-resources.md), and its slices and
+the [domain modeling design](design/domain-resources.md), and its slices and
 progress are on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 Kubernetes Releases consume collections too, without orchestration, as
 described in the [Release catalog design](design/release-catalog.md). The
@@ -476,15 +505,18 @@ spec:
 
 Evidence beyond a receipt is an **attestation**: a named pass or fail result
 about one unit's current receipt or an environment's recorded state, written by
-the unit's driver during `reconcile` or `nyl verify`, or by people and external
-systems through `nyl attest`. A KubernetesPublication in observe mode attests
-`accepted` and `healthy` from Argo CD, matching each Application's running
-revision to the publication commit that introduced it. Observations are
-recorded where the credentials exist, typically in CI, and decisions read the
-recorded evidence. Argo CD health means Kubernetes considers the resources
+the unit's driver during `reconcile` or when `nyl attest` asks it, or by people
+and external systems through `nyl attest --name … --result …`. A
+KubernetesPublication in observe mode attests `accepted` and `healthy` from
+Argo CD, matching each Application's running revision to the publication
+commit that introduced it and listing them in the attestations' details.
+Attestations are recorded where the credentials exist, typically in CI, and
+decisions read the recorded evidence. Attestations are evidence for promotion
+and dependents; drift, which `nyl detect-drift` records, is separate: it is a
+reason for the next reconcile to act, not evidence. Argo CD health means Kubernetes considers the resources
 ready, not that the application works; application-level checks are further
 attestations. The [promotion contract](design/promotion.md#health-evidence)
-defines attestations, observation, publication matching, and coverage.
+defines attestations, publication matching, and coverage.
 
 ### State, evidence, and recovery
 
@@ -492,7 +524,7 @@ defines attestations, observation, publication matching, and coverage.
 | --- | --- |
 | Authored intent | Source Git |
 | Desired units (with deletion and hold lifecycle) and promotion records | Desired-state Git ref per environment |
-| Latest receipt and condition per unit, artifacts, latest observations and attestations | Observed-state Git ref per environment |
+| Latest receipt and condition per unit, artifacts, latest drift records and attestations | Observed-state Git ref per environment |
 | Terraform resource state | Terraform/OpenTofu backend |
 | Credentials and private keys | Secret store or execution environment |
 | Render cache | Disposable local storage |
@@ -516,6 +548,15 @@ successful execution evidence, and current external observations. A matching
 receipt proves success for particular inputs; it does not prove the system is
 still healthy or free of drift. Rollback publishes a new forward desired
 revision; it never rewinds a ref or observed history.
+
+Every state identity uses its own local Git repository: direct local paths
+are opened in place, a matching source checkout can be reused, and remote
+identities use a cache repository. Online operations fetch and publish under a
+remote lease. Offline operations use the same local repository without network
+access; their receipts and checkpoints remain there, and online operations
+refuse unpublished local work until it is recovered or explicitly discarded.
+This keeps the source checkout independent from state identity and preserves
+execution evidence across interrupted runs.
 
 The lifecycle contract must address:
 
@@ -606,10 +647,35 @@ decisions about release history, pruning, and readiness.
 Preserve `nyl render`, `diff`, `apply`, `render-tree`, and `publish-tree` with their
 Kubernetes meanings. Release inputs extend them without new required flags.
 
+The pure Python `nyl` client invokes the installed CLI's single-file `render`
+entry point and inspects its emitted manifests. Rust owns configuration,
+validation, rendering, and caching; Python holds no orchestration state or
+render cache. Full-tree inspection requires a documented manifest inventory,
+because publication trees also contain ownership indexes and state files.
+
 `nyl comment upsert` publishes supplied Markdown as a sticky PR/MR comment on
 GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
 comment keys and authenticated account ownership require no orchestration state
 or Nyl project configuration.
+
+`nyl reconcile -e <environment> --worktree` runs uncommitted changes, including
+Git-visible untracked files. Nyl captures the files once so discovery, planning,
+and execution all use the same inputs. The snapshot preserves internal symlinks
+without following them; declared input paths still cannot traverse symlinks.
+The run saves its snapshot in the configured state repository before executing
+units, so another clone can recover or tear down the exact deployment. `--local`
+keeps that state in the local clone instead. Snapshot history remains available
+as long as its state history is retained; automatic cleanup is not implemented.
+
+Worktree reconciliation selects one environment. Units with explicit source pins
+keep those revisions, and Kubernetes publication requires committed source.
+
+Unit progress and labelled tool output stream on stderr. Public tool lines are
+indented; explicit output options can hide them or append masked per-unit logs
+to local files. Summaries follow dispatch
+order, with dependency order for units that did not run and consumers first for
+teardown. JSON reports retain a keyed units map and provide the summary order
+separately.
 
 Orchestration commands are top-level, because it is all GitOps. The
 [orchestration core contract](design/orchestration-core.md#commands) specifies
@@ -620,7 +686,8 @@ nyl update source-locks --check
 nyl plan -e dev
 nyl reconcile -e dev [--unit …] [--approve …] [--allow-teardown]
 nyl status -e dev
-nyl verify -e dev
+nyl detect-drift -e dev
+nyl attest -e dev
 nyl promote dev-to-staging
 nyl teardown -e dev --unit web-image [--hold]
 nyl hold -e dev --unit web-image --reason "incident 4711"
@@ -652,14 +719,14 @@ policy.
 | plan | Preview effects and unresolved inputs without executing |
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
-| verify | Observe external state and report drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
+| detect-drift | Check whether current receipts still hold and record drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
 | promote | Move a proven source commit and selected values into the target environment, or open a change for review |
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason, or import the run of a broken lease without executing |
-| attest | Record an external attestation for a unit's current receipt or an environment's state |
+| attest | Ask drivers to attest current receipts, such as Argo CD acceptance and health, or record an external attestation for a unit's current receipt or an environment's state |
 | state init / move / forget / delete | Create state, relocate it and retire the old location, drop a unit from state without touching its resources, or remove an environment's state after its units are torn down |
-| state reset / restore | Drop local transitions and follow the remote again, or restore remote state after local transitions were pushed by hand |
+| state reset / restore | Guarded discard of local receipts to follow remote state, or restore historical content in forward commits |
 | lease break | Declare a dead lease holder gone so the next run takes over at once |
 | build | Run a unit's `build` capability from the current worktree without writing state |
 
@@ -688,7 +755,7 @@ structured results.
 
 Each milestone's items and exit criterion are on the
 [Orchestration roadmap](https://niklasrosenstein.github.io/nyl/orchestration/roadmap/#milestones), with M9's slices
-on the [Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/).
+on the [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
 
 ## Open decisions
 
@@ -721,14 +788,14 @@ reasons to delay independent work.
   PromotionRecord, state selection, attestations, and observation for M5–M6
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
-- [Domain resource collections](design/domain-resources.md): the M9 proposal
+- [Domain modeling](design/domain-resources.md): the M9 proposal
   for team-owned declarations as unit inputs
 - [Release catalog](design/release-catalog.md): Releases as inventoried
   resources, label membership, and collections in rendering, part of M9
 
 - [Nyl rendering session and bundle](crates/nyl-render/src/render/session.rs)
 - [Nyl components](crates/nyl-render/src/components/mod.rs)
-- [Kubernetes GitOps resource model](crates/nyl-core/src/resources/gitops.rs)
+- [Kubernetes GitOps resource model](crates/nyl-render/src/resources/gitops.rs)
 - [Source-lock updates](nyl/src/cli/commands/source.rs)
 - [Rendered-file ownership reconciliation](crates/nyl-render/src/gitops/reconcile.rs)
 - [Rendered-tree publication](nyl/src/cli/commands/publish_tree.rs)

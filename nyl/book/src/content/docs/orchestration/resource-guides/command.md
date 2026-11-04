@@ -17,7 +17,8 @@ spec:
   values:
     bucket: {fromUnit: {unit: storage, output: bucket}}
   command: ['./run.sh']
-  verify: ['./verify.sh']
+  detectDrift: ['./drift.sh']
+  attest: ['./smoke.sh']
   fingerprint: ['./tool-versions.sh']
   workingDir: ../scripts/seed
   env:
@@ -25,6 +26,7 @@ spec:
   idempotent: true
   outputs:
     seedVersion: {type: string}
+  attestations: [{name: smoke}]
   timeout: 10m
 ```
 
@@ -33,7 +35,8 @@ spec:
 | Field | Meaning |
 | --- | --- |
 | `command` | The argument vector of the reconcile step. Required. |
-| `verify` | An argument vector that reports drift: exit 0 for clean, 2 for drift, anything else for an error. |
+| `detectDrift` | The argument vector [`nyl detect-drift`](/nyl/reference/cli/detect-drift/) runs to report drift: exit 0 for clean, 2 for drift, anything else for an unknown result. |
+| `attest` | The argument vector [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest) runs; it writes the results of the unit's own `attestations` to `NYL_ATTESTATIONS`. It needs an attestation declared without `from: external`. |
 | `teardown` | An argument vector that removes the command's effects. Without it the unit cannot tear down and defaults to `deletionPolicy: Retain`. |
 | `fingerprint` | An argument vector whose stdout enters the execution key, such as the versions of the tools the command uses. |
 | `files` | Local-path globs. The content of the files they match enters the execution key. |
@@ -67,10 +70,10 @@ A step starts from an empty environment. Nyl sets only:
 | `HOME` | A fresh, empty directory that exists only for the step. |
 | `NYL_INPUTS` | The path of a JSON file `{"values": …}` holding the resolved `values`. |
 | `NYL_OUTPUTS` | The path of an existing empty file for the step's outputs. Only `command` gets it. |
-| `NYL_ATTESTATIONS` | The path of an existing empty file for attestation results, when the unit declares attestations it produces itself. |
+| `NYL_ATTESTATIONS` | The path of an existing empty file for attestation results, when the unit declares attestations it produces itself. `detectDrift` and `fingerprint` do not get it. |
 | `NYL_UNIT` | The unit's name. A fingerprint runs before the unit's execution and does not get it. |
 | `NYL_ENVIRONMENT` | The environment's name. |
-| `NYL_OPERATION` | `reconcile`, `verify`, `teardown`, or `fingerprint`. |
+| `NYL_OPERATION` | `reconcile`, `detect-drift`, `attest`, `teardown`, or `fingerprint`. |
 
 The variables named in `env.passthrough` are copied from the runner's
 environment. A missing declared variable stops the unit before it runs. Every other variable of the process that
@@ -170,16 +173,25 @@ clears the failure or the uncertain execution, and the next reconcile runs the
 unit again. [Recovery](/nyl/orchestration/recovery/) describes conditions and
 their recovery in full.
 
-`verify` records a drift observation, never a receipt. It receives the same
-inputs and environment as `command`, without `NYL_OUTPUTS`. Under the
-default `driftRepair: converge`, drift found by `nyl verify` makes an
+`detectDrift` produces a drift record, never a receipt. It receives the same
+inputs and environment as `command`, without `NYL_OUTPUTS` and
+`NYL_ATTESTATIONS`. Under the default `driftRepair: converge`, drift found by
+`nyl detect-drift` makes an
 idempotent command execute again in the next reconcile, which lists it under
 `driftRepaired`. A command without `idempotent: true` is not safe to re-run:
-reconcile reports it `awaiting-approval` instead, and
-`nyl reconcile -e <env> --local --approve <unit>` repairs it. See
+reconcile reports it `awaiting-approval` instead. See
 [drift repair](/nyl/orchestration/resource-guides/environment/#drift-repair). `teardown`
 receives the stored `values` under `values` and the last receipt's outputs
 under `outputs` in `NYL_INPUTS`; exit 0 completes the deletion.
+
+`attest` runs when [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest)
+asks for the unit's attestations, such as a smoke test against what the
+command deployed. It writes one JSON object of `pass` or `fail` per declared
+name to `NYL_ATTESTATIONS`, such as `{"smoke": "pass"}`; a declared name it
+leaves out stays pending, and undeclared names are ignored. The `command`
+step can write the same file when the reconcile itself proves the result. An
+`attest` step that does not exit 0 makes the unit `unknown` and records
+nothing.
 
 ## See also
 

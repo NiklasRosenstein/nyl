@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [develop, 'feat/m4-*']
   push:
     branches: [develop]
     tags:
@@ -107,6 +107,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force "$env:DEV_DRIVE/tmp", "$env:DEV_DRIVE/target" | Out-Null
           New-Item -ItemType Junction -Path target -Target "$env:DEV_DRIVE/target" | Out-Null
+          $miseTemp = Join-Path $env:LOCALAPPDATA "Temp"
+          New-Item -ItemType Directory -Force $miseTemp | Out-Null
+          "NYL_MISE_TMP=$miseTemp" >> $env:GITHUB_ENV
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.98.1
@@ -121,6 +124,10 @@ jobs:
 
       - name: Install pinned Helm and kubeconform
         uses: jdx/mise-action@v3
+        # mise installs with a rename; its temporary files must share the Windows install volume.
+        env:
+          TMP: ${{ env.NYL_MISE_TMP || runner.temp }}
+          TEMP: ${{ env.NYL_MISE_TMP || runner.temp }}
         with:
           install_args: helm kubeconform
 
@@ -139,7 +146,45 @@ jobs:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: core.fsync
           GIT_CONFIG_VALUE_0: none
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --features nyl/test-clock,nyl/test-kinds
+
+  native-tools:
+    name: Native tools (M4)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.13.2
+          tofu_wrapper: false
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: Prepare Buildx and the local registry image
+        run: |
+          docker buildx use default
+          docker buildx version
+          docker pull registry:2
+
+      - name: Run required native driver and binary scenarios
+        run: |
+          cargo test -p nyl-units --features native-tests --test terraform_native_test
+          cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test
 
   build-linux-musl:
     name: Build Linux musl binaries

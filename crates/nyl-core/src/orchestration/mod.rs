@@ -5,7 +5,7 @@
 //! Contract: [Orchestration core](../../../../design/orchestration-core.md).
 //! This module holds data and trait definitions only; the rules live in
 //! `nyl-orchestration`, the Git state store in `nyl-state`, and the drivers
-//! in `nyl-drivers`.
+//! in `nyl-units`.
 
 /// `Serialize` through `Display`, `Deserialize` through `FromStr`, and the
 /// JSON Schema `$schema`, for a type that is written as one string.
@@ -42,5 +42,6 @@ pub mod driver;
 pub mod graph;
 pub mod ids;
 pub mod ports;
+pub mod progress;
 pub mod state;
 pub mod time;

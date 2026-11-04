@@ -5,7 +5,7 @@ use tracing::Span;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use tracing_indicatif::style::ProgressStyle;
 
-use crate::gitops::{ReleaseProgress, TreeRenderObserver};
+use nyl_render::gitops::{ReleaseProgress, TreeRenderObserver};
 
 /// Progress controls shared by the rendered-tree commands.
 #[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]

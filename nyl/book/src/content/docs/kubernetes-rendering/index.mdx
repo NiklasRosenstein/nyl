@@ -1,0 +1,47 @@
+---
+title: 'Kubernetes Rendering'
+description: 'Render Kubernetes manifests from Helm charts, components, and templates, and apply them directly.'
+---
+
+import LinkCards from '../../../components/LinkCards.astro';
+
+Kubernetes Rendering turns Helm charts, reusable components, and templates into
+plain Kubernetes manifests, from one configuration in Git. `nyl render`,
+`nyl diff`, and `nyl apply` share one pipeline, so a local render and a CI
+render of the same declaration take [one path](/nyl/start/introduction/#one-declaration-one-path).
+
+This is the first layer. It is the right place to start, and the right place to
+stop if Kubernetes is all you deploy. [Kubernetes GitOps](/nyl/kubernetes-gitops/)
+builds on it by publishing the rendered manifests to Git.
+
+## Concepts
+
+<LinkCards
+  items={[
+    { title: 'Rendering Pipeline', text: 'The steps that render, diff, and apply share, from loading the project to filtering the final manifests.', href: '/kubernetes-rendering/pipeline/' },
+    { title: 'Component System', text: 'Map Kubernetes-style resources to Helm charts with a predictable lookup model.', href: '/kubernetes-rendering/components/overview/' },
+    { title: 'Git Integration', text: 'How Git-backed Helm charts and publication sources resolve through a shared local cache.', href: '/kubernetes-rendering/git-integration/' },
+  ]}
+/>
+
+## Workflow
+
+<LinkCards
+  items={[
+    { title: 'CLI-First Workflows', text: 'Direct feedback from Nyl for bootstrapping, debugging, test clusters, and one-off operational checks.', href: '/kubernetes-rendering/cli-workflows/' },
+    { title: 'Manifest validation', text: 'Run configured validators against the final Kubernetes manifests.', href: '/kubernetes-rendering/validation/manifest-validation/' },
+    { title: 'Kyverno Policies', text: 'Mutate and validate resources at render time, before they reach the cluster.', href: '/kubernetes-rendering/validation/kyverno-policies/' },
+    { title: 'Renovate Integration', text: 'A reusable Renovate preset for Helm chart version bumps.', href: '/kubernetes-rendering/renovate/' },
+  ]}
+/>
+
+## Resources
+
+<LinkCards
+  mono
+  items={[
+    { title: 'HelmChart', text: 'Chart reference methods and behavior.', href: '/kubernetes-rendering/resource-guides/helm-chart/' },
+    { title: 'Component', text: 'Local resolution and lookup.', href: '/kubernetes-rendering/resource-guides/component/' },
+    { title: 'RemoteManifest', text: 'Fetching and behavior of remote manifests.', href: '/kubernetes-rendering/resource-guides/remote-manifest/' },
+  ]}
+/>

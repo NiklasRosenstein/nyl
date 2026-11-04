@@ -2,12 +2,16 @@
 title: 'Recovery'
 ---
 
+Native state repairs use [`nyl exec`](/nyl/reference/cli/exec/) while the unit
+is held. The repair is recorded before the tool starts, and the first execution
+after resume requires explicit approval of the resulting plan.
+
 Runs die: a CI job is killed, a runner loses its network, or someone cancels a
 pipeline. Orchestration never loses a result it recorded and never guesses one
 it did not. This page explains how the next run takes over from a run that
 died, what an `uncertain` unit is, and how
 [`nyl recover`](/nyl/reference/cli/recover/) and
-[`nyl verify`](/nyl/reference/cli/verify/) help an operator settle it.
+[`nyl detect-drift`](/nyl/reference/cli/detect-drift/) help an operator settle it.
 
 ## Leases, run refs, and checkpoints
 
@@ -27,7 +31,8 @@ While a run is alive, its lease and its run ref both hold the environment:
 
 ```console
 $ nyl reconcile -e dev
-error NYL-LEASE-HELD: dev is held by run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 (reconcile) by unknown@localhost, until 2026-10-25T13:19:59.431883317+00:00
+error NYL-LEASE-HELD
+  dev is held by run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 (reconcile) by unknown@localhost, until 2026-10-25T13:19:59.431883317+00:00
   fix: wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone
 ```
 
@@ -67,10 +72,11 @@ $ nyl reconcile -e dev
 UNIT      KIND     RESULT     DETAIL
 database  Command  imported
 migrate   Command  uncertain  run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
-run: 01a1732a-44de-7b8d-90ca-4602a61d3a51
-source: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
-desired: fcfbb6fb6d03c2c3a539c4ef19787d50a9614d43
-observed: e83e5e124d593a94226d7a3287df158b2c87e93f
+
+  run:      01a1732a-44de-7b8d-90ca-4602a61d3a51
+  source:   8400718ac2236aa6b71cd5a9c43d4ddd94545257
+  desired:  fcfbb6fb6d03c2c3a539c4ef19787d50a9614d43
+  observed: e83e5e124d593a94226d7a3287df158b2c87e93f
 ```
 
 Its transition commit records both lists and the break:
@@ -96,7 +102,7 @@ its kind's recovery policy:
 
 | Policy | Next run | Kinds |
 | --- | --- | --- |
-| `converge` | Executes the unit again, in the same run that marked it. The result is `recovered`. | [Command](/nyl/orchestration/resource-guides/command/) with `idempotent: true`, and the planned OpenTofu, OciImage, and KubernetesPublication kinds |
+| `converge` | Executes the unit again, in the same run that marked it. The result is `recovered`. | [Command](/nyl/orchestration/resource-guides/command/) with `idempotent: true`, OpenTofu, Terraform, and OciImage; KubernetesPublication is planned |
 | `inspect` | Asks the driver whether the effects were applied: applied records the receipt (`recovered`), not applied executes again, and unknown leaves the condition for `nyl recover` | Kinds that can observe their effects |
 | `manual` | Leaves the condition; the unit waits for `nyl recover` | Command without `idempotent: true` |
 
@@ -107,8 +113,11 @@ $ nyl status -e dev
 UNIT      KIND     STATE      RECEIPT  LAST RUN                              DETAIL
 database  Command  current    current  01a1732a-11d1-7ed6-a3cc-174dc69c7856
 migrate   Command  uncertain  none     01a1732a-11d1-7ed6-a3cc-174dc69c7856  run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
-source: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
-warning NYL-UNIT-UNCERTAIN (migrate): unit migrate is uncertain: run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
+
+  source:   8400718ac2236aa6b71cd5a9c43d4ddd94545257
+
+warning NYL-UNIT-UNCERTAIN (migrate)
+  unit migrate is uncertain: run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken
   fix: check what the execution did; a unit whose recovery policy converges runs again in the next nyl reconcile, otherwise run `nyl recover -e dev --unit migrate --retry --reason <text>` once it is safe to run it again
 ```
 
@@ -136,9 +145,10 @@ $ nyl reconcile -e dev
 UNIT      KIND     RESULT    DETAIL
 database  Command  current
 migrate   Command  executed
-run: 01a1732a-5626-7e0b-8be9-1f86f45686fb
-source: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
-observed: a86335501a1f0e3b0dd7e244d382ebd411adf6fd
+
+  run:      01a1732a-5626-7e0b-8be9-1f86f45686fb
+  source:   8400718ac2236aa6b71cd5a9c43d4ddd94545257
+  observed: a86335501a1f0e3b0dd7e244d382ebd411adf6fd
 ```
 
 `--accept <run>` adopts what a run checkpointed for the unit, its receipt,
@@ -196,7 +206,9 @@ gone:
 $ nyl lease break -e dev --reason "runner was killed"
 lease-break dev: done
   broken: run 01a17a9c-0455-77cd-a40d-42e3b92482da
-warning NYL-LEASE-HELD: the lease of run 01a17a9c-0455-77cd-a40d-42e3b92482da by unknown@localhost was broken; if that run is still alive it may still cause effects, but it can no longer write state
+
+warning NYL-LEASE-HELD
+  the lease of run 01a17a9c-0455-77cd-a40d-42e3b92482da by unknown@localhost was broken; if that run is still alive it may still cause effects, but it can no longer write state
   fix: make sure the runner is gone; units it was executing become uncertain at the next run
 ```
 
@@ -206,14 +218,16 @@ transition commit is pushed together with a check of the holder's own lease.
 The dead run's effects must be recorded before anything else writes state.
 So only an operation that imports the broken run takes the broken lease
 over: `nyl reconcile`, `nyl teardown`, or `nyl recover -e <env>`. Every other
-command that writes state, `nyl verify`, `nyl hold`, and the `nyl state`
+command that writes state, `nyl detect-drift`, `nyl attest`, `nyl hold`, and the `nyl state`
 commands included, exits 2 with `NYL-LEASE-BROKEN`, or waits under
 `--wait-lease`:
 
 ```console
 $ nyl state forget -e dev --unit migrate
 state-forget dev: refused
-error NYL-LEASE-BROKEN: the lease of dev was broken and its run 01a17a9c-0455-77cd-a40d-42e3b92482da has not been imported yet
+
+error NYL-LEASE-BROKEN
+  the lease of dev was broken and its run 01a17a9c-0455-77cd-a40d-42e3b92482da has not been imported yet
   fix: run `nyl recover -e dev` to import it (a `nyl reconcile` or `nyl teardown` of dev imports it too), then run this command again
 ```
 
@@ -241,25 +255,24 @@ its transition commit lands, such as a reconcile that fails during
 resolution or is cancelled, puts the broken lease back when it releases, so
 the break stays in effect until an import is committed.
 
-When the state cannot be imported into, because `state.yaml` is missing
-after a broken `nyl state init`, the state moved away, or a remote tip is a
-`Nyl-Local` commit, `nyl recover -e <env>` still takes the broken lease over
-and releases it, so `nyl state init`, `nyl state move`, or `nyl state
-restore` can repair the state. See [`nyl recover`](/nyl/reference/cli/recover/#importing-a-broken-run).
+When state cannot be imported because it is missing or moved, `nyl recover`
+takes over and releases the broken lease so the state can be repaired. See
+[`nyl recover`](/nyl/reference/cli/recover/#importing-a-broken-run).
 
-## Verifying receipts
+## Detecting drift
 
-[`nyl verify -e <env>`](/nyl/reference/cli/verify/) asks each unit's driver
-whether what its current receipt describes still holds, without executing
-anything. It records the latest drift observation, a health observation when
-the driver reports one, and the attestations the driver reports, in one
-observed commit, and writes nothing when nothing changed. It never changes a
-receipt or a condition; `verify` exits 3 on drift so that a pipeline can
-alert on it.
+[`nyl detect-drift -e <env>`](/nyl/reference/cli/detect-drift/) asks each
+unit's driver whether what its current receipt describes still holds, without
+executing anything. It records each unit's drift record in one observed
+commit, and writes nothing when nothing changed. It never changes a receipt
+or a condition; `detect-drift` exits 3 on drift so that a pipeline can alert
+on it. Attestations, the evidence that dependents and promotion require, are
+separate: [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest)
+records them.
 
 ## Repairing drift
 
-A unit whose latest drift observation is `drifted` is `drifted` in
+A unit whose latest drift record is `drifted` is `drifted` in
 [`nyl status`](/nyl/reference/cli/status/), which exits 2 for it, and
 [`nyl plan`](/nyl/reference/cli/plan/) lists it as a unit that would execute:
 like a changed unit, it is work for the next reconcile.
@@ -267,8 +280,8 @@ like a changed unit, it is work for the next reconcile.
 - With the Environment's `driftRepair: converge`, the default, the next
   `nyl reconcile` executes every drifted unit whose recovery policy is
   `converge` again, and its transition commit lists it under `driftRepaired`.
-  The new receipt removes the drift observation in the same commit, so the
-  unit is not repaired again until `verify` finds new drift.
+  The new receipt removes the drift record in the same commit, so the
+  unit is not repaired again until `detect-drift` finds new drift.
 - A drifted unit that is not safe to re-run is reported `awaiting-approval`
   (exit 2) while the rest of the run continues. A matching
   `--approve <unit>` executes it and records the approval's identity.
@@ -279,22 +292,22 @@ like a changed unit, it is work for the next reconcile.
   records who asked and why under `reapplied`. A named unit that is not safe
   to re-run follows the approval rule above.
 
-`nyl verify`'s `NYL-VERIFY-DRIFT` warning says for each unit what the next
+`nyl detect-drift`'s `NYL-DRIFT-DETECTED` warning says for each unit what the next
 reconcile does with it.
 
-## Recovery next to local runs
+## Recovery with local state
 
-A [`--local` run](/nyl/orchestration/environments-and-state/#local-runs)
-never takes over remote runs: while remote state holds dead runs, it exits 1
-with `NYL-LOCAL-RUN-LEFTOVERS`, and a remote `nyl reconcile` or `nyl recover
--e <env>` takes them over first. Under the remote lease, a `--local` run also
-refuses a broken remote lease with `NYL-LEASE-BROKEN` (exit 2), even when the
-broken holder left no run ref, because only an import records the break. A `--local` run executes a unit whose recovery policy is not
-`converge` only when named with `--approve <unit>`.
+`--local` uses the configured local repository without a remote lease. Local
+receipts and checkpoints remain available there for recovery. Online commands
+refuse to overwrite unpublished local work.
 
 ## See also
 
 - [Runs](/nyl/orchestration/runs/)
 - [Environments and state](/nyl/orchestration/environments-and-state/)
 - [Git storage](/nyl/reference/git-storage/)
-- [`nyl reconcile`](/nyl/reference/cli/reconcile/), [`nyl recover`](/nyl/reference/cli/recover/), [`nyl verify`](/nyl/reference/cli/verify/), [`nyl status`](/nyl/reference/cli/status/)
+- [`nyl reconcile`](/nyl/reference/cli/reconcile/), [`nyl recover`](/nyl/reference/cli/recover/), [`nyl detect-drift`](/nyl/reference/cli/detect-drift/), [`nyl status`](/nyl/reference/cli/status/)
+
+When a held-unit `nyl exec` command cannot start, Nyl restores the unit's prior
+observed state. A command that may have started retains its operator-modified
+approval fence, including when it times out.

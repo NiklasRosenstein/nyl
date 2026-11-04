@@ -1,11 +1,12 @@
 //! Pure decisions over snapshots. Each module owns one rule of the
 //! contracts, links its section, and has its tests.
 
+pub mod checks;
 pub mod desired;
 pub mod drift;
 pub mod execution_key;
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 pub mod freshness;
 pub mod graph;
 pub mod hold;
@@ -23,7 +24,6 @@ pub mod teardown_readiness;
 pub mod teardown_wait;
 pub mod transitions;
 pub mod unit_state;
-pub mod verification;
 
 pub mod multi_environment;
 

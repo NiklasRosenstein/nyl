@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { createMarkdownProcessor } from '@astrojs/markdown-remark';
-import { resources, resourceGroups, resourceSections, resourceSidebar, resourceUsage, summary } from '../src/lib/resources.mjs';
+import { resources, resourceGroups, resourceSections, resourceSidebar, resourceUsage, summary, guideRoute } from '../src/lib/resources.mjs';
 import { fieldAnchor, resourceMarkdown, schemaReference } from '../src/lib/schema-reference.mjs';
 
 import { createResourceMarkdownProcessor } from '../src/lib/resource-markdown.mjs';
@@ -16,7 +16,7 @@ test('every resource has an accurate, documented schema and valid example', () =
   for (const resource of resources) {
     const schema = schemaFor(resource);
     assert.ok(summary(schema).length > 20, resource.name);
-    assert.deepEqual(resourceUsage(schema).map(({ label }) => label), ['When needed', 'If omitted']);
+    assert.deepEqual(resourceUsage(schema).map(({ label }) => label), resource.apiVersion.startsWith('units.') ? [] : ['When needed', 'If omitted']);
     assert.equal(schema.properties.apiVersion.const, resource.apiVersion);
     assert.ok(schema.examples.length, resource.name);
     const validate = ajv.compile(schema);
@@ -73,6 +73,9 @@ test('mutually exclusive fields read as labelled variants rather than a blanket 
 test('catalog and sidebar cover the same version-qualified identities', () => {
   assert.equal(resourceGroups().flatMap((group) => group.resources).length, resources.length);
   assert.equal(new Set(resources.map((resource) => resource.route)).size, resources.length);
+  for (const resource of resources.filter(({ name }) => ['Terraform', 'OpenTofu'].includes(name))) {
+    assert.equal(guideRoute(resource), '/orchestration/resource-guides/terraform/');
+  }
   const sidebar = resourceSidebar();
   assert.deepEqual(sidebar.map(({ label }) => label), resourceSections.map(({ label }) => label));
   for (const [index, group] of sidebar.entries()) {

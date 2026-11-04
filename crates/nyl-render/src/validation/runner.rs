@@ -384,7 +384,7 @@ pub async fn validate_manifest_input(
         return Ok(());
     }
     let mut partition = if let Some(cluster) = cluster {
-        let inventory = crate::gitops::discover_gitops_inventory(project, None)?;
+        let inventory = crate::gitops::discover_gitops_inventory(project, None, config.resource_catalogue.clone())?;
         partition_for(&inventory, resolve_cluster_contract(&inventory, cluster)?)?
     } else {
         ValidationPartition {
@@ -1025,7 +1025,8 @@ mod tests {
         let directory = TempDir::new().unwrap();
         std::fs::write(directory.path().join("nyl.toml"),
             "[validation]\nenabled=true\n[validation.kubeconform]\nbuiltin_schemas=\"vendor-used\"\nschema_locations=['schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json']\n").unwrap();
-        let config = ProjectConfig::load_from_dir(None, Some(directory.path())).unwrap();
+        let config =
+            ProjectConfig::load_from_dir(None, Some(directory.path()), crate::config::test_catalogue()).unwrap();
         let definitions = schemas::extract_crds(&[crd("integer")]).unwrap();
         let schema = &definitions["widgets.example.com"].versions["v1"].strict;
         store::atomic_write(
@@ -1787,7 +1788,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         for timeout in [false, true] {
             let (directory, mut config, first) = fixture();
-            config.config.validation.kubeconform.as_mut().unwrap().timeout_seconds = 1;
+            config.config.validation.kubeconform.as_mut().unwrap().timeout_seconds = 10;
             let second = ValidationPartition {
                 destination: "second".into(),
                 version: first.version.clone(),

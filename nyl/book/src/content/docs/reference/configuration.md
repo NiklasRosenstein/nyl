@@ -23,6 +23,10 @@ example a local ApplicationGroup `spec.source.path`:
   `/applications/web`.
 - A path must stay inside the worktree and must not traverse a symbolic link.
 
+Cluster and DeploymentTarget [`spec.valuesFrom[].file`](/nyl/kubernetes-gitops/targets-and-clusters/#file-backed-values)
+paths use the resource's source directory as their relative base. Their `/`
+form uses the same Git worktree root.
+
 The two forms name the same directory only for one `nyl.toml` location, such as
 `nyl/nyl.toml` for the examples above. Relative paths move with `nyl.toml`:
 use them for Releases kept together with the configuration. Rooted paths do
@@ -116,7 +120,7 @@ share one lock entry and one blob. See [`nyl vendor`](/nyl/reference/cli/vendor/
 for snapshot maintenance.
 
 Deployment values, Kubernetes capabilities, and kube contexts live in
-Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/rendered-gitops/resources/),
+Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/kubernetes-gitops/resources/),
 not in `nyl.toml`.
 
 ## Git credentials
@@ -200,3 +204,21 @@ The published project schema is available at
 arguments that return CI approvers as JSON. It runs before unit effects, with
 a 30-second timeout. See [Approvals](/nyl/orchestration/runs/#approvals) for
 its context variables, response format, identity precedence, and GitHub lookup.
+
+## Native unit tool versions
+
+Set a default exact version per native infrastructure kind:
+
+```toml
+[units.OpenTofu]
+version = "1.13.2"
+
+[units.Terraform]
+version = "1.9.8"
+```
+
+A unit's `spec.version` overrides its kind's project default. The selected
+version enters its execution key, and a different installed binary fails before
+native effects. Without a version, the installed tool runs and its version is
+recorded in the receipt without triggering execution when the binary changes.
+Nyl never downloads tools.

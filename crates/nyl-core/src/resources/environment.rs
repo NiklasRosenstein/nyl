@@ -38,7 +38,7 @@ pub const KIND_ENVIRONMENT_GROUP: &str = "EnvironmentGroup";
 /// No orchestration happens; rendering and publication work as before.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Environment))]
+#[schemars(example = super::schema::environment_example())]
 pub struct Environment {
     /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
@@ -192,7 +192,7 @@ fn environment_source_schema(schema: &mut schemars::Schema) {
 /// Each Environment carries all of its own configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::EnvironmentGroup))]
+#[schemars(example = super::schema::environment_group_example())]
 pub struct EnvironmentGroup {
     /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
@@ -314,7 +314,7 @@ impl EnvironmentSource {
             )));
         }
         if git.is_remote() {
-            validate_repository_choice(git.repository_ref.as_ref(), git.repository.as_ref(), field)?;
+            git.validate_repository(field)?;
         }
         let revision = git
             .revision

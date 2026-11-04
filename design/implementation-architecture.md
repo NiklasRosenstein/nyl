@@ -20,7 +20,7 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
          │                      └► nyl-collections ─► nyl-core
          ├─► nyl-state ─────────┬► nyl-core
          │                      └► nyl-git
-         ├─► nyl-drivers ─┬──────► nyl-core
+         ├─► nyl-units ───┬──────► nyl-core
          │                └──────► nyl-render ─┬► nyl-core
          │                                     ├► nyl-collections
          │                                     └► nyl-git
@@ -29,19 +29,20 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
-| `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-core` | The resources orchestration reads (GitRepository, Environment, EnvironmentGroup, the fields every unit shares), the resource catalogue machinery, state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
 | `nyl-collections` | Domain resource rules shared by rendering and orchestration: schema validation and defaulting, identity, membership, ownership claims, the reference closure, bundle assembly, transition rules ([domain resources](domain-resources.md#code-homes)) | Git, processes, network, clock, environment, and every Nyl crate except `nyl-core` |
 | `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
-| `nyl-render` | Today's Kubernetes rendering and rendered GitOps, unchanged in behavior | Orchestration crates |
+| `nyl-render` | Kubernetes rendering and Kubernetes GitOps, including their resources (Release, HelmChart, Component, RemoteManifest, Cluster, DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) and their catalogue descriptors | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
-| `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
+| `nyl-units` | The built-in unit kinds, one module each holding the kind's declaration, validation, schema descriptor, and `Driver` implementation; the driver registry and the process runner with masking; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` and `nyl-collections` |
-| `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
+| `nyl-cli` | Argument parsing, output formats, exit categories, the assembled resource catalogue, and wiring the concrete implementations into orchestration | Business rules |
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
   the binary, `cargo install --path nyl`, and the release artifacts unchanged.
-  Its library re-exports the `nyl-render` modules and `nyl_core::resources`, so
-  integration tests and benches use `nyl::…` paths.
+  Code, tests, and benches import items from the crate that owns them; no
+  crate re-exports another's modules, so moving an item updates its importers
+  in the same change.
 - No crate is published to crates.io. Nyl ships as release binaries and
   container images, so crate boundaries can move without a public library
   API to keep stable.
@@ -55,9 +56,23 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 - `nyl-orchestration` depends only on the pure crates `nyl-core` and
   `nyl-collections`, so the compiler rejects any direct Git, process, or
   cluster call from orchestration; `nyl-cli` passes in
-  the implementations from `nyl-state` and `nyl-drivers`.
+  the implementations from `nyl-state` and `nyl-units`.
 - Plugin drivers, when added, implement the same driver trait through a
-  process adapter in `nyl-drivers`.
+  process adapter in `nyl-units`.
+- A unit kind's declaration and its driver live in one module of `nyl-units`,
+  so the rules of a kind, such as which capabilities a spec enables, are not
+  split across crates. `nyl-render` never depends on `nyl-units`: the CLI
+  passes the assembled resource catalogue into discovery, rendering, editor
+  annotations, and schema export. The catalogue has no default: every
+  discovery entry point, project-configuration loader, render session, and
+  pinned-source renderer takes it as an argument, so no entry point can
+  validate against fewer resource APIs than another.
+- Each crate owns the resources of its layer and contributes their
+  descriptors to that catalogue: `nyl-core` the `gitops.nyl/v1` resources
+  orchestration reads, `nyl-render` the Kubernetes rendering and Kubernetes
+  GitOps resources, and `nyl-units` the unit kinds. `nyl-core` knows no
+  Kubernetes resource model; it keeps only the API group constants and the
+  deprecated API versions that validate every envelope.
 - `nyl-git` exists so that state pushes and `publish-tree` share one
   transport and one credential configuration without `nyl-state` depending
   on rendering.
@@ -159,7 +174,7 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Cancellation is an injected, cloneable flag (`shell::run::Cancellation`)
   that the command line's signal handler sets and tests set directly; the
   process runner shares it and forwards the signal to running tools. Only
-  `reconcile`, `verify`, and `recover` install the handler; the command line
+  `reconcile`, `detect-drift`, `attest`, and `recover` install the handler; the command line
   runs their orchestration on its own thread so the signal task stays free,
   and a second signal exits at once. Tier-1 tests cancel through the flag,
   and `orchestration_signal_test` sends SIGTERM to the real binary.
@@ -224,7 +239,7 @@ preflight separated from the state mutation by another lease acquisition.
 
 Provider adapters hold no business rules: each serializes an export plan into
 its scheduler's syntax and maps runner profiles and job observations, behind a
-trait in `nyl-core`. The GitLab adapter lives in `nyl-drivers` beside the other
+trait in `nyl-core`. The GitLab adapter lives in `nyl-units` beside the other
 effectful implementations; `nyl-cli` only wires it. GitLab and an in-memory test
 adapter share graph, admission, and result conformance fixtures, so the rules
 are proven once; future providers implement this boundary without changing

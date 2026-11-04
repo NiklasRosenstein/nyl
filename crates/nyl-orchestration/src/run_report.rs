@@ -1,4 +1,4 @@
-//! The typed report of `plan`, `reconcile`, `status`, and `verify`.
+//! The typed report of `plan`, `reconcile`, `status`, `teardown`, `detect-drift`, and `attest`.
 //!
 //! Contract: [Planning](../../../../design/orchestration-core.md#planning),
 //! [Inspection](../../../../design/orchestration-core.md#inspection) (the
@@ -13,11 +13,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::Change;
-use nyl_core::orchestration::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, RunId, UnitName};
-use nyl_core::orchestration::state::{AttestationResult, FailureCategory, Operation};
+use nyl_core::orchestration::ids::{ChangeDigest, CommitId, EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::state::{AttestationResult, Operation};
 use serde::Serialize;
 
 use crate::transition::TransitionSummary;
+use nyl_core::orchestration::progress::UnitResult;
 
 /// API version of every orchestration report.
 pub const REPORT_API_VERSION: &str = "gitops.nyl/v1";
@@ -28,8 +29,10 @@ pub enum ReportKind {
     PlanReport,
     ReconcileReport,
     StatusReport,
-    /// `nyl verify`: per unit its [`UnitVerification`].
-    VerifyReport,
+    /// `nyl detect-drift`: per unit its [`UnitCheck`].
+    DetectDriftReport,
+    /// `nyl attest`: per unit its [`UnitCheck`] with its attestations.
+    AttestReport,
     /// `nyl teardown`: per unit its [`UnitResult`], exit categories as for reconcile.
     TeardownReport,
 }
@@ -164,12 +167,24 @@ pub struct EnvironmentRunReport {
     /// The run, for reconcile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunId>,
+    /// The configured state repository identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_repository: Option<String>,
+    /// The local state repository used by this command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_local_path: Option<String>,
     /// The source commit S the units were rendered at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
+    /// Credential-free origin URL, or local checkout path when it has no origin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_repository: Option<String>,
     /// Units leaving the ownership set; never filtered by `--unit`.
     pub leaving: Vec<LeavingUnit>,
     pub units: BTreeMap<UnitName, UnitReport>,
+    /// Summary order: dispatches first, then remaining units in dependency order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unit_order: Vec<UnitName>,
     /// Changed desired units omitted by the plan’s output filter still invalidate consumer evidence.
     #[serde(skip)]
     pub(crate) unreported_changes: BTreeSet<UnitName>,
@@ -181,7 +196,7 @@ pub struct EnvironmentRunReport {
     /// the transition summary's `recovered`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recovered: Vec<UnitName>,
-    /// Units executed again because their latest drift observation was
+    /// Units executed again because their latest drift record was
     /// `drifted`: the transition summary's `driftRepaired`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub drift_repaired: Vec<UnitName>,
@@ -205,8 +220,12 @@ impl EnvironmentRunReport {
             complete: false,
             run: None,
             source_commit: None,
+            source_repository: None,
+            state_repository: None,
+            state_local_path: None,
             leaving: Vec::new(),
             units: BTreeMap::new(),
+            unit_order: Vec::new(),
             unreported_changes: BTreeSet::new(),
             imported: Vec::new(),
             recovered: Vec::new(),
@@ -215,6 +234,23 @@ impl EnvironmentRunReport {
             commits: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
+        }
+    }
+
+    /// Units in the shell's dispatch/dependency order, with a stable fallback.
+    pub fn ordered_units(&self) -> impl Iterator<Item = (&UnitName, &UnitReport)> {
+        self.unit_order
+            .iter()
+            .filter_map(|name| self.units.get_key_value(name))
+            .chain(self.units.iter().filter(|(name, _)| !self.unit_order.contains(name)))
+    }
+
+    /// Append units to the summary order once, preserving dispatch order.
+    pub fn order_units(&mut self, names: impl IntoIterator<Item = UnitName>) {
+        for name in names {
+            if !self.unit_order.contains(&name) {
+                self.unit_order.push(name);
+            }
         }
     }
 
@@ -232,6 +268,8 @@ impl EnvironmentRunReport {
     ///   awaiting approval, pending teardown, tearing down);
     /// - `complete` is true exactly when the exit is 0.
     pub fn finish(&mut self, kind: ReportKind) {
+        self.unit_order.retain(|name| self.units.contains_key(name));
+        self.order_units(self.units.keys().cloned().collect::<Vec<_>>());
         let errors = self.errors.iter().map(ExitCategory::of_finding);
         let units = self.units.values().map(|unit| unit_exit(kind, unit));
         self.exit = errors.chain(units).fold(ExitCategory::Ok, ExitCategory::most_severe);
@@ -350,7 +388,7 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 | UnitResult::TearingDown { .. },
             ) => ExitCategory::Incomplete,
         },
-        ReportKind::VerifyReport => crate::rules::verification::unit_exit(unit),
+        ReportKind::DetectDriftReport | ReportKind::AttestReport => crate::rules::checks::unit_exit(unit),
         ReportKind::StatusReport => match (unit.state, unit.condition) {
             // A held or deleting unit with a condition exits by its
             // condition, which still needs a run or `nyl recover`.
@@ -416,12 +454,21 @@ impl LeavingConsequence {
 #[serde(rename_all = "camelCase")]
 pub struct UnitReport {
     pub kind: String,
+    /// Why this invocation selected the unit for execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_reason: Option<nyl_core::orchestration::progress::ExecutionReason>,
+    /// Receipt provenance when its Nyl version differs from this invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_nyl_version: Option<String>,
     /// What a reconcile did; `None` in plan and status reports.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub result: Option<UnitResult>,
     /// The unit's state for plan and status; `None` in reconcile reports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<UnitState>,
+    /// A held unit has no managed instance (its desired document has no uid).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_instance: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ReceiptState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -439,9 +486,9 @@ pub struct UnitReport {
     /// not a stored condition, makes a plan exit 3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_error: Option<String>,
-    /// What `verify` found; `None` in other reports.
+    /// What `detect-drift` or `attest` found; `None` in other reports.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub verification: Option<UnitVerification>,
+    pub check: Option<UnitCheck>,
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -454,7 +501,7 @@ pub struct UnitReport {
     /// [Recovery](../../../../design/orchestration-core.md#recovery), holds on uncertain units.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<ConditionState>,
-    /// The latest drift observation of a unit with a current receipt
+    /// The latest drift record of a unit with a current receipt
     /// (status and `get units -e`). Contract: [Drift](../../../../design/orchestration-core.md#drift).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drift: Option<DriftAttribute>,
@@ -476,7 +523,7 @@ pub enum ConditionState {
     Failed,
 }
 
-/// A unit's latest drift observation, as status shows it.
+/// A unit's latest drift record, as status shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriftAttribute {
@@ -502,8 +549,11 @@ impl UnitReport {
     pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
+            execution_reason: None,
+            receipt_nyl_version: None,
             result: None,
             state: None,
+            no_instance: false,
             receipt: None,
             changes: None,
             change_digest: None,
@@ -511,7 +561,7 @@ impl UnitReport {
             summary: None,
             blocked_by: Vec::new(),
             plan_error: None,
-            verification: None,
+            check: None,
             message: None,
             last_run: None,
             condition: None,
@@ -529,128 +579,23 @@ impl UnitReport {
             .as_ref()
             .map(UnitResult::name)
             .or_else(|| self.state.map(UnitState::name))
-            .or_else(|| {
-                self.verification
-                    .as_ref()
-                    .map(|verification| verification.result.name())
-            })
+            .or_else(|| self.check.as_ref().map(|check| check.result.name()))
     }
 }
 
-/// What a reconcile did with a unit, as the report and the transition
-/// commit's `units:` block record it.
+/// What `detect-drift` or `attest` found for one unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "result", rename_all = "kebab-case")]
-pub enum UnitResult {
-    /// The unit already had a current receipt.
-    Current,
-    #[serde(rename_all = "camelCase")]
-    Executed {
-        execution_key: ExecutionKey,
-    },
-    /// A leftover run's checkpoint with the same execution key became the
-    /// unit's receipt (`rules::takeover`).
-    #[serde(rename_all = "camelCase")]
-    Imported {
-        execution_key: ExecutionKey,
-        run: RunId,
-    },
-    /// The unit was uncertain, and this run recovered it: executed again
-    /// under the `converge` policy, or `inspect` found its effects applied.
-    #[serde(rename_all = "camelCase")]
-    Recovered {
-        execution_key: ExecutionKey,
-    },
-    Failed {
-        category: FailureCategory,
-        retryable: bool,
-    },
-    Uncertain {
-        reason: String,
-    },
-    Blocked {
-        reason: String,
-    },
-    AwaitingApproval,
-    /// Held: the run changed nothing about it. `pending` names the source
-    /// commit whose changes the hold keeps from applying. `teardown` is set
-    /// when the unit has a pending teardown request (a `nyl teardown --unit`
-    /// of the held unit, recorded and carried out after `nyl resume`);
-    /// `recorded` when this run recorded that request, which is the whole
-    /// of a teardown of a held unit and exits 0. Contract:
-    /// [Deletion](../../../../design/orchestration-core.md#deletion), holds.
-    Held {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pending: Option<CommitId>,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        teardown: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        recorded: bool,
-    },
-    /// Current, but its latest drift observation is `drifted` and this run
-    /// did not repair it (`driftRepair: manual`, or excluded by `--unit`).
-    /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
-    Drifted,
-    /// Deleting, and its teardown has not started: it awaits
-    /// `--allow-teardown`, `--allow-dependents`, a dependent's teardown, an
-    /// approval, or a readiness override.
-    PendingTeardown {
-        reason: String,
-    },
-    /// Its teardown started and waits, such as a publication under its `teardownWait`.
-    TearingDown {
-        reason: String,
-    },
-    /// Left the ownership set with `deletionPolicy: Retain`: its files became
-    /// a `retained` tombstone; its resources stay.
-    Retained,
-    /// Its teardown completed, or its tombstone was torn down: its files were removed.
-    Removed,
-    /// Its kind cannot tear down: its resources were left in place, as
-    /// `left` describes, and its files removed (or kept, held, without an
-    /// incarnation).
-    Released {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        left: Option<String>,
-    },
-}
-
-impl UnitResult {
-    /// The result name, as `expect` keys and headlines count it.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::Executed { .. } => "executed",
-            Self::Imported { .. } => "imported",
-            Self::Recovered { .. } => "recovered",
-            Self::Failed { .. } => "failed",
-            Self::Uncertain { .. } => "uncertain",
-            Self::Blocked { .. } => "blocked",
-            Self::AwaitingApproval => "awaiting-approval",
-            Self::Held { .. } => "held",
-            Self::Drifted => "drifted",
-            Self::PendingTeardown { .. } => "pending-teardown",
-            Self::TearingDown { .. } => "tearing-down",
-            Self::Retained => "retained",
-            Self::Removed => "removed",
-            Self::Released { .. } => "released",
-        }
-    }
-}
-
-/// What `verify` found for one unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UnitVerification {
+pub struct UnitCheck {
     #[serde(flatten)]
-    pub result: VerifyResult,
-    /// The driver's attestations of the current receipt, by name.
+    pub result: CheckResult,
+    /// The driver's attestations of the current receipt, by name (`attest`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub attestations: BTreeMap<String, AttestationResult>,
 }
 
-impl From<VerifyResult> for UnitVerification {
-    /// A verdict without attestations.
-    fn from(result: VerifyResult) -> Self {
+impl From<CheckResult> for UnitCheck {
+    /// A result without attestations.
+    fn from(result: CheckResult) -> Self {
         Self {
             result,
             attestations: BTreeMap::new(),
@@ -658,29 +603,34 @@ impl From<VerifyResult> for UnitVerification {
     }
 }
 
-/// The drift verdict of one unit's verification.
+/// The result of one unit's check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "verification", rename_all = "kebab-case")]
-pub enum VerifyResult {
+#[serde(tag = "check", rename_all = "kebab-case")]
+pub enum CheckResult {
+    /// `detect-drift`: the receipt still holds.
     Clean,
+    /// `detect-drift`: the resources no longer match the receipt.
     Drifted {
         summary: String,
     },
+    /// `attest`: the driver attested the receipt; the results are the attestations.
+    Attested,
     Unknown {
         reason: String,
     },
-    /// No current receipt to verify.
+    /// No current receipt to check.
     NoReceipt,
-    /// The kind cannot verify.
+    /// The kind cannot run the check.
     Unsupported,
 }
 
-impl VerifyResult {
+impl CheckResult {
     /// The kebab-case name, as reports serialize it.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Clean => "clean",
             Self::Drifted { .. } => "drifted",
+            Self::Attested => "attested",
             Self::Unknown { .. } => "unknown",
             Self::NoReceipt => "no-receipt",
             Self::Unsupported => "unsupported",
@@ -703,7 +653,7 @@ pub enum UnitState {
     PendingTeardown,
     TearingDown,
     Retained,
-    /// A current unit whose latest drift observation is `drifted`: work for
+    /// A current unit whose latest drift record is `drifted`: work for
     /// the next reconcile (status exits 2, plan lists it as executing).
     /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
     Drifted,
@@ -752,6 +702,8 @@ pub struct BlockedBy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nyl_core::orchestration::ids::ExecutionKey;
+    use nyl_core::orchestration::state::FailureCategory;
 
     #[test]
     fn test_exit_categories_combine_by_severity_not_by_code() {

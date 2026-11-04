@@ -3,7 +3,7 @@
 //! Decisions are pure functions over snapshots; the shell in
 //! `nyl-orchestration` reads and writes only through these traits, and
 //! `nyl-cli` passes in the implementations from `nyl-state` and
-//! `nyl-drivers`. Each trait has an in-memory or fake implementation used by
+//! `nyl-units`. Each trait has an in-memory or fake implementation used by
 //! the scenario tests. See the implementation architecture's "Formats and
 //! traits" (`design/implementation-architecture.md`).
 
@@ -13,8 +13,8 @@ use serde_json::Value;
 
 use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
 use super::state::{
-    ArtifactDocument, Attestation, DesiredUnit, EnvironmentRecord, Lease, Observation, ObservationType, ObservedUnit,
-    Run, Signal, StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
+    StateLocation, StateRecord,
 };
 use super::time::{Duration, Timestamp};
 use crate::resources::environment::Environment;
@@ -125,12 +125,11 @@ pub struct EnvironmentSnapshot {
     pub observed: BTreeMap<UnitName, ObservedUnit>,
     /// Artifacts of the latest receipts, by unit and artifact name.
     pub artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
-    /// The latest observation per type, by unit
-    /// (`observed/units/<unit>/observations/<type>.yaml`), as `nyl verify`
-    /// writes them. Contract: [Commands](../../../../design/orchestration-core.md#commands).
-    pub observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    /// The latest drift detection per unit (`observed/units/<unit>/drift.yaml`),
+    /// as `nyl detect-drift` writes it. Contract: [Drift](../../../../design/orchestration-core.md#drift).
+    pub drift: BTreeMap<UnitName, DriftRecord>,
     /// Driver attestations by unit and name
-    /// (`observed/units/<unit>/attestations/<name>.yaml`).
+    /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
@@ -145,11 +144,11 @@ pub struct TransitionChanges {
     pub observed: BTreeMap<UnitName, Option<ObservedUnit>>,
     /// The complete artifact set of a unit's latest receipt; `None` removes all.
     pub artifacts: BTreeMap<UnitName, Option<BTreeMap<String, ArtifactDocument>>>,
-    /// The complete set of a unit's latest observations, one per type;
-    /// `None` removes all. Written by `nyl verify`.
-    pub observations: BTreeMap<UnitName, Option<BTreeMap<ObservationType, Observation>>>,
+    /// A unit's latest drift detection; `None` removes it. Written by
+    /// `nyl detect-drift`, and removed with a new receipt.
+    pub drift: BTreeMap<UnitName, Option<DriftRecord>>,
     /// The complete set of a unit's driver attestations by name; `None`
-    /// removes all. Written by `nyl verify`.
+    /// removes all. Written by `nyl attest`, and by reconcile with a receipt.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
     /// Remove every file of the environment's state on both refs before
     /// applying the other changes: `state.yaml`, `desired/`, and `observed/`
@@ -175,7 +174,7 @@ impl TransitionChanges {
             && self.desired.is_empty()
             && self.observed.is_empty()
             && self.artifacts.is_empty()
-            && self.observations.is_empty()
+            && self.drift.is_empty()
             && self.attestations.is_empty()
     }
 }
@@ -298,6 +297,21 @@ pub struct LocalDivergence {
 /// fenced by the run's lease, so a run whose lease was taken over can never
 /// overwrite state.
 pub trait StateStore: Send + Sync {
+    /// Prepare the backing repository for explicit state initialization, before
+    /// taking its lease. Git stores create a missing local bare repository;
+    /// stores without separately provisioned storage need no preparation.
+    /// Contract: [Initialization and moves](../../../../design/orchestration-core.md#initialization-and-moves).
+    fn prepare_init(&self, _location: &StateLocation) -> StateResult<()> {
+        Ok(())
+    }
+
+    /// Import and validate an explicitly identified worktree snapshot before a run uses it.
+    fn prepare_worktree_snapshot(&self, _location: &StateLocation, _commit: &CommitId) -> StateResult<()> {
+        Err(StateError::Unavailable(
+            "this state store cannot retain worktree snapshots".to_owned(),
+        ))
+    }
+
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 
@@ -551,6 +565,27 @@ pub fn update_lease_then_run<S: StateStore + ?Sized>(
 
 /// Every Git operation on sources that decisions depend on.
 pub trait SourceResolver: Send + Sync {
+    /// Freeze Git-visible working files without changing HEAD or the user's index.
+    /// `previous` may reuse an identical snapshot retained in state history.
+    fn snapshot_worktree(
+        &self,
+        base: &CommitId,
+        identity: &CommitIdentity,
+        now: Timestamp,
+        previous: Option<&CommitId>,
+    ) -> SourceResult<WorktreeSnapshot> {
+        let _ = (base, identity, now, previous);
+        Err(SourceError(
+            "this source resolver cannot snapshot working files".to_owned(),
+        ))
+    }
+
+    /// Whether a commit is an explicitly marked worktree snapshot.
+    fn is_worktree_snapshot(&self, commit: &CommitId) -> SourceResult<bool> {
+        let _ = commit;
+        Ok(false)
+    }
+
     /// The commit a revision names now.
     fn resolve_revision(&self, repository: &SourceRepository, revision: &str) -> SourceResult<CommitId>;
     /// The first of `refs` (names or globs) whose tip contains `commit`, or
@@ -574,8 +609,72 @@ pub trait SourceResolver: Send + Sync {
         commit: &CommitId,
         path: &std::path::Path,
     ) -> SourceResult<()>;
+    /// A checkout restricted to declared worktree-rooted paths and globs.
+    /// Adapters without sparse support preserve semantics with a full checkout.
+    fn worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &std::path::Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let _ = paths;
+        self.worktree(repository, commit, path)
+    }
+    /// Reset a private concurrency-slot checkout with the same path selection.
+    fn reset_worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &std::path::Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let _ = paths;
+        self.reset_worktree(repository, commit, path)
+    }
+    /// Ensure a declared source path can be reconstructed in a private checkout.
+    /// With `recursive`, check descendants too; otherwise check the path itself
+    /// and its ancestors. Paths may contain glob patterns.
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let _ = (repository, commit, path, recursive);
+        Ok(())
+    }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
+}
+
+/// Local source-cache refs for worktree snapshots, keyed by base commit and tree.
+/// State and run commits retain the snapshot as a parent in the configured state
+/// repository before effects start. These cache refs are not pushed there.
+/// Snapshots remain reachable while their cache refs or state history retain them;
+/// automatic snapshot garbage collection is not implemented.
+pub const WORKTREE_SNAPSHOT_PREFIX: &str = "refs/nyl-worktrees/";
+
+/// Commit trailer distinguishing snapshots from committed-source release evidence.
+pub const WORKTREE_SNAPSHOT_MARKER: &str = "Nyl-Worktree-Snapshot: true";
+
+/// Recognize snapshot provenance even after a source is checked out or fetched.
+pub fn is_worktree_snapshot_message(message: &str) -> bool {
+    message.lines().any(|line| line == WORKTREE_SNAPSHOT_MARKER)
+}
+
+/// An immutable invocation-selected source, independent of the state destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSnapshot {
+    /// The entry checkout's committed HEAD.
+    pub base: CommitId,
+    /// The immutable snapshot commit whose tree the run consumes.
+    pub commit: CommitId,
+    /// Content-addressed local ref used by source selection and persisted provenance.
+    pub revision: String,
+    /// Whether an existing snapshot with the same base and tree was reused.
+    pub reused: bool,
 }
 
 /// One unit as an environment's source renders it.
@@ -594,6 +693,8 @@ pub struct RenderedUnit {
 /// unit discovery found, selected or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedSource {
+    /// Named Git read URLs declared at this source revision.
+    pub repositories: BTreeMap<String, String>,
     pub source_commit: CommitId,
     /// Worktree-rooted directory containing `nyl.toml` at the source commit,
     /// such as `/nyl`, or `/` at the worktree root. Drivers resolve local

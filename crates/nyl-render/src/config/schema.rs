@@ -14,10 +14,17 @@ pub fn generate_project_config_schema() -> serde_json::Value {
 }
 
 /// The complete published schema set: every resource artifact from
-/// [`nyl_core::resources::schema::schema_artifacts`] plus the `nyl.toml`
-/// schema, keyed by path within the published schema directory.
-pub fn published_schema_artifacts() -> BTreeMap<String, serde_json::Value> {
-    let mut artifacts = nyl_core::resources::schema::schema_artifacts();
+/// [`nyl_core::resources::schema::schema_artifacts`], the aggregate Kubernetes
+/// GitOps resource schema, and the `nyl.toml` schema, keyed by path within the
+/// published schema directory.
+pub fn published_schema_artifacts(
+    descriptors: &[nyl_core::resources::schema::ResourceDescriptor],
+) -> BTreeMap<String, serde_json::Value> {
+    let mut artifacts = nyl_core::resources::schema::schema_artifacts(descriptors);
+    artifacts.insert(
+        "gitops-resource.schema.json".into(),
+        crate::resources::generate_gitops_aggregate_schema(),
+    );
     artifacts.insert(PROJECT_CONFIG_SCHEMA_PATH.into(), generate_project_config_schema());
     artifacts
 }
@@ -36,23 +43,17 @@ mod tests {
     }
 
     #[test]
-    fn test_published_schema_set_matches_docs_artifacts() {
-        let schema_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../nyl/book")
-            .join("public")
-            .join("reference")
-            .join("schemas");
-        let artifacts = published_schema_artifacts();
-        assert!(artifacts.contains_key(PROJECT_CONFIG_SCHEMA_PATH));
-        for (path, expected) in artifacts {
-            let published = fs::read_to_string(schema_directory.join(&path))
-                .unwrap_or_else(|error| panic!("published schema {path} must exist: {error}"));
-            let published: serde_json::Value =
-                serde_json::from_str(&published).expect("published schema file must be valid JSON");
-            assert_eq!(
-                published, expected,
-                "Published schema {path} is out of date. Regenerate with: nyl schema all --output-dir nyl/book/public/reference/schemas"
-            );
-        }
+    fn test_project_schema_matches_published_artifact() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../nyl/book/public/reference/schemas")
+            .join(PROJECT_CONFIG_SCHEMA_PATH);
+        let published = fs::read_to_string(path).expect("published project schema must exist");
+        let published: serde_json::Value =
+            serde_json::from_str(&published).expect("published schema must be valid JSON");
+        assert_eq!(
+            published,
+            generate_project_config_schema(),
+            "Regenerate with nyl schema all"
+        );
     }
 }

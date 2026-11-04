@@ -5,7 +5,7 @@ title: 'Git storage'
 Nyl keeps everything it records in Git: the configuration it renders from, the
 trees it publishes, and the state orchestration writes. This page lists every
 repository and ref involved, who writes it, and when to use which layout. The
-guides explain the concepts: [Rendered GitOps](/nyl/rendered-gitops/) for
+guides explain the concepts: [Kubernetes GitOps](/nyl/kubernetes-gitops/) for
 publication, and [Environments and state](/nyl/orchestration/environments-and-state/),
 [Runs](/nyl/orchestration/runs/), and [Recovery](/nyl/orchestration/recovery/)
 for orchestration.
@@ -16,7 +16,7 @@ for orchestration.
 | --- | --- | --- |
 | Source repository | `nyl.toml` and every resource Nyl renders: releases, targets, environments, and units | People, through commits and pull requests. Nyl reads it, and orchestration renders units from a fresh checkout of the run's source commit. |
 | Publication destinations | Rendered Kubernetes trees for Argo CD | [`nyl publish-tree`](/nyl/reference/cli/publish-tree/); from M5 (planned), KubernetesPublication units |
-| State repositories | Each environment's desired and observed state and its coordination refs | Orchestration commands such as `reconcile`, `recover`, `verify`, and `nyl state` |
+| State repositories | Each environment's desired and observed state and its coordination refs | Orchestration commands such as `reconcile`, `recover`, `detect-drift`, and `nyl state` |
 
 All three can be one repository.
 
@@ -29,7 +29,7 @@ a branch or revision, and a path prefix:
 - The tree beneath the prefix carries an ownership index, `_nyl/index.json`,
   that records which files Nyl owns. Publication removes only owned files and
   fails when an owned file was changed outside Nyl
-  ([Rendered layout](/nyl/rendered-gitops/rendered-layout/#ownership-index)).
+  ([Rendered layout](/nyl/kubernetes-gitops/rendered-layout/#ownership-index)).
 - One target owns one repository, revision, and prefix. Targets sharing a
   revision must use disjoint prefixes, which Nyl checks, including through
   URL aliases.
@@ -59,7 +59,7 @@ Nyl never force-pushes a state ref.
 
 Inside the refs, `state.yaml` records the location and its history,
 `desired/` the resolved environment and each unit's desired document, and
-`observed/` each unit's receipt, condition, artifacts, observations, and
+`observed/` each unit's receipt, condition, artifacts, drift record, and
 attestations. Each operation writes at most one commit per state ref.
 
 [`nyl state delete`](/nyl/reference/cli/state/#nyl-state-delete) keeps the
@@ -86,6 +86,16 @@ default, fast-forwarded to the remote and never pushed:
   drops local commits, and [`nyl state restore`](/nyl/reference/cli/state/#nyl-state-restore)
   repairs a remote whose tip is a `Nyl-Local` commit pushed by hand.
 
+### Worktree snapshots
+
+[`reconcile --worktree`](/nyl/orchestration/runs/#worktree-inputs) creates local
+source refs `refs/nyl-worktrees/<base>/<tree>` without changing HEAD or the
+staging index. They reuse identical snapshots. The snapshot and its source
+ancestry are retained as parents of state and pre-effect run commits, so state
+moves and fresh-clone recovery preserve the inputs. State history inspection
+stops at the snapshot boundary. With `--local`, snapshot history stays in this
+clone; otherwise it is published to the configured state repository.
+
 ## Coordination refs
 
 Refs under `coordinationRefPrefix`, in the state repository, coordinate runs.
@@ -109,7 +119,8 @@ dea88c9f5d771d6d36ce713136a4994999523ba5 commit	refs/nyl/dev/runs/01a1732a-a59c-
 $ git show refs/nyl/dev/runs/01a1732a-a59c-760b-aebe-f293aff659d9:run.yaml
 apiVersion: gitops.nyl/v1
 kind: Run
-run: 01a1732a-a59c-760b-aebe-f293aff659d9
+
+  run:      01a1732a-a59c-760b-aebe-f293aff659d9
 runner: unknown@localhost
 operation: reconcile
 sourceCommit: 829c3b4f2faa421fc9498168330f1e92df8772a5

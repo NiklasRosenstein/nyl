@@ -186,7 +186,7 @@ environment, because a different source is a rollback admission; read-only
 
 ### What admission does not touch
 
-Holds, resumes, recovery, attestations, verification, lifecycle work, and
+Holds, resumes, recovery, attestations, drift detection, lifecycle work, and
 direct local runs change unit state, not deployment intent, so they leave the
 admission unchanged; workers recheck that unit state under the lease anyway.
 `nyl state restore` rewrites desired and observed content and carries

@@ -5,13 +5,14 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use colored::Colorize;
 
-use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
-    reconcile_rendered_tree_with_options, resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache,
-    RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
+use nyl_render::gitops::discover_gitops_inventory;
+use nyl_render::gitops::{
+    compile_target_tree_cached_with_observer_and_options, reconcile_rendered_tree_with_options,
+    resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache, RenderIndex, RenderIndexPublication,
+    TreeCacheArgs, TreeRenderOptions,
 };
-use crate::resources::{DeploymentTarget, GitOpsResource, GitOpsResourceKind};
-use crate::{NylError, Result};
+use nyl_render::resources::{DeploymentTarget, GitOpsResource, GitOpsResourceKind};
+use nyl_render::{NylError, Result};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
@@ -20,7 +21,7 @@ use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct RenderTreeArgs {
     #[command(flatten)]
-    pub validation: crate::validation::ValidationArgs,
+    pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
 
@@ -61,7 +62,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     args.validation
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
     let started = Instant::now();
-    let initial = discover_gitops_inventory(&args.path, None)?;
+    let initial = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let target_name = resolve_deployment_target_name(&initial, args.target.as_deref())?;
     let target = initial
         .get(GitOpsResourceKind::DeploymentTarget, &target_name)
@@ -109,7 +110,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         &mut progress,
         TreeRenderOptions {
             allow_secret_inputs: args.allow_secret_inputs,
-            publication_read: crate::gitops::inputs::PublicationRead::from_offline(args.offline),
+            publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(args.offline),
             ..TreeRenderOptions::default()
         },
     )
@@ -117,7 +118,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     if let Some(base) = &compiled.publication_base {
         eprintln!("{}", base.describe());
     }
-    let validation = crate::validation::validate_tree(&args.validation, &inventory, &compiled).await;
+    let validation = nyl_render::validation::validate_tree(&args.validation, &inventory, &compiled).await;
     if args.check {
         validation?;
         report_checked_target(
@@ -129,12 +130,12 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         return Ok(());
     }
 
-    let carried = crate::gitops::inputs::carry_paths(&inventory, &target_name)?;
-    let crate::gitops::provenance::WorktreeSourceState {
+    let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target_name)?;
+    let nyl_render::gitops::provenance::WorktreeSourceState {
         commit: source_commit,
         dirty,
-    } = crate::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
-    let inputs = crate::gitops::provenance::hash_inputs(&inventory, &compiled)?;
+    } = nyl_render::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
+    let inputs = nyl_render::gitops::provenance::hash_inputs(&inventory, &compiled)?;
     let repository_identity = compiled
         .repository_name
         .clone()
@@ -190,7 +191,7 @@ fn report_render_result(
     report_stdout: bool,
 ) -> Result<()> {
     let target = target_name.cyan().bold();
-    let output = crate::util::path_for_display(output_root)
+    let output = nyl_render::util::path_for_display(output_root)
         .display()
         .to_string()
         .replace(std::path::MAIN_SEPARATOR, "/")

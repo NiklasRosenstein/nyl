@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use nyl::config::ProjectConfig;
+use nyl_render::config::ProjectConfig;
 use std::fs;
 use std::hint::black_box;
 use tempfile::TempDir;
@@ -33,7 +33,7 @@ helm_chart_search_paths = ["./charts", "./manifests"]
 
     c.bench_function("config_parsing_simple", |b| {
         b.iter(|| {
-            let _result: Result<nyl::config::ProjectFile, _> = toml::from_str(black_box(toml_content));
+            let _result: Result<nyl_render::config::ProjectFile, _> = toml::from_str(black_box(toml_content));
         });
     });
 }
@@ -56,7 +56,7 @@ helm_chart_search_paths = ["./charts"]
 
     c.bench_function("config_load_full", |b| {
         b.iter(|| {
-            let _result = ProjectConfig::load(Some(black_box(config_path.clone())));
+            let _result = ProjectConfig::load(Some(black_box(config_path.clone())), nyl::resource_catalogue());
         });
     });
 }

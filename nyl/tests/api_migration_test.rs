@@ -40,7 +40,7 @@ fn discovery_rejects_obsolete_envelopes_with_structurally_templated_specs() {
         ("Release", "gitops.nyl/v1", "k8s.nyl/v1"),
     ] {
         std::fs::write(project.path().join("resource.yaml"), format!("apiVersion: {api}\nkind: {kind}\nmetadata:\n  name: test\nspec:\n{{% if values.enabled %}}\n  enabled: true\n{{% endif %}}\n")).unwrap();
-        let error = nyl::gitops::discover_gitops_inventory(project.path(), None)
+        let error = nyl_render::gitops::discover_gitops_inventory(project.path(), None, nyl::resource_catalogue())
             .unwrap_err()
             .to_string();
         assert!(error.contains(expected), "{error}");
@@ -104,6 +104,20 @@ fn generated_api_error_identifies_source_parent_and_generated_resource() {
             "Resource: nyl.niklasrosenstein.github.com/v1 HelmChart default/generated",
         ))
         .stderr(predicate::str::contains("set apiVersion to \"k8s.nyl/v1\""));
+}
+
+#[test]
+fn generated_unit_in_workload_api_group_is_rejected() {
+    let project = chart_emitting_helm_chart("k8s.nyl/v1");
+    std::fs::write(
+        project.path().join("charts/wrapper/templates/chart.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: OciImage\nmetadata:\n  name: generated\n",
+    )
+    .unwrap();
+    render_chart(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("set apiVersion to \"units.gitops.nyl/v1\""));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use nyl::template::TemplateEngine;
+use nyl_render::template::TemplateEngine;
 use serde_json::json;
 use std::hint::black_box;
 
@@ -161,7 +161,7 @@ fn bench_json_serialization(c: &mut Criterion) {
 
     c.bench_function("json_to_yaml_serialization", |b| {
         b.iter(|| {
-            let yaml = nyl::yaml::serialize_yaml_document(black_box(&data)).unwrap();
+            let yaml = nyl_render::yaml::serialize_yaml_document(black_box(&data)).unwrap();
             black_box(yaml);
         });
     });

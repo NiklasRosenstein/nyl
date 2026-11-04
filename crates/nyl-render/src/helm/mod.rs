@@ -494,7 +494,8 @@ mod tests {
             let project = TempDir::new().unwrap();
             let config_path = project.path().join("nyl.toml");
             fs::write(&config_path, "[vendor]\nmode = \"preferred\"\npath = \"vendor\"\n").unwrap();
-            let config = crate::config::ProjectConfig::load(Some(config_path)).unwrap();
+            let config =
+                crate::config::ProjectConfig::load(Some(config_path), crate::config::test_catalogue()).unwrap();
             let chart = ChartRef {
                 repository: Some(format!("git+file://{}", remote.path().display())),
                 version: revision.map(str::to_owned),
@@ -1013,6 +1014,7 @@ mod tests {
         let cache_dir = TempDir::new().unwrap();
         let render_cache = RenderCache::with_root(cache_dir.path(), CacheMode::Default).unwrap();
         let config = ProjectConfig {
+            resource_catalogue: crate::config::test_catalogue(),
             file: None,
             config: ProjectFile::default(),
         };

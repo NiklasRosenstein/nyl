@@ -1,5 +1,7 @@
 use unicode_width::UnicodeWidthStr;
 
+use super::presentation::{styled, Style};
+
 /// A table cell whose rendered representation may contain zero-width styling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Cell {
@@ -39,7 +41,10 @@ pub(crate) fn render(headers: &[&str], rows: &[Vec<Cell>]) -> String {
     let mut output = String::new();
     write_line(
         &mut output,
-        headers.iter().map(|header| (*header, UnicodeWidthStr::width(*header))),
+        headers
+            .iter()
+            .map(|header| styled(header, Style::Bold))
+            .zip(headers.iter().map(|header| UnicodeWidthStr::width(*header))),
         &widths,
     );
     for row in rows {
@@ -53,9 +58,9 @@ pub(crate) fn render(headers: &[&str], rows: &[Vec<Cell>]) -> String {
     output
 }
 
-fn write_line<'a>(output: &mut String, cells: impl Iterator<Item = (&'a str, usize)>, widths: &[usize]) {
+fn write_line(output: &mut String, cells: impl Iterator<Item = (impl AsRef<str>, usize)>, widths: &[usize]) {
     for (index, ((rendered, visible_width), column_width)) in cells.zip(widths).enumerate() {
-        output.push_str(rendered);
+        output.push_str(rendered.as_ref());
         if index + 1 < widths.len() {
             output.extend(std::iter::repeat_n(' ', column_width - visible_width + 2));
         }

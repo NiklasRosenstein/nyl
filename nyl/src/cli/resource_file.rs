@@ -3,7 +3,7 @@ use std::io::Write as _;
 use std::ops::Range;
 use std::path::Path;
 
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DocumentRange {

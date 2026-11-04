@@ -15,11 +15,11 @@ use serde_json::Value;
 
 use crate::gitops::reconcile::in_rendered_tree;
 use crate::gitops::{resolve_cluster_contract, GitOpsInventory};
-use crate::resources::schema::ResourceKind;
 use crate::resources::GitOpsResource;
 use crate::validation::resolve::{self, SchemaResolver};
 use crate::validation::{store, BuiltinSchemas, KubeconformSettings};
 use crate::{NylError, Result};
+use nyl_core::resources::schema::ResourceDescriptor;
 
 /// The comment prefix yaml-language-server reads in each document.
 pub const MODELINE_PREFIX: &str = "# yaml-language-server: $schema=";
@@ -69,7 +69,11 @@ impl AnnotationReport {
 /// Schemas are compared in `check` mode only when they are vendored; a local
 /// `.nyl/schemas` directory is a per-checkout cache. `check` never downloads:
 /// a vendored built-in schema it cannot derive must exist on disk.
-pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<AnnotationReport> {
+pub async fn annotate_project(
+    inventory: &GitOpsInventory,
+    check: bool,
+    descriptors: &[ResourceDescriptor],
+) -> Result<AnnotationReport> {
     let project_root = &inventory.project_root;
     let vendor = store::vendor_root(project_root, &inventory.project_config)?;
     let mode = inventory.project_config.config.editor.schemas;
@@ -77,7 +81,7 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
         EditorSchemas::Local => store::safe_path(project_root, Path::new(".nyl/schemas"))?,
         EditorSchemas::Vendored => store::safe_path(&vendor, Path::new("schemas/editor"))?,
     };
-    let catalog = SchemaCatalog::load(inventory, &vendor)?;
+    let catalog = SchemaCatalog::load(inventory, &vendor, descriptors)?;
 
     let mut report = AnnotationReport::default();
     let mut generated = BTreeMap::new();
@@ -235,16 +239,16 @@ struct SchemaCatalog {
 }
 
 impl SchemaCatalog {
-    fn load(inventory: &GitOpsInventory, vendor: &Path) -> Result<Self> {
+    fn load(inventory: &GitOpsInventory, vendor: &Path, descriptors: &[ResourceDescriptor]) -> Result<Self> {
         let mut nyl = BTreeMap::new();
         let mut components = None;
-        for kind in ResourceKind::ALL {
+        for kind in descriptors {
             let file = PathBuf::from("nyl").join(kind.schema_path());
-            let schema = kind.schema();
-            if kind == ResourceKind::Component {
-                components = Some((kind.api_version().to_owned(), file, schema));
+            let schema = (kind.schema)();
+            if kind.dynamic_kind {
+                components = Some((kind.api_version.to_owned(), file, schema));
             } else {
-                nyl.insert((kind.api_version().to_owned(), kind.name().to_owned()), (file, schema));
+                nyl.insert((kind.api_version.to_owned(), kind.name.to_owned()), (file, schema));
             }
         }
 

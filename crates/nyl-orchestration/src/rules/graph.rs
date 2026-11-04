@@ -319,6 +319,15 @@ pub fn topological_order(graph: &ExecutionGraph) -> Vec<UnitName> {
     order
 }
 
+/// Consumers first in dependency waves, with names ordered within each wave.
+pub fn teardown_order(graph: &ExecutionGraph) -> Vec<UnitName> {
+    let mut reversed = graph.clone();
+    for edge in &mut reversed.edges {
+        std::mem::swap(&mut edge.producer, &mut edge.consumer);
+    }
+    topological_order(&reversed)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};

@@ -9,13 +9,13 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M3 is complete. Continue with M4: real container-image and infrastructure drivers, using the shared orchestration, approval, and recovery contracts.',
+    intro: 'M4 is complete. Continue with M5: Kubernetes publications that consume image digests and infrastructure outputs.',
     steps: [
-      { text: 'Implement OciImage with docker buildx, digest artifacts, credential admission, and direct builds through nyl build.', done: false },
-      { text: 'Implement Terraform and OpenTofu over one driver, including native plans, approval digests, output references, verification, and teardown.', done: false },
-      { text: 'Extend the two-tier reference scenarios to real tools, and add sparse source worktrees and held-unit exec support.', done: false },
+      { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: false },
+      { text: 'Add publication observation, attestations, direct builds, and teardown ownership fences.', done: false },
+      { text: 'Add preview environment templates, expiry, limits, and end-to-end reference scenarios.', done: false },
     ],
-    outro: 'KubernetesPublication remains represented by FakePublication until its real driver arrives in M5. Promotion paths follow in M6.',
+    outro: 'Promotion paths follow in M6.',
   },
   stages: [
     {
@@ -66,7 +66,7 @@ export const orchestrationRoadmap = {
         { text: 'Implement environments, YAML state files with published schemas, `nyl state init`/`move`/`forget` (including moves between branches and custom refs), leases and run checkpoints under a configurable coordination ref prefix, validated against GitHub, GitLab, and Forgejo for custom refs and mixed atomic pushes, and one transition commit per operation with a machine-readable summary, pushed atomically with the lease check.', done: true },
         { text: 'Implement `nyl state delete`, including decommissioning declared environments.', done: true },
         { text: 'Support optional dedicated SSH keys and HTTPS tokens, configured only when needed, for state pushes and `publish-tree`. Remote Git operations run the `git` command line through `nyl-git`, so by default they authenticate as the user\'s `git` does (SSH config and keys, agent, credential helpers); `[[git.credentials]]` in `nyl.toml` names a key file, or a key or token in an environment variable, per repository URL prefix, for runners without those. State pushes use the same transport, including atomic multi-ref pushes with per-ref leases; libgit2 handles only local repository access.', done: true },
-        { text: 'Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown` (including `--hold`), `hold`, and `resume` for a dependency graph of command units with `fromUnit` references, including `--local` runs next to remote state on the clone\'s own state branches, state without a remote, and `state move --from local` when a remote is added.', done: true },
+        { text: 'Implement `plan`, `reconcile`, `status`, `detect-drift`, `recover`, `teardown` (including `--hold`), `hold`, and `resume` for a dependency graph of command units with `fromUnit` references, including `--local` runs next to remote state on the clone\'s own state branches, state without a remote, and `state move --from local` when a remote is added.', done: true },
         { text: 'Implement cross-environment references and multi-environment runs by repeated `-e`, a label selector, or an EnvironmentGroup with shared defaults, ordered by those references, each environment with its own lease and transition commit.', done: true },
         { text: 'Implement approvals bound to the desired document, with recorded approval sources and identity (`verified`, `asserted`, `local`), the GitHub approver lookup and the `[approval] lookup` hook, and the common `env` credential admission.', done: true },
         { text: 'Implement pinned source worktrees, reachability checks against protected refs, and content-based execution keys.', done: true },
@@ -84,15 +84,17 @@ export const orchestrationRoadmap = {
       title: 'Container image and Terraform units',
       summary: 'Container image builds and Terraform or OpenTofu configurations as units.',
       needs: ['M3'],
+      done: true,
       exitCriterion: 'A network configuration\'s outputs feed a dependent configuration; an image build records a digest; unchanged inputs plan no change; the M4 part of the reference scenarios passes with the real tools in the required `tier2` CI job.',
       items: [
-        { text: 'Add the `OciImage` kind over `docker buildx`, recording digest references and a `ContainerImage` artifact, with the `registryAuth` helper and named build contexts.', done: false },
-        { text: 'Add `nyl build` for kinds with the `build` capability, starting with `OciImage`: builds from the current worktree, `--load` or `--push`, no state.', done: false },
-        { text: 'Add the `Terraform` and `OpenTofu` kinds over one implementation, with native state and locking, declared output admission, change digests, plan approval (`bind: plan`), verification, and teardown.', done: false },
-        { text: 'Support a local-module Terraform configuration pinned to a source commit and path.', done: false },
-        { text: 'Demonstrate Terraform-to-Terraform output references.', done: false },
-        { text: 'Check out only what a unit reads when its kind declares its inputs: `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their source paths and the `nyl.toml` directory, so their cost in a large monorepo follows the unit, not the repository. A Command unit can read anything in the repository, so it keeps a full worktree unless it declares the paths it reads.', done: false },
-        { text: 'Add the `exec` driver capability and `nyl exec` for held units, with the deployed or `--worktree` spec and source snapshot, ownership-scope checks, recorded spec differences, approval of the first execution afterwards, and refusal exit 125; implement it for OpenTofu and Terraform, with their missing-state guard.', done: false },
+        { text: 'Add the `OciImage` kind over `docker buildx`, recording digest references and a `ContainerImage` artifact, with the `registryAuth` helper and named build contexts.', done: true },
+        { text: 'Add `nyl build` for kinds with the `build` capability, starting with `OciImage`: builds from the current worktree, forwards driver options after `--`, and writes no state.', done: true },
+        { text: 'Support `nyl reconcile --worktree` for one environment, using an immutable working-file snapshot throughout preflight and execution, retained in state and run history for fresh-clone recovery and teardown.', done: true },
+        { text: 'Add the `Terraform` and `OpenTofu` kinds over one implementation, with native state and locking, declared output admission, change digests, plan approval (`bind: plan`), verification, and teardown.', done: true },
+        { text: 'Support a local-module Terraform configuration pinned to a source commit and path.', done: true },
+        { text: 'Demonstrate Terraform-to-Terraform output references.', done: true },
+        { text: 'Check out only what a unit reads when its kind declares its inputs: `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their source paths and the `nyl.toml` directory, so their cost in a large monorepo follows the unit, not the repository. A Command unit can read anything in the repository, so it keeps a full worktree unless it declares the paths it reads.', done: true },
+        { text: 'Add the `exec` driver capability and `nyl exec` for held units, with the deployed or `--worktree` spec and source snapshot, ownership-scope checks, recorded spec differences, approval of the first execution afterwards, and refusal exit 125; implement it for OpenTofu and Terraform, with their missing-state guard.', done: true },
       ],
     },
     {
@@ -105,7 +107,8 @@ export const orchestrationRoadmap = {
         { text: 'Add the Kubernetes publication unit over `render-tree`/`publish-tree`.', done: false },
         { text: 'Resolve `fromUnit` Release input bindings into an explicit pinned input snapshot for rendering.', done: false },
         { text: 'Distinguish `published` from `attested` evidence and named attestations for dependents.', done: false },
-        { text: 'Add the publication unit\'s observe mode: read generated Argo CD Applications\' last successful sync and health, match them to publication commits by Application directory tree, record the observations, and attest `accepted` and `healthy`.', done: false },
+        { text: 'Add the publication unit\'s observe mode: read generated Argo CD Applications\' last successful sync and health, match them to publication commits by Application directory tree, and attest `accepted` and `healthy` through `nyl attest`, with each Application\'s running publication and health in the attestations\' details.', done: false },
+        { text: 'Add observed values: the generic `observe` driver capability, `fromUnit: {unit, observation}`, re-observation in `reconcile` and a `nyl observe` command for jobs that hold the read credentials, `observationWait`, and the publication unit\'s reads of rendered resource fields once their Application runs the current publication (the `observed-value` walkthrough).', done: false },
         { text: 'Document an end-to-end local/CI example.', done: false },
         { text: 'Declare the `build` capability for `KubernetesPublication`: `nyl build` renders the tree, `--diff` compares it with the published tree, and `--push` publishes only targets no environment owns.', done: false },
         { text: 'Support inline DeploymentTargets on `KubernetesPublication`, its two-phase teardown with the `teardownWait` strategies, ownership-index owner fencing, and the teardown readiness check with its warnings.', done: false },
@@ -138,7 +141,7 @@ export const orchestrationRoadmap = {
       needs: ['M6'],
       items: [
         { text: 'Evaluate a scheduled or long-running runner and its observation cadence using M3–M6 evidence. The drift-repair policy is settled in M3 part 5: converging units repair recorded drift automatically by default.', done: false },
-        { text: 'Add an opt-in `nyl reconcile --verify`: the run verifies its current units under its own lease, then repairs what drifted by `driftRepair`, all in one transition commit, so a scheduled job needs one command and no lease gap between `nyl verify` and `nyl reconcile`. It reuses the verify path; without the flag, reconcile does not verify.', done: false },
+        { text: 'Add an opt-in `nyl reconcile --detect-drift`: the run checks its current units for drift under its own lease, then repairs what drifted by `driftRepair`, all in one transition commit, so a scheduled job needs one command and no lease gap between `nyl detect-drift` and `nyl reconcile`. It reuses the drift detection path; without the flag, reconcile does not detect drift.', done: false },
         { text: 'Decide which command-unit uses warrant typed drivers, and whether to add the plugin driver protocol.', done: false },
         { text: 'Support minimum healthy durations and flapping guards over recorded observations.', done: false },
         { text: 'Evaluate application-level checks as promotion evidence.', done: false },
@@ -161,10 +164,10 @@ export const orchestrationRoadmap = {
       ],
     },
     {
-      // Title and needs come from the domain resources roadmap.
+      // Title and needs come from the domain modeling roadmap.
       id: 'M9',
       summary: 'Team-owned, typed declarations that units implement and Releases read, the fourth layer of Nyl.',
-      delegate: 'domain-resources',
+      delegate: 'domain-modeling',
     },
   ],
 };

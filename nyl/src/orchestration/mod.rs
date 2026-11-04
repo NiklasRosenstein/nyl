@@ -14,3 +14,5 @@ pub mod multi_environment;
 pub mod secrets;
 
 pub mod approval;
+
+pub mod direct;

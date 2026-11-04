@@ -105,6 +105,13 @@ pub struct RenderedBundle {
     pub helm_render_count: usize,
 }
 
+/// The project configuration a session renders with: one the caller loaded,
+/// or one the session loads from its root with the caller's catalogue.
+enum SessionProject<'a> {
+    Loaded(&'a ProjectConfig),
+    Load(crate::config::ResourceCatalogue),
+}
+
 impl RenderSession {
     /// Build an offline rendering session from a project root and effective target.
     pub fn for_target(
@@ -113,7 +120,15 @@ impl RenderSession {
         target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
-        Self::build(project_root, Some(project_config), target, cluster, false, false, true)
+        Self::build(
+            project_root,
+            SessionProject::Loaded(project_config),
+            target,
+            cluster,
+            false,
+            false,
+            true,
+        )
     }
 
     /// Build an offline rendering session that admits the project's secrets
@@ -124,7 +139,15 @@ impl RenderSession {
         target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
-        Self::build(project_root, Some(project_config), target, cluster, true, false, true)
+        Self::build(
+            project_root,
+            SessionProject::Loaded(project_config),
+            target,
+            cluster,
+            true,
+            false,
+            true,
+        )
     }
 
     /// Build with the central project configuration but without secrets or
@@ -135,19 +158,42 @@ impl RenderSession {
         target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
-        Self::build(project_root, Some(project_config), target, cluster, false, false, false)
+        Self::build(
+            project_root,
+            SessionProject::Loaded(project_config),
+            target,
+            cluster,
+            false,
+            false,
+            false,
+        )
     }
 
     /// Build a restricted remote-source session. Remote projects cannot load a
     /// secrets provider from their checkout.
-    pub fn for_remote_target(project_root: &Path, target: &DeploymentTarget, cluster: &Cluster) -> Result<Self> {
-        Self::build(project_root, None, target, cluster, false, true, false)
+    /// The checkout's `nyl.toml` is validated against the caller's resource
+    /// catalogue.
+    pub fn for_remote_target(
+        project_root: &Path,
+        target: &DeploymentTarget,
+        cluster: &Cluster,
+        catalogue: crate::config::ResourceCatalogue,
+    ) -> Result<Self> {
+        Self::build(
+            project_root,
+            SessionProject::Load(catalogue),
+            target,
+            cluster,
+            false,
+            true,
+            false,
+        )
     }
 
     #[allow(clippy::too_many_lines)]
     fn build(
         project_root: &Path,
-        project_config: Option<&ProjectConfig>,
+        project_config: SessionProject<'_>,
         target: &DeploymentTarget,
         cluster: &Cluster,
         load_secrets: bool,
@@ -161,8 +207,8 @@ impl RenderSession {
             .canonicalize()
             .map_err(|error| NylError::config(format!("Failed to resolve project root: {error}")))?;
         let project_config = match project_config {
-            Some(project_config) => project_config.clone(),
-            None => ProjectConfig::load_from_dir(None, Some(&project_root))?,
+            SessionProject::Loaded(project_config) => project_config.clone(),
+            SessionProject::Load(catalogue) => ProjectConfig::load_from_dir(None, Some(&project_root), catalogue)?,
         };
         if restrict_checkout {
             let config_file = project_config.file.as_ref().ok_or_else(|| {
@@ -277,7 +323,7 @@ impl RenderSession {
         let session = if let Some((target, cluster)) = target {
             Self::build(
                 project_root,
-                Some(project_config),
+                SessionProject::Loaded(project_config),
                 target,
                 cluster,
                 allow_secret_inputs,
@@ -428,6 +474,15 @@ impl RenderSession {
                 worktree: request.provenance_worktree_root,
             },
         )?;
+        for resource in &bundle.resources {
+            nyl_core::resources::schema::validate_resource_api_with_catalog(
+                &resource.value,
+                &self.project_config.resource_catalogue.0,
+            )
+            .map_err(|error| {
+                NylError::from(error).with_render_provenance(resource.provenance.resource(&resource.value).to_string())
+            })?;
+        }
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
@@ -634,6 +689,7 @@ impl RenderSession {
         recorder.record_value(
             "request",
             &serde_json::json!({
+                "resourceCatalogue": self.project_config.resource_catalogue.0.iter().map(|d| (d.name, d.api_version, d.dynamic_kind)).collect::<Vec<_>>(),
                 "onlySourceKind": request.only_source_kind,
                 "pathMode": format!("{:?}", request.path_mode),
                 "provenanceRoot": request.provenance_root,
@@ -803,7 +859,7 @@ fn record_resource_directory_dependency(
     resource: &Value,
     config: &ProjectConfig,
 ) -> Result<()> {
-    if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
+    if resource.get("apiVersion").and_then(Value::as_str) == Some(nyl_core::constants::API_VERSION)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
         let chart: HelmChart = serde_json::from_value(resource.clone())?;
@@ -831,7 +887,7 @@ fn record_resource_directory_dependency(
 }
 
 fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig) -> Option<String> {
-    if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
+    if resource.get("apiVersion").and_then(Value::as_str) == Some(nyl_core::constants::API_VERSION)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
         return match serde_json::from_value::<HelmChart>(resource.clone()) {
@@ -952,7 +1008,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::constants::{API_VERSION, API_VERSION_K8S_GITOPS};
+    use nyl_core::constants::{API_VERSION, API_VERSION_K8S_GITOPS};
 
     fn target() -> DeploymentTarget {
         serde_json::from_value(serde_json::json!({
@@ -989,6 +1045,7 @@ mod tests {
     #[test]
     fn mutable_git_chart_selectors_cannot_reuse_complete_render_output() {
         let config = ProjectConfig {
+            resource_catalogue: crate::config::test_catalogue(),
             file: None,
             config: crate::config::ProjectFile::default(),
         };
@@ -1022,7 +1079,7 @@ mod tests {
             "[vendor]\nmode = \"preferred\"\npath = \"vendor\"\n",
         )
         .unwrap();
-        let config = ProjectConfig::load_from_dir(None, Some(project.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(project.path()), crate::config::test_catalogue()).unwrap();
         let chart = crate::resources::ChartRef {
             repository: Some("git+https://example.invalid/charts.git".to_owned()),
             version: Some("main".to_owned()),
@@ -1072,7 +1129,7 @@ mod tests {
     fn only_unpinned_remote_charts_bypass_release_caching() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         let pinned = serde_json::json!({
             "apiVersion": "components.k8s.nyl/v1",
             "kind": "https://charts.example.com/#workload@1.2.3",
@@ -1137,7 +1194,7 @@ data:
     fn central_session_reuses_the_parsed_project_configuration() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         fs::write(temp.path().join("nyl.toml"), "not valid TOML = [").unwrap();
 
         RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
@@ -1151,7 +1208,7 @@ data:
         fs::create_dir(&source).unwrap();
         let path = source.join("app.yaml");
         fs::write(&path, "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: app}\n").unwrap();
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         session.set_cache(Some(
             RenderCache::with_root(temp.path().join("cache"), CacheMode::Default).unwrap(),
@@ -1174,7 +1231,7 @@ data:
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
         fs::write(temp.path().join("nyl-secrets.yaml"), "not: [valid").unwrap();
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
 
         let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         let context = session.template_context().to_json();
@@ -1217,7 +1274,7 @@ data:
         )
         .unwrap();
 
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
         assert_eq!(rendered.release.unwrap().metadata.name, "production");
@@ -1260,7 +1317,7 @@ spec:
         )
         .unwrap();
 
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
 
@@ -1296,7 +1353,7 @@ spec:
         )
         .unwrap();
 
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         let error = session
             .render_release_file(Path::new("bad.yaml"))
@@ -1321,13 +1378,15 @@ spec:
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
 
-        let session = RenderSession::for_remote_target(temp.path(), &target(), &cluster()).unwrap();
+        let session =
+            RenderSession::for_remote_target(temp.path(), &target(), &cluster(), crate::config::test_catalogue())
+                .unwrap();
         let context = session.template_context().to_json();
         assert_eq!(context["secrets"], serde_json::json!({}));
         assert_eq!(context["env"], serde_json::json!({}));
         assert!(context["target"]["spec"]["publication"].get("repository").is_none());
 
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
         let session = RenderSession::for_untrusted_source(temp.path(), &config, &target(), &cluster()).unwrap();
         let context = session.template_context().to_json();
         assert_eq!(context["secrets"], serde_json::json!({}));
@@ -1344,9 +1403,10 @@ spec:
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         symlink("/tmp", temp.path().join("components")).unwrap();
 
-        let error = RenderSession::for_remote_target(temp.path(), &target(), &cluster())
-            .err()
-            .unwrap();
+        let error =
+            RenderSession::for_remote_target(temp.path(), &target(), &cluster(), crate::config::test_catalogue())
+                .err()
+                .unwrap();
         assert!(error.to_string().contains("symbolic links"));
     }
 }

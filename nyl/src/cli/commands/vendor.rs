@@ -7,14 +7,14 @@ use clap::Args;
 use colored::Colorize;
 
 use crate::cli::tree_progress::{TreeProgressArgs, TreeProgressReporter};
-use crate::gitops::inputs::PublicationRead;
-use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, CacheMode, GitOpsCache,
-    TreeRenderOptions,
+use nyl_render::gitops::discover_gitops_inventory;
+use nyl_render::gitops::inputs::PublicationRead;
+use nyl_render::gitops::{
+    compile_target_tree_cached_with_observer_and_options, CacheMode, GitOpsCache, TreeRenderOptions,
 };
-use crate::render::artifact::DirectoryVendorWriter;
-use crate::resources::GitOpsResourceKind;
-use crate::{NylError, Result};
+use nyl_render::render::artifact::DirectoryVendorWriter;
+use nyl_render::resources::GitOpsResourceKind;
+use nyl_render::{NylError, Result};
 
 #[derive(Args, Debug)]
 pub struct VendorArgs {
@@ -81,7 +81,7 @@ pub async fn execute(args: VendorArgs) -> Result<()> {
 }
 
 async fn sync(args: VendorRenderArgs) -> Result<()> {
-    let inventory = discover_gitops_inventory(&args.path, None)?;
+    let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_population(args.refresh);
@@ -94,7 +94,7 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
         TreeRenderOptions::default(),
     )
     .await?;
-    crate::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty(), args.refresh).await?;
+    nyl_render::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty(), args.refresh).await?;
     let result = writer.sync(&cache.observed_artifacts(), !args.target.is_empty())?;
     let count = result.artifacts.to_string().cyan().bold();
     println!(
@@ -105,7 +105,7 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
 }
 
 async fn check(args: VendorCheckArgs) -> Result<()> {
-    let inventory = discover_gitops_inventory(&args.path, None)?;
+    let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_check();
@@ -117,10 +117,11 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
         ..TreeRenderOptions::default()
     };
     let compiled = compile_targets(&inventory, &targets, &cache, args.progress, options).await?;
-    crate::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
+    nyl_render::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
     writer.check(&cache.observed_artifacts(), args.target.is_empty())?;
-    let schema_root = crate::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
-    let unreferenced = writer.unreferenced_count()? + crate::validation::store::check_and_prune(&schema_root, false)?;
+    let schema_root = nyl_render::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    let unreferenced =
+        writer.unreferenced_count()? + nyl_render::validation::store::check_and_prune(&schema_root, false)?;
     let count = cache.observed_artifacts().len().to_string().cyan().bold();
     println!("✓ Vendor snapshot is complete and valid ({count} artifacts)");
     if unreferenced > 0 {
@@ -130,21 +131,21 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
 }
 
 fn prune(path: &Path) -> Result<()> {
-    let inventory = discover_gitops_inventory(path, None)?;
+    let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
-    let schema_root = crate::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
-    let removed = crate::validation::store::check_and_prune(&schema_root, true)? + writer.prune()?;
+    let schema_root = nyl_render::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    let removed = nyl_render::validation::store::check_and_prune(&schema_root, true)? + writer.prune()?;
     println!("✓ Pruned {removed} unreferenced vendor artifact(s)");
     Ok(())
 }
 
 async fn compile_targets(
-    inventory: &crate::gitops::GitOpsInventory,
+    inventory: &nyl_render::gitops::GitOpsInventory,
     targets: &[String],
     cache: &GitOpsCache,
     progress: TreeProgressArgs,
     options: TreeRenderOptions,
-) -> Result<Vec<crate::gitops::CompiledTargetTree>> {
+) -> Result<Vec<nyl_render::gitops::CompiledTargetTree>> {
     let mut compiled = Vec::new();
     for target in targets {
         let mut observer = TreeProgressReporter::new(progress, (targets.len() > 1).then(|| target.clone()));
@@ -164,7 +165,7 @@ async fn compile_targets(
     Ok(compiled)
 }
 
-fn selected_targets(inventory: &crate::gitops::GitOpsInventory, requested: &[String]) -> Result<Vec<String>> {
+fn selected_targets(inventory: &nyl_render::gitops::GitOpsInventory, requested: &[String]) -> Result<Vec<String>> {
     let available = inventory
         .resources
         .values()

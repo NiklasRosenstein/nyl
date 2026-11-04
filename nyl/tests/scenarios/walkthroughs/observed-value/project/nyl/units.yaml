@@ -1,0 +1,32 @@
+# The publication observes the address the load balancer assigns to its
+# Service; `dns` publishes a record for it.
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {dev: 'true'}
+spec:
+  target: '{{ values.target }}'
+  mode: observe
+  observations:
+    ingressIp:
+      type: string
+      from:
+        resource: {apiVersion: v1, kind: Service, namespace: web, name: web}
+        pointer: /status/loadBalancer/ingress/0/ip
+  timeout: 10m
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: dns
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/dns.sh']
+  workingDir: ../scripts
+  values:
+    address: {fromUnit: {unit: kubernetes, observation: ingressIp}}
+  command: [sh, './dns.sh']
+  env:
+    passthrough: [SCENARIO_TMP]
+  idempotent: true

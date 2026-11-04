@@ -11,8 +11,9 @@ use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::Change;
 use nyl_core::orchestration::ports::{SourceRepository, SourceResolver};
+use nyl_core::orchestration::progress::UnitResult;
 use nyl_git::GitAuth;
-use nyl_orchestration::run_report::{EnvironmentRunReport, LeavingConsequence, UnitResult, UnitState};
+use nyl_orchestration::run_report::{EnvironmentRunReport, LeavingConsequence, UnitState};
 use nyl_orchestration::shell::inspect::{self, GetValue};
 use nyl_orchestration::shell::run::{self, Cancellation, RunMode, TeardownTarget};
 use nyl_state::source::GitSourceResolver;
@@ -247,8 +248,9 @@ fn test_discovery_works_in_a_source_resolver_worktree() {
     let directory = TempDir::new().unwrap();
     let worktree = directory.path().join("worktree");
     resolver.worktree(&SourceRepository::This, &head, &worktree).unwrap();
-    let inventory = nyl::gitops::discover_gitops_inventory(&worktree.join("nyl"), None).unwrap();
-    let units = nyl::gitops::units::discover_units(&inventory).unwrap();
+    let inventory =
+        nyl_render::gitops::discover_gitops_inventory(&worktree.join("nyl"), None, nyl::resource_catalogue()).unwrap();
+    let units = nyl_render::gitops::units::discover_units(&inventory).unwrap();
     assert_eq!(units.len(), 4);
 }
 
@@ -359,4 +361,47 @@ fn test_plan_teardown_previews_from_stored_documents() {
     assert!(plan.errors.is_empty(), "{plan:#?}");
     assert_eq!(plan.units[&unit("svc")].changes, Some(Change::Destroy), "{plan:#?}");
     assert_eq!(harness.tips(), before);
+}
+
+/// A named remote source reads and fingerprints the remote repository, not
+/// a same-named local directory, and follows its revision independently of S.
+#[test]
+fn test_remote_source_uses_its_declared_repository_root_and_revision() {
+    let remote_project = project(&[("module/main.tf", "# remote v1\n")]);
+    let remote = World::new(remote_project.path());
+    let project = infra_project(
+        "{path: module, repositoryRef: {name: modules}, revision: main}",
+        "  allowUnprotectedSource: true\n",
+    );
+    std::fs::write(
+        project.path().join("nyl/repository.yaml"),
+        format!(
+            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata: {{name: modules}}\nspec:\n  repoURL: '{}'\n",
+            remote.project_url()
+        ),
+    )
+    .unwrap();
+    let harness = Harness::new(project.path(), false);
+    harness.init();
+    let first = harness.reconcile(&[]);
+    assert_eq!(first.exit.code(), 0, "{first:#?}");
+    let first_key = match &first.units[&unit("network")].result {
+        Some(UnitResult::Executed { execution_key }) => execution_key.clone(),
+        other => panic!("network did not execute: {other:?}"),
+    };
+    let again = harness.reconcile(&[]);
+    assert_eq!(outcome(&again, "current"), set(&["network"]));
+    remote.commit_files("main", "change remote module", &[("module/main.tf", "# remote v2\n")]);
+    let changed = harness.reconcile(&[]);
+    assert_eq!(changed.exit.code(), 0, "{changed:#?}");
+    let next_key = match &changed.units[&unit("network")].result {
+        Some(UnitResult::Executed { execution_key }) => execution_key,
+        other => panic!("network did not execute: {other:?}"),
+    };
+    assert_ne!(next_key, &first_key);
+    let snapshot = harness.store.snapshot(&harness.location).unwrap();
+    let source = &snapshot.desired[&unit("network")].resolved_spec.as_ref().unwrap()["source"];
+    assert_eq!(source["path"], "/module");
+    assert_eq!(source["commit"], remote.rev_parse("main"));
+    assert_eq!(source["repository"]["repoURL"], remote.project_url());
 }

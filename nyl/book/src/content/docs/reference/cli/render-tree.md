@@ -69,5 +69,5 @@ explicitly, or `--progress off` to disable it. A complete target-tree cache hit
 has no per-Release work to report.
 
 Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
+[Manifest validation](/nyl/kubernetes-rendering/validation/manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.

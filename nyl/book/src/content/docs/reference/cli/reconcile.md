@@ -7,10 +7,9 @@ results in its state. See [Runs](/nyl/orchestration/runs/) for how a run
 chooses its source commit, resolves references, and decides what executes.
 
 :::note
-Orchestration is being built in milestone M3. `reconcile` runs selected
-environments'  [Command](/nyl/orchestration/resource-guides/command/) units,
-takes over from runs that died, repairs drift, and deletes units that left
-the environment; remote approvals and runs over several environments follow.
+`reconcile` runs selected environments' Command, OciImage, Terraform, and
+OpenTofu units, with recorded approvals, recovery, drift repair, and lifecycle
+handling. Kubernetes publication and promotion drivers follow in M5 and M6.
 :::
 
 ```bash
@@ -21,6 +20,7 @@ nyl reconcile -e prod --source 3e7b9c1 --author "Release Bot <release@example.co
 nyl reconcile -e dev -o json
 nyl reconcile -e dev --wait-lease 30m
 nyl reconcile -e dev --local --approve migrate
+nyl reconcile -e dev --worktree
 nyl reconcile -e dev --allow-teardown
 nyl reconcile -e dev --leaving --allow-teardown
 nyl reconcile -e dev --unit config --reapply --reason "rotate credentials"
@@ -41,48 +41,9 @@ that left the ownership set and of teardowns an operator requested with
 [Deletion and holds](/nyl/orchestration/deletion/) describes. A unit with
 `deletionPolicy: Teardown` that left source waits for `--allow-teardown`:
 
-```console
-$ nyl reconcile -e dev
-Units leaving the ownership set of dev (1):
-  teardown, needs --allow-teardown:   scratch (removed)
-  dropped from state, resources kept: (none)
-  retained as tombstones:             (none)
-
-UNIT     KIND     RESULT            DETAIL
-cache    Command  current
-config   Command  current
-extra    Command  executed
-scratch  Command  pending-teardown
-seed     Command  current
-worker   Command  current
-run: 01a17ac1-4c6f-7d70-8d17-67644811eab7
-source: ea88fa3d6330a476c69ac698edbedab8cc5b7be7
-desired: 81117d9f1baa8fa2c8db45139c3cf486b8d3879e
-observed: 7b18f7fa52729b27399b285f1ed76dbdfdf29fdb
-warning NYL-PLAN-UNITS-LEAVING: 1 unit(s) leave the ownership set of dev: scratch (removed)
-  fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
-warning NYL-TEARDOWN-PENDING (scratch): unit scratch of dev left the ownership set; its teardown waits for --allow-teardown
-  fix: pass --allow-teardown to nyl reconcile to tear it down, restore it in source to keep it, or let it go without a teardown with `nyl state forget -e dev --unit scratch`
-$ nyl reconcile -e dev --allow-teardown
-removed scratch
-Units leaving the ownership set of dev (1):
-  teardown, needs --allow-teardown:   scratch (removed)
-  dropped from state, resources kept: (none)
-  retained as tombstones:             (none)
-
-UNIT     KIND     RESULT   DETAIL
-cache    Command  current
-config   Command  current
-extra    Command  current
-scratch  Command  removed
-seed     Command  current
-worker   Command  current
-run: 01a17ac1-4e91-77be-904d-da53c4fd269f
-source: ea88fa3d6330a476c69ac698edbedab8cc5b7be7
-desired: 182633b7ab899fc7c2f0c836644fa10bcc6e5409
-observed: 02dac2dc31d29972006a5583de6f4e32365e0782
-warning NYL-PLAN-UNITS-LEAVING: 1 unit(s) leave the ownership set of dev: scratch (removed)
-  fix: restore the units in source or in the unitSelector's labels if they should stay; pass --fail-on-leaving to plan to make removals fail a pipeline
+```bash
+nyl reconcile -e dev
+nyl reconcile -e dev --allow-teardown
 ```
 
 `--allow-teardown` gates only the start of a teardown caused by a change to
@@ -92,27 +53,14 @@ it is reported `held` with the source commit whose changes wait.
 
 ## Drift
 
-A unit whose latest [drift observation](/nyl/reference/cli/verify/) is
+A unit whose latest [drift record](/nyl/reference/cli/detect-drift/) is
 `drifted` runs again when its recovery policy is `converge` and the
 Environment's `driftRepair` is `converge`, the default, and the transition
 commit lists it under `driftRepaired`. A drifted unit that is not safe to
-re-run is `awaiting-approval` while the rest of the run continues; a
-`--local` run executes it with `--approve`. Under `driftRepair: manual`,
+re-run is `awaiting-approval` while the rest of the run continues. Under `driftRepair: manual`,
 drifted units stay `drifted` until `--reapply` names them. See
 [Repairing drift](/nyl/orchestration/recovery/#repairing-drift).
 
-```console
-$ nyl reconcile -e dev
-UNIT    KIND     RESULT             DETAIL
-cache   Command  current
-config  Command  executed
-extra   Command  current
-seed    Command  awaiting-approval
-worker  Command  current
-run: 01a17ac1-5904-7e98-993d-d452167aa129
-source: ea88fa3d6330a476c69ac698edbedab8cc5b7be7
-observed: e9030d4534b190e1a82161dc15d0c0f29e6c90b2
-```
 
 ## Stopping at the first failure
 
@@ -124,20 +72,20 @@ run still checkpoints them and writes its transition commit:
 
 ```console
 $ nyl reconcile -e dev --fail-fast --concurrency 1
-connection refused
+[dev/broken] starting Command (reconcile): no receipt
+  [dev/broken] connection refused
+[dev/broken] failed in 0.0s: command exited with code 1
 UNIT    KIND     RESULT   DETAIL
 broken  Command  failed   command exited with code 1
-cache   Command  current
-config  Command  current
-extra   Command  current
-report  Command  blocked  --fail-fast stopped the run after broken
-seed    Command  current
-worker  Command  current
-run: 01a17ac1-5cb2-7c73-8a5b-46bb04b9cf5c
-source: 1af28df1e4f0db7bdab23402106123ce1592a47c
-desired: c30d18d44b74895ae0dd147201ad18762d36d26d
-observed: 0b2fd370c62ab5c01bc9199954bdcfe9b17eca44
-warning NYL-RUN-STOPPED: --fail-fast stopped the run of dev after unit broken: it started no further unit
+report  Command  blocked  /dependsOn/0 waits for broken (no-current-receipt)
+
+  run:      01a18581-e81a-76b7-b92e-dde094292715
+  source:   31d0b75f7f54f720a76847c6dacf768371f0ca63
+  desired:  4b5fd9df85d0db0c82181710bc9b457a582a8e22
+  observed: 63b784cd15c55e8337adf1379c2bc6e09e69e611
+
+warning NYL-RUN-STOPPED
+  --fail-fast stopped the run of dev after unit broken: it started no further unit
   fix: fix broken, then run again; without --fail-fast a run continues with every unit that does not depend on it
 ```
 
@@ -153,9 +101,7 @@ checkpoint with the unit's current execution key becomes its receipt
 the same run. The transition commit lists both under `imported` and
 `recovered`, and a broken lease once under `leaseBroken`. While a live run
 holds the lease or its run ref still carries a deadline, the run exits 2 with
-`NYL-LEASE-HELD`, unless `--wait-lease` waits for it. A `--local` run never
-takes a broken remote lease over: it exits 2 with `NYL-LEASE-BROKEN` and
-names `nyl recover -e <env>`.
+`NYL-LEASE-HELD`, unless `--wait-lease` waits for it.
 
 ## Cancellation
 
@@ -191,9 +137,9 @@ for qualified unit options and independent state transactions.
 | `--fail-fast` | Start no further unit after the first failure, uncertain outcome, or approval wait. Units not started report `blocked`, and the run warns with `NYL-RUN-STOPPED`. |
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
 | `--source <rev>` | Render units at this revision or commit instead of the Environment's source, for this run only. It must pass the same [reachability checks](/nyl/orchestration/runs/#source-commit), and the transition commit marks it as an override. |
+| `--worktree` | Snapshot Git-visible working files, including uncommitted and untracked files, and reconcile exactly one named environment from them. Conflicts with `--source`, `-l`, and `-g`. State publication follows the configured repository or `--local`. See [worktree inputs](/nyl/orchestration/runs/#worktree-inputs). |
 | `--wait-lease <duration>` | Wait up to this long, such as `10m`, while another run holds the lease, instead of exiting 2 with `NYL-LEASE-HELD`. |
-| `--local` | Run next to remote state without publishing it: continue from this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs) and commit there, marked `Nyl-Local: true`. Warns `NYL-LOCAL-RUN-UNRECORDED` for every unit it executes. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote or with full `refs/…` state refs, and with `NYL-LOCAL-RUN-LEFTOVERS` while remote state has dead runs to take over. |
-| `--local-lease` | With `--local`, take this clone's own lease instead of the remote one, accepting that CI may run at the same time. |
+| `--local` | Operate on the configured local state repository without fetching, pushing, or taking a remote lease. |
 | `--approve <unit>[=<digest>]` | Approve a manual unit, a drift repair that is not safe to repeat, or a non-converging unit in a local run. Repeatable or comma-separated. A desired-bound approval covers its initial execution key; a plan-bound digest covers the reviewed changes. Excluded units are an error. See [Approvals](/nyl/orchestration/runs/#approvals). |
 | `--approve-all` | Approve every candidate without a reviewed digest; policies with `requireDigest: true` still wait. Explicit digests override this for named units. |
 | `--approved-by <name>`, `--approval-source <source>` | Assert approver identities and their source. Names are repeatable or comma-separated; recorded as `asserted`. Without these flags Nyl uses a configured lookup, CI context, or the Git user. |
@@ -209,8 +155,19 @@ The table lists each unit with its result: `executed`, `current`,
 units leaving the ownership set prints the leaving section first, as
 [`nyl plan`](/nyl/reference/cli/plan/) does. `-o json` prints the same
 report as JSON on stdout, with `result` per unit as in the transition commit
-summary; diagnostics go to stderr. Every error and warning carries a stable
-code and its fix.
+summary. Each environment's `unitOrder` lists the table order while `units`
+remains a map keyed by name. The table lists dispatched units first in dispatch
+order, then units that did not run in dependency order; teardown uses consumers
+first. Names break ties within a parallel wave.
+
+Unit start and end messages stream to stderr with the environment/unit address,
+result, elapsed time, and a short failure reason. Public tool output is indented
+and carries that address on every line; captured outputs retain their original
+bytes. [Execution output controls](/nyl/orchestration/runs/#following-execution)
+can hide tool output (`--quiet-unit-output`), append masked unit logs to files
+(`--unit-log-dir DIR`), or do both.
+`-o json` keeps stdout exclusively for the report. Every error and warning carries
+a stable code and its fix.
 
 ## Exit codes
 
@@ -218,7 +175,7 @@ code and its fix.
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed (`removed`, `retained`, `released`). |
 | 1 | A configuration, resolution, or operational error, such as `NYL-STATE-MISSING`, `NYL-SOURCE-UNREACHABLE`, `NYL-UNIT-UNKNOWN`, or `NYL-COMMIT-IDENTITY-MISSING`. |
-| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`); or a `--local` run found a broken remote lease (`NYL-LEASE-BROKEN`). |
+| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`). |
 | 3 | At least one execution failed. |
 | 4 | At least one execution is uncertain, the run lost its lease (`NYL-LEASE-LOST`), or it was cancelled (`NYL-RUN-CANCELLED`). |
 
@@ -231,17 +188,13 @@ Besides the codes above, a reconcile reports:
 
 | Code | Meaning and fix |
 | --- | --- |
+| `NYL-SOURCE-WORKTREE` | The run uses an immutable working-file snapshot retained in state history. Commit changes and run without `--worktree` for committed-source evidence. |
 | `NYL-UNIT-UNCERTAIN` | A unit may have had effects without a recorded result. Check what it did; a converging unit runs again in the next reconcile, others need [`nyl recover`](/nyl/reference/cli/recover/). |
 | `NYL-RUN-SUPERSEDED` | A dead run checkpointed a unit with an execution key the new resolution no longer has. Its effects are real, so the unit becomes `uncertain` when the result recorded effects. |
 | `NYL-RUN-LATE-CHECKPOINT` | A run whose lease was broken checkpointed a unit after it was marked `uncertain`. The checkpoint stays as evidence; adopt it with `nyl recover --accept <run>` or run the unit again with `--retry`. |
 | `NYL-RUN-UNIMPORTED` | Reported by `nyl status`: a run ended without its transition commit, cancelled or after losing its lease, and the next reconcile imports its checkpoints. Units it left uncertain show as `uncertain` until then. |
 | `NYL-RUN-CANCELLED` | The run was cancelled by a signal. Run `nyl reconcile` again to take over its checkpoints. |
 | `NYL-LEASE-LOST` | Another invocation took over or deleted the lease. The run pushed nothing; the next run imports its checkpoints. |
-| `NYL-STATE-LOCAL-TIP` | A remote state ref's tip is a `Nyl-Local` commit pushed by hand. Repair it with [`nyl state restore`](/nyl/reference/cli/state/#nyl-state-restore). |
-| `NYL-LOCAL-RUN-UNRECORDED` | A `--local` run executed a unit that remote state does not know about. Record it with a remote `nyl reconcile -e <env> --unit <unit>` once the change is committed. |
-| `NYL-LOCAL-RUN-UNSUPPORTED` | `--local` needs remote state with state refs that are branches. |
-| `NYL-LOCAL-RUN-LEFTOVERS` | Remote state holds runs that died and were not taken over. Run `nyl reconcile -e <env>` without `--local` first. |
-| `NYL-LEASE-BROKEN` | A `--local` run found the remote lease broken and its run not imported. Run `nyl recover -e <env>` first. |
 | `NYL-RUN-STOPPED` | `--fail-fast` stopped the run after a unit failed, became uncertain, or waited for an approval. Fix that unit and run again. |
 | `NYL-UNIT-HELD` | A held unit keeps source changes or a teardown from applying. Lift the hold with `nyl resume`. |
 | `NYL-PLAN-UNITS-LEAVING` | Units leave the ownership set. Restore them in source or the `unitSelector` if they should stay. |

@@ -7,14 +7,14 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
-use crate::{
-    cli::{
-        apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, Phase, PhaseTiming},
-        commands::render::{
-            run_render_preflight, ClusterClientRequirement, DiscoveryProgress, RenderOptions, RenderPreflightOptions,
-        },
-        namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
+use crate::cli::{
+    apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, Phase, PhaseTiming},
+    commands::render::{
+        run_render_preflight, ClusterClientRequirement, DiscoveryProgress, RenderOptions, RenderPreflightOptions,
     },
+    namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
+};
+use nyl_render::{
     kubernetes::{
         enforce_release_history_limit,
         prune::{prune_decision, PruneDecision},
@@ -72,7 +72,7 @@ pub struct ApplyArgs {
         long,
         value_name = "N",
         conflicts_with = "no_release",
-        value_parser = crate::config::parse_release_history_limit
+        value_parser = nyl_render::config::parse_release_history_limit
     )]
     pub history_limit: Option<u32>,
 }
@@ -133,7 +133,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     tracing::info!("Validating {} manifests", desired_manifests.len());
     let validation_started = Instant::now();
-    crate::validation::validate_manifest_input(
+    nyl_render::validation::validate_manifest_input(
         &args.common.validation,
         &preflight.project_config,
         &preflight.project_root,
@@ -142,7 +142,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
         None,
-        crate::validation::ManifestValidationInput {
+        nyl_render::validation::ManifestValidationInput {
             manifests: &desired_manifests,
             source: &args.common.path,
             provenance: &preflight.provenance,
@@ -234,7 +234,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
 /// Resolve the release name and namespace from the rendered Release or the CLI flags.
 fn resolve_release_identity(
-    release: Option<&crate::resources::Release>,
+    release: Option<&nyl_render::resources::Release>,
     name: Option<String>,
     namespace: Option<String>,
 ) -> Result<(String, String)> {
@@ -397,7 +397,7 @@ async fn run_concurrently<T, R, Fut>(
 
 /// How long one prune waits in total for deleted resources to terminate before
 /// deleting the resources they may depend on.
-const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_secs(120);
+const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_mins(2);
 const PRUNE_TERMINATION_POLL: Duration = Duration::from_secs(1);
 
 /// Delete resources no longer desired, at most `concurrency` at a time, and return
@@ -680,7 +680,7 @@ impl<'s> ReleaseRecorder<'s> {
                         previous.revision, previous.status
                     )));
                 }
-                let previous_docs = crate::yaml::parse_yaml_documents_k8s_compatible(&previous.manifest)
+                let previous_docs = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&previous.manifest)
                     .map_err(|e| NylError::Config(format!("Failed to parse previous release manifest: {}", e)))?;
                 scopes.load(client, &previous.resource_keys).await;
                 scopes.load(client, &manifest_keys(&previous_docs)?).await;
@@ -1114,7 +1114,7 @@ pub(crate) fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<Strin
     let mut yaml_parts = Vec::new();
 
     for manifest in manifests {
-        let yaml = crate::yaml::serialize_yaml_value(manifest).map_err(NylError::YamlEmit)?;
+        let yaml = nyl_render::yaml::serialize_yaml_value(manifest).map_err(NylError::YamlEmit)?;
         yaml_parts.push(yaml);
     }
 
@@ -1209,7 +1209,7 @@ mod tests {
 
     fn resource_key(name: &str) -> ResourceKey {
         ResourceKey {
-            gvk: crate::kubernetes::GroupVersionKind {
+            gvk: nyl_render::kubernetes::GroupVersionKind {
                 group: String::new(),
                 version: "v1".to_string(),
                 kind: "ConfigMap".to_string(),
@@ -1244,9 +1244,9 @@ mod tests {
         let current =
             vec![json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "b", "namespace": "default"}})];
 
-        let previous = crate::yaml::parse_yaml_documents_k8s_compatible(&previous).unwrap();
+        let previous = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&previous).unwrap();
         let merged = merge_append_manifest(&current, previous, &ObjectScopes::default()).unwrap();
-        let docs = crate::yaml::parse_yaml_documents_k8s_compatible(&merged).unwrap();
+        let docs = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&merged).unwrap();
 
         // The stored manifest carries over A (not in the current set) plus B, with no
         // duplicate B (B is present in both current and previous).
@@ -1262,7 +1262,7 @@ mod tests {
     /// A cluster with a fixed per-request latency that records apply order and
     /// how many applies were in flight at once.
     struct LatencyClient {
-        inner: crate::kubernetes::MockKubeClient,
+        inner: nyl_render::kubernetes::MockKubeClient,
         latency: Duration,
         failing: &'static str,
         in_flight: AtomicUsize,
@@ -1281,7 +1281,7 @@ mod tests {
     impl LatencyClient {
         fn new(failing: &'static str) -> Self {
             Self {
-                inner: crate::kubernetes::MockKubeClient::new(),
+                inner: nyl_render::kubernetes::MockKubeClient::new(),
                 latency: Duration::from_millis(250),
                 failing,
                 in_flight: AtomicUsize::new(0),
@@ -1599,15 +1599,15 @@ mod tests {
             .collect();
         let stored = manifests_to_yaml(&manifests).unwrap();
         assert_eq!(
-            crate::yaml::parse_yaml_documents_k8s_compatible(&stored).unwrap(),
+            nyl_render::yaml::parse_yaml_documents_k8s_compatible(&stored).unwrap(),
             manifests
         );
 
         let mut updated = manifests[0].clone();
         updated["data"] = json!({"revision": "updated"});
-        let previous = crate::yaml::parse_yaml_documents_k8s_compatible(&stored).unwrap();
+        let previous = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&stored).unwrap();
         let appended = merge_append_manifest(&[updated.clone()], previous, &ObjectScopes::default()).unwrap();
-        let restored = crate::yaml::parse_yaml_documents_k8s_compatible(&appended).unwrap();
+        let restored = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&appended).unwrap();
         assert_eq!(restored.len(), manifests.len());
         assert!(restored.contains(&updated));
         for manifest in &manifests[1..] {
@@ -1651,7 +1651,7 @@ mod tests {
         let mut scopes = ObjectScopes::default();
         scopes
             .load(
-                &crate::kubernetes::MockKubeClient::new(),
+                &nyl_render::kubernetes::MockKubeClient::new(),
                 &manifest_keys(&manifests).unwrap(),
             )
             .await;
@@ -1730,7 +1730,7 @@ mod tests {
     async fn test_release_recorder_prunes_by_argocd_prune_sync_option() {
         for confirm_prune in [false, true] {
             let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
-            let client = crate::kubernetes::MockKubeClient::new();
+            let client = nyl_render::kubernetes::MockKubeClient::new();
             let previous = [
                 ("retained", "Prune=false"),
                 ("confirmed", "Delete=confirm,Prune=confirm"),
@@ -1836,7 +1836,7 @@ mod tests {
             "app",
             &[],
             true,
-            &crate::kubernetes::MockKubeClient::new(),
+            &nyl_render::kubernetes::MockKubeClient::new(),
             &mut ObjectScopes::default(),
         )
         .await;

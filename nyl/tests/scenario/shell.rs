@@ -17,8 +17,6 @@ use nyl_core::orchestration::ports::{
 };
 use nyl_core::orchestration::state::{Condition, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation};
 use nyl_core::orchestration::time::Duration;
-use nyl_drivers::fake::Script;
-use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
 use nyl_orchestration::fault::{FaultInjector, NoFaults};
 use nyl_orchestration::run_report::{EnvironmentRunReport, RunReport};
@@ -30,6 +28,8 @@ use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::memory::MemoryStateStore;
 use nyl_state::source::GitSourceResolver;
+use nyl_units::fake::Script;
+use nyl_units::process::ProcessRunner;
 use tempfile::TempDir;
 
 use super::runner::{AUTHOR, START};
@@ -55,9 +55,11 @@ pub fn shared_project() -> PathBuf {
 /// The process environment tools see: this process's `PATH`, as the tier-1
 /// runner passes it.
 pub fn process_env() -> BTreeMap<String, String> {
-    std::env::var("PATH")
+    let mut values = std::env::var("PATH")
         .map(|path| BTreeMap::from([("PATH".to_owned(), path)]))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    values.extend(super::docker_selectors());
+    values
 }
 
 /// `dev`'s state location in the world's `project.git`.
@@ -174,7 +176,7 @@ impl Harness {
             (Box::new(MemoryStateStore::new()), None)
         };
         let script = Script::new();
-        let drivers = nyl_drivers::registry::with_test_kinds(&script);
+        let drivers = nyl_units::registry::with_test_kinds(&script, nyl::resource_catalogue());
         Self {
             location: location(&world),
             world,
@@ -210,6 +212,7 @@ impl Harness {
             cancellation,
             prompt: None,
             observer: None,
+            progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         super::runner::invoke_in(&self.world, &wiring, &args, "main", "").unwrap()
@@ -263,12 +266,13 @@ impl Harness {
         let clone = self.world.fresh_clone("main");
         let entry_commit = CommitId::new(git_output(&clone, &["rev-parse", "HEAD"])).unwrap();
         let sources = GitSourceResolver::new(clone.join(".git"), GitAuth::none());
-        let renderer = UnitSourceRenderer::new("/nyl");
+        let renderer = UnitSourceRenderer::new("/nyl", nyl::resource_catalogue());
         let entry = renderer.render(&clone, &dev(), &entry_commit).unwrap().environment;
         Job {
             sources,
             renderer,
             request: RunRequest {
+                worktree_source: None,
                 unavailable: BTreeSet::new(),
                 environment_errors: BTreeMap::new(),
                 planned: BTreeMap::new(),
@@ -318,6 +322,7 @@ impl Harness {
             secrets: None,
             commit_identity: identity.then_some(&self.identity),
             observer: None,
+            progress: None,
             prompt: None,
         };
         operation(&context, &job.request)
@@ -348,9 +353,9 @@ impl Harness {
             .remove(0)
     }
 
-    pub fn verify(&self) -> EnvironmentRunReport {
+    pub fn detect_drift(&self) -> EnvironmentRunReport {
         let job = self.job(&[], Cancellation::default());
-        self.run_with(&job, nyl_orchestration::shell::verify::verify)
+        self.run_with(&job, nyl_orchestration::shell::check::detect_drift)
             .environments
             .remove(0)
     }
@@ -414,6 +419,9 @@ fn take_failure(left: &AtomicUsize) -> bool {
 }
 
 impl StateStore for FaultyStore {
+    fn prepare_worktree_snapshot(&self, location: &StateLocation, commit: &CommitId) -> StateResult<()> {
+        self.inner.prepare_worktree_snapshot(location, commit)
+    }
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         self.inner.snapshot(location)
     }

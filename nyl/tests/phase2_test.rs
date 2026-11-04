@@ -5,12 +5,12 @@
 /// - Component discovery
 /// - Helm chart resolution
 /// - Component instantiation to HelmChart
-use nyl::components::ComponentRegistry;
-use nyl::config::ProjectConfig;
-use nyl::generator::{instantiate_component, Generator};
-use nyl::helm::HelmChartResolver;
-use nyl::resources::ChartRef;
-use nyl::secrets::SecretsConfig;
+use nyl_render::components::ComponentRegistry;
+use nyl_render::config::ProjectConfig;
+use nyl_render::generator::{instantiate_component, Generator};
+use nyl_render::helm::HelmChartResolver;
+use nyl_render::resources::ChartRef;
+use nyl_render::secrets::SecretsConfig;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -119,10 +119,10 @@ fn test_secrets_config_integration() {
 
     // Test secret operations
     config
-        .set("api_key", nyl::secrets::SecretValue::from("secret-123"))
+        .set("api_key", nyl_render::secrets::SecretValue::from("secret-123"))
         .unwrap();
     config
-        .set("db_password", nyl::secrets::SecretValue::from("pass456"))
+        .set("db_password", nyl_render::secrets::SecretValue::from("pass456"))
         .unwrap();
 
     let keys = config.keys().unwrap();
@@ -131,7 +131,10 @@ fn test_secrets_config_integration() {
     assert!(keys.contains(&"db_password".to_string()));
 
     let api_key = config.get("api_key").unwrap();
-    assert_eq!(api_key, nyl::secrets::SecretValue::String("secret-123".to_string()));
+    assert_eq!(
+        api_key,
+        nyl_render::secrets::SecretValue::String("secret-123".to_string())
+    );
 }
 
 #[test]
@@ -201,7 +204,7 @@ helm_chart_search_paths = []
     create_test_chart(&charts_dir, "redis");
 
     // Load config and create generator
-    let config = ProjectConfig::load(Some(config_path)).unwrap();
+    let config = ProjectConfig::load(Some(config_path), nyl::resource_catalogue()).unwrap();
     let generator = Generator::new(config);
 
     // Find and instantiate components
@@ -276,7 +279,7 @@ fn test_multiple_search_paths_priority() {
     let component = registry.find_component("v1.test.io", "App").unwrap().unwrap();
 
     match component {
-        nyl::components::Component::Helm(helm) => {
+        nyl_render::components::Component::Helm(helm) => {
             assert!(helm.path.starts_with(&path1));
         }
     }

@@ -6,5 +6,6 @@ metadata:
   name: scratch
   labels: {dev: 'true'}
 spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
   context: {path: ../scripts}
   repository: '%REGISTRY%/scratch'

@@ -52,6 +52,18 @@ pub fn receipt_state(desired: Option<&DesiredUnit>, observed: Option<&ObservedUn
     }
 }
 
+/// Receipt provenance for this incarnation when its Nyl version differs.
+pub fn receipt_nyl_version(desired: &DesiredUnit, observed: Option<&ObservedUnit>, version: &str) -> Option<String> {
+    desired.unit.uid.as_ref()?;
+    crate::rules::freshness::same_incarnation(desired, observed)?
+        .receipt
+        .as_ref()?
+        .versions
+        .get("nyl")
+        .filter(|recorded| recorded.as_str() != version)
+        .cloned()
+}
+
 /// A unit's state from its persisted documents; `running` when a live run
 /// ref names it.
 pub fn unit_state(desired: &DesiredUnit, observed: Option<&ObservedUnit>, running: bool) -> UnitState {
@@ -284,7 +296,7 @@ fn condition_warning(
 /// (`NYL-TEARDOWN-PENDING`) or waiting under its `teardownWait`
 /// (`NYL-TEARDOWN-WAITING`). Contract: [Deletion](../../../../design/orchestration-core.md#deletion)
 /// and [Inspection](../../../../design/orchestration-core.md#inspection).
-fn lifecycle_details(
+pub(crate) fn lifecycle_details(
     environment: &EnvironmentName,
     name: &UnitName,
     desired: &DesiredUnit,
@@ -293,6 +305,7 @@ fn lifecycle_details(
 ) {
     match &desired.lifecycle {
         Lifecycle::Held { hold, deletion } => {
+            unit.no_instance = desired.unit.uid.is_none();
             unit.pending = hold.pending.as_ref().map(|pending| pending.source_commit.clone());
             let mut what = Vec::new();
             if let Some(pending) = &unit.pending {
@@ -310,19 +323,32 @@ fn lifecycle_details(
                 Some(reason) => format!("{} ({reason})", hold.by),
                 None => hold.by.clone(),
             };
-            let what = if what.is_empty() {
+            let pending = what.join(", ");
+            let what = if pending.is_empty() {
                 String::new()
             } else {
-                format!("; {}", what.join(", "))
+                format!("; {pending}")
             };
-            unit.warnings.push(Finding::new(
+            let mut finding = Finding::new(
                 Code::UnitHeld,
                 format!(
                     "{name} is held by {by} since {}{what}",
                     hold.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 ),
                 format!("reconcile changes nothing about it until `nyl resume -e {environment} --unit {name}`"),
-            ));
+            )
+            .with_title(format!("Unit '{name}' is held in environment '{environment}'"));
+            if let Some(reason) = &hold.reason {
+                finding = finding.with_detail("Reason", reason);
+            }
+            finding = finding
+                .with_detail("Since", hold.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .with_detail("By", &hold.by);
+            if !pending.is_empty() {
+                finding = finding.with_detail("Pending", pending);
+            }
+            unit.warnings
+                .push(finding.with_action("Action", format!("nyl resume -e {environment} --unit {name}")));
         }
         Lifecycle::Deleting { deletion } => {
             if let Some(waiting) = observed.and_then(|observed| observed.waiting.as_ref()) {
@@ -364,7 +390,7 @@ fn lifecycle_details(
 /// running unit and holder, and suggested next actions as warnings with fixes.
 /// `now` decides which leases and run refs are past their deadline (the
 /// units a dead run was executing read `uncertain`). With `drivers`, units
-/// with a current receipt show their drift observation
+/// with a current receipt show their drift record
 /// ([`crate::rules::drift::status_drift`]), which needs each unit's
 /// recovery policy.
 pub fn status(
@@ -445,8 +471,8 @@ pub fn status_with_readiness(
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
         if drivers.is_some() {
-            unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.observations.get(name));
-            // A current unit whose latest drift observation is `drifted` is
+            unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.drift.get(name));
+            // A current unit whose latest drift record is `drifted` is
             // work for the next reconcile: state `drifted`, exit 2.
             if unit.state == Some(UnitState::Current)
                 && unit.drift.as_ref().is_some_and(|drift| drift.result == "drifted")
@@ -861,7 +887,7 @@ mod tests {
     fn test_held_and_uncertain_exits_4_with_the_condition() {
         let mut snapshot = snapshot(&[("database", 2)]);
         snapshot.desired.get_mut(&name("database")).unwrap().lifecycle = lifecycle(json!({
-            "state": "held", "hold": {"since": "2026-01-01T00:00:00Z", "by": "jane",
+            "state": "held", "hold": {"since": "2026-01-01T00:00:00Z", "by": "jane", "reason": "maintenance",
                 "pending": {"sourceCommit": "5a90000000000000000000000000000000000000"}}
         }));
         snapshot.observed.get_mut(&name("database")).unwrap().condition = Some(condition(json!({
@@ -880,6 +906,27 @@ mod tests {
             .iter()
             .find(|warning| warning.code == Code::UnitHeld)
             .unwrap();
+        assert_eq!(
+            held.presentation.title.as_deref(),
+            Some("Unit 'database' is held in environment 'dev'")
+        );
+        assert_eq!(
+            held.presentation
+                .details
+                .iter()
+                .map(|field| (field.label.as_str(), field.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Reason", "maintenance"),
+                ("Since", "2026-01-01T00:00:00Z"),
+                ("By", "jane"),
+                (
+                    "Pending",
+                    "pending changes from 5a90000000000000000000000000000000000000"
+                ),
+            ]
+        );
+        assert_eq!(held.presentation.actions[0].value, "nyl resume -e dev --unit database");
         assert!(held.fix.contains("nyl resume -e dev --unit database"), "{}", held.fix);
         assert!(held.message.contains("pending changes from 5a90"), "{}", held.message);
         assert_eq!(report.exit, ExitCategory::Uncertain);
@@ -919,12 +966,15 @@ mod tests {
             "deletion": {"reason": "replace", "intent": "teardown", "teardown": "pending",
                 "requested": {"by": "jane", "at": "2026-01-01T00:00:00Z"}}
         }));
+        snapshot.observed.remove(&name("network"));
         let report = status_at(&snapshot, &Coordination::default(), at("00:30"));
         let api = &report.units[&name("api")];
         assert_eq!(api.state, Some(UnitState::Held));
+        assert!(api.no_instance);
         assert_eq!(api.receipt, Some(ReceiptState::None));
         assert_eq!(api.kind, "");
         let network = &report.units[&name("network")];
+        assert!(!network.no_instance);
         assert_eq!(
             network.summary.as_deref(),
             Some("teardown pending, carried out after resume")
@@ -966,30 +1016,26 @@ mod tests {
         );
     }
 
-    /// Drift: a current unit whose latest drift observation is `drifted` is
+    /// Drift: a current unit whose latest drift record is `drifted` is
     /// work for the next reconcile: state `drifted`, exit 2.
     #[test]
     fn test_a_drifted_current_unit_is_drifted_and_exits_2() {
-        use nyl_core::orchestration::state::{Drift, Observation, ObservationKind, ObservationType, StateV1};
+        use nyl_core::orchestration::state::{Drift, DriftRecord, DriftRecordKind, StateV1};
         let mut snapshot = snapshot(&[("network", 1)]);
         let unit = snapshot.desired[&name("network")].unit.clone();
-        snapshot.observations.insert(
+        snapshot.drift.insert(
             name("network"),
-            BTreeMap::from([(
-                ObservationType::Drift,
-                Observation {
-                    api_version: StateV1,
-                    kind: ObservationKind,
-                    unit,
-                    observation_type: ObservationType::Drift,
-                    execution_key: hex_key('a'),
-                    at: at("00:10"),
-                    result: Drift::Drifted {
-                        summary: "changed outside Nyl".to_owned(),
-                    },
-                    details: serde_json::Value::Null,
+            DriftRecord {
+                api_version: StateV1,
+                kind: DriftRecordKind,
+                unit,
+                execution_key: hex_key('a'),
+                at: at("00:10"),
+                result: Drift::Drifted {
+                    summary: "changed outside Nyl".to_owned(),
                 },
-            )]),
+                details: serde_json::Value::Null,
+            },
         );
         let mut drivers = DriverSet::new();
         drivers.register(std::sync::Arc::new(crate::rules::fixtures::TestDriver {
@@ -1008,5 +1054,32 @@ mod tests {
 
     fn codes(findings: &[Finding]) -> Vec<Code> {
         findings.iter().map(|finding| finding.code).collect()
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::receipt_nyl_version;
+    use crate::rules::fixtures::{desired_numbered, hex_key, observed_numbered};
+
+    #[test]
+    fn receipt_version_is_advisory_for_the_same_incarnation() {
+        let mut desired = desired_numbered("build", 1, Some(hex_key('a')));
+        let mut observed = observed_numbered("build", 1, Some(hex_key('a')));
+        observed
+            .receipt
+            .as_mut()
+            .unwrap()
+            .versions
+            .insert("nyl".into(), "1.0".into());
+        assert_eq!(
+            receipt_nyl_version(&desired, Some(&observed), "1.1").as_deref(),
+            Some("1.0")
+        );
+        assert_eq!(receipt_nyl_version(&desired, Some(&observed), "1.0"), None);
+        desired.unit.uid = None;
+        assert_eq!(receipt_nyl_version(&desired, Some(&observed), "1.1"), None);
+        desired.unit.uid = desired_numbered("build", 2, Some(hex_key('a'))).unit.uid;
+        assert_eq!(receipt_nyl_version(&desired, Some(&observed), "1.1"), None);
     }
 }

@@ -4,7 +4,7 @@
 import { resources } from '../lib/resources.mjs';
 
 interface Props {
-  section: 'kubernetes' | 'rendered-gitops' | 'orchestration';
+  section: 'kubernetes-rendering' | 'kubernetes-gitops' | 'orchestration';
 }
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
@@ -18,7 +18,7 @@ const H = 44;
 type Node = { label: string; x: number; y: number; w?: number; h?: number; link?: boolean; note?: string };
 type Edge = { from: [number, number]; to: [number, number]; label: string; at?: [number, number]; anchor?: string };
 
-// Rendered GitOps: configuration resources and the fields that reference others.
+// Kubernetes GitOps: configuration resources and the fields that reference others.
 const gitops: Node[] = [
   { label: 'ArgoCDInstance', x: 40, y: 30, link: true },
   { label: 'DeploymentTarget', x: 300, y: 30, link: true },
@@ -66,16 +66,21 @@ const orchestration: Node[] = [
   { label: 'EnvironmentGroup', x: 40, y: 30, link: true },
   { label: 'Environment', x: 40, y: 170, link: true },
   { label: 'GitRepository', x: 400, y: 100, link: true },
+  { label: 'OciImage', x: 40, y: 310, link: true },
+  { label: 'Terraform', note: 'or OpenTofu', x: 300, y: 310, link: true },
 ];
 const orchestrationEdges: Edge[] = [
   { from: [130, 74], to: [130, 168], label: 'selects by labels', at: [138, 125], anchor: 'start' },
   { from: [220, 52], to: [398, 114], label: 'default state repository', at: [300, 70], anchor: 'start' },
   { from: [220, 192], to: [398, 130], label: 'state.repositoryRef', at: [300, 182], anchor: 'start' },
+  { from: [130, 214], to: [130, 308], label: 'unitSelector', at: [140, 265], anchor: 'start' },
+  { from: [220, 205], to: [390, 308], label: 'unitSelector', at: [300, 255] },
+  { from: [300, 332], to: [222, 332], label: 'fromUnit', at: [261, 324] },
 ];
 
 const diagrams = [
   {
-    id: 'rendered-gitops',
+    id: 'kubernetes-gitops',
     nodes: gitops,
     edges: gitopsEdges,
     viewBox: '0 0 760 390',
@@ -83,7 +88,7 @@ const diagrams = [
       'A DeploymentTarget binds a Cluster, an optional ArgoCDInstance, and a publication GitRepository, and selects ApplicationGroups by label. Each ApplicationGroup reads Releases from its source directory and may share an AppProjectDefinition.',
   },
   {
-    id: 'kubernetes',
+    id: 'kubernetes-rendering',
     nodes: rendering,
     edges: renderingEdges,
     viewBox: '0 0 790 320',
@@ -94,9 +99,9 @@ const diagrams = [
     id: 'orchestration',
     nodes: orchestration,
     edges: orchestrationEdges,
-    viewBox: '0 0 620 240',
+    viewBox: '0 0 760 380',
     claim:
-      'An EnvironmentGroup gives the Environments it selects shared defaults, including the repository their state lives in; an Environment may name its own.',
+      'EnvironmentGroups supply defaults and state repositories. Environments select native image and infrastructure units by labels; infrastructure units consume image artifacts and units read declared outputs through fromUnit.',
   },
 ];
 const diagram = diagrams.find((candidate) => candidate.id === Astro.props.section);

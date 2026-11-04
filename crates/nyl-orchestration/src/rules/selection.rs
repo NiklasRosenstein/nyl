@@ -19,7 +19,7 @@
 //!   awaits approval ([`Skipped::LocalApproval`]). Contract:
 //!   [Local runs](../../../../design/orchestration-core.md#local-runs).
 //! - A unit with a current receipt is a candidate again when
-//!   [`drift::repair`] says so: its latest drift observation of that receipt
+//!   [`drift::repair`] says so: its latest drift record of that receipt
 //!   is `drifted`, or `--reapply` names it. Under `driftRepair: manual` a
 //!   drifted unit that is not reapplied stays [`Skipped::Drifted`]. A
 //!   candidate whose execution recovery policy is `converge` is selected;
@@ -33,8 +33,8 @@ use nyl_core::orchestration::driver::{DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, Observation, ObservationType, ObservedUnit,
-    Provenance, Readiness,
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, DriftRecord, Lifecycle, ObservedUnit, Provenance,
+    Readiness,
 };
 use nyl_core::resources::environment::DriftRepair;
 
@@ -59,10 +59,10 @@ pub struct Candidates<'a> {
     pub local: Option<&'a BTreeSet<UnitName>>,
     /// Matching invocation approvals; when present these supersede legacy local names.
     pub approvals: Option<&'a BTreeMap<UnitName, ApprovalRecord>>,
-    /// The latest observations per unit and type (`nyl verify`'s drift
-    /// observations select drifted units again). Contract:
+    /// The latest drift record per unit (`nyl detect-drift`'s `drifted`
+    /// records select units again). Contract:
     /// [Drift](../../../../design/orchestration-core.md#drift).
-    pub observations: &'a BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+    pub drift: &'a BTreeMap<UnitName, DriftRecord>,
     /// The environment's `driftRepair`, as rendered at S.
     pub drift_repair: DriftRepair,
     /// `nyl reconcile --unit <u>… --reapply`: the named units, to execute
@@ -70,6 +70,38 @@ pub struct Candidates<'a> {
     /// A named unit whose recovery policy is not `converge` awaits approval
     /// instead (without a matching invocation approval).
     pub reapply: &'a BTreeSet<UnitName>,
+}
+
+/// Explain a selected unit using its prior receipt and invocation.
+pub fn execution_reason(
+    desired: &DesiredUnit,
+    observed: Option<&ObservedUnit>,
+    reapply: bool,
+    drivers: &DriverSet,
+) -> nyl_core::orchestration::progress::ExecutionReason {
+    use nyl_core::orchestration::progress::ExecutionReason as Reason;
+    let observed = same_incarnation(desired, observed);
+    match observed.and_then(|o| o.condition.as_ref()) {
+        Some(Condition::Uncertain { .. }) => return Reason::Recovery,
+        Some(Condition::Failed { retryable: true, .. }) => return Reason::Retry,
+        _ => {}
+    }
+    let Some(receipt) = observed.and_then(|o| o.receipt.as_ref()) else {
+        return Reason::NoReceipt;
+    };
+    if observed.is_some_and(|o| o.operator_modified.is_some()) {
+        return Reason::OperatorModified;
+    }
+    if desired.execution_key.as_ref() == Some(&receipt.execution_key) {
+        return if reapply { Reason::Reapply } else { Reason::DriftRepair };
+    }
+    if drivers
+        .get(&desired.unit.api_version, &desired.unit.kind)
+        .is_some_and(|driver| driver.behavior_version() != receipt.behavior_version)
+    {
+        return Reason::DriverBehaviorChanged;
+    }
+    Reason::InputsChanged
 }
 
 /// Why a unit is not selected.
@@ -86,7 +118,7 @@ pub enum Skipped {
     /// execution recovery policy is not `converge`. Reported as
     /// `awaiting-approval`.
     LocalApproval,
-    /// Current, its latest drift observation is `drifted`, and this run
+    /// Current, its latest drift record is `drifted`, and this run
     /// does not repair it (`driftRepair: manual`). Reported as `drifted`.
     /// Contract: [Drift](../../../../design/orchestration-core.md#drift).
     Drifted,
@@ -130,6 +162,21 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         return Err(Skipped::Blocked);
     }
     let observed = candidates.observed.get(name);
+    let modified = same_incarnation(desired, observed).is_some_and(|observed| observed.operator_modified.is_some());
+    if modified {
+        let digest_required = candidates
+            .drivers
+            .get(&desired.unit.api_version, &desired.unit.kind)
+            .is_some_and(|driver| {
+                driver
+                    .capabilities(desired.resolved_spec.as_ref().unwrap_or(&desired.spec))
+                    .change_digest
+            });
+        let approval = candidates.approvals.and_then(|approvals| approvals.get(name));
+        if approval.is_none() || (digest_required && approval.is_some_and(|approval| approval.digest.is_none())) {
+            return Err(Skipped::ManualApproval);
+        }
+    }
     // A condition of an earlier incarnation does not apply to this one.
     let condition = same_incarnation(desired, observed).and_then(|observed| observed.condition.as_ref());
     match condition {
@@ -145,7 +192,7 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         }
         Some(Condition::Failed { retryable: false, .. }) => return Err(Skipped::FailedNonRetryable),
         Some(Condition::Failed { retryable: true, .. }) | None => {
-            if receipt_is_current(desired, observed) {
+            if receipt_is_current(desired, observed) && !modified {
                 // Current: a candidate again only for drift repair or
                 // `--reapply`, by the drift rule.
                 let Some(repair) = drift::repair(candidates, name, desired, observed) else {
@@ -284,13 +331,12 @@ mod tests {
     use super::*;
     use crate::rules::fixtures::*;
 
-    /// A drift observation of `desired`'s current receipt.
-    fn drift_observation(desired: &DesiredUnit, result: Drift) -> Observation {
-        Observation {
+    /// A drift record of `desired`'s current receipt.
+    fn drift_record(desired: &DesiredUnit, result: Drift) -> DriftRecord {
+        DriftRecord {
             api_version: nyl_core::orchestration::state::StateV1,
-            kind: nyl_core::orchestration::state::ObservationKind,
+            kind: nyl_core::orchestration::state::DriftRecordKind,
             unit: desired.unit.clone(),
-            observation_type: ObservationType::Drift,
             execution_key: desired.execution_key.clone().unwrap(),
             at: "2026-09-24T12:00:00Z".parse().unwrap(),
             result,
@@ -311,7 +357,7 @@ mod tests {
         attempted: BTreeSet<UnitName>,
         local: Option<BTreeSet<UnitName>>,
         approvals: Option<BTreeMap<UnitName, ApprovalRecord>>,
-        observations: BTreeMap<UnitName, BTreeMap<ObservationType, Observation>>,
+        drift: BTreeMap<UnitName, DriftRecord>,
         drift_repair: DriftRepair,
         reapply: BTreeSet<UnitName>,
     }
@@ -327,7 +373,7 @@ mod tests {
                 attempted: BTreeSet::new(),
                 local: None,
                 approvals: None,
-                observations: BTreeMap::new(),
+                drift: BTreeMap::new(),
                 drift_repair: DriftRepair::default(),
                 reapply: BTreeSet::new(),
             }
@@ -342,13 +388,10 @@ mod tests {
             );
         }
 
-        /// Record a drift observation of `unit`'s current receipt.
+        /// Record a drift detection of `unit`'s current receipt.
         fn observe(&mut self, unit: &str, result: Drift) {
-            let observation = drift_observation(&self.desired[&name(unit)], result);
-            self.observations
-                .entry(name(unit))
-                .or_default()
-                .insert(ObservationType::Drift, observation);
+            let record = drift_record(&self.desired[&name(unit)], result);
+            self.drift.insert(name(unit), record);
         }
 
         fn add(&mut self, unit: &str, spec: Value) {
@@ -370,7 +413,7 @@ mod tests {
                 attempted: &self.attempted,
                 local: self.local.as_ref(),
                 approvals: self.approvals.as_ref(),
-                observations: &self.observations,
+                drift: &self.drift,
                 drift_repair: self.drift_repair,
                 reapply: &self.reapply,
             })
@@ -534,6 +577,38 @@ mod tests {
     }
 
     #[test]
+    fn test_release_version_does_not_select_current_receipt() {
+        let mut world = World::new();
+        world.current("build", json!({}));
+        world
+            .observed
+            .get_mut(&name("build"))
+            .unwrap()
+            .receipt
+            .as_mut()
+            .unwrap()
+            .versions
+            .insert("nyl".into(), "old-release".into());
+        let (ready, skipped) = world.select(None);
+        assert!(ready.is_empty());
+        assert_eq!(skipped[&name("build")], Skipped::Current);
+    }
+
+    #[test]
+    fn test_execution_reason_identifies_driver_behavior_change() {
+        let mut world = World::new();
+        world.current("build", json!({}));
+        let observed = world.observed.get_mut(&name("build")).unwrap();
+        let receipt = observed.receipt.as_mut().unwrap();
+        receipt.behavior_version = 0;
+        receipt.execution_key = key("older");
+        assert_eq!(
+            execution_reason(&world.desired[&name("build")], Some(observed), false, &world.drivers),
+            nyl_core::orchestration::progress::ExecutionReason::DriverBehaviorChanged
+        );
+    }
+
+    #[test]
     fn test_batches_split_by_concurrency_of_at_least_one() {
         let ready = [name("a"), name("b"), name("c")];
         assert_eq!(batches(&ready, 2), [vec![name("a"), name("b")], vec![name("c")]]);
@@ -541,7 +616,7 @@ mod tests {
         assert!(batches(&[], 4).is_empty());
     }
 
-    /// Catches drift observations being ignored (an idempotent unit that
+    /// Catches drift records being ignored (an idempotent unit that
     /// drifted is never repaired), or a unit that is not safe to re-run
     /// executing without an approval.
     #[test]
@@ -584,11 +659,11 @@ mod tests {
         assert_eq!(skipped, BTreeMap::from([(name("converge"), Skipped::Drifted)]));
     }
 
-    /// Catches a stale observation re-running a unit: `unknown` drift, or
+    /// Catches a stale drift record re-running a unit: `unknown` drift, or
     /// `drifted` about another incarnation or another receipt, says nothing
     /// about the current receipt.
     #[test]
-    fn test_select_ignores_observations_that_do_not_say_the_current_receipt_drifted() {
+    fn test_select_ignores_drift_records_that_do_not_say_the_current_receipt_drifted() {
         let mut world = World::new();
         for unit in ["unknown", "incarnation", "key"] {
             world.current(unit, json!({"idempotent": true}));
@@ -601,20 +676,8 @@ mod tests {
         );
         world.observe("incarnation", drifted());
         world.observe("key", drifted());
-        let observations = &mut world.observations;
-        observations
-            .get_mut(&name("incarnation"))
-            .unwrap()
-            .get_mut(&ObservationType::Drift)
-            .unwrap()
-            .unit
-            .uid = Some(uid("earlier"));
-        observations
-            .get_mut(&name("key"))
-            .unwrap()
-            .get_mut(&ObservationType::Drift)
-            .unwrap()
-            .execution_key = key("earlier");
+        world.drift.get_mut(&name("incarnation")).unwrap().unit.uid = Some(uid("earlier"));
+        world.drift.get_mut(&name("key")).unwrap().execution_key = key("earlier");
         let (ready, skipped) = world.select(None);
         assert!(ready.is_empty(), "{ready:?}");
         assert!(
@@ -655,5 +718,67 @@ mod tests {
         let (ready, skipped) = world.select(None);
         assert!(ready.is_empty());
         assert_eq!(skipped[&name("manual")], Skipped::ManualApproval);
+    }
+
+    #[test]
+    fn test_operator_repair_requires_approval_even_with_an_unchanged_key() {
+        let mut world = World::new();
+        world.current("repaired", json!({"idempotent":true}));
+        world.observed.get_mut(&name("repaired")).unwrap().operator_modified =
+            Some(nyl_core::orchestration::state::OperatorModification {
+                request: nyl_core::orchestration::state::Request {
+                    by: "operator".to_owned(),
+                    at: "2026-10-28T00:00:00Z".parse().unwrap(),
+                    reason: Some("repair".to_owned()),
+                },
+                status: None,
+            });
+        assert_eq!(world.select(None).1[&name("repaired")], Skipped::ManualApproval);
+        assert!(!receipt_is_current(
+            &world.desired[&name("repaired")],
+            world.observed.get(&name("repaired"))
+        ));
+        world.approvals = Some(BTreeMap::from([(
+            name("repaired"),
+            ApprovalRecord {
+                by: vec!["operator".to_owned()],
+                identity: ApprovalIdentity::Local,
+                source: Some("local".to_owned()),
+                digest: None,
+                reviewed: false,
+            },
+        )]));
+        assert_eq!(world.select(None).0, [name("repaired")]);
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::execution_reason;
+    use crate::rules::fixtures;
+    use nyl_core::orchestration::driver::DriverSet;
+    use nyl_core::orchestration::progress::ExecutionReason as Reason;
+    use serde_json::json;
+
+    #[test]
+    fn execution_reason_uses_receipt_evidence_without_guessing_inputs() {
+        let mut desired = fixtures::desired("build", "Command", json!({}), "new");
+        desired.resolved_spec = Some(json!({"command": "build"}));
+        let observed = fixtures::observed("build", "Command", Some(fixtures::receipt("old", json!({}), vec![])));
+        let drivers = DriverSet::new();
+        assert_eq!(execution_reason(&desired, None, false, &drivers), Reason::NoReceipt);
+        assert_eq!(
+            execution_reason(&desired, Some(&observed), false, &drivers),
+            Reason::InputsChanged
+        );
+        desired.execution_key = Some(observed.receipt.as_ref().unwrap().execution_key.clone());
+        assert_eq!(
+            execution_reason(&desired, Some(&observed), true, &drivers),
+            Reason::Reapply
+        );
+        assert_eq!(
+            execution_reason(&desired, Some(&observed), false, &drivers),
+            Reason::DriftRepair
+        );
     }
 }

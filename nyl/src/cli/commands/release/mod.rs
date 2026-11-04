@@ -7,7 +7,7 @@ mod show;
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use crate::Result;
+use nyl_render::Result;
 
 /// Manage releases
 #[derive(Args, Debug)]

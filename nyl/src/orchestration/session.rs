@@ -20,14 +20,16 @@ use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::source::GitSourceResolver;
 
 use crate::cli::commands::reconcile::RunOutput;
+use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
-use crate::gitops::units::UnitSourceRenderer;
-use crate::gitops::{discover_gitops_inventory, GitOpsInventory};
 use crate::orchestration::project::{
     declared, open_store, requested_by as requested_by_default, resolve_environment, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::NylError;
+use nyl_render::gitops::discover_gitops_inventory;
+use nyl_render::gitops::units::UnitSourceRenderer;
+use nyl_render::gitops::GitOpsInventory;
+use nyl_render::NylError;
 
 /// Why a command stopped before the shell produced a report.
 pub enum Stop {
@@ -59,7 +61,7 @@ pub struct Session {
 impl Session {
     /// Discover the project at `path` and resolve `environment` in it.
     pub fn open(path: &Path, environment: &str) -> Result<Self, Stop> {
-        let inventory = discover_gitops_inventory(path, None)?;
+        let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
         let resolved = resolve_environment(&inventory, environment)?;
         Ok(Self { inventory, resolved })
     }
@@ -106,20 +108,61 @@ impl Session {
         open_store(&self.inventory, &self.resolved, author)
     }
 
+    /// Open the state store without contacting remote repositories.
+    pub fn offline_store(&self, author: Option<CommitAuthor>) -> Result<GitStateStore, NylError> {
+        crate::orchestration::project::open_store_mode(&self.inventory, &self.resolved, author, true)
+    }
+
     /// Sources in the clone, through the project's Git credentials.
     pub fn sources(&self) -> Result<GitSourceResolver, NylError> {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
-        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth))
+        let state = self.store(None)?;
+        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
+            .with_snapshot_repository(state.repository_path(&self.resolved.location))
+            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root()))
+    }
+
+    /// Wire explicit working-file capture through the shared source shell.
+    pub fn snapshot_worktree(
+        &self,
+        wiring: &Wiring<'_>,
+        author: Option<&str>,
+        local: bool,
+    ) -> Result<nyl_core::orchestration::ports::WorktreeSnapshot, Stop> {
+        let identity = wiring.commit_identity(&self.resolved.git_dir, author)?;
+        let store = if local {
+            self.offline_store(None)?
+        } else {
+            self.store(None)?
+        };
+        let sources = self.sources()?;
+        nyl_orchestration::shell::sources::snapshot_worktree(
+            &store,
+            &sources,
+            &self.resolved.location,
+            &self.entry_commit()?,
+            &identity,
+            wiring.clock.as_ref(),
+            wiring.progress,
+        )
+        .map_err(|error| {
+            Finding::new(
+                Code::SourceUnavailable,
+                error,
+                "check state access and worktree paths; symlink targets must stay inside the repository",
+            )
+            .into()
+        })
     }
 
     /// The renderer of the environment's units at a source commit.
     pub fn renderer(&self) -> UnitSourceRenderer {
-        UnitSourceRenderer::new(self.entry_project_dir()).with_previous_paths(self.previous_paths())
+        UnitSourceRenderer::new(self.entry_project_dir(), crate::resource_catalogue())
+            .with_previous_paths(self.previous_paths())
     }
 
     /// The shell context of one command, working through `store`: the
-    /// environment's state store, or a [`LocalStore`](nyl_orchestration::shell::local::LocalStore)
-    /// wrapping it for `--local`.
+    /// environment's configured state store.
     pub fn context<'a>(
         &self,
         store: &'a dyn StateStore,
@@ -150,7 +193,7 @@ impl Session {
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
         let mut report = self.run_with(wiring, store, identity, request, operation)?;
-        self.add_warnings(&mut report);
+        self.annotate_report(&mut report);
         Ok(report)
     }
 
@@ -182,38 +225,22 @@ impl Session {
             secrets: Some(&secrets),
             commit_identity: identity,
             observer: wiring.observer,
+            progress: wiring.progress,
             prompt: wiring.prompt,
         };
         Ok(operation(&context, request))
     }
 
-    /// Add the warnings of resolving the environment to `report`.
-    pub fn add_warnings(&self, report: &mut RunReport) {
+    /// Add source repository context and environment-resolution warnings to the report.
+    pub fn annotate_report(&self, report: &mut RunReport) {
         for environment in &mut report.environments {
+            if environment.source_commit.is_some() {
+                environment.source_repository = Some(self.resolved.source_repository.clone());
+            }
             let mut warnings = self.resolved.warnings.clone();
             warnings.append(&mut environment.warnings);
             environment.warnings = warnings;
         }
-    }
-
-    /// The `--local` options of a run, after checking that the state has
-    /// a local view (`NYL-LOCAL-RUN-UNSUPPORTED` otherwise): remote state
-    /// whose refs are branches. `approve` are the `--approve` units.
-    pub fn local_run(
-        &self,
-        local_lease: bool,
-        approve: &[String],
-    ) -> Result<nyl_orchestration::shell::local::LocalRun, Finding> {
-        use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
-        nyl_orchestration::rules::local::view(&self.resolved.location)?;
-        Ok(LocalRun {
-            lease: if local_lease {
-                LeaseScope::Local
-            } else {
-                LeaseScope::Remote
-            },
-            approve: unit_names("--approve", approve)?,
-        })
     }
 
     /// The request of one `plan` or `reconcile`.
@@ -251,6 +278,7 @@ impl Session {
             units,
             concurrency: options.concurrency.max(1),
             source_override: options.source.map(str::to_owned),
+            worktree_source: None,
             wait: options.wait,
             local: options.local.clone(),
             cancellation: options.cancellation.clone(),
@@ -299,7 +327,7 @@ pub fn project_dir(inventory: &GitOpsInventory) -> String {
     format!("/{relative}")
 }
 
-/// The options of a `plan`, `reconcile`, or `verify` request.
+/// The options of a `plan`, `reconcile`, `detect-drift`, or `attest` request.
 pub struct RunOptions<'a> {
     pub units: &'a [String],
     pub concurrency: usize,
@@ -307,7 +335,7 @@ pub struct RunOptions<'a> {
     pub wait: Option<Duration>,
     /// `--local`, `--local-lease`, and `--approve` of `reconcile`; `None` elsewhere.
     pub local: Option<nyl_orchestration::shell::local::LocalRun>,
-    /// The wiring's cancellation for `reconcile` and `verify`; never set for `plan`.
+    /// The wiring's cancellation for `reconcile`, `detect-drift`, and `attest`; never set for `plan`.
     pub cancellation: nyl_orchestration::shell::run::Cancellation,
     /// The operation on the run path: reconcile, a recover import, or a teardown.
     pub mode: nyl_orchestration::shell::run::RunMode,
@@ -356,11 +384,12 @@ pub fn outcome(report: &RunReport, output: RunOutput, exit: u8) -> CommandOutcom
         RunOutput::Json => pretty_json(&json),
         RunOutput::Table => table(report),
     };
+    let stderr = diagnostics(report);
     CommandOutcome {
         exit,
         report: json,
         stdout,
-        stderr: diagnostics(report),
+        stderr,
     }
 }
 
@@ -427,15 +456,15 @@ fn table(report: &RunReport) -> String {
             text.push('\n');
         }
         let rows = environment
-            .units
-            .iter()
+            .ordered_units()
             .map(|(name, unit)| unit_row(report.kind, name, unit))
             .collect::<Vec<_>>();
         let headers: &[&str] = match report.kind {
             ReportKind::PlanReport => &["UNIT", "KIND", "STATE", "RECEIPT", "CHANGES", "DETAIL"],
             ReportKind::ReconcileReport | ReportKind::TeardownReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
-            ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
+            ReportKind::DetectDriftReport => &["UNIT", "KIND", "DRIFT", "DETAIL"],
+            ReportKind::AttestReport => &["UNIT", "KIND", "ATTESTATIONS", "DETAIL"],
         };
         if rows.is_empty() {
             // A refused operation reaches no units; its error says why.
@@ -445,14 +474,42 @@ fn table(report: &RunReport) -> String {
         } else {
             let _ = writeln!(text, "{}", render_table(headers, &rows));
         }
+        if environment.run.is_some() || environment.source_commit.is_some() || !environment.commits.is_empty() {
+            text.push('\n');
+        }
         if let Some(run) = &environment.run {
-            let _ = writeln!(text, "run: {run}");
+            let _ = writeln!(
+                text,
+                "  {}      {}",
+                styled("run:", Style::Dim),
+                styled(run.as_ref(), Style::Dim)
+            );
+        }
+        if let Some(repository) = &environment.state_repository {
+            let _ = writeln!(text, "{} {repository}", styled("state repository:", Style::Dim));
+        }
+        if let Some(path) = &environment.state_local_path {
+            let _ = writeln!(text, "{} {path}", styled("state local path:", Style::Dim));
         }
         if let Some(source) = &environment.source_commit {
-            let _ = writeln!(text, "source: {source}");
+            let _ = writeln!(
+                text,
+                "  {}   {}",
+                styled("source:", Style::Dim),
+                styled(source.as_ref(), Style::Dim)
+            );
+            if let Some(repository) = &environment.source_repository {
+                let _ = writeln!(text, "            {repository}");
+            }
         }
         for (side, commit) in &environment.commits {
-            let _ = writeln!(text, "{side}: {commit}");
+            let _ = writeln!(
+                text,
+                "  {}{} {}",
+                styled(&format!("{side}:"), Style::Dim),
+                " ".repeat(9usize.saturating_sub(side.to_string().len() + 1)),
+                styled(commit.as_ref(), Style::Dim)
+            );
         }
     }
     text
@@ -471,9 +528,67 @@ pub fn cell_label(value: Option<impl serde::Serialize>) -> String {
 /// held or deleting unit next to it, such as `held (uncertain)`.
 pub fn state_cell(unit: &UnitReport) -> String {
     let outcome = unit.outcome_name().unwrap_or("-");
-    match unit.condition {
-        Some(condition) => format!("{outcome} ({})", cell_label(Some(condition))),
-        None => outcome.to_owned(),
+    let mut details = Vec::new();
+    if outcome == "held" && unit.no_instance {
+        details.push("no instance".to_owned());
+    }
+    if let Some(condition) = unit.condition {
+        details.push(cell_label(Some(condition)));
+    }
+    // `attest` shows each attestation's result next to `attested`.
+    for (name, result) in unit.check.iter().flat_map(|check| &check.attestations) {
+        let result = match result {
+            nyl_core::orchestration::state::AttestationResult::Pass => "pass",
+            nyl_core::orchestration::state::AttestationResult::Fail => "fail",
+        };
+        details.push(format!("{name}: {result}"));
+    }
+    if details.is_empty() {
+        outcome.to_owned()
+    } else {
+        format!("{outcome} ({})", details.join(", "))
+    }
+}
+
+/// A state cell styled according to the report's typed outcome.
+pub(crate) fn styled_state_cell(unit: &UnitReport) -> Cell {
+    use nyl_orchestration::run_report::{CheckResult, UnitState};
+    let style = match &unit.result {
+        Some(result) => result_style(result),
+        None => match unit.state {
+            Some(UnitState::Failed) => Some(Style::Failure),
+            Some(
+                UnitState::Blocked
+                | UnitState::AwaitingApproval
+                | UnitState::Uncertain
+                | UnitState::Held
+                | UnitState::PendingTeardown
+                | UnitState::Drifted,
+            ) => Some(Style::Attention),
+            _ => match unit.check.as_ref() {
+                Some(check)
+                    if check
+                        .attestations
+                        .values()
+                        .any(|result| *result == nyl_core::orchestration::state::AttestationResult::Fail) =>
+                {
+                    Some(Style::Failure)
+                }
+                Some(check) => match check.result {
+                    CheckResult::Drifted { .. }
+                    | CheckResult::Unknown { .. }
+                    | CheckResult::NoReceipt
+                    | CheckResult::Unsupported => Some(Style::Attention),
+                    CheckResult::Clean | CheckResult::Attested => None,
+                },
+                None => None,
+            },
+        },
+    };
+    let value = state_cell(unit);
+    match style {
+        Some(style) => Cell::styled(&value, styled(&value, style)),
+        None => Cell::plain(value),
     }
 }
 
@@ -496,7 +611,10 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
             let changes = cell_label(unit.changes);
             vec![name.to_string(), kind_cell(unit), outcome, receipt, changes, detail]
         }
-        ReportKind::ReconcileReport | ReportKind::TeardownReport | ReportKind::VerifyReport => {
+        ReportKind::ReconcileReport
+        | ReportKind::TeardownReport
+        | ReportKind::DetectDriftReport
+        | ReportKind::AttestReport => {
             vec![name.to_string(), kind_cell(unit), outcome, detail]
         }
         ReportKind::StatusReport => {
@@ -504,31 +622,40 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
             vec![name.to_string(), kind_cell(unit), outcome, receipt, last_run, detail]
         }
     };
-    cells.into_iter().map(Cell::plain).collect()
+    let mut cells: Vec<Cell> = cells.into_iter().map(Cell::plain).collect();
+    cells[2] = styled_state_cell(unit);
+    cells
 }
 
 /// The most useful single line about a unit: its plan error, blockers,
 /// failure message, or driver summary, followed by a held unit's pending
-/// changes (`pending changes from <commit>`) and the drift observation.
+/// changes (`pending changes from <commit>`) and the drift record.
 pub fn detail(unit: &UnitReport) -> String {
-    if let Some(error) = &unit.plan_error {
-        return format!("plan failed: {error}");
+    let leading = if let Some(error) = &unit.plan_error {
+        Some(format!("plan failed: {error}"))
+    } else if !unit.blocked_by.is_empty() {
+        Some(
+            unit.blocked_by
+                .iter()
+                .map(|blocked| match &blocked.unit {
+                    Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
+                    None => format!("{}: {}", blocked.pointer, blocked.reason),
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else if let Some(nyl_core::orchestration::progress::UnitResult::Blocked { reason }) = &unit.result {
+        Some(reason.clone())
+    } else {
+        None
+    };
+    let mut parts: Vec<String> = leading.into_iter().collect();
+    if let Some(reason) = unit.execution_reason {
+        parts.push(format!("reason: {}", reason.description()));
     }
-    if !unit.blocked_by.is_empty() {
-        return unit
-            .blocked_by
-            .iter()
-            .map(|blocked| match &blocked.unit {
-                Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
-                None => format!("{}: {}", blocked.pointer, blocked.reason),
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
+    if let Some(version) = &unit.receipt_nyl_version {
+        parts.push(format!("receipt Nyl version: {version}"));
     }
-    if let Some(nyl_orchestration::run_report::UnitResult::Blocked { reason }) = &unit.result {
-        return reason.clone();
-    }
-    let mut parts = Vec::new();
     if let Some(pending) = &unit.pending {
         parts.push(format!("pending changes from {pending}"));
     }
@@ -570,20 +697,131 @@ fn diagnostics(report: &RunReport) -> String {
     text
 }
 
-/// Print one finding with its code and fix.
+/// Append a finding as a readable block with its stable code.
 pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, finding: &Finding) {
+    text.push('\n');
+    let severity = match level {
+        "warning" => styled(level, Style::Warning),
+        "error" => styled(level, Style::Error),
+        _ => level.to_owned(),
+    };
+    let headline = finding.presentation.title.as_deref().unwrap_or(&finding.message);
+    let mut lines = headline.split('\n');
+    let first = lines.next().unwrap_or_default();
     let unit = unit.map(|unit| format!(" ({unit})")).unwrap_or_default();
+    let _ = writeln!(text, "{severity}  {}", styled(first, Style::Bold));
+    for line in lines {
+        let _ = writeln!(text, "  {line}");
+    }
+    text.push('\n');
+    let fallback_detail = (finding.presentation.title.is_some()
+        && finding.presentation.details.is_empty()
+        && finding.presentation.actions.is_empty()
+        && finding.message != headline)
+        .then_some(("Details", finding.message.as_str()));
+    let fallback_action = finding
+        .presentation
+        .actions
+        .is_empty()
+        .then_some(("Action", finding.fix.as_str()));
+    let fields = finding
+        .presentation
+        .details
+        .iter()
+        .chain(&finding.presentation.actions)
+        .map(|field| (field.label.as_str(), field.value.as_str()))
+        .chain(fallback_detail)
+        .chain(fallback_action)
+        .collect::<Vec<_>>();
+    let width = fields
+        .iter()
+        .map(|(label, _)| unicode_width::UnicodeWidthStr::width(*label))
+        .max()
+        .unwrap_or(0);
+    for (label, value) in fields {
+        write_field(text, label, value, width);
+    }
+    text.push('\n');
+    let _ = writeln!(text, "  {}", styled(&format!("{}{unit}", finding.code), Style::Dim));
+}
+
+fn write_field(text: &mut String, label: &str, value: &str, width: usize) {
+    let padding = width - unicode_width::UnicodeWidthStr::width(label);
+    let mut lines = value.split('\n');
     let _ = writeln!(
         text,
-        "{level} {}{unit}: {}\n  fix: {}",
-        finding.code, finding.message, finding.fix
+        "  {}{}  {}",
+        styled(label, Style::Dim),
+        " ".repeat(padding),
+        lines.next().unwrap_or_default()
     );
+    for line in lines {
+        let _ = writeln!(text, "  {}  {line}", " ".repeat(width));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nyl_orchestration::run_report::UnitResult;
+    use nyl_core::orchestration::progress::UnitResult;
+    use nyl_orchestration::run_report::{ConditionState, UnitState};
+
+    #[test]
+    fn test_structured_finding_fields_align_and_multiline_fallback_is_preserved() {
+        let finding = Finding::new(Code::DriverError, "legacy", "legacy fix")
+            .with_title("Unit is held")
+            .with_detail("Reason", "incident\nfollow up")
+            .with_action("Action", "resume");
+        let mut text = String::new();
+        write_finding(&mut text, "warning", None, &finding);
+        assert_eq!(text, "\nwarning  Unit is held\n\n  Reason  incident\n          follow up\n  Action  resume\n\n  NYL-DRIVER-ERROR\n");
+        let finding = Finding::new(Code::DriverError, "first\nsecond", "repair\nretry");
+        text.clear();
+        write_finding(&mut text, "error", None, &finding);
+        assert_eq!(
+            text,
+            "\nerror  first\n  second\n\n  Action  repair\n          retry\n\n  NYL-DRIVER-ERROR\n"
+        );
+    }
+
+    #[test]
+    fn test_optional_finding_fields_keep_actions_and_fallback_fix() {
+        let mut text = String::new();
+        let detail = Finding::new(Code::DriverError, "message", "repair")
+            .with_title("Headline")
+            .with_detail("Reason", "blocked");
+        write_finding(&mut text, "error", None, &detail);
+        assert_eq!(
+            text,
+            "\nerror  Headline\n\n  Reason  blocked\n  Action  repair\n\n  NYL-DRIVER-ERROR\n"
+        );
+        text.clear();
+        let action = Finding::new(Code::DriverError, "message", "repair").with_action("Retry", "run again");
+        write_finding(&mut text, "error", None, &action);
+        assert_eq!(text, "\nerror  message\n\n  Retry  run again\n\n  NYL-DRIVER-ERROR\n");
+    }
+
+    #[test]
+    fn test_held_without_instance_keeps_its_condition_visible() {
+        let mut unit = UnitReport::new("Command");
+        unit.state = Some(UnitState::Held);
+        unit.no_instance = true;
+        assert_eq!(state_cell(&unit), "held (no instance)");
+        unit.condition = Some(ConditionState::Uncertain);
+        assert_eq!(state_cell(&unit), "held (no instance, uncertain)");
+        unit.no_instance = false;
+        assert_eq!(state_cell(&unit), "held (uncertain)");
+    }
+
+    #[test]
+    fn test_blocked_unit_shows_receipt_version() {
+        let mut unit = UnitReport::new("Command");
+        unit.result = Some(UnitResult::Blocked {
+            reason: "waiting".to_owned(),
+        });
+        unit.receipt_nyl_version = Some("1.0".to_owned());
+        assert_eq!(detail(&unit), "waiting; receipt Nyl version: 1.0");
+    }
 
     /// Catches the table and the JSON telling different stories: both come
     /// from one report, and the exit is the one the command passes.
@@ -591,6 +829,15 @@ mod tests {
     fn test_outcome_renders_table_and_json_from_one_report() {
         let mut report = RunReport::new(ReportKind::ReconcileReport);
         let mut environment = EnvironmentRunReport::new(EnvironmentName::new("dev").unwrap());
+        environment.source_commit = Some(CommitId::new("a".repeat(40)).unwrap());
+        environment.warnings.push(Finding::new(
+            Code::StateLocalDiverged,
+            "state branches differ",
+            "inspect --local",
+        ));
+        environment
+            .warnings
+            .push(Finding::new(Code::DriverError, "unit failed", "retry"));
         environment.units.insert(
             UnitName::new("web").unwrap(),
             UnitReport {
@@ -604,6 +851,8 @@ mod tests {
         report.environments.push(environment);
         let table = outcome(&report, RunOutput::Table, 2);
         assert_eq!(table.exit, 2);
+        assert!(table.stdout.contains("\n\n  source:   "), "{}", table.stdout);
+        assert_eq!(table.stderr, "\nwarning  state branches differ\n\n  Action  inspect --local\n\n  NYL-STATE-LOCAL-DIVERGED\n\nwarning  unit failed\n\n  Action  retry\n\n  NYL-DRIVER-ERROR\n");
         assert!(table.stdout.contains("web"), "{}", table.stdout);
         assert!(table.stdout.contains("blocked"), "{}", table.stdout);
         assert!(

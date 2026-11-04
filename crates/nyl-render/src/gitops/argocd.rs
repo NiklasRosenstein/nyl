@@ -33,7 +33,7 @@ pub fn build_directory_application(input: &DirectoryApplicationInput) -> Result<
     validate_required("Argo CD project", &input.project)?;
     validate_required("repository URL", &input.repo_url)?;
     validate_required("revision", &input.revision)?;
-    crate::resources::validate_relative_path("rendered path", &input.rendered_path, false, false)?;
+    nyl_core::resources::validate_relative_path("rendered path", &input.rendered_path, false, false)?;
     validate_required("destination namespace", &input.destination_namespace)?;
     input.destination.validate()?;
 

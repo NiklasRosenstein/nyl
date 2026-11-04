@@ -1,0 +1,92 @@
+# Observed value: the publication's ingress address arrives after the
+# publication, reaches its consumer, and changes without the publication
+# executing (design/orchestration-core.md, Observed values).
+contract: design/orchestration-core.md#observed-values
+milestone: M5
+tiers: [1]                            # the observer is scripted
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+
+  # With the default observationWait of 0s, the run observes once. The load
+  # balancer has not assigned an address yet, so dns waits for a later run.
+  - driver: {unit: kubernetes, operation: observe, outcome: pending}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: [kubernetes]
+      blocked: [dns]
+      codes: [NYL-OBSERVATION-PENDING]
+      commits: {desired: 1, observed: 1}
+
+  # The next run observes the address without executing the publication.
+  - driver: {unit: kubernetes, operation: observe, outcome: succeeded, outputs: {ingressIp: 203.0.113.10}}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [dns]
+      current: [kubernetes]
+      observationsChanged: [kubernetes]
+      get:
+        args: [observation, kubernetes/ingressIp, -e, dev]
+        value: 203.0.113.10
+
+  # The load balancer changes its address by itself: the publication's
+  # execution key is unchanged, yet its consumer executes with the new value.
+  - driver: {unit: kubernetes, operation: observe, outcome: succeeded, outputs: {ingressIp: 203.0.113.20}}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [dns]
+      current: [kubernetes]
+      observationsChanged: [kubernetes]
+
+  # A run that cannot read keeps the recorded value; nothing executes.
+  - driver: {unit: kubernetes, operation: observe, outcome: failed}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      current: [kubernetes, dns]
+      codes: [NYL-OBSERVATION-FAILED]
+      commits: {desired: 0, observed: 0}
+      get:
+        args: [observation, kubernetes/ingressIp, -e, dev]
+        value: 203.0.113.20
+
+  # A scheduled `nyl observe`, in a job that holds the read credentials,
+  # finds the next change on its own. It is not drift, but dns's inputs
+  # changed: dns is ready, work for the next reconcile.
+  - driver: {unit: kubernetes, operation: observe, outcome: succeeded, outputs: {ingressIp: 203.0.113.30}}
+  - nyl: [observe, -e, dev]
+    exit: 0
+    expect:
+      observationsChanged: [kubernetes]
+      codes: [NYL-OBSERVATION-CHANGED]
+      commits: {desired: 0, observed: 1}
+  - nyl: [status, -e, dev]
+    exit: 2
+    expect:
+      current: [kubernetes]
+      ready: [dns]
+  - driver: {unit: kubernetes, operation: observe, outcome: succeeded, outputs: {ingressIp: 203.0.113.30}}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [dns]
+      current: [kubernetes]
+
+  # With observationWait, a run that publishes waits for the address. The
+  # new receipt starts with ingressIp pending, and the observer catches up
+  # after two polls; the address is unchanged, so dns stays current.
+  - commit: {branch: main, message: "Scale web and wait for its address", apply: patches/wait}
+  - driver: {unit: kubernetes, operation: observe, outcome: pending, times: 2}
+  - driver: {unit: kubernetes, operation: observe, outcome: succeeded, outputs: {ingressIp: 203.0.113.30}}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [kubernetes]
+      current: [dns]
+      get:
+        args: [observation, kubernetes/ingressIp, -e, dev]
+        value: 203.0.113.30

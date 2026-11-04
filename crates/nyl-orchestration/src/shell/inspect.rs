@@ -21,7 +21,7 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownRea
 
 /// `nyl status -e <env>`, with a `NYL-STATE-LOCAL-DIVERGED` warning when
 /// the clone's local state branches diverged from the remote. Through a
-/// [`super::local::LocalStore`] (`--local`) it reports the local view.
+/// the offline store it reports local state.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
     status_with(context, environment, location, None)
 }
@@ -45,14 +45,20 @@ pub fn status_with(
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
         let readiness = drivers.map(|drivers| teardown_readiness(environment, &snapshot, drivers));
-        Ok(crate::rules::unit_state::status_with_readiness(
+        let mut report = crate::rules::unit_state::status_with_readiness(
             environment,
             &snapshot,
             &coordination,
             context.clock.now(),
             drivers,
             &readiness.unwrap_or_default(),
-        ))
+        );
+        for (name, unit) in &mut report.units {
+            unit.receipt_nyl_version = snapshot.desired.get(name).and_then(|desired| {
+                crate::rules::unit_state::receipt_nyl_version(desired, snapshot.observed.get(name), &context.version)
+            });
+        }
+        Ok(report)
     };
     let mut environment_report = read().unwrap_or_else(|finding: Finding| {
         let mut failed = EnvironmentRunReport::new(environment.clone());

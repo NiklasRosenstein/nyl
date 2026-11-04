@@ -166,8 +166,7 @@ pub fn broken_lease(environment: &EnvironmentName, lease: &Lease) -> Finding {
 /// Whether a run on the shared run path takes a broken lease over: a
 /// `reconcile`, `teardown`, or `recover` imports the broken run, except a
 /// `--local` run under the remote lease, which never imports remote run
-/// refs and so refuses a broken remote lease with `NYL-LEASE-BROKEN`
-/// (a `--local-lease` run takes only the clone's own lease). Contract:
+/// refs and so refuses a broken remote lease with `NYL-LEASE-BROKEN`. Contract:
 /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases)
 /// item 1, and [Local runs](../../../../design/orchestration-core.md#local-runs).
 pub fn run_takeover(local: Option<&super::local::LocalRun>) -> BrokenLease {

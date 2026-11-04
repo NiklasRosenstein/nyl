@@ -9,6 +9,8 @@
 #![allow(dead_code)] // Each test binary uses part of the harness.
 
 pub mod format;
+#[cfg(feature = "tier2")]
+pub mod native;
 pub mod runner;
 pub mod shell;
 pub mod world;
@@ -18,13 +20,42 @@ use std::path::{Path, PathBuf};
 use format::{Milestone, Scenario};
 
 /// The milestone this harness has reached.
-pub const REACHED: Milestone = Milestone(3);
+pub const REACHED: Milestone = Milestone(4);
 
 /// A scenario file and its parsed content.
 pub struct Loaded {
     pub name: String,
     pub directory: PathBuf,
     pub scenario: Scenario,
+}
+
+/// Explicit Docker selector admission for real-tool fixtures. Values never enter
+/// committed fixture YAML; the isolated CLI inherits only these declared keys.
+pub fn docker_selectors() -> std::collections::BTreeMap<String, String> {
+    #[cfg(feature = "tier2")]
+    {
+        let mut values: std::collections::BTreeMap<_, _> = [
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+        ]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok().map(|value| (name.to_owned(), value)))
+        .collect();
+        if !values.contains_key("DOCKER_CONFIG") {
+            if let Some(home) = std::env::var_os("HOME") {
+                let config = PathBuf::from(home).join(".docker");
+                if config.is_dir() {
+                    values.insert("DOCKER_CONFIG".to_owned(), config.to_string_lossy().into_owned());
+                }
+            }
+        }
+        values
+    }
+    #[cfg(not(feature = "tier2"))]
+    std::collections::BTreeMap::new()
 }
 
 /// `nyl <args>` through the binary in `checkout`, with a home that holds no
@@ -42,7 +73,8 @@ pub fn nyl_binary(checkout: &Path, home: &Path, args: &[&str]) -> std::process::
         .env("XDG_CONFIG_HOME", home)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         // CI forces colour; the assertions read plain text.
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .envs(docker_selectors());
     command
 }
 

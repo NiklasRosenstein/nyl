@@ -1940,11 +1940,11 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "nyl-core",
- "nyl-drivers",
  "nyl-git",
  "nyl-orchestration",
  "nyl-render",
  "nyl-state",
+ "nyl-units",
  "predicates",
  "regex",
  "reqwest",
@@ -1970,8 +1970,6 @@ name = "nyl-core"
 version = "0.5.9"
 dependencies = [
  "chrono",
- "clap",
- "glob",
  "hex",
  "proptest",
  "ryu-js",
@@ -1982,24 +1980,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "nyl-drivers"
-version = "0.5.9"
-dependencies = [
- "chrono",
- "glob",
- "hex",
- "libc",
- "nyl-core",
- "nyl-render",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "walkdir",
 ]
 
 [[package]]
@@ -2074,6 +2054,7 @@ version = "0.5.9"
 dependencies = [
  "chrono",
  "git2",
+ "glob",
  "nyl-core",
  "nyl-git",
  "proptest",
@@ -2081,6 +2062,27 @@ dependencies = [
  "serde-saphyr 2.0.0",
  "serde_json",
  "tempfile",
+ "url",
+]
+
+[[package]]
+name = "nyl-units"
+version = "0.5.9"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "glob",
+ "hex",
+ "libc",
+ "nyl-core",
+ "nyl-render",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]
@@ -3144,7 +3146,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

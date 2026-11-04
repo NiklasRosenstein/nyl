@@ -24,10 +24,11 @@
 pub mod cli;
 pub mod orchestration;
 
-pub use nyl_render::{
-    components, config, constants, editor, error, generator, git, gitops, helm, kubernetes, postprocess, render,
-    resources, secrets, template, util, validation, yaml,
-};
-
-// Re-export commonly used types
-pub use error::{NylError, Result};
+/// The resource catalogue every CLI workflow passes to discovery, rendering,
+/// editor annotations, and schema export: the resources nyl-core, nyl-render,
+/// and nyl-units own.
+pub fn resource_catalogue() -> nyl_render::config::ResourceCatalogue {
+    let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+    descriptors.extend_from_slice(nyl_units::catalog::RESOURCES);
+    nyl_render::config::ResourceCatalogue(descriptors)
+}

@@ -116,7 +116,7 @@ Delete one or more releases (or a specific revision) and, by default, the
 resources they created. Like an Argo CD Application deletion, purging keeps
 resources whose sync option is `Delete=false`, and those with `Delete=confirm`,
 such as managed Namespaces, unless `--confirm-delete` is passed. See
-[Pruning and deletion](/nyl/kubernetes/pipeline/#pruning-and-deletion).
+[Pruning and deletion](/nyl/kubernetes-rendering/pipeline/#pruning-and-deletion).
 
 - `--no-purge` - Delete only the release records, not the resources
 - `--confirm-delete` - Also delete resources whose sync option is `Delete=confirm`

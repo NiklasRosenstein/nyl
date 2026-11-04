@@ -72,7 +72,7 @@ pub struct PublicationSnapshot {
     pub control_digest: String,
     pub groups: BTreeMap<String, String>,
     pub releases: BTreeMap<String, PublishedRelease>,
-    pub bindings: BTreeMap<String, Vec<crate::resources::release_inputs::PublicationInputSource>>,
+    pub bindings: BTreeMap<String, Vec<nyl_core::bindings::PublicationInputSource>>,
 }
 
 impl PublicationSnapshot {
@@ -198,7 +198,7 @@ pub(super) fn load_baseline(
         .as_deref()
         .ok_or_else(|| full_publish("the destination branch is missing"))?;
     let read = |path: &str| -> Result<Vec<u8>> {
-        crate::resources::validate_relative_path("published path", path, false, false)?;
+        nyl_core::resources::validate_relative_path("published path", path, false, false)?;
         let path = if base.prefix.is_empty() {
             path.to_owned()
         } else {
@@ -237,7 +237,7 @@ pub(super) fn load_baseline(
     let mut claimed = BTreeSet::new();
     for (key, release) in &snapshot.releases {
         let workload = &release.workload;
-        crate::resources::relative_path_to_posix("published Release directory", &workload.release_directory)?;
+        nyl_core::resources::relative_path_to_posix("published Release directory", &workload.release_directory)?;
         validate_path_segment("published Application name", &workload.application_name)?;
         if *key != format!("{}/{}", workload.group.metadata.name, workload.release.metadata.name) {
             return Err(full_publish("Release metadata has an inconsistent identity"));

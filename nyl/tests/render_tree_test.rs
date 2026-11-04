@@ -1273,7 +1273,7 @@ fn project_templates_generate_constrained_projects() {
         ])
         .assert()
         .success();
-    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+    let project = nyl_render::yaml::parse_yaml_value_k8s_compatible(
         &fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"))
             .unwrap(),
     )
@@ -1333,7 +1333,7 @@ fn bare_project_template_derives_least_privilege_defaults() {
         ])
         .assert()
         .success();
-    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+    let project = nyl_render::yaml::parse_yaml_value_k8s_compatible(
         &fs::read_to_string(
             output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads-production.yaml"),
         )
@@ -3219,10 +3219,10 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
     let path = root.join("workloads/api/configmap/api/api.yaml");
     let rendered = fs::read_to_string(&path).unwrap();
     assert!(rendered.contains("config: |\n    first\n    second\n"), "{rendered}");
-    let documents = nyl::yaml::parse_yaml_documents_k8s_compatible(&rendered).unwrap();
+    let documents = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&rendered).unwrap();
     let quoted = documents
         .iter()
-        .map(|document| nyl::yaml::serialize_yaml_document(document).unwrap())
+        .map(|document| nyl_render::yaml::serialize_yaml_document(document).unwrap())
         .collect::<Vec<_>>()
         .join("---\n");
     fs::write(path, &quoted).unwrap();
@@ -4270,7 +4270,7 @@ spec:
         .success();
 
     let root = fixture.path().join("deploy-worktree/production");
-    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+    let project = nyl_render::yaml::parse_yaml_value_k8s_compatible(
         &fs::read_to_string(root.join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")).unwrap(),
     )
     .unwrap();
@@ -4630,6 +4630,23 @@ fn with_production_api_bindings(fixture: &TempDir) {
         fixture,
         "    workloads/api:\n      image:\n        value: registry.example.com/api@sha256:4f0c\n      database:\n        fromFile:\n          path: environments/database.yaml\n          pointer: /database\n",
     );
+}
+
+#[test]
+fn test_render_and_tree_reject_unit_in_workload_api_group() {
+    let fixture = fixture();
+    let path = fixture.path().join("applications/workloads/api.yaml");
+    let source = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!("{source}\n---\napiVersion: k8s.nyl/v1\nkind: OciImage\nmetadata:\n  name: image\n"),
+    )
+    .unwrap();
+    let expected = predicate::str::contains("set apiVersion to \"units.gitops.nyl/v1\"");
+    nyl_render(&fixture, &["--target", "production", "applications/workloads/api.yaml"])
+        .failure()
+        .stderr(expected.clone());
+    render_production(&fixture).failure().stderr(expected);
 }
 
 #[test]
@@ -6720,7 +6737,7 @@ spec:
 }
 
 fn rendered_config_maps(stdout: &[u8]) -> BTreeMap<String, serde_json::Value> {
-    nyl::yaml::parse_yaml_documents_k8s_compatible(std::str::from_utf8(stdout).unwrap())
+    nyl_render::yaml::parse_yaml_documents_k8s_compatible(std::str::from_utf8(stdout).unwrap())
         .unwrap()
         .into_iter()
         .filter(|document| document["kind"] == "ConfigMap")
@@ -7161,8 +7178,8 @@ fn partial_group_publication_preserves_other_groups_with_unavailable_sources() {
 
 #[test]
 fn partial_publication_shared_api_refuses_a_destination_move_without_publication_inputs() {
-    use nyl::gitops::publication::{prepare_target_publication, render_target, PublicationAuthor, TargetRender};
-    use nyl::gitops::tree::partial::PublicationSelection;
+    use nyl_render::gitops::publication::{prepare_target_publication, render_target, PublicationAuthor, TargetRender};
+    use nyl_render::gitops::tree::partial::PublicationSelection;
     let (fixture, destination, seed, _) = publication_fixture();
     publish_production(&fixture).success();
     // Publication metadata must work in a later checkout, including through
@@ -7171,6 +7188,7 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
     Repository::clone(fixture.path().to_str().unwrap(), checkout.path()).unwrap();
     change_partial_api(&checkout);
     let rendered = render_target(&TargetRender {
+        resource_catalogue: nyl::resource_catalogue(),
         worktree: checkout.path(),
         project_dir: checkout.path(),
         target: "production",
@@ -7236,8 +7254,8 @@ fn partial_publication_requires_full_target_for_shared_control_changes() {
 
 #[test]
 fn partial_index_format_roundtrips_versioned_golden_and_legacy_envelope() {
-    use nyl::gitops::reconcile::parse_index;
-    use nyl::gitops::tree::partial::PublicationSnapshot;
+    use nyl_render::gitops::reconcile::parse_index;
+    use nyl_render::gitops::tree::partial::PublicationSnapshot;
     let golden: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/partial-publication/index-v3.json")).unwrap();
     let index = parse_index(&serde_json::to_vec(&golden).unwrap(), "index-v3.json").unwrap();
@@ -7329,7 +7347,7 @@ fn partial_publication_rejects_retained_state_inside_a_new_release() {
 
 #[test]
 fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
-    use nyl::gitops::publication::{publish_target, render_target, PublicationAuthor, TargetRender};
+    use nyl_render::gitops::publication::{publish_target, render_target, PublicationAuthor, TargetRender};
     let (fixture, destination, _, _) = publication_fixture();
     fs::write(fixture.path().join(".gitignore"), ".nyl/\n").unwrap();
     add_partial_worker(&fixture);
@@ -7352,6 +7370,7 @@ fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
     // The shared publication API also keeps the published generation when only
     // imperative settings and the source revision change.
     let rendered = render_target(&TargetRender {
+        resource_catalogue: nyl::resource_catalogue(),
         worktree: fixture.path(),
         project_dir: fixture.path(),
         target: "production",
@@ -7437,4 +7456,180 @@ fn publication_updates_policy_metadata_when_manifest_bytes_are_unchanged() {
             .success()
             .stdout(predicate::str::contains("already published"));
     }
+}
+
+#[test]
+fn file_backed_values_reach_tree_and_direct_renders_with_warm_caches() {
+    let fixture = fixture();
+    let project = fixture.path().join("nyl");
+    fs::create_dir(&project).unwrap();
+    for path in ["nyl.toml", "config", "applications"] {
+        fs::rename(fixture.path().join(path), project.join(path)).unwrap();
+    }
+    let shared = fixture.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::write(shared.join("cluster.yaml"), "region: west\n").unwrap();
+    fs::write(shared.join("platform.yaml"), "environment: first\n").unwrap();
+    for (path, source) in [
+        ("config/clusters/prod-eu-1.yaml", "{file: ../../../shared/cluster.yaml}"),
+        (
+            "config/targets/production.yaml",
+            "{file: ../../../shared/platform.yaml, key: platform}",
+        ),
+    ] {
+        let path = project.join(path);
+        let contents = fs::read_to_string(&path)
+            .unwrap()
+            .replace("spec:\n", &format!("spec:\n  valuesFrom: [{source}]\n"));
+        fs::write(path, contents).unwrap();
+    }
+    let release_path = project.join("applications/workloads/api.yaml");
+    fs::write(
+        &release_path,
+        fs::read_to_string(&release_path).unwrap().replace(
+            "{{ values.environment }}",
+            "{{ values.platform.environment }}-{{ values.region }}",
+        ),
+    )
+    .unwrap();
+    let cache = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let tree = |cwd: &std::path::Path| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(cwd)
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--offline", "--target", "production", "--output-dir"])
+            .arg(output.path())
+            .assert()
+            .success();
+        read_tree(output.path())
+    };
+    let first = tree(&project);
+    assert!(read_resources(output.path()).contains("environment: first-west"));
+    assert_eq!(tree(&project.join("config/targets")), first);
+    let index: serde_json::Value =
+        serde_json::from_slice(&first[&PathBuf::from("production/_nyl/index.json")]).unwrap();
+    for path in ["/shared/cluster.yaml", "/shared/platform.yaml"] {
+        assert!(index["inputs"][path].is_string(), "{index}");
+    }
+
+    for (args, expected) in [
+        (
+            vec![
+                "render",
+                "--offline",
+                "--target",
+                "production",
+                "applications/workloads/api.yaml",
+            ],
+            "environment: first-west",
+        ),
+        (
+            vec![
+                "render",
+                "--offline",
+                "--release-only",
+                "--target",
+                "production",
+                "applications/workloads/api.yaml",
+            ],
+            "environment: first-west",
+        ),
+        (vec!["validate"], "GitOps configuration is valid"),
+    ] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(&project)
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(expected));
+    }
+    fs::write(shared.join("platform.yaml"), "environment: second\n").unwrap();
+    fs::write(shared.join("cluster.yaml"), "region: east\n").unwrap();
+    let second = tree(&project.join("config"));
+    assert!(read_resources(output.path()).contains("environment: second-east"));
+    assert_eq!(tree(&project), second);
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(&project)
+        .env("NYL_CACHE_DIR", cache.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args([
+            "render",
+            "--offline",
+            "--release-only",
+            "--target",
+            "production",
+            "applications/workloads/api.yaml",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("environment: second-east"));
+
+    fs::write(project.join("nyl.toml"), "[vendor]\nmode='preferred'\n").unwrap();
+    for args in [vec!["vendor"], vec!["vendor", "--check"]] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(&project)
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Vendor snapshot"));
+    }
+}
+
+#[test]
+fn file_backed_values_enforce_publication_reproducibility() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    let data = fixture.path().join("shared.yaml");
+    fs::write(&data, "environment: committed\n").unwrap();
+    let target = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target,
+        fs::read_to_string(&target).unwrap().replace(
+            "  values:\n    environment: production\n",
+            "  valuesFrom: [{file: ../../shared.yaml}]\n",
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Declare shared values");
+    let publish = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["publish-tree", "--target", "production"])
+            .assert()
+    };
+    publish().success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let committed = published_commit(&repository, "deploy/production").id();
+    fs::write(&data, "environment: uncommitted\n").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "published",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+  environment: uncommitted"));
+    publish()
+        .failure()
+        .stderr(predicate::str::contains("Local changes affect deployment target"));
+    assert_eq!(published_commit(&repository, "deploy/production").id(), committed);
 }

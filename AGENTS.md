@@ -7,10 +7,10 @@ This file provides guidelines for AI assistants (Claude, GitHub Copilot) working
 Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 - Jinja2-compatible templating with MiniJinja
 - Helm chart integration
-- Cluster- and target-aware rendered GitOps configuration
+- Cluster- and target-aware Kubernetes GitOps configuration
 - Git repository support with authentication
 - Kubernetes client integration (kubectl diff/apply)
-- Target-aware rendered GitOps trees, diffs, and publication
+- Target-aware Kubernetes GitOps trees, diffs, and publication
 
 **Primary Language:** Rust 1.93.0+  
 **Build System:** Cargo  
@@ -48,7 +48,7 @@ bug, and document a deliberate one where users choose it.
   permission.
 - Progress is tracked in the documentation, not in ROADMAP.md: the data
   modules in `nyl/book/src/lib/roadmaps/` render the Orchestration and Domain
-  resources roadmap pages. Tick an item in the change that ships it, keep the
+  modeling roadmap pages. Tick an item in the change that ships it, keep the
   next step accurate, and set a stage's `done` only when its exit criterion is
   met; a test rejects `done` while an item is unticked. Distinguish proposals
   from implemented capabilities, and preserve milestone identifiers for
@@ -74,7 +74,8 @@ These rules keep it maintainable:
   orchestration crates; `nyl-orchestration` depends only on `nyl-core` and,
   from M9, the equally pure `nyl-collections`, which both it and
   `nyl-render` use for domain resource rules;
-  `nyl-state` and `nyl-drivers` implement the traits; `nyl-cli` wires them
+  `nyl-state` and `nyl-units` (the built-in unit kinds: declarations
+  and drivers) implement the traits; `nyl-cli` wires them
   together and holds no business rules.
 - Decisions are pure functions over snapshots. Only the orchestration shell
   performs effects, and nothing outside it reads the clock, the process
@@ -93,17 +94,55 @@ These rules keep it maintainable:
 - State-file formats are versioned with golden files; a format change adds a
   version and a migration.
 
+### Driver boundary
+
+The orchestration engine is generic over registered unit drivers. Native tool
+semantics belong to the driver implementing the unit kind. This boundary applies
+to behavior and persisted data, not just crate dependencies.
+
+- Keep tool-specific validation, defaults, execution, ownership semantics,
+  recovery requirements, and diagnostic codes in the driver. Shared code owns
+  dependency resolution, coordination, lifecycle, and evidence through generic
+  driver contracts.
+- Shared core protocols, orchestration, state storage, and CLI workflows must
+  not select behavior by concrete unit kind, tool name, vendor error code, or
+  human diagnostic text. Driver diagnostics may be recorded and displayed
+  unchanged; they are not a control protocol.
+- Shared protocol and state types describe cross-driver orchestration facts.
+  Do not add tool-specific variants or fields, such as a Terraform backend
+  variant or an accepted-empty-backend flag. A generic name does not make a
+  tool-specific rule generic.
+- Drivers expose their requirements and validate tool-specific decisions through
+  the driver contract. The engine coordinates and records the result without
+  interpreting driver-private data. A driver using existing capabilities must
+  not require edits to shared scheduling, lifecycle, recovery, or state commands.
+- Concrete kind names belong in registration, declarative resource schemas,
+  driver implementations, and their documentation and tests. Those locations
+  do not authorize kind-specific policy in the engine. Test generic rules with
+  test drivers; use real drivers for integration and driver conformance tests.
+
+Reviewers must check the boundary explicitly:
+
+- Trace each tool-specific requirement from declaration through execution,
+  recovery, and persistence. Does any shared layer interpret its meaning?
+- Inspect shared branches, enums, state fields, and defaults for concrete kind
+  names, backend concepts, vendor codes, and message matching. Check semantics
+  even when names appear generic.
+- Could another driver use the same orchestration path without an engine edit?
+  Reject special cases; require a driver-owned decision or a genuinely generic
+  contract, with tests at the layer that owns the rule.
+
 ## Repository Structure
 
 ```
 /
 ├── Cargo.toml         # Workspace: shared version, dependencies, and profiles
 ├── crates/
-│   ├── nyl-core/      # Resource and state types, schemas, digests, orchestration traits (no effects)
-│   ├── nyl-render/    # Kubernetes rendering and rendered GitOps
+│   ├── nyl-core/      # Shared gitops.nyl resources, unit fields, schema catalogue, state types, digests, orchestration traits (no effects)
+│   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
-│   └── nyl-drivers/   # Unit kind drivers and the process runner
+│   └── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
 ├── nyl/               # The `nyl` command line (plays the nyl-cli role)
 │   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests
@@ -115,9 +154,10 @@ These rules keep it maintainable:
 └── .github/          # CI/CD workflows
 ```
 
-The `nyl` package re-exports the `nyl-render` modules and `nyl_core::resources`,
-so integration tests and benches keep using `nyl::…` paths. None of the crates is
-published to crates.io; Nyl ships as release binaries and container images.
+Code, tests, and benches import items from the crate that owns them
+(`nyl_render::…`, `nyl_core::…`, `nyl_units::…`); no crate re-exports another's
+modules. None of the crates is published to crates.io; Nyl ships as release
+binaries and container images.
 
 ## Development Workflow
 
@@ -126,6 +166,7 @@ published to crates.io; Nyl ships as release binaries and container images.
 - kubectl (for diff/apply commands)
 - Helm (for Helm chart rendering)
 - mise (recommended for task management)
+- Node.js 22.23.4 or newer (for the documentation site; Astro rejects older 22.x releases)
 
 ### Essential Commands
 
@@ -325,7 +366,7 @@ fn test_operation() -> Result<()> {
 - **Trait Composition:** Define traits for testability and extensibility
 - **Immutability:** Prefer immutable data structures where possible
 
-### Rendered GitOps invariants
+### Kubernetes GitOps invariants
 
 - `DeploymentTarget.spec.applicationGroupSelector` matches literal
   `ApplicationGroup.metadata.labels` before target rendering. Effective
@@ -366,16 +407,16 @@ src/
 ├── template/     # Template engine (MiniJinja wrapper)
 ├── generator/    # Manifest generation pipeline
 ├── kubernetes/   # Kubernetes client (kube-rs)
-├── resources/    # HelmChart, Component resources
+├── resources/    # Kubernetes rendering and GitOps resources and their catalogue
 ├── git/          # Git repository management
-├── gitops/       # Rendered GitOps discovery, compilation, layout, and ownership
+├── gitops/       # Kubernetes GitOps discovery, compilation, layout, and ownership
 ├── helm/         # Helm chart processing
 ├── components/   # Component discovery and registry
 ├── secrets/      # Secrets provider framework
 └── util/         # Shared utilities
 ```
 
-### Rendered GitOps invariants
+### Kubernetes GitOps invariants
 
 - Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
   (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
@@ -447,10 +488,13 @@ src/
 1. Add filter function in `crates/nyl-render/src/template/mod.rs`
 2. Register in `TemplateEngine::new()`
 3. Add unit test
-4. Document it in the Kubernetes section, `nyl/book/src/content/docs/kubernetes/`
+4. Document it in the Kubernetes Rendering section, `nyl/book/src/content/docs/kubernetes-rendering/`
 
 ### Adding a New Resource Type
-1. Define resource struct in `crates/nyl-core/src/resources/`
+1. Define the resource struct in the crate that owns it: Kubernetes rendering and
+   Kubernetes GitOps resources in `crates/nyl-render/src/resources/` (with its
+   descriptor and example in `catalog.rs`), resources orchestration also reads
+   in `crates/nyl-core/src/resources/`, and unit kinds in `crates/nyl-units/`
 2. Implement `Serialize`, `Deserialize` traits
 3. Add parsing logic in `crates/nyl-render/src/config/`
 4. Add validation in the resource type's `validate` method
@@ -487,7 +531,7 @@ src/
 - **Caching:** Cache expensive operations (Git clones, Helm downloads)
 - **Profile before optimizing:** Use `cargo bench` to measure performance
 
-### Rendered GitOps cache invariants
+### Kubernetes GitOps cache invariants
 
 - Every value that can affect rendered bytes must enter the shared dependency
   recorder at the layer that consumes it. This includes file content and
@@ -518,7 +562,7 @@ See `BENCHMARKS.md` for detailed performance analysis.
 ### Writing Documentation
 - Resource reference pages and catalog summaries are generated from Rust-derived
   JSON Schemas. Put purpose and field descriptions in Rust doc comments and
-  examples in schema annotations. Every resource's doc comment includes
+  examples in schema annotations. Every non-unit resource's doc comment includes
   `## When needed` and `## If omitted` sections; the catalog reads these sections
   from the schema description. Keep workflow narratives in the Astro guides.
   Regenerate schemas with `nyl schema all --output-dir nyl/book/public/reference/schemas`.
@@ -542,11 +586,11 @@ The site is split into header sections, each with its own sidebar
 
 | Content | Location under `nyl/book/src/content/docs/` |
 | --- | --- |
-| First steps and the core principle | `start/`, `index.md` |
-| Rendering and applying manifests directly | `kubernetes/` |
-| The rendered manifest pattern | `rendered-gitops/` |
+| First steps and the core principle | `start/`, `index.mdx` |
+| Rendering and applying manifests directly | `kubernetes-rendering/` |
+| The rendered manifest pattern | `kubernetes-gitops/` |
 | Environments, state, orchestration, and its roadmap | `orchestration/` |
-| Domain resources and their roadmap | `domain-resources/` |
+| Domain modeling and its roadmap | `domain-modeling/` |
 | One page per command or closely related pair | `reference/cli/` |
 | `nyl.toml` and editor schemas | `reference/` |
 | Usage guide for a resource | the owning section's `resource-guides/` |
@@ -560,14 +604,18 @@ Mechanics that are easy to miss:
 - Sidebars are explicit lists. Add every new page to its section in
   `astro.config.mjs`, and list a new command in `reference/cli/index.md` under
   its purpose group.
-- Moving or renaming a page adds its old route to `src/lib/moved-pages.mjs`, so
-  the old URL redirects, and updates every link to it, including links in Rust
-  sources.
+- Moving or renaming a page updates every link to it, including links in Rust
+  sources. The docs keep no redirects from old routes.
 - A new resource joins a section in `resourceSections` (`src/lib/resources.mjs`),
   needs a usage guide (the build fails without one), and appears in its
   section's diagram (`src/components/ResourceDiagram.astro`) when it references
   or is referenced by other resources there. A changed reference field updates
   that diagram.
+- The four layers (Kubernetes Rendering, Kubernetes GitOps, Orchestration, Domain
+  modeling) are listed once, in `src/lib/layers.mjs`. The header tabs, the
+  sidebar's layer rail, and the landing page read that list, so renaming or
+  reordering a layer updates it, `astro.config.mjs`, and the landing page's copy
+  (`src/components/Landing.astro`) together.
 - Regenerate schemas after changing a resource's Rust doc comments or fields.
 - A deprecation keeps the old form working, warns when the CLI reads it, and
   adds a row to `reference/deprecations.md`. Deprecated API versions live in

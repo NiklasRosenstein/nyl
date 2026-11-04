@@ -4,6 +4,8 @@ use crate::{
     cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat, SortBy},
     cli::table::{render as render_table, Cell},
+};
+use nyl_render::{
     kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     Result,
 };
@@ -48,7 +50,8 @@ pub async fn execute(args: ListArgs) -> Result<()> {
     let storage = KubernetesReleaseStorage::new(client);
 
     // List releases
-    let mut releases: Vec<crate::kubernetes::ReleaseInfo> = storage.list_releases(args.namespace.as_deref()).await?;
+    let mut releases: Vec<nyl_render::kubernetes::ReleaseInfo> =
+        storage.list_releases(args.namespace.as_deref()).await?;
 
     // Filter by status if not --all
     if !args.all {
@@ -124,7 +127,7 @@ pub async fn execute(args: ListArgs) -> Result<()> {
             println!("{}", json);
         }
         OutputFormat::Yaml => {
-            let yaml = crate::yaml::serialize_yaml_document(&releases)?;
+            let yaml = nyl_render::yaml::serialize_yaml_document(&releases)?;
             print!("{}", yaml);
         }
     }

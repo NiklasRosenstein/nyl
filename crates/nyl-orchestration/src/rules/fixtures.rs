@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use nyl_core::constants::API_VERSION_UNITS;
 use nyl_core::orchestration::driver::{
-    Capabilities, Driver, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope, PlanReport,
-    RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, Verification,
+    Capabilities, DriftDetection, Driver, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope,
+    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitName};
 use nyl_core::orchestration::ports::RunState;
@@ -110,7 +110,9 @@ pub fn receipt(seed: &str, outputs: Value, artifacts: Vec<ArtifactDigest>) -> Re
 
 pub fn observed(unit: &str, kind: &str, receipt: Option<Receipt>) -> ObservedUnit {
     ObservedUnit {
-        api_version: StateV1,
+        api_version: nyl_core::orchestration::state::StateV1,
+        operator_modified: None,
+        retry: None,
         kind: ObservedUnitKind,
         unit: identity(unit, kind),
         receipt,
@@ -224,7 +226,7 @@ pub fn lease_record(id: &str, deadline: Timestamp) -> Lease {
 
 /// A driver of `units.gitops.nyl/v1` kind `kind`. Its execution recovery
 /// policy is `converge` when the spec sets `idempotent: true`, `inspect`
-/// when it sets `inspect: true`, else `manual`. The `Publication` kind tears
+/// when it sets `inspect: true`, else `manual`; it attests with `attests: true`. The `Publication` kind tears
 /// down and claims `spec.prefix` in one repository; `spec.broken` fails
 /// validation.
 pub struct TestDriver {
@@ -241,9 +243,13 @@ impl Driver for TestDriver {
     fn behavior_version(&self) -> u32 {
         1
     }
-    fn capabilities(&self, _: &Value) -> Capabilities {
+    fn default_timeout(&self) -> nyl_core::orchestration::time::Duration {
+        nyl_core::orchestration::time::Duration::from_mins(17)
+    }
+    fn capabilities(&self, spec: &Value) -> Capabilities {
         Capabilities {
             teardown: self.kind == "Publication",
+            attest: spec["attests"] == json!(true),
             ..Capabilities::default()
         }
     }
@@ -269,13 +275,35 @@ impl Driver for TestDriver {
         }
         Ok(())
     }
+    fn secret_refs(&self, spec: &Value) -> Result<Vec<String>, String> {
+        Ok(spec
+            .get("secretRefs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect())
+    }
+    fn credential_environment(&self, spec: &Value, process_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        spec.get("credentialVariable")
+            .and_then(Value::as_str)
+            .and_then(|name| process_env.get(name).map(|value| (name.to_owned(), value.clone())))
+            .into_iter()
+            .collect()
+    }
     fn ownership_scopes(&self, _: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.get("prefix")
             .and_then(Value::as_str)
-            .map(|prefix| OwnershipScope::Publication {
-                repository: "https://example.com/deploy.git".to_owned(),
-                revision: "main".to_owned(),
-                path_prefix: prefix.to_owned(),
+            .map(|prefix| OwnershipScope {
+                namespace: "test-tree".to_owned(),
+                key: vec!["https://example.com/deploy.git".to_owned(), "main".to_owned()],
+                path: prefix
+                    .split('/')
+                    .filter(|part| !part.is_empty() && *part != ".")
+                    .map(str::to_owned)
+                    .collect(),
+                description: format!("tree {prefix}"),
             })
             .into_iter()
             .collect()
@@ -289,7 +317,12 @@ impl Driver for TestDriver {
     fn reconcile(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
         Ok(Supported::Unsupported)
     }
-    fn verify(&self, _: &ExecutionContext<'_>, _: &DesiredUnit, _: &Receipt) -> DriverResult<Supported<Verification>> {
+    fn detect_drift(
+        &self,
+        _: &ExecutionContext<'_>,
+        _: &DesiredUnit,
+        _: &Receipt,
+    ) -> DriverResult<Supported<DriftDetection>> {
         Ok(Supported::Unsupported)
     }
 }

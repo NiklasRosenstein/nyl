@@ -128,6 +128,48 @@ pub fn discover_units(inventory: &GitOpsInventory) -> Result<BTreeMap<UnitName, 
     Ok(units)
 }
 
+/// Render one explicitly named unit for a direct build, sharing orchestration's
+/// template context and envelope checks. Without an environment, templates
+/// cannot read environment values or names.
+pub fn render_direct_unit(
+    inventory: &GitOpsInventory,
+    name: &UnitName,
+    environment: Option<&Environment>,
+) -> Result<(UnitEnvelope, Value)> {
+    let units = discover_units(inventory)?;
+    let unit = units
+        .get(name)
+        .ok_or_else(|| NylError::config(format!("unit {name} is not declared")))?;
+    let context = environment.map_or_else(|| serde_json::json!({}), unit_template_context);
+    let mut spec = render_unit(unit, &context)
+        .map_err(|error| {
+            if environment.is_none() {
+                NylError::config(format!(
+                    "{error}; pass -e <environment> when a build reads environment values"
+                ))
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(|| NylError::config(format!("unit {name} renders to nothing")))?;
+    apply_unit_defaults(inventory, &unit.envelope.kind, &mut spec);
+    Ok((unit.envelope.clone(), spec))
+}
+
+fn apply_unit_defaults(inventory: &GitOpsInventory, kind: &str, spec: &mut Value) {
+    if let Some(version) = inventory
+        .project_config
+        .config
+        .units
+        .get(kind)
+        .and_then(|defaults| defaults.version.as_ref())
+    {
+        if spec.get("version").is_none() {
+            spec["version"] = Value::String(version.clone());
+        }
+    }
+}
+
 fn unit_invalid(location: &str, message: &str) -> NylError {
     NylError::config(format!("{}: unit in {location}: {message}", Code::UnitInvalid))
 }
@@ -200,13 +242,17 @@ pub struct UnitSourceRenderer {
     entry_project_dir: String,
     /// `[project] previous_paths` of the entry `nyl.toml`.
     previous_paths: Vec<String>,
+    resource_catalogue: crate::config::ResourceCatalogue,
 }
 
 impl UnitSourceRenderer {
-    pub fn new(entry_project_dir: impl Into<String>) -> Self {
+    /// A renderer for the project at `entry_project_dir`, validating pinned
+    /// checkouts against the caller's resource catalogue.
+    pub fn new(entry_project_dir: impl Into<String>, resource_catalogue: crate::config::ResourceCatalogue) -> Self {
         Self {
             entry_project_dir: entry_project_dir.into(),
             previous_paths: Vec::new(),
+            resource_catalogue,
         }
     }
 
@@ -227,7 +273,7 @@ impl UnitSourceRenderer {
         let same = self.entry_project_dir.trim_start_matches('/');
         let located =
             crate::util::project_path::locate_checkout_project(worktree, Path::new(same), &[], &self.previous_paths)?;
-        let inventory = super::discover_gitops_inventory(&located.directory, None)?;
+        let inventory = super::discover_gitops_inventory(&located.directory, None, self.resource_catalogue.clone())?;
         let effective = resolve_effective_environment(&inventory, environment)?;
         let units = discover_units(&inventory)?;
         let mut rendered = render_environment_units(&inventory, &units, &effective)?;
@@ -248,6 +294,16 @@ impl UnitSourceRenderer {
             })
             .collect();
         Ok(RenderedSource {
+            repositories: inventory
+                .resources
+                .values()
+                .filter_map(|resource| match &resource.resource {
+                    Some(GitOpsResource::GitRepository(repository)) => {
+                        Some((repository.metadata.name.clone(), repository.spec.repo_url.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
             source_commit: commit.clone(),
             project_dir: worktree_rooted(&inventory, Path::new("")),
             environment: effective,
@@ -301,7 +357,7 @@ fn declared(inventory: &GitOpsInventory) -> (Vec<&Environment>, Vec<EnvironmentG
 
 /// The Environment `name` with its group defaults applied, through the one
 /// group rule of nyl-core.
-fn resolve_effective_environment(inventory: &GitOpsInventory, name: &EnvironmentName) -> Result<Environment> {
+pub fn resolve_effective_environment(inventory: &GitOpsInventory, name: &EnvironmentName) -> Result<Environment> {
     let (environments, groups) = declared(inventory);
     let environment = environments
         .into_iter()
@@ -334,6 +390,7 @@ fn render_environment_units(
         }
         let mut spec = render_unit(unit, &context)?;
         if let Some(spec) = &mut spec {
+            apply_unit_defaults(inventory, &unit.envelope.kind, spec);
             if unit.is_publication() {
                 if spec_enabled(spec) {
                     expand_publication_releases(inventory, unit, spec)?;
@@ -761,11 +818,12 @@ spec:
     }
 
     fn inventory(worktree: &TempDir) -> GitOpsInventory {
-        super::super::discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap()
+        super::super::discover_gitops_inventory(&worktree.path().join("nyl"), None, crate::config::test_catalogue())
+            .unwrap()
     }
 
     fn render(worktree: &TempDir, environment: &str) -> SourceResult<RenderedSource> {
-        UnitSourceRenderer::new("/nyl").render(
+        UnitSourceRenderer::new("/nyl", crate::config::test_catalogue()).render(
             worktree.path(),
             &EnvironmentName::new(environment).unwrap(),
             &CommitId::new("a".repeat(40)).unwrap(),
@@ -927,6 +985,42 @@ spec:
             json!({"region": "eu", "tier": "shared"})
         );
         assert_eq!(source.environment.spec.values["tier"], json!("shared"));
+    }
+
+    #[test]
+    fn test_native_tool_default_version_enters_rendered_spec_and_unit_version_wins() {
+        let worktree = project(&[("platform.yaml", PLATFORM), ("units.yaml", UNITS)]);
+        fs::write(
+            worktree.path().join("nyl/nyl.toml"),
+            "[project]\n[units.OpenTofu]\nversion = \"1.9.5\"\n",
+        )
+        .unwrap();
+        let source = render(&worktree, "dev").unwrap();
+        assert_eq!(
+            unit(&source, "database").spec.as_ref().unwrap()["version"],
+            json!("1.9.5")
+        );
+        let inventory = crate::gitops::discover_gitops_inventory(
+            &worktree.path().join("nyl"),
+            None,
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
+        let (_, direct) = render_direct_unit(&inventory, &UnitName::new("database").unwrap(), None).unwrap();
+        assert_eq!(direct["version"], json!("1.9.5"));
+        fs::write(
+            worktree.path().join("nyl/units.yaml"),
+            UNITS.replace(
+                "  source: {path: ../infra/database}",
+                "  version: 1.8.9\n  source: {path: ../infra/database}",
+            ),
+        )
+        .unwrap();
+        let source = render(&worktree, "dev").unwrap();
+        assert_eq!(
+            unit(&source, "database").spec.as_ref().unwrap()["version"],
+            json!("1.8.9")
+        );
     }
 
     #[test]

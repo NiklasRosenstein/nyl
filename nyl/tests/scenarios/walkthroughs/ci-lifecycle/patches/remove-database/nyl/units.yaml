@@ -15,6 +15,7 @@ metadata:
   name: web-image
   labels: {dev: 'true'}
 spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
   context: {path: ../services/web}
   repository: '%REGISTRY%/web'
 ---

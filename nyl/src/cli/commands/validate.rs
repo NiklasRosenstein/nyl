@@ -5,9 +5,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use crate::config::{ConfigWarning, ProjectConfig};
-use crate::util::path_for_display;
-use crate::{NylError, Result};
+use nyl_render::config::{ConfigWarning, ProjectConfig};
+use nyl_render::util::path_for_display;
+use nyl_render::{NylError, Result};
 
 /// Validate project configuration
 #[derive(Args, Debug)]
@@ -125,7 +125,7 @@ impl ValidationReport {
 /// end the run.
 async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()> {
     let config_file = ProjectConfig::find(Some(project_dir))?;
-    let config = ProjectConfig::load(config_file.clone())?;
+    let config = ProjectConfig::load(config_file.clone(), crate::resource_catalogue())?;
     report.config_dir = config_file.as_deref().and_then(Path::parent).map(Path::to_path_buf);
     match &config_file {
         Some(file) => report.config_file = Some(slash_path(&path_for_display(file))),
@@ -156,14 +156,14 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
         }
         return Ok(());
     }
-    let inventory = crate::gitops::discover_gitops_inventory(project_root, None)?;
-    crate::gitops::validate_gitops_inventory(&inventory)?;
+    let inventory = nyl_render::gitops::discover_gitops_inventory(project_root, None, crate::resource_catalogue())?;
+    nyl_render::gitops::validate_gitops_inventory(&inventory)?;
     report.warnings.extend(
         crate::orchestration::project::validate_environments(&inventory)?
             .into_iter()
             .map(ValidationWarning::Environment),
     );
-    let units = crate::gitops::units::discover_units(&inventory)?;
+    let units = nyl_render::gitops::units::discover_units(&inventory)?;
     // Target bindings first: their findings name the DeploymentTarget field a
     // publication unit's reference comes from.
     validate_targets(&inventory).await?;
@@ -195,12 +195,15 @@ fn slash_path(path: &Path) -> String {
 /// ([`nyl_orchestration::rules::desired::check_units`]), with the drivers
 /// they use: specs, ownership scopes, unknown dependencies,
 /// cycles, and references to undeclared or sensitive outputs.
-fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Result<()> {
+fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
     use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
     use nyl_core::orchestration::ports::SourceRenderer;
 
     let wiring = crate::orchestration::run::ProcessWiring::new();
-    let renderer = crate::gitops::units::UnitSourceRenderer::new(crate::orchestration::session::project_dir(inventory));
+    let renderer = nyl_render::gitops::units::UnitSourceRenderer::new(
+        crate::orchestration::session::project_dir(inventory),
+        crate::resource_catalogue(),
+    );
     // The worktree is rendered as it is, committed or not; the commit only labels it.
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
     let (environments, _) = crate::orchestration::project::declared(inventory);
@@ -243,26 +246,26 @@ fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Res
 /// placeholders for the bindings orchestration resolves, and its `fromUnit`
 /// references are checked against that environment's units instead. Other
 /// targets compile as `render-tree` does, so those bindings stay rejected.
-async fn validate_targets(inventory: &crate::gitops::GitOpsInventory) -> Result<()> {
+async fn validate_targets(inventory: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
     let target_names = inventory
         .resources
         .values()
-        .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
+        .filter(|resource| resource.identity.kind == nyl_render::resources::GitOpsResourceKind::DeploymentTarget)
         .map(|resource| resource.identity.name.clone())
         .collect::<Vec<_>>();
     // Like `vendor --check`, validation reads fromPublication state at
     // the refreshed branch head and falls back to the cached head, so
     // it also works offline.
-    let options = crate::gitops::TreeRenderOptions {
-        publication_read: crate::gitops::inputs::PublicationRead::FreshOrCached,
-        ..crate::gitops::TreeRenderOptions::default()
+    let options = nyl_render::gitops::TreeRenderOptions {
+        publication_read: nyl_render::gitops::inputs::PublicationRead::FreshOrCached,
+        ..nyl_render::gitops::TreeRenderOptions::default()
     };
-    let placements = crate::gitops::units::target_placements(inventory)?;
+    let placements = nyl_render::gitops::units::target_placements(inventory)?;
     let mut compiled = Vec::with_capacity(target_names.len());
     for target in target_names {
         let mut target_options = options.clone();
         if let Some(environment) = placements.get(&target) {
-            let issues = crate::gitops::units::check_unit_bindings(inventory, &target, environment)?;
+            let issues = nyl_render::gitops::units::check_unit_bindings(inventory, &target, environment)?;
             if !issues.is_empty() {
                 return Err(NylError::config(format!(
                     "DeploymentTarget {target:?} of Environment {environment} has invalid unit references:\n{}",
@@ -273,11 +276,18 @@ async fn validate_targets(inventory: &crate::gitops::GitOpsInventory) -> Result<
                         .join("\n")
                 )));
             }
-            target_options.orchestrated_inputs = Some(crate::gitops::inputs::OrchestratedInputs::Placeholders);
+            target_options.orchestrated_inputs = Some(nyl_render::gitops::inputs::OrchestratedInputs::Placeholders);
         }
-        compiled.push(crate::gitops::compile_target_tree_with_options(inventory, &target, target_options).await?);
+        compiled.push(
+            Box::pin(nyl_render::gitops::compile_target_tree_with_options(
+                inventory,
+                &target,
+                target_options,
+            ))
+            .await?,
+        );
     }
-    crate::gitops::validate_compiled_argocd_names(inventory, &compiled)
+    nyl_render::gitops::validate_compiled_argocd_names(inventory, &compiled)
 }
 
 #[cfg(test)]

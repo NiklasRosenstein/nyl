@@ -49,6 +49,6 @@ impl<'de> Deserialize<'de> for DenyUnknownFields {
 }
 
 /// Close a flattened schema the way `deny_unknown_fields` would.
-pub(crate) fn deny_additional_properties(schema: &mut schemars::Schema) {
+pub fn deny_additional_properties(schema: &mut schemars::Schema) {
     schema.insert("additionalProperties".into(), serde_json::Value::Bool(false));
 }

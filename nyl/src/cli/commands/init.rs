@@ -9,11 +9,12 @@ use git2::Repository;
 use serde_json::{json, Value};
 
 use crate::cli::commands::cluster::{self, ClusterCaptureArgs};
-use crate::config::{ProjectConfig, VendorMode};
-use crate::resources::{parse_gitops_resource, validate_repository_coordinates};
-use crate::util::path_for_display;
-use crate::util::project_path::ProjectPaths;
-use crate::{NylError, Result};
+use nyl_core::resources::validate_repository_coordinates;
+use nyl_render::config::{ProjectConfig, VendorMode};
+use nyl_render::resources::parse_gitops_resource;
+use nyl_render::util::path_for_display;
+use nyl_render::util::project_path::ProjectPaths;
+use nyl_render::{NylError, Result};
 
 const MINIMAL_PROJECT_CONFIG: &str = r"#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json
 
@@ -230,7 +231,7 @@ async fn init_gitops(args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result
     let documents = build_documents(&config)?;
     let yaml = documents
         .iter()
-        .map(crate::yaml::serialize_yaml_document)
+        .map(nyl_render::yaml::serialize_yaml_document)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .join("---\n");
 
@@ -252,7 +253,7 @@ async fn init_gitops(args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result
     }
 
     println!(
-        "✓ Initialized rendered GitOps configuration at {}",
+        "✓ Initialized Kubernetes GitOps configuration at {}",
         path_for_display(&config.output).display()
     );
     if config.create_project_config {
@@ -343,7 +344,7 @@ fn resolve_config(mut args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Resul
         )));
     }
     if let (Some(mode), Some(existing)) = (vendor, &found_config) {
-        let declared = ProjectConfig::load(Some(existing.clone()))?
+        let declared = ProjectConfig::load(Some(existing.clone()), crate::resource_catalogue())?
             .vendor()
             .map(|settings| settings.mode);
         if declared != Some(mode) {
@@ -627,7 +628,7 @@ fn project_template(project: &ProjectScope, config: &GitOpsInitConfig) -> Value 
 
 fn resource(kind: &str, name: &str, spec: Value) -> Value {
     json!({
-        "apiVersion": crate::resources::GitOpsResourceKind::parse(kind).expect("scaffold kind").api_version(),
+        "apiVersion": nyl_render::resources::GitOpsResourceKind::parse(kind).expect("scaffold kind").api_version(),
         "kind": kind,
         "metadata": {"name": name},
         "spec": spec

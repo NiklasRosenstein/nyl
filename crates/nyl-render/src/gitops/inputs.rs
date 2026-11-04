@@ -15,7 +15,7 @@
 //!   and each resolved input is digested for the ownership index.
 //!
 //! The declaration types and their pure rules live in
-//! [`nyl_core::resources::release_inputs`], and precedence, type checks, and
+//! [`crate::resources::release_inputs`], and precedence, type checks, and
 //! aggregated issues in the shared resolver [`nyl_core::bindings`];
 //! [`InputSources`] is its provider for Release inputs.
 
@@ -27,13 +27,15 @@ use serde_json::Value;
 
 use nyl_core::bindings::{Provided, Providers, Provision, Resolved};
 
-use crate::resources::release_inputs::{
-    FileInputSource, GitInputSource, InputBinding, InputDeclaration, PromotionInputSource, PublicationInputSource,
-    ReleaseKey, UnitInputSource,
-};
-use crate::resources::{DeploymentTarget, InlineGitRepository};
+use crate::resources::release_inputs::ReleaseKey;
+use crate::resources::DeploymentTarget;
 use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
+use nyl_core::bindings::{
+    FileInputSource, GitInputSource, InputBinding, InputDeclaration, PromotionInputSource, PublicationInputSource,
+    UnitInputSource,
+};
+use nyl_core::resources::InlineGitRepository;
 
 /// Ownership-index key prefix of resolved input digests.
 pub const INDEX_INPUT_PREFIX: &str = "@input/";
@@ -115,7 +117,7 @@ impl PublicationBase {
         let error = |error: NylError, hint: &str| {
             NylError::config(format!(
                 "Cannot read publication branch {branch} of {} for fromPublication Release inputs: {error}{hint}",
-                crate::util::sanitize_url(url),
+                nyl_git::sanitize_url(url),
             ))
         };
         let (commit, origin) = match read {
@@ -174,7 +176,7 @@ impl PublicationBase {
 
     /// Human-readable description of the state this render read.
     pub fn describe(&self) -> String {
-        let url = crate::util::sanitize_url(&self.url);
+        let url = nyl_git::sanitize_url(&self.url);
         match (&self.commit, self.origin) {
             (_, PublicationBaseOrigin::Unavailable) => format!(
                 "Publication branch {} of {url} is not in the local Git cache (it was never fetched, or does not exist yet) and was not refreshed; fromPublication inputs are unbound",
@@ -223,7 +225,7 @@ pub fn verify_publication_base(
     }
     Err(NylError::config(format!(
         "Publication {}@{branch} is at {} but fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
-        crate::util::sanitize_url(publication_url),
+        nyl_git::sanitize_url(publication_url),
         head.unwrap_or("no commit"),
         base.commit.as_deref().unwrap_or("no commit"),
     )))
@@ -297,7 +299,7 @@ impl OrchestratedInputs {
 
 /// Resolves a GitRepository name to the repository and its source file.
 pub type RepositoryResolver<'a> =
-    dyn Fn(&crate::resources::LocalReference) -> Result<(InlineGitRepository, PathBuf)> + 'a;
+    dyn Fn(&nyl_core::resources::LocalReference) -> Result<(InlineGitRepository, PathBuf)> + 'a;
 
 /// Reads a file at an immutable commit.
 pub trait GitBlobSource {
@@ -575,7 +577,7 @@ impl ResolvedTargetInputs {
     }
 }
 
-pub use nyl_core::bindings::select;
+use nyl_core::bindings::select;
 
 /// Digest of an input's canonical JSON value.
 pub fn value_digest(value: &Value) -> Result<String> {
@@ -966,41 +968,41 @@ fn resolve_git(
     sources: &InputSources<'_>,
 ) -> std::result::Result<ResolvedInput, String> {
     let (repository, repository_source) = match (&source.git.repository, &source.git.repository_ref) {
-        (Some(repository), _) => (repository.clone(), None),
+        (Some(repository), _) => (repository.repo_url.clone(), None),
         (None, Some(reference)) => {
             let (repository, path) =
                 (sources.repositories)(reference).map_err(|error| format!("{field}.fromGit.repositoryRef: {error}"))?;
-            (repository, Some(path))
+            (repository.repo_url, Some(path))
         }
         (None, None) => unreachable!("validated fromGit names a repository"),
     };
     let (commit, path) = (source.commit(), source.path());
     let bytes = sources
         .git
-        .read_blob(&repository.repo_url, commit, path)
+        .read_blob(&repository, commit, path)
         .map_err(|error| match error {
             NylError::Git(_) => format!(
                 "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
                 path,
                 commit,
-                crate::util::sanitize_url(&repository.repo_url),
-                crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
+                nyl_git::sanitize_url(&repository),
+                nyl_git::redact_url_credentials(&error.to_string(), &repository)
             ),
             // Vendor policy errors carry their own fix.
             NylError::Config(message) => format!(
                 "{field}.fromGit: {}",
-                crate::util::redact_url_credentials(&message, &repository.repo_url)
+                nyl_git::redact_url_credentials(&message, &repository)
             ),
             other => format!(
                 "{field}.fromGit: {}",
-                crate::util::redact_url_credentials(&other.to_string(), &repository.repo_url)
+                nyl_git::redact_url_credentials(&other.to_string(), &repository)
             ),
         })?
         .ok_or_else(|| {
             format!(
                 "{field}.fromGit: commit {} of {} has no file {}",
                 commit,
-                crate::util::sanitize_url(&repository.repo_url),
+                nyl_git::sanitize_url(&repository),
                 path
             )
         })?;
@@ -1009,7 +1011,7 @@ fn resolve_git(
     Ok(ResolvedInput {
         value,
         origin: InputOrigin::Git {
-            url: credential_free_url(&repository.repo_url),
+            url: credential_free_url(&repository),
             commit: commit.to_owned(),
             path: path.to_owned(),
             blob_digest: nyl_core::digest::sha256_hex(&bytes),
@@ -1746,7 +1748,8 @@ mod tests {
         let source = CachedGitBlobSource::new(
             Some(crate::git::GitManager::with_cache_dir(temp.path().join("cache"))),
             temp.path(),
-            &crate::config::ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap(),
+            &crate::config::ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue())
+                .unwrap(),
             None,
         );
         let url = temp.path().join("publication").to_string_lossy().into_owned();

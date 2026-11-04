@@ -1,8 +1,8 @@
 //! Bounded review presentation; complete evidence belongs in JSON and the patch artifact.
 
 use super::*;
-use crate::render::ProvenanceFrame;
-use crate::validation::{ResourceResult, ResourceStatus, SchemaOrigin};
+use nyl_render::render::ProvenanceFrame;
+use nyl_render::validation::{ResourceResult, ResourceStatus, SchemaOrigin};
 
 pub(super) const MARKDOWN_LIMIT: usize = 60_000;
 const FILES_LIMIT: usize = 10_000;
@@ -660,8 +660,8 @@ fn patch_files(patch: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::Provenance;
-    use crate::validation::{Finding, ResourceIdentity, ResourceLocation, ValidationReport};
+    use nyl_render::render::Provenance;
+    use nyl_render::validation::{Finding, ResourceIdentity, ResourceLocation, ValidationReport};
 
     fn sample_report(count: usize) -> Report {
         use clap::Parser as _;
@@ -759,7 +759,7 @@ mod tests {
         validation.resources[2].findings[0].path = None;
         validation.finish();
         report.validation(
-            crate::validation::TreeValidationOutcome {
+            nyl_render::validation::TreeValidationOutcome {
                 report: Some(validation),
                 result: Err(NylError::ValidationReported("invalid".into())),
             },
@@ -804,7 +804,7 @@ mod tests {
             }
             validation.finish();
             report.validation(
-                crate::validation::TreeValidationOutcome {
+                nyl_render::validation::TreeValidationOutcome {
                     report: Some(validation),
                     result: Err(NylError::ValidationReported("invalid".into())),
                 },
@@ -870,7 +870,7 @@ mod tests {
             };
             validation.finish();
             report.validation(
-                crate::validation::TreeValidationOutcome {
+                nyl_render::validation::TreeValidationOutcome {
                     report: Some(validation),
                     result: Ok(()),
                 },

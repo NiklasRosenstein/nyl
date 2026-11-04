@@ -18,7 +18,7 @@ use nyl_core::orchestration::ports::Clock as _;
 use nyl_core::orchestration::state::{
     FailureCategory, Lease, LeaseKind, Operation, Request, Run, RunKind, StateV1, TeardownWaiting,
 };
-use nyl_drivers::fake::Scripted;
+use nyl_units::fake::Scripted;
 
 use scenario::shell::{self, dev, shared_project};
 use scenario::world::git_output;
@@ -175,7 +175,10 @@ fn test_state_delete_leaves_the_deleted_marker_and_refuses_later_commands() {
             refused.stderr
         );
         assert!(
-            refused.stderr.contains("remove the Environment") && refused.stderr.contains("--fresh"),
+            refused.stderr.contains("Start over")
+                && refused.stderr.contains("--fresh")
+                && refused.stderr.contains("Decommission")
+                && refused.stderr.contains("remove Environment dev from source"),
             "{args:?}: {}",
             refused.stderr
         );

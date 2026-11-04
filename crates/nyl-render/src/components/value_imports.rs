@@ -13,7 +13,7 @@
 //! Imports read only the `values` of the render session's target, so they never
 //! widen what a session admits. A render without a DeploymentTarget has no
 //! values to import: optional imports contribute nothing and required imports
-//! fail. User documentation: `nyl/book/src/content/docs/kubernetes/components/value-imports.md`.
+//! fail. User documentation: `nyl/book/src/content/docs/kubernetes-rendering/components/value-imports.md`.
 
 use std::collections::BTreeSet;
 use std::path::Path;

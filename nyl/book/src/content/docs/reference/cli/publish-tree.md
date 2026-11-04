@@ -18,6 +18,10 @@ Publication proceeds when both rendered trees and their publication coordinates
 match, using the clean checkout for provenance. Local files such as editor
 configuration therefore do not block a reproducible publication.
 
+Synthetic snapshots created by `reconcile --worktree` are rejected with
+`NYL-SOURCE-WORKTREE`, including after checkout and with `--allow-dirty`.
+Commit the source changes and publish that revision.
+
 `--require-clean` rejects any non-ignored source worktree change before
 rendering. Its error lists up to 20 dirty files with Git index/worktree status
 codes and repository-relative paths, and reports how many more were omitted.
@@ -43,9 +47,9 @@ Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
 `NYL_GIT_AUTHOR_NAME` and `NYL_GIT_AUTHOR_EMAIL` for a Nyl-specific override.
 
-See [Publish from the protected branch](/nyl/rendered-gitops/workflow/publish/)
+See [Publish from the protected branch](/nyl/kubernetes-gitops/workflow/publish/)
 for CI patterns and rendered layout. The
-[Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)
+[Kubernetes GitOps resource reference](/nyl/kubernetes-gitops/resources/)
 documents the configuration model.
 
 See the [options shared by the tree commands](/nyl/reference/cli/render-tree/#options-shared-by-the-tree-commands) for target selection, caching, secret inputs, progress,

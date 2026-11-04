@@ -47,7 +47,7 @@ impl Provenance {
         self.0.insert(
             0,
             ProvenanceFrame::Remote {
-                repository: crate::util::sanitize_url(repository),
+                repository: nyl_git::sanitize_url(repository),
                 revision: revision.to_owned(),
             },
         );
@@ -62,9 +62,9 @@ impl Provenance {
                 *path = match path.strip_prefix("/") {
                     Ok(relative) => format!(
                         "/{}",
-                        crate::resources::relative_path_to_posix("rendered provenance path", relative)?
+                        nyl_core::resources::relative_path_to_posix("rendered provenance path", relative)?
                     ),
-                    Err(_) => crate::resources::relative_path_to_posix("rendered provenance path", path)?,
+                    Err(_) => nyl_core::resources::relative_path_to_posix("rendered provenance path", path)?,
                 }
                 .into();
             }

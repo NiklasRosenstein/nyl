@@ -507,15 +507,15 @@ fn test_a_hold_signal_for_a_unit_the_run_executed_keeps_its_incarnation() {
 }
 
 /// Q28: only a reconcile or teardown run reads hold signals. While another
-/// operation holds the lease (here `verify`), `nyl hold` meets a held
+/// operation holds the lease (here `detect-drift`), `nyl hold` meets a held
 /// lease (NYL-LEASE-HELD, exit 2) and sends no signal nothing would read.
 #[test]
-fn test_hold_while_a_verify_holds_the_lease_refuses_as_a_held_lease() {
+fn test_hold_while_a_drift_check_holds_the_lease_refuses_as_a_held_lease() {
     let harness = Harness::new();
     harness.init();
     let (store, location) = (harness.store.as_ref(), &harness.location);
     let mut lease = harness.other_lease(30);
-    lease.operation = Operation::Verify;
+    lease.operation = Operation::DetectDrift;
     store.take_lease(location, &dev(), &lease, None).unwrap();
 
     let held = harness.hold("network");

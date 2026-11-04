@@ -2,8 +2,8 @@ use clap::Args;
 use colored::Colorize;
 use dialoguer::Confirm;
 
-use crate::{
-    cli::commands::cluster::load_target_kube_config,
+use crate::cli::commands::cluster::load_target_kube_config;
+use nyl_render::{
     kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     NylError, Result,
 };
@@ -90,30 +90,31 @@ async fn delete_release(
     purge: Option<bool>,
 ) -> Result<()> {
     // Get revisions to delete and the relevant release state
-    let (revisions, relevant_release): (Vec<u32>, Option<crate::kubernetes::ReleaseState>) = if let Some(rev) = revision
-    {
-        // Check if the specified revision exists
-        let release_opt: Option<crate::kubernetes::ReleaseState> = storage.get_release(name, namespace, rev).await?;
-        if release_opt.is_none() {
-            return Err(NylError::Config(format!(
-                "Release '{}' revision {} not found in namespace '{}'",
-                name, rev, namespace
-            )));
-        }
-        (vec![rev], release_opt)
-    } else {
-        // Delete all revisions; ensure the release exists and get the latest state
-        let all_revisions: Vec<u32> = storage.list_revisions(name, namespace).await?;
-        if all_revisions.is_empty() {
-            return Err(NylError::Config(format!(
-                "Release '{}' not found in namespace '{}'",
-                name, namespace
-            )));
-        }
-        let latest_release: Option<crate::kubernetes::ReleaseState> =
-            storage.get_latest_release(name, namespace).await?;
-        (all_revisions, latest_release)
-    };
+    let (revisions, relevant_release): (Vec<u32>, Option<nyl_render::kubernetes::ReleaseState>) =
+        if let Some(rev) = revision {
+            // Check if the specified revision exists
+            let release_opt: Option<nyl_render::kubernetes::ReleaseState> =
+                storage.get_release(name, namespace, rev).await?;
+            if release_opt.is_none() {
+                return Err(NylError::Config(format!(
+                    "Release '{}' revision {} not found in namespace '{}'",
+                    name, rev, namespace
+                )));
+            }
+            (vec![rev], release_opt)
+        } else {
+            // Delete all revisions; ensure the release exists and get the latest state
+            let all_revisions: Vec<u32> = storage.list_revisions(name, namespace).await?;
+            if all_revisions.is_empty() {
+                return Err(NylError::Config(format!(
+                    "Release '{}' not found in namespace '{}'",
+                    name, namespace
+                )));
+            }
+            let latest_release: Option<nyl_render::kubernetes::ReleaseState> =
+                storage.get_latest_release(name, namespace).await?;
+            (all_revisions, latest_release)
+        };
 
     // Determine if the relevant release is currently deployed (for warnings and purge)
     let is_deployed = relevant_release
@@ -213,11 +214,11 @@ async fn delete_release(
 /// option retains them or awaits `--confirm-delete`.
 async fn purge_resources(
     client: kube::Client,
-    release: &crate::kubernetes::ReleaseState,
+    release: &nyl_render::kubernetes::ReleaseState,
     confirm_delete: bool,
 ) -> Result<()> {
-    use crate::kubernetes::prune::{delete_decision, PruneDecision};
-    use crate::kubernetes::{KubeClient, KubeRsClient};
+    use nyl_render::kubernetes::prune::{delete_decision, PruneDecision};
+    use nyl_render::kubernetes::{KubeClient, KubeRsClient};
 
     println!("Purging resources from cluster...");
 

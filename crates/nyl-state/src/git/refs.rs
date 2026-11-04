@@ -76,6 +76,15 @@ impl Refs<'_> {
         }
     }
 
+    pub fn baseline(&self, name: &str) -> String {
+        self.tracking(name)
+            .replacen("refs/nyl-tracking/", "refs/nyl-baseline/", 1)
+    }
+
+    pub fn baseline_oid(&self, name: &str) -> Option<Oid> {
+        self.repository.refname_to_id(&self.baseline(name)).ok()
+    }
+
     /// The commits of the named refs and globs, by full ref name.
     pub fn heads(&self, patterns: &[String]) -> StateResult<BTreeMap<String, Oid>> {
         if let Some(url) = self.url {
@@ -159,8 +168,182 @@ impl Refs<'_> {
         Ok(())
     }
 
+    /// Refuse to discard coordination records written offline.
+    pub fn check_local_coordination(&self, prefix: &str) -> StateResult<()> {
+        let pattern = format!("{prefix}*");
+        let mut names = std::collections::BTreeSet::new();
+        for reference in self.repository.references_glob(&pattern).map_err(unavailable)? {
+            let reference = reference.map_err(unavailable)?;
+            if let Ok(name) = reference.name() {
+                names.insert(name.to_owned());
+            }
+        }
+        let tracked = self.baseline(&pattern);
+        let tracking_prefix = self.baseline("refs/");
+        for reference in self.repository.references_glob(&tracked).map_err(unavailable)? {
+            let reference = reference.map_err(unavailable)?;
+            if let Ok(name) = reference.name() {
+                if let Some(suffix) = name.strip_prefix(&tracking_prefix) {
+                    names.insert(format!("refs/{suffix}"));
+                }
+            }
+        }
+        for name in names {
+            if self.repository.refname_to_id(&name).ok() != self.baseline_oid(&name) {
+                return Err(StateError::Unavailable(format!("local coordination record {name} contains unpublished work; recover it with --local before resetting state")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Synchronize the local view only when it still matches the last remote view.
+    #[allow(clippy::too_many_lines)] // Keep the ref validation and atomic synchronization together.
+    pub fn sync_local(&self, names: &[String], heads: &BTreeMap<String, Oid>) -> StateResult<()> {
+        if self.url.is_none() {
+            return Ok(());
+        }
+        let mut all = names
+            .iter()
+            .filter(|name| !name.contains('*'))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        all.extend(heads.keys().cloned());
+        for pattern in names.iter().filter(|name| name.contains('*')) {
+            for reference in self.repository.references_glob(pattern).map_err(unavailable)? {
+                let reference = reference.map_err(unavailable)?;
+                if let Ok(name) = reference.name() {
+                    all.insert(name.to_owned());
+                }
+            }
+            let tracking_pattern = self.baseline(pattern);
+            let prefix = self.baseline("refs/");
+            for reference in self
+                .repository
+                .references_glob(&tracking_pattern)
+                .map_err(unavailable)?
+            {
+                let reference = reference.map_err(unavailable)?;
+                if let Ok(name) = reference.name() {
+                    if let Some(suffix) = name.strip_prefix(&prefix) {
+                        all.insert(format!("refs/{suffix}"));
+                    }
+                }
+            }
+        }
+        let mut expected = BTreeMap::new();
+        let mut baselines = BTreeMap::new();
+        if !self.repository.is_bare() {
+            if let Ok(head) = self.repository.head() {
+                if head.name().is_ok_and(|name| all.contains(name)) {
+                    return Err(StateError::Unavailable(
+                        "a configured state ref is checked out; use a separate branch for state".to_owned(),
+                    ));
+                }
+            }
+        }
+        for name in &all {
+            let local = self.repository.refname_to_id(name).ok();
+            let baseline = self.baseline_oid(name);
+            let remote = heads.get(name).copied();
+            if local != baseline && !(baseline.is_none() && local == remote) {
+                return Err(StateError::Unavailable(format!(
+                    "local state at {} contains unpublished changes to {name}; inspect with --local and use `nyl state reset --local` with the required discard options before using the remote",
+                    self.repository.path().display()
+                )));
+            }
+            expected.insert(name.clone(), local);
+            baselines.insert(name.clone(), baseline);
+        }
+        self.fetch(heads, false)?;
+        for name in names.iter().filter(|name| !name.contains('*')) {
+            if let (Some(Some(before)), Some(after)) = (expected.get(name), heads.get(name)) {
+                if before != after
+                    && !self
+                        .repository
+                        .graph_descendant_of(*after, *before)
+                        .map_err(unavailable)?
+                {
+                    for (name, old) in &expected {
+                        self.set_tracking(name, *old)?;
+                    }
+                    return Err(StateError::NotFastForward {
+                        reference: name.clone(),
+                    });
+                }
+            }
+        }
+        let mut transaction = self.repository.transaction().map_err(unavailable)?;
+        for name in &all {
+            transaction.lock_ref(name).map_err(unavailable)?;
+            transaction.lock_ref(&self.baseline(name)).map_err(unavailable)?;
+        }
+        for name in &all {
+            if self.repository.refname_to_id(name).ok() != expected[name] || self.baseline_oid(name) != baselines[name]
+            {
+                return Err(StateError::conflict(name.clone(), Some("a concurrent local change")));
+            }
+            match heads.get(name) {
+                Some(oid) => transaction
+                    .set_target(name, *oid, None, "nyl: synchronize local state")
+                    .map_err(unavailable)?,
+                None if expected[name].is_some() => transaction.remove(name).map_err(unavailable)?,
+                None => {}
+            }
+            let baseline = self.baseline(name);
+            match heads.get(name) {
+                Some(oid) => transaction
+                    .set_target(&baseline, *oid, None, "nyl: acknowledge state")
+                    .map_err(unavailable)?,
+                None if baselines[name].is_some() => transaction.remove(&baseline).map_err(unavailable)?,
+                None => {}
+            }
+        }
+        transaction.commit().map_err(unavailable)?;
+        for name in &all {
+            self.set_tracking(name, heads.get(name).copied())?;
+        }
+        Ok(())
+    }
+
+    fn update_mirror(&self, update: &Update) -> Result<(), UpdateError> {
+        let baseline = self.baseline(&update.name);
+        let mut transaction = self.repository.transaction()?;
+        transaction.lock_ref(&update.name)?;
+        transaction.lock_ref(&baseline)?;
+        if self.repository.refname_to_id(&update.name).ok() != update.expected
+            || self.baseline_oid(&update.name) != update.expected
+        {
+            return Err(UpdateError::Stale);
+        }
+        match update.new {
+            Some(oid) => {
+                transaction.set_target(&update.name, oid, None, "nyl: synchronize local state")?;
+                transaction.set_target(&baseline, oid, None, "nyl: acknowledge state")?;
+            }
+            None if update.expected.is_some() => {
+                transaction.remove(&update.name)?;
+                transaction.remove(&baseline)?;
+            }
+            None => {}
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Apply every update or none.
     pub fn update(&self, updates: &[Update]) -> Result<(), UpdateError> {
+        if !self.repository.is_bare() {
+            if let Ok(head) = self.repository.head() {
+                if head
+                    .name()
+                    .is_ok_and(|name| updates.iter().any(|update| update.name == name))
+                {
+                    return Err(UpdateError::Other(StateError::Unavailable(
+                        "a configured state ref is checked out; use a separate branch for state".to_owned(),
+                    )));
+                }
+            }
+        }
         match self.push_url.or(self.url) {
             Some(url) => {
                 let pushes = updates
@@ -174,8 +357,21 @@ impl Refs<'_> {
                 match nyl_git::push_atomic(self.repository.path(), url, &pushes, self.auth) {
                     Ok(()) => {
                         for update in updates {
+                            let baseline = self.baseline_oid(&update.name);
+                            let local = self.repository.refname_to_id(&update.name).ok();
                             self.set_tracking(&update.name, update.new)
                                 .map_err(UpdateError::Other)?;
+                            if local == baseline {
+                                let mirror = Update {
+                                    name: update.name.clone(),
+                                    new: update.new,
+                                    expected: baseline,
+                                };
+                                match self.update_mirror(&mirror) {
+                                    Ok(()) | Err(UpdateError::Stale) => {}
+                                    Err(error) => return Err(error),
+                                }
+                            }
                         }
                         Ok(())
                     }
@@ -203,6 +399,18 @@ impl Refs<'_> {
     }
 
     fn update_local(&self, updates: &[Update]) -> Result<(), UpdateError> {
+        if !self.repository.is_bare() {
+            if let Ok(head) = self.repository.head() {
+                if head
+                    .name()
+                    .is_ok_and(|name| updates.iter().any(|update| update.name == name))
+                {
+                    return Err(UpdateError::Other(StateError::Unavailable(
+                        "a configured state ref is checked out; use a separate branch for state".to_owned(),
+                    )));
+                }
+            }
+        }
         let mut transaction = self.repository.transaction()?;
         for update in updates {
             transaction.lock_ref(&update.name)?;

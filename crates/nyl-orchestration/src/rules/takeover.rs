@@ -911,13 +911,13 @@ mod tests {
     }
 
     /// Catches a `--local` run taking over remote run refs, and a broken
-    /// `verify` lease marking units uncertain although verify has no effects.
+    /// `detect-drift` lease marking units uncertain although it has no effects.
     #[test]
     fn test_foreign_runs_and_a_replaced_lease_without_effects_contribute_nothing() {
         let mut foreign = run_state(RUN_2, "11:00", &["database"], vec![checkpoint("network", "v1", RUN_2)]);
         foreign.foreign = true;
         let mut world = World::new(vec![foreign, run_state(OWN, "11:00", &["web"], Vec::new())]);
-        world.replaced = Some(lease(RUN_1, Operation::Verify, &["database"], true));
+        world.replaced = Some(lease(RUN_1, Operation::DetectDrift, &["database"], true));
         world.resolve("network", "v1");
         world.resolve("database", "v1");
         world.resolve("web", "v1");

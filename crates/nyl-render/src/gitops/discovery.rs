@@ -12,13 +12,13 @@ use std::path::{Component, Path, PathBuf};
 use git2::{Repository, Status, StatusOptions};
 
 use crate::config::ProjectConfig;
-use crate::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::resources::{
     parse_gitops_resource, parse_gitops_resource_identity, GitOpsResource, GitOpsResourceIdentity, GitOpsResourceKind,
 };
 use crate::util::project_path::ProjectPaths;
 use crate::util::SourceContext;
 use crate::{NylError, Result};
+use nyl_core::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 
 /// A stable key for a discovered compiler resource.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,10 +49,12 @@ pub struct DiscoveredGitOpsResource {
     /// Literal labels from the static resource envelope. Selection never
     /// depends on target rendering.
     pub static_labels: BTreeMap<String, String>,
-    /// Present when the source document is already a complete static resource.
+    /// Present when the source document is a complete static resource, with file-backed values resolved.
     /// Templatable ApplicationGroup and AppProjectDefinition specs are parsed
     /// only after a target context is selected.
     pub resource: Option<GitOpsResource>,
+    /// Imported values files, using portable project/worktree keys.
+    pub values_inputs: BTreeSet<PathBuf>,
 }
 
 /// Deterministic inventory of Git-visible YAML and GitOps resources.
@@ -88,16 +90,35 @@ impl GitOpsInventory {
         ProjectPaths::new(self.project_root.clone(), self.worktree_root.clone())
     }
 
+    /// Resolve read-only source coordinates, discarding a named repository's
+    /// publication destination because source checkouts never write to it.
+    pub fn resolve_git_source(
+        &self,
+        source: &nyl_core::resources::GitSource,
+    ) -> Result<(nyl_core::resources::ReadGitRepository, Option<PathBuf>)> {
+        source.validate_repository("source")?;
+        if let Some(repository) = &source.repository {
+            return Ok((repository.clone(), None));
+        }
+        let (repository, path) = self.resolve_git_repository(source.repository_ref.as_ref(), None)?;
+        Ok((
+            nyl_core::resources::ReadGitRepository {
+                repo_url: repository.repo_url,
+            },
+            path,
+        ))
+    }
+
     /// The repository a `repositoryRef` or inline `repository` pair names,
     /// with the project-relative source file of the referenced GitRepository.
     ///
-    /// This is the one resolution of that pair for ApplicationGroup sources,
-    /// publications, `fromGit` bindings, and source-lock updates.
+    /// Publication and state destinations retain both read and write URLs.
+    /// Read sources use [`Self::resolve_git_source`] instead.
     pub fn resolve_git_repository(
         &self,
-        reference: Option<&crate::resources::LocalReference>,
-        inline: Option<&crate::resources::InlineGitRepository>,
-    ) -> Result<(crate::resources::InlineGitRepository, Option<PathBuf>)> {
+        reference: Option<&nyl_core::resources::LocalReference>,
+        inline: Option<&nyl_core::resources::InlineGitRepository>,
+    ) -> Result<(nyl_core::resources::InlineGitRepository, Option<PathBuf>)> {
         if let Some(repository) = inline {
             return Ok((repository.clone(), None));
         }
@@ -109,7 +130,7 @@ impl GitOpsInventory {
             unreachable!("inventory kind key and resource variant must agree");
         };
         Ok((
-            crate::resources::InlineGitRepository {
+            nyl_core::resources::InlineGitRepository {
                 repo_url: repository.spec.repo_url.clone(),
                 publish_url: repository.spec.publish_url.clone(),
             },
@@ -179,12 +200,17 @@ pub fn derived_group_source_root(project_root: &Path, group_source_path: &Path, 
     }
 }
 
-/// Locate the nearest `nyl.toml` and discover Git-visible GitOps resources.
+/// Locate the nearest `nyl.toml` and discover Git-visible GitOps resources,
+/// validated against the caller's resource catalogue.
 ///
 /// A relative `output_subtree` is resolved beneath the project root. The
 /// subtree is omitted from both the YAML file list and resource inventory.
-pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>) -> Result<GitOpsInventory> {
-    discover_inventory(start_dir, output_subtree, InvalidResources::Fail)
+pub fn discover_gitops_inventory(
+    start_dir: &Path,
+    output_subtree: Option<&Path>,
+    catalogue: crate::config::ResourceCatalogue,
+) -> Result<GitOpsInventory> {
+    discover_inventory(start_dir, output_subtree, InvalidResources::Fail, catalogue)
 }
 
 /// Discover a project like [`discover_gitops_inventory`], leaving out
@@ -194,8 +220,11 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
 /// a document without a valid envelope, a resource that does not deserialize,
 /// and a later duplicate of a name are skipped. The inventory is incomplete by
 /// design and must not feed rendering.
-pub fn discover_gitops_inventory_for_editing(start_dir: &Path) -> Result<GitOpsInventory> {
-    discover_inventory(start_dir, None, InvalidResources::Skip)
+pub fn discover_gitops_inventory_for_editing(
+    start_dir: &Path,
+    catalogue: crate::config::ResourceCatalogue,
+) -> Result<GitOpsInventory> {
+    discover_inventory(start_dir, None, InvalidResources::Skip, catalogue)
 }
 
 /// What discovery does with a resource document that cannot be parsed.
@@ -209,6 +238,7 @@ fn discover_inventory(
     start_dir: &Path,
     output_subtree: Option<&Path>,
     invalid: InvalidResources,
+    catalogue: crate::config::ResourceCatalogue,
 ) -> Result<GitOpsInventory> {
     let start_dir = if start_dir.is_file() {
         start_dir.parent().unwrap_or(start_dir)
@@ -217,7 +247,7 @@ fn discover_inventory(
     };
     let config_file =
         ProjectConfig::find(Some(start_dir))?.ok_or_else(|| NylError::ConfigNotFound("nyl.toml".to_owned()))?;
-    let project_config = ProjectConfig::load(Some(config_file.clone()))?;
+    let project_config = ProjectConfig::load(Some(config_file.clone()), catalogue)?;
     let project_root = config_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -274,12 +304,21 @@ fn discover_project_inventory(
             .map_or_else(|| settings.path.clone(), |relative| project_root.join(relative));
         normalize_absolute_path(&path)
     });
-    let worktree_data_files = collect_git_visible_data_files(
-        &repository,
-        &repository_root,
-        output_subtree.as_deref(),
-        vendor_subtree.as_deref(),
-    )?;
+    let worktree_visible_files = collect_git_visible_files(&repository, &repository_root)?;
+    let worktree_data_files = worktree_visible_files
+        .iter()
+        .filter(|path| {
+            let absolute = repository_root.join(path);
+            is_data_path(path)
+                && !output_subtree
+                    .as_ref()
+                    .is_some_and(|output| absolute.starts_with(output))
+                && !vendor_subtree
+                    .as_ref()
+                    .is_some_and(|vendor| absolute.starts_with(vendor))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let worktree_yaml_files = worktree_data_files
         .iter()
         .filter(|path| is_yaml_path(path))
@@ -299,10 +338,28 @@ fn discover_project_inventory(
 
     for relative_path in &yaml_files {
         let absolute_path = project_root.join(relative_path);
-        match discover_file_resources(&absolute_path, relative_path, &mut resources, invalid) {
+        match discover_file_resources(
+            &absolute_path,
+            relative_path,
+            &mut resources,
+            invalid,
+            &project_config.resource_catalogue,
+        ) {
             Err(_) if invalid == InvalidResources::Skip => {}
             result => result?,
         }
+    }
+
+    let paths = ProjectPaths::new(project_root.clone(), repository_root.clone());
+    let mut invalid_keys = Vec::new();
+    for (key, discovered) in &mut resources {
+        match super::values::resolve_resource_values(&paths, &worktree_visible_files, discovered) {
+            Err(_) if invalid == InvalidResources::Skip => invalid_keys.push(key.clone()),
+            result => result?,
+        }
+    }
+    for key in invalid_keys {
+        resources.remove(&key);
     }
 
     Ok(GitOpsInventory {
@@ -316,16 +373,10 @@ fn discover_project_inventory(
     })
 }
 
-/// Git-visible YAML and JSON files of the whole worktree, relative to its
+/// Git-visible regular files of the whole worktree, relative to its
 /// root: tracked files and untracked files that are not ignored, without
-/// submodules, symbolic links, or paths through them, and without the output
-/// and vendor subtrees.
-fn collect_git_visible_data_files(
-    repository: &Repository,
-    repository_root: &Path,
-    output_subtree: Option<&Path>,
-    vendor_subtree: Option<&Path>,
-) -> Result<BTreeSet<PathBuf>> {
+/// submodules, symbolic links, or paths through them.
+fn collect_git_visible_files(repository: &Repository, repository_root: &Path) -> Result<BTreeSet<PathBuf>> {
     let mut repository_paths = BTreeSet::new();
     let index = repository.index().map_err(crate::git::GitError::from)?;
     for entry in index.iter() {
@@ -359,15 +410,10 @@ fn collect_git_visible_data_files(
 
     let mut result = BTreeSet::new();
     for repository_relative in repository_paths {
-        if has_dot_git_component(&repository_relative) || !is_data_path(&repository_relative) {
+        if has_dot_git_component(&repository_relative) {
             continue;
         }
         let absolute_path = repository_root.join(&repository_relative);
-        if output_subtree.is_some_and(|output| absolute_path.starts_with(output))
-            || vendor_subtree.is_some_and(|vendor| absolute_path.starts_with(vendor))
-        {
-            continue;
-        }
         let Ok(metadata) = std::fs::symlink_metadata(&absolute_path) else {
             // A tracked file deleted from the worktree is not visible.
             continue;
@@ -385,12 +431,13 @@ fn discover_file_resources(
     relative_path: &Path,
     resources: &mut BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
     invalid: InvalidResources,
+    catalogue: &crate::config::ResourceCatalogue,
 ) -> Result<()> {
     let bytes = std::fs::read(absolute_path)?;
     let contents = String::from_utf8_lossy(&bytes);
 
     for (document_index, document) in split_yaml_documents(&contents).into_iter().enumerate() {
-        let discovered = discover_document(document, document_index, relative_path);
+        let discovered = discover_document(document, document_index, relative_path, catalogue);
         let (key, discovered) = match discovered {
             Ok(Some(found)) => found,
             Ok(None) => continue,
@@ -421,7 +468,22 @@ fn discover_document(
     document: &str,
     document_index: usize,
     relative_path: &Path,
+    catalogue: &crate::config::ResourceCatalogue,
 ) -> Result<Option<(GitOpsInventoryKey, DiscoveredGitOpsResource)>> {
+    let envelope = crate::yaml::parse_yaml_documents_k8s_compatible(document)
+        .ok()
+        .and_then(|documents| (documents.len() == 1).then(|| documents[0].clone()))
+        .unwrap_or_else(|| {
+            let (api_version, kind, name) = scan_static_envelope_fields(document);
+            serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
+        });
+    nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
+        NylError::config(format!(
+            "{} document {}: {error}",
+            relative_path.display(),
+            document_index + 1
+        ))
+    })?;
     if !advertises_gitops_api(document) {
         return Ok(None);
     }
@@ -459,6 +521,7 @@ fn discover_document(
         identity,
         static_labels,
         resource,
+        values_inputs: BTreeSet::new(),
     };
     Ok(Some((key, discovered)))
 }
@@ -539,12 +602,14 @@ fn parse_complete_resource(document: &str, contextual_path: &Path) -> Result<Git
             contextual_path.display()
         )));
     }
-    parse_gitops_resource(&parsed_documents[0])?.ok_or_else(|| {
-        NylError::config(format!(
-            "Document {} advertises {API_VERSION_K8S_GITOPS} but is not a GitOps resource",
-            contextual_path.display()
-        ))
-    })
+    parse_gitops_resource(&parsed_documents[0])
+        .map_err(|error| NylError::config(format!("{}: {error}", contextual_path.display())))?
+        .ok_or_else(|| {
+            NylError::config(format!(
+                "Document {} advertises {API_VERSION_K8S_GITOPS} but is not a GitOps resource",
+                contextual_path.display()
+            ))
+        })
 }
 
 fn scan_static_identity(document: &str) -> Result<Option<GitOpsResourceIdentity>> {
@@ -775,6 +840,40 @@ spec:
     }
 
     #[test]
+    fn test_read_source_resolves_named_repository_without_its_publication_coordinates() {
+        let (temporary, _) = project();
+        fs::write(temporary.path().join("repository.yaml"), "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata: {name: shared}\nspec: {repoURL: 'https://example.invalid/read.git', publishURL: 'ssh://git@example.invalid/write.git'}\n").unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
+        let reference = nyl_core::resources::LocalReference {
+            name: "shared".to_owned(),
+        };
+        let source = nyl_core::resources::GitSource {
+            repository_ref: Some(reference.clone()),
+            ..nyl_core::resources::GitSource::default()
+        };
+        let (read, source_path) = inventory.resolve_git_source(&source).unwrap();
+        assert_eq!(
+            serde_json::to_value(read).unwrap(),
+            serde_json::json!({"repoURL": "https://example.invalid/read.git"})
+        );
+        assert_eq!(source_path.as_deref(), Some(Path::new("repository.yaml")));
+        let (write, _) = inventory.resolve_git_repository(Some(&reference), None).unwrap();
+        assert_eq!(
+            write.publish_url.as_deref(),
+            Some("ssh://git@example.invalid/write.git")
+        );
+        let invalid: nyl_core::resources::GitSource = serde_json::from_value(serde_json::json!({
+            "repository": {"repoURL": "https://user:password@example.invalid/read.git"},
+        }))
+        .unwrap();
+        assert!(inventory
+            .resolve_git_source(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("user information"));
+    }
+
+    #[test]
     fn discovers_tracked_and_nonignored_untracked_resources_deterministically() {
         let (temporary, repository) = project();
         fs::create_dir_all(temporary.path().join("config/targets")).unwrap();
@@ -784,7 +883,7 @@ spec:
         let staging = TARGET.replace("production", "staging");
         fs::write(temporary.path().join("config/targets/untracked.yml"), staging).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         assert_eq!(
             inventory.yaml_files,
             vec![
@@ -819,7 +918,12 @@ spec:
         )
         .unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), Some(Path::new("rendered"))).unwrap();
+        let inventory = discover_gitops_inventory(
+            temporary.path(),
+            Some(Path::new("rendered")),
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         assert_eq!(inventory.yaml_files, vec![PathBuf::from("applications.yaml")]);
         assert!(inventory.resources.is_empty());
     }
@@ -842,7 +946,7 @@ spec:
         .unwrap();
         track(&repository, "third-party/artifacts/manifests/example.com/target.yaml");
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
 
         assert!(inventory.yaml_files.is_empty(), "{:?}", inventory.yaml_files);
         assert!(inventory.resources.is_empty());
@@ -870,7 +974,7 @@ spec:
         )
         .unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let group = inventory.get(GitOpsResourceKind::ApplicationGroup, "optional").unwrap();
         assert_eq!(group.identity.name, "optional");
         assert!(inventory
@@ -891,7 +995,7 @@ spec:
         fs::write(temporary.path().join("outside"), TARGET).unwrap();
         symlink(temporary.path().join("outside"), temporary.path().join("linked.yaml")).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         assert!(inventory.yaml_files.is_empty());
     }
 
@@ -920,7 +1024,7 @@ spec:
             .unwrap();
         index.write().unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         assert!(inventory.yaml_files.is_empty());
     }
 
@@ -936,7 +1040,7 @@ spec:
         )
         .unwrap();
 
-        let error = discover_gitops_inventory(temporary.path(), None)
+        let error = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue())
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown field"));
@@ -962,7 +1066,7 @@ spec:
         )
         .unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let cluster = inventory.get(GitOpsResourceKind::Cluster, "prod-eu-1").unwrap();
         assert!(matches!(cluster.resource, Some(GitOpsResource::Cluster(_))));
     }
@@ -988,7 +1092,7 @@ spec:
         )
         .unwrap();
 
-        assert!(discover_gitops_inventory(temporary.path(), None).is_err());
+        assert!(discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).is_err());
     }
 
     #[test]
@@ -997,7 +1101,7 @@ spec:
         fs::write(temporary.path().join("one.yaml"), TARGET).unwrap();
         fs::write(temporary.path().join("two.yaml"), TARGET).unwrap();
 
-        let error = discover_gitops_inventory(temporary.path(), None)
+        let error = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue())
             .unwrap_err()
             .to_string();
         assert!(error.contains("Duplicate GitOps resource DeploymentTarget/production"));
@@ -1017,8 +1121,9 @@ spec:
         .unwrap();
 
         // Rendering needs a complete inventory; editor tooling keeps what parses.
-        assert!(discover_gitops_inventory(temporary.path(), None).is_err());
-        let inventory = discover_gitops_inventory_for_editing(temporary.path()).unwrap();
+        assert!(discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).is_err());
+        let inventory =
+            discover_gitops_inventory_for_editing(temporary.path(), crate::config::test_catalogue()).unwrap();
         let target = inventory
             .get(GitOpsResourceKind::DeploymentTarget, "production")
             .unwrap();
@@ -1039,7 +1144,7 @@ spec:
         );
         fs::write(temporary.path().join("resources.yaml"), content).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         let resource = inventory
             .get(GitOpsResourceKind::DeploymentTarget, "production")
             .unwrap();
@@ -1052,7 +1157,12 @@ spec:
         fs::write(temporary.path().join("target.yaml"), TARGET).unwrap();
         fs::create_dir_all(temporary.path().join("nested/deep")).unwrap();
 
-        let inventory = discover_gitops_inventory(&temporary.path().join("nested/deep"), None).unwrap();
+        let inventory = discover_gitops_inventory(
+            &temporary.path().join("nested/deep"),
+            None,
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         assert_eq!(inventory.project_root, temporary.path().canonicalize().unwrap());
         assert!(inventory
             .get(GitOpsResourceKind::DeploymentTarget, "production")
@@ -1064,7 +1174,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(temporary.path().join("target.yaml"), TARGET).unwrap();
 
-        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
         fs::write(temporary.path().join("nyl.toml"), "not valid TOML = [").unwrap();
 
         let rediscovered = inventory.rediscover(None).unwrap();

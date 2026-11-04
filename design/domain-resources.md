@@ -2,9 +2,9 @@
 
 **Status:** proposal for [#173](https://github.com/NiklasRosenstein/nyl/issues/173),
 milestone M9. Nothing here exists yet. Progress is tracked on the
-[Domain resources roadmap](https://niklasrosenstein.github.io/nyl/domain-resources/roadmap/)
+[Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/)
 in the documentation, generated from
-[`nyl/book/src/lib/roadmaps/domain-resources.mjs`](../nyl/book/src/lib/roadmaps/domain-resources.mjs). It
+[`nyl/book/src/lib/roadmaps/domain-modeling.mjs`](../nyl/book/src/lib/roadmaps/domain-modeling.mjs). It
 extends the [orchestration core contract](orchestration-core.md) and the
 [infrastructure units](infrastructure-units.md) and changes neither: a project
 that declares no ResourceDefinition never sees any of it.
@@ -133,7 +133,7 @@ spec:
   owner: payments
 ```
 
-- Discovery uses the project-wide Git visibility rule that rendered GitOps
+- Discovery uses the project-wide Git visibility rule that Kubernetes GitOps
   resources follow. A document is a domain resource when its `apiVersion` and
   `kind` match a definition. Files that discovery already treats as Release
   files or ApplicationGroup sources are skipped, so a Kubernetes manifest is
@@ -160,7 +160,7 @@ identity, provenance, and parsed document, sorted by identity.
 
 Every catalog resource goes through three checks. Each check reads only S,
 so its result applies to every environment and can be cached under the
-[cache invariants](../AGENTS.md#rendered-gitops-cache-invariants).
+[cache invariants](../AGENTS.md#kubernetes-gitops-cache-invariants).
 
 1. **Schema.** The definition validates `spec`, then applies its defaults.
    Reference objects in `x-nyl-accepts-references` fields are skipped here.
@@ -608,7 +608,7 @@ in its serialized `DesiredUnit`.
 - `DesiredUnit` gains `bundle: Option<ResourceBundle>`, loaded from the sidecar
   file. Drivers read it but never write it.
 - A new optional capability `prepare` returns the native inputs that the
-  driver's `plan`, `reconcile`, `verify`, and `exec` pass to the tool:
+  driver's `plan`, `reconcile`, `detect_drift`, and `exec` pass to the tool:
 
   ```rust
   fn prepare(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<NativeInputs>>;
@@ -957,7 +957,7 @@ instantiating it differently in some environments.
 | Bundle assembly and its canonical digest | `nyl-collections`, shared by units and [Releases](release-catalog.md) |
 | Discovery of definitions and resources, the catalog, Kyverno admission | `nyl-render` (`gitops::discovery`, `validation`), returned through `SourceRenderer` as part of `RenderedSource` |
 | Resolving references inside a bundle, and the bundle digest in the execution key | `nyl-orchestration` resolution, `rules::execution_key` |
-| `prepare` and `NativeInputs` per kind | `nyl-drivers` |
+| `prepare` and `NativeInputs` per kind | `nyl-units`, in the kind's module |
 | `nyl prepare`, `get resources`, `schema resources` | `nyl-cli`, wiring only |
 
 Contract walkthroughs become scenarios under

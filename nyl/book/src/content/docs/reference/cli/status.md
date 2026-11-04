@@ -30,10 +30,12 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   resume". A held marker, written by `nyl hold` for a unit the environment
   never reconciled, has no kind (`-`) and no receipt. Each held unit warns
   with `NYL-UNIT-HELD`, naming [`nyl resume`](/nyl/reference/cli/hold/).
+  A held unit without a managed instance shows `held (no instance)`; this
+  does not say whether resources released from management still exist.
 - **Drift.** A unit with a current receipt shows its latest drift
-  observation from [`nyl verify`](/nyl/reference/cli/verify/) in its detail
+  record from [`nyl detect-drift`](/nyl/reference/cli/detect-drift/) in its detail
   (`drift: clean`, `drifted`, or `unknown`). A current unit whose latest
-  observation is `drifted` has the state `drifted`: work for the next
+  record is `drifted` has the state `drifted`: work for the next
   reconcile, like a changed unit.
 - **Teardowns.** A unit pending teardown warns with `NYL-TEARDOWN-PENDING`,
   naming `nyl reconcile --allow-teardown` for an omission (or `nyl teardown
@@ -57,12 +59,16 @@ unit only warns. A run whose lease expired or was broken before it finished
 is reported with `NYL-LEASE-LOST`; the fix names `nyl reconcile`, and `nyl
 recover -e <env>`, which imports the run without executing anything.
 
-When this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs)
-hold local transitions or are behind the remote, `status` warns with
-`NYL-STATE-LOCAL-DIVERGED`, such as "local state of dev has 2 local
-transitions and is 3 behind the remote". The warning does not change the exit
-code. `--local` shows the local view instead: the state as the clone's
-branches hold it, including `nyl reconcile --local` runs.
+The table is separated from its indented source and commit provenance by a blank
+line. Beneath the source commit, the report shows the checkout's credential-free
+`origin` URL, or its local path when there is no origin. JSON exposes that context
+as `sourceRepository`. Diagnostics follow separately, with a code, message and
+suggested fix in each block. Warning and error headings use color according to
+the global `--color auto|always|never` setting. Environment names are quoted,
+such as `environment 'local'`.
+
+The report identifies the configured state repository and its local path.
+`--local` reads that repository without contacting the remote.
 
 Select several environments with repeated `-e`, with `-l stage=production`, or
 with `-g <group>`. They run in dependency order with one report section per
@@ -76,7 +82,7 @@ for qualified unit options and independent state transactions.
 | `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
 | `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
 | `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
-| `--local` | Show this clone's local view of the state, including `--local` runs. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote, whose local branches already are the state. |
+| `--local` | Read the local state repository without contacting the remote. |
 | `-o`, `--output <table\|json>` | A table, or the typed `StatusReport`. Default `table`. |
 | `[PATH]` | The project directory or a path beneath it. Default `.`. |
 

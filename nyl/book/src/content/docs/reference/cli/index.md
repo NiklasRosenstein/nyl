@@ -15,28 +15,53 @@ closely related pair.
 - **Project inputs**: inspect resources and pin what rendering reads.
   - [`get and update`](/nyl/reference/cli/project-resources/) - Inspect resources, capture cluster capabilities, and move source locks
   - [`vendor`](/nyl/reference/cli/vendor/) - Snapshot and verify remote renderer inputs
-- **Kubernetes**: act on a cluster directly, through the shared [rendering pipeline](/nyl/kubernetes/pipeline/).
+- **Kubernetes Rendering**: act on a cluster directly, through the shared [rendering pipeline](/nyl/kubernetes-rendering/pipeline/).
   - [`render`](/nyl/reference/cli/render/) - Render Kubernetes manifests
   - [`diff`](/nyl/reference/cli/diff/) - Show diff between rendered manifests and cluster state
   - [`apply`](/nyl/reference/cli/apply/) - Apply rendered manifests to the cluster
   - [`release`](/nyl/reference/cli/release/) - Inspect release history and roll back to a previous revision
-- **Rendered GitOps**: render, compare, and publish a deployment target's tree.
+- **Kubernetes GitOps**: render, compare, and publish a deployment target's tree.
   - [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
   - [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
   - [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
 - **CI integration**: report results where reviewers look.
   - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 - **Orchestration** (in development): manage environments' state in Git.
+  - [`build`](/nyl/reference/cli/build/) - Build an artifact from the current checkout without state writes
   - [`plan`](/nyl/reference/cli/plan/) - Show what a reconcile would do, without writing anything
   - [`reconcile`](/nyl/reference/cli/reconcile/) - Execute an environment's ready units and record the results
   - [`status`](/nyl/reference/cli/status/) - Report each unit's state from one snapshot of an environment's state
-  - [`verify`](/nyl/reference/cli/verify/) - Check current receipts for drift and record the observations
+  - [`detect-drift and attest`](/nyl/reference/cli/detect-drift/) - Check current receipts for drift, or have their drivers attest them
   - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
   - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result
+  - [`exec`](/nyl/reference/cli/exec/) - Run a held unit's native tool with recorded repair context
   - [`state and lease`](/nyl/reference/cli/state/) - Create, move, forget, reset, restore, and delete an environment's state; break a lost lease
 
+Orchestration warnings and errors appear as separate blocks on stderr. Each block
+shows a headline, labelled details and actions when available, and a stable code.
+Table headings and diagnostic severity use terminal styling when color is enabled;
+the same information remains readable without color. JSON reports remain on stdout.
+A finding retains its complete `code`, `message`, and `fix` in JSON; optional
+`title`, `details`, and `actions` provide presentation fields for the same facts
+and remedies. For example, a status check against deleted state reports:
+
+```console
+$ nyl status -e dev --color never
+error  State for environment 'dev' was deleted
+
+  Start over    nyl state init -e dev --fresh
+  Decommission  remove Environment dev from source
+
+  NYL-STATE-DELETED
+```
+
 ## Global Options
+
+`--quiet-unit-output` hides public tool output from orchestration units while
+keeping their start/end messages. `--unit-log-dir DIR` appends masked unit logs
+to files, independently of console output. See
+[Following execution](/nyl/orchestration/runs/#following-execution) for usage.
 
 ### `--verbose` / `-v`
 
@@ -92,3 +117,5 @@ Show the version of nyl.
 ```bash
 nyl --version
 ```
+
+- [`build`](/nyl/reference/cli/build/) builds a unit artifact locally or pushes it without orchestration state writes.

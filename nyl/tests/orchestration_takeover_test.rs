@@ -20,8 +20,6 @@ use nyl_core::orchestration::state::{
     ApprovalIdentity, ApprovalRecord, FailureCategory, Lease, LeaseKind, Operation, StateV1,
 };
 use nyl_core::orchestration::time::Duration;
-use nyl_drivers::fake::Scripted;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::{FaultPoint, NoFaults};
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
@@ -29,6 +27,8 @@ use nyl_orchestration::shell::recover::{recover_environment, RecoverUnit};
 use nyl_orchestration::shell::run::{self, Cancellation, RunContext};
 use nyl_orchestration::shell::state as state_ops;
 use nyl_state::memory::MemoryStateStore;
+use nyl_units::fake::Scripted;
+use nyl_units::process::ProcessRunner;
 use scenario::format::CommitStep;
 use scenario::runner::{FaultSlot, AUTHOR};
 use scenario::shell::{
@@ -218,17 +218,18 @@ fn recover(harness: &Harness, unit: Option<RecoverUnit>) -> StateOperationReport
         secrets: None,
         commit_identity: Some(&harness.identity),
         observer: None,
+        progress: None,
         prompt: None,
     };
     recover_environment(&context, &job.request)
 }
 
 /// "Runs and leases" items 1 and 8: an operation that does not import the
-/// broken run (here `verify`) refuses with `NYL-LEASE-BROKEN` and writes
+/// broken run (here `detect-drift`) refuses with `NYL-LEASE-BROKEN` and writes
 /// nothing, leaving the break in place; `nyl recover -e dev` imports the
 /// run, records the break once, and consumes the run ref.
 #[test]
-fn test_a_lease_break_refuses_verify_until_recover_imports_the_run() {
+fn test_a_lease_break_refuses_detect_drift_until_recover_imports_the_run() {
     let mut harness = Harness::new(&shared_project(), true);
     harness.init();
     let first = harness.reconcile(&[]);
@@ -252,11 +253,11 @@ fn test_a_lease_break_refuses_verify_until_recover_imports_the_run() {
     let lease = harness.coordination().lease;
     let tips = harness.tips();
 
-    let verified = harness.verify();
+    let verified = harness.detect_drift();
     assert_eq!(verified.exit.code(), 2, "{verified:#?}");
     assert_eq!(codes(&verified.errors), [Code::LeaseBroken], "{verified:#?}");
     assert!(verified.errors[0].fix.contains("nyl recover -e dev"), "{verified:#?}");
-    assert_eq!(harness.tips(), tips, "verify wrote nothing");
+    assert_eq!(harness.tips(), tips, "detect-drift wrote nothing");
     assert_eq!(harness.coordination().lease, lease, "the break stays");
 
     let recovered = recover(&harness, None);

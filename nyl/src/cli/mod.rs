@@ -3,6 +3,7 @@ pub mod commands;
 pub mod filter;
 pub mod git_auth;
 pub(crate) mod namespace_resolution;
+pub(crate) mod presentation;
 pub(crate) mod resource_file;
 mod signals;
 pub(crate) mod table;
@@ -10,7 +11,7 @@ pub(crate) mod tree_progress;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::Result;
+use nyl_render::Result;
 
 /// When to use colored output
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -39,10 +40,22 @@ pub struct Cli {
     /// When to use colored output
     #[arg(long, value_enum, default_value = "auto", global = true)]
     pub color: ColorChoice,
+
+    /// Hide public unit tool output; unit start/end messages still appear.
+    #[arg(long, global = true)]
+    pub quiet_unit_output: bool,
+
+    /// Append masked unit tool output to DIR/<environment>/<unit>.log.
+    #[arg(long, value_name = "DIR", global = true)]
+    pub unit_log_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Build a unit artifact without orchestration state writes
+    Build(commands::build::BuildArgs),
+    /// Run the native operator tool of a held unit
+    Exec(commands::exec::ExecArgs),
     /// Maintain sticky pull request and merge request comments
     Comment(commands::comment::CommentArgs),
 
@@ -109,8 +122,11 @@ enum Commands {
     /// Show an environment's units, lease, and runs
     Status(commands::status::StatusArgs),
 
-    /// Verify an environment's current receipts with their drivers
-    Verify(commands::verify::VerifyArgs),
+    /// Check whether an environment's current receipts still hold, and record drift
+    DetectDrift(commands::check::CheckArgs),
+
+    /// Ask the drivers to attest an environment's current receipts
+    Attest(commands::check::CheckArgs),
 
     /// Clear a unit's uncertain or failed condition, or accept a checkpointed result
     Recover(commands::recover::RecoverArgs),
@@ -145,19 +161,24 @@ impl Cli {
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
             Commands::Vendor(args) => commands::vendor::execute(args).await,
-            Commands::Get(_)
+            Commands::Exec(_)
+            | Commands::Build(_)
+            | Commands::Get(_)
             | Commands::State(_)
             | Commands::Lease(_)
             | Commands::Plan(_)
             | Commands::Reconcile(_)
             | Commands::Status(_)
-            | Commands::Verify(_)
+            | Commands::DetectDrift(_)
+            | Commands::Attest(_)
             | Commands::Recover(_)
             | Commands::Teardown(_)
             | Commands::Hold(_)
             | Commands::Resume(_) => {
+                #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
+                eprintln!("Nyl test build: fake drivers enabled; use a production build for real orchestration");
                 let cancellation = nyl_orchestration::shell::run::Cancellation::new();
-                // reconcile, verify, and recover end cleanly on SIGINT or
+                // reconcile, detect-drift, attest, and recover end cleanly on SIGINT or
                 // SIGTERM instead of dying with the lease held.
                 let handler = self
                     .cancels_on_signal()
@@ -168,7 +189,10 @@ impl Cli {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let worker = std::thread::spawn(move || {
                     let outcome = (|| -> Result<crate::orchestration::run::CommandOutcome> {
-                        let owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        let mut owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        owned.tools = owned
+                            .tools
+                            .unit_output(self.quiet_unit_output, self.unit_log_dir.clone());
                         let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
                         self.execute_in_process(&wiring)
                     })();
@@ -196,15 +220,18 @@ impl Cli {
     }
 
     /// Whether the command cancels on SIGINT and SIGTERM ("Runs and leases"
-    /// item 7): the commands that take the lease to execute, verify, or
+    /// item 7): the commands that take the lease to execute, check, or
     /// recover units, and the state operations, whose `--wait-lease` a
     /// signal stops. `lease break` waits for nothing; other commands keep the
     /// default disposition.
     fn cancels_on_signal(&self) -> bool {
         matches!(
             self.command,
-            Commands::Reconcile(_)
-                | Commands::Verify(_)
+            Commands::Exec(_)
+                | Commands::Build(_)
+                | Commands::Reconcile(_)
+                | Commands::DetectDrift(_)
+                | Commands::Attest(_)
                 | Commands::Recover(_)
                 | Commands::State(_)
                 | Commands::Teardown(_)
@@ -214,7 +241,7 @@ impl Cli {
     }
 
     /// Run an orchestration command (`plan`, `reconcile`, `status`,
-    /// `verify`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
+    /// `detect-drift`, `attest`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
     /// instead of printing and exiting. The tier-1 scenario harness calls
     /// this. An orchestration command that fails before producing its report,
     /// such as on a project that cannot be discovered, is an outcome with
@@ -224,20 +251,23 @@ impl Cli {
         wiring: &crate::orchestration::run::Wiring<'_>,
     ) -> Result<crate::orchestration::run::CommandOutcome> {
         let result = match self.command {
+            Commands::Build(args) => commands::build::run(&args, wiring),
+            Commands::Exec(args) => commands::exec::run(&args, wiring),
             Commands::Plan(args) => commands::plan::run(&args, wiring),
             Commands::Reconcile(args) => commands::reconcile::run(&args, wiring),
             Commands::Status(args) => commands::status::run(&args, wiring),
             Commands::Get(args) => commands::get::run(&args, wiring),
             Commands::State(args) => commands::state::run_state(&args, wiring),
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
-            Commands::Verify(args) => commands::verify::run(&args, wiring),
+            Commands::DetectDrift(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::DetectDrift, wiring),
+            Commands::Attest(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Attest, wiring),
             Commands::Recover(args) => commands::recover::run(&args, wiring),
             Commands::Teardown(args) => commands::teardown::run(&args, wiring),
             Commands::Hold(args) => commands::hold::run_hold(&args, wiring),
             Commands::Resume(args) => commands::hold::run_resume(&args, wiring),
             _ => {
-                return Err(crate::NylError::config(
-                    "only plan, reconcile, status, verify, recover, teardown, hold, resume, get, state, and lease run in-process",
+                return Err(nyl_render::NylError::config(
+                    "only plan, reconcile, status, detect-drift, attest, recover, teardown, hold, resume, get, state, and lease run in-process",
                 ))
             }
         };

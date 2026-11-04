@@ -1,3 +1,7 @@
+terraform {
+  backend "local" {}
+}
+
 variable "vpc_id" {
   type = string
 }

@@ -1,5 +1,5 @@
-//! Drift repair end to end, in-process with Git state: `nyl verify` records
-//! drift of Command units whose `verify` step reads a marker file outside
+//! Drift repair end to end, in-process with Git state: `nyl detect-drift` records
+//! drift of Command units whose `detectDrift` step reads a marker file outside
 //! the project (a change made outside Nyl), and `status`, `plan`, and
 //! `reconcile` act on it as `driftRepair` and the recovery policies say.
 //!
@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use nyl::cli::Cli;
 use nyl::orchestration::run::{CommandOutcome, Wiring};
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::NoFaults;
 use nyl_orchestration::shell::run::Cancellation;
+use nyl_units::process::ProcessRunner;
 use scenario::runner::AUTHOR;
 use scenario::shell::{self, command, project, ENVIRONMENT, NYL_TOML};
 use scenario::world::git_output;
@@ -28,7 +28,7 @@ use tempfile::TempDir;
 
 const OBSERVED: &str = "refs/heads/nyl/dev/observed";
 
-/// A project with two Command units whose `verify` reports drift while a
+/// A project with two Command units whose `detectDrift` step reports drift while a
 /// marker file `<unit>.drift` exists in `markers`, and whose command
 /// removes the marker (a repair) and appends to `<unit>.runs`:
 /// `api` is idempotent (recovery policy `converge`), `job` is not
@@ -49,7 +49,7 @@ impl Harness {
                 name,
                 &format!("rm -f {dir}/{name}.drift; echo run >> {dir}/{name}.runs"),
                 &format!(
-                    "  verify: [sh, -c, 'test ! -e {dir}/{name}.drift || exit 2']\n{}",
+                    "  detectDrift: [sh, -c, 'test ! -e {dir}/{name}.drift || exit 2']\n{}",
                     if idempotent { "  idempotent: true\n" } else { "" }
                 ),
             )
@@ -87,6 +87,7 @@ impl Harness {
             cancellation: Cancellation::default(),
             prompt: None,
             observer: None,
+            progress: None,
         };
         let argv = std::iter::once("nyl".to_owned())
             .chain(args.iter().map(|arg| (*arg).to_owned()))
@@ -124,15 +125,15 @@ impl Harness {
         harness
     }
 
-    /// A change outside Nyl: the unit's `verify` reports drift from now on,
+    /// A change outside Nyl: the unit's `detectDrift` step reports drift from now on,
     /// until its command runs again.
     fn drift(&self, unit: &str) {
         std::fs::write(self.markers.path().join(format!("{unit}.drift")), "").unwrap();
     }
 
-    /// `nyl verify -e dev`, which records the drift observations.
-    fn verify(&self) -> CommandOutcome {
-        self.invoke(&["verify", "-e", "dev", "-o", "json"])
+    /// `nyl detect-drift -e dev`, which records the drift records.
+    fn detect_drift(&self) -> CommandOutcome {
+        self.invoke(&["detect-drift", "-e", "dev", "-o", "json"])
     }
 
     /// How often the unit's command ran.
@@ -155,7 +156,7 @@ fn unit<'a>(report: &'a Value, name: &str) -> &'a Value {
     &report["environments"][0]["units"][name]
 }
 
-/// Under the default `driftRepair: converge`: `verify` exits 3 and its fix
+/// Under the default `driftRepair: converge`: `detect-drift` exits 3 and its fix
 /// says what the next reconcile does per unit; `status` shows both units
 /// `drifted` (exit 2); `reconcile` executes the idempotent unit (summary
 /// `driftRepaired`) and reports the other `awaiting-approval` (exit 2)
@@ -168,20 +169,20 @@ fn test_reconcile_repairs_converge_units_and_awaits_approval_for_others() {
     harness.drift("api");
     harness.drift("job");
 
-    let verified = harness.verify();
-    assert_eq!(verified.exit, 3, "{}", verified.stderr);
-    assert_eq!(unit(&verified.report, "api")["verification"], "drifted");
+    let detected = harness.detect_drift();
+    assert_eq!(detected.exit, 3, "{}", detected.stderr);
+    assert_eq!(unit(&detected.report, "api")["check"], "drifted");
     assert!(
-        verified
+        detected
             .stderr
             .contains("the next `nyl reconcile -e dev` repairs it by executing api again"),
         "{}",
-        verified.stderr
+        detected.stderr
     );
     assert!(
-        verified.stderr.contains("run `nyl reconcile -e dev --approve job`"),
+        detected.stderr.contains("run `nyl reconcile -e dev --approve job`"),
         "{}",
-        verified.stderr
+        detected.stderr
     );
 
     let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
@@ -208,17 +209,19 @@ fn test_reconcile_repairs_converge_units_and_awaits_approval_for_others() {
     assert_eq!(unit(&again.report, "api")["result"], "current");
     assert_eq!(harness.runs("api"), 2, "a repaired unit is not repaired again");
     assert_eq!(harness.tip(), after_repair, "nothing to write for the repaired unit");
-    let reverified = harness.verify();
-    assert_eq!(unit(&reverified.report, "api")["verification"], "clean");
+    let redetected = harness.detect_drift();
+    assert_eq!(unit(&redetected.report, "api")["check"], "clean");
 
-    let (local, clone) =
+    let (local, _clone) =
         harness.invoke_in_clone(&["reconcile", "-e", "dev", "--local", "--approve", "job", "-o", "json"]);
     assert_eq!(local.exit, 0, "{}", local.stderr);
     assert_eq!(unit(&local.report, "job")["result"], "executed");
     assert_eq!(harness.runs("job"), 2);
-    let local_message = git_output(&clone, &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"]);
+    let local_message = git_output(
+        &harness.shell.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+    );
     assert!(local_message.contains("driftRepaired: [job]"), "{local_message}");
-    assert!(local_message.contains(r#""identity":"local""#), "{local_message}");
 }
 
 /// Under `driftRepair: manual`, reconcile executes no drifted unit, even an
@@ -227,7 +230,7 @@ fn test_reconcile_repairs_converge_units_and_awaits_approval_for_others() {
 fn test_manual_drift_repair_leaves_drifted_units() {
     let harness = Harness::reconciled(Some("manual"));
     harness.drift("api");
-    assert_eq!(harness.verify().exit, 3);
+    assert_eq!(harness.detect_drift().exit, 3);
 
     let reconciled = harness.reconcile(&[]);
     assert_eq!(reconciled.exit, 2, "{}", reconciled.stderr);
@@ -285,7 +288,7 @@ fn test_reapply_requires_unit_and_reason() {
 fn test_plan_lists_a_drifted_unit_as_drifted() {
     let harness = Harness::reconciled(None);
     harness.drift("api");
-    assert_eq!(harness.verify().exit, 3);
+    assert_eq!(harness.detect_drift().exit, 3);
     let plan = harness.invoke(&["plan", "-e", "dev", "-o", "json"]);
     assert_eq!(plan.exit, 0, "{}", plan.stderr);
     assert_eq!(unit(&plan.report, "api")["state"], "drifted");
@@ -299,7 +302,7 @@ fn test_plan_lists_a_drifted_unit_as_drifted() {
 fn test_a_failed_repair_is_not_recorded_as_repaired() {
     let harness = Harness::reconciled(None);
     harness.drift("api");
-    assert_eq!(harness.verify().exit, 3);
+    assert_eq!(harness.detect_drift().exit, 3);
     // The repair's append to its run log fails.
     let runs = harness.markers.path().join("api.runs");
     std::fs::remove_file(&runs).unwrap();
@@ -334,7 +337,7 @@ fn test_fail_fast_stops_at_an_approval_wait_decided_at_selection() {
     let harness = Harness::reconciled(None);
     harness.drift("api");
     harness.drift("job");
-    assert_eq!(harness.verify().exit, 3);
+    assert_eq!(harness.detect_drift().exit, 3);
 
     let stopped = harness.reconcile(&["--fail-fast"]);
     assert_eq!(

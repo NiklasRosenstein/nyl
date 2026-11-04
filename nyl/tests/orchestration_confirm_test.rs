@@ -21,7 +21,6 @@ use nyl_core::orchestration::state::{
     Operation, Readiness, Run, RunKind, Signal, SignalAction, StateLocation, StateV1, TeardownWaiting, UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::NoFaults;
 use nyl_orchestration::run_report::ExitCategory;
 use nyl_orchestration::shell::run::Cancellation;
@@ -29,6 +28,7 @@ use nyl_orchestration::shell::signal::{deliver, Delivery};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use nyl_state::memory::MemoryStateStore;
+use nyl_units::process::ProcessRunner;
 use scenario::runner::{invoke_in, AUTHOR};
 use scenario::shell::{self as harness, shared_project};
 use scenario::world::git_output;
@@ -131,7 +131,9 @@ fn desired(unit: &str) -> DesiredUnit {
 /// The observed file of `unit`, waiting after phase 1 when `waiting`.
 fn observed(unit: &str, waiting: bool) -> ObservedUnit {
     ObservedUnit {
-        api_version: StateV1,
+        api_version: nyl_core::orchestration::state::StateV1,
+        operator_modified: None,
+        retry: None,
         kind: ObservedUnitKind,
         unit: desired(unit).unit,
         receipt: None,
@@ -494,6 +496,7 @@ fn invoke(harness: &harness::Harness, args: &[&str]) -> CommandOutcome {
         cancellation: Cancellation::default(),
         prompt: None,
         observer: None,
+        progress: None,
     };
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     invoke_in(&harness.world, &wiring, &args, "main", "").unwrap()
@@ -561,6 +564,10 @@ fn test_manual_wait_exits_2_until_confirm_removed_runs_phase_2() {
         &["show", "refs/heads/nyl/dev/desired:desired/units/kubernetes.yaml"],
     );
     assert!(kubernetes.contains("state: held"), "{kubernetes}");
+    assert!(
+        kubernetes.contains("teardown requested; automatic recreation is suspended"),
+        "{kubernetes}"
+    );
     assert!(
         kubernetes.contains("name: kubernetes\n  apiVersion:"),
         "the held file has no uid: {kubernetes}"
@@ -696,6 +703,7 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
                 cancellation: Cancellation::default(),
                 prompt: None,
                 observer: None,
+                progress: None,
             };
             let args = ["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]
                 .map(str::to_owned)

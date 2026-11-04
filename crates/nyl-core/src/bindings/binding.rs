@@ -311,7 +311,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::resources::release_inputs::{validate_bindings, ReleaseInputBindings};
 
     #[test]
     fn test_binding_sets_exactly_one_source() {
@@ -328,55 +327,5 @@ mod tests {
             .contains("value and fromFile"));
         let binding: InputBinding = serde_json::from_value(json!({"fromPromotion": {"value": "image"}})).unwrap();
         assert!(binding.kind("b").unwrap().requires_orchestration());
-    }
-
-    #[test]
-    fn test_from_git_requires_a_repository_revision_and_full_commit() {
-        let commit = "3f1c9a0000000000000000000000000000000000";
-        let cases = [
-            (
-                json!({"revision": "main", "commit": commit, "path": "a.json"}),
-                "Exactly one of",
-            ),
-            (
-                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "3f1c", "path": "a.json"}),
-                "40-character lowercase hexadecimal",
-            ),
-            (
-                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": commit.to_uppercase(), "path": "a.json"}),
-                "40-character lowercase hexadecimal",
-            ),
-            (
-                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "a".repeat(64), "path": "a.json"}),
-                "40-character lowercase hexadecimal",
-            ),
-            (
-                json!({"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "../a.json"}),
-                "fromGit.path",
-            ),
-        ];
-        for (source, expected) in cases {
-            let bindings: ReleaseInputBindings =
-                serde_json::from_value(json!({"g/r": {"image": {"fromGit": source.clone()}}})).unwrap();
-            let error = validate_bindings(&bindings).unwrap_err().to_string();
-            assert!(error.contains(expected), "{source}: {error}");
-        }
-    }
-
-    #[test]
-    fn test_from_publication_paths_stay_inside_the_prefix() {
-        for (source, expected) in [
-            (json!({"path": "../other/state.json"}), "fromPublication.path"),
-            (json!({"path": "/state.json"}), "fromPublication.path"),
-            (
-                json!({"path": "state.json", "carryFileFromWorktree": "build/./images.json"}),
-                "fromPublication.carryFileFromWorktree",
-            ),
-        ] {
-            let bindings: ReleaseInputBindings =
-                serde_json::from_value(json!({"g/r": {"image": {"fromPublication": source.clone()}}})).unwrap();
-            let error = validate_bindings(&bindings).unwrap_err().to_string();
-            assert!(error.contains(expected), "{source}: {error}");
-        }
     }
 }

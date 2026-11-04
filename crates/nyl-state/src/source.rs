@@ -38,6 +38,8 @@ use nyl_core::orchestration::ids::CommitId;
 use nyl_core::orchestration::ports::{SourceError, SourceRepository, SourceResolver, SourceResult};
 use nyl_git::GitAuth;
 
+pub mod worktree;
+
 /// The ref prefix under which repositories named by URL are fetched.
 const SOURCES_NAMESPACE: &str = "refs/nyl-sources";
 
@@ -48,6 +50,8 @@ const SYMLINK_MODE: i32 = 0o120_000;
 /// fetched into it.
 pub struct GitSourceResolver {
     git_dir: PathBuf,
+    snapshot_git_dir: Option<PathBuf>,
+    worktree_cache: Option<PathBuf>,
     auth: GitAuth,
     /// Read URLs of repositories named by credential-free URL, as for
     /// [`crate::git::Endpoint`].
@@ -121,11 +125,27 @@ impl GitSourceResolver {
     pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth) -> Self {
         Self {
             git_dir: git_dir.into(),
+            snapshot_git_dir: None,
+            worktree_cache: None,
             auth,
             endpoints: BTreeMap::new(),
             fetched: Mutex::new(BTreeSet::new()),
             symlinks: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Exclude the configured Nyl cache from working-file snapshots.
+    #[must_use]
+    pub fn with_worktree_cache(mut self, path: impl Into<PathBuf>) -> Self {
+        self.worktree_cache = Some(path.into());
+        self
+    }
+
+    /// Read retained worktree snapshots from the state repository when absent from the source clone.
+    #[must_use]
+    pub fn with_snapshot_repository(mut self, git_dir: impl Into<PathBuf>) -> Self {
+        self.snapshot_git_dir = Some(git_dir.into());
+        self
     }
 
     /// Read the repository that sources name by `identity` from `url`.
@@ -150,6 +170,18 @@ impl GitSourceResolver {
     fn open(&self) -> SourceResult<Repository> {
         Repository::open(&self.git_dir)
             .map_err(|cause| git_error(&format!("cannot open repository {}", self.git_dir.display()), &cause))
+    }
+
+    fn snapshot_repository(&self, oid: Oid) -> Option<Repository> {
+        let repository = Repository::open(self.snapshot_git_dir.as_ref()?).ok()?;
+        if repository
+            .find_commit(oid)
+            .is_ok_and(|commit| worktree::is_snapshot(&commit))
+        {
+            Some(repository)
+        } else {
+            None
+        }
     }
 
     fn read_url<'a>(&'a self, identity: &'a str) -> &'a str {
@@ -233,8 +265,13 @@ impl GitSourceResolver {
     /// The entry clone and `commit`, fetched when missing, after checking
     /// its tree's symbolic links (once per tree and resolver).
     fn checked_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<(Repository, Oid)> {
-        let source = self.open()?;
+        let mut source = self.open()?;
         let oid = Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?;
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            if let Some(snapshot_source) = self.snapshot_repository(oid) {
+                source = snapshot_source;
+            }
+        }
         if !Self::commit_exists(&source, oid) {
             self.ensure_fetched(&source, repository)?;
             self.fetch_one(&source, repository, commit.as_str(), None);
@@ -270,6 +307,15 @@ impl GitSourceResolver {
 
     /// Create a detached checkout of `oid` at the missing or empty `path`.
     fn create_checkout(source: &Repository, oid: Oid, path: &Path) -> SourceResult<()> {
+        Self::create_checkout_with_paths(source, oid, path, None)
+    }
+
+    fn create_checkout_with_paths(
+        source: &Repository,
+        oid: Oid,
+        path: &Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
         let objects = Self::objects_dir(source)?;
         let created = Repository::init(path)
             .map_err(|cause| git_error(&format!("cannot create worktree {}", path.display()), &cause))?;
@@ -283,6 +329,68 @@ impl GitSourceResolver {
         checkout
             .set_head_detached(oid)
             .map_err(|cause| git_error(&format!("cannot detach the worktree at {oid}"), &cause))?;
+        if let Some(paths) = paths {
+            let tree = checkout
+                .find_commit(oid)
+                .and_then(|commit| commit.tree())
+                .map_err(|cause| git_error("cannot read sparse source tree", &cause))?;
+            let mut patterns = Vec::new();
+            for path in paths {
+                let path = path.trim_start_matches('/');
+                if path.split('/').any(|part| part == "..")
+                    || path
+                        .chars()
+                        .any(|character| character.is_control() || character == char::from(92))
+                {
+                    return Err(error("sparse checkout paths must stay inside the worktree"));
+                }
+                if path.is_empty() {
+                    patterns.push("/*".to_owned());
+                    continue;
+                }
+                let entry = tree.get_path(Path::new(path)).ok();
+                let directory = entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.kind() == Some(ObjectType::Tree));
+                // Existing tree paths are literals; only unmatched paths are authored globs.
+                let path = if entry.is_some() {
+                    path.chars().fold(String::new(), |mut escaped, character| {
+                        if matches!(character, '*' | '?' | '[' | ' ') {
+                            escaped.push(char::from(92));
+                        }
+                        escaped.push(character);
+                        escaped
+                    })
+                } else {
+                    path.to_owned()
+                };
+                patterns.push(format!(
+                    "/{path}{}",
+                    if directory && !path.ends_with('/') { "/" } else { "" }
+                ));
+            }
+            let sparse = checkout.path().join("info/sparse-checkout");
+            std::fs::create_dir_all(sparse.parent().expect("sparse path parent"))
+                .and_then(|()| std::fs::write(&sparse, format!("{}\n", patterns.join("\n"))))
+                .map_err(|cause| error(format!("cannot write sparse checkout paths: {cause}")))?;
+            checkout
+                .config()
+                .and_then(|mut config| config.set_bool("core.sparseCheckout", true))
+                .map_err(|cause| git_error("cannot configure sparse checkout", &cause))?;
+            let output = nyl_git::repository_command(checkout.path())
+                .arg("--work-tree")
+                .arg(path)
+                .args(["-c", "core.sparseCheckoutCone=false", "read-tree", "-mu", "HEAD"])
+                .output()
+                .map_err(|cause| error(format!("cannot start sparse checkout: {cause}")))?;
+            if !output.status.success() {
+                return Err(error(format!(
+                    "cannot check out sparse source: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            return Ok(());
+        }
         checkout
             .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
             .map_err(|cause| git_error(&format!("cannot check out {oid}"), &cause))?;
@@ -518,6 +626,32 @@ fn escapes(directory: &str, target: &str) -> bool {
 }
 
 impl SourceResolver for GitSourceResolver {
+    fn snapshot_worktree(
+        &self,
+        base: &CommitId,
+        identity: &nyl_core::orchestration::ports::CommitIdentity,
+        now: nyl_core::orchestration::time::Timestamp,
+        previous: Option<&CommitId>,
+    ) -> SourceResult<nyl_core::orchestration::ports::WorktreeSnapshot> {
+        let repository = self.open()?;
+        worktree::capture(
+            &repository,
+            base,
+            identity,
+            now,
+            previous,
+            self.worktree_cache.as_deref(),
+        )
+    }
+
+    fn is_worktree_snapshot(&self, commit: &CommitId) -> SourceResult<bool> {
+        let (repository, oid) = self.checked_commit(&SourceRepository::This, commit)?;
+        let commit = repository
+            .find_commit(oid)
+            .map_err(|cause| git_error("cannot inspect source commit", &cause))?;
+        Ok(worktree::is_snapshot(&commit))
+    }
+
     fn resolve_revision(&self, repository: &SourceRepository, revision: &str) -> SourceResult<CommitId> {
         let repo = self.open()?;
         self.ensure_fetched(&repo, repository)?;
@@ -532,7 +666,9 @@ impl SourceResolver for GitSourceResolver {
             if !Self::commit_exists(&repo, oid) {
                 self.fetch_one(&repo, repository, revision, None);
             }
-            return if Self::commit_exists(&repo, oid) {
+            return if Self::commit_exists(&repo, oid)
+                || (*repository == SourceRepository::This && self.snapshot_repository(oid).is_some())
+            {
                 commit_id(oid)
             } else {
                 Err(missing())
@@ -613,6 +749,87 @@ impl SourceResolver for GitSourceResolver {
         // changed file mode: start over from a fresh checkout.
         Self::remove_worktree(path)?;
         Self::create_checkout(&source, oid, path)
+    }
+
+    fn worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        if !is_missing_or_empty(path)? {
+            return Err(error(format!("worktree path {} is not empty", path.display())));
+        }
+        Self::create_checkout_with_paths(&source, oid, path, paths)
+    }
+
+    fn reset_worktree_with_paths(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &Path,
+        paths: Option<&[String]>,
+    ) -> SourceResult<()> {
+        let Some(paths) = paths else {
+            return self.reset_worktree(repository, commit, path);
+        };
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        if !is_missing_or_empty(path)? {
+            if !Self::made_here(&source, path)? {
+                return Err(error(format!(
+                    "worktree path {} is not a checkout Nyl made",
+                    path.display()
+                )));
+            }
+            // Rebuild the sparse index and discard every previous unit's files;
+            // the objects remain borrowed, so no repository objects are copied.
+            Self::remove_worktree(path)?;
+        }
+        Self::create_checkout_with_paths(&source, oid, path, Some(paths))
+    }
+
+    fn validate_source_path(
+        &self,
+        repository: &SourceRepository,
+        commit: &CommitId,
+        path: &str,
+        recursive: bool,
+    ) -> SourceResult<()> {
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        let tree = source
+            .find_commit(oid)
+            .and_then(|commit| commit.tree())
+            .map_err(|cause| git_error("cannot inspect source tree", &cause))?;
+        let mut problem = None;
+        tree.walk(TreeWalkMode::PreOrder, |directory, entry| {
+            let Ok(name) = entry.name() else { return git2::TreeWalkResult::Ok; };
+            let name = format!("{directory}{name}");
+            let relevant = match worktree::source_path_matches(path, &name, recursive, entry.filemode() == 0o160_000) {
+                Ok(relevant) => relevant,
+                Err(cause) => { problem = Some(cause.to_string()); return git2::TreeWalkResult::Ok; }
+            };
+            if !relevant { return git2::TreeWalkResult::Ok; }
+            if entry.filemode() == 0o160_000 {
+                problem = Some(format!("source path {path} requires submodule {name}; vendor its contents into the source repository before running Nyl"));
+                return git2::TreeWalkResult::Ok;
+            }
+            if entry.kind() == Some(ObjectType::Blob) {
+                match source.find_blob(entry.id()) {
+                    Ok(blob) if worktree::is_lfs_pointer(blob.content()) => {
+                        problem = Some(format!("source path {path} requires Git LFS file {name}; provide the file as ordinary Git content before running Nyl"));
+                    }
+                    Err(cause) => problem = Some(format!("cannot inspect source input {name}: {cause}")),
+                    Ok(_) => {}
+                }
+            }
+            git2::TreeWalkResult::Ok
+        }).map_err(|cause| git_error("cannot inspect source inputs", &cause))?;
+        if let Some(problem) = problem {
+            return Err(error(problem));
+        }
+        Ok(())
     }
 
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {

@@ -27,12 +27,12 @@ use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::ports::{Clock, CommitIdentity};
 use nyl_core::orchestration::state::{DesiredUnit, FailureCategory, ObservedUnit};
 use nyl_core::orchestration::time::Duration;
-use nyl_drivers::fake::{Script, Scripted};
-use nyl_drivers::process::ProcessRunner;
 use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint};
 use nyl_orchestration::rules::unit_state::receipt_state;
 use nyl_orchestration::run_report::ReceiptState;
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
+use nyl_units::fake::{Script, Scripted};
+use nyl_units::process::ProcessRunner;
 use serde_json::Value;
 
 use super::format::{
@@ -55,9 +55,10 @@ const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// The outcome keys of `expect` that name sets of units: each a
 /// `UnitResult::name` or `UnitState::name`, as `UnitReport::outcome_name`
 /// gives them.
-pub const OUTCOME_KEYS: [&str; 13] = [
+pub const OUTCOME_KEYS: [&str; 14] = [
     "executed",
     "current",
+    "ready",
     "blocked",
     "failed",
     "uncertain",
@@ -162,6 +163,7 @@ impl Shared {
             cancellation: nyl_orchestration::shell::run::Cancellation::default(),
             prompt: None,
             observer: None,
+            progress: None,
         }
     }
 }
@@ -182,6 +184,20 @@ fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
         .expect("start time")
         .to_utc();
     let script = Script::new();
+    #[cfg(feature = "tier2")]
+    let registry = if tier == 2 {
+        Some(super::native::Registry::new()?)
+    } else {
+        None
+    };
+    #[cfg(feature = "tier2")]
+    let world = World::with_registry(
+        &loaded.directory.join(&loaded.scenario.project),
+        registry
+            .as_ref()
+            .map_or(super::world::FAKE_REGISTRY, |registry| registry.address.as_str()),
+    );
+    #[cfg(not(feature = "tier2"))]
     let world = World::new(&loaded.directory.join(&loaded.scenario.project));
     // Command units admit `SCENARIO_TMP` through `env.passthrough` to reach
     // the files `file` steps change outside Nyl.
@@ -191,7 +207,7 @@ fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
         world,
         clock: Arc::new(FakeClock::new(start)),
         ids: SequentialIds::new(),
-        drivers: nyl_drivers::registry::with_test_kinds(&script),
+        drivers: nyl_units::registry::with_test_kinds(&script, nyl::resource_catalogue()),
         script,
         tools: ProcessRunner::new(),
         faults: FaultSlot::default(),
@@ -294,8 +310,11 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 let operation = match step.operation {
                     StepOperation::Plan => DriverOperation::Plan,
                     StepOperation::Reconcile => DriverOperation::Reconcile,
-                    StepOperation::Verify => DriverOperation::Verify,
+                    StepOperation::DetectDrift => DriverOperation::DetectDrift,
                     StepOperation::Teardown => DriverOperation::Teardown,
+                    StepOperation::Observe => {
+                        return Err("observe steps run from M5, when the fake kinds observe".to_owned());
+                    }
                 };
                 let result = match step.outcome {
                     DriverOutcome::Succeeded => Scripted::Succeeded {
@@ -303,6 +322,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     },
                     DriverOutcome::Uncertain => Scripted::Uncertain,
                     DriverOutcome::Drifted => Scripted::Drifted,
+                    DriverOutcome::Pending => return Err("only observe steps are pending".to_owned()),
                     DriverOutcome::Failed => Scripted::Failed {
                         category: serde_json::from_value::<FailureCategory>(Value::String(
                             step.category.clone().unwrap_or_default(),
@@ -768,10 +788,11 @@ fn reads_summary(expect: &Expect) -> bool {
 }
 
 /// The outcome keys of `expect` with the sets they name, in [`OUTCOME_KEYS`] order.
-fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 13] {
+fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 14] {
     let sets = [
         &expect.executed,
         &expect.current,
+        &expect.ready,
         &expect.blocked,
         &expect.failed,
         &expect.uncertain,
@@ -790,12 +811,13 @@ fn outcome_sets(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 13] {
 /// The keys of `expect` that name a list of units in both the report and
 /// the transition summary: the expect key, the summary's and the report's
 /// key, and the expected list.
-fn list_keys(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 4] {
+fn list_keys(expect: &Expect) -> [(&'static str, &Option<Vec<String>>); 5] {
     [
         ("recovered", &expect.recovered),
         ("imported", &expect.imported),
         ("driftRepaired", &expect.drift_repaired),
         ("reapplied", &expect.reapplied),
+        ("observationsChanged", &expect.observations_changed),
     ]
 }
 
@@ -809,10 +831,10 @@ fn run_environment(report: &Value) -> Option<&Value> {
 }
 
 /// A unit's outcome name in a report or a summary entry: its `result`
-/// (reconcile, teardown), `state` (plan, status), or `verification` (verify),
+/// (reconcile, teardown), `state` (plan, status), or `check` (detect-drift, attest),
 /// as `UnitReport::outcome_name` orders them.
 fn outcome_of(unit: &Value) -> Option<&str> {
-    ["result", "state", "verification"]
+    ["result", "state", "check"]
         .iter()
         .find_map(|key| unit.get(*key).and_then(Value::as_str))
 }
@@ -827,8 +849,9 @@ fn outcome_of(unit: &Value) -> Option<&str> {
 ///   wrote a transition commit whose `units:` block carries outcomes, the
 ///   newest such block; a state operation's actions (`hold`, `resume`)
 ///   carry none, so only its report is read.
-/// - `recovered`, `imported`, `driftRepaired`, and `reapplied` compare
-///   against the newest summary's list (`reapplied`'s `units`) and the
+/// - `recovered`, `imported`, `driftRepaired`, `reapplied`, and
+///   `observationsChanged` compare against the newest summary's list
+///   (`reapplied`'s `units`, `observationsChanged`'s units) and the
 ///   report's list of that name, missing meaning empty, in the run report
 ///   or a state operation's `details`.
 /// - `lease-broken` checks whether the newest summary records `leaseBroken`.
@@ -887,6 +910,8 @@ pub fn check_results(expect: &Expect, report: &Value, summaries: Option<&[Value]
                 newest.ok_or_else(|| format!("{key}: the step wrote no transition commit whose summary lists it"))?;
             let listed = match key {
                 "reapplied" => names(summary.pointer("/reapplied/units")),
+                // Per unit, the observations whose value changed.
+                "observationsChanged" => keys(summary.get(key)),
                 _ => names(summary.get(key)),
             };
             if listed != expected {
@@ -898,7 +923,11 @@ pub fn check_results(expect: &Expect, report: &Value, summaries: Option<&[Value]
         let reported = run_environment(report)
             .and_then(|environment| environment.get(key))
             .or_else(|| report.pointer(&format!("/details/{key}")));
-        let reported = names(reported);
+        let reported = if key == "observationsChanged" {
+            keys(reported)
+        } else {
+            names(reported)
+        };
         if reported != expected {
             return Err(format!("{key}: the report lists {reported:?} instead of {expected:?}"));
         }
@@ -1037,7 +1066,7 @@ pub fn invoke_in(
 }
 
 /// Each unit's outcome in a transition summary's `units:` block: its
-/// `result`, or a verify's `verification`; an operator action has none.
+/// `result`, or a check's `check`; an operator action has none.
 fn summary_units(summary: &Value) -> BTreeMap<String, String> {
     summary
         .get("units")
@@ -1049,6 +1078,15 @@ fn summary_units(summary: &Value) -> BTreeMap<String, String> {
 }
 
 /// The unit names of a list, empty when it is absent.
+/// The keys of a map, such as the units of `observationsChanged`.
+fn keys(map: Option<&Value>) -> BTreeSet<String> {
+    map.and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 fn names(list: Option<&Value>) -> BTreeSet<String> {
     list.and_then(Value::as_array)
         .into_iter()
@@ -1059,7 +1097,8 @@ fn names(list: Option<&Value>) -> BTreeSet<String> {
 }
 
 /// A fresh CI checkout, isolated process environment, and the same injected
-/// time as tier 1. M3 uses the test kinds until real drivers arrive in M4/M5.
+/// time as tier 1. Image and infrastructure drivers are real; publication
+/// remains fake until M5.
 fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
     let checkout = shared.world.fresh_clone(branch);
     super::world::git(&checkout, &["config", "user.name", "Scenario"]);

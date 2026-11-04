@@ -1,138 +1,119 @@
 //! Resource identities and portable, Rust-derived schema artifacts.
+//!
+//! Each crate that owns resources contributes [`ResourceDescriptor`]s; the
+//! application assembles them into one catalogue and passes it to discovery,
+//! rendering, editor annotations, and schema export. This module describes
+//! the `gitops.nyl/v1` resources nyl-core owns.
 
-use super::{
-    generate_gitops_resource_schema, generate_release_schema, GitOpsResourceKind, HelmChart, NylComponent,
-    RemoteManifest,
-};
+use super::environment::{Environment, EnvironmentGroup, KIND_ENVIRONMENT, KIND_ENVIRONMENT_GROUP};
+use super::{GitRepository, KIND_GIT_REPOSITORY};
 use crate::constants::{API_VERSION, API_VERSION_COMPONENTS, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::{CoreError, Result};
-use clap::ValueEnum;
 use schemars::schema_for;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-/// A built-in resource schema; Component describes the dynamic-kind envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ResourceKind {
-    #[value(name = "GitRepository", alias = "git-repository", alias = "repository")]
-    GitRepository,
-    #[value(name = "Cluster", alias = "cluster")]
-    Cluster,
-    #[value(name = "ArgoCDInstance", alias = "argocd-instance", alias = "argocd")]
-    ArgoCDInstance,
-    #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
-    DeploymentTarget,
-    #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
-    AppProjectDefinition,
-    #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
-    ApplicationGroup,
-    #[value(name = "Environment", alias = "environment")]
-    Environment,
-    #[value(name = "EnvironmentGroup", alias = "environment-group")]
-    EnvironmentGroup,
-    #[value(name = "Release", alias = "release")]
-    Release,
-    #[value(name = "HelmChart", alias = "helm-chart", alias = "helmchart")]
-    HelmChart,
-    #[value(name = "RemoteManifest", alias = "remote-manifest")]
-    RemoteManifest,
-    #[value(name = "Component", alias = "component")]
-    Component,
+/// Static metadata and schema generator for one resource kind.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceDescriptor {
+    /// Canonical kind name.
+    pub name: &'static str,
+    /// Canonical API version.
+    pub api_version: &'static str,
+    /// Stable schema filename stem.
+    pub slug: &'static str,
+    /// Additional CLI selectors.
+    pub aliases: &'static [&'static str],
+    /// Whether this schema describes a dynamic kind envelope.
+    pub dynamic_kind: bool,
+    /// Generate the schema and its examples.
+    pub schema: fn() -> Value,
+}
+impl PartialEq for ResourceDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.api_version == other.api_version
+            && self.slug == other.slug
+            && self.aliases == other.aliases
+            && self.dynamic_kind == other.dynamic_kind
+    }
+}
+impl ResourceDescriptor {
+    /// Version-qualified schema path.
+    pub fn schema_path(&self) -> String {
+        format!("{}/{}.schema.json", self.api_version, self.slug)
+    }
 }
 
-impl ResourceKind {
-    /// All supported schemas in catalog order.
-    pub const ALL: [Self; 12] = [
-        Self::GitRepository,
-        Self::Environment,
-        Self::EnvironmentGroup,
-        Self::Cluster,
-        Self::DeploymentTarget,
-        Self::ArgoCDInstance,
-        Self::ApplicationGroup,
-        Self::AppProjectDefinition,
-        Self::Release,
-        Self::HelmChart,
-        Self::RemoteManifest,
-        Self::Component,
-    ];
+/// The resources nyl-core owns, in catalogue order.
+pub fn resource_descriptors() -> Vec<ResourceDescriptor> {
+    vec![
+        ResourceDescriptor {
+            name: KIND_GIT_REPOSITORY,
+            api_version: API_VERSION_GITOPS,
+            slug: "git-repository",
+            aliases: &["repository"],
+            dynamic_kind: false,
+            schema: || {
+                gitops_schema(
+                    KIND_GIT_REPOSITORY,
+                    json!(schema_for!(GitRepository)),
+                    git_repository_example(),
+                )
+            },
+        },
+        ResourceDescriptor {
+            name: KIND_ENVIRONMENT,
+            api_version: API_VERSION_GITOPS,
+            slug: "environment",
+            aliases: &[],
+            dynamic_kind: false,
+            schema: || gitops_schema(KIND_ENVIRONMENT, json!(schema_for!(Environment)), environment_example()),
+        },
+        ResourceDescriptor {
+            name: KIND_ENVIRONMENT_GROUP,
+            api_version: API_VERSION_GITOPS,
+            slug: "environment-group",
+            aliases: &[],
+            dynamic_kind: false,
+            schema: || {
+                gitops_schema(
+                    KIND_ENVIRONMENT_GROUP,
+                    json!(schema_for!(EnvironmentGroup)),
+                    environment_group_example(),
+                )
+            },
+        },
+    ]
+}
 
-    /// Public schema name (Component is an envelope, not a literal kind).
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::GitRepository => "GitRepository",
-            Self::Environment => "Environment",
-            Self::EnvironmentGroup => "EnvironmentGroup",
-            Self::Cluster => "Cluster",
-            Self::DeploymentTarget => "DeploymentTarget",
-            Self::ArgoCDInstance => "ArgoCDInstance",
-            Self::ApplicationGroup => "ApplicationGroup",
-            Self::AppProjectDefinition => "AppProjectDefinition",
-            Self::Release => "Release",
-            Self::HelmChart => "HelmChart",
-            Self::RemoteManifest => "RemoteManifest",
-            Self::Component => "Component",
-        }
+/// A `gitops.nyl/v1` resource schema with its constant envelope, title, and example.
+fn gitops_schema(kind: &str, mut schema: Value, example: Value) -> Value {
+    set_envelope(&mut schema, API_VERSION_GITOPS, Some(kind));
+    schema["title"] = json!(kind);
+    if schema.get("examples").is_none() {
+        schema["examples"] = json!([example]);
     }
+    schema
+}
 
-    /// Canonical API version.
-    pub fn api_version(self) -> &'static str {
-        match self {
-            Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
-            Self::HelmChart | Self::RemoteManifest | Self::Cluster | Self::Release => API_VERSION,
-            Self::Component => API_VERSION_COMPONENTS,
-            _ => API_VERSION_K8S_GITOPS,
-        }
-    }
+/// Minimal authored GitRepository, shared by its schema and the documentation.
+pub fn git_repository_example() -> Value {
+    json!({"apiVersion": API_VERSION_GITOPS, "kind": KIND_GIT_REPOSITORY, "metadata": {"name": "deploy"}, "spec": {"repoURL": "https://github.com/example/deploy.git"}})
+}
 
-    /// Stable URL slug.
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::GitRepository => "git-repository",
-            Self::Environment => "environment",
-            Self::EnvironmentGroup => "environment-group",
-            Self::Cluster => "cluster",
-            Self::DeploymentTarget => "deployment-target",
-            Self::ArgoCDInstance => "argocd-instance",
-            Self::ApplicationGroup => "application-group",
-            Self::AppProjectDefinition => "app-project-definition",
-            Self::Release => "release",
-            Self::HelmChart => "helm-chart",
-            Self::RemoteManifest => "remote-manifest",
-            Self::Component => "component",
-        }
-    }
+/// Minimal authored Environment, shared by its schema and the documentation.
+pub fn environment_example() -> Value {
+    json!({"apiVersion": API_VERSION_GITOPS, "kind": KIND_ENVIRONMENT, "metadata": {"name": "production"}, "spec": {"unitSelector": {"matchLabels": {"stage": "production"}}, "values": {"target": "production"}, "state": {"repositoryRef": {"name": "deploy"}}, "protectedRefs": ["main"]}})
+}
 
-    /// Relative, version-qualified schema path.
-    pub fn schema_path(self) -> String {
-        format!("{}/{}.schema.json", self.api_version(), self.slug())
-    }
-
-    /// Generate the resource schema from its Rust model and documentation.
-    pub fn schema(self) -> Value {
-        let mut schema = if let Some(kind) = GitOpsResourceKind::parse(self.name()) {
-            generate_gitops_resource_schema(kind)
-        } else {
-            match self {
-                Self::Release => generate_release_schema(),
-                Self::HelmChart => json!(schema_for!(HelmChart)),
-                Self::RemoteManifest => json!(schema_for!(RemoteManifest)),
-                Self::Component => json!(schema_for!(NylComponent)),
-                _ => unreachable!("control resources handled above"),
-            }
-        };
-        set_envelope(
-            &mut schema,
-            self.api_version(),
-            (self != Self::Component).then(|| self.name()),
-        );
-        schema["title"] = json!(self.name());
-        schema
-    }
+/// Minimal authored EnvironmentGroup, shared by its schema and the documentation.
+pub fn environment_group_example() -> Value {
+    json!({"apiVersion": API_VERSION_GITOPS, "kind": KIND_ENVIRONMENT_GROUP, "metadata": {"name": "production"}, "spec": {"environmentSelector": {"matchLabels": {"stage": "production"}}, "values": {"cluster": "prod-1"}, "driftRepair": "manual"}})
 }
 
 /// Add discriminators without discarding descriptions from Rust documentation.
-pub(crate) fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&str>) {
+pub fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&str>) {
     schema["properties"]["apiVersion"]["const"] = json!(api_version);
     if let Some(kind) = kind {
         schema["properties"]["kind"]["const"] = json!(kind);
@@ -180,10 +161,11 @@ pub fn canonicalize_api_version(value: &mut Value) -> Option<DeprecatedApiVersio
     Some(deprecated)
 }
 
-/// Reject recognized Nyl resources in an API group that does not define them.
-/// Unrelated Kubernetes APIs and custom component aliases remain available,
-/// and so do deprecated API versions.
-pub fn validate_resource_api(value: &Value) -> Result<()> {
+/// Reject recognized Nyl resources in an API group that does not define them,
+/// against the composed resource catalogue. Unrelated Kubernetes APIs and
+/// custom component aliases remain available, and so do deprecated API
+/// versions.
+pub fn validate_resource_api_with_catalog(value: &Value, descriptors: &[ResourceDescriptor]) -> Result<()> {
     if deprecated_api_version(value).is_some() {
         return Ok(());
     }
@@ -198,11 +180,12 @@ pub fn validate_resource_api(value: &Value) -> Result<()> {
     } else if matches!(
         api,
         API_VERSION | API_VERSION_GITOPS | API_VERSION_K8S_GITOPS | "nyl.niklasrosenstein.github.com/v1"
-    ) {
-        ResourceKind::ALL
-            .into_iter()
-            .find(|resource| *resource != ResourceKind::Component && resource.name() == kind)
-            .map(ResourceKind::api_version)
+    ) || descriptors.iter().any(|resource| resource.api_version == api)
+    {
+        descriptors
+            .iter()
+            .find(|resource| !resource.dynamic_kind && resource.name == kind)
+            .map(|resource| resource.api_version)
     } else {
         None
     };
@@ -220,80 +203,31 @@ pub fn validate_resource_api(value: &Value) -> Result<()> {
 /// URLs. The project configuration schema, `nyl.schema.json`, is published next
 /// to them by the rendering crate that owns `nyl.toml`, whose
 /// `config::schema::published_schema_artifacts` returns the complete set.
-pub fn schema_artifacts() -> BTreeMap<String, Value> {
+pub fn schema_artifacts(descriptors: &[ResourceDescriptor]) -> BTreeMap<String, Value> {
     let mut files = BTreeMap::new();
     let mut manifest = Vec::new();
-    for kind in ResourceKind::ALL {
+    for kind in descriptors {
         let path = kind.schema_path();
-        files.insert(path.clone(), kind.schema());
+        files.insert(path.clone(), (kind.schema)());
         files.insert(
-            format!("{}.schema.json", kind.slug()),
+            format!("{}.schema.json", kind.slug),
             json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": path}),
         );
-        manifest.push(json!({"name": kind.name(), "apiVersion": kind.api_version(), "slug": kind.slug(), "schema": path, "dynamicKind": kind == ResourceKind::Component}));
+        manifest.push(json!({"name": kind.name, "apiVersion": kind.api_version, "slug": kind.slug, "schema": path, "dynamicKind": kind.dynamic_kind}));
     }
     // Files that reference a deprecated API version's schema URL keep working.
     for deprecated in DEPRECATED_API_VERSIONS {
-        let kind = ResourceKind::ALL
-            .into_iter()
-            .find(|kind| kind.name() == deprecated.kind)
-            .expect("deprecations name known kinds");
+        let Some(kind) = descriptors.iter().find(|kind| kind.name == deprecated.kind) else {
+            continue;
+        };
         files.insert(
-            format!("{}/{}.schema.json", deprecated.api_version, kind.slug()),
+            format!("{}/{}.schema.json", deprecated.api_version, kind.slug),
             json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": format!("../../{}", kind.schema_path())}),
         );
     }
     files.insert("resources.json".into(), json!({"resources": manifest}));
-    files.insert(
-        "gitops-resource.schema.json".into(),
-        super::generate_gitops_aggregate_schema(),
-    );
     files.extend(crate::orchestration::state::state_document_schemas());
     files
-}
-
-/// Minimal authored example shared by schema consumers and the documentation.
-pub fn resource_example(kind: ResourceKind) -> Value {
-    let spec = match kind {
-        ResourceKind::GitRepository => json!({"repoURL": "https://github.com/example/deploy.git"}),
-        ResourceKind::Environment => {
-            json!({"unitSelector": {"matchLabels": {"stage": "production"}}, "values": {"target": "production"}, "state": {"repositoryRef": {"name": "deploy"}}, "protectedRefs": ["main"]})
-        }
-        ResourceKind::EnvironmentGroup => {
-            json!({"environmentSelector": {"matchLabels": {"stage": "production"}}, "values": {"cluster": "prod-1"}, "driftRepair": "manual"})
-        }
-        ResourceKind::Cluster => {
-            json!({"destination": {"server": "https://kubernetes.default.svc"}, "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1", "apps/v1"]}})
-        }
-        ResourceKind::ArgoCDInstance => json!({"clusterRef": {"name": "primary"}, "namespace": "argocd"}),
-        ResourceKind::DeploymentTarget => {
-            json!({"clusterRef": {"name": "primary"}, "argocdRef": {"name": "primary"}, "publication": {"repositoryRef": {"name": "deploy"}, "revision": "deploy", "pathPrefix": "targets/production"}})
-        }
-        ResourceKind::AppProjectDefinition => {
-            json!({"management": "External", "manifest": {"apiVersion": "argoproj.io/v1alpha1", "kind": "AppProject", "metadata": {"name": "workloads", "namespace": "argocd"}, "spec": {}}})
-        }
-        ResourceKind::ApplicationGroup => {
-            json!({"projectTemplate": {"destinations": [{"server": "https://kubernetes.default.svc", "namespace": "workloads"}]}, "applicationNamespace": "argocd", "source": {"path": "applications/workloads"}, "destinationNamespace": "workloads"})
-        }
-        ResourceKind::Release => json!({"include": ["manifests/*.yaml"]}),
-        ResourceKind::HelmChart => json!({"chart": {"name": "./charts/app"}, "values": {"replicaCount": 2}}),
-        ResourceKind::RemoteManifest => json!({"url": "https://example.com/manifests/app.yaml"}),
-        ResourceKind::Component => json!({"replicaCount": 2}),
-    };
-    let name = match kind {
-        ResourceKind::GitRepository => "deploy",
-        ResourceKind::Cluster | ResourceKind::ArgoCDInstance => "primary",
-        ResourceKind::DeploymentTarget | ResourceKind::Environment | ResourceKind::EnvironmentGroup => "production",
-        _ => "workloads",
-    };
-    let mut example = json!({"apiVersion": kind.api_version(), "kind": if kind == ResourceKind::Component { "app/v1/WebService" } else { kind.name() }, "metadata": {"name": name}, "spec": spec});
-    if matches!(
-        kind,
-        ResourceKind::Release | ResourceKind::HelmChart | ResourceKind::RemoteManifest | ResourceKind::Component
-    ) {
-        example["metadata"]["namespace"] = json!("workloads");
-    }
-    example
 }
 
 /// Require exactly one non-null alternative, matching Option deserialization.
@@ -305,7 +239,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
 /// messages quote these branches; without them a reader sees only
 /// `required: [<field>]` from one branch, which reads as if that field were
 /// required outright, and the branch has no name to report.
-pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &str)], neither: Option<&str>) {
+pub fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &str)], neither: Option<&str>) {
     let mut alternatives = Vec::new();
     for (field, description) in fields {
         let excluded = fields
@@ -333,94 +267,9 @@ pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &
 
 /// Mark the [`GitSource`](super::GitSource) fields a use requires and close
 /// the flattened schema, as `deny_unknown_fields` would.
-pub(crate) fn require_git_source_fields(schema: &mut schemars::Schema, fields: &[&str]) {
+pub fn require_git_source_fields(schema: &mut schemars::Schema, fields: &[&str]) {
     super::git_source::require_fields(schema, fields);
     super::strict::deny_additional_properties(schema);
-}
-
-pub(crate) fn cluster_destination_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(
-        schema,
-        &[
-            (
-                "name",
-                "Addresses the destination by its registered Argo CD cluster name.",
-            ),
-            ("server", "Addresses the destination by its Kubernetes API server URL."),
-        ],
-        None,
-    );
-}
-
-pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
-    schema.insert(
-        "if".into(),
-        json!({
-            "required":["apiContractFrom"],
-            "properties":{"apiContractFrom":{"type":"object","required":["mode"],"properties":{"mode":{"const":"all"}}}}
-        }),
-    );
-    schema.insert("then".into(), json!({"properties":{"kubernetes":{"type":"null"}}}));
-    schema.insert(
-        "else".into(),
-        json!({"required":["kubernetes"],"properties":{"kubernetes":{"not":{"type":"null"}}}}),
-    );
-}
-pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(
-        schema,
-        &[
-            (
-                "repositoryRef",
-                "Publishes to the coordinates of the named GitRepository.",
-            ),
-            ("repository", "Publishes to the inline coordinates declared here."),
-        ],
-        None,
-    );
-}
-pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(
-        schema,
-        &[
-            (
-                "projectRef",
-                "Uses the named AppProjectDefinition, so the project can be shared between groups or managed outside Nyl.",
-            ),
-            (
-                "projectTemplate",
-                "Generates an AppProject for this group from the declared AppProject fields; omitted fields admit only what the group deploys.",
-            ),
-        ],
-        Some("Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders."),
-    );
-}
-pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(
-        schema,
-        &[
-            ("url", "Fetches the manifests at this single URL."),
-            ("urls", "Fetches the manifests at each URL, in order."),
-        ],
-        None,
-    );
-}
-pub(crate) fn source_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(
-        schema,
-        &[
-            (
-                "repositoryRef",
-                "Reads Releases from a checkout of the named GitRepository.",
-            ),
-            (
-                "repository",
-                "Reads Releases from a checkout of the inline coordinates declared here.",
-            ),
-        ],
-        Some("Reads Releases from this project, at the declared `path`."),
-    );
-    require_git_source_fields(schema, &["path"]);
 }
 
 #[cfg(test)]
@@ -428,85 +277,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_examples_follow_resource_runtime_contracts() {
-        for kind in ResourceKind::ALL {
-            let example = resource_example(kind);
-            validate_resource_api(&example).unwrap();
-            if GitOpsResourceKind::parse(kind.name()).is_some() {
-                super::super::parse_gitops_resource(&example).unwrap().unwrap();
-            } else {
-                match kind {
-                    ResourceKind::Release => {
-                        super::super::Release::from_value(&example).unwrap();
-                    }
-                    ResourceKind::HelmChart => {
-                        serde_json::from_value::<HelmChart>(example).unwrap();
-                    }
-                    ResourceKind::RemoteManifest => {
-                        RemoteManifest::from_value(&example).unwrap().validate().unwrap();
-                    }
-                    ResourceKind::Component => {
-                        serde_json::from_value::<NylComponent>(example).unwrap();
-                    }
-                    _ => unreachable!(),
-                }
+    fn test_core_examples_follow_resource_runtime_contracts() {
+        for descriptor in resource_descriptors() {
+            let example = (descriptor.schema)()["examples"][0].clone();
+            validate_resource_api_with_catalog(&example, &resource_descriptors()).unwrap();
+            match descriptor.name {
+                KIND_GIT_REPOSITORY => serde_json::from_value::<GitRepository>(example)
+                    .unwrap()
+                    .validate()
+                    .unwrap(),
+                KIND_ENVIRONMENT => serde_json::from_value::<Environment>(example)
+                    .unwrap()
+                    .validate()
+                    .unwrap(),
+                KIND_ENVIRONMENT_GROUP => serde_json::from_value::<EnvironmentGroup>(example)
+                    .unwrap()
+                    .validate()
+                    .unwrap(),
+                _ => unreachable!(),
             }
         }
     }
-
-    #[test]
-    fn test_exclusive_field_branches_are_labelled_for_readers_and_validators() {
-        // The generated reference and validator messages quote these branches;
-        // an anonymous branch only shows `required: [<field>]`, which reads as
-        // if that field were required outright.
-        let mut checked = 0;
-        for kind in ResourceKind::ALL {
-            let mut stack = vec![kind.schema()];
-            while let Some(node) = stack.pop() {
-                match node {
-                    Value::Object(map) => {
-                        if let Some(Value::Array(branches)) = map.get("oneOf") {
-                            let constraint_only = branches
-                                .iter()
-                                .all(|branch| !["type", "$ref", "const"].iter().any(|key| branch.get(key).is_some()));
-                            if constraint_only {
-                                for branch in branches {
-                                    assert!(
-                                        branch
-                                            .get("title")
-                                            .and_then(Value::as_str)
-                                            .is_some_and(|title| !title.is_empty()),
-                                        "{}: exclusive branch needs a title: {branch}",
-                                        kind.name()
-                                    );
-                                    assert!(
-                                        // Say what choosing the branch does, rather than restating its title.
-                                        branch
-                                            .get("description")
-                                            .and_then(Value::as_str)
-                                            .is_some_and(
-                                                |text| text.ends_with('.') && text.split_whitespace().count() > 3
-                                            ),
-                                        "{}: exclusive branch needs a description of what it does: {branch}",
-                                        kind.name()
-                                    );
-                                    checked += 1;
-                                }
-                            }
-                        }
-                        stack.extend(map.into_values());
-                    }
-                    Value::Array(items) => stack.extend(items),
-                    _ => {}
-                }
-            }
-        }
-        assert!(
-            checked >= 9,
-            "expected every exclusive-field branch to be checked, saw {checked}"
-        );
-    }
-
     #[test]
     fn test_exclusive_fields_publishes_the_call_site_meaning_of_each_branch() {
         let mut schema = schemars::Schema::default();
@@ -533,48 +324,5 @@ mod tests {
         let mut required = schemars::Schema::default();
         exclusive_fields(&mut required, &[("first", "Does the first thing.")], None);
         assert_eq!(required.get("oneOf").and_then(Value::as_array).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_deprecated_api_versions_are_accepted_and_canonicalized() {
-        for deprecated in DEPRECATED_API_VERSIONS {
-            let kind = ResourceKind::ALL
-                .into_iter()
-                .find(|kind| kind.name() == deprecated.kind)
-                .unwrap();
-            assert_eq!(kind.api_version(), deprecated.replacement, "{}", deprecated.kind);
-            let mut example = resource_example(kind);
-            example["apiVersion"] = json!(deprecated.api_version);
-            validate_resource_api(&example).unwrap();
-            assert_eq!(canonicalize_api_version(&mut example), Some(deprecated));
-            assert_eq!(example["apiVersion"], deprecated.replacement);
-            assert_eq!(deprecated_api_version(&example), None);
-        }
-        // Only the listed kinds keep their old API version.
-        let mut target = resource_example(ResourceKind::DeploymentTarget);
-        target["apiVersion"] = json!(API_VERSION);
-        assert!(validate_resource_api(&target).is_err());
-    }
-
-    #[test]
-    fn test_moved_envelopes_require_the_canonical_api() {
-        for kind in ResourceKind::ALL.into_iter().filter(|kind| {
-            !matches!(
-                kind,
-                ResourceKind::GitRepository | ResourceKind::Environment | ResourceKind::EnvironmentGroup
-            )
-        }) {
-            let old_api = match kind {
-                ResourceKind::HelmChart | ResourceKind::RemoteManifest => "nyl.niklasrosenstein.github.com/v1",
-                ResourceKind::Component => "components.nyl.niklasrosenstein.github.com/v1",
-                _ => API_VERSION_GITOPS,
-            };
-            let mut example = resource_example(kind);
-            example["apiVersion"] = json!(old_api);
-            let error = validate_resource_api(&example).unwrap_err().to_string();
-            assert!(error.contains(kind.api_version()), "{error}");
-        }
-        validate_resource_api(&json!({"apiVersion": "apps/v1", "kind": "Deployment"})).unwrap();
-        validate_resource_api(&json!({"apiVersion": "example.org/v1", "kind": "Cluster"})).unwrap();
     }
 }

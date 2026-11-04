@@ -1,7 +1,6 @@
-//! Units: the fields every unit kind shares, and the built-in `Command` kind.
+//! Fields every unit kind shares.
 //!
-//! Contract: [Units](../../../../design/orchestration-core.md#units) and
-//! [Command unit](../../../../design/orchestration-core.md#command-unit).
+//! Contract: [Units](../../../../design/orchestration-core.md#units).
 //!
 //! A unit's envelope (`apiVersion`, `kind`, `metadata.name`,
 //! `metadata.labels`) is literal, so environments select units before
@@ -18,15 +17,11 @@ use serde::de::{Deserializer, Error as _};
 use serde::{Deserialize, Serialize};
 
 use super::gitops::validate_static_required;
-use super::strict::DenyUnknownFields;
 use crate::bindings::{validate_input_name, InputType};
 use crate::constants::API_VERSION_UNITS;
 use crate::orchestration::ids::{EnvironmentName, UnitName};
 use crate::orchestration::time::Duration;
 use crate::{CoreError, Result};
-
-/// Kind name of the built-in [`CommandSpec`] unit.
-pub const KIND_COMMAND: &str = "Command";
 
 /// The literal part of a unit document, read before its spec renders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -37,16 +32,8 @@ pub struct UnitEnvelope {
     pub metadata: UnitMetadata,
 }
 
-/// A unit's identity and selection labels. Both are literal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UnitMetadata {
-    /// The unit's identity for references, receipts, leases, and deletion; unique per environment across all unit kinds.
-    pub name: String,
-    /// Literal labels that Environment `unitSelector`s match.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
+/// A unit's literal identity and selection labels.
+pub use super::gitops::GitOpsResourceMetadata as UnitMetadata;
 
 impl UnitEnvelope {
     /// The validated unit name.
@@ -394,101 +381,6 @@ pub enum AttestationSource {
     External,
 }
 
-/// Runs commands from the environment's source commit.
-///
-/// The command starts from an empty environment plus `PATH`, a fresh `HOME`,
-/// `NYL_INPUTS` with the resolved `values`, `NYL_OUTPUTS` for its outputs,
-/// `NYL_UNIT`, `NYL_ENVIRONMENT`, `NYL_OPERATION`, and what `env` admits.
-/// There is no sandbox beyond the working directory and that environment.
-///
-/// ## When needed
-///
-/// For a step no built-in kind covers, such as seeding a database.
-///
-/// ## If omitted
-///
-/// Nothing runs outside the built-in kinds.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[schemars(transform = super::strict::deny_additional_properties)]
-pub struct CommandSpec {
-    /// Files, as local-path globs, whose content enters the execution key. Other files may be read but never trigger re-execution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
-    /// Values the command reads from `NYL_INPUTS`; references such as `fromUnit` may appear at any depth.
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub values: serde_json::Value,
-    /// Argument vector of the reconcile step, executed without a shell. A relative first element is resolved against `workingDir`.
-    pub command: Vec<String>,
-    /// Argument vector reporting drift: exit 0 for clean, 2 for drift, anything else for an error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verify: Option<Vec<String>>,
-    /// Argument vector removing the command's effects. Without it the kind cannot tear down and defaults to `deletionPolicy: Retain`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub teardown: Option<Vec<String>>,
-    /// Argument vector whose stdout enters the execution key, such as tool versions. Runs during resolution without secrets; must be fast and deterministic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<Vec<String>>,
-    /// Working directory under the local path rule, where `/` alone names the worktree root. Default the directory containing `nyl.toml`.
-    #[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<String>,
-    /// The author's claim that re-running with identical inputs is safe: failures become retryable and uncertain executions re-run.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub idempotent: bool,
-    #[serde(flatten)]
-    pub common: CommonUnitFields,
-    #[serde(flatten)]
-    #[schemars(skip)]
-    pub unknown_fields: DenyUnknownFields,
-}
-
-impl CommandSpec {
-    /// What the kind supports for this spec: declared outputs always,
-    /// teardown only with a `teardown` step.
-    pub fn support(&self) -> KindSupport {
-        KindSupport {
-            declared_outputs: true,
-            teardown: self.teardown.is_some(),
-        }
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        validate_argv("spec.command", &self.command)?;
-        for (field, argv) in [
-            ("spec.verify", &self.verify),
-            ("spec.teardown", &self.teardown),
-            ("spec.fingerprint", &self.fingerprint),
-        ] {
-            if let Some(argv) = argv {
-                validate_argv(field, argv)?;
-            }
-        }
-        for (index, pattern) in self.files.iter().enumerate() {
-            let field = format!("spec.files[{index}]");
-            crate::local_path::validate_local_path(&field, pattern)?;
-            glob::Pattern::new(pattern)
-                .map_err(|error| CoreError::config(format!("Invalid {field} glob {pattern:?}: {error}")))?;
-        }
-        if let Some(directory) = &self.working_dir {
-            if directory != "/" {
-                crate::local_path::validate_local_path("spec.workingDir", directory)?;
-            }
-        }
-        if !(self.values.is_null() || self.values.is_object()) {
-            return Err(CoreError::config("spec.values must be an object"));
-        }
-        self.common.validate(self.support())
-    }
-}
-
-fn validate_argv(field: &str, argv: &[String]) -> Result<()> {
-    match argv.first() {
-        Some(program) if !program.is_empty() => Ok(()),
-        _ => Err(CoreError::config(format!(
-            "{field} must be a non-empty argument vector whose first element names the program"
-        ))),
-    }
-}
-
 /// The API version of the built-in unit kinds.
 pub fn is_builtin_unit_api_version(api_version: &str) -> bool {
     api_version == API_VERSION_UNITS
@@ -498,66 +390,6 @@ pub fn is_builtin_unit_api_version(api_version: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn command(spec: serde_json::Value) -> Result<CommandSpec> {
-        let spec: CommandSpec = serde_json::from_value(spec)?;
-        spec.validate()?;
-        Ok(spec)
-    }
-
-    #[test]
-    fn test_command_accepts_the_contract_example() {
-        let spec = command(json!({
-            "files": ["../scripts/seed/**"],
-            "values": {"bucket": {"fromUnit": {"unit": "storage", "output": "bucket"}}},
-            "command": ["./run.sh"],
-            "verify": ["./verify.sh"],
-            "teardown": ["./remove.sh"],
-            "fingerprint": ["./tool-versions.sh"],
-            "workingDir": "../scripts/seed",
-            "env": {"passthrough": ["AWS_REGION", "AWS_PROFILE"], "secrets": {"DB_PASSWORD": "database-password"}},
-            "idempotent": true,
-            "outputs": {"seedVersion": {"type": "string"}},
-            "timeout": "10m"
-        }))
-        .unwrap();
-        assert_eq!(spec.common.timeout, Some(Duration::from_mins(10)));
-        assert_eq!(
-            spec.common.effective_deletion_policy(spec.support()),
-            DeletionPolicy::Teardown
-        );
-    }
-
-    #[test]
-    fn test_command_without_teardown_retains_and_rejects_teardown_policy() {
-        let spec = command(json!({"command": ["./run.sh"]})).unwrap();
-        assert_eq!(
-            spec.common.effective_deletion_policy(spec.support()),
-            DeletionPolicy::Retain
-        );
-        let error = command(json!({"command": ["./run.sh"], "deletionPolicy": "Teardown"}))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("cannot tear down"), "{error}");
-    }
-
-    /// Catches a timeout so large that deadline arithmetic overflows.
-    #[test]
-    fn test_command_rejects_a_timeout_above_seven_days() {
-        assert!(command(json!({"command": ["./run.sh"], "timeout": "7d"})).is_ok());
-        let error = command(json!({"command": ["./run.sh"], "timeout": "100000000d"}))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("spec.timeout may be at most 7d"), "{error}");
-    }
-
-    #[test]
-    fn test_command_rejects_unknown_fields_next_to_flattened_common_fields() {
-        let error = command(json!({"command": ["./run.sh"], "dependOn": ["network"]}))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("unknown field `dependOn`"), "{error}");
-    }
 
     #[test]
     fn test_approval_accepts_short_and_long_forms() {

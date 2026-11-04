@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use nyl_core::orchestration::ports::SecretProvider;
 use serde_json::Value;
 
-use crate::secrets::SecretsConfig;
+use nyl_render::secrets::SecretsConfig;
 
 /// Lazily opens the project's secrets provider, only when a unit needs it.
 /// Read-only status and fingerprinting never open a secrets file.

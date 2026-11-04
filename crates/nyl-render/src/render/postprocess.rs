@@ -1,6 +1,7 @@
 //! Release post-processing and deduplication.
 
-use crate::{config::StripEmptyMetadataLabelsMode, kubernetes::ResourceKey, resources::Release, Result};
+use crate::{kubernetes::ResourceKey, resources::Release, Result};
+use nyl_core::settings::StripEmptyMetadataLabelsMode;
 
 /// Deduplicate Kubernetes identities with last occurrence winning.
 ///

@@ -321,6 +321,7 @@ mod tests {
             secrets: None,
             commit_identity: None,
             observer,
+            progress: None,
             prompt,
         };
         let waiting = waiting();

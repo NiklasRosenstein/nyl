@@ -21,15 +21,17 @@ use nyl_orchestration::shell::inspect::{self, GetValue};
 use serde_json::{json, Value};
 
 use crate::cli::table::{render as render_table, Cell};
-use crate::gitops::units::discover_units;
-use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{
-    cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, write_finding, Session, Stop,
+    cell_label, detail, kind_cell, pretty_json, readiness_cell, state_cell, styled_state_cell, write_finding, Session,
+    Stop,
 };
-use crate::resources::{GitOpsResource, GitOpsResourceKind};
-use crate::{NylError, Result};
+use nyl_render::gitops::discover_gitops_inventory;
+use nyl_render::gitops::units::discover_units;
+use nyl_render::gitops::{DiscoveredGitOpsResource, GitOpsInventory};
+use nyl_render::resources::{GitOpsResource, GitOpsResourceKind};
+use nyl_render::{NylError, Result};
 
 /// Inspect GitOps resources declared in the project, or an environment's state.
 #[derive(Args, Debug)]
@@ -263,20 +265,13 @@ fn state_form(
         Err(Stop::Finding(finding)) => return Ok(refused(&finding)),
         Err(Stop::Error(error)) => return Err(error),
     };
-    let store = session.store(None)?;
-    let location = &session.resolved.location;
-    // `--local`: the clone's local view, through the store a `--local` run uses.
-    let local_store = if options.local {
-        match session.local_run(false, &[]) {
-            Ok(local) => Some(nyl_orchestration::shell::local::LocalStore::new(&store, local)),
-            Err(finding) => return Ok(refused(&finding)),
-        }
+    let store = if options.local {
+        session.offline_store(None)?
     } else {
-        None
+        session.store(None)?
     };
-    let state = local_store
-        .as_ref()
-        .map_or(&store as &dyn nyl_core::orchestration::ports::StateStore, |local| local);
+    let location = &session.resolved.location;
+    let state = &store as &dyn nyl_core::orchestration::ports::StateStore;
     let snapshot = match inspect::snapshot(state, location, None) {
         Ok(snapshot) => snapshot,
         Err(finding) => return Ok(refused(&finding)),
@@ -284,8 +279,8 @@ fn state_form(
     let snapshot = match &options.state_revision {
         None => snapshot,
         Some(revision) => {
-            let read = state_tips_at(&session.resolved.git_dir, &snapshot.tips, revision)
-                .and_then(|tips| inspect::snapshot(&store, location, Some(&tips)));
+            let read = state_tips_at(&store.repository_path(location), &snapshot.tips, revision)
+                .and_then(|tips| inspect::snapshot(state, location, Some(&tips)));
             match read {
                 Ok(snapshot) => snapshot,
                 Err(finding) => return Ok(refused(&finding)),
@@ -365,7 +360,9 @@ fn unit_state_row(name: &UnitName, unit: &UnitReport, wide: bool) -> Vec<Cell> {
     if wide {
         cells.push(readiness_cell(unit));
     }
-    cells.into_iter().map(Cell::plain).collect()
+    let mut cells: Vec<Cell> = cells.into_iter().map(Cell::plain).collect();
+    cells[2] = styled_state_cell(unit);
+    cells
 }
 
 /// `nyl get unit <u> -e <env>`: the exact persisted documents.
@@ -544,12 +541,12 @@ fn lines(items: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
 }
 
 fn yaml(value: &Value) -> Result<String> {
-    crate::yaml::serialize_yaml_value(value).map_err(NylError::YamlEmit)
+    nyl_render::yaml::serialize_yaml_value(value).map_err(NylError::YamlEmit)
 }
 
 /// `nyl get units` without `-e`: unit declarations and the environments selecting each.
 fn unit_declarations(path: &Path, output: GetOutput) -> Result<CommandOutcome> {
-    let inventory = discover_gitops_inventory(path, None)?;
+    let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let units = discover_units(&inventory)?;
     let (environments, _) = declared(&inventory);
     let selecting = |labels: &BTreeMap<String, String>| {
@@ -623,7 +620,7 @@ fn unit_declarations(path: &Path, output: GetOutput) -> Result<CommandOutcome> {
 
 /// The declaration forms: one table of the resources of `kind`.
 fn declarations(kind: GitOpsResourceKind, selection: &GetResourceArgs) -> Result<CommandOutcome> {
-    let inventory = discover_gitops_inventory(&selection.path, None)?;
+    let inventory = discover_gitops_inventory(&selection.path, None, crate::resource_catalogue())?;
     let resources = inventory
         .resources
         .values()
@@ -667,7 +664,7 @@ fn effective_clusters(
     stderr: &mut String,
 ) -> Result<()> {
     for resource in resources {
-        let effective = crate::gitops::resolve_cluster_contract(inventory, &resource.identity.name)?;
+        let effective = nyl_render::gitops::resolve_cluster_contract(inventory, &resource.identity.name)?;
         if effective.capabilities_source != resource.identity.name || effective.schemas_source != resource.identity.name
         {
             let _ = writeln!(
@@ -794,7 +791,11 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
     }
 }
 
-fn environment_row(name: &str, environment: &crate::resources::environment::Environment, file: String) -> Vec<String> {
+fn environment_row(
+    name: &str,
+    environment: &nyl_core::resources::environment::Environment,
+    file: String,
+) -> Vec<String> {
     let state = &environment.spec.state;
     let repository = state
         .repository_ref

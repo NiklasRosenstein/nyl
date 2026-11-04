@@ -2,11 +2,11 @@
 members = [
     "nyl",
     "crates/nyl-core",
+    "crates/nyl-units",
     "crates/nyl-git",
     "crates/nyl-render",
     "crates/nyl-state",
     "crates/nyl-orchestration",
-    "crates/nyl-drivers",
 ]
 resolver = "2"
 
@@ -21,11 +21,11 @@ publish = false
 
 [workspace.dependencies]
 nyl-core = { path = "crates/nyl-core" }
+nyl-units = { path = "crates/nyl-units" }
 nyl-git = { path = "crates/nyl-git" }
 nyl-render = { path = "crates/nyl-render" }
 nyl-state = { path = "crates/nyl-state" }
 nyl-orchestration = { path = "crates/nyl-orchestration" }
-nyl-drivers = { path = "crates/nyl-drivers" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
@@ -64,11 +64,13 @@ tracing-indicatif = "0.3.14"
 walkdir = "2.5"
 same-file = "1.0.6"
 glob = "0.3"
-# Signals to a tool's process group (nyl-drivers process runner); already a
+# Signals to a tool's process group (nyl-units process runner); already a
 # transitive dependency, so it adds no new crates.
 libc = "0.2"
 sha2 = "0.11"
 percent-encoding = "2.3"
+# Local state repository URLs use the same parser as the HTTP client.
+url = { version = "2.5", default-features = false, features = ["std"] }
 hex = "0.4"
 tempfile = "3.15"
 base64 = "0.23"

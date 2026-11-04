@@ -23,6 +23,9 @@ pub mod teardown;
 pub mod update;
 pub mod validate;
 pub mod vendor;
-pub mod verify;
 
 pub mod capture;
+
+pub mod build;
+pub mod check;
+pub mod exec;

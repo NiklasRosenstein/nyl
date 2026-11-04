@@ -15,13 +15,14 @@ use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
     AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
-    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DenyUnknownFields,
-    DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, GitSource, InlineGitRepository,
-    LocalReference, ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
+    GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy, RendererConfig,
+    RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
 use crate::{NylError, Result};
+use nyl_core::resources::{DenyUnknownFields, GitSource, InlineGitRepository, LocalReference};
 
 use super::{
     build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout_with_provenance,
@@ -779,6 +780,7 @@ async fn compile_target_tree_recording(
         cluster_path,
         argocd.cluster_path.clone(),
     ]);
+    inputs.extend(target_discovered.values_inputs.iter().cloned());
     for name in [cluster.metadata.name.as_str(), argocd.cluster.metadata.name.as_str()] {
         inputs.extend(super::resolve_cluster_contract(inventory, name)?.inputs);
     }
@@ -951,11 +953,11 @@ async fn compile_target_tree_recording(
             }
 
             let group_output = group.spec.output_path.as_deref().unwrap_or(&group.metadata.name);
-            crate::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
+            nyl_core::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
             validate_path_segment("Release metadata.name", &release.metadata.name)?;
             if release.metadata.name == "_namespaces" {
                 return Err(NylError::config(
-                    "Release metadata.name \"_namespaces\" is reserved by the rendered GitOps layout",
+                    "Release metadata.name \"_namespaces\" is reserved by the Kubernetes GitOps layout",
                 ));
             }
             let release_directory = PathBuf::from(group_output).join(&release.metadata.name);
@@ -1331,6 +1333,16 @@ fn prepare_target_cache(
     let key = format!("{}\0{}", inventory.project_root.display(), inputs.target.metadata.name);
     let previous = cache.load_record("target", &key)?;
     let mut recorder = cache.recorder();
+    recorder.record_value(
+        "resource-catalogue",
+        &inventory
+            .project_config
+            .resource_catalogue
+            .0
+            .iter()
+            .map(|d| (d.name, d.api_version, d.dynamic_kind))
+            .collect::<Vec<_>>(),
+    )?;
     if let Some(config_file) = &inventory.project_config.file {
         recorder.record_path_file(config_file)?;
     }
@@ -1357,6 +1369,9 @@ fn prepare_target_cache(
             .values()
             .filter(|resource| contract.inputs.contains(&resource.source_path))
         {
+            for path in &discovered.values_inputs {
+                recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+            }
             if let Some(GitOpsResource::Cluster(declared)) = &discovered.resource {
                 let mut declared = declared.clone();
                 declared.spec.live = None;
@@ -1367,7 +1382,7 @@ fn prepare_target_cache(
             }
         }
     }
-    record_target_control_dependencies(&mut recorder, inputs, groups)?;
+    record_target_control_dependencies(&mut recorder, inventory, inputs, groups)?;
     for prepared in groups {
         let members = prepared
             .source
@@ -1413,9 +1428,15 @@ fn prepare_target_cache(
 
 fn record_target_control_dependencies(
     recorder: &mut crate::render::cache::DependencyRecorder,
+    inventory: &GitOpsInventory,
     inputs: &TargetCacheInputs<'_>,
     groups: &[PreparedGroup],
 ) -> Result<()> {
+    if let Some(target) = inventory.get(GitOpsResourceKind::DeploymentTarget, &inputs.target.metadata.name) {
+        for path in &target.values_inputs {
+            recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+        }
+    }
     recorder.record_value("tree-render-options", &inputs.options)?;
     let mut effective_target = inputs.target.clone();
     effective_target.apply_defaults();
@@ -2184,9 +2205,9 @@ fn resolve_argocd_instance(
         return Ok(EffectiveArgoCDInstance {
             identity: format!("implicit:{}", target.metadata.name),
             resource: ArgoCDInstance {
-                api_version: crate::constants::API_VERSION_K8S_GITOPS.to_owned(),
+                api_version: nyl_core::constants::API_VERSION_K8S_GITOPS.to_owned(),
                 kind: crate::resources::KIND_ARGOCD_INSTANCE.to_owned(),
-                metadata: crate::resources::GitOpsResourceMetadata {
+                metadata: nyl_core::resources::GitOpsResourceMetadata {
                     name: format!("{}-implicit", target.metadata.name),
                     labels: BTreeMap::new(),
                 },
@@ -3008,14 +3029,14 @@ struct ResolvedGroupSource {
     source_session: Option<RenderSession>,
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
-    repository: Option<InlineGitRepository>,
+    repository: Option<nyl_core::resources::ReadGitRepository>,
 }
 
 struct StaticReleaseFile {
     path: PathBuf,
     name: Option<String>,
     /// Literal input declarations; empty when the Release declares none.
-    inputs: BTreeMap<String, crate::resources::release_inputs::InputDeclaration>,
+    inputs: BTreeMap<String, nyl_core::bindings::InputDeclaration>,
 }
 
 /// Resolve the target's Release inputs before any Release renders, so every
@@ -3047,7 +3068,7 @@ fn resolve_prepared_release_inputs(
         })
         .collect::<Vec<_>>();
     let paths = inventory.paths();
-    let repositories = |reference: &crate::resources::LocalReference| {
+    let repositories = |reference: &nyl_core::resources::LocalReference| {
         let (repository, source) = inventory.resolve_git_repository(Some(reference), None)?;
         let source = source.expect("a referenced GitRepository has a source file");
         // Absolute, like `fromFile` paths, so the cache recorder reads the
@@ -3076,7 +3097,7 @@ fn resolve_remote_group_source(
     git_manager: &mut Option<GitManager>,
     cache: Option<&GitOpsCache>,
     provenance_inputs: &mut Vec<PathBuf>,
-) -> Result<(PathBuf, PathBuf, InlineGitRepository)> {
+) -> Result<(PathBuf, PathBuf, nyl_core::resources::ReadGitRepository)> {
     let (repository, repository_path) = resolve_source_repository(inventory, source)?;
     if let Some(repository_path) = repository_path {
         provenance_inputs.push(repository_path);
@@ -3300,7 +3321,12 @@ fn build_group_source_session(
                 "ApplicationGroup source.rendererConfig.projectPath",
             )?;
             let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
-            Some(RenderSession::for_remote_target(&project_root, target, &cluster)?)
+            Some(RenderSession::for_remote_target(
+                &project_root,
+                target,
+                &cluster,
+                inventory.project_config.resource_catalogue.clone(),
+            )?)
         }
         (Some(_), RendererConfigMode::Central) => {
             let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
@@ -3363,8 +3389,8 @@ fn warn_unclaimed_group_manifests(
 fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
-) -> Result<(InlineGitRepository, Option<PathBuf>)> {
-    inventory.resolve_git_repository(source.git.repository_ref.as_ref(), source.git.repository.as_ref())
+) -> Result<(nyl_core::resources::ReadGitRepository, Option<PathBuf>)> {
+    inventory.resolve_git_source(&source.git)
 }
 
 fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
@@ -3623,7 +3649,7 @@ fn collect_leaf_paths(value: &Value, segments: &mut Vec<String>, output: &mut Ve
 }
 
 fn insert_file(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
-    crate::resources::relative_path_to_posix("rendered path", &path)?;
+    nyl_core::resources::relative_path_to_posix("rendered path", &path)?;
     if files.insert(path.clone(), bytes).is_some() {
         return Err(NylError::config(format!(
             "More than one rendered resource owns {}",

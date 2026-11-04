@@ -38,12 +38,12 @@ use super::reconcile::{
     RenderIndexPublication, DEFAULT_INDEX_PATH,
 };
 use super::{
-    compile_target_tree_recorded, discover_gitops_inventory, CacheMode, CompiledTargetTree, GitOpsCache,
-    GitOpsInventory, TargetDependencies, TreeRenderOptions,
+    compile_target_tree_recorded, CacheMode, CompiledTargetTree, GitOpsCache, GitOpsInventory, TargetDependencies,
+    TreeRenderOptions,
 };
 use crate::config::{ProjectConfig, ProjectFile};
-use crate::git::transport::GitAuth;
 use crate::{NylError, Result};
+use nyl_git::GitAuth;
 
 /// One orchestrated render.
 #[derive(Debug, Clone)]
@@ -65,6 +65,8 @@ pub struct TargetRender<'a> {
     /// invocations and tests stay isolated and the result never depends on
     /// host state.
     pub cache_dir: Option<&'a Path>,
+    /// Resource APIs registered by the caller.
+    pub resource_catalogue: crate::config::ResourceCatalogue,
 }
 
 /// Who authors and commits a publication commit, and when. Orchestrated publications pass
@@ -161,7 +163,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         let relative = request.project_dir.strip_prefix("/").unwrap_or(request.project_dir);
         request.worktree.join(relative)
     };
-    let inventory = discover_gitops_inventory(&project_dir, None)?;
+    let inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?;
     super::resolve_deployment_target_name(&inventory, Some(request.target))?;
 
     // A render without a cache directory still keeps its source checkouts
@@ -190,7 +192,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     index.files = desired
         .iter()
         .map(|(path, bytes)| {
-            crate::resources::relative_path_to_posix("rendered output path", path)
+            nyl_core::resources::relative_path_to_posix("rendered output path", path)
                 .map(|path| (path, nyl_core::digest::sha256_hex(bytes)))
                 .map_err(NylError::from)
         })
@@ -216,7 +218,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     Ok(RenderedTarget {
         report: compiled.publication_report.clone(),
         destination: PublicationDestination {
-            repository: crate::util::sanitize_url(&compiled.repository.repo_url),
+            repository: nyl_git::sanitize_url(&compiled.repository.repo_url),
             push_url: compiled
                 .repository
                 .publish_url
@@ -443,7 +445,7 @@ pub fn index_digest(index: &RenderIndex) -> Result<String> {
 fn load_project_file(project_dir: &Path) -> Result<ProjectFile> {
     let file = project_dir.join("nyl.toml");
     if file.is_file() {
-        Ok(ProjectConfig::load_from_dir(Some(file), None)?.config)
+        ProjectConfig::read_project_file(&file)
     } else {
         Ok(ProjectFile::default())
     }
@@ -569,7 +571,7 @@ impl PreparedPublication {
         if actual != self.expected {
             return Err(NylError::config(format!(
                 "Publication {}@{} advanced from {:?} to {actual:?}; refusing stale publish",
-                crate::util::sanitize_url(&self.push_url),
+                nyl_git::sanitize_url(&self.push_url),
                 self.branch,
                 self.expected,
             )));
@@ -751,7 +753,7 @@ fn clone_branch(url: &str, branch: &str, path: &Path, auth: &GitAuth) -> Result<
             repository.remote("origin", url)?;
             Ok(repository)
         })
-        .map_err(|error| NylError::config(format!("Failed to clone {}: {error}", crate::util::sanitize_url(url))))?;
+        .map_err(|error| NylError::config(format!("Failed to clone {}: {error}", nyl_git::sanitize_url(url))))?;
     {
         let mut config = repository.config().map_err(crate::git::GitError::from)?;
         config
@@ -1013,6 +1015,7 @@ spec:
             target: "dev",
             inputs,
             cache_dir,
+            resource_catalogue: crate::config::test_catalogue(),
         })
     }
 
@@ -1068,7 +1071,12 @@ spec:
         assert!(error.contains("fromUnit needs orchestrated execution"), "{error}");
 
         // Tree commands pass no snapshot at all and keep rejecting the binding.
-        let inventory = discover_gitops_inventory(&worktree.path().join("nyl"), None).unwrap();
+        let inventory = super::super::discover_gitops_inventory(
+            &worktree.path().join("nyl"),
+            None,
+            crate::config::test_catalogue(),
+        )
+        .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1088,6 +1096,29 @@ spec:
     fn test_render_target_input_record_is_portable() {
         let (_publication, url) = publication_repository();
         let (first, second) = (project(&url), project(&url));
+        for directory in [&first, &second] {
+            let root = directory.path();
+            std::fs::create_dir(root.join("shared")).unwrap();
+            std::fs::write(root.join("shared/cluster.yaml"), "region: west\n").unwrap();
+            std::fs::write(root.join("shared/target.yaml"), "environment: dev\n").unwrap();
+            let path = root.join("nyl/platform.yaml");
+            let documents =
+                crate::yaml::parse_yaml_documents_k8s_compatible(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let documents = documents
+                .into_iter()
+                .map(|mut document| {
+                    if let Some(file) = match document["kind"].as_str() {
+                        Some("Cluster") => Some("../shared/cluster.yaml"),
+                        Some("DeploymentTarget") => Some("../shared/target.yaml"),
+                        _ => None,
+                    } {
+                        document["spec"]["valuesFrom"] = serde_json::json!([{"file":file}]);
+                    }
+                    crate::yaml::serialize_yaml_document(&document).unwrap()
+                })
+                .collect::<Vec<_>>();
+            std::fs::write(path, documents.join("---\n")).unwrap();
+        }
         let (first_cache, second_cache) = (TempDir::new().unwrap(), TempDir::new().unwrap());
         let inputs = snapshot("registry.test/web@sha256:abc");
         let one = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
@@ -1100,6 +1131,8 @@ spec:
         for key in [
             "/applications/web/release.yaml",
             "/nyl/nyl.toml",
+            "/shared/cluster.yaml",
+            "/shared/target.yaml",
             "@resource:DeploymentTarget/dev",
             "@cluster-contract-capabilities:dev",
             "@input:web/web/image",
@@ -1115,6 +1148,22 @@ spec:
         // A cached second render yields the same record.
         let again = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
         assert_eq!(again.input_record, one.input_record);
+
+        // Provenance covers file content even when the effective values stay equal.
+        std::fs::write(
+            first.path().join("shared/cluster.yaml"),
+            "# shared facts\nregion: west\n",
+        )
+        .unwrap();
+        let changed = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
+        assert_ne!(
+            changed.input_record["/shared/cluster.yaml"],
+            one.input_record["/shared/cluster.yaml"]
+        );
+        assert_eq!(
+            changed.input_record["@resource:Cluster/dev"],
+            one.input_record["@resource:Cluster/dev"]
+        );
     }
 
     /// The record's entries for files of remote sources.

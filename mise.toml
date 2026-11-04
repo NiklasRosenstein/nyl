@@ -15,6 +15,7 @@ sops = "3.13.3"
 helm = "4.3.1"
 kubectl = "1.37.1"
 node = "22"
+uv = "0.11.26"
 
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
@@ -30,17 +31,17 @@ run = "cargo fmt --all --check"
 [tasks.lint]
 description = "Run Rust clippy"
 dir = "nyl"
-run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+run = "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests"
 dir = "nyl"
-run = "cargo test --workspace --all-features"
+run = "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo test --workspace --features nyl/test-clock,nyl/test-kinds"
 
 [tasks.test-verbose]
 description = "Run Rust tests with output"
 dir = "nyl"
-run = "cargo test --workspace --all-features -- --nocapture"
+run = "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo test --workspace --features nyl/test-clock,nyl/test-kinds -- --nocapture"
 
 [tasks.bench]
 description = "Run Rust benchmarks"
@@ -59,16 +60,49 @@ run = "cargo build --profile dist"
 
 [tasks.check-all]
 description = "Run all checks"
+depends = ["python-check"]
 dir = "nyl"
 run = [
   "cargo fmt --all --check",
-  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-  "cargo test --workspace --all-features",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-../target/test} cargo test --workspace --features nyl/test-clock,nyl/test-kinds",
 ]
 
 [tasks.pre-commit]
 description = "Run pre-commit checks"
 depends = ["fmt-check", "lint", "test"]
+# The Rust tests use feature-enabled CLI artifacts; Python builds the production CLI.
+run = "mise run python-check"
+
+[tasks.python-sync]
+description = "Install locked Python development dependencies"
+dir = "python"
+run = "uv sync --locked"
+
+[tasks.python-test]
+description = "Test Python against a CLI built from this checkout"
+depends = ["python-sync"]
+dir = "python"
+run = [
+  "uv run --no-sync python scripts/version.py",
+  "uv run --no-sync pytest",
+]
+
+[tasks.python-check]
+description = "Check Python formatting, lint, types, packaging, and rendering"
+depends = ["python-test"]
+dir = "python"
+run = [
+  "uv run --no-sync ruff format --check .",
+  "uv run --no-sync ruff check .",
+  "uv run --no-sync mypy",
+]
+
+[tasks.python-build]
+description = "Build Python distributions with the Cargo-derived version"
+depends = ["python-sync"]
+dir = "python"
+run = ["uv run --no-sync python scripts/version.py", "uv build --no-sources"]
 
 [tasks.coverage]
 description = "Generate coverage report"
@@ -118,3 +152,10 @@ run = "cargo clean"
 [tasks.test-renovate-matchers]
 description = "Validate Renovate custom regex matchers against fixtures"
 run = "bash scripts/test-renovate-matchers.sh"
+
+[tasks.test-native]
+description = "Run required native infrastructure, image, and binary acceptance tests"
+run = [
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl-units --features native-tests --test terraform_native_test",
+  "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test} cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test",
+]

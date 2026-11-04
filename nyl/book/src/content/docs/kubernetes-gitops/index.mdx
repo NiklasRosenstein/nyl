@@ -1,0 +1,55 @@
+---
+title: 'Kubernetes GitOps'
+description: 'Publish rendered manifests to Git for Argo CD, Flux, or another reconciler to sync.'
+---
+
+import LinkCards from '../../../components/LinkCards.astro';
+
+Kubernetes GitOps publishes rendered manifests to Git for a reconciler to sync.
+Nyl compiles each deployment target into an ordinary directory of Kubernetes
+manifests in a Git revision, with Argo CD Applications and least-privilege
+AppProjects. Argo CD, Flux, or another reconciler syncs the published YAML, and
+Nyl never runs in the cluster's reconciliation path.
+
+This layer builds on [Kubernetes Rendering](/nyl/kubernetes-rendering/): the
+same configuration renders the manifests, so what you inspect locally is what CI
+publishes.
+
+## Start here
+
+<LinkCards
+  items={[
+    { title: 'Rendered Manifest Pattern', text: 'The recommended deployment model: ordinary YAML in a deployment revision, which Argo CD reads as plain directories.', href: '/kubernetes-gitops/rendered-manifest-pattern/' },
+  ]}
+/>
+
+## Concepts
+
+<LinkCards
+  items={[
+    { title: 'Project Structure and Discovery', text: 'Resources are discovered project-wide, from the directory containing nyl.toml and beneath it.', href: '/kubernetes-gitops/project-structure/' },
+    { title: 'Targets and Cluster Variation', text: 'A Cluster models one destination; a DeploymentTarget binds it to deployment intent and publication coordinates.', href: '/kubernetes-gitops/targets-and-clusters/' },
+    { title: 'Release Inputs', text: 'Typed inputs that each DeploymentTarget binds, for values that differ per environment.', href: '/kubernetes-gitops/release-inputs/' },
+    { title: 'Rendered Layout', text: 'The tree Nyl writes into a target\'s publication prefix.', href: '/kubernetes-gitops/rendered-layout/' },
+    { title: 'Trust and Admission Boundaries', text: 'What Nyl validates and records, and why it is not the ultimate admission boundary.', href: '/kubernetes-gitops/security/' },
+  ]}
+/>
+
+## Workflow
+
+<LinkCards
+  items={[
+    { title: 'Render and Validate', text: 'Render a DeploymentTarget into a checkout of its publication repository.', href: '/kubernetes-gitops/workflow/render/' },
+    { title: 'Diff in Pull Requests', text: 'Compare the desired tree with the currently published deployment revision.', href: '/kubernetes-gitops/workflow/diff/' },
+    { title: 'Publish', text: 'Publish from the protected branch.', href: '/kubernetes-gitops/workflow/publish/' },
+    { title: 'Move a Publication', text: 'What happens when a target\'s repository, revision, or path prefix changes.', href: '/kubernetes-gitops/workflow/move-publication/' },
+  ]}
+/>
+
+## Resources
+
+<LinkCards
+  items={[
+    { title: 'Resources', text: 'Shared repository configuration in gitops.nyl/v1 and Kubernetes-specific configuration in k8s.gitops.nyl/v1.', href: '/kubernetes-gitops/resources/' },
+  ]}
+/>

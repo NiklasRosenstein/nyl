@@ -25,7 +25,7 @@ use nyl_orchestration::shell::run::{LifecycleOptions, RunMode};
 use super::state::{render, Common};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::placeholder_environment;
-use crate::{NylError, Result};
+use nyl_render::{NylError, Result};
 
 /// Import a broken lease's run, clear a unit's condition, or accept a checkpointed result.
 #[derive(Args, Debug)]
@@ -33,6 +33,10 @@ use crate::{NylError, Result};
 pub struct RecoverArgs {
     #[command(flatten)]
     pub common: Common,
+
+    /// Recover from the local state repository without contacting the remote.
+    #[arg(long)]
+    pub local: bool,
 
     /// The unit to recover; needs --retry or --accept. Without it, recover
     /// imports the run of a broken lease.
@@ -85,6 +89,7 @@ pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         Operation::Recover.as_str(),
         RunMode::Recover { unit },
         LifecycleOptions::default(),
+        args.local,
         None,
         None,
         recover_environment,

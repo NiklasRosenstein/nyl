@@ -74,7 +74,9 @@ hold dev: done
 $ nyl status -e dev
 UNIT     KIND  STATE  RECEIPT  LAST RUN  DETAIL
 migrate  -     held   none     -
-warning NYL-UNIT-HELD (migrate): migrate is held by Alice <alice@example.com> (incident 4711) since 2026-10-26T23:03:58Z
+
+warning NYL-UNIT-HELD (migrate)
+  migrate is held by Alice <alice@example.com> (incident 4711) since 2026-10-26T23:03:58Z
   fix: reconcile changes nothing about it until `nyl resume -e dev --unit migrate`
 ```
 
@@ -93,7 +95,7 @@ released its lease, in a `hold` commit requested by you, so a delivered
 hold always takes effect.
 
 Only reconcile and teardown runs read signals. While another operation
-holds the lease, such as `nyl verify`, `nyl recover`, or a state
+holds the lease, such as `nyl detect-drift`, `nyl recover`, or a state
 operation, `nyl hold` exits 2 with `NYL-LEASE-HELD` like `resume`;
 `--wait-lease <duration>` waits for it instead.
 

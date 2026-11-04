@@ -172,9 +172,48 @@ pub fn decide(
     }
 }
 
-/// Whether `--accept` adopts `checkpoint` for `desired`: it holds a receipt,
-/// and its desired document's uid and execution key, and the receipt's key,
-/// equal the current desired document's.
+/// Acknowledge a driver's recorded retry requirement, without interpreting its context.
+pub fn acknowledge_retry(
+    desired: &DesiredUnit,
+    action: &RecoverAction,
+    request: &nyl_core::orchestration::state::Request,
+    recovered: &mut ObservedUnit,
+) -> Result<(), Finding> {
+    if !matches!(action, RecoverAction::Retry)
+        || !matches!(
+            recovered.retry,
+            Some(nyl_core::orchestration::state::RetryAcknowledgement::Required { .. })
+        )
+    {
+        return Ok(());
+    }
+    if request.reason.as_ref().is_none_or(|reason| reason.trim().is_empty()) {
+        return Err(Finding::new(
+            Code::RecoverReasonRequired,
+            "the driver requires a reason to acknowledge this retry",
+            "verify the unit's failure and pass --reason to recover --retry",
+        ));
+    }
+    match crate::rules::transitions::apply_to(
+        desired,
+        Some(recovered),
+        Event::AcknowledgeRetry {
+            request: request.clone(),
+        },
+    ) {
+        Ok(Applied::Changed(changed)) => *recovered = *changed,
+        _ => {
+            return Err(Finding::new(
+                Code::RecoverNothing,
+                "the retry requirement no longer applies to this unit",
+                "read the unit's current state and retry recovery",
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Whether the checkpoint receipt and desired document match the current uid and key.
 fn acceptable(checkpoint: &Checkpoint, desired: &DesiredUnit) -> bool {
     let Some(key) = &desired.execution_key else {
         return false;
