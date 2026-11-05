@@ -1,7 +1,0 @@
-release-date = "2025-01-22"
-
-[[entries]]
-id = "d8a87ff7-b417-4c8d-90fc-59a2189ca7ad"
-type = "fix"
-description = "Remove sneaky `breakpoint()` call in `nyl template`"
-author = "@NiklasRosenstein"
