@@ -61,13 +61,13 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "822cf5b4-40b4-4edf-95c6-07693947d902"
 type = "feature"
-description = "An ApplicationGroup may declare neither `projectRef` nor `projectTemplate`; it then owns an implied AppProject named after the group that permits every namespace and cluster-scoped resource on the target workload Cluster. Declaring `spec.projectTemplate` remains the least-privilege form and still requires explicit destination namespaces."
+description = "An ApplicationGroup may declare neither `projectRef` nor `projectTemplate`; it then owns an implied AppProject named after the group that admits only what its Applications deploy: the target publication repository, the target Cluster with the group's Release namespaces, and the rendered resource kinds by scope. `spec.projectTemplate` mirrors every AppProject field; declared fields are kept as written and omitted fields take those derived values. Deriving a whitelist fails when a rendered kind's scope is unknown"
 author = "@NiklasRosenstein"
 
 [[entries]]
 id = "087dafe2-887b-47bc-af60-9eb39be22df7"
 type = "improvement"
-description = "`nyl init` no longer generates an AppProjectDefinition. The generated ApplicationGroup uses the implied AppProject, and `--project-name`, `--allow-namespace`, and `--allow-cluster-resource` narrow it through `spec.projectTemplate`, leaving every dimension they do not name permissive"
+description = "`nyl init` no longer generates an AppProjectDefinition. The generated ApplicationGroup uses the implied AppProject, and `--project-name`, `--allow-namespace`, and `--allow-cluster-resource` write an explicit `spec.projectTemplate`, leaving every field they do not name at its derived least-privilege default"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -110,4 +110,124 @@ author = "@NiklasRosenstein"
 id = "83372d88-23ef-4706-8f71-ebd9f2eed971"
 type = "docs"
 description = "Redesign the documentation site around four layers (Kubernetes Rendering, Kubernetes GitOps, Orchestration, Domain modeling) and rename its routes to match: `/kubernetes/` is now `/kubernetes-rendering/`, `/rendered-gitops/` is now `/kubernetes-gitops/`, and `/domain-resources/` is now `/domain-modeling/`. The old routes do not redirect, and the rendered GitOps wording is now Kubernetes GitOps"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "93c663f3-f225-4d6d-b399-cdb0551b3b69"
+type = "breaking change"
+description = "`render-tree` and `publish-tree` write each rendered resource to its own file, `<release>/<kind>[.<group>]/[<namespace>/]<name>.yaml` (CRDs under `<release>/crd/`), replacing the per-Release `resources.yaml`; the Argo CD catalog uses the same layout beneath `_nyl/catalog`. The first publication after upgrading rewrites the whole tree"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "01a3945c-24e5-4a6c-a167-f1aeec0d64f2"
+type = "breaking change"
+description = "Remote Git operations (fetch, ref listing, push) run the `git` command line instead of libgit2, so Nyl authenticates exactly as `git` does (SSH config and agent, credential helpers, `insteadOf`, `core.sshCommand`/`GIT_SSH_COMMAND`). `git` must now be on `PATH`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b64071ea-1c29-4631-8917-ac34a28bea54"
+type = "breaking change"
+description = "`nyl render`, `nyl diff`, and `nyl apply` with `--target` take a Release from the compiled target, so they render exactly what its Application deploys, including generated Namespaces and the group's `destinationNamespace`; no command takes a namespace from the kube context anymore"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "4eddf3b7-05bc-43e7-bc2a-751932b87826"
+type = "breaking change"
+description = "`applicationNameTemplate` is a `${ … }` template value that must contain at least one expression; the `{% raw %}` form is no longer expanded. `nyl validate` rejects duplicate generated Argo CD names across every pair of targets whose instances share a cluster and namespace, including implicit per-target instances"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "7ba0df58-4043-44af-9e12-230cf804cccb"
+type = "breaking change"
+description = "`diff-tree` and `publish-tree` fail with `NYL_PROJECT_SCOPE_CONTRACTION` when a resource leaving a cascading Application would lose the AppProject permission Argo CD needs to delete it. Keep the scope with the new `ApplicationGroup.spec` fields `retainedProjectNamespaces`, `retainedNamespaceResourceWhitelist`, and `retainedClusterResourceWhitelist`, or pass `--ignore-project-scope-contraction` after review"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6c34ed36-f40e-4ca0-8d86-f7ae15f3cd64"
+type = "deprecation"
+description = "Cluster and Release move to `apiVersion: k8s.nyl/v1`. `k8s.gitops.nyl/v1` stays accepted for both with a warning, and rendered output is identical either way. `nyl render --context` is deprecated and ignored, since `render` never connects to Kubernetes"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6fb96c53-ba3f-4c84-8221-3715ddd828fd"
+type = "feature"
+description = "Typed Release inputs with DeploymentTarget bindings from `value`, `fromFile`, locked `fromGit`, and `fromPublication` (state in the target's own publication branch, optionally carried from the worktree with `carryFileFromWorktree`). Direct commands accept `--input NAME=JSON` and `--inputs FILE`, and `nyl update source-locks` refreshes `fromGit` locks, optionally per `--target`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ddbd3d3c-35fd-4949-842a-a0ed76e94c6f"
+type = "feature"
+description = "Orchestration preview: declare Environments of units whose state lives in Git, and run them with `nyl plan`, `reconcile`, `status`, `detect-drift`, `attest`, `teardown`, `hold`/`resume`, `recover`, `exec`, `build`, and `state`/`lease`. Built-in units cover constrained commands, OCI images built with Docker Buildx (`OciImage`), and Terraform and OpenTofu configurations run with their native tools. `reconcile --worktree` runs uncommitted changes from a snapshot. Orchestration is in development and does not yet publish Kubernetes trees"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "99be3439-e5db-4fb4-9fdf-a64909f4cd3b"
+type = "feature"
+description = "`publish-tree --application-group` and `--release` replace only the selected ApplicationGroups or group-qualified Releases and keep the rest of the published tree, while still validating the combined tree"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "47d9f2bd-daaa-4af6-8a68-fdafaa0d4830"
+type = "feature"
+description = "`nyl apply --handoff[=MANAGER]` and `nyl release rollback --handoff` apply as another field manager (`argocd-controller` by default) and release the fields Nyl owned, so Argo CD can take over resources Nyl bootstrapped"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "94047cec-60d9-4d94-8852-513f110e16f7"
+type = "feature"
+description = "Cluster and DeploymentTarget accept `spec.valuesFrom`, a list of plain YAML mapping files merged before inline `spec.values`, optionally mounted under a `key`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "0ffc4bdc-8dbe-4a45-9c94-6fcfa1689b1c"
+type = "feature"
+description = "A local component can declare value imports in `nyl-component.yaml` that copy JSON Pointer selections of the effective Cluster and DeploymentTarget values into chart values, for platform defaults"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "2de370b5-f379-45c3-bc00-2a8988c31db5"
+type = "feature"
+description = "`nyl schema annotate` adds a yaml-language-server schema comment to every YAML document in the project, and `--check` verifies them in CI"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "21ac286c-162f-4509-ace0-baa98cb57579"
+type = "feature"
+description = "`nyl capture cluster --crds` vendors whole CustomResourceDefinitions and records which kinds are cluster-scoped"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "32997d50-106b-46f7-a063-f5821028d124"
+type = "improvement"
+description = "Publication commit messages list the generated Argo CD Applications whose files changed"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "4993cff9-deed-4a70-9420-5c58ffc8ae75"
+type = "improvement"
+description = "Resource parsing and schema validation errors name the failing field path with an actionable hint, and orchestration diagnostics lead with a headline, aligned details, and the actions to take"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6314ab7b-8f91-437c-bd09-896e79d5abb5"
+type = "improvement"
+description = "When `publish-tree --require-clean` rejects a worktree, it lists up to 20 changed files with their Git status codes"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "47d06c36-33a7-4eae-ba5b-8b9a35689175"
+type = "improvement"
+description = "Project discovery only checks files it consumes, which speeds it up in large repositories"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "80b43989-317f-4e01-a742-150b6da0e5bb"
+type = "fix"
+description = "Git-backed Helm charts on a branch, tag, or default `HEAD` resolve the ref before reusing cached charts and rendered output, instead of staying at the first cached commit"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "01fc102c-cdf8-4d26-ba71-c205270082b8"
+type = "fix"
+description = "Unchanged Git LFS files no longer make the worktree look dirty, which blocked `publish-tree --require-clean` after a fresh CI checkout"
 author = "@NiklasRosenstein"
