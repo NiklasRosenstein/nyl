@@ -46,6 +46,13 @@
             "matchDepNames": ["helm"],
             "groupName": "Helm toolchain",
             "separateMajorMinor": false
+        },
+        {
+            "description": "kube pins a k8s-openapi release, so both must update in one PR; a kube major usually pairs with a k8s-openapi minor",
+            "matchManagers": ["cargo"],
+            "matchPackageNames": ["kube", "k8s-openapi"],
+            "groupName": "kube and k8s-openapi",
+            "separateMajorMinor": false
         }
     ],
     "customManagers": [
