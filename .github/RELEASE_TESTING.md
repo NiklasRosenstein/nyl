@@ -78,7 +78,7 @@ Before creating a real release, verify:
 - [ ] Clippy is clean: `cargo clippy --workspace --all-targets --all-features`
 - [ ] Formatting is correct: `cargo fmt --all --check`
 - [ ] Workspace version updated in the root `Cargo.toml` (`scripts/release.sh` does this)
-- [ ] CHANGELOG.md updated with release notes
+- [ ] `.changelog/_unreleased.toml` lists the release's changes (`scripts/release.sh` renames it to `.changelog/<version>.toml`)
 - [ ] Documentation builds: `mise run docs-build`
 - [ ] `dist plan` lists the `nyl` binary
 - [ ] Test with prerelease tag (e.g., `v0.1.0-rc.1`)
@@ -116,7 +116,7 @@ treats as "do not distribute" unless the package opts in.
 
 1. **Prepare release**:
    ```bash
-   # Update CHANGELOG.md
+   # Complete the entries in .changelog/_unreleased.toml
    git commit -am "chore: prepare v0.1.0 release"
    git push
    ```

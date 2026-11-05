@@ -646,9 +646,13 @@ mise run docs-rustdoc      # Opens in browser
 - **release.yml:** Binary releases with cargo-dist
 
 ### Release Process
-1. Update `CHANGELOG.md`
+1. Make sure `.changelog/_unreleased.toml` describes every user-visible change
+   since the last release. Changes add their entry there as they land.
 2. Run `scripts/release.sh X.Y.Z`: it bumps the shared workspace version in the
-   root `Cargo.toml` and `Cargo.lock`, commits, tags `vX.Y.Z`, and pushes
+   root `Cargo.toml` and `Cargo.lock`, renames `.changelog/_unreleased.toml` to
+   `.changelog/X.Y.Z.toml` with the release date, commits both in one commit,
+   tags `vX.Y.Z`, and pushes. A prerelease such as `X.Y.Z-rc.1` keeps the
+   unreleased file
 3. GitHub Actions builds and publishes binaries and images; nothing is published
    to crates.io
 

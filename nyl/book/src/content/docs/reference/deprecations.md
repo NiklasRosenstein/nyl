@@ -8,9 +8,9 @@ the removal release; nothing else changes when you do.
 
 | Deprecated | Use instead | Deprecated in | Removal |
 | --- | --- | --- | --- |
-| `Cluster` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | the release after 0.5.9 | a future release |
-| `Release` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | the release after 0.5.9 | a future release |
-| `nyl render --context` | nothing: `render` never connects to Kubernetes | the release after 0.5.9 | a future release |
+| `Cluster` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | 0.6.0 | a future release |
+| `Release` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | 0.6.0 | a future release |
+| `nyl render --context` | nothing: `render` never connects to Kubernetes | 0.6.0 | a future release |
 
 ## Cluster and Release in `k8s.nyl/v1`
 
