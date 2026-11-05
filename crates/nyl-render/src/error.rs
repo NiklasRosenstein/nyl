@@ -69,6 +69,15 @@ pub enum NylError {
         hint: String,
     },
 
+    /// A loaded document does not match its resource type. The source file is
+    /// attached by the caller's render provenance.
+    #[error("Invalid {kind}: {message}\nHint: {hint}")]
+    ResourceParse {
+        kind: String,
+        message: String,
+        hint: String,
+    },
+
     #[error("Git error: {0}")]
     Git(#[from] crate::git::GitError),
 
@@ -123,6 +132,19 @@ impl NylError {
         }
     }
 
+    /// Report a core resource error found in the document at `location`.
+    ///
+    /// A resource parse failure keeps its own hint and names the document;
+    /// any other core error becomes a configuration error prefixed with it.
+    pub fn from_core_at(error: nyl_core::CoreError, location: impl std::fmt::Display) -> Self {
+        match error {
+            nyl_core::CoreError::ResourceParse { kind, message, hint } => {
+                NylError::resource_validation(location.to_string(), format!("Invalid {kind}: {message}"), hint)
+            }
+            other => NylError::config(format!("{location}: {other}")),
+        }
+    }
+
     /// Returns true if this error is related to configuration
     pub fn is_config_error(&self) -> bool {
         matches!(self, NylError::Config(_) | NylError::ConfigNotFound(_))
@@ -151,6 +173,9 @@ impl From<nyl_core::CoreError> for NylError {
     fn from(err: nyl_core::CoreError) -> Self {
         match err {
             nyl_core::CoreError::Config(message) => NylError::Config(message),
+            nyl_core::CoreError::ResourceParse { kind, message, hint } => {
+                NylError::ResourceParse { kind, message, hint }
+            }
             nyl_core::CoreError::Json(error) => NylError::Json(error),
         }
     }

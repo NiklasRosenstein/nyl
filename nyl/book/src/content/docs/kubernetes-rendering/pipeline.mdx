@@ -32,6 +32,26 @@ inputs. `--refresh` bypasses cache reads and replaces successful entries;
 `--no-cache` disables persistent reads and writes. `diff` and `apply` always
 perform their live-cluster work even when desired-manifest rendering is reused.
 
+## Resource errors
+
+Nyl's own resources (`HelmChart`, `Component`, `RemoteManifest`, `Release`,
+and the Kubernetes GitOps resources) reject unknown fields and values of the
+wrong type. The error names the source document, the resource kind, the path
+of the offending field, and a hint for fixing it:
+
+```console
+$ nyl render chart.yaml --kube-version 1.28.0 --kube-api-versions v1
+ERROR nyl: Render error:
+Source: chart.yaml (document 1)
+Resource: k8s.nyl/v1 HelmChart default/web (chart: web)
+Caused by: Invalid HelmChart: Type mismatch at `spec.chart.version`: invalid type: sequence, expected a string
+Hint: Check that the field value matches the expected type. For example, numbers should not be quoted, booleans should be true/false.
+```
+
+Failures are classified as an unknown field, a type mismatch, or a missing
+required field; a missing field is reported at the path of the object that
+lacks it.
+
 ## YAML Data Preservation
 
 Nyl preserves manifest keys, values, and types when its YAML output is parsed

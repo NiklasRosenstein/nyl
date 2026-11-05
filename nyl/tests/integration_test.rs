@@ -403,6 +403,39 @@ data:
 }
 
 #[test]
+fn test_render_command_reports_resource_parse_error_with_field_path() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
+    fs::write(
+        temp.path().join("chart.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: web\n  namespace: default\nspec:\n  chart:\n    name: web\n    version: [1, 2]\n",
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args([
+            "render",
+            "--offline",
+            "--kube-version",
+            "1.28.0",
+            "--kube-api-versions",
+            "v1",
+        ])
+        .arg("chart.yaml")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Source: chart.yaml (document 1)"))
+        .stderr(predicate::str::contains(
+            "Invalid HelmChart: Type mismatch at `spec.chart.version`: invalid type: sequence, expected a string",
+        ))
+        .stderr(predicate::str::contains(
+            "Hint: Check that the field value matches the expected type.",
+        ));
+}
+
+#[test]
 fn test_render_command_expands_release_includes() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();

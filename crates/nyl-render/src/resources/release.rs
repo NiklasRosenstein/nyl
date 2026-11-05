@@ -122,8 +122,7 @@ impl Release {
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
         let mut value = value.clone();
         nyl_core::resources::schema::canonicalize_api_version(&mut value);
-        let release: Self =
-            serde_json::from_value(value).map_err(|e| CoreError::Config(format!("Invalid Release resource: {e}")))?;
+        let release: Self = nyl_core::resources::parse_resource(&value, "Release")?;
         release.validate()?;
         Ok(release)
     }

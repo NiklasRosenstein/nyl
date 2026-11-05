@@ -42,6 +42,7 @@ serde = { version = "1.0", features = ["derive"] }
 # float_roundtrip parses every float to the nearest double, which canonical
 # JSON digests depend on
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
+serde_path_to_error = "0.1"
 # ECMAScript number formatting for RFC 8785 canonical JSON
 ryu-js = "1.0"
 toml = "1"

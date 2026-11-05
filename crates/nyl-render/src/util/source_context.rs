@@ -5,6 +5,7 @@
 //! and field locations.
 
 use crate::error::{NylError, Result};
+use nyl_core::resources::parse::parse_error_hint;
 use std::path::PathBuf;
 
 /// Tracks the source file context for parsing operations
@@ -12,6 +13,11 @@ use std::path::PathBuf;
 pub struct SourceContext {
     /// The file path being parsed
     file_path: PathBuf,
+}
+
+/// The resource parse classification, labelling other parser failures as YAML errors.
+fn classify_error(error_msg: &str) -> &'static str {
+    nyl_core::resources::parse::classify_parse_error(error_msg).unwrap_or("YAML parse error")
 }
 
 impl SourceContext {
@@ -55,7 +61,7 @@ impl SourceContext {
     /// Enhance a serde error with file context and helpful hints
     fn enhance_yaml_error(&self, error: serde_saphyr::DeserializeError, context: &str) -> NylError {
         let error_msg = error.to_string();
-        let classification = Self::classify_error(&error_msg);
+        let classification = classify_error(&error_msg);
         let location_suffix = if let Some(location) = error.location() {
             format!(" (line {}, column {})", location.line(), location.column())
         } else {
@@ -64,7 +70,7 @@ impl SourceContext {
         let message = format!("{} in {}{}: {}", classification, context, location_suffix, error_msg);
 
         // Generate helpful hints based on error type
-        let hint = Self::generate_hint(&error_msg);
+        let hint = parse_error_hint(&error_msg);
 
         NylError::resource_validation(self.file_path.display().to_string(), message, hint)
     }
@@ -72,119 +78,16 @@ impl SourceContext {
     /// Enhance a serde_json error with file context and helpful hints.
     fn enhance_serde_json_error(&self, error: serde_json::Error, context: &str) -> NylError {
         let error_msg = error.to_string();
-        let classification = Self::classify_error(&error_msg);
+        let classification = classify_error(&error_msg);
         let message = format!("{} in {}: {}", classification, context, error_msg);
-        let hint = Self::generate_hint(&error_msg);
+        let hint = parse_error_hint(&error_msg);
         NylError::resource_validation(self.file_path.display().to_string(), message, hint)
-    }
-
-    /// Classify parser errors into stable buckets for readable diagnostics.
-    fn classify_error(error_msg: &str) -> &'static str {
-        if Self::extract_unknown_field(error_msg).is_some() {
-            return "Unknown field";
-        }
-
-        if error_msg.contains("invalid type:") {
-            return "Type mismatch";
-        }
-
-        if error_msg.contains("missing field") {
-            return "Missing required field";
-        }
-
-        "YAML parse error"
-    }
-
-    /// Extract field name from "unknown field `name`" error messages
-    fn extract_unknown_field(error_msg: &str) -> Option<String> {
-        // Pattern: "unknown field `fieldname`"
-        if let Some(start) = error_msg.find("unknown field `") {
-            let after_prefix = &error_msg[start + 15..];
-            if let Some(end) = after_prefix.find('`') {
-                return Some(after_prefix[..end].to_string());
-            }
-        }
-        None
-    }
-
-    /// Generate helpful hints based on error message content
-    fn generate_hint(error_msg: &str) -> String {
-        if error_msg.contains("unknown field") {
-            return "Check for typos in field names. Refer to the resource API documentation for valid fields. \
-                    Common mistakes: 'char' instead of 'chart', 'vale' instead of 'value'."
-                .to_string();
-        }
-
-        if error_msg.contains("invalid type") {
-            return "Check that the field value matches the expected type. \
-                    For example, numbers should not be quoted, booleans should be true/false."
-                .to_string();
-        }
-
-        if error_msg.contains("missing field") {
-            return "Ensure all required fields are present in the resource definition. \
-                    Check the resource documentation for required vs optional fields."
-                .to_string();
-        }
-
-        "Check the resource definition against the API reference documentation.".to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_unknown_field() {
-        let msg = "unknown field `unknownField`, expected one of `chart`, `release`";
-        assert_eq!(
-            SourceContext::extract_unknown_field(msg),
-            Some("unknownField".to_string())
-        );
-    }
-
-    #[test]
-    fn test_classify_error_unknown_field() {
-        let msg = "unknown field `xyz`";
-        let result = SourceContext::classify_error(msg);
-        assert_eq!(result, "Unknown field");
-    }
-
-    #[test]
-    fn test_classify_error_type_mismatch() {
-        let msg = "invalid type: string \"abc\", expected u32";
-        let result = SourceContext::classify_error(msg);
-        assert_eq!(result, "Type mismatch");
-    }
-
-    #[test]
-    fn test_classify_error_missing_field() {
-        let msg = "missing field `chart`";
-        let result = SourceContext::classify_error(msg);
-        assert_eq!(result, "Missing required field");
-    }
-
-    #[test]
-    fn test_generate_hint_unknown_field() {
-        let hint = SourceContext::generate_hint("unknown field `xyz`");
-        assert!(hint.contains("typos"));
-        assert!(hint.contains("API documentation"));
-    }
-
-    #[test]
-    fn test_generate_hint_type_mismatch() {
-        let hint = SourceContext::generate_hint("invalid type: string, expected u32");
-        assert!(hint.contains("type"));
-        assert!(hint.contains("quoted"));
-    }
-
-    #[test]
-    fn test_generate_hint_missing_field() {
-        let hint = SourceContext::generate_hint("missing field `chart`");
-        assert!(hint.contains("required"));
-        assert!(hint.contains("documentation"));
-    }
 
     #[test]
     fn test_source_context_new() {

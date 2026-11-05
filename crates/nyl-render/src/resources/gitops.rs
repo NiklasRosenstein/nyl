@@ -991,36 +991,37 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
     let mut value = value.clone();
     nyl_core::resources::schema::canonicalize_api_version(&mut value);
     let value = &value;
-    let resource = match identity.kind {
-        GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
-        GitOpsResourceKind::Cluster => GitOpsResource::Cluster(parse_as(value, KIND_CLUSTER)?),
-        GitOpsResourceKind::ArgoCDInstance => GitOpsResource::ArgoCDInstance(parse_as(value, KIND_ARGOCD_INSTANCE)?),
-        GitOpsResourceKind::DeploymentTarget => {
-            let mut target: DeploymentTarget = parse_as(value, KIND_DEPLOYMENT_TARGET)?;
-            target.apply_defaults();
-            GitOpsResource::DeploymentTarget(target)
-        }
-        GitOpsResourceKind::AppProjectDefinition => {
-            GitOpsResource::AppProjectDefinition(parse_as(value, KIND_APP_PROJECT_DEFINITION)?)
-        }
-        GitOpsResourceKind::ApplicationGroup => {
-            GitOpsResource::ApplicationGroup(Box::new(parse_as(value, KIND_APPLICATION_GROUP)?))
-        }
-        GitOpsResourceKind::Environment => GitOpsResource::Environment(Box::new(parse_as(
-            value,
-            nyl_core::resources::environment::KIND_ENVIRONMENT,
-        )?)),
-        GitOpsResourceKind::EnvironmentGroup => GitOpsResource::EnvironmentGroup(parse_as(
-            value,
-            nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP,
-        )?),
-    };
+    let resource =
+        match identity.kind {
+            GitOpsResourceKind::GitRepository => {
+                GitOpsResource::GitRepository(nyl_core::resources::parse_resource(value, KIND_GIT_REPOSITORY)?)
+            }
+            GitOpsResourceKind::Cluster => {
+                GitOpsResource::Cluster(nyl_core::resources::parse_resource(value, KIND_CLUSTER)?)
+            }
+            GitOpsResourceKind::ArgoCDInstance => {
+                GitOpsResource::ArgoCDInstance(nyl_core::resources::parse_resource(value, KIND_ARGOCD_INSTANCE)?)
+            }
+            GitOpsResourceKind::DeploymentTarget => {
+                let mut target: DeploymentTarget = nyl_core::resources::parse_resource(value, KIND_DEPLOYMENT_TARGET)?;
+                target.apply_defaults();
+                GitOpsResource::DeploymentTarget(target)
+            }
+            GitOpsResourceKind::AppProjectDefinition => GitOpsResource::AppProjectDefinition(
+                nyl_core::resources::parse_resource(value, KIND_APP_PROJECT_DEFINITION)?,
+            ),
+            GitOpsResourceKind::ApplicationGroup => GitOpsResource::ApplicationGroup(Box::new(
+                nyl_core::resources::parse_resource(value, KIND_APPLICATION_GROUP)?,
+            )),
+            GitOpsResourceKind::Environment => GitOpsResource::Environment(Box::new(
+                nyl_core::resources::parse_resource(value, nyl_core::resources::environment::KIND_ENVIRONMENT)?,
+            )),
+            GitOpsResourceKind::EnvironmentGroup => GitOpsResource::EnvironmentGroup(
+                nyl_core::resources::parse_resource(value, nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP)?,
+            ),
+        };
     resource.validate()?;
     Ok(Some(resource))
-}
-
-fn parse_as<T: serde::de::DeserializeOwned>(value: &serde_json::Value, kind: &str) -> Result<T> {
-    serde_json::from_value(value.clone()).map_err(|error| CoreError::config(format!("Invalid {kind}: {error}")))
 }
 
 impl GitOpsResource {
