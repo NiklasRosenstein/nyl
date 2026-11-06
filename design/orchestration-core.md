@@ -619,8 +619,10 @@ spec:
     uid, in any lifecycle. The driver owns the rule: it takes a prefix over
     only when the owner is `gone`, and fails closed when state cannot say
     (`unknown`: the environment is not declared at the source commit, or its
-    state cannot be read). Calls that never publish, such as drift detection
-    and `nyl build`, pass a directory that answers `unknown` for everything.
+    state cannot be read). Calls outside a run, such as drift detection and
+    `nyl build`, pass a directory that answers `unknown` for everything; a
+    direct `--push` records no owner and so never takes a prefix over (see
+    Direct builds below).
   - A refused publication or removal fails with category `ownership`,
     retryable, because the next run reads state again; nothing was written.
     The code says why: `NYL-KUBERNETES-OWNER-FENCED` while the owner exists,
@@ -729,6 +731,67 @@ spec:
     in status after Argo CD applies the manifest. A missing resource, or a
     value of the wrong type, after the Application runs the publication is
     `failed`.
+
+**Direct builds.** The unit declares the `build` capability
+(`nyl build <unit> [-e <env>] [-- --diff | --push]`, see
+[Direct builds](#direct-builds)), so the tree can be rendered, compared with
+the published one, and, for a target no environment owns, published, without
+orchestration:
+
+- A build renders the unit's target through the path a run takes: the same
+  renderer, the same pinned `releases` snapshot (resolved against the
+  environment's receipts with `-e`, exactly as `nyl get output` does), no
+  process environment, and no project secrets. It owns nothing, takes no
+  lease, and writes no receipt or state. The files are those of the
+  worktree, uncommitted changes included, or of `--source <rev>`; the
+  render reads them as a Git worktree, and the ownership index names the
+  unit's source commit, never a snapshot's.
+- Without `-e`, a target whose Release inputs bind `fromUnit` fails like any
+  reference (`-e` names the way out). A unit that declares its target inline
+  cannot be built without `-e`: the inline target is named
+  `<environment>-<unit>` and rendered with the environment's values, so the
+  build refuses with `NYL-KUBERNETES-BUILD-INLINE-TARGET`.
+- With no argument, the build prints a `RenderedTree` document: the target's
+  publication `repository`, `branch`, and `pathPrefix`, the `target`, the
+  digest of every file beneath the prefix (`files`, by path in the
+  repository), and the `indexDigest` a publication of exactly this tree would
+  record.
+- `--diff` compares the render with the tree published at the destination,
+  reading it and writing nothing, and prints a `TreeDiff` document: `base`
+  (the branch head, or `null` before it exists), `changes` (`none`, `create`
+  when nothing is published at the prefix, or `update`), the `owner` the
+  published index names, and the `files` that differ with their `change`
+  (`added`, `modified`, or `removed`). The ownership index is compared by the
+  files it records, and files in the prefix that it does not own are not part
+  of the tree. A difference is not a failure: like `diff-tree`, the exit is
+  0 whether or not the trees differ, and a pipeline reads `changes`. An owned
+  prefix can be compared, because only publishing is fenced.
+- `--push` publishes the render as one commit, by compare-and-swap with the
+  retries of a run's publication, and prints the `PublishedTree` document a
+  run records, without recording it. It publishes only a target no
+  environment owns, and refuses otherwise, before anything is rendered or
+  written, with a stable code and the fix:
+  - `NYL-KUBERNETES-BUILD-TARGET-OWNED` when a publication unit that an
+    Environment selects places the target (`target_placements`: even a unit
+    being torn down, because it owns its target until its teardown
+    completes). The fix names `nyl reconcile -e <environment>`.
+  - `NYL-TREE-OWNED-BY-UNIT` when the published ownership index names a unit
+    incarnation. The publication records no owner, so it cannot tell whether
+    that unit still exists; the way out is the one above, a deliberate
+    release of the prefix.
+  - `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` when the worktree has uncommitted
+    changes, because the index attributes the tree to a commit that must hold
+    it; the fix is to commit, or to build a revision with `--source`.
+  - `NYL-KUBERNETES-BUILD-IDENTITY` when no identity is known to author the
+    commit (`user.name` and `user.email` of the repository's Git
+    configuration, or the wiring's author).
+
+  The index of a direct publication has version 3 and no `owner`, as
+  `publish-tree` writes it, so an environment that later selects the unit
+  adopts the prefix.
+- Any other argument, or `--diff` with `--push`, is refused with
+  `NYL-KUBERNETES-BUILD-ARGUMENT`. The documents are local build information:
+  nothing records them, and no reference reads them.
 
 **Teardown.** A publication unit supports teardown when its target is
 configured so that removing the manifests removes the workloads. It proceeds
@@ -1265,6 +1328,13 @@ spec:
   commit: 9c1e…
   indexDigest: sha256:77d0…
 ```
+
+A direct build (see [Direct builds](#direct-builds)) prints the artifact it
+produced, in the same document shape. A kind may also print documents of
+other kinds that only a build prints and nothing records: `KubernetesPublication`
+prints a `RenderedTree` for a plain build and a `TreeDiff` for `--diff` (see
+the [publication unit](#kubernetes-publication-unit)). Their `metadata.name`
+is `tree` and `diff`, no receipt lists them, and no reference reads them.
 
 A reference reads an artifact through `fromUnit` with `artifact` instead of
 `output`, an optional `kind` assertion, and a `pointer` into the artifact's
@@ -2966,6 +3036,10 @@ orchestration:
   with an error naming the reference and `-e`; there are no per-kind override
   flags in the generic CLI. Arguments after `--` reach the driver unchanged;
   each driver defines and validates its own build options.
+- A direct build prints the documents it produced: the artifacts of its kind,
+  and for a driver that has a read-only mode, such as the publication
+  driver's `--diff`, a report document in the same shape. Nothing records
+  them, and the exit is 0 whatever such a report finds.
 - The capability is a boolean declaring support for direct builds. The driver
   owns publishing policy and validates its arguments. For example, the image
   driver accepts `-- --push`; a kind that cannot safely publish outside

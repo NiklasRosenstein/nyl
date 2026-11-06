@@ -59,6 +59,11 @@ pub struct TargetRender<'a> {
     /// inline: the target is then not discovered but added to the inventory
     /// under `target`, as every other target is compiled from there.
     pub inline: Option<&'a InlineTarget>,
+    /// The commit the ownership index records as the tree's source. `None`
+    /// reads the head of the worktree's repository, which is the source
+    /// commit for a run's checkout; a direct build, whose worktree is a
+    /// snapshot of files, names the commit the files stand for.
+    pub source_commit: Option<&'a str>,
     /// The orchestration unit incarnation that publishes the tree; the
     /// ownership index then records it and fences the prefix.
     pub owner: Option<RenderIndexOwner>,
@@ -233,10 +238,12 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     };
     let (compiled, dependencies) = compile_target_tree_recorded(&inventory, request.target, &cache, options).await?;
 
-    let source_commit = Repository::discover(&inventory.worktree_root)
-        .ok()
-        .and_then(|repository| repository.head().ok().and_then(|head| head.target()))
-        .map(|oid| oid.to_string());
+    let source_commit = request.source_commit.map(str::to_owned).or_else(|| {
+        Repository::discover(&inventory.worktree_root)
+            .ok()
+            .and_then(|repository| repository.head().ok().and_then(|head| head.target()))
+            .map(|oid| oid.to_string())
+    });
     let mut index = target_render_index(&inventory, &compiled, request.target, source_commit, false)?;
     if let Some(owner) = &request.owner {
         index = index.owned_by(owner.clone());
@@ -529,6 +536,155 @@ impl PreparedTarget {
     }
 }
 
+/// How a rendered file differs from the published tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileChange {
+    /// The branch holds no such file; publishing creates it.
+    Added,
+    /// The branch holds other bytes; publishing replaces them.
+    Modified,
+    /// The previous ownership index records the file and the render no
+    /// longer produces it; publishing removes it.
+    Removed,
+}
+
+impl FileChange {
+    /// The name the `TreeDiff` document gives the change.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Modified => "modified",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// What publishing a rendered target would change, read from the
+/// destination branch and never written to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetDiff {
+    /// The branch head the render was compared with; `None` before the
+    /// branch exists.
+    pub base: Option<String>,
+    /// The unit incarnation the published ownership index names, if any.
+    pub published_owner: Option<RenderIndexOwner>,
+    /// Whether the branch holds an ownership index for the prefix.
+    pub published: bool,
+    /// Every file that differs, by path relative to the prefix, in path order.
+    pub files: BTreeMap<PathBuf, FileChange>,
+}
+
+/// Compare `rendered` with the tree published at its destination: the files
+/// beneath the prefix, except the ownership index, whose content follows from
+/// them, against the bytes the branch holds, and the files the published
+/// index owns that the render no longer produces. Unowned files in the
+/// prefix, such as state files other tools commit, are not part of the tree.
+///
+/// This reads the destination and writes nothing, so it applies to a prefix
+/// another owner holds as well: only publishing is fenced.
+pub fn diff_target_publication(
+    rendered: &RenderedTarget,
+    project_dir: &Path,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<TargetDiff> {
+    let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
+    let branch = writable_branch_name(&rendered.destination.branch)?;
+    let push_url = &rendered.destination.push_url;
+    let prefix = rendered.destination.path_prefix.as_str();
+    let scratch = tempfile::TempDir::new()?;
+    let repository = Repository::init(scratch.path())
+        .and_then(|repository| {
+            repository.remote("origin", push_url)?;
+            Ok(repository)
+        })
+        .map_err(|error| NylError::config(format!("Failed to read {}: {error}", nyl_git::sanitize_url(push_url))))?;
+    fetch_branch(&repository, push_url, branch, &auth)?;
+    let base = remote_branch_oid(&repository, branch);
+    let desired: BTreeMap<&Path, &[u8]> = rendered
+        .files
+        .iter()
+        .filter(|(path, _)| path.as_path() != Path::new(DEFAULT_INDEX_PATH))
+        .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+        .collect();
+    let mut diff = TargetDiff {
+        base: base.map(|oid| oid.to_string()),
+        published_owner: None,
+        published: false,
+        files: BTreeMap::new(),
+    };
+    let Some(base) = base else {
+        diff.files = desired
+            .keys()
+            .map(|path| (path.to_path_buf(), FileChange::Added))
+            .collect();
+        return Ok(diff);
+    };
+    let tree = repository
+        .find_commit(base)
+        .and_then(|commit| commit.tree())
+        .map_err(crate::git::GitError::from)?;
+    for (path, bytes) in &desired {
+        let relative =
+            nyl_core::resources::relative_path_to_posix("rendered output path", path).map_err(NylError::from)?;
+        match read_tree_file(&repository, &tree, prefix, &relative)? {
+            None => {
+                diff.files.insert(path.to_path_buf(), FileChange::Added);
+            }
+            Some(published) if published != *bytes => {
+                diff.files.insert(path.to_path_buf(), FileChange::Modified);
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(index) = read_tree_file(&repository, &tree, prefix, DEFAULT_INDEX_PATH)? {
+        let index = parse_index(&index, DEFAULT_INDEX_PATH)?;
+        diff.published = true;
+        for owned in index.files.keys() {
+            let path = PathBuf::from(owned);
+            // A path the render releases from ownership stays published by design.
+            if !desired.contains_key(path.as_path()) && !rendered.reconcile.release.contains(&path) {
+                diff.files.insert(path, FileChange::Removed);
+            }
+        }
+        diff.published_owner = index.owner;
+    }
+    Ok(diff)
+}
+
+/// Make `worktree`, a plain copy of a project's Git-visible files, a Git
+/// worktree with those files committed, so discovery and rendering see what
+/// they see in a checkout. A directory that is a worktree already is left as
+/// it is.
+///
+/// A direct build reads a private snapshot of the files, not a checkout; the
+/// commit this makes stands for no source commit, which is why the render
+/// takes the source commit as a [`TargetRender::source_commit`] instead.
+pub fn ensure_git_worktree(worktree: &Path) -> Result<()> {
+    if worktree.join(".git").exists() {
+        return Ok(());
+    }
+    let git = |error: git2::Error| NylError::from(crate::git::GitError::from(error));
+    let repository = Repository::init(worktree).map_err(git)?;
+    let mut index = repository.index().map_err(git)?;
+    // The snapshot holds exactly what Git showed, files it ignores but
+    // tracks included.
+    index.add_all(["*"], IndexAddOption::FORCE, None).map_err(git)?;
+    index.write().map_err(git)?;
+    let tree = repository.find_tree(index.write_tree().map_err(git)?).map_err(git)?;
+    let signature = git2::Signature::new("nyl", "nyl@localhost", &git2::Time::new(0, 0)).map_err(git)?;
+    repository
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "nyl: snapshot of the worktree",
+            &tree,
+            &[],
+        )
+        .map_err(git)?;
+    Ok(())
+}
+
 /// `sha256:<hex>` over the canonical JSON of an ownership index.
 pub fn index_digest(index: &RenderIndex) -> Result<String> {
     Ok(format!(
@@ -690,6 +846,31 @@ pub fn prepare_publication(
     })
 }
 
+/// The bytes of `relative`, beneath `prefix`, in `tree`; `None` when the tree
+/// holds no such file.
+fn read_tree_file(
+    repository: &Repository,
+    tree: &git2::Tree<'_>,
+    prefix: &str,
+    relative: &str,
+) -> Result<Option<Vec<u8>>> {
+    let path = match prefix.trim_end_matches('/') {
+        "" => relative.to_owned(),
+        prefix => format!("{prefix}/{relative}"),
+    };
+    match tree.get_path(Path::new(&path)) {
+        Ok(entry) => {
+            let blob = entry
+                .to_object(repository)
+                .and_then(|object| object.peel_to_blob())
+                .map_err(crate::git::GitError::from)?;
+            Ok(Some(blob.content().to_vec()))
+        }
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(crate::git::GitError::from(error).into()),
+    }
+}
+
 /// The files the ownership index of the publication at `head` owns beneath
 /// `prefix`, read from that commit, except paths released from ownership.
 /// Owned files absent from the commit are skipped, as reconciliation allows.
@@ -706,23 +887,7 @@ fn published_owned_files(
         .find_commit(head)
         .and_then(|commit| commit.tree())
         .map_err(crate::git::GitError::from)?;
-    let read = |relative: &str| -> Result<Option<Vec<u8>>> {
-        let path = match prefix.trim_end_matches('/') {
-            "" => relative.to_owned(),
-            prefix => format!("{prefix}/{relative}"),
-        };
-        match tree.get_path(Path::new(&path)) {
-            Ok(entry) => {
-                let blob = entry
-                    .to_object(repository)
-                    .and_then(|object| object.peel_to_blob())
-                    .map_err(crate::git::GitError::from)?;
-                Ok(Some(blob.content().to_vec()))
-            }
-            Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
-            Err(error) => Err(crate::git::GitError::from(error).into()),
-        }
-    };
+    let read = |relative: &str| read_tree_file(repository, &tree, prefix, relative);
     let Some(index) = read(DEFAULT_INDEX_PATH)? else {
         return Ok(BTreeMap::new());
     };
@@ -1412,6 +1577,7 @@ spec:
 
     fn render(worktree: &Path, inputs: &InputSnapshot, cache_dir: Option<&Path>) -> Result<RenderedTarget> {
         render_target(&TargetRender {
+            source_commit: None,
             inline: None,
             owner: None,
             selection: super::super::tree::partial::PublicationSelection::default(),
@@ -1543,6 +1709,7 @@ spec:
         owner: Option<RenderIndexOwner>,
     ) -> Result<RenderedTarget> {
         render_target(&TargetRender {
+            source_commit: None,
             inline: Some(inline),
             owner,
             selection: super::super::tree::partial::PublicationSelection::default(),

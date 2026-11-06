@@ -7242,6 +7242,7 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
     Repository::clone(fixture.path().to_str().unwrap(), checkout.path()).unwrap();
     change_partial_api(&checkout);
     let rendered = render_target(&TargetRender {
+        source_commit: None,
         inline: None,
         owner: None,
         resource_catalogue: nyl::resource_catalogue(),
@@ -7447,6 +7448,7 @@ fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
     // The shared publication API also keeps the published generation when only
     // imperative settings and the source revision change.
     let rendered = render_target(&TargetRender {
+        source_commit: None,
         inline: None,
         owner: None,
         resource_catalogue: nyl::resource_catalogue(),

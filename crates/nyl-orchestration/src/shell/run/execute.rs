@@ -298,6 +298,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         cache_dir: shared.cache_dir.clone(),
         teardown_wait: None,
         incarnations: shared.incarnations,
+        dirty_source: false,
     };
 
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
