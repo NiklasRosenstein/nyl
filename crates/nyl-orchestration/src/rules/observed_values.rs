@@ -28,10 +28,11 @@
 //!   recorded for the producer's current receipt that is not older than its
 //!   `maxAge`, else `pending` with the reason.
 //! - **Changed.** [`changed_consumers`] finds, from stored documents alone,
-//!   the consumers whose resolved value no longer equals the recorded one:
-//!   they are `ready` for the next reconcile, which `plan` and `status` show
-//!   and `nyl observe` names with `NYL-OBSERVATION-CHANGED`. It is neither
-//!   drift nor evidence: the producer's receipt still holds.
+//!   the consumers whose resolved value no longer equals the recorded one,
+//!   and the ones that wait for a value that has now arrived: they are `ready`
+//!   for the next reconcile, which `plan` and `status` show and `nyl observe`
+//!   names with `NYL-OBSERVATION-CHANGED`. It is neither drift nor evidence:
+//!   the producer's receipt still holds.
 //! - **Reasons.** A consumer's blocked reason reads `observation <name> of
 //!   <producer> is pending: <why>`; [`parse_reason`] reads one back for
 //!   reports, which show the stable reason [`OBSERVATION_PENDING`] and the
@@ -44,8 +45,8 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
 use nyl_core::orchestration::ids::{ExecutionKey, UnitName};
 use nyl_core::orchestration::state::{
-    BlockedReason, DesiredUnit, Lifecycle, ObservationRecord, ObservationRecordKind, ObservedUnit, RecordedObservation,
-    StateV1,
+    BlockedReason, DesiredUnit, Lifecycle, ObservationRecord, ObservationRecordKind, ObservedUnit, Readiness,
+    RecordedObservation, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::units::ObservationDeclaration;
@@ -156,9 +157,9 @@ pub fn settle(inputs: &SettleInputs<'_>) -> Settled {
                 // A value read again is recorded again once its last read is
                 // older than the refresh interval, or than half its `maxAge`
                 // when that is shorter, so `maxAge` stays satisfiable.
-                let refresh = declaration
-                    .max_age
-                    .map_or(inputs.refresh, |age| inputs.refresh.min(Duration::from_secs(age.as_secs() / 2)));
+                let refresh = declaration.max_age.map_or(inputs.refresh, |age| {
+                    inputs.refresh.min(Duration::from_secs(age.as_secs() / 2))
+                });
                 let unchanged = matches!(before, Some(RecordedObservation::Value { value: old, observed_at })
                     if *old == value && inputs.now < refresh.after(*observed_at));
                 if unchanged {
@@ -220,9 +221,14 @@ pub fn settle(inputs: &SettleInputs<'_>) -> Settled {
 /// What a consumer may resolve of one observation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Standing {
-    Value { value: Value, observed_at: Timestamp },
+    Value {
+        value: Value,
+        observed_at: Timestamp,
+    },
     /// No usable value, with the reason a consumer's blocked reason shows.
-    Pending { reason: String },
+    Pending {
+        reason: String,
+    },
 }
 
 /// The standing of observation `name` of `unit`, whose current receipt has
@@ -243,7 +249,9 @@ pub fn standing(
         None => Standing::Pending {
             reason: "not observed yet".to_owned(),
         },
-        Some(RecordedObservation::Pending { pending }) => Standing::Pending { reason: pending.clone() },
+        Some(RecordedObservation::Pending { pending }) => Standing::Pending {
+            reason: pending.clone(),
+        },
         Some(RecordedObservation::Value { value, observed_at }) => match declaration.max_age {
             Some(max_age) if now > max_age.after(*observed_at) => Standing::Pending {
                 reason: format!(
@@ -271,7 +279,9 @@ pub fn changes(
     stored
         .iter()
         .filter(|(unit, record)| {
-            let receipt = observed.get(*unit).and_then(|observed| observed.receipt.as_ref().map(|r| (observed, r)));
+            let receipt = observed
+                .get(*unit)
+                .and_then(|observed| observed.receipt.as_ref().map(|r| (observed, r)));
             !receipt.is_some_and(|(observed, receipt)| {
                 receipt.execution_key == record.execution_key && observed.unit.uid == record.unit.uid
             })
@@ -330,36 +340,84 @@ pub fn warnings(unit: &UnitName, environment: &str, reasons: &[BlockedReason]) -
         .collect()
 }
 
-/// A consumer whose resolved value of an observation no longer equals the
-/// recorded one.
+/// A consumer whose inputs differ from what is recorded for an observation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChangedConsumer {
     pub consumer: UnitName,
     pub producer: UnitName,
     pub observation: String,
+    /// The value was not there when the consumer last resolved (it blocked
+    /// on it); otherwise it resolved another value.
+    pub arrived: bool,
 }
 
-/// The consumers whose stored resolution of an observation reference differs
-/// from what is recorded now, found from the stored documents alone (no
-/// rendering): each active consumer of this environment with a resolved
-/// spec, for each of its `fromUnit: {unit, observation}` references whose
-/// producer has a current receipt and a usable value that is not the value
-/// the consumer resolved. A producer without a usable value leaves its
-/// consumer to resolution, which blocks it.
+/// The consumers whose stored resolution of an observation differs from what
+/// is recorded now, found from the stored documents alone (no rendering):
+///
+/// - each active consumer of this environment with a resolved spec, for each
+///   of its `fromUnit: {unit, observation}` references whose producer has a
+///   current receipt and a usable value that is not the value the consumer
+///   resolved;
+/// - each active consumer that is blocked only on observations (see
+///   [`reason`]) that now all have a usable value: `arrived`.
+///
+/// A producer without a usable value leaves its consumer to resolution,
+/// which blocks it.
 pub fn changed_consumers(
     desired: &BTreeMap<UnitName, DesiredUnit>,
     observed: &BTreeMap<UnitName, ObservedUnit>,
     records: &BTreeMap<UnitName, ObservationRecord>,
     now: Timestamp,
 ) -> Vec<ChangedConsumer> {
+    // What a producer's observation holds now: its value, if usable.
+    let usable = |producer: &UnitName, observation: &str| -> Option<Value> {
+        let producer_document = desired.get(producer)?;
+        if !receipt_is_current(producer_document, observed.get(producer)) {
+            return None;
+        }
+        let key = producer_document.execution_key.as_ref()?;
+        let declaration = declarations(spec_of(producer_document)).ok()?.remove(observation)?;
+        match standing(
+            producer_document,
+            key,
+            &declaration,
+            observation,
+            records.get(producer),
+            now,
+        ) {
+            Standing::Value { value, .. } => Some(value),
+            Standing::Pending { .. } => None,
+        }
+    };
     let mut changed = Vec::new();
     for (consumer, document) in desired {
-        let Some(resolved) = document.resolved_spec.as_ref() else {
-            continue;
-        };
         if !matches!(document.lifecycle, Lifecycle::Active) {
             continue;
         }
+        let Some(resolved) = document.resolved_spec.as_ref() else {
+            // Blocked only on observations that now have values.
+            if let Readiness::Blocked { reasons } = &document.readiness {
+                let waits: Vec<_> = reasons.iter().map(|reason| parse_reason(&reason.reason)).collect();
+                let arrived: Vec<ChangedConsumer> = waits
+                    .iter()
+                    .flatten()
+                    .filter_map(|waiting| {
+                        let producer = UnitName::new(&waiting.producer).ok()?;
+                        usable(&producer, &waiting.observation)?;
+                        Some(ChangedConsumer {
+                            consumer: consumer.clone(),
+                            producer,
+                            observation: waiting.observation.clone(),
+                            arrived: true,
+                        })
+                    })
+                    .collect();
+                if !reasons.is_empty() && arrived.len() == reasons.len() {
+                    changed.extend(arrived);
+                }
+            }
+            continue;
+        };
         let Ok(references) = unit_references("", &document.spec) else {
             continue;
         };
@@ -371,24 +429,7 @@ pub fn changed_consumers(
             let Ok(producer) = UnitName::new(&source.unit) else {
                 continue;
             };
-            let Some(producer_document) = desired.get(&producer) else {
-                continue;
-            };
-            if !receipt_is_current(producer_document, observed.get(&producer)) {
-                continue;
-            }
-            let Some(key) = producer_document.execution_key.as_ref() else {
-                continue;
-            };
-            let Some(declaration) = declarations(spec_of(producer_document))
-                .ok()
-                .and_then(|mut declared| declared.remove(observation))
-            else {
-                continue;
-            };
-            let Standing::Value { value, .. } =
-                standing(producer_document, key, &declaration, observation, records.get(&producer), now)
-            else {
+            let Some(value) = usable(&producer, observation) else {
                 continue;
             };
             let selected = nyl_core::json_pointer::resolve(&value, source.pointer.as_deref().unwrap_or(""));
@@ -397,6 +438,7 @@ pub fn changed_consumers(
                     consumer: consumer.clone(),
                     producer,
                     observation: observation.to_owned(),
+                    arrived: false,
                 });
             }
         }
@@ -418,10 +460,17 @@ pub fn changed_warnings(
         .map(|changed| {
             Finding::new(
                 Code::ObservationChanged,
-                format!(
-                    "observed value {} of {} changed, so {consumer} resolves another value than it executed with",
-                    changed.observation, changed.producer
-                ),
+                if changed.arrived {
+                    format!(
+                        "observed value {} of {} has a value now, so {consumer} can resolve",
+                        changed.observation, changed.producer
+                    )
+                } else {
+                    format!(
+                        "observed value {} of {} changed, so {consumer} resolves another value than it executed with",
+                        changed.observation, changed.producer
+                    )
+                },
                 format!("run `nyl reconcile -e {environment}`: it executes {consumer} with the new value, under its own approval"),
             )
         })
@@ -512,7 +561,11 @@ mod tests {
     /// what is recorded, and the next reconcile only runs them when told.
     #[test]
     fn test_a_value_arriving_after_pending_is_recorded_and_changed() {
-        let first = settled(None, &readings(&[("ip", pending("no address")), ("port", pending("no port"))]), at(1));
+        let first = settled(
+            None,
+            &readings(&[("ip", pending("no address")), ("port", pending("no port"))]),
+            at(1),
+        );
         let record = first.record.clone().unwrap();
         assert_eq!(
             record.values["ip"],
@@ -605,9 +658,13 @@ mod tests {
     /// wrong type being recorded.
     #[test]
     fn test_a_failed_read_keeps_the_last_value_and_a_wrong_type_fails() {
-        let record = settled(None, &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]), at(0))
-            .record
-            .unwrap();
+        let record = settled(
+            None,
+            &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]),
+            at(0),
+        )
+        .record
+        .unwrap();
         let outcome = settled(
             Some(&record),
             &readings(&[("ip", failed("no credentials")), ("port", value(json!("https")))]),
@@ -625,9 +682,13 @@ mod tests {
     /// pending read after a value replaces it.
     #[test]
     fn test_a_value_that_becomes_pending_replaces_the_value() {
-        let record = settled(None, &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]), at(0))
-            .record
-            .unwrap();
+        let record = settled(
+            None,
+            &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]),
+            at(0),
+        )
+        .record
+        .unwrap();
         let outcome = settled(
             Some(&record),
             &readings(&[("ip", pending("address removed")), ("port", value(json!(443)))]),
@@ -648,9 +709,13 @@ mod tests {
     fn test_standing_requires_the_receipt_and_honors_max_age() {
         let unit = producer();
         let key = hex_key('a');
-        let record = settled(None, &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]), at(0))
-            .record
-            .unwrap();
+        let record = settled(
+            None,
+            &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]),
+            at(0),
+        )
+        .record
+        .unwrap();
         let declared = declared();
         let standing_of = |name: &str, record: Option<&ObservationRecord>, key: &ExecutionKey, now| {
             standing(&unit, key, &declared[name], name, record, now)
@@ -663,10 +728,16 @@ mod tests {
             }
         );
         let other_key = hex_key('b');
-        assert!(matches!(standing_of("ip", Some(&record), &other_key, at(1)), Standing::Pending { .. }));
+        assert!(matches!(
+            standing_of("ip", Some(&record), &other_key, at(1)),
+            Standing::Pending { .. }
+        ));
         assert!(matches!(standing_of("ip", None, &key, at(1)), Standing::Pending { .. }));
         // `port` stops resolving 10 minutes after its last successful read.
-        assert!(matches!(standing_of("port", Some(&record), &key, at(10)), Standing::Value { .. }));
+        assert!(matches!(
+            standing_of("port", Some(&record), &key, at(10)),
+            Standing::Value { .. }
+        ));
         let Standing::Pending { reason } = standing_of("port", Some(&record), &key, at(11)) else {
             panic!("older than maxAge");
         };
@@ -676,7 +747,10 @@ mod tests {
             uid: Some(super::super::fixtures::uid_numbered(9)),
             ..other.unit
         };
-        assert!(matches!(standing_of("ip", Some(&other), &key, at(1)), Standing::Pending { .. }));
+        assert!(matches!(
+            standing_of("ip", Some(&other), &key, at(1)),
+            Standing::Pending { .. }
+        ));
     }
 
     /// Catches an old receipt's values surviving the receipt that replaced
@@ -684,24 +758,50 @@ mod tests {
     /// reference.
     #[test]
     fn test_changes_drop_the_records_of_replaced_receipts() {
-        let record = settled(None, &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]), at(0))
-            .record
-            .unwrap();
+        let record = settled(
+            None,
+            &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]),
+            at(0),
+        )
+        .record
+        .unwrap();
         let stored = BTreeMap::from([(name("kubernetes"), record)]);
-        let current = BTreeMap::from([(name("kubernetes"), observed_numbered("kubernetes", 1, Some(hex_key('a'))))]);
+        let current = BTreeMap::from([(
+            name("kubernetes"),
+            observed_numbered("kubernetes", 1, Some(hex_key('a'))),
+        )]);
         assert!(changes(&stored, &current).is_empty());
-        let replaced = BTreeMap::from([(name("kubernetes"), observed_numbered("kubernetes", 1, Some(hex_key('b'))))]);
-        assert_eq!(changes(&stored, &replaced), BTreeMap::from([(name("kubernetes"), None)]));
-        assert_eq!(changes(&stored, &BTreeMap::new()), BTreeMap::from([(name("kubernetes"), None)]));
-        let recreated = BTreeMap::from([(name("kubernetes"), observed_numbered("kubernetes", 2, Some(hex_key('a'))))]);
-        assert_eq!(changes(&stored, &recreated), BTreeMap::from([(name("kubernetes"), None)]));
+        let replaced = BTreeMap::from([(
+            name("kubernetes"),
+            observed_numbered("kubernetes", 1, Some(hex_key('b'))),
+        )]);
+        assert_eq!(
+            changes(&stored, &replaced),
+            BTreeMap::from([(name("kubernetes"), None)])
+        );
+        assert_eq!(
+            changes(&stored, &BTreeMap::new()),
+            BTreeMap::from([(name("kubernetes"), None)])
+        );
+        let recreated = BTreeMap::from([(
+            name("kubernetes"),
+            observed_numbered("kubernetes", 2, Some(hex_key('a'))),
+        )]);
+        assert_eq!(
+            changes(&stored, &recreated),
+            BTreeMap::from([(name("kubernetes"), None)])
+        );
     }
 
     /// Catches a reason that does not survive storage in a desired
     /// document, where status and the reports read it back.
     #[test]
     fn test_reasons_round_trip_with_the_drivers_words() {
-        let text = reason("ip", "kubernetes", "field-not-set: /status/loadBalancer: of the Service");
+        let text = reason(
+            "ip",
+            "kubernetes",
+            "field-not-set: /status/loadBalancer: of the Service",
+        );
         assert_eq!(
             parse_reason(&text),
             Some(WaitingFor {
@@ -744,7 +844,10 @@ mod tests {
         let desired = |consumer: DesiredUnit| {
             BTreeMap::from([(name("kubernetes"), declared_object.clone()), (name("dns"), consumer)])
         };
-        let observed = BTreeMap::from([(name("kubernetes"), observed_numbered("kubernetes", 1, Some(hex_key('a'))))]);
+        let observed = BTreeMap::from([(
+            name("kubernetes"),
+            observed_numbered("kubernetes", 1, Some(hex_key('a'))),
+        )]);
         let unit = declared_object.clone();
         let key = hex_key('a');
         let declaration = declarations(&unit.spec).unwrap();
@@ -767,15 +870,50 @@ mod tests {
             [ChangedConsumer {
                 consumer: name("dns"),
                 producer: name("kubernetes"),
-                observation: "ip".to_owned()
+                observation: "ip".to_owned(),
+                arrived: false
             }]
         );
         let same = desired(consumer(json!({"values": {"address": "203.0.113.20"}})));
         assert!(changed_consumers(&same, &observed, &records, at(1)).is_empty());
         // A producer whose receipt is not current has no value to compare.
-        let replaced = BTreeMap::from([(name("kubernetes"), observed_numbered("kubernetes", 1, Some(hex_key('b'))))]);
+        let replaced = BTreeMap::from([(
+            name("kubernetes"),
+            observed_numbered("kubernetes", 1, Some(hex_key('b'))),
+        )]);
         assert!(changed_consumers(&stale, &replaced, &records, at(1)).is_empty());
         // Without a record there is nothing recorded to differ from.
         assert!(changed_consumers(&stale, &observed, &BTreeMap::new(), at(1)).is_empty());
+
+        // A consumer blocked only on the value, which now has one, can resolve.
+        let mut waiting = consumer(json!({}));
+        waiting.resolved_spec = None;
+        waiting.execution_key = None;
+        waiting.readiness = Readiness::Blocked {
+            reasons: vec![BlockedReason {
+                pointer: "/values/address".to_owned(),
+                reason: reason("ip", "kubernetes", "no address yet"),
+            }],
+        };
+        let arrived = desired(waiting.clone());
+        assert_eq!(
+            changed_consumers(&arrived, &observed, &records, at(1)),
+            [ChangedConsumer {
+                consumer: name("dns"),
+                producer: name("kubernetes"),
+                observation: "ip".to_owned(),
+                arrived: true
+            }]
+        );
+        // Still blocked when the value is not there, or when something else blocks it too.
+        assert!(changed_consumers(&arrived, &observed, &BTreeMap::new(), at(1)).is_empty());
+        let mut also = waiting;
+        if let Readiness::Blocked { reasons } = &mut also.readiness {
+            reasons.push(BlockedReason {
+                pointer: "/dependsOn/0".to_owned(),
+                reason: "network has no current receipt".to_owned(),
+            });
+        }
+        assert!(changed_consumers(&desired(also), &observed, &records, at(1)).is_empty());
     }
 }

@@ -488,7 +488,11 @@ pub struct ResourceRef {
 impl std::fmt::Display for ResourceRef {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.namespace {
-            Some(namespace) => write!(formatter, "{} {namespace}/{} ({})", self.kind, self.name, self.api_version),
+            Some(namespace) => write!(
+                formatter,
+                "{} {namespace}/{} ({})",
+                self.kind, self.name, self.api_version
+            ),
             None => write!(formatter, "{} {} ({})", self.kind, self.name, self.api_version),
         }
     }

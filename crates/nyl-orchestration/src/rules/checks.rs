@@ -306,12 +306,8 @@ pub fn observe_check(readings: &ObservedValues, declared: &BTreeMap<String, Obse
             .map(|name| {
                 let status = match readings.values.get(name) {
                     Some(ObservedValue::Value { value }) => ObservationStatus::Value { value: value.clone() },
-                    Some(ObservedValue::Pending { reason }) => ObservationStatus::Pending {
-                        reason: reason.clone(),
-                    },
-                    Some(ObservedValue::Failed { reason }) => ObservationStatus::Failed {
-                        reason: reason.clone(),
-                    },
+                    Some(ObservedValue::Pending { reason }) => ObservationStatus::Pending { reason: reason.clone() },
+                    Some(ObservedValue::Failed { reason }) => ObservationStatus::Failed { reason: reason.clone() },
                     None => ObservationStatus::Failed {
                         reason: format!("the driver reported nothing for observation {name}"),
                     },
@@ -571,7 +567,12 @@ mod tests {
         .unwrap();
         let readings = |port: ObservedValue| ObservedValues {
             values: BTreeMap::from([
-                ("ip".to_owned(), ObservedValue::Value { value: json!("203.0.113.10") }),
+                (
+                    "ip".to_owned(),
+                    ObservedValue::Value {
+                        value: json!("203.0.113.10"),
+                    },
+                ),
                 ("port".to_owned(), port),
             ]),
         };
@@ -588,15 +589,25 @@ mod tests {
                 None,
                 DriftRepair::Converge,
             );
-            (unit_exit(&unit), findings.iter().map(|finding| finding.code).collect::<Vec<_>>())
+            (
+                unit_exit(&unit),
+                findings.iter().map(|finding| finding.code).collect::<Vec<_>>(),
+            )
         };
-        assert_eq!(check(ObservedValue::Value { value: json!(443) }), (ExitCategory::Ok, vec![]));
         assert_eq!(
-            check(ObservedValue::Pending { reason: "no port".to_owned() }),
+            check(ObservedValue::Value { value: json!(443) }),
+            (ExitCategory::Ok, vec![])
+        );
+        assert_eq!(
+            check(ObservedValue::Pending {
+                reason: "no port".to_owned()
+            }),
             (ExitCategory::Incomplete, vec![Code::ObservationPending])
         );
         assert_eq!(
-            check(ObservedValue::Failed { reason: "no credentials".to_owned() }),
+            check(ObservedValue::Failed {
+                reason: "no credentials".to_owned()
+            }),
             (ExitCategory::Incomplete, vec![Code::ObservationFailed])
         );
         // A name the driver left out is failed.

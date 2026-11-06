@@ -1528,7 +1528,14 @@ mod tests {
         // An empty declaration declares nothing, so every kind accepts it.
         let accepted = run_desire(
             &source(vec![
-                ("reads", rendered(TEST_KIND, true, Some(json!({"observes": true, "observations": observations})))),
+                (
+                    "reads",
+                    rendered(
+                        TEST_KIND,
+                        true,
+                        Some(json!({"observes": true, "observations": observations})),
+                    ),
+                ),
                 ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
             ]),
             &EnvironmentSnapshot::default(),

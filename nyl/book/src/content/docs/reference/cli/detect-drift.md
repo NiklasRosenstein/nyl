@@ -120,6 +120,10 @@ recorded for the current receipt, and `attest` is what records it: the next
 `reconcile` runs the blocked unit, and no `attest` is needed between the two
 for a unit that attested itself in its `command`.
 
+[`nyl observe`](/nyl/reference/cli/observe/) is the third check of current
+receipts: it reads the observed values of units whose kind reads them, and
+shares these options, leases, and exit codes.
+
 ## Cancellation and several environments
 
 SIGINT or SIGTERM cancels the check: it starts no further batch,

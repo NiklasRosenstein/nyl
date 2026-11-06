@@ -503,7 +503,8 @@ pub fn status_with_readiness(
     // A current consumer whose observed value changed is work for the next
     // reconcile: state `ready`, exit 2. Contract:
     // [Observed values](../../../../design/orchestration-core.md#observed-values).
-    let changed = super::observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &snapshot.observations, now);
+    let changed =
+        super::observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &snapshot.observations, now);
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
@@ -514,7 +515,7 @@ pub fn status_with_readiness(
             unit_state(desired, observed, running.contains(name))
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
-        if unit.state == Some(UnitState::Current) {
+        if matches!(unit.state, Some(UnitState::Current | UnitState::Blocked)) {
             let reasons = changed
                 .iter()
                 .filter(|changed| &changed.consumer == name)
@@ -525,7 +526,12 @@ pub fn status_with_readiness(
                     "ready: {}",
                     reasons
                         .iter()
-                        .map(|changed| format!("observed value {} of {} changed", changed.observation, changed.producer))
+                        .map(|changed| format!(
+                            "observed value {} of {} {}",
+                            changed.observation,
+                            changed.producer,
+                            if changed.arrived { "arrived" } else { "changed" }
+                        ))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
@@ -545,7 +551,9 @@ pub fn status_with_readiness(
         }
         let condition = observed.and_then(|observed| observed.condition.as_ref());
         unit.last_run = observed.and_then(ObservedUnit::last_run).cloned();
-        if let Readiness::Blocked { reasons } = &desired.readiness {
+        // A unit whose every blocker is an observed value that has arrived
+        // since is ready, and shows no blocker.
+        if let (Readiness::Blocked { reasons }, false) = (&desired.readiness, unit.state == Some(UnitState::Ready)) {
             unit.blocked_by = reasons
                 .iter()
                 .map(|reason| blocked_by(&reason.pointer, &reason.reason))

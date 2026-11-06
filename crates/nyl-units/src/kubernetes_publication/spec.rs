@@ -107,7 +107,9 @@ pub(super) struct ObservationSource {
 /// `{resource: {apiVersion, kind, namespace?, name}, pointer}`. Nothing here
 /// needs the rendered target; whether the target renders the resource is
 /// checked when the unit is resolved. Secrets are never read.
-pub(super) fn observation_sources(spec: &Value) -> Result<std::collections::BTreeMap<String, ObservationSource>, String> {
+pub(super) fn observation_sources(
+    spec: &Value,
+) -> Result<std::collections::BTreeMap<String, ObservationSource>, String> {
     let mut sources = std::collections::BTreeMap::new();
     let Some(observations) = spec.get("observations") else {
         return Ok(sources);
@@ -117,12 +119,13 @@ pub(super) fn observation_sources(spec: &Value) -> Result<std::collections::BTre
         .ok_or("spec.observations must be a mapping of observation names")?;
     for (name, declaration) in observations {
         let field = format!("spec.observations.{name}.from");
-        let from = declaration
-            .get("from")
-            .and_then(Value::as_object)
-            .ok_or_else(|| format!("{field} is required: {{resource: {{apiVersion, kind, namespace, name}}, pointer}}"))?;
+        let from = declaration.get("from").and_then(Value::as_object).ok_or_else(|| {
+            format!("{field} is required: {{resource: {{apiVersion, kind, namespace, name}}, pointer}}")
+        })?;
         if let Some(key) = from.keys().find(|key| !matches!(key.as_str(), "resource" | "pointer")) {
-            return Err(format!("{field} has unknown field {key:?}; it has resource and pointer"));
+            return Err(format!(
+                "{field} has unknown field {key:?}; it has resource and pointer"
+            ));
         }
         let resource = from
             .get("resource")
@@ -308,12 +311,18 @@ mod tests {
         assert_eq!(sources["ip"].resource.name, "ingress-nginx");
         assert_eq!(sources["ip"].resource.namespace.as_deref(), Some("ingress"));
         let cluster_scoped = json!({"apiVersion": "v1", "kind": "Namespace", "name": "ingress"});
-        assert!(validate(&observing(&json!({"resource": cluster_scoped, "pointer": "/status/phase"}))).is_ok());
+        assert!(validate(&observing(
+            &json!({"resource": cluster_scoped, "pointer": "/status/phase"})
+        ))
+        .is_ok());
         for (from, expected) in [
             (json!({"pointer": "/a"}), "resource is required"),
             (json!({"resource": service}), "pointer is required"),
             (json!({"resource": service, "pointer": "a"}), "JSON Pointer"),
-            (json!({"resource": service, "pointer": "/a", "other": 1}), "unknown field \"other\""),
+            (
+                json!({"resource": service, "pointer": "/a", "other": 1}),
+                "unknown field \"other\"",
+            ),
             (
                 json!({"resource": {"apiVersion": "v1", "kind": "Service"}, "pointer": "/a"}),
                 "name is required",

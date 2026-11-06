@@ -10,8 +10,8 @@ use nyl_core::orchestration::ports::{
     Checkpoint, Committed, StateError, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservationRecord, ObservedUnit, Operation, Run, RunKind,
-    Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
+    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservationRecord, ObservedUnit,
+    Operation, Run, RunKind, Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
 use nyl_state::git::{CommitAuthor, GitStateStore};

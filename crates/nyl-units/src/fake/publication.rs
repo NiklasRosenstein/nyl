@@ -246,9 +246,7 @@ impl Driver for FakePublication {
             .and_then(Value::as_object)
             .map(|observations| observations.keys().cloned().collect())
             .unwrap_or_default();
-        self.script
-            .observed(&unit.unit.name, &names)
-            .map(Supported::Supported)
+        self.script.observed(&unit.unit.name, &names).map(Supported::Supported)
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {

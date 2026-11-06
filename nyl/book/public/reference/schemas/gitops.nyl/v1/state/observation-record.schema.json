@@ -1,0 +1,134 @@
+{
+  "$defs": {
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "ExecutionKey": {
+      "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "ObservationRecordKind": {
+      "const": "ObservationRecord"
+    },
+    "RecordedObservation": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "The value, and when it was last read successfully.",
+          "properties": {
+            "observedAt": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "value": true
+          },
+          "required": [
+            "value",
+            "observedAt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No value yet for this receipt, with the driver's reason.",
+          "properties": {
+            "pending": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pending"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "One observation in an [`ObservationRecord`]."
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    },
+    "UnitIdentity": {
+      "additionalProperties": false,
+      "description": "A unit's identity in state documents.",
+      "properties": {
+        "apiVersion": {
+          "description": "The unit's kind; empty only in a held marker, which `nyl hold` writes\nfor a unit it never rendered ([`DesiredUnit::held_marker`]).",
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/UnitName"
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The incarnation; absent for a held unit without one."
+        }
+      },
+      "required": [
+        "environment",
+        "name"
+      ],
+      "type": "object"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A unit's latest observed values, `observed/units/<unit>/observations.yaml`:\nwhat the driver read for the receipt whose execution key it names. A\nrecord belongs to that receipt alone and goes when a new receipt replaces\nit, so a value read from what ran before never satisfies a reference.\nContract: [Observed values](../../../../design/orchestration-core.md#observed-values).",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "at": {
+      "description": "When the record was last written: a recorded read, never a read that\nchanged nothing.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "executionKey": {
+      "$ref": "#/$defs/ExecutionKey"
+    },
+    "kind": {
+      "$ref": "#/$defs/ObservationRecordKind"
+    },
+    "unit": {
+      "$ref": "#/$defs/UnitIdentity"
+    },
+    "values": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RecordedObservation"
+      },
+      "description": "Each declared observation by name, as of its last recorded read.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "unit",
+    "executionKey",
+    "at",
+    "values"
+  ],
+  "title": "ObservationRecord",
+  "type": "object"
+}

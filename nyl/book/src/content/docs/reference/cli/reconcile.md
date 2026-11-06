@@ -10,7 +10,7 @@ chooses its source commit, resolves references, and decides what executes.
 `reconcile` runs selected environments' Command, OciImage, Terraform,
 OpenTofu, and [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/)
 units, with recorded approvals, recovery, drift repair, and lifecycle
-handling. Publication observation and promotion drivers follow in M5 and M6.
+handling. Promotion drivers follow in M6.
 :::
 
 ```bash
@@ -33,6 +33,21 @@ The environment's state must exist: create it once with
 lease, executes waves of ready units until nothing is ready, writes one
 transition commit per state ref it changes, and releases the lease. A run
 that changes nothing writes no commit.
+
+## Observed values
+
+A run reads the [observed values](/nyl/orchestration/runs/#observed-values) of
+every unit that has a current receipt and declares `observations` once, before it
+resolves the unit's consumers, and after it executed such a unit waits up to
+the unit's `observationWait` for values that are still pending, polling about
+every 15 seconds and only while no other unit is ready. A consumer of a pending
+value is blocked (`NYL-OBSERVATION-PENDING`, exit 2); a changed value makes its
+consumers execute again in the same run, without the producer executing. A read
+that fails warns (`NYL-OBSERVATION-FAILED`) and keeps the last recorded value.
+The transition commit's summary lists the observations whose value changed under
+`observationsChanged`. The run needs the read credentials the unit admits; a job
+without them can leave the reading to [`nyl observe`](/nyl/reference/cli/observe/)
+elsewhere.
 
 ## Deletion
 
@@ -213,6 +228,11 @@ Besides the codes above, a reconcile reports:
 | `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix, so nothing was published (a retryable failure). Tear that unit down or release it with `nyl state forget`; see [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership). |
 | `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read, so the fence holds. Declare the environment again and tear its unit down, or release the prefix as the same page describes. |
 | `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published, and nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile again. |
+| `NYL-KUBERNETES-OBSERVATION-UNOWNED` | A publication observes a resource its target does not render. Observe a resource one of the target's Releases renders. |
+| `NYL-OBSERVATIONS-UNSUPPORTED` | A unit declares `observations`, but its kind cannot read observed values for its spec, such as a Command, or a publication in `mode: publish`. |
+| `NYL-OBSERVATION-PENDING` | A consumer waits for an observed value that its producer's current receipt has none of yet. Run `nyl observe` or `nyl reconcile` once the system holds it, or give the producer an `observationWait`. |
+| `NYL-OBSERVATION-FAILED` | An observed value could not be read; the last recorded value stays usable. Fix the cause, such as missing credentials. |
+| `NYL-OBSERVATION-CHANGED` | Reported by `nyl status` and `nyl observe`: an observed value changed or arrived, so its consumers are ready for the next reconcile. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting first. |
 | `NYL-STATE-DELETED` | The environment's state was deleted with `nyl state delete`. Remove the Environment, or start over with `nyl state init --fresh`. |

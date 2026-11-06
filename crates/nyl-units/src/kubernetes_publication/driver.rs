@@ -57,8 +57,8 @@ use serde_json::{json, Value};
 
 use super::observe::{self, ARGOCD};
 use super::observed_values::{self, ClusterReader, LiveReader};
-use super::spec::{OBSERVATION_SOURCES, WORKLOAD};
 use super::readiness::evaluate;
+use super::spec::{OBSERVATION_SOURCES, WORKLOAD};
 use super::{build, plan, publish, render, resolution_inputs, teardown, teardown_wait, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
 

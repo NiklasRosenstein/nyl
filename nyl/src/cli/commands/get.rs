@@ -462,7 +462,9 @@ fn value_form(
             match kind {
                 ValueKind::Artifact => "name the artifact as <unit>/<artifact>, such as web-image/image",
                 ValueKind::Output => "name the output as <unit>/<output>, such as network/vpcId",
-                ValueKind::Observation => "name the observed value as <unit>/<observation>, such as kubernetes/ingressIp",
+                ValueKind::Observation => {
+                    "name the observed value as <unit>/<observation>, such as kubernetes/ingressIp"
+                }
             },
         )));
     };

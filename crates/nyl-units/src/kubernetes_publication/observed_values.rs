@@ -108,8 +108,9 @@ pub(super) fn recorded(spec: &Value, rendered: &RenderedTarget, target: &str) ->
     if declared.is_empty() {
         return Ok(None);
     }
-    let applications = generated_applications(rendered)
-        .map_err(|error| DriverError::before_effects(format!("cannot read the Applications of target {target}: {error}")))?;
+    let applications = generated_applications(rendered).map_err(|error| {
+        DriverError::before_effects(format!("cannot read the Applications of target {target}: {error}"))
+    })?;
     let mut sources = serde_json::Map::new();
     for (name, source) in &declared {
         let owner = owning_application(rendered, &source.resource).map_err(|error| {
@@ -247,36 +248,31 @@ impl LiveReader for ClusterReader {
     fn read(&self, request: &LiveRequest<'_>) -> BTreeMap<String, ObservedValue> {
         let names = || request.sources.keys();
         let owners: BTreeSet<&(String, String)> = request.sources.values().map(|source| &source.application).collect();
-        let argo = match reader(
-            request.argocd,
-            request.env,
-            budget(request.now, request.deadline),
-        ) {
+        let argo = match reader(request.argocd, request.env, budget(request.now, request.deadline)) {
             Ok(reader) => reader,
             Err(error) => return fail_all(names(), &error.message),
         };
         // The whole reading, anchored as `nyl attest` anchors it, so a
         // credential or context for another Argo CD is never mistaken for a
         // target whose Applications are not running yet.
-        let live = match read_all(argo.as_ref(), request.argocd).and_then(|live| {
-            if request.argocd.location.access.method == ArgoCDAccessMethod::Kubernetes {
-                ensure_anchored(argo.as_ref(), request.argocd, &live)?;
-            }
-            ensure_gone_is_visible(
-                argo.as_ref(),
-                request.argocd,
-                &live,
-                request
-                    .argocd
-                    .applications
-                    .iter()
-                    .filter(|application| owners.contains(&(application.namespace.clone(), application.name.clone()))),
-            )?;
-            Ok(live)
-        }) {
-            Ok(live) => live,
-            Err(error) => return fail_all(names(), &error.message),
-        };
+        let live =
+            match read_all(argo.as_ref(), request.argocd).and_then(|live| {
+                if request.argocd.location.access.method == ArgoCDAccessMethod::Kubernetes {
+                    ensure_anchored(argo.as_ref(), request.argocd, &live)?;
+                }
+                ensure_gone_is_visible(
+                    argo.as_ref(),
+                    request.argocd,
+                    &live,
+                    request.argocd.applications.iter().filter(|application| {
+                        owners.contains(&(application.namespace.clone(), application.name.clone()))
+                    }),
+                )?;
+                Ok(live)
+            }) {
+                Ok(live) => live,
+                Err(error) => return fail_all(names(), &error.message),
+            };
         let variable = |name: &str| request.env.get(name).cloned();
         let history = match GitPublicationHistory::fetch(&request.argocd.publication, request.project_dir, &variable) {
             Ok(history) => history,

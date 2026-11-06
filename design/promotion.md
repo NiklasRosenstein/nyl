@@ -871,6 +871,14 @@ answer of a teardown wait, is shared and names no reconciler:
   `kubectl` does, and the client offers no way to restrict it; what it reads
   is the kubeconfig's declaration, not Nyl's. Use the API method where
   that matters.
+- **Observed values read the workload Cluster the same way.** A
+  [`KubernetesPublication`'s observed values](orchestration-core.md#kubernetes-publication-unit)
+  read a rendered resource from the target's workload Cluster, which may be
+  another Cluster than the instance's control plane, through the workload
+  Cluster's own `spec.live.context` in the admitted `KUBECONFIG`, once the
+  Application that owns the resource runs the receipt's publication (matched
+  as above). The same rules apply: only admitted credentials, no ambient
+  kube configuration.
 - **Deadlines.** Each reading ends within the check's deadline, at most 30
   seconds.
 

@@ -80,7 +80,10 @@ impl Live {
         let directory = tempfile::TempDir::new().unwrap();
         let workload = kube_workload(objects.clone());
         let (stub, mut env) = match method {
-            Method::Kubernetes => (kube_api_with_projects(served.clone(), applications(Vec::new())), BTreeMap::new()),
+            Method::Kubernetes => (
+                kube_api_with_projects(served.clone(), applications(Vec::new())),
+                BTreeMap::new(),
+            ),
             Method::Api => (
                 argocd_api_full(
                     TOKEN,
@@ -97,7 +100,10 @@ impl Live {
         } else {
             "https://unused.invalid".to_owned()
         };
-        kubeconfig_contexts(&file, &[("argocd-admin", &control), ("workload-admin", &workload.url())]);
+        kubeconfig_contexts(
+            &file,
+            &[("argocd-admin", &control), ("workload-admin", &workload.url())],
+        );
         env.insert("KUBECONFIG".to_owned(), file.display().to_string());
         let platform = world.work().join("nyl/platform.yaml");
         let mut text = std::fs::read_to_string(&platform).unwrap();
@@ -112,17 +118,17 @@ impl Live {
         );
         let access = match method {
             Method::Kubernetes => String::new(),
-            Method::Api => format!(
-                "  access: {{method: api, api: {{server: '{}'}}}}\n",
-                stub.url()
-            ),
+            Method::Api => format!("  access: {{method: api, api: {{server: '{}'}}}}\n", stub.url()),
         };
         text.push_str(&format!(
             "---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata: {{name: control}}\nspec:\n  destination:\n    server: https://control.example.invalid\n  live: {{context: argocd-admin}}\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1, apps/v1]\n    clusterScopedKinds: [core/Namespace]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {{name: control}}\nspec:\n  clusterRef: {{name: control}}\n  namespace: argocd\n{access}"
         ));
         std::fs::write(&platform, text).unwrap();
         git(&world.work(), &["add", "--all"]);
-        git(&world.work(), &["commit", "--quiet", "--message", "Declare the clusters"]);
+        git(
+            &world.work(),
+            &["commit", "--quiet", "--message", "Declare the clusters"],
+        );
         Self {
             world,
             stub,
@@ -219,7 +225,13 @@ impl Live {
                 let revision = running(&app.name)?;
                 let mut source = app.source.clone();
                 source["targetRevision"] = json!("deploy");
-                Some(application_with_source(&app.name, &app.namespace, &source, &[&revision], "Healthy"))
+                Some(application_with_source(
+                    &app.name,
+                    &app.namespace,
+                    &source,
+                    &[&revision],
+                    "Healthy",
+                ))
             })
             .collect();
     }
@@ -277,16 +289,21 @@ fn failed_reason(value: &ObservedValue) -> &str {
 fn test_resolution_records_the_owning_application_and_the_workload_cluster() {
     let driver = real();
     let live = Live::new(Method::Kubernetes);
-    let unit = live
-        .resolve(&driver, Live::spec(json!({"ready": replicas()})))
-        .unwrap();
+    let unit = live.resolve(&driver, Live::spec(json!({"ready": replicas()}))).unwrap();
     let resolved = unit.resolved_spec.as_ref().unwrap();
     assert_eq!(
         resolved["observationSources"],
         json!({"ready": {"application": {"namespace": "argocd", "name": "web"}}})
     );
-    assert_eq!(resolved["workload"], json!({"cluster": "dev", "context": "workload-admin"}));
-    assert_eq!(facts(&unit).location.cluster, "control", "Argo CD runs in another Cluster");
+    assert_eq!(
+        resolved["workload"],
+        json!({"cluster": "dev", "context": "workload-admin"})
+    );
+    assert_eq!(
+        facts(&unit).location.cluster,
+        "control",
+        "Argo CD runs in another Cluster"
+    );
     assert_eq!(facts(&unit).location.context.as_deref(), Some("argocd-admin"));
     assert!(driver.capabilities(&Live::spec(json!({}))).observed_values);
     assert!(!driver.capabilities(&spec()).observed_values);
@@ -300,11 +317,15 @@ fn test_resolution_records_the_owning_application_and_the_workload_cluster() {
         .unwrap()
         .replace("workload-admin", "renamed-admin");
     std::fs::write(&platform, text).unwrap();
-    git(&live.world.work(), &["commit", "--quiet", "--all", "--message", "Rename the context"]);
-    let renamed = live
-        .resolve(&driver, Live::spec(json!({"ready": replicas()})))
-        .unwrap();
-    assert_eq!(renamed.resolved_spec.as_ref().unwrap()["workload"]["context"], "renamed-admin");
+    git(
+        &live.world.work(),
+        &["commit", "--quiet", "--all", "--message", "Rename the context"],
+    );
+    let renamed = live.resolve(&driver, Live::spec(json!({"ready": replicas()}))).unwrap();
+    assert_eq!(
+        renamed.resolved_spec.as_ref().unwrap()["workload"]["context"],
+        "renamed-admin"
+    );
     assert_eq!(renamed.execution_key, unit.execution_key);
 }
 
@@ -332,9 +353,7 @@ fn test_an_observation_must_read_a_resource_the_target_renders_and_never_a_secre
         "resource": {"apiVersion": "v1", "kind": "Secret", "namespace": "web", "name": "web"},
         "pointer": "/data/token"
     }});
-    let message = driver
-        .validate_spec(&Live::spec(json!({"token": secret})))
-        .unwrap_err();
+    let message = driver.validate_spec(&Live::spec(json!({"token": secret}))).unwrap_err();
     assert!(message.contains("never reads"), "{message}");
 }
 
@@ -349,9 +368,7 @@ fn test_observe_reads_the_field_only_once_its_application_runs_the_publication()
     let driver = real();
     for method in [Method::Kubernetes, Method::Api] {
         let live = Live::new(method);
-        let unit = live
-            .resolve(&driver, Live::spec(json!({"ready": replicas()})))
-            .unwrap();
+        let unit = live.resolve(&driver, Live::spec(json!({"ready": replicas()}))).unwrap();
         let (tree, commit) = live.publish(&driver, &unit);
         let ready = |live: &Live| live.observe(&driver, &unit, &tree, &live.env)["ready"].clone();
         *live.objects.lock().unwrap() = vec![deployment("web", "web", &json!({"readyReplicas": 3}))];
@@ -366,10 +383,16 @@ fn test_observe_reads_the_field_only_once_its_application_runs_the_publication()
         // It runs an older publication.
         live.serve(&unit, |_| Some("0".repeat(40)));
         assert!(pending_reason(&ready(&live)).starts_with("application-not-running-publication:"));
-        assert_eq!(live.workload_reads(), 0, "{method:?}: nothing is read before the publication runs");
+        assert_eq!(
+            live.workload_reads(),
+            0,
+            "{method:?}: nothing is read before the publication runs"
+        );
 
         // The owning Application runs the publication; the catalog is slow.
-        live.serve(&unit, |name| Some(if name == "web" { commit.clone() } else { "0".repeat(40) }));
+        live.serve(&unit, |name| {
+            Some(if name == "web" { commit.clone() } else { "0".repeat(40) })
+        });
         assert_eq!(ready(&live), ObservedValue::Value { value: json!(3) }, "{method:?}");
         assert!(live.workload_reads() > 0);
         // Argo CD was read through its own endpoint, never the workload's.
@@ -401,9 +424,7 @@ fn test_observe_reads_the_field_only_once_its_application_runs_the_publication()
 fn test_observe_fails_without_the_admitted_credentials_and_never_reads_ambient_ones() {
     let driver = real();
     let live = Live::new(Method::Kubernetes);
-    let unit = live
-        .resolve(&driver, Live::spec(json!({"ready": replicas()})))
-        .unwrap();
+    let unit = live.resolve(&driver, Live::spec(json!({"ready": replicas()}))).unwrap();
     let (tree, commit) = live.publish(&driver, &unit);
     live.serve(&unit, |_| Some(commit.clone()));
     *live.objects.lock().unwrap() = vec![deployment("web", "web", &json!({"readyReplicas": 3}))];
@@ -411,7 +432,10 @@ fn test_observe_fails_without_the_admitted_credentials_and_never_reads_ambient_o
     // No kubeconfig admitted: nothing is read, from either cluster.
     let values = live.observe(&driver, &unit, &tree, &BTreeMap::new());
     let reason = failed_reason(&values["ready"]);
-    assert!(reason.contains("KUBECONFIG") && reason.contains("env.passthrough"), "{reason}");
+    assert!(
+        reason.contains("KUBECONFIG") && reason.contains("env.passthrough"),
+        "{reason}"
+    );
     assert!(live.stub.requests().is_empty() && live.workload.requests().is_empty());
 
     // A kubeconfig without the workload Cluster's context fails there.
@@ -428,13 +452,16 @@ fn test_observe_fails_without_the_admitted_credentials_and_never_reads_ambient_o
         .unwrap()
         .replace("  live: {context: workload-admin}\n", "");
     std::fs::write(&platform, text).unwrap();
-    git(&live.world.work(), &["commit", "--quiet", "--all", "--message", "No context"]);
-    let undeclared = live
-        .resolve(&driver, Live::spec(json!({"ready": replicas()})))
-        .unwrap();
+    git(
+        &live.world.work(),
+        &["commit", "--quiet", "--all", "--message", "No context"],
+    );
+    let undeclared = live.resolve(&driver, Live::spec(json!({"ready": replicas()}))).unwrap();
     let reason = failed_reason(&live.observe(&driver, &undeclared, &tree, &live.env)["ready"]).to_owned();
     assert!(
-        reason.contains("Cluster dev") && reason.contains("spec.live.context") && reason.contains("never uses the current context"),
+        reason.contains("Cluster dev")
+            && reason.contains("spec.live.context")
+            && reason.contains("never uses the current context"),
         "{reason}"
     );
 }
