@@ -553,6 +553,43 @@ fn test_environments_sharing_a_ref_through_path_keep_their_own_directories() {
     }
 }
 
+/// Instances are found by listing the directories of the ref they share: both
+/// stores list exactly the `state.yaml` of each directory directly beneath the
+/// parent path, in name order, and nothing for a parent without any.
+#[test]
+fn test_listing_a_shared_ref_returns_the_record_of_each_environment_directory() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let parent = location(&subject.repository, "nyl/previews", "nyl/previews", "");
+        assert!(store.list_records(&parent).unwrap().is_empty(), "{}", subject.name);
+        for (name, run) in [("pr-2", RUN_B), ("pr-1", RUN_A)] {
+            let at = location(&subject.repository, "nyl/previews", "nyl/previews", name);
+            let environment = environment(name);
+            let version = store.take_lease(&at, &environment, &lease(run), None).unwrap();
+            let base = store.snapshot(&at).unwrap().tips;
+            let committed = store
+                .commit(&at, &environment, &base, &init(&at, name), &version)
+                .unwrap();
+            store
+                .release_lease(&at, &environment, &committed.lease_version)
+                .unwrap();
+        }
+        let listed = store
+            .list_records(&parent)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.environment.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(listed, ["pr-1", "pr-2"], "{}", subject.name);
+        let beneath = location(&subject.repository, "nyl/previews", "nyl/previews", "pr-1");
+        assert!(
+            store.list_records(&beneath).unwrap().is_empty(),
+            "{}: a directory of one environment lists no children",
+            subject.name
+        );
+    }
+}
+
 #[test]
 fn test_concurrent_writers_sharing_a_ref_rebase_unless_their_directory_changed() {
     for subject in subjects() {
