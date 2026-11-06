@@ -1519,6 +1519,208 @@ spec:
         assert!(error.contains("target names are unique"), "{error}");
     }
 
+    const PREVIEW_TEMPLATE: &str = r"apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata: {name: preview}
+spec:
+  parameters:
+    pr: {type: integer}
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values:
+    region: eu
+    host: 'pr-{{ params.pr }}.preview.example.com'
+    prefix: '{{ environment.name }}'
+  state:
+    desiredRef: nyl/previews
+    observedRef: nyl/previews
+    path: '{{ environment.name }}'
+";
+
+    /// The publication unit a template instance renders: its target is inline,
+    /// named and prefixed from the environment, with the instance's values.
+    const PREVIEW_UNIT: &str = r"apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {preview: 'true'}
+spec:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      publication:
+        repository: {repoURL: 'https://example.invalid/deploy.git'}
+        revision: previews
+        pathPrefix: '{{ values.prefix }}'
+      values: {hostname: '{{ values.host }}', pr: '{{ params.pr }}'}
+";
+
+    fn preview_project(unit: &str) -> TempDir {
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        project(&[
+            ("platform.yaml", &platform),
+            ("preview.yaml", PREVIEW_TEMPLATE),
+            ("kubernetes.yaml", unit),
+        ])
+    }
+
+    fn instances(pairs: &[(&str, i64)]) -> BTreeMap<EnvironmentName, InstanceDescriptor> {
+        pairs
+            .iter()
+            .map(|(name, pr)| {
+                (
+                    EnvironmentName::new(*name).unwrap(),
+                    InstanceDescriptor {
+                        template: "preview".to_owned(),
+                        params: BTreeMap::from([("pr".to_owned(), json!(pr))]),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Catches an instance that renders with anything but its template and
+    /// recorded parameters: the template's values render over `params` and
+    /// the instance's name, units read `params`, and the inline target is
+    /// named and prefixed per instance, so instances share nothing.
+    #[test]
+    fn test_an_instance_renders_its_templates_values_and_params() {
+        let worktree = preview_project(PREVIEW_UNIT);
+        let renderer = UnitSourceRenderer::new("/nyl", crate::config::test_catalogue())
+            .with_instances(instances(&[("pr-1", 1), ("pr-22", 22)]));
+        let commit = CommitId::new("a".repeat(40)).unwrap();
+        let source = renderer
+            .render(worktree.path(), &EnvironmentName::new("pr-22").unwrap(), &commit)
+            .unwrap();
+        assert_eq!(source.environment.metadata.name, "pr-22");
+        assert_eq!(
+            source.environment.spec.values["host"],
+            json!("pr-22.preview.example.com")
+        );
+        assert_eq!(source.environment.spec.state.path, "pr-22");
+        let terms = source.instance.expect("an instance");
+        assert_eq!(
+            (terms.template.as_str(), terms.params["pr"].clone()),
+            ("preview", json!(22))
+        );
+        let spec = unit(&render_with(&worktree, &renderer, "pr-22"), "kubernetes")
+            .spec
+            .clone()
+            .unwrap();
+        assert_eq!(spec["target"]["name"], json!("pr-22-kubernetes"));
+        assert_eq!(spec["target"]["inline"]["publication"]["pathPrefix"], json!("pr-22"));
+        assert_eq!(
+            spec["target"]["inline"]["values"]["hostname"],
+            json!("pr-22.preview.example.com")
+        );
+        assert_eq!(spec["target"]["inline"]["values"]["pr"], json!("22"));
+
+        // An environment that is neither declared nor a known instance is unknown.
+        let error = renderer
+            .render(worktree.path(), &EnvironmentName::new("pr-3").unwrap(), &commit)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-ENVIRONMENT-UNKNOWN"), "{error}");
+    }
+
+    fn render_with(worktree: &TempDir, renderer: &UnitSourceRenderer, environment: &str) -> RenderedSource {
+        renderer
+            .render(
+                worktree.path(),
+                &EnvironmentName::new(environment).unwrap(),
+                &CommitId::new("a".repeat(40)).unwrap(),
+            )
+            .unwrap()
+    }
+
+    /// Catches instances missing from the checks across environments: each
+    /// instance's target is placed by it (so a direct `--push` refuses
+    /// it) and joins the inventory, and instances whose targets would
+    /// collide, here by publishing to the same prefix, fail the compile of every
+    /// publication render.
+    #[test]
+    fn test_instances_join_placements_and_inline_target_checks() {
+        let worktree = preview_project(PREVIEW_UNIT);
+        let known = inventory(&worktree).with_instances(instances(&[("pr-1", 1), ("pr-2", 2)]));
+        assert_eq!(
+            target_placements(&known).unwrap(),
+            BTreeMap::from([
+                ("pr-1-kubernetes".to_owned(), EnvironmentName::new("pr-1").unwrap()),
+                ("pr-2-kubernetes".to_owned(), EnvironmentName::new("pr-2").unwrap()),
+            ])
+        );
+        let extended = with_inline_targets(&known).unwrap();
+        for name in ["pr-1-kubernetes", "pr-2-kubernetes"] {
+            assert!(
+                extended.get(GitOpsResourceKind::DeploymentTarget, name).is_some(),
+                "{name}"
+            );
+        }
+        super::super::validate_gitops_inventory(&extended).unwrap();
+
+        // Targets of every instance publishing to one prefix is the template's error.
+        let shared = PREVIEW_UNIT.replace("pathPrefix: '{{ values.prefix }}'", "pathPrefix: previews");
+        let worktree = preview_project(&shared);
+        let known = inventory(&worktree).with_instances(instances(&[("pr-1", 1), ("pr-2", 2)]));
+        let extended = with_inline_targets(&known).unwrap();
+        let error = super::super::validate_gitops_inventory(&extended)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlapping publication path prefixes"), "{error}");
+        assert!(
+            error.contains("pr-1-kubernetes") && error.contains("pr-2-kubernetes"),
+            "{error}"
+        );
+    }
+
+    /// Catches a template that renders for no instance without anything
+    /// saying why: a parameter of the wrong type, a missing one, and an
+    /// undeclared one each name the parameter and the template.
+    #[test]
+    fn test_instantiate_binds_parameters_against_the_declarations() {
+        let worktree = preview_project(PREVIEW_UNIT);
+        let discovered = inventory(&worktree);
+        let template = super::super::instances::find_template(&discovered, "preview").unwrap();
+        let name = EnvironmentName::new("pr-1").unwrap();
+        let attempt = |params: Value| {
+            let params = params
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            super::super::instances::instantiate(template, &name, &params)
+                .map(|_| ())
+                .map_err(|finding| format!("{}: {}", finding.code, finding.message))
+        };
+        assert_eq!(attempt(json!({"pr": 1})), Ok(()));
+        for (params, expected) in [
+            (json!({"pr": "one"}), "parameter \"pr\": expected integer, got string"),
+            (
+                json!({}),
+                "parameter \"pr\" of EnvironmentTemplate preview has no default",
+            ),
+            (json!({"pr": 1, "other": true}), "parameter \"other\" is not declared"),
+        ] {
+            let error = attempt(params).unwrap_err();
+            assert!(error.starts_with("NYL-INSTANCE-PARAMETER-INVALID"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
+
+        // A state location that reads parameters cannot locate the state holding them.
+        let params_in_state = PREVIEW_TEMPLATE.replace("path: '{{ environment.name }}'", "path: 'pr-{{ params.pr }}'");
+        let worktree = project(&[("preview.yaml", &params_in_state)]);
+        let discovered = inventory(&worktree);
+        let template = super::super::instances::find_template(&discovered, "preview").unwrap();
+        let finding = super::super::instances::instance_state(template, &name).unwrap_err();
+        assert_eq!(finding.code, Code::TemplateInvalid);
+        assert!(
+            finding.message.contains("spec.state may only read environment.name"),
+            "{}",
+            finding.message
+        );
+    }
+
     /// Catches an inline target that is not a valid DeploymentTarget being
     /// accepted by the renderer and failing only at publication.
     #[test]

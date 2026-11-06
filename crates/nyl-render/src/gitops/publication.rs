@@ -80,6 +80,10 @@ pub struct TargetRender<'a> {
     pub cache_dir: Option<&'a Path>,
     /// Resource APIs registered by the caller.
     pub resource_catalogue: crate::config::ResourceCatalogue,
+    /// The instances of EnvironmentTemplates the caller knows, whose inline
+    /// targets join the compile's checks across targets like every declared
+    /// environment's.
+    pub instances: &'a nyl_core::orchestration::instance::Instances,
 }
 
 /// Who authors and commits a publication commit, and when. Orchestrated publications pass
@@ -218,7 +222,8 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         let relative = request.project_dir.strip_prefix("/").unwrap_or(request.project_dir);
         request.worktree.join(relative)
     };
-    let mut inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?;
+    let mut inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?
+        .with_instances(request.instances.clone());
     // Every environment's inline targets join the inventory, so the compile's
     // checks across targets see them whichever unit renders. The target this
     // render is for comes from the document it was given.
@@ -1597,6 +1602,7 @@ spec:
 
     fn render(worktree: &Path, inputs: &InputSnapshot, cache_dir: Option<&Path>) -> Result<RenderedTarget> {
         render_target(&TargetRender {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             source_commit: None,
             inline: None,
             owner: None,
@@ -1729,6 +1735,7 @@ spec:
         owner: Option<RenderIndexOwner>,
     ) -> Result<RenderedTarget> {
         render_target(&TargetRender {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             source_commit: None,
             inline: Some(inline),
             owner,

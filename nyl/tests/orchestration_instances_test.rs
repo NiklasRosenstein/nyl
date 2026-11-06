@@ -69,6 +69,11 @@ fn world(extra: &[(&str, &str)]) -> (tempfile::TempDir, harness::Harness) {
 }
 
 fn invoke(harness: &harness::Harness, branch: &str, args: &[&str]) -> CommandOutcome {
+    try_invoke(harness, branch, args).unwrap()
+}
+
+/// [`invoke`] for a command that may fail with an error rather than a report.
+fn try_invoke(harness: &harness::Harness, branch: &str, args: &[&str]) -> Result<CommandOutcome, String> {
     let cancellation = Cancellation::default();
     let tools = ProcessRunner::new().cancelled_by(cancellation.shared());
     let wiring = Wiring {
@@ -85,7 +90,7 @@ fn invoke(harness: &harness::Harness, branch: &str, args: &[&str]) -> CommandOut
         progress: None,
     };
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    invoke_in(&harness.world, &wiring, &args, branch, "").unwrap()
+    invoke_in(&harness.world, &wiring, &args, branch, "")
 }
 
 /// The `state.yaml` of an instance in the shared ref.
@@ -297,4 +302,223 @@ fn test_state_delete_tears_an_instance_down_and_leaves_its_neighbour() {
     );
     assert_eq!(revived.exit, 1);
     assert!(revived.stderr.contains("NYL-STATE-DELETED"), "{}", revived.stderr);
+}
+
+fn first_error_code(outcome: &CommandOutcome) -> String {
+    [
+        "NYL-INSTANCE-TEMPLATE-UNKNOWN",
+        "NYL-INSTANCE-PARAMETER-INVALID",
+        "NYL-INSTANCE-NAME-TAKEN",
+        "NYL-INSTANCE-TEMPLATE-REQUIRED",
+        "NYL-ENVIRONMENT-UNKNOWN",
+        "NYL-TEMPLATE-INVALID",
+    ]
+    .into_iter()
+    .find(|code| outcome.stderr.contains(code))
+    .unwrap_or_default()
+    .to_owned()
+}
+
+/// Every way to name an instance wrongly is refused with its own code before
+/// anything is written, and says what to do: an unknown template, a
+/// parameter of the wrong type, a missing or undeclared one, `--param`
+/// without `--template`, a name a declared Environment or another
+/// instance already uses, and a name nothing declares. Catches an instance
+/// created from a guess, or a refusal that is not actionable.
+#[test]
+fn test_naming_an_instance_wrongly_is_refused_with_a_code_and_writes_nothing() {
+    let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: dev\nspec:\n  unitSelector: {matchLabels: {dev: 'true'}}\n  allowUnprotectedSource: true\n";
+    let other = TEMPLATE
+        .replace("name: preview", "name: other")
+        .replace("nyl/previews", "nyl/others");
+    let (_directory, harness) = world(&[("nyl/dev.yaml", environment), ("nyl/other.yaml", &other)]);
+    let init = |args: &[&str]| {
+        let mut command = vec!["state", "init"];
+        command.extend_from_slice(args);
+        invoke(&harness, "main", &command)
+    };
+    let refused = [
+        (
+            vec!["-e", "pr-1", "--template", "nope", "--param", "pr=1"],
+            "NYL-INSTANCE-TEMPLATE-UNKNOWN",
+        ),
+        (
+            vec!["-e", "pr-1", "--template", "preview", "--param", "pr=one"],
+            "NYL-INSTANCE-PARAMETER-INVALID",
+        ),
+        (
+            vec!["-e", "pr-1", "--template", "preview"],
+            "NYL-INSTANCE-PARAMETER-INVALID",
+        ),
+        (
+            vec![
+                "-e",
+                "pr-1",
+                "--template",
+                "preview",
+                "--param",
+                "pr=1",
+                "--param",
+                "x=1",
+            ],
+            "NYL-INSTANCE-PARAMETER-INVALID",
+        ),
+        (vec!["-e", "pr-1", "--param", "pr=1"], "NYL-INSTANCE-TEMPLATE-REQUIRED"),
+        (
+            vec!["-e", "dev", "--template", "preview", "--param", "pr=1"],
+            "NYL-INSTANCE-NAME-TAKEN",
+        ),
+        (
+            vec![
+                "-e",
+                "pr-1",
+                "--template",
+                "preview",
+                "--param",
+                "size=huge",
+                "--param",
+                "pr=1",
+            ],
+            "NYL-INSTANCE-PARAMETER-INVALID",
+        ),
+    ];
+    for (args, code) in refused {
+        let outcome = init(&args);
+        assert_eq!(outcome.exit, 1, "{args:?}: {}", outcome.stderr);
+        assert_eq!(first_error_code(&outcome), code, "{args:?}: {}", outcome.stderr);
+    }
+    let unknown = invoke(&harness, "main", &["reconcile", "-e", "pr-9"]);
+    assert_eq!(unknown.exit, 1);
+    assert!(unknown.stderr.contains("NYL-ENVIRONMENT-UNKNOWN"), "{}", unknown.stderr);
+    assert!(
+        unknown.stderr.contains("--template"),
+        "the fix names how to create an instance: {}",
+        unknown.stderr
+    );
+
+    // A name another template's instance uses is taken.
+    assert_eq!(
+        init(&["-e", "pr-1", "--template", "preview", "--param", "pr=1"]).exit,
+        0
+    );
+    let taken = init(&["-e", "pr-1", "--template", "other", "--param", "pr=1"]);
+    assert_eq!(taken.exit, 1);
+    assert_eq!(first_error_code(&taken), "NYL-INSTANCE-NAME-TAKEN", "{}", taken.stderr);
+    assert!(!git_output(&harness.world.bare(), &["branch", "--list", "nyl/others"]).contains("nyl/others"));
+}
+
+/// `get environments` lists the declared environments and the live
+/// instances found by listing the template's state location, with their
+/// expiry; a deleted instance is gone. Catches an instance that needs a
+/// central index to be found, and a deleted one that lingers.
+#[test]
+fn test_get_environments_lists_instances_by_listing_their_state() {
+    let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: dev\nspec:\n  unitSelector: {matchLabels: {dev: 'true'}}\n  allowUnprotectedSource: true\n";
+    let (_directory, harness) = world(&[("nyl/dev.yaml", environment)]);
+    for pr in ["1", "2"] {
+        let created = invoke(
+            &harness,
+            "main",
+            &[
+                "state",
+                "init",
+                "-e",
+                &format!("pr-{pr}"),
+                "--template",
+                "preview",
+                "--param",
+                &format!("pr={pr}"),
+            ],
+        );
+        assert_eq!(created.exit, 0, "{}", created.stderr);
+    }
+    // The command line appends the project path, so each listing names one environment.
+    for (name, template) in [("dev", "-"), ("pr-1", "preview"), ("pr-2", "preview")] {
+        let listed = invoke(&harness, "main", &["get", "environments", name]);
+        assert_eq!(listed.exit, 0, "{}", listed.stderr);
+        let row = listed
+            .stdout
+            .lines()
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(row, [name, template], "{}", listed.stdout);
+        assert_eq!(
+            listed.stdout.contains("2026-10-01T10:00:00Z"),
+            template == "preview",
+            "{}",
+            listed.stdout
+        );
+    }
+
+    assert_eq!(invoke(&harness, "main", &["state", "delete", "-e", "pr-1"]).exit, 0);
+    let gone = invoke(&harness, "main", &["get", "environments", "pr-1"]);
+    assert_eq!(gone.exit, 1);
+    assert!(gone.stderr.contains("was not found"), "{}", gone.stderr);
+    assert_eq!(invoke(&harness, "main", &["get", "environments", "pr-2"]).exit, 0);
+}
+
+/// A unit the pull request removes from the template's selection is torn
+/// down by the next reconcile of the instance without `--allow-teardown`,
+/// because the template sets `allowTeardown`. Catches omission that stalls
+/// as pending teardown on an instance, which no operator would be there to
+/// approve.
+#[test]
+fn test_a_unit_left_by_the_template_is_torn_down_unattended() {
+    let extra = UNITS
+        .replace("name: site", "name: extra")
+        .replace("{{ values.dir }}", "{{ values.dir }}-extra");
+    let both = format!("{UNITS}---\n{extra}");
+    let (_directory, harness) = world(&[("nyl/units.yaml", &both)]);
+    let reconcile = |branch: &str| {
+        invoke(
+            &harness,
+            branch,
+            &[
+                "reconcile",
+                "-e",
+                "pr-4",
+                "--template",
+                "preview",
+                "--param",
+                "pr=4",
+                "-o",
+                "json",
+            ],
+        )
+    };
+    harness.world.branch(&scenario::format::BranchStep {
+        name: "pr-4".to_owned(),
+        from: "main".to_owned(),
+    });
+    let created = reconcile("pr-4");
+    assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
+    let units = created.report["environments"][0]["units"].as_object().unwrap().clone();
+    assert_eq!(
+        units.keys().collect::<Vec<_>>(),
+        ["extra", "site"],
+        "{}",
+        created.report
+    );
+
+    let left = extra.replace("preview: 'true'", "other: 'true'");
+    harness.world.commit_files(
+        "pr-4",
+        "Drop the extra unit from the preview",
+        &[("nyl/units.yaml", &format!("{UNITS}---\n{left}"))],
+    );
+    let leaving = reconcile("pr-4");
+    assert_eq!(leaving.exit, 0, "{}\n{}", leaving.stderr, leaving.stdout);
+    let result = |unit: &str| leaving.report["environments"][0]["units"][unit]["result"].clone();
+    assert_eq!(result("extra"), "removed", "{}", leaving.report);
+    assert_eq!(result("site"), "current", "{}", leaving.report);
+    assert!(!harness
+        .world
+        .scenario_tmp()
+        .join("previews-extra")
+        .join("pr-4")
+        .exists());
+    assert!(tag(&harness, "pr-4").is_some());
 }

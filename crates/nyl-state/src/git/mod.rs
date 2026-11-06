@@ -28,7 +28,7 @@ use nyl_core::orchestration::ports::{
     TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    Attestation, AttestationRecord, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation,
+    Attestation, AttestationRecord, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation, StateRecord,
 };
 use nyl_git::GitAuth;
 
@@ -92,6 +92,43 @@ pub struct Endpoint {
 }
 
 impl GitStateStore {
+    /// Both state refs' trees, after the sync a read does, with the tips.
+    fn read_trees(&self, location: &StateLocation) -> StateResult<(StateTips, Files, Files)> {
+        let repository = self.open(location)?;
+        let refs = self.refs(&repository, location);
+        let desired_name = StateLocation::full_name(&location.desired_ref);
+        let observed_name = StateLocation::full_name(&location.observed_ref);
+        let names = [
+            desired_name.clone(),
+            observed_name.clone(),
+            format!("{}*", location.coordination_ref_prefix),
+        ];
+        let heads = refs.heads(&names)?;
+        if self.allow_pending && refs.url.is_some() {
+            refs.check_local_coordination(&location.coordination_ref_prefix)?;
+            let state_heads = heads
+                .iter()
+                .filter(|(name, _)| *name == &desired_name || *name == &observed_name)
+                .map(|(name, oid)| (name.clone(), *oid))
+                .collect();
+            refs.fetch(&state_heads, false)?;
+        } else {
+            refs.sync_local(&names, &heads)?;
+        }
+        let desired_tip = heads.get(&desired_name).copied();
+        let observed_tip = heads.get(&observed_name).copied();
+        let desired = tree::read(&repository, refs.fetched(&heads, &desired_name))?;
+        let observed = tree::read(&repository, refs.fetched(&heads, &observed_name))?;
+        Ok((
+            StateTips {
+                desired: desired_tip.map(commit_id),
+                observed: observed_tip.map(commit_id),
+            },
+            desired,
+            observed,
+        ))
+    }
+
     /// A store working through the repository at `git_dir`: the source
     /// checkout's clone, whose own branches are the state when a location
     /// names [`StateLocation::LOCAL_REPOSITORY`], and which keeps the fetched objects and
@@ -631,45 +668,33 @@ impl StateStore for GitStateStore {
     }
 
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
-        let repository = self.open(location)?;
-        let refs = self.refs(&repository, location);
-        let desired_name = StateLocation::full_name(&location.desired_ref);
-        let observed_name = StateLocation::full_name(&location.observed_ref);
-        let names = [
-            desired_name.clone(),
-            observed_name.clone(),
-            format!("{}*", location.coordination_ref_prefix),
-        ];
-        let heads = refs.heads(&names)?;
-        if self.allow_pending && refs.url.is_some() {
-            refs.check_local_coordination(&location.coordination_ref_prefix)?;
-            let state_heads = heads
-                .iter()
-                .filter(|(name, _)| *name == &desired_name || *name == &observed_name)
-                .map(|(name, oid)| (name.clone(), *oid))
-                .collect();
-            refs.fetch(&state_heads, false)?;
-        } else {
-            refs.sync_local(&names, &heads)?;
-        }
-        let desired_tip = heads.get(&desired_name).copied();
-        let observed_tip = heads.get(&observed_name).copied();
-        let desired = tree::beneath(
-            &tree::read(&repository, refs.fetched(&heads, &desired_name))?,
-            &location.path,
-        );
-        let observed = tree::beneath(
-            &tree::read(&repository, refs.fetched(&heads, &observed_name))?,
-            &location.path,
-        );
+        let (tips, desired, observed) = self.read_trees(location)?;
         snapshot_of(
-            StateTips {
-                desired: desired_tip.map(commit_id),
-                observed: observed_tip.map(commit_id),
-            },
-            &desired,
-            &observed,
+            tips,
+            &tree::beneath(&desired, &location.path),
+            &tree::beneath(&observed, &location.path),
         )
+    }
+
+    /// The `state.yaml` of every directory directly beneath `location.path`
+    /// that has one, such as the instances sharing one ref.
+    fn list_records(&self, location: &StateLocation) -> StateResult<Vec<StateRecord>> {
+        let (_, desired, observed) = self.read_trees(location)?;
+        let prefix = tree::prefix(&location.path);
+        let mut records = BTreeMap::new();
+        for files in [&observed, &desired] {
+            for (path, bytes) in files {
+                let Some(name) = path
+                    .strip_prefix(&prefix)
+                    .and_then(|relative| relative.strip_suffix(&format!("/{STATE_FILE}")))
+                    .filter(|name| !name.is_empty() && !name.contains('/'))
+                else {
+                    continue;
+                };
+                records.insert(name.to_owned(), from_yaml::<StateRecord>(STATE_FILE, bytes)?);
+            }
+        }
+        Ok(records.into_values().collect())
     }
 
     /// Read the state as of `tips`, for `nyl get --state-revision`: the

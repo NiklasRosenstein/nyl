@@ -590,6 +590,39 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
         warnings.extend(resolved.warnings);
         locations.push((resolved.name, resolved.location));
     }
+    // Instances of a template get one state location each, wherever the
+    // template puts it: two sample instances must not share one, or a second
+    // instance would find the first's `state.yaml` at its own location.
+    let (_, groups) = declared(inventory);
+    for template in nyl_render::gitops::instances::templates(inventory) {
+        let mut sampled = Vec::new();
+        for (name, _) in nyl_render::gitops::instances::sample_instances(template) {
+            let state = nyl_render::gitops::instances::instance_state(template, &name)
+                .map_err(|finding| finding_error(&finding))?;
+            let mut skeleton = template.environment_skeleton(name.as_str());
+            skeleton.spec.state = state;
+            let located = locate(inventory, &skeleton, &groups).map_err(|finding| finding_error(&finding))?;
+            warnings.extend(located.warnings.clone());
+            sampled.push((located.name, located.location));
+        }
+        if let [(first, left), (second, right)] = sampled.as_slice() {
+            if left.repository == right.repository
+                && left.path == right.path
+                && (left.desired_ref == right.desired_ref || left.observed_ref == right.observed_ref)
+            {
+                return Err(finding_error(&Finding::new(
+                    Code::TemplateInvalid,
+                    format!(
+                        "EnvironmentTemplate {} gives instances {first} and {second} the same state location {}",
+                        template.metadata.name,
+                        nyl_orchestration::rules::state_location::describe(left)
+                    ),
+                    "set spec.state.path to `{{ environment.name }}`, or refs that read environment.name",
+                )));
+            }
+        }
+        locations.extend(sampled);
+    }
     let conflicts = nyl_orchestration::rules::state_location::ref_conflicts(&locations);
     if let Some(conflict) = conflicts.first() {
         return Err(finding_error(conflict));
@@ -647,4 +680,83 @@ pub fn parse_params(params: &[String]) -> std::result::Result<BTreeMap<String, V
         }
     }
     Ok(parsed)
+}
+
+/// An instance found by listing its template's state.
+pub struct ListedInstance {
+    pub name: EnvironmentName,
+    pub descriptor: InstanceDescriptor,
+    pub record: StateRecord,
+}
+
+/// The name no environment has, standing for an instance's name while a
+/// template's state location is examined.
+const SENTINEL_NAME: &str = "nyl-instance-sentinel";
+
+/// Every live instance of every EnvironmentTemplate, found by listing each
+/// template's state location. Contract: [Instances](../../../design/orchestration-core.md#instances):
+/// "Instances are discovered by listing the template's state location, so no
+/// central index exists."
+///
+/// A template whose refs or repository depend on the environment name has no
+/// one location to list, and a `state.path` must end in the environment's
+/// name to be a directory per instance; instances of such a template are
+/// found by name only. Deleted instances are not listed. A location that
+/// cannot be read is a warning, not a failure of the command that lists it.
+pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> (Vec<ListedInstance>, Vec<Finding>) {
+    let mut listed = Vec::new();
+    let mut warnings = Vec::new();
+    let Ok(sentinel) = EnvironmentName::new(SENTINEL_NAME) else {
+        return (listed, warnings);
+    };
+    let (_, groups) = declared(inventory);
+    for template in nyl_render::gitops::instances::templates(inventory) {
+        let Ok(state) = nyl_render::gitops::instances::instance_state(template, &sentinel) else {
+            continue;
+        };
+        let mut skeleton = template.environment_skeleton(SENTINEL_NAME);
+        skeleton.spec.state = state;
+        let Ok(located) = locate(inventory, &skeleton, &groups) else {
+            continue;
+        };
+        let location = &located.location;
+        let by_name = [&location.repository, &location.desired_ref, &location.observed_ref]
+            .iter()
+            .any(|part| part.contains(SENTINEL_NAME));
+        let Some(parent) = location.path.strip_suffix(SENTINEL_NAME).filter(|_| !by_name) else {
+            continue;
+        };
+        let mut parent_location = location.clone();
+        parent_location.path = parent.trim_matches('/').to_owned();
+        let records = open_store_mode(inventory, &located, None, offline)
+            .map_err(|error| error.to_string())
+            .and_then(|store| store.list_records(&parent_location).map_err(|error| error.to_string()));
+        match records {
+            Ok(records) => {
+                for record in records {
+                    if record.template.as_deref() != Some(template.metadata.name.as_str()) || record.deleted().is_some()
+                    {
+                        continue;
+                    }
+                    listed.push(ListedInstance {
+                        name: record.environment.clone(),
+                        descriptor: InstanceDescriptor {
+                            template: template.metadata.name.clone(),
+                            params: record.params.clone(),
+                        },
+                        record,
+                    });
+                }
+            }
+            Err(message) => warnings.push(Finding::new(
+                Code::StateUnavailable,
+                format!(
+                    "cannot list the instances of EnvironmentTemplate {}: {message}",
+                    template.metadata.name
+                ),
+                "check access to the template's state repository; checks across environments skip its instances meanwhile",
+            )),
+        }
+    }
+    (listed, warnings)
 }

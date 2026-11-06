@@ -316,6 +316,32 @@ impl StateStore for MemoryStateStore {
         ))
     }
 
+    fn list_records(&self, location: &StateLocation) -> StateResult<Vec<StateRecord>> {
+        let mut inner = self.lock();
+        follow(&mut inner, location, &location.desired_ref);
+        follow(&mut inner, location, &location.observed_ref);
+        let prefix = if location.path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", location.path.trim_matches('/'))
+        };
+        let mut records = BTreeMap::new();
+        for reference in [&location.observed_ref, &location.desired_ref] {
+            let Some(state_ref) = inner.refs.get(&ref_key(location, reference)) else {
+                continue;
+            };
+            for (path, directory) in &state_ref.directories {
+                let listed = path
+                    .strip_prefix(&prefix)
+                    .is_some_and(|name| !name.is_empty() && !name.contains('/'));
+                if let (true, Some(record)) = (listed, &directory.record) {
+                    records.insert(path.clone(), record.clone());
+                }
+            }
+        }
+        Ok(records.into_values().collect())
+    }
+
     fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
         let inner = self.lock();
         let read = |reference: &str, tip: Option<&CommitId>| -> StateResult<Option<Directory>> {

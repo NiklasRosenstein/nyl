@@ -358,6 +358,7 @@ mod tests {
 
     fn context<'a>(directory: &TempDir, tools: &'a NoTools, approved: Option<ChangeDigestArg>) -> ExecutionContext<'a> {
         ExecutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             source_roots: std::collections::BTreeMap::default(),
             secrets: std::collections::BTreeMap::default(),
             artifacts: std::collections::BTreeMap::default(),

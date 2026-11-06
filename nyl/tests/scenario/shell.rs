@@ -312,6 +312,7 @@ impl Harness {
         // Running tools receive the run's cancelling signal.
         let tools = ProcessRunner::new().cancelled_by(job.request.cancellation.shared());
         let context = RunContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             base: &base,
             sources: &job.sources,
             renderer: &job.renderer,
