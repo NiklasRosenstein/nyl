@@ -49,6 +49,9 @@ pub struct Removal<'a> {
     pub wait: Option<Duration>,
     /// `--author`.
     pub author: Option<&'a str>,
+    /// `--source`: take the units' source files from this revision when the
+    /// recorded commit cannot be fetched.
+    pub source: Option<&'a str>,
 }
 
 /// Remove the expired instance `session` works on: `teardown --all`, then
@@ -86,7 +89,7 @@ pub fn remove_expired(
     let mut request = session.request(&RunOptions {
         units: &[],
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
-        source: None,
+        source: removal.source,
         wait: removal.wait,
         local: None,
         cancellation: wiring.cancellation.clone(),

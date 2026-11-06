@@ -314,6 +314,7 @@ fn stopped(
 }
 
 /// The deletion itself, holding the lease.
+#[allow(clippy::too_many_arguments)] // The state operation's context, its lease and request, and the instance's keep ref and expiry.
 fn delete_holding(
     context: &Context<'_>,
     environment: &EnvironmentName,

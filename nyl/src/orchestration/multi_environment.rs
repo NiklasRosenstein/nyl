@@ -76,21 +76,7 @@ pub fn select(
         });
     }
     single_source(source_override, &selection.iter().cloned().collect::<Vec<_>>())?;
-    // Expired instances a reconcile removes are not rendered: the removal runs
-    // from their stored documents, so a lost source commit cannot keep one alive.
-    let removing = expiry.map_or_else(BTreeSet::new, |expiry| {
-        expiries
-            .iter()
-            .filter(|(name, _)| selection.contains(name.as_str()))
-            .filter(|(_, (template, expires_at))| {
-                let ttl = nyl_render::gitops::instances::find_template(&inventory, template)
-                    .and_then(|template| template.spec.ttl);
-                nyl_orchestration::rules::expiry::decide(expiry.intent, *expires_at, ttl, expiry.now)
-                    == nyl_orchestration::rules::expiry::Disposition::Remove
-            })
-            .map(|(name, _)| name.clone())
-            .collect::<BTreeSet<_>>()
-    });
+    let removing = removing_instances(&inventory, &expiries, &selection, expiry);
     let repository = git2::Repository::discover(&inventory.project_root)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
     let commit = repository
@@ -228,6 +214,31 @@ fn known_instances(
         undeclared.push(name.clone());
     }
     (instances, errors, undeclared, unlisted, expiries)
+}
+
+/// The selected instances a reconcile with `expiry` removes: expired ones are
+/// not rendered by the preflight, because removing one runs from its stored
+/// documents, so a lost source commit cannot keep it alive.
+fn removing_instances(
+    inventory: &GitOpsInventory,
+    expiries: &Expiries,
+    selection: &BTreeSet<String>,
+    expiry: Option<Expiry>,
+) -> BTreeSet<EnvironmentName> {
+    let Some(expiry) = expiry else {
+        return BTreeSet::new();
+    };
+    expiries
+        .iter()
+        .filter(|(name, _)| selection.contains(name.as_str()))
+        .filter(|(_, (template, expires_at))| {
+            let ttl = nyl_render::gitops::instances::find_template(inventory, template)
+                .and_then(|template| template.spec.ttl);
+            nyl_orchestration::rules::expiry::decide(expiry.intent, *expires_at, ttl, expiry.now)
+                == nyl_orchestration::rules::expiry::Disposition::Remove
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// Each known instance's template and recorded expiry.

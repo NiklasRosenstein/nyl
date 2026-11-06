@@ -457,6 +457,7 @@ fn removal(args: &ReconcileArgs) -> Removal<'_> {
         reason: args.reason.as_deref(),
         wait: args.wait_lease,
         author: args.author.as_deref(),
+        source: args.source.as_deref(),
     }
 }
 
@@ -581,6 +582,8 @@ fn reconcile(
                     .as_ref()
                     .and_then(|found| expiry::extended(found.terms.ttl, now));
                 instance.action = instance.expires_at.map(|_| InstanceAction::Extended);
+                // Activity renewed it, even if it had expired.
+                instance.expired = false;
             }
         }
         for name in &evicted {

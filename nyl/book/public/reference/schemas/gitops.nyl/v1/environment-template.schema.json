@@ -216,8 +216,12 @@
           ],
           "description": "Whether `reconcile` repairs drift by itself. Omitted, `converge`."
         },
+        "keepSource": {
+          "description": "Keep each instance's latest source commit fetchable with a keep ref, `refs/nyl/<instance>/keep` under the state's `coordinationRefPrefix`, in the source repository, so teardown still finds its source after the pull request branch is gone. `nyl state delete` removes the ref. Needs push access to that ref pattern; `false` turns it off, and instances must then be removed before their branches disappear. Default `true`.",
+          "type": "boolean"
+        },
         "maxInstances": {
-          "description": "The most instances of this template that may exist at once. Omitted, unlimited. Enforcement is in progress: today the limit is recorded and not checked.",
+          "description": "The most instances of this template that may exist at once, expired ones included until they are removed. At the limit, `state init --template` and `reconcile --template` refuse to create another instance (exit 2) and name the expired instances that could be removed; `--make-room` removes them first, oldest expiry first and only as many as needed. Needs `state.path` ending in `{{ environment.name }}` so Nyl can list the instances. Omitted, unlimited.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -267,7 +271,7 @@
               "type": "null"
             }
           ],
-          "description": "How long an instance lives without activity, such as `7d`; `state init --template` moves the instance's `expiresAt` to now plus `ttl`. Omitted, instances never expire. Removing expired instances is in progress: today `expiresAt` is recorded and listed, and nothing removes the instance."
+          "description": "How long an instance lives without activity, such as `7d`: `state init --template`, `reconcile --template`, and every other `reconcile` of the instance (unless `--no-extend`) move its `expiresAt` to now plus `ttl`. A `reconcile` that finds the instance expired removes it, the way `nyl state delete --teardown` does, unless it is `--renew` or `reconcile --template`; `reconcile --template <name>` without an instance sweeps every instance of the template and never extends. Omitted, instances never expire."
         },
         "unitSelector": {
           "$ref": "#/$defs/LabelSelector",
@@ -464,7 +468,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "What a preview environment looks like, instantiated with parameters.\n\nInstances are created with `nyl state init --template` (or\n`nyl reconcile --template`), exist only in state, and behave like declared\nenvironments for every command. The template has the Environment's fields\nplus `parameters`, `deletionPolicy`, `allowTeardown`, `ttl`,\nand `maxInstances`. Strings in `values`, `state`, and `source`\nare templates: they read `params` and `environment.name` when an instance\nis created from the template, and `state` reads only `environment.name`,\nbecause it locates the state that holds the parameters.\n\n## When needed\n\nTo give every pull request its own environment, created and removed by CI.\n\n## If omitted\n\nEvery environment is declared with an `Environment` resource in source.",
+  "description": "What a preview environment looks like, instantiated with parameters.\n\nInstances are created with `nyl state init --template` (or\n`nyl reconcile --template`), exist only in state, and behave like declared\nenvironments for every command. The template has the Environment's fields\nplus `parameters`, `deletionPolicy`, `allowTeardown`, `ttl`,\n`maxInstances`, and `keepSource`. Strings in `values`, `state`, and `source`\nare templates: they read `params` and `environment.name` when an instance\nis created from the template, and `state` reads only `environment.name`,\nbecause it locates the state that holds the parameters.\n\n## When needed\n\nTo give every pull request its own environment, created and removed by CI.\n\n## If omitted\n\nEvery environment is declared with an `Environment` resource in source.",
   "examples": [
     {
       "apiVersion": "gitops.nyl/v1",

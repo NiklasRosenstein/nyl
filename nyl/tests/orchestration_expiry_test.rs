@@ -237,6 +237,7 @@ fn test_renew_and_the_pull_request_job_keep_an_expired_instance() {
     let renewed = invoke(&harness, "main", &["reconcile", "-e", "pr-1", "--renew", "-o", "json"]);
     assert_eq!(renewed.exit, 0, "{}\n{}", renewed.stderr, renewed.stdout);
     assert_eq!(instance_report(&renewed, 0)["action"], "extended");
+    assert_eq!(instance_report(&renewed, 0)["expired"], false, "{}", renewed.report);
     assert_eq!(expires_at(&harness, "pr-1"), "2026-10-09T10:00:00Z");
     assert!(exists(&harness, "pr-1") && !deleted(&harness, "pr-1"));
 
@@ -884,4 +885,51 @@ fn test_state_move_template_renames_the_template_of_its_instances() {
     // Closing it needs no source: the stored documents carry what teardown runs.
     let closed = invoke(&harness, "main", &["state", "delete", "-e", "pr-1", "--teardown"]);
     assert_eq!(closed.exit, 0, "{}\n{}", closed.stderr, closed.stdout);
+}
+
+/// Removing an expired instance renders nothing from source, so a lost source
+/// commit (no keep ref, branch deleted) fails only that instance's teardown,
+/// with the way forward, and the sweep still maintains the others; `--source`
+/// then tears it down with another revision's files. Catches a sweep that
+/// stops at one preview whose pull request branch is gone.
+#[test]
+fn test_a_lost_source_commit_fails_only_that_instances_removal() {
+    let template = format!("{TEMPLATE}  keepSource: false\n");
+    let (_directory, harness) = world(&template, UNITS);
+    harness.world.branch(&scenario::format::BranchStep {
+        name: "pr-9".to_owned(),
+        from: "main".to_owned(),
+    });
+    harness
+        .world
+        .commit_files("pr-9", "A change", &[("nyl/note.txt", "one")]);
+    let created = invoke(
+        &harness,
+        "pr-9",
+        &["reconcile", "-e", "pr-9", "--template", "preview", "--param", "pr=9"],
+    );
+    assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
+    harness.advance(5 * DAY);
+    open(&harness, 1);
+    harness.advance(3 * DAY);
+    harness.world.delete_branch("pr-9");
+
+    let sweep = invoke(&harness, "main", &["reconcile", "--template", "preview", "-o", "json"]);
+    assert_ne!(sweep.exit, 0, "{}\n{}", sweep.stderr, sweep.stdout);
+    assert!(sweep.stderr.contains("--source <revision>"), "{}", sweep.stderr);
+    let environments = sweep.report["environments"].as_array().unwrap();
+    let live = environments
+        .iter()
+        .find(|environment| environment["name"] == "pr-1")
+        .unwrap();
+    assert_eq!(live["units"]["site"]["result"], "current", "{}", sweep.report);
+    assert!(exists(&harness, "pr-9") && !deleted(&harness, "pr-9"));
+
+    let removed = invoke(
+        &harness,
+        "main",
+        &["reconcile", "-e", "pr-9", "--source", "main", "-o", "json"],
+    );
+    assert_eq!(removed.exit, 0, "{}\n{}", removed.stderr, removed.stdout);
+    assert!(!exists(&harness, "pr-9") && deleted(&harness, "pr-9"));
 }

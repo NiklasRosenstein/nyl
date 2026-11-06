@@ -1121,7 +1121,15 @@ Nyl reports unmet requirements where they matter:
   `deletionPolicy` is `Teardown`, including every unit of a template instance,
   naming each unmet requirement and the setting that fixes it.
 - `nyl state init --template` warns when the template contains publication
-  units that are not teardown-ready, because instances are always torn down.
+  units that are not teardown-ready, because instances are always torn down,
+  and when a unit's teardown would wait for an operator that an unattended
+  removal, such as an expiry, lacks (`teardownWait: manual`,
+  `NYL-TEARDOWN-WAIT-MANUAL`). The units render at the entry checkout and
+  resolve against the instance's state like a `plan`, so a unit that waits for
+  the outputs of another cannot show its requirements before its producers
+  ran, and `plan` and `reconcile` show them from then on. A driver reports what
+  an unattended removal would wait for in `TeardownReadiness::unattended`,
+  which never blocks.
 - `nyl get units -e <env> -o wide` and `nyl status` show teardown readiness per
   publication unit (`ready`, or `incomplete: <reasons>`).
 - Every teardown runs a preflight listing what would remain, however it was
@@ -1246,11 +1254,25 @@ nyl get environments                                         # declared environm
   `state.path` that ends in `{{ environment.name }}` and refs and a repository
   that do not read the name. A template whose refs depend on the name has its
   instances found by name only, and `get environments` and the fleet job do not
-  list them. Changing a template's `state` would hide the
-  instances at the old location from the fleet job and the close jobs, so
-  `plan` and `reconcile` refuse such a change while instances exist at the
-  old location and name `nyl state move --template <name> --from …`, which
-  moves every instance like `state move` moves one environment.
+  list them. Changing a template's `state` hides the instances at the old
+  location from the fleet job, the close jobs, and every command that names
+  one (`NYL-ENVIRONMENT-UNKNOWN`), because the old location is recorded
+  nowhere in source; `nyl state move --template <name> [--state-path …
+  --desired-ref … --observed-ref … --coordination-refs … --from …]`, with the
+  old location's options like `state move`, moves every instance found by
+  listing the old location, one `state move` each. The old `--state-path`
+  ends in `{{ environment.name }}` like the template's, and the old location
+  must be listable the same way. Without any old-location option it refuses
+  (`NYL-STATE-LOCATION-MISMATCH`); naming no instance at the old location
+  refuses too (`NYL-STATE-MISSING`), and moving again finds the instances
+  already there. A template renamed in source leaves its instances' records
+  naming the old one, so no command finds them (`NYL-INSTANCE-TEMPLATE-UNKNOWN`):
+  `nyl state move --template <new> --from-template <old>` records the
+  instances found at the new template's location as the new template's, one
+  transition commit each, and combined with old-location options moves them
+  first. An instance renders at its recorded source commit, which predates the
+  rename, so its next run is its pull request job's `reconcile --template
+  <new>`, which moves the recorded commit; closing it needs no source.
 - `state init --template` records its entry worktree's commit as the
   instance's source commit (`sourceCommit` in `state.yaml`), so a later plain
   run of the instance has one: it renders at that commit and records
@@ -1325,6 +1347,14 @@ nyl get environments                                         # declared environm
   request branch is deleted or squash-merged therefore still finds its source.
   It needs push access to that ref pattern. `keepSource: false` turns it off, and the
   pipeline should then remove instances before their branches disappear.
+  `state init --template` and `reconcile --template` push the ref before they
+  write the record, so the commit the record names is always fetchable, and
+  refuse when the push fails (`NYL-INSTANCE-KEEP-FAILED`, exit 1) rather than
+  promise a teardown they cannot deliver; a run with `--local` pushes nothing.
+  Every command that needs a recorded commit the clone lacks fetches it from
+  the ref. `state delete` removes the ref once nothing of the instance
+  remains; a ref that cannot be removed is a warning, because it is no reason
+  to keep the state.
 - When an instance's recorded source commit cannot be fetched, teardown fails
   with a message suggesting `--source <revision>`. `nyl teardown --all` and
   `nyl state delete --teardown` accept `--source` to take the units' source
@@ -1346,12 +1376,12 @@ Implementation status (M5): a template's `values`, `source`, and
 `protectedRefs` strings render with `params` and `environment.name` when an
 instance is loaded, so a `values.target` object carries concrete prefixes and
 names into a unit's `target: {{ values.target | tojson }}`. `deletionPolicy`,
-`allowTeardown`, and `ttl` (`expiresAt` is recorded by `state init --template`)
-are implemented. Not yet implemented: removal of expired instances and the
-`--renew`, `--no-extend`, and `--make-room` flags, `maxInstances`, `keepSource`
-and its keep refs, `catalogApplication.shared`, `nyl state move --template`,
-the fleet `reconcile --template` without `-e`, and cross-environment references
-to declared environments.
+`allowTeardown`, `ttl`, `maxInstances`, `keepSource` with its keep refs,
+sliding expiry and the removal of expired instances, `--renew`, `--no-extend`,
+`--make-room`, the fleet `reconcile --template` without `-e`, and `nyl state
+move --template` are implemented. Not yet implemented:
+`catalogApplication.shared`, and cross-environment references to declared
+environments.
 
 ### Template changes
 
@@ -1371,7 +1401,15 @@ that pull request would deploy, whichever job reconciles it.
   [Expiry](#expiry)). An instance whose lease is held is skipped and reported
   as `busy`, not as a failure, because another run is reconciling it; the
   exit category reflects only the instances the fleet run processed, and a
-  busy expired instance is removed by a later run. It never renders an
+  busy expired instance is removed by a later run. The fleet finds the
+  instances by listing the template's state location, so it needs a listable
+  one (`NYL-INSTANCE-NOT-LISTABLE`); an unreadable listing fails the run
+  (`NYL-STATE-UNAVAILABLE`) instead of sweeping what it could not see. It
+  names no source: `--source` and `--worktree` are rejected, because each
+  instance runs at its own recorded commit. The removal of an expired instance
+  does not render its source, so a recorded commit that is gone fails only the
+  teardown that needs its files (`--source <revision>` supplies them) and
+  never the sweep of the other instances. It never renders an
   instance's units with a template from another commit, because that
   combination was never reviewed together; pulling the default branch into
   every pull request remains a pipeline choice.
@@ -1379,34 +1417,59 @@ that pull request would deploy, whichever job reconciles it.
 ### Expiry
 
 Nyl has no daemon, so expiry works through ordinary CI runs, and a continuous
-runner (M7) could add timely enforcement later:
+runner (M7) could add timely enforcement later. Whether an instance is expired
+is decided from its record's `expiresAt`, the template's `ttl`, and the
+injected clock (`nyl_orchestration::rules::expiry`); a template without `ttl`
+never expires its instances, whatever an older record says. An instance is
+expired from the moment `expiresAt` is reached.
 
 - `state.yaml` records `expiresAt`. Only activity on one instance extends it:
-  `state init --template` and every `reconcile -e <instance>` without
-  `--no-extend` move it to now plus `ttl` when they start, whether or not the
-  run succeeds, so an active pull request keeps its preview even while its
-  preview fails.
+  `state init --template`, `reconcile -e <instance> --template <name>`, and
+  every other `reconcile -e <instance>` that finds the instance live and is not
+  `--no-extend` move it to now plus `ttl` when they start, in a commit of its
+  own (operation `state-renew`, none when the time does not change), whether or
+  not the run succeeds, so an active pull request keeps its preview even
+  while its preview fails. `plan`, `status`, `get`, and `teardown` never
+  extend it.
 - Expiry is the declared intent to clean up, so every reconcile that finds an
-  instance expired removes it instead of reconciling it: `reconcile -e
-  <instance>`, `reconcile -e <instance> --no-extend`, and `reconcile
-  --template <name>`. Removal runs `teardown --all` and then `state delete`.
-  The template's `allowTeardown` authorizes that teardown; without it, the
-  instance is reported as pending teardown and the run exits 2. An instance
-  whose teardown readiness is incomplete is reported and left in place unless
-  the run passes `--allow-incomplete`. Removal also waits for each
-  publication's `teardownWait`: with the `manual` default of a unit without `observe`,
-  it stops after phase 1 until `--confirm-removed`, so templates meant to
-  expire unattended use `observe` or `delay`, and `state init --template`
-  warns otherwise. `status` and `get environments` show expired instances
-  until they are removed.
-- `--renew` is the only way to keep an expired instance: it extends the expiry
-  and then reconciles.
+  instance expired removes it instead of reconciling it, checking expiry
+  before it extends anything: `reconcile -e <instance>`, `reconcile -e
+  <instance> --no-extend`, and `reconcile --template <name>`. Removal runs
+  `teardown --all` and then `state delete`, with the teardown's units
+  recorded as deleting with the reason `expired`. Nothing is deleted while a
+  unit has an incarnation, a teardown in progress, or a recorded request, so
+  the state stays until every teardown completed, and the run's report says
+  what remains (`action: removal-incomplete`; exit 2 for waits, 3 and 4 for a
+  failed or uncertain teardown). The teardown starts only when the template's
+  `allowTeardown` (read at the entry checkout, which is the scheduled job's
+  trusted one) or `--allow-teardown` authorizes it; without either, the units
+  are recorded as pending teardown, the instance is reported as pending
+  (`action: removal-pending`, `NYL-INSTANCE-REMOVAL-PENDING`), and the run exits
+  2. An instance whose teardown readiness is incomplete is reported and left in
+  place unless the run passes `--allow-incomplete`, and the options of `reconcile`
+  that gate a teardown (`--allow-dependents`, `--approve`, `--source`) apply to
+  it. Removal also waits for each publication's `teardownWait`: with the
+  `manual` default of `mode: publish`, it stops after phase 1 until
+  `--confirm-removed`, so templates meant to expire unattended use `observe`
+  or `delay`, and `state init --template` warns otherwise
+  (`NYL-TEARDOWN-WAIT-MANUAL`, with every unmet readiness requirement of the
+  units its run can resolve before any producer ran). The decision is made
+  from the record the command read and repeated under the lease: a record
+  whose `expiresAt` changed since (another run renewed or removed it) leaves
+  everything in place (`NYL-INSTANCE-RENEWED`, exit 2). `status`, `plan`, and
+  `get environments` show expired instances until they are removed
+  (`NYL-INSTANCE-EXPIRED` warning).
+- `--renew` is the only way to keep an expired instance by a plain
+  reconcile: it extends the expiry and then reconciles.
 - `reconcile -e <instance>` extends a live instance's expiry;
   `reconcile -e <instance> --no-extend` reconciles it as maintenance without
   extending; `reconcile --template <name>` never extends.
 - `--renew` and `--no-extend` conflict and are rejected together. Both are
   rejected for declared environments, which have no expiry, and for the fleet
-  reconcile, `--template` without `-e`.
+  reconcile, `--template` without `-e` (`NYL-INSTANCE-OPTION-INVALID`, exit 1),
+  as are `--param` and `--make-room` there. `--no-extend` is also rejected with
+  `--template`, which is activity by definition; `--renew` with it is
+  redundant and accepted.
 - The pull request job's `reconcile -e <instance> --template <name> --param …`
   is activity by definition, so it renews an expired instance instead of
   removing it: updating an active pull request never removes its preview.
@@ -1415,12 +1478,27 @@ runner (M7) could add timely enforcement later:
   updates its parameters when they changed, extends the expiry, and
   reconciles, so updating an active pull request never removes its preview. `state delete --teardown` removes one instance explicitly,
   expired or not.
-- At `maxInstances`, `state init --template` refuses with exit 2 and names
-  the expired instances that could be removed. Removing them is the scheduled
+- `maxInstances` counts the template's live instances, expired ones included
+  until they are removed, and limits creation only: updating an existing
+  instance is never refused, and a deleted one starts over (`--fresh`) as a
+  new one. It needs the instances to be listable, so `nyl validate` rejects a
+  template with `maxInstances` whose state location depends on the instance
+  name, and creation refuses (`NYL-INSTANCE-NOT-LISTABLE`). At `maxInstances`,
+  `state init --template` and the pull request job's `reconcile --template`
+  refuse with exit 2 (`NYL-INSTANCE-LIMIT`) and write nothing, naming the
+  expired instances that could be removed. Removing them is the scheduled
   fleet job's work, never a side effect of another pull request's job:
   hitting the limit is a project configuration concern, not the new pull
   request's. `--make-room` opts in to removing expired instances first, the
-  same way the fleet job does, and then creating the instance.
+  same way the fleet job does (the same removal, authorized by
+  `allowTeardown` or `--allow-teardown`, with `--allow-incomplete` for
+  incomplete readiness), and then creating the instance. It removes the
+  expired instances with the oldest `expiresAt` first and only as many as the
+  new instance needs, never a live instance. When too few instances are
+  expired, or a removal does not finish, nothing is created and the refusal
+  says which (`NYL-INSTANCE-LIMIT`, exit 2). Creation under a limit is not
+  atomic across jobs: two jobs creating at once can exceed it by one, which
+  the next `--make-room` or fleet run absorbs.
 
 A typical pipeline runs `reconcile -e <instance> --template <name> --param …`
 when a pull request opens or updates, `state delete --teardown` when it closes, and
@@ -2001,7 +2079,7 @@ Nyl-Version: 0.7.0
   of the summary and of each receipt.
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
   `recover`, `detect-drift`, `attest`, `observe`, `exec`, `ci-admit`, `state-init`,
-  `state-move`, `state-delete`,
+  `state-renew`, `state-move`, `state-delete`,
   and `state-forget`. `lease break` writes only the lease ref; the
   transition commit that imports the broken run lists the break under
   `leaseBroken` with who broke it and why.

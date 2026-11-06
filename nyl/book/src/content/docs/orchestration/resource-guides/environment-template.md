@@ -69,14 +69,15 @@ $ nyl get environments
 
 An instance is found only while its template exists at the entry checkout: a
 checkout that no longer declares the template reports
-`NYL-INSTANCE-TEMPLATE-UNKNOWN`, and renaming or removing a template will need
-`nyl state move --template`, which is still to come.
+`NYL-INSTANCE-TEMPLATE-UNKNOWN`. Renaming a template, or changing where its
+`state` puts instances, goes through [`nyl state move
+--template`](#moving-and-renaming-a-template).
 
 A plain `reconcile -e pr-123` from any checkout renders the instance at the
 source commit its record names, not at the checkout, and records which commit it
 used; only `reconcile --template`, entered from the pull request's own
 checkout, moves the recorded commit. `get environments` lists the declared
-environments and the live instances with their expiry.
+environments and the live instances with their expiry, marking an expired one.
 
 ## What renders with the parameters
 
@@ -129,20 +130,96 @@ or a run of a unit that claims native resources refuses with `NYL-STATE-UNAVAILA
 instead of checking without them. A deleted instance's name still answers the
 owner fence of the prefix it published, as an owner that no longer exists.
 
+## Expiry, limits, and the fleet
+
+Nyl has no daemon, so expiry works through the commands people already run:
+
+```yaml
+spec:
+  ttl: 7d
+  maxInstances: 20
+  allowTeardown: true
+```
+
+- **Activity extends.** `state init --template`, the pull request job's
+  `reconcile -e pr-123 --template preview --param pr=123`, and every other
+  `reconcile -e pr-123` move `expiresAt` to now plus `ttl` when they start,
+  whether or not the run succeeds, so a pull request that keeps pushing keeps
+  its preview even while the preview fails. `plan`, `status`, `get`, and
+  `teardown` never extend it, and `reconcile -e pr-123 --no-extend` is
+  maintenance that does not.
+- **Expired instances are removed by the next reconcile that reaches them**:
+  a plain or `--no-extend` `reconcile -e pr-123`, or the scheduled
+  `reconcile --template preview`, which maintains the live instances at their
+  own recorded commits, never extends any, and removes the expired. Removal is
+  `teardown --all` and then `state delete`, so nothing is deleted while a unit
+  still has resources. `allowTeardown: true` authorizes the teardown;
+  without it, or `--allow-teardown`, the run records the units as pending
+  teardown and exits 2. A removal that waits (a publication's `teardownWait`,
+  an approval, unmet readiness) or fails leaves the state and exits like the
+  teardown does, and a later run continues it. `--renew` keeps an expired
+  instance, as does the pull request job's `reconcile --template`: updating an
+  active pull request never removes its preview.
+- **`maxInstances`** counts the template's instances, expired ones until they
+  are removed, when one is created. At the limit `state init --template` and
+  `reconcile --template` exit 2 (`NYL-INSTANCE-LIMIT`) and write nothing, naming
+  the expired instances that could go: removing them is the scheduled job's
+  work, not a side effect of another pull request's job. `--make-room` opts
+  in: it removes the expired instances with the oldest expiry first, only as
+  many as needed and never a live one, and then creates the instance; too few
+  expired instances, or a removal that does not finish, still refuse. Nyl counts
+  by listing, so `maxInstances` needs `state.path: '{{ environment.name }}'`
+  and refs and a repository that do not read the name (`nyl validate` rejects
+  the template otherwise). Two jobs creating at once can exceed the limit by
+  one.
+- **The fleet job.** A scheduled job runs `nyl reconcile --template preview`
+  from the default branch. It needs the same preview credentials as the pull
+  request jobs. An instance whose lease another run holds is reported as
+  `busy` and does not fail the job, and a later run removes it if it is
+  expired. Removing an expired instance renders nothing from source, so a pull
+  request branch that is gone does not keep it alive; the teardown of a unit
+  that needs its files does, until `--source <revision>` supplies them.
+
+A removal waits for each publication's `teardownWait`, and the default
+`manual` waits for a person to confirm with `--confirm-removed`. A template
+whose previews should expire unattended sets `observe` or `delay` on its
+publications; `state init --template` warns (`NYL-TEARDOWN-WAIT-MANUAL`)
+about a `manual` wait and about every unmet teardown requirement of the units
+it can resolve before their producers ran, such as a catalog that does not
+prune (`NYL-TEARDOWN-CATALOG-MANUAL-SYNC`). `plan` shows the rest once the units
+resolve.
+
+## Source keep refs
+
+Teardown needs the instance's source files, and a closed pull request's branch
+may be gone. With `keepSource`, the default, each instance's recorded source
+commit is kept fetchable through the ref `refs/nyl/<instance>/keep` (under the
+state's `coordinationRefPrefix`) in the source repository. `state init
+--template` and `reconcile --template` move it before they record the commit
+and refuse when the push is refused (`NYL-INSTANCE-KEEP-FAILED`), so the preview
+job needs push access to `refs/nyl/*`. Every command that needs the recorded
+commit fetches it from the ref when the clone lacks it, and `state delete`
+removes the ref once the instance is gone. `keepSource: false` keeps nothing;
+the pipeline must then remove instances before their branches disappear, or
+tear them down with `--source <revision>`. A run with `--local` pushes no
+ref.
+
+## Moving and renaming a template
+
+An instance is found at the location its template names, under the template's
+name. After changing the template's `state` or renaming it, move the instances
+with one command (see [`nyl state move`](/nyl/reference/cli/state/#moving-every-instance-of-a-template)):
+
+```console
+$ nyl state move --template preview --state-path 'previews/{{ environment.name }}'
+$ nyl state move --template previews --from-template preview
+```
+
 ## Not yet implemented
 
-Part of the preview lifecycle is still in progress:
-
-- `state init --template` and `reconcile --template` move `expiresAt` to now
-  plus `ttl`, and a plain `reconcile` does not, but nothing removes an expired
-  instance yet.
-- `maxInstances` is recorded and not enforced.
-- `keepSource` and the keep ref that lets teardown find a source commit after
-  its branch is deleted: use `--source <revision>` meanwhile.
 - `catalogApplication.shared`, one catalog for every instance: each instance
   publishes a catalog Application of its own.
-- Cross-environment references to declared environments, and reconciling every
-  instance of a template with `reconcile --template` and no `-e`.
+- Cross-environment references to declared environments.
 
 ## See also
 

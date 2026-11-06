@@ -612,6 +612,10 @@ pub struct TeardownReadiness {
     pub remnants: Vec<Finding>,
     /// Requirements the driver cannot see, which never block.
     pub not_checked: Vec<String>,
+    /// What only an operator can answer, which a teardown nobody attends,
+    /// such as the removal of an expired template instance, would wait for.
+    /// They never block; `nyl state init --template` warns about them.
+    pub unattended: Vec<Finding>,
 }
 
 impl TeardownReadiness {

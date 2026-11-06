@@ -381,6 +381,7 @@ fn run_init(
         reason: common.reason.as_deref(),
         wait: common.wait_lease,
         author: common.author.as_deref(),
+        source: None,
     };
     run_with_instance(
         common,

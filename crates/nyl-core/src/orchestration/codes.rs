@@ -208,6 +208,10 @@ codes! {
     /// Teardown readiness: a self-managing catalog Application and its
     /// AppProjects remain after teardown (remnant).
     TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
+    /// Teardown readiness: the unit's teardown waits for an operator to
+    /// confirm the removal, so an unattended removal, such as the expiry of a
+    /// template instance, stops after its first phase. A warning.
+    TeardownWaitManual => "NYL-TEARDOWN-WAIT-MANUAL",
     /// A unit whose kind cannot tear down was released: its resources were
     /// left in place and the transition commit lists them.
     UnitReleased => "NYL-UNIT-RELEASED",

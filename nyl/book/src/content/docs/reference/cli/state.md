@@ -67,6 +67,21 @@ declarations (`NYL-INSTANCE-PARAMETER-INVALID`), and `--param` without
 `--template` (`NYL-INSTANCE-TEMPLATE-REQUIRED`), all with exit 1 before anything
 is written. `--fresh` with `--template` starts a deleted instance over.
 
+Creating an instance also checks the template's `maxInstances` and keeps its
+source: at the limit it refuses with exit 2 (`NYL-INSTANCE-LIMIT`), writes
+nothing, and names the expired instances that could be removed;
+`--make-room` removes them first, oldest expiry first and only as many as the
+new instance needs, then creates it, and `--allow-teardown` and
+`--allow-incomplete` authorize those removals like the options of
+[`nyl reconcile`](/nyl/reference/cli/reconcile/#preview-lifecycle) do. Unless
+the template sets `keepSource: false`, it moves the keep ref
+`refs/nyl/<instance>/keep` of the source repository to the recorded commit
+before recording it (`NYL-INSTANCE-KEEP-FAILED`, exit 1, when the push is
+refused). It warns about what the instance's teardown would meet: each unmet
+requirement of its publications and a `manual` `teardownWait`, which stops a
+removal nobody attends (`NYL-TEARDOWN-WAIT-MANUAL`). See
+[expiry and limits](/nyl/orchestration/resource-guides/environment-template/#expiry-limits-and-the-fleet).
+
 ## `nyl state move`
 
 ```bash
@@ -91,6 +106,34 @@ records the move so that every command against it refuses with
 `NYL-STATE-MOVED` and names the new one, and only then does the new location
 become usable. An interrupted move completes when run again. The old refs are
 kept for audit; removing them is a manual step.
+
+### Moving every instance of a template
+
+```bash
+# After changing the template's state.path from previews/<name> to <name>:
+nyl state move --template preview --state-path 'previews/{{ environment.name }}'
+# After renaming the template from preview to previews in source:
+nyl state move --template previews --from-template preview
+```
+
+Instances live in state, so a change to an
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)'s
+`state`, or to its name, hides them: no command finds an instance whose
+record is not where, and under the name, its template says
+(`NYL-ENVIRONMENT-UNKNOWN`, `NYL-INSTANCE-TEMPLATE-UNKNOWN`). `--template <name>`
+without `-e` moves every instance of the template, found by listing the old
+location, with one move each. The old-location options are the same as above,
+and an old `--state-path` ends in `{{ environment.name }}` like the template's
+own. `--from-template <old>` names the template the instances had; they are
+recorded as `<name>`'s, in one transition commit each, after they moved when
+old-location options came with it. Without any of these options the command
+refuses (`NYL-STATE-LOCATION-MISMATCH`), and naming no instance at the old
+location refuses too (`NYL-STATE-MISSING`). Moving again finds the instances
+already moved. The template's current location must be listable
+(`NYL-INSTANCE-NOT-LISTABLE`). `-o json` prints `{template, instances: […]}`
+with each instance's operation report, and the exit is the highest of theirs.
+An instance still renders at its recorded commit, which predates a rename, so
+its pull request job's `reconcile --template <name>` moves it on.
 
 ## `nyl state forget`
 
