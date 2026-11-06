@@ -201,7 +201,7 @@ and to the harness's validation, together with the first scenario using them.
 | `commit: {branch, message, apply, delete}` | Copies the files under `apply` over the working clone, removes the paths in `delete`, commits, and pushes |
 | `branch: {name, from}` | Creates and pushes a branch |
 | `squash-merge: {branch, into}` | Squash-merges and pushes, keeping the branch |
-| `delete-branch: <name>` | Deletes a branch in `project.git` |
+| `delete-branch: <name>` | Deletes a branch in `project.git` and prunes what no ref names anymore, as a host does, so a commit only that branch carried can no longer be fetched |
 | `clock: {advance: <duration>}` or `{set: <timestamp>}` | Moves the injected clock |
 | `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result. The orchestration commands run in-process in tier 1; any other command, such as `publish-tree`, runs as the binary in both tiers, and `expect` then reads its files and output, not a report |
 | `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `detect-drift`, `teardown`, and from M5 `observe`), returning `outcome` (`succeeded`, `failed`, `uncertain`, and for `detect-drift` also `drifted`); `observe` returns `succeeded` with the observed values in `outputs`, `pending`, or `failed` without a category |
@@ -210,6 +210,7 @@ and to the harness's validation, together with the first scenario using them.
 | `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease` before a `--wait-lease` poll, or a fault point), leaving it running; the commits other steps write meanwhile do not count toward its `commits` |
 | `resume: <id>` | Lets a paused invocation continue and waits for it; `exit` and `expect` check its result |
 | `ref: {delete: <ref>}` | Deletes a ref in the state repository, as someone with push access could |
+| `ref: {set: <ref>, to: <branch>}` | Points a ref of `project.git` at the tip of a branch, such as the `refs/pull/<n>/head` a host keeps for a pull request after its branch is deleted |
 
 `expect` holds only user-visible results:
 

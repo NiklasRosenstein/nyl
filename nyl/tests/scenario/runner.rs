@@ -311,7 +311,14 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             StepKind::Branch => self.world.branch(step.branch.as_ref().expect("kind")),
             StepKind::SquashMerge => self.world.squash_merge(step.squash_merge.as_ref().expect("kind")),
             StepKind::DeleteBranch => self.world.delete_branch(step.delete_branch.as_ref().expect("kind")),
-            StepKind::Ref => self.world.delete_ref(&step.reference.as_ref().expect("kind").delete),
+            StepKind::Ref => {
+                let step = step.reference.as_ref().expect("kind");
+                match (&step.delete, &step.set, &step.to) {
+                    (Some(reference), _, _) => self.world.delete_ref(reference),
+                    (_, Some(reference), Some(branch)) => self.world.set_ref(reference, branch),
+                    _ => unreachable!("validated: delete, or set with to"),
+                }
+            }
             StepKind::File => self.world.file(step.file.as_ref().expect("kind"))?,
             StepKind::Clock => {
                 let step = step.clock.as_ref().expect("kind");

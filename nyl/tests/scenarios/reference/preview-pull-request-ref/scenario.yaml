@@ -1,0 +1,48 @@
+# Scenario 2's tier-1 variant "pull request ref": the template omits `keepSource`
+# (default false), so Nyl keeps nothing, but the host keeps the pull request's
+# head under `refs/pull/123/head` after the branch is gone, as GitHub does. The
+# close job at `main` fetches the recorded commit by its id from the origin and
+# removes the preview with no `--source` and no keep ref; a run without network
+# access (`--local`) does not fetch it.
+contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request
+milestone: M5
+tiers: [1]
+project: ../preview/project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+  - commit: {branch: main, message: "Keep no source", apply: ../preview-no-keep-ref/patches/no-keep}
+  - branch: {name: pr-123, from: main}
+  - commit: {branch: pr-123, message: "Change the page", apply: ../preview/patches/web}
+  - nyl: [reconcile, -e, pr-123, --template, preview, --param, pr=123]
+    at: pr-123
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+      keep-refs: {count: 0}
+
+  # The squash-merge and the branch deletion leave the pull request's head
+  # under the host's own ref and nowhere else.
+  - ref: {set: refs/pull/123/head, to: pr-123}
+  - squash-merge: {branch: pr-123, into: main}
+  - delete-branch: pr-123
+
+  # Without network access the recorded commit is not fetched, and nothing runs.
+  - nyl: [reconcile, -e, pr-123, --no-extend, --local]
+    exit: 1
+    expect:
+      codes: [NYL-SOURCE-UNAVAILABLE]
+  - {nyl: [get, environments, pr-123], exit: 0}
+
+  # The close job at main fetches the commit by its id and removes the preview.
+  - nyl: [state, delete, -e, pr-123, --teardown]
+    exit: 0
+    expect:
+      outcome: done
+      removed: [kubernetes, database]
+      released: [web-image]
+      deploy: {branch: previews, absent: ['pr-123/**']}
+      keep-refs: {count: 0}
+  - {nyl: [get, environments, pr-123], exit: 1}

@@ -1,8 +1,9 @@
-# Scenario 2's tier-1 variant "no keep ref": with `keepSource: false` nothing
-# keeps the instance's source commit but its branch, so the close job after the
-# squash-merge cannot fetch it, fails with the way forward, and succeeds with
-# `--source`, which takes the files of every unit, an OpenTofu unit's pinned
-# `source` included, from that revision.
+# Scenario 2's tier-1 variant "no keep ref": the template omits `keepSource`
+# (default false), so nothing keeps the instance's source commit but its branch
+# and no ref of the host names it, so the close job after the squash-merge
+# cannot fetch it, fails with the way forward, and succeeds with `--source`,
+# which takes the files of every unit, an OpenTofu unit's pinned `source`
+# included, from that revision.
 contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request
 milestone: M5
 tiers: [1]
