@@ -108,13 +108,20 @@ pub enum RequirementError {
     External(String),
 }
 
-/// The text every [`RequirementError::External`] contains, which
-/// [`error_code`] reads back from a resolution error.
-const EXTERNAL_FRAGMENT: &str = "which only an external source supplies";
-/// The text every [`RequirementError::Undeclared`] contains.
-const UNDECLARED_FRAGMENT: &str = "requires attestation ";
-
+/// The fix a resolution error of this kind carries; a `nyl validate` finding
+/// names the producer's attestations in its fix instead.
 impl RequirementError {
+    pub fn fix(&self) -> &'static str {
+        match self {
+            Self::Undeclared(_) => {
+                "require an attestation the producer declares, or declare it in the producer's `spec.attestations`"
+            }
+            Self::External(_) => {
+                "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6): require only the names the producer's driver observes"
+            }
+        }
+    }
+
     /// The stable code the error is reported with.
     pub fn code(&self) -> Code {
         match self {
@@ -129,19 +136,6 @@ impl std::fmt::Display for RequirementError {
         match self {
             Self::Undeclared(message) | Self::External(message) => formatter.write_str(message),
         }
-    }
-}
-
-/// The code of a resolution error that [`RequirementError`] wrote, so a
-/// consumer's run reports it with its own code rather than as an invalid
-/// reference.
-pub fn error_code(message: &str) -> Option<Code> {
-    if message.contains(EXTERNAL_FRAGMENT) {
-        Some(Code::AttestationExternalUnsupported)
-    } else if message.contains(UNDECLARED_FRAGMENT) && message.contains(" of unit ") {
-        Some(Code::AttestationUndeclared)
-    } else {
-        None
     }
 }
 
@@ -189,7 +183,7 @@ fn external_error(names: &[String], producer: &DesiredUnit) -> RequirementError 
         )
     };
     RequirementError::External(format!(
-        "requires attestation {} of unit {unit}, {EXTERNAL_FRAGMENT}; Nyl cannot record external attestations yet, so the consumer would wait forever ({others})",
+        "requires attestation {} of unit {unit}, which only an external source supplies; Nyl cannot record external attestations yet, so the consumer would wait forever ({others})",
         names
             .iter()
             .map(|name| format!("{name:?}"))
@@ -461,20 +455,10 @@ mod tests {
                 error.to_string().contains("\"qa\"") && error.to_string().contains("observes healthy"),
                 "{error}"
             );
-            assert_eq!(
-                error_code(&error.to_string()),
-                Some(Code::AttestationExternalUnsupported)
-            );
         }
         assert_eq!(
             required(Evidence::Published, &["healthy".to_owned()], &unit),
             Ok(vec!["healthy".to_owned()])
-        );
-        let undeclared = required(Evidence::Published, &["nope".to_owned()], &unit).unwrap_err();
-        assert_eq!(error_code(&undeclared.to_string()), Some(Code::AttestationUndeclared));
-        assert_eq!(
-            error_code("reads output \"x\", which the receipt does not record"),
-            None
         );
     }
 

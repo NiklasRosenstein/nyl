@@ -210,7 +210,7 @@ pub fn get_value(
     let reason = match resolve(&snapshot.desired) {
         Ok(ReferenceValue::Value { value, .. }) => return Ok(GetValue::Value(value)),
         Ok(ReferenceValue::Blocked { reason, .. }) => reason,
-        Err(message) => return Err(unresolved(message)),
+        Err(error) => return Err(unresolved(error.message)),
     };
     if !allow_stale {
         return Err(unresolved(reason));
@@ -238,7 +238,7 @@ pub fn get_value(
             ),
         }),
         Ok(ReferenceValue::Blocked { reason, .. }) => Err(unresolved(reason)),
-        Err(message) => Err(unresolved(message)),
+        Err(error) => Err(unresolved(error.message)),
     }
 }
 
