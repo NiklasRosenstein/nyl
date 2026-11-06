@@ -84,6 +84,8 @@ codes! {
     UnitOwnershipOverlap => "NYL-UNIT-OWNERSHIP-OVERLAP",
     /// A reference names a unit outside the ownership set, an undeclared or sensitive output, a mismatched artifact kind, or a value of the wrong type.
     ReferenceInvalid => "NYL-REFERENCE-INVALID",
+    /// A cross-environment reference or `dependsOn` entry names an instance of an EnvironmentTemplate as its producer. Instances are consumers only.
+    ReferenceInstanceProducer => "NYL-REFERENCE-INSTANCE-PRODUCER",
     /// A `nyl get` value form found no current receipt to read.
     ReferenceUnresolved => "NYL-REFERENCE-UNRESOLVED",
     /// `--allow-stale` printed a value from a receipt that is not current.

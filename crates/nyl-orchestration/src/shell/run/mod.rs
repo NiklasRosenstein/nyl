@@ -250,6 +250,12 @@ pub struct RunRequest {
     pub planned: BTreeMap<EnvironmentName, BTreeSet<UnitName>>,
     /// Declared environments and their state locations; producer snapshots are read lazily once.
     pub environments: BTreeMap<EnvironmentName, StateLocation>,
+    /// The entries of `environments` that are instances of EnvironmentTemplates
+    /// and no declared Environment. Instances are consumers only: they are
+    /// found by the checks across environments (fencing, `exec`, the
+    /// protection of producers) but never read as a producer, so a reference
+    /// to one is refused (`NYL-REFERENCE-INSTANCE-PRODUCER`).
+    pub instances: BTreeSet<EnvironmentName>,
     pub environment: EnvironmentName,
     /// The Environment as the entry worktree declares it, with group
     /// defaults applied: the source of `source`, `state`, `protectedRefs`,
@@ -910,6 +916,13 @@ impl<'r, 'a> Session<'r, 'a> {
         for unit in prepared.desired.units.values() {
             for environment in crate::rules::multi_environment::dependencies(&unit.spec) {
                 if environment == *self.environment() || self.environments.borrow().contains_key(&environment) {
+                    continue;
+                }
+                if self.request.instances.contains(&environment) {
+                    errors.push(crate::rules::multi_environment::instance_producer_finding(
+                        &format!("unit {}", unit.unit.name),
+                        &environment,
+                    ));
                     continue;
                 }
                 if self.request.unavailable.contains(&environment) {

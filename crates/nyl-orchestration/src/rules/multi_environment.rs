@@ -36,6 +36,29 @@ pub fn dependencies(spec: &Value) -> BTreeSet<EnvironmentName> {
     result
 }
 
+/// The instances of EnvironmentTemplates that a rendered unit names as the
+/// producer of a reference or a `dependsOn` entry. Instances are consumers
+/// only: they are too short-lived to depend on, so a producer is always a
+/// declared environment.
+pub fn instance_producers(spec: &Value, instances: &BTreeSet<EnvironmentName>) -> BTreeSet<EnvironmentName> {
+    dependencies(spec)
+        .into_iter()
+        .filter(|environment| instances.contains(environment))
+        .collect()
+}
+
+/// The refusal of a reference to an instance, with the fix.
+pub fn instance_producer_finding(consumer: &str, producer: &EnvironmentName) -> Finding {
+    Finding::new(
+        Code::ReferenceInstanceProducer,
+        format!(
+            "{consumer} reads a unit of {producer}, which is an instance of an EnvironmentTemplate; \
+             instances are consumers only, because they are too short-lived to depend on"
+        ),
+        "read from a declared Environment, whose units persist, and move what the instance needs there",
+    )
+}
+
 /// Producers before consumers, ties by name. Validate the entire declared graph,
 /// including environments outside the invocation's selection.
 pub fn order(graph: &BTreeMap<EnvironmentName, BTreeSet<EnvironmentName>>) -> Result<Vec<EnvironmentName>, Finding> {
@@ -145,8 +168,9 @@ pub fn units(
 /// receipts exist. Shared by source validation and command selection.
 pub fn validate_sources(
     sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
+    instances: &BTreeSet<EnvironmentName>,
 ) -> Result<Vec<EnvironmentName>, Finding> {
-    validate_available_sources(sources, &BTreeSet::new())
+    validate_available_sources(sources, &BTreeSet::new(), instances)
 }
 
 /// Validate all available declarations, retaining failed environments as graph
@@ -154,7 +178,21 @@ pub fn validate_sources(
 pub fn validate_available_sources(
     sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
     unavailable: &BTreeSet<EnvironmentName>,
+    instances: &BTreeSet<EnvironmentName>,
 ) -> Result<Vec<EnvironmentName>, Finding> {
+    for (consumer_environment, source) in sources {
+        for (consumer, unit) in source.units.iter().filter(|(_, unit)| unit.selected) {
+            let Some(spec) = unit.spec.as_ref() else {
+                continue;
+            };
+            if let Some(producer) = instance_producers(spec, instances).into_iter().next() {
+                return Err(instance_producer_finding(
+                    &format!("{consumer_environment}/{consumer}"),
+                    &producer,
+                ));
+            }
+        }
+    }
     let mut graph: BTreeMap<EnvironmentName, BTreeSet<EnvironmentName>> = sources
         .iter()
         .map(|(environment, source)| {
@@ -325,6 +363,32 @@ mod tests {
         graph.get_mut(&name("z")).unwrap().insert(name("a"));
         assert!(order(&graph).unwrap_err().message.contains("a -> z -> a"));
     }
+    /// Instances are consumers only: a reference or a `dependsOn` entry whose
+    /// producer is an instance is found, whichever form names it, and
+    /// refused with its stable code and the fix. Catches an instance read as a
+    /// producer, which would make a unit depend on something that expires.
+    #[test]
+    fn test_instance_producers_are_found_in_references_and_depends_on() {
+        let instances = BTreeSet::from([name("pr-1")]);
+        let by_reference =
+            json!({"values": {"vpc": {"fromUnit": {"environment": "pr-1", "unit": "network", "output": "id"}}}});
+        let by_depends_on = json!({"dependsOn": [{"environment": "pr-1", "unit": "seed"}]});
+        let declared = json!({"dependsOn": [{"environment": "dev", "unit": "seed"}]});
+        assert_eq!(
+            instance_producers(&by_reference, &instances),
+            BTreeSet::from([name("pr-1")])
+        );
+        assert_eq!(
+            instance_producers(&by_depends_on, &instances),
+            BTreeSet::from([name("pr-1")])
+        );
+        assert!(instance_producers(&declared, &instances).is_empty());
+        let finding = instance_producer_finding("dev/web", &name("pr-1"));
+        assert_eq!(finding.code, Code::ReferenceInstanceProducer);
+        assert!(finding.message.contains("dev/web") && finding.message.contains("pr-1"));
+        assert!(finding.fix.contains("declared Environment"));
+    }
+
     #[test]
     fn test_dependencies_and_qualified_units() {
         assert_eq!(

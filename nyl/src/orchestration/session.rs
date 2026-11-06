@@ -433,7 +433,12 @@ impl Session {
         }
         // Instances are environments too: their stored claims fence resources
         // by owner, protect producers they read, and are checked by `exec`.
+        // They are consumers only, never a producer another unit reads.
+        let mut instances = BTreeSet::new();
         for (name, location) in &self.instance_locations {
+            if !environments.contains_key(name) && !environment_errors.contains_key(name) {
+                instances.insert(name.clone());
+            }
             environments.entry(name.clone()).or_insert_with(|| location.clone());
         }
         environment_errors.extend(self.instance_errors.clone());
@@ -441,6 +446,7 @@ impl Session {
             planned: BTreeMap::new(),
             approvals: nyl_orchestration::rules::approval::Approvals::default(),
             environments,
+            instances,
             environment_errors,
             unavailable: BTreeSet::new(),
             environment: self.resolved.name.clone(),
