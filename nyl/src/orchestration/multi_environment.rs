@@ -341,7 +341,11 @@ fn read_environment(
     }
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
     let mut sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
-    // An instance's recorded commit stays fetchable through its keep refs.
+    // A recorded commit the clone lacks is fetched by its id from the project's origin,
+    // and an instance's keep refs are the fallback.
+    if !request.offline {
+        sources = sources.with_origin_fetch();
+    }
     if let Some(id) = resolved
         .instance
         .as_ref()

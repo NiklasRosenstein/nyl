@@ -204,7 +204,16 @@ resolve.
 Teardown needs the instance's source files, and a closed pull request's branch
 may be gone. By default Nyl pushes nothing to the source repository: the
 instance is torn down by the pull request closed job, while its recorded commit
-is still reachable. A template whose previews may expire, through the fleet,
+is still reachable. A command that needs the recorded commit and finds that
+the clone lacks it fetches it **by its exact id from the clone's `origin`**,
+with the credentials Nyl uses for the other Git fetches. GitHub keeps a pull
+request's commits reachable through `refs/pull/<n>/head` and GitLab through
+`refs/merge-requests/<n>/head`, also after the branch is deleted or the pull
+request is squash-merged, so a closed job that checked out only the default
+branch still finds the commit. Nothing but the recorded id is requested from
+the declared origin; if the host refuses, the command reports the commit as
+missing, as `--source <revision>` expects. A run with `--local` fetches
+nothing. A template whose previews may expire, through the fleet,
 long after their branches are gone sets `keepSource: true`: each instance's
 recorded source commit is then kept fetchable through a ref of its own in the
 source repository, `refs/nyl-keep/<keepId>/<commit>`, and `state delete`
