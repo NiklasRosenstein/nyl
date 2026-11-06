@@ -426,9 +426,12 @@ impl ValuesFromFile {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogApplicationOverrides {
-    /// Whether to generate a catalog Application recursively sourcing `_nyl/catalog`.
+    /// Whether to generate a catalog Application recursively sourcing `_nyl/catalog`. A target with `shared` generates none, whatever this says.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Sync this target's catalog directory through a catalog Application shared by many targets, such as every preview on a branch. Nyl renders that Application once, under `_nyl/shared/<name>/`, and the target generates no catalog Application of its own. The other `catalogApplication` fields then belong in this block, because they describe the shared Application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<SharedCatalogApplication>,
     /// Catalog Application name. Defaults to the target name; names must be unique within the Argo CD instance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -452,10 +455,65 @@ pub struct CatalogApplicationOverrides {
     pub annotations: BTreeMap<String, String>,
 }
 
+/// The shared catalog Application of `catalogApplication.shared`: its name and the policy it overrides.
+///
+/// Contract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).
+/// Every target that names the same catalog must describe it identically,
+/// because one manifest is rendered for all of them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SharedCatalogApplication {
+    /// Name of the shared catalog and of its Argo CD Application. It also names the reserved publication prefix `_nyl/shared/<name>/` that holds the manifest.
+    pub name: String,
+    /// Argo CD project override; inherits the instance catalog default when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Catalog synchronization override; inherits the instance default when omitted. Previews tear down only when this prunes.
+    #[serde(rename = "syncPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub sync_policy: Option<GitOpsSyncPolicy>,
+    /// Application deletion override; inherits the instance default when omitted.
+    #[serde(
+        rename = "applicationDeletionPolicy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub application_deletion_policy: Option<ApplicationDeletionPolicy>,
+    /// Self-pruning override; inherits the instance default when omitted.
+    #[serde(rename = "selfPrunePolicy", default, skip_serializing_if = "Option::is_none")]
+    pub self_prune_policy: Option<ManagedResourceDeletionPolicy>,
+    /// Labels added to the shared Application.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations added to the shared Application.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+impl CatalogApplicationOverrides {
+    /// Whether the target generates a catalog Application of its own: not when
+    /// a shared catalog syncs its catalog directory.
+    pub fn generates_application(&self) -> bool {
+        self.enabled && self.shared.is_none()
+    }
+
+    /// Whether any per-target catalog setting is declared, which a shared
+    /// catalog takes from its `shared` block instead.
+    fn has_target_settings(&self) -> bool {
+        self.name.is_some()
+            || self.project.is_some()
+            || self.sync_policy.is_some()
+            || self.application_deletion_policy.is_some()
+            || self.self_prune_policy.is_some()
+            || !self.labels.is_empty()
+            || !self.annotations.is_empty()
+    }
+}
+
 impl Default for CatalogApplicationOverrides {
     fn default() -> Self {
         Self {
             enabled: true,
+            shared: None,
             name: None,
             project: None,
             sync_policy: None,
@@ -1344,6 +1402,24 @@ impl DeploymentTarget {
             true,
             false,
         )?;
+        if let Some(shared) = &self.spec.catalog_application.shared {
+            validate_dns_subdomain("spec.catalogApplication.shared.name", &shared.name)?;
+            if let Some(project) = &shared.project {
+                validate_static_required("spec.catalogApplication.shared.project", project)?;
+            }
+            if self.spec.catalog_application.has_target_settings() {
+                return Err(CoreError::config(
+                    "spec.catalogApplication.shared replaces the target's own catalog Application, so its name, project, \
+                     syncPolicy, applicationDeletionPolicy, selfPrunePolicy, labels, and annotations belong in the shared block",
+                ));
+            }
+            if self.publication_path_prefix().is_empty() {
+                return Err(CoreError::config(
+                    "a target with spec.catalogApplication.shared needs a spec.publication.pathPrefix, because the \
+                     shared catalog lives beside the targets under the reserved prefix _nyl/shared/<name>/",
+                ));
+            }
+        }
         if let Some(name) = &self.spec.catalog_application.name {
             validate_dns_subdomain("spec.catalogApplication.name", name)?;
         }

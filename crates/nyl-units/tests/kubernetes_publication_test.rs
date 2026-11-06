@@ -756,6 +756,151 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
     assert!(first.overlaps(&second));
 }
 
+/// [`inline_spec`] for the preview `name`: its own prefix and name, and its
+/// catalog shared as `previews` with `shared`.
+fn preview_spec(name: &str, shared: Value) -> Value {
+    let mut spec = inline_spec();
+    spec["target"]["name"] = json!(name);
+    spec["target"]["inline"]["publication"]["pathPrefix"] = json!(name);
+    spec["target"]["inline"]["catalogApplication"] = json!({"shared": shared});
+    spec
+}
+
+/// The artifact `tree` a publication recorded.
+fn tree_artifact(outcome: &Outcome) -> Value {
+    let Outcome::Succeeded { artifacts, .. } = outcome else {
+        panic!("the publication succeeds: {outcome:?}");
+    };
+    artifacts
+        .iter()
+        .find(|artifact| artifact.metadata.name == "tree")
+        .expect("a PublishedTree")
+        .spec
+        .clone()
+}
+
+/// A shared catalog end to end through the driver: the first target's
+/// publication creates the manifest under its reserved prefix with the owner
+/// `catalog:<name>` (the target's own tree holds no catalog Application),
+/// later targets find it current and leave it alone, a target that renders
+/// another manifest reports `differs` without overwriting it, teardown reads
+/// the shared Application's settings and leaves the catalog standing, and
+/// `nyl build -- --shared-catalog` is the one writer that replaces it. Catches
+/// pull requests overwriting each other's manifest, a catalog removed with its
+/// last target, and readiness read from a catalog that is not in the tree.
+#[test]
+fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_build() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let publish = |name: &str, shared: Value| {
+        let unit = resolved_unit(&driver, &world, preview_spec(name, shared));
+        let Supported::Supported(outcome) = driver
+            .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+            .unwrap()
+        else {
+            panic!("the driver reconciles");
+        };
+        (unit, outcome)
+    };
+
+    let (first, outcome) = publish("pr-1", pruning.clone());
+    assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "created");
+    let files = world.files("deploy");
+    for path in [
+        "_nyl/shared/previews/catalog.yaml",
+        "_nyl/shared/previews/_nyl/index.json",
+        "pr-1/_nyl/index.json",
+    ] {
+        assert!(files.contains(&path.to_owned()), "{path} in {files:?}");
+    }
+    let manifest = git(&world.bare(), &["show", "deploy:_nyl/shared/previews/catalog.yaml"]);
+    assert!(
+        manifest.contains("name: previews") && manifest.contains("prune: true"),
+        "{manifest}"
+    );
+    let shared_index: Value = serde_json::from_str(&git(
+        &world.bare(),
+        &["show", "deploy:_nyl/shared/previews/_nyl/index.json"],
+    ))
+    .unwrap();
+    assert_eq!(shared_index["owner"], "catalog:previews");
+    assert!(
+        !files
+            .iter()
+            .filter(|path| path.starts_with("pr-1/_nyl/catalog/"))
+            .any(|path| git(&world.bare(), &["show", &format!("deploy:{path}")]).contains("path: pr-1/_nyl/catalog")),
+        "the target's tree holds no catalog Application of its own"
+    );
+    // Readiness is read from the shared Application, whose catalog the project does not own.
+    let settings = first.resolved_spec.as_ref().unwrap()["teardownSettings"].clone();
+    assert_eq!(settings["catalogPrunes"], true, "{settings}");
+    assert_eq!(settings["catalogOwnedByParent"], true, "{settings}");
+
+    // A second target finds the same manifest and writes nothing outside its prefix.
+    let head = git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]);
+    let (_, outcome) = publish("pr-2", pruning.clone());
+    assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "current");
+    assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+
+    // A target that renders another manifest leaves the published one alone.
+    let (_, outcome) = publish("pr-3", json!({"name": "previews"}));
+    assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "differs");
+    assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+
+    // The build is the writer: --diff reads, --push replaces.
+    let build_unit = resolved_unit(&driver, &world, preview_spec("pr-3", json!({"name": "previews"})));
+    let build = |arguments: &[&str]| {
+        let arguments = arguments.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let mut ctx = context(&world, DriverOperation::Build, Some(&id));
+        ctx.dirty_source = false;
+        driver.build(&ctx, &build_unit, &arguments).unwrap()
+    };
+    let Supported::Supported(diff) = build(&["--shared-catalog", "--diff"]) else {
+        panic!("the driver builds");
+    };
+    assert_eq!(diff[0].spec["changes"], "update");
+    assert_eq!(diff[0].spec["owner"], "catalog:previews");
+    assert_eq!(diff[0].spec["pathPrefix"], "_nyl/shared/previews");
+    assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+    let Supported::Supported(pushed) = build(&["--shared-catalog", "--push"]) else {
+        panic!("the driver builds");
+    };
+    assert_eq!(pushed[0].spec["target"], "catalog:previews");
+    assert_ne!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+    let replaced = git(&world.bare(), &["show", "deploy:_nyl/shared/previews/catalog.yaml"]);
+    assert!(!replaced.contains("prune: true"), "{replaced}");
+
+    // Teardown of the last target removes its own files; the catalog stays.
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&id));
+    let deleting = publication_world::deleting(first);
+    driver.teardown(&ctx, &deleting).unwrap();
+    ctx.teardown_wait = Some(nyl_core::orchestration::driver::WaitCompletion::Delayed);
+    driver.teardown(&ctx, &deleting).unwrap();
+    let files = world.files("deploy");
+    assert!(!files.iter().any(|path| path.starts_with("pr-1/")), "{files:?}");
+    assert!(
+        files.contains(&"_nyl/shared/previews/catalog.yaml".to_owned()),
+        "{files:?}"
+    );
+
+    // --shared-catalog of a target that shares none is refused with its code.
+    let plain = resolved_unit(&driver, &world, inline_spec());
+    let error = driver
+        .build(
+            &context(&world, DriverOperation::Build, Some(&id)),
+            &plain,
+            &[std::ffi::OsString::from("--shared-catalog")],
+        )
+        .err()
+        .expect("a target without a shared catalog has none to build");
+    assert!(
+        error.to_string().contains("NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG"),
+        "{error}"
+    );
+}
+
 /// Catches a renamed target publishing a second tree and orphaning the first,
 /// or failing in the ownership index with no way out: nothing in the engine
 /// replaces a unit when its destination changes, so the driver fails closed

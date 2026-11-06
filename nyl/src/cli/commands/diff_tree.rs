@@ -975,6 +975,7 @@ mod tests {
             state_files: BTreeMap::new(),
             committed_state_paths: BTreeSet::new(),
             publication_base: None,
+            shared_catalog: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;

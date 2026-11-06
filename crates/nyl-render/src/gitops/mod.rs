@@ -13,6 +13,7 @@ pub mod project_scope;
 pub mod provenance;
 pub mod publication;
 pub mod reconcile;
+pub mod shared_catalog;
 pub mod source_locks;
 pub mod tree;
 pub mod units;
