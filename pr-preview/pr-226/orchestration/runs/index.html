@@ -151,8 +151,8 @@ for the producer’s existence.</p>
 pass, and a producer that declares none is satisfied by its receipt.</li>
 <li><code dir="auto">attestations: [a, b]</code> requires exactly those, whatever <code dir="auto">evidence</code> says. Each
 must be one the producer declares: the names its kind produces, such as
-<code dir="auto">accepted</code> and <code dir="auto">healthy</code> for a <a href="/nyl/pr-preview/pr-226/orchestration/resource-guides/kubernetes-publication/">publication in observe
-mode</a>, and the
+<code dir="auto">accepted</code> and <code dir="auto">healthy</code> for a <a href="/nyl/pr-preview/pr-226/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd">publication that declares
+<code dir="auto">observe: {}</code></a>, and the
 names in its <code dir="auto">spec.attestations</code>. Naming another is an error
 (<code dir="auto">NYL-ATTESTATION-UNDECLARED</code>), which <code dir="auto">nyl validate</code> reports too.</li>
 <li>An attestation declared with <code dir="auto">from: external</code> is supplied only by a person
