@@ -29,12 +29,16 @@ impl Slots {
         }
     }
 
-    /// Main and independent source-field worktrees of one unit in a slot.
+    /// Main and independent source-field worktrees of one unit in a slot, at
+    /// `commit`: the job's source commit, which differs from the unit's
+    /// `recorded` one under a teardown's `--source`.
+    #[allow(clippy::too_many_arguments)] // The unit's checkout inputs, with the recorded commit beside the job's.
     pub(crate) fn checkout_unit(
         &self,
         sources: &dyn SourceResolver,
         slot: usize,
         commit: &CommitId,
+        recorded: Option<&CommitId>,
         driver: &dyn nyl_core::orchestration::driver::Driver,
         spec: &serde_json::Value,
         project_dir: &str,
@@ -46,8 +50,8 @@ impl Slots {
         String,
     > {
         let worktree = self.directory.join(format!("slot-{slot}"));
-        crate::shell::sources::validate_local_inputs(sources, driver, spec, commit)?;
-        let paths = crate::shell::sources::main_checkout_paths(driver, spec, commit, commit, project_dir)?;
+        crate::shell::sources::validate_local_inputs(sources, driver, spec, commit, recorded)?;
+        let paths = crate::shell::sources::main_checkout_paths(driver, spec, commit, recorded, commit, project_dir)?;
         sources
             .reset_worktree_with_paths(&SourceRepository::This, commit, &worktree, paths.as_deref())
             .map_err(|error| format!("cannot check out commit {commit}: {error}"))?;
@@ -56,6 +60,7 @@ impl Slots {
             driver,
             spec,
             commit,
+            recorded,
             project_dir,
             &self.directory.join(format!("slot-{slot}-sources")),
             Some((&worktree, commit)),

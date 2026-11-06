@@ -1463,10 +1463,12 @@ nyl get environments                                         # declared environm
   `nyl state delete --teardown` accept `--source` to take the units' source
   files from another revision, typically the protected branch right after the
   pull request was squash-merged. Teardown uses the stored resolved specs, so
-  only the source files come from that revision. When they differ from the
-  recorded source, Nyl warns and records the substitution in the transition
-  commit; it never refuses, so a lost commit cannot lock anyone out of
-  removing an instance.
+  only the source files come from that revision, including those of a source
+  field the stored spec pinned to the recorded commit without an explicit
+  `revision` or `commit` lock; explicit locks and other repositories stay as
+  declared. When they differ from the recorded source, Nyl warns and records
+  the substitution in the transition commit; it never refuses, so a lost
+  commit cannot lock anyone out of removing an instance.
 - An instance's units read shared infrastructure from declared environments
   with a cross-environment reference, such as
   `fromUnit: {environment: dev, unit: network, output: vpcId}`, under the

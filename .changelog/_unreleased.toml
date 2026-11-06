@@ -303,3 +303,9 @@ id = "6efe7756-b86d-47a3-9bc4-258a8c9af4d2"
 type = "docs"
 description = "Add an end-to-end example to the Orchestration guide: one project with an OciImage, an OpenTofu configuration, a KubernetesPublication, and a preview template, reconciled locally and in GitHub Actions (reconcile on main, `nyl attest` and `nyl observe` with either Argo CD access method, a preview per pull request, its close job, and the scheduled fleet reconcile and shared-catalog writer), with the credentials the units admit and the token a preview job needs for keep refs. M5 is complete: its exit criterion is met by the reference scenarios, which now all run in both tiers with the built-in publication driver"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "1f9d2003-0882-458d-a02c-3d76a7717781"
+type = "fix"
+description = "`nyl teardown --all --source <revision>` and `nyl state delete --teardown --source <revision>` now take the files of a unit's Git source field from that revision when the stored spec pinned the field to the unit's recorded source commit (an OpenTofu or Terraform `source`, an image `context`), as they already did for the unit's own files, so a lost source commit no longer locks an instance out of removal. Explicit `revision` and `commit` locks and other repositories stay as declared, and the stored spec, its digests, and approvals are unchanged"
+author = "@NiklasRosenstein"
