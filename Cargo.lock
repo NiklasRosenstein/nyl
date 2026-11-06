@@ -1974,6 +1974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyl-e2e"
+version = "0.5.9"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "nyl-git"
 version = "0.6.1"
 dependencies = [

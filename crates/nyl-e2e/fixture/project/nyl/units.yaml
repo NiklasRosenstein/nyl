@@ -1,0 +1,56 @@
+# Block-style labels, because a unit's labels are read before it renders.
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: database
+  labels:
+    stage: dev
+spec:
+  source: {path: ../infra/database}
+  backend: {path: '%STATE_DIR%/{{ environment.name }}-database.tfstate'}
+  variables: {name: '{{ environment.name }}'}
+  outputs:
+    connection: {type: object}
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: web-image
+  labels:
+    stage: dev
+spec:
+  env: {passthrough: %DOCKER_PASSTHROUGH%}
+  context: {path: ../services/web}
+  repository: '%REGISTRY_HOST%/web'
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels:
+    stage: dev
+spec:
+  target: dev
+  observe: {}
+  # Two live fields of what the publication deploys. The Service's cluster IP
+  # appears when Argo CD has applied it; the ready replicas when the pods run
+  # the image from the local registry.
+  observations:
+    serviceClusterIP:
+      type: string
+      from:
+        resource: {apiVersion: v1, kind: Service, namespace: web, name: web}
+        pointer: /spec/clusterIP
+    readyReplicas:
+      type: integer
+      from:
+        resource: {apiVersion: apps/v1, kind: Deployment, namespace: web, name: web}
+        pointer: /status/readyReplicas
+  # The teardown waits until Argo CD has removed the workloads, reading it the
+  # way `nyl attest` does.
+  teardownWait: {strategy: observe}
+  # What the unit admits to read the reconciler and the cluster.
+  env: {passthrough: %PUBLICATION_ENV%}
+  timeout: 10m

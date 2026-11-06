@@ -1,0 +1,47 @@
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata:
+  name: web
+  namespace: '{{ inputs.namespace }}'
+spec:
+  inputs:
+    image: {type: string}
+    databaseHost: {type: string}
+    namespace: {type: string}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: '{{ inputs.namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+        - name: web
+          # The digest the image unit pushed to the local registry, which the
+          # kind nodes resolve to the registry container.
+          image: '{{ inputs.image }}'
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - name: DATABASE_HOST
+              value: '{{ inputs.databaseHost }}'
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: '{{ inputs.namespace }}'
+spec:
+  selector: {app: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}
