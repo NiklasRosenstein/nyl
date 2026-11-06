@@ -668,7 +668,8 @@ jobs:
       # …the tools and login steps above
       - run: >
           nyl reconcile -e "pr-${{ github.event.number }}" --template preview
-          --param "pr=${{ github.event.number }}" --wait-lease 10m
+          --param "pr=${{ github.event.number }}"
+          --source-ref "refs/pull/${{ github.event.number }}/head" --wait-lease 10m
 ```
 
 The checkout is of the pull request's head commit. The instance records the
@@ -676,7 +677,13 @@ commit it ran from, and the close job below fetches that commit from the
 repository after the branch is gone; GitHub keeps the head under
 `refs/pull/<n>/head`, but not the synthetic merge commit that a plain checkout of
 a `pull_request` event takes, so a preview job that ran from the merge commit
-could not be removed later without `--source`.
+could not be removed later without `--source`. `--source-ref` records that
+head ref next to the commit, for a host that refuses to serve a commit by its id:
+the close job then fetches the ref by name and looks for the recorded commit in
+it, never at the ref's tip (see [the pull request closed
+job](/nyl/orchestration/resource-guides/environment-template/#the-pull-request-closed-job)).
+A local run of the same command just leaves the flag out and keeps what CI
+recorded.
 
 The first run creates the instance, `pr-1` here, in the shared `nyl/previews`
 ref: the template's name, its parameters, the pull request's commit as its
@@ -684,7 +691,7 @@ source, and an expiry of seven days from now. Every later push extends the
 expiry and executes only what the push changed:
 
 ```console
-$ nyl reconcile -e pr-1 --template preview --param pr=1
+$ nyl reconcile -e pr-1 --template preview --param pr=1 --source-ref refs/pull/1/head
 UNIT        KIND                   RESULT    DETAIL
 database    OpenTofu               executed  reason: no receipt
 web-image   OciImage               executed  reason: no receipt
@@ -703,7 +710,7 @@ share one state ref and one deploy branch, and `nyl get environments` lists
 them with their expiry:
 
 ```console
-$ nyl reconcile -e pr-2 --template preview --param pr=2
+$ nyl reconcile -e pr-2 --template preview --param pr=2 --source-ref refs/pull/2/head
 UNIT        KIND                   RESULT    DETAIL
 database    OpenTofu               executed  reason: no receipt
 web-image   OciImage               executed  reason: no receipt
