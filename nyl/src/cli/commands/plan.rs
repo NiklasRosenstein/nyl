@@ -108,6 +108,7 @@ pub fn run(args: &PlanArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             false,
             wiring.drivers,
             &crate::orchestration::project::InstanceRequest::default(),
+            None,
         ),
         |environment, selected, planned, unavailable| {
             let mut args = args.clone();

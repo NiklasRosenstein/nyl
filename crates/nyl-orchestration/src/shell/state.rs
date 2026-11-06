@@ -295,7 +295,7 @@ pub fn init_instance(
             report.details.insert("template".to_owned(), json!(instance.template));
             let snapshot = read(context, location, environment)?;
             let now = held.lease.taken_at;
-            let expires_at = instance.ttl.map(|ttl| ttl.after(now));
+            let expires_at = crate::rules::expiry::extended(instance.ttl, now);
             let event = StateEvent::StateInitialized {
                 at: now,
                 by: context.requested_by.clone(),
@@ -372,6 +372,62 @@ pub fn init_instance(
             let mut summary = summary(Operation::StateInit, environment, headline);
             summary.details.insert("template".to_owned(), json!(instance.template));
             summary.details.insert("params".to_owned(), json!(instance.params));
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
+        },
+    )
+}
+
+/// Activity on an instance: move its `expiresAt` to now plus `ttl` (cleared
+/// for a template without one), the first step of every `reconcile -e
+/// <instance>` that is not `--no-extend`. It is one transition commit, none
+/// when the expiry already is that time, written whether or not the run that
+/// follows succeeds.
+///
+/// Contract: [Expiry](../../../../design/orchestration-core.md#expiry).
+pub fn renew_instance(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    ttl: Option<nyl_core::orchestration::time::Duration>,
+    requested: &Requested,
+) -> StateOperationReport {
+    with_lease(
+        context,
+        environment,
+        Operation::StateRenew,
+        location,
+        requested,
+        |held, report| {
+            let snapshot = read(context, location, environment)?;
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+            check_remote_tips(context.store, location, environment)?;
+            let mut record = snapshot.record.clone().expect("check_record found state.yaml");
+            let expires_at = crate::rules::expiry::extended(ttl, held.lease.taken_at);
+            if record.template.is_none() {
+                return Err(Finding::new(
+                    Code::InstanceOptionInvalid,
+                    format!("{environment} is a declared environment, which has no expiry"),
+                    "expiry applies to instances of an EnvironmentTemplate",
+                ));
+            }
+            if record.expires_at == expires_at {
+                report
+                    .details
+                    .insert("note".to_owned(), json!("the expiry is already that time"));
+                return Ok(());
+            }
+            record.expires_at = expires_at;
+            if let Some(expires_at) = expires_at {
+                report.details.insert("expiresAt".to_owned(), json!(expires_at));
+            }
+            let mut summary = summary(Operation::StateRenew, environment, "expiry extended");
+            if let Some(expires_at) = expires_at {
+                summary.details.insert("expiresAt".to_owned(), json!(expires_at));
+            }
+            let changes = TransitionChanges {
+                record: Some(record),
+                ..TransitionChanges::default()
+            };
             commit(context, location, held, &snapshot, summary, changes, requested, report)
         },
     )
@@ -657,6 +713,64 @@ fn move_holding(
         }
     }
     Ok(())
+}
+
+/// `nyl state move --template <new> --from-template <old>`, for one
+/// instance whose state stays where it is: record the instance as one of the
+/// template `to`, because its template was renamed in source. One transition
+/// commit, none when the instance already is `to`'s.
+///
+/// Contract: [Instances](../../../../design/orchestration-core.md#instances).
+/// Moving the state of the instances of a template is
+/// [`relocate`] for each; this is the part of the move that renames.
+pub fn retemplate(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    to: &str,
+    requested: &Requested,
+) -> StateOperationReport {
+    with_lease(
+        context,
+        environment,
+        Operation::StateMove,
+        location,
+        requested,
+        |held, report| {
+            report.details.insert("location".to_owned(), json!(describe(location)));
+            let snapshot = read(context, location, environment)?;
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+            check_remote_tips(context.store, location, environment)?;
+            let mut record = snapshot.record.clone().expect("check_record found state.yaml");
+            let Some(from) = record.template.clone() else {
+                return Err(Finding::new(
+                    Code::InstanceNameTaken,
+                    format!("{environment} is a declared environment, not an instance of a template"),
+                    "only instances of an EnvironmentTemplate have a template to rename",
+                ));
+            };
+            if from == to {
+                report.details.insert(
+                    "note".to_owned(),
+                    json!(format!("the instance already is of template {to}")),
+                );
+                return Ok(());
+            }
+            record.template = Some(to.to_owned());
+            report
+                .details
+                .insert("template".to_owned(), json!({"from": from, "to": to}));
+            let mut summary = summary(Operation::StateMove, environment, "template renamed");
+            summary
+                .details
+                .insert("template".to_owned(), json!({"from": from, "to": to}));
+            let changes = TransitionChanges {
+                record: Some(record),
+                ..TransitionChanges::default()
+            };
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
+        },
+    )
 }
 
 /// `nyl lease break -e <env> --reason <text>`: declare the lease holder gone.

@@ -1332,12 +1332,14 @@ pub(super) fn mark_teardowns(
     for name in names {
         let unit = life.desired[&name].clone();
         let in_set = ownership.contains(&name);
+        let expired = request.lifecycle.expired.is_some();
         let reason = match (all, in_set) {
+            (true, _) if expired => DeletionReason::Expired,
             (true, _) => DeletionReason::Decommission,
             (false, true) => DeletionReason::Replace,
             (false, false) => DeletionReason::Teardown,
         };
-        let hold = (request.lifecycle.hold || (all && in_set)).then(|| Hold {
+        let hold = (request.lifecycle.hold || (all && in_set && !expired)).then(|| Hold {
             since: now,
             by: context.base.requested_by.clone(),
             reason: Some(hold_reason(request.reason.as_deref())),

@@ -199,7 +199,7 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::Targets(selection) => declarations(GitOpsResourceKind::DeploymentTarget, selection),
         GetCommand::AppProjects(selection) => declarations(GitOpsResourceKind::AppProjectDefinition, selection),
         GetCommand::ApplicationGroups(selection) => declarations(GitOpsResourceKind::ApplicationGroup, selection),
-        GetCommand::Environments(selection) => environments(selection),
+        GetCommand::Environments(selection) => environments(selection, wiring.clock.now()),
         GetCommand::EnvironmentTemplates(selection) => declarations(GitOpsResourceKind::EnvironmentTemplate, selection),
         GetCommand::Units(units) => match &units.state.environment {
             None => unit_declarations(&units.path, units.state.output),
@@ -691,7 +691,7 @@ fn declarations(kind: GitOpsResourceKind, selection: &GetResourceArgs) -> Result
 /// `nyl get environments`: the declared Environments, then the live
 /// instances of every EnvironmentTemplate, found by listing their state.
 /// Contract: [Instances](../../../../design/orchestration-core.md#instances).
-fn environments(selection: &GetResourceArgs) -> Result<CommandOutcome> {
+fn environments(selection: &GetResourceArgs, now: nyl_core::orchestration::time::Timestamp) -> Result<CommandOutcome> {
     let inventory = discover_gitops_inventory(&selection.path, None, crate::resource_catalogue())?;
     let wanted = |name: &str| selection.name.as_deref().is_none_or(|selected| selected == name);
     let mut rows = Vec::new();
@@ -735,7 +735,17 @@ fn environments(selection: &GetResourceArgs) -> Result<CommandOutcome> {
             state,
             instance.record.expires_at.map_or_else(
                 || "-".to_owned(),
-                |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                |at| {
+                    let time = at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    // An instance stays listed, as expired, until a reconcile removes it.
+                    let ttl = nyl_render::gitops::instances::find_template(&inventory, &instance.descriptor.template)
+                        .and_then(|template| template.spec.ttl);
+                    if nyl_orchestration::rules::expiry::expired(Some(at), ttl, now) {
+                        format!("{time} (expired)")
+                    } else {
+                        time
+                    }
+                },
             ),
             "-".to_owned(),
         ]);
