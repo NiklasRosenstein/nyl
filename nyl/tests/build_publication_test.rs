@@ -63,7 +63,8 @@ fn standalone_project() -> tempfile::TempDir {
     }
     let edit = |path: &str, from: &str, to: &str| {
         let file = copy.path().join(path);
-        let text = std::fs::read_to_string(&file).unwrap();
+        // Git may check fixtures out with CRLF line endings (Windows).
+        let text = std::fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
         assert!(text.contains(from), "{path} holds {from:?}");
         std::fs::write(file, text.replace(from, to)).unwrap();
     };
@@ -229,7 +230,8 @@ fn inline_project() -> tempfile::TempDir {
     let project = standalone_project();
     let edit = |path: &str, from: &str, to: &str| {
         let file = project.path().join(path);
-        let text = std::fs::read_to_string(&file).unwrap();
+        // Git may check fixtures out with CRLF line endings (Windows).
+        let text = std::fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
         assert!(text.contains(from), "{path} holds {from:?}");
         std::fs::write(file, text.replace(from, to)).unwrap();
     };
