@@ -190,12 +190,30 @@ impl SharedCatalogManifest {
 /// `diff-tree`) that compile a target from a plain inventory enforce the same
 /// rules, such as that a revision carrying a shared catalog holds nothing else.
 pub fn validate_with_samples(inventory: &GitOpsInventory) -> Result<()> {
+    // Rendering every environment's units is only worth it, and only a new way
+    // to fail, for a project that declares a shared catalog somewhere: in a
+    // target, an inline target of a unit, or a template's values.
+    if !declares_shared_catalog(inventory) {
+        return validate_shared_catalogs(inventory);
+    }
     let samples = super::instances::templates(inventory)
         .into_iter()
         .flat_map(super::instances::sample_instances)
         .collect();
     let extended = super::units::with_inline_targets(&inventory.clone().with_instances(samples))?;
     validate_shared_catalogs(&extended)
+}
+
+/// Whether any YAML file of the project mentions `catalogApplication` followed
+/// by `shared`, as a target, a unit's inline target, or a template does.
+/// Conservative: a file that merely mentions both counts.
+fn declares_shared_catalog(inventory: &GitOpsInventory) -> bool {
+    inventory.yaml_files.iter().any(|file| {
+        std::fs::read_to_string(inventory.project_root.join(file)).is_ok_and(|text| {
+            text.find("catalogApplication")
+                .is_some_and(|at| text[at..].contains("shared"))
+        })
+    })
 }
 
 /// A target that takes part in the checks across targets.

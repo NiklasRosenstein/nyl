@@ -37,6 +37,12 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
             ));
         }
     }
+    if spec.contains_key("sharedCatalogReading") {
+        return Err(
+            "spec.sharedCatalogReading is recorded from the publication branch when the unit is resolved and must not be written by hand"
+                .to_owned(),
+        );
+    }
     if spec.contains_key("teardownSettings") {
         return Err(
             "spec.teardownSettings is recorded from the rendered target when the unit is resolved and must not be written by hand; \

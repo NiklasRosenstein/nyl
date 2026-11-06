@@ -44,7 +44,7 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
-use super::run::shared_catalog_view;
+use super::run::{read_shared_catalog, SHARED_CATALOG_READING};
 use nyl_core::orchestration::driver::{
     AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext,
     Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
@@ -255,8 +255,7 @@ impl Driver for KubernetesPublicationDriver {
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
         let (rendered, mut inputs) = resolution_inputs(&self.resource_catalogue, ctx, spec)?;
-        let view = shared_catalog_view(ctx, &rendered)?;
-        let settings = nyl_render::gitops::publication::teardown_settings_with(&rendered, &view).map_err(|error| {
+        let settings = nyl_render::gitops::publication::teardown_settings(&rendered).map_err(|error| {
             DriverError::before_effects(format!(
                 "cannot read the teardown settings of DeploymentTarget {:?}: {error}",
                 unit_target(spec).unwrap_or_default()
@@ -265,6 +264,12 @@ impl Driver for KubernetesPublicationDriver {
         let settings = serde_json::to_value(settings)
             .map_err(|error| DriverError::before_effects(format!("cannot record the teardown settings: {error}")))?;
         inputs.recorded.insert(TEARDOWN_SETTINGS.to_owned(), settings);
+        // What the branch holds of a shared catalog follows the writer, not the
+        // target: recorded for readiness, never keyed.
+        if let Some(reading) = read_shared_catalog(&ctx.env, &ctx.project_dir, &rendered)? {
+            inputs.recorded.insert(SHARED_CATALOG_READING.to_owned(), reading);
+            inputs.excluded_fields.push(SHARED_CATALOG_READING.to_owned());
+        }
         if observe::observes(spec) {
             inputs.recorded.insert(ARGOCD.to_owned(), observe::recorded(&rendered)?);
             // How Argo CD is read (the declared access, the control-plane
@@ -402,6 +407,12 @@ impl Driver for KubernetesPublicationDriver {
     /// requirements) for a document resolved without them.
     fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        // A shared catalog's rows follow the manifest the branch holds, recorded unkeyed.
+        if let Some(reading) = spec.pointer(SHARED_CATALOG_READING) {
+            return super::readiness::evaluate_reading(&unit.unit.environment, &unit.unit.name, reading)
+                .map(Supported::Supported)
+                .map_err(DriverError::before_effects);
+        }
         match spec.pointer(TEARDOWN_SETTINGS) {
             None => Ok(Supported::Unsupported),
             Some(settings) => {

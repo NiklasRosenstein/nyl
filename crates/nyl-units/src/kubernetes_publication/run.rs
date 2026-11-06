@@ -547,33 +547,101 @@ impl SharedCatalogResult {
     }
 }
 
-/// The manifest of the shared catalog that a target's teardown readiness
-/// reads: what the branch holds, because Argo CD runs that, not what this
-/// target renders. A manifest that is missing is not checked (nothing prunes
-/// yet), one that differs is read as published, and a branch that cannot be
-/// read fails the resolution, closed.
+/// The recorded, unkeyed member that holds what the branch holds of the shared catalog.
+pub(crate) const SHARED_CATALOG_READING: &str = "/sharedCatalogReading";
+
+/// What the branch holds of the shared catalog a target names, as the teardown
+/// readiness reads it: `{result, settings, problem?}`. Argo CD runs what the
+/// branch holds, not what one target renders, so the settings are those of the
+/// published Application (the render's when the branch holds it, none checked
+/// while the manifest is missing). A branch that cannot be read, or a manifest
+/// that is no Application, is recorded as `problem`, which blocks a teardown.
+/// A prefix another owner holds, or another shared catalog on the branch, is
+/// an error of its own. `None` for a target that shares no catalog.
+///
+/// The reading is recorded but never keyed: it follows the branch, which the
+/// writer changes, and a change there must not re-execute every preview.
 ///
 /// Contract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).
-pub(crate) fn shared_catalog_view(
-    ctx: &ResolutionContext<'_>,
+pub(crate) fn read_shared_catalog(
+    env: &std::collections::BTreeMap<String, String>,
+    project_dir: &std::path::Path,
     rendered: &RenderedTarget,
-) -> DriverResult<nyl_render::gitops::publication::SharedCatalogView> {
+) -> DriverResult<Option<Value>> {
     use nyl_render::gitops::publication::SharedCatalogView;
     let Some(shared) = rendered.shared_catalog.as_deref() else {
-        return Ok(SharedCatalogView::Rendered);
+        return Ok(None);
     };
-    let variable = |name: &str| ctx.env.get(name).cloned();
-    let inspection = inspect_shared_catalog(shared, &ctx.project_dir, &variable).map_err(|error| {
-        DriverError::before_effects(format!(
-            "cannot read the shared catalog {} to check its teardown settings: {error}",
-            shared.destination.path_prefix
-        ))
+    let variable = |name: &str| env.get(name).cloned();
+    let (result, view, problem) = match inspect_shared_catalog(shared, project_dir, &variable) {
+        Ok(inspection) => match (inspection.state, inspection.published) {
+            (SharedCatalogState::Current, _) => ("current", SharedCatalogView::Rendered, None),
+            (SharedCatalogState::Differs(_), Some(application)) => {
+                ("differs", SharedCatalogView::Published(application), None)
+            }
+            (SharedCatalogState::Differs(_), None) => (
+                "unparseable",
+                SharedCatalogView::NotChecked,
+                Some("the manifest on the branch is not a readable Application".to_owned()),
+            ),
+            (SharedCatalogState::Missing, _) => ("missing", SharedCatalogView::NotChecked, None),
+        },
+        Err(error)
+            if error.is_owner_fenced()
+                || error
+                    .to_string()
+                    .contains(nyl_render::gitops::shared_catalog::SHARED_CATALOG_CONFLICT_CODE) =>
+        {
+            return Err(DriverError::before_effects(format!(
+                "the shared catalog {}: {error}",
+                shared.destination.path_prefix
+            )))
+        }
+        Err(error) => (
+            "unreadable",
+            SharedCatalogView::NotChecked,
+            Some(format!("cannot read the publication branch: {error}")),
+        ),
+    };
+    let settings = nyl_render::gitops::publication::teardown_settings_with(rendered, &view).map_err(|error| {
+        DriverError::before_effects(format!("cannot read the shared catalog's teardown settings: {error}"))
     })?;
-    Ok(match (inspection.state, inspection.published) {
-        (SharedCatalogState::Current, _) => SharedCatalogView::Rendered,
-        (SharedCatalogState::Differs(_), Some(application)) => SharedCatalogView::Published(application),
-        (SharedCatalogState::Differs(_), None) | (SharedCatalogState::Missing, _) => SharedCatalogView::NotChecked,
-    })
+    let mut reading = json!({"result": result, "settings": settings});
+    if let Some(problem) = problem {
+        reading["problem"] = Value::String(problem);
+    }
+    Ok(Some(reading))
+}
+
+/// Before a teardown starts, read the shared catalog again: the settings
+/// recorded at the last resolution may be older than the writer's last push,
+/// and an instance that expired is removed from its stored document without
+/// resolving. Held, with the readiness code, when the catalog no longer prunes
+/// or deletes with its Applications' finalizers, or cannot be read. Only the
+/// catalog's own rows hold it here; the Namespace rows and `--allow-incomplete`
+/// are the shell's preflight.
+fn shared_catalog_hold(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    rendered: &RenderedTarget,
+) -> DriverResult<Option<Outcome>> {
+    use nyl_core::orchestration::codes::Code;
+    let Some(reading) = read_shared_catalog(&ctx.env, &ctx.project_dir, rendered)? else {
+        return Ok(None);
+    };
+    let readiness = super::readiness::evaluate_reading(&unit.unit.environment, &unit.unit.name, &reading)
+        .map_err(DriverError::before_effects)?;
+    let held = readiness.blocking.iter().find(|finding| {
+        matches!(
+            finding.code,
+            Code::TeardownCatalogManualSync | Code::TeardownApplicationsOrphaned
+        )
+    });
+    Ok(held.map(|finding| Outcome::Failed {
+        category: FailureCategory::Ownership,
+        retryable: true,
+        message: format!("{}: {} ({})", finding.code, finding.message, finding.fix),
+    }))
 }
 
 /// The warning of a publication that found another manifest at the shared catalog's prefix.
@@ -865,6 +933,9 @@ pub(crate) fn teardown(
         });
     }
     let rendered = render()?;
+    if let Some(held) = shared_catalog_hold(ctx, unit, &rendered)? {
+        return Ok(held);
+    }
     let before = state_inputs(&rendered)?;
     let stateful = rendered.publication_base.is_some();
     let phase1_of = |rendered: RenderedTarget| {
