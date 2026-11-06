@@ -44,6 +44,7 @@ stable for references from issues and pull requests:
 | M7 | Continuous operation and scope decision |
 | M8 | Provider-neutral CI execution and first GitLab adapter |
 | M9 | Domain modeling for units and Releases |
+| M10 | Direct reconciler for Kubernetes publications |
 
 ## Product direction
 
@@ -532,7 +533,8 @@ Cluster's declared local context and the kubeconfig the unit admits, or the
 Argo CD API server, at a declared address with a token the unit admits. The
 credential is never read from anywhere but the unit's admitted environment,
 and an observation that cannot establish a result records nothing rather than
-a failure. Attestations are recorded where the credentials exist, typically in
+a failure. A target that declares the direct reconciler is read the same way
+through Nyl's own release state in its Cluster (M10). Attestations are recorded where the credentials exist, typically in
 CI, and decisions read the recorded evidence. Attestations are evidence for promotion
 and dependents: a `dependsOn` entry or `fromUnit` requires them with
 `evidence: attested` or named `attestations`, and its consumer stays blocked
@@ -661,11 +663,39 @@ processing belong to this path. Every input affecting rendered bytes, including
 resolved Release inputs, participates in dependency recording; cache entries are
 disposable and never establish execution success.
 
-Kubernetes delivery distinguishes publication for an external reconciler,
-publication plus observation, and direct application through Nyl. Observation of
-Argo CD does not authorize Nyl to apply or prune its workloads. Reusing Nyl's
-direct Kubernetes lifecycle inside orchestration requires explicit compatibility
-decisions about release history, pruning, and readiness.
+Kubernetes delivery is chosen by the DeploymentTarget, never by the unit that
+places it: publication for an external reconciler (Argo CD, the default),
+publication plus observation of it (`observe: {}`), or the **direct
+reconciler** (`reconciler: {direct: {}}`, M10), where Nyl applies the target's
+Releases to its Cluster itself. Observing Argo CD never authorizes Nyl to apply
+or prune its workloads; a direct target has no Argo CD, so nothing else
+applies them. The direct reconciler reuses `nyl apply`'s mechanics (server-side
+apply, pruning by release state, the `Prune` and `Delete` sync options, the
+Namespace policies) through one implementation in `nyl-render` that the command
+and the publication driver both call, and keeps the invariants of the Argo CD
+path:
+
+- The tree is still published, without Applications, AppProjects, or a catalog,
+  as the receipt, the provenance record, and the input of promotion. Git is
+  published first and the cluster applied second, so the cluster never runs
+  bytes no commit holds, and a release revision cites its publication commit.
+- Credentials come only from the unit's admitted `KUBECONFIG` and the Cluster's
+  declared `live.context`; the context's server must match the declared
+  destination.
+- The release state in the cluster records the owning unit incarnation, and a
+  Release is fenced like a published prefix: another existing owner, or a
+  manual `nyl apply`, is refused. A target's reconciler is part of the
+  publication's identity, so switching one is a teardown, never an edit.
+- `observe: {}` reads Nyl's own release state and the rollout status of the
+  workloads through a second `ReconcilerReader`; the shared evaluation, the
+  attestations, and the teardown wait do not change, and teardown deletes in
+  the cluster in two phases behind `teardownWait`.
+
+Nothing in the engine, the state formats, or the CLI workflows knows the
+direct reconciler: it belongs to the target's declaration, to `nyl-render`, and
+to the publication driver. The
+[contract](design/orchestration-core.md#direct-reconciler) has the details and
+the open questions.
 
 ## User and machine interfaces
 
@@ -826,6 +856,8 @@ reasons to delay independent work.
 - [Git worktrees](crates/nyl-render/src/git/worktree.rs)
 - [Direct Kubernetes application](nyl/src/cli/commands/apply.rs)
 - [Kubernetes release state](crates/nyl-render/src/kubernetes/state.rs)
+- [Direct reconciler](design/orchestration-core.md#direct-reconciler): the M10
+  proposal for applying a target's Releases through the publication unit
 
 These are navigation aids, not frozen API guarantees.
 

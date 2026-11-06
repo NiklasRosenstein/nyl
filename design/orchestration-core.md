@@ -642,7 +642,9 @@ spec:
   environment, templated preview environments need its inline target, and
   deselecting it starts a teardown, which a plain target never implies.
 - Generated Argo CD Application and AppProject names must be unique among all
-  targets whose Argo CD instance resolves to the same cluster and namespace:
+  targets whose Argo CD instance resolves to the same cluster and namespace
+  (a direct target generates none, see
+  [Direct reconciler](#direct-reconciler)):
   static targets on explicit or implicit instances, and inline targets alike.
   Validation checks this across every target it can see, including every
   instance of an EnvironmentTemplate, whose inline targets must therefore
@@ -781,12 +783,13 @@ spec:
   `observe` strategy available for `teardownWait`, and makes it the default.
   `observe` is an object so that options can be added later; only `{}` is
   accepted. It does not say which reconciler is read: that follows the
-  reconciler of the unit's target (today the target's ArgoCDInstance), so
-  the same declaration observes whatever runs the target. Without `observe`
+  reconciler of the unit's target (its ArgoCDInstance, or its direct
+  reconciler), so the same declaration observes whatever runs the target. Without `observe`
   the unit only publishes, its default `teardownWait` is `manual`, and
-  `teardownWait: {strategy: observe}` is a validation error. Direct application through Nyl, which
-  would attest `healthy` from rollout status during `reconcile`, is not a mode
-  in the initial scope.
+  `teardownWait: {strategy: observe}` is a validation error. A target may instead declare
+  `reconciler: {direct: {}}`: Nyl then applies its Releases itself, after
+  publishing, and `observe` reads Nyl's own release state in the cluster (see
+  [Direct reconciler](#direct-reconciler)).
 - It supports [observed values](#observed-values) with `observe: {}`, whose
   credentials it needs (a unit that does not declare `observe` and declares
   `observations` is rejected with `NYL-OBSERVATIONS-UNSUPPORTED`). Its `from`
@@ -926,7 +929,8 @@ orchestration:
 
 **Teardown.** A publication unit supports teardown when its target is
 configured so that removing the manifests removes the workloads. It proceeds
-in two phases, both through Git:
+in two phases, both through Git (a direct target's two phases delete in the
+cluster instead: see [Direct reconciler](#direct-reconciler)):
 
 1. **Remove the workload Applications.** The unit publishes a tree whose
    `_nyl/catalog` still contains the catalog Application and the generated
@@ -963,7 +967,8 @@ deployments from the generated Applications. A second reconciler kind adds a
 variant of `ReconcilerLocation` with its renderer next to Argo CD's, and a
 reader implementing `ReconcilerReader` plus the one match arm of
 `reconciler::reader` that builds it; `evaluate`, the driver's observation, the
-orchestration engine, state, and the CLI do not change. The facts recorded at
+orchestration engine, state, and the CLI do not change (the
+[direct reconciler](#direct-reconciler) is that second kind). The facts recorded at
 resolution follow the same split: the neutral part (`kind`, `publication`,
 `expected`, `anchors`) and the kind's location (for Argo CD `instance`,
 `namespace`, `cluster`, `context`, and `access`).
@@ -1293,6 +1298,553 @@ Nyl reports unmet requirements where they matter:
   `NYL-TEARDOWN-CATALOG-REMAINS`; each names the setting that fixes it.
 - `nyl validate` does not check teardown readiness, because it cannot know
   whether a target will ever be torn down.
+
+### Direct reconciler
+
+A DeploymentTarget is delivered one of two ways. By default an external
+reconciler, Argo CD, runs the published tree. With `reconciler: {direct: {}}`
+Nyl itself applies the target's Releases to the target's Cluster with the
+mechanics of `nyl apply` (server-side apply, pruning by release state, the
+`Prune` and `Delete` sync options), and still publishes the tree. The choice is
+the target's, never the unit's: a `KubernetesPublication` places a target and
+does not know which reconciler runs it, `observe: {}` keeps meaning "also read
+what the reconciler did", and the same declaration, scenario, and promotion
+evidence work for both. The invariant the design keeps is that **Git is never
+behind the cluster**: the cluster runs only what a published commit holds, so
+a failure between the two effects leaves Git ahead, which the next execution
+converges, never the cluster running bytes no one recorded.
+
+#### Declaration
+
+```yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata: {name: dev}
+spec:
+  clusterRef: {name: kind-dev}     # the Cluster declares destination and live.context
+  reconciler:
+    direct: {}                     # absent: Argo CD, as today
+  publication: {repositoryRef: {name: deploy}, revision: deploy, pathPrefix: targets/dev}
+  applicationGroupSelector: {matchLabels: {tier: platform}}
+```
+
+- `spec.reconciler` is optional, an object with exactly one member, and today
+  the member is `direct`, written `direct: {}`. A tagged one-member object,
+  not a bare keyword or an alternative to `argocdRef`, because a reconciler
+  kind may need options (`direct` takes none yet) and a kind that is not Argo
+  CD must not borrow Argo CD's reference field. Absence selects Argo CD, so
+  every released declaration keeps its meaning.
+- **Exclusive and validated.** `DeploymentTarget::validate` rejects
+  `reconciler.direct` together with `argocdRef` and with any
+  `catalogApplication` field other than its defaults (`enabled`, `shared`,
+  `name`, `project`, `syncPolicy`, `applicationDeletionPolicy`,
+  `selfPrunePolicy`, `labels`, `annotations`): a direct target generates no
+  Application, catalog, or AppProject, so each would be a setting that does
+  nothing. An empty `reconciler` object, or one with an unknown member, is
+  rejected. The same declaration is valid in an inline target
+  (`spec.target.inline`).
+- **What a direct target still needs.** The Cluster, with its destination and
+  committed Kubernetes capabilities exactly as for Argo CD (rendering is
+  unchanged), and a publication, because the tree is still published (see
+  below). A unit that applies or reads a direct target also needs the
+  Cluster's `spec.live.context`: resolution fails before effects with
+  `NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING`, whose fix names the Cluster and
+  the field. Rendering and `publish-tree` never need it.
+- **What it no longer needs.** No ArgoCDInstance (explicit or implicit), no
+  catalog Application, no AppProject, no Application manifests, and no
+  Application names. `ApplicationGroup` fields that describe Argo CD
+  (`applicationNamespace`, `projectRef`, `projectTemplate`, the `retained*`
+  lists, `syncPolicy`, `applicationDeletionPolicy`, `applicationNameTemplate`,
+  `releaseCustomization`, and the Application `labels` and `annotations`)
+  are ignored for a direct target, because one group may be selected by
+  targets of both kinds; `destinationNamespace`, `outputPath`, `namespace`,
+  and `sharedNamespaces` apply to both.
+- **ArgoCDInstance rules.** "An explicit ArgoCDInstance makes `argocdRef`
+  mandatory for every target" becomes "...for every Argo CD target", and the
+  implicit target-local instance exists only for an Argo CD target. A project
+  of direct targets declares no ArgoCDInstance, and a project with explicit
+  instances sets `argocdRef` on its Argo CD targets alone. The seam is
+  `resolve_argocd_instance` in the target compiler: a direct target resolves a
+  `Delivery::Direct` value instead, so the compiler, the cache key, and
+  `RenderedTarget` carry `delivery: Delivery` (`ArgoCd(ArgoCdLocation)` or
+  `Direct(DirectLocation)`) in place of today's mandatory `argocd`.
+- **ApplicationGroup projects.** A direct target generates no AppProject, so
+  project derivation (and the rule that deriving a whitelist fails when a
+  kind's scope is unknown) is skipped. What does not depend on Argo CD still
+  holds for every target: a Release's resources stay within the namespaces it
+  may use, a Namespace is managed by the group's `namespace` policy, and a
+  rendered duplicate object is rejected. Nothing at runtime enforces the
+  project-style cluster-resource whitelist, so a direct target relies on the
+  render-time checks and on the credentials' own RBAC.
+- **Namespace ownership.** A destination or additional Namespace belongs to
+  its owning Release exactly as it belongs to its owning workload Application
+  today, and the Namespace's `Prune` and `Delete` sync options (from `namespace.prunePolicy`
+  and `deletePolicy`) mean what `nyl apply` makes of them. Bootstrap
+  namespaces stay externally owned unless `sharedNamespaces` delegates them.
+  A `Dedicated` shared-namespace owner would generate an Application with no
+  Release to hold release state, so it is rejected for a direct target, with
+  the fix to own the Namespace by a Release or declare it `External`.
+- **Collisions.** Release state is stored under the Release's name in the
+  Release's namespace of the target's Cluster, so two Releases of one direct
+  target, or of two direct targets with the same Cluster, may not share
+  namespace and name: validation rejects it with
+  `NYL-KUBERNETES-DIRECT-RELEASE-COLLISION`, across every target it can see
+  (static, inline, and the sample instances of every EnvironmentTemplate, as
+  the Argo CD name check does). The generated Application-name uniqueness rule
+  does not apply to direct targets.
+
+Every entry point takes the path the declaration selects:
+
+| Entry point | For a direct target |
+| --- | --- |
+| `nyl render`, `nyl build` | Unchanged: render the Release or the tree, never connect. |
+| `nyl render-tree`, `nyl publish-tree` | The tree of Releases and the ownership index, without `_nyl/catalog`. Publication only: nothing reaches the cluster. The index records the reconciler (see below). |
+| `nyl diff`, `nyl apply -f <release> --target <t>` | The Release is taken from the compiled target (`gitops::direct`), applied by the shared function below with the CLI's options (`--concurrency`, `--append-release`, `--confirm-prune`, `--handoff`, `--context`). The context is `--context`, then the Cluster's `live.context`, then the current context, and the server of the context must match the Cluster's declared destination, as today. |
+| `nyl reconcile` | The unit's execution: publish, then apply every Release (below). |
+| `nyl attest`, `nyl observe`, teardown wait | Read through the direct reader (below). |
+| `nyl detect-drift` | The branch compared with the tree, as for Argo CD, and, when the unit admits `KUBECONFIG`, whether the latest release revision of any Release runs another publication (`drifted`); a cluster that cannot be read leaves a clean branch `unknown`. Live edits to applied objects are `nyl diff`'s, not drift. |
+| `nyl validate` | The static rules above, including collisions. |
+
+The orchestrated and the manual path share the apply code and its fence, and
+differ only where a user chooses: the manual `nyl apply` takes its context and
+kubeconfig from its flags and the environment, as a local command does, and
+the driver only from the admitted environment and the declared context.
+
+#### Publication and order
+
+A direct target still publishes its tree to Git. The published tree is the
+receipt, the provenance record, and the input promotion reads, and it is what
+the release revisions in the cluster cite. It holds:
+
+- the Release directories, byte for byte what Argo CD would sync from them
+  (the same files `nyl apply` reads from the compiled target);
+- `_nyl/index.json`, a version 3 index with the owner, the compilation
+  metadata, and a new optional member `reconciler` (`direct`; absent means
+  Argo CD). `reconciler` is part of the index's identity (`same_owner`), so a
+  publication whose target changed reconciler is refused, whichever command
+  makes it, with `NYL-TREE-RECONCILER-CHANGED` and the fix. The refusal is
+  essential, not tidy: moving an Argo CD target to direct removes
+  `_nyl/catalog`, and a self-managing catalog that prunes would then delete
+  the Applications and, through their finalizers, the workloads. Switching is
+  a procedure: tear the unit down (or delete the Applications with their
+  resources kept), then publish under the new declaration. The unit adds
+  `NYL-KUBERNETES-RECONCILER-CHANGED`, retryable, with `nyl teardown -e <env>
+  --unit <u>` as the fix, before any effect. The receipt's `PublishedTree`
+  now records `reconciler` and `cluster` beside `target`, and
+  `NYL-KUBERNETES-TARGET-CHANGED` compares the Cluster as well, because the old
+  Cluster would keep the workloads.
+
+It holds no Application, AppProject, catalog, or shared-catalog manifest.
+
+**Order.** A reconcile of a direct unit runs: render; preflight the cluster
+(connect through the admitted `KUBECONFIG` and the declared context, check the
+server against the destination, read the release state and fence of every
+Release, all read-only); publish the tree (compare-and-swap, with the owner
+fence and retries of every publication); apply each Release; remove the
+Releases that left the tree; return the `PublishedTree` receipt. Git comes
+first because the release revision records the publication commit, so the
+running revision is exact; because the cheap, undoable checks (owner fence,
+head race, validation) all precede any cluster effect; and because it keeps
+the invariant above. Applying first would let the cluster run bytes whose
+push then failed, with no record of what ran.
+
+| Where it stops | What happened | Outcome | Next execution |
+| --- | --- | --- | --- |
+| Render, preflight, credentials, context, destination mismatch, Git owner fence, release fence | Nothing | `Failed` (`credentials` or `ownership`, retryable) or a failure before effects | Retries |
+| The push may or may not have landed | The branch may hold the tree | `Uncertain`, as for every publication | Converges: publishing again is a no-op or a retry |
+| One or more resources rejected (admission, validation, API error) | Git ahead; the Release's revision records `Failed` with the keys it applied; other Releases may have applied | `Failed` (`tool-error`), naming each Release and resource; `retryable` unless every failure is the API rejecting the manifest itself | Applies every Release again as a new revision; the tree is unchanged |
+| The connection drops mid-apply, or the revision cannot be recorded | Unknown | `Uncertain` | `RecoveryPolicy::Converge`: applying again is safe |
+| The unit's deadline passes | Partial; the revision is recorded `Failed` | `Failed` (`timeout`) | As above |
+| A prune fails | Applied; the keys that failed to delete stay recorded in the revision | `Failed` (`tool-error`, retryable) | The next apply retries the delete |
+
+A receipt is written only after every Release applied and pruned. Objects
+that a `Prune=confirm` Namespace policy keeps are not failures: the
+driver never confirms (confirmation is an input outside the declaration), keeps
+them tracked, and returns the warning `NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION`
+naming them, with the fix of declaring `namespace.prunePolicy: Automatic` in
+Git. Both recovery policies are `Converge`; `inspect` stays unsupported.
+
+#### Applying
+
+`nyl apply` and the driver share one implementation in `nyl-render`. Today its
+mechanics live in the CLI (`nyl/src/cli/commands/apply.rs`: the release
+recorder, the batched apply, pruning, the purge of `release delete`), which
+the driver cannot call and which the architecture says should hold no business
+rule. They move to `nyl_render::kubernetes::lifecycle` without behavior
+change, and the CLI keeps only argument parsing and the renderer of
+`ApplyEvent`s:
+
+- `prepare_manifests` (namespace resolution from the destination namespace,
+  duplicate collapse), `apply_release`, and `purge_release`, which carry
+  `ReleaseRecorder` (`reserve`, `run`, `complete`), `apply_sorted_manifests`,
+  `keys_to_prune`, `collect_live_state`, `filter_by_prune_option`,
+  `prune_resources` with its termination waits, the history limit, and
+  `ensure_namespace_exists`;
+- the typed `ApplyEvent` and `ReleaseRun` report (the CLI's `Phase` and
+  `PhaseTiming` stay output types; the run returns its durations);
+- the interruption, today `tokio::signal::ctrl_c`, becomes a parameter of
+  `apply_release`: the CLI passes Ctrl-C, the driver the unit's deadline;
+- `verify_cluster_server` (a context's server must match the Cluster's
+  declared destination, unless the destination is the in-cluster address or a
+  name), moved from `commands/cluster.rs`;
+- `release_manifests`, which reads a Release's documents from the compiled
+  tree's directory, shared with `gitops::direct`, so a direct command and the
+  driver apply the same bytes, and the driver applies exactly what it
+  pushed.
+
+The shared function takes a connected `KubeClient` and `ReleaseStorage`, so
+how a client is obtained stays each entry point's: the CLI as today, the driver
+through the explicit `Connection` of the readers (the kubeconfig files the unit
+admits as `KUBECONFIG` and the Cluster's declared `spec.live.context`, never
+the current context, `~/.kube/config`, or in-cluster configuration; a missing
+variable is a failure naming it and the `env` entry that admits it).
+Server-side apply is as `nyl apply` makes it: force-applied as the field
+manager `nyl` (a handoff to Argo CD is a manual option and has no meaning for
+a direct target), resources in Argo CD's kind order, one concurrent batch per
+kind with at most eight in flight, discovery refreshed after
+CustomResourceDefinitions register kinds, release state recorded `Rendered` before the
+cluster is touched, completed `Deployed` or `Failed`, then pruning by
+release state (the most recent `Deployed` revision plus what failed revisions
+applied) honoring each live object's `Prune` option, in reverse apply order
+with waits for termination, and the project's `[release] history_limit`. The
+driver's `ApplySettings` come from the declaration alone: `confirm_prune`
+false, no `--append-release`, the history limit from `nyl.toml`.
+
+**Several Releases.** Each Release is its own release (own name, own
+revisions, own state), applied one at a time in waves so that a target is
+deterministic and reversible:
+
+1. Releases that render CustomResourceDefinitions or APIServices, because
+   others may render the kinds they register;
+2. every other Release.
+
+Within a wave, Releases are ordered by group, then Release name. `nyl apply`
+orders resources inside a Release by kind (Namespaces and CRDs first); the
+waves extend that rule across Releases, and teardown runs them in reverse. A
+failed Release does not stop the rest of its wave, but later waves do not
+start, because they may need what it registers. A Release whose namespace is
+owned by another Release (`sharedNamespaces`) creates a bare Namespace to hold
+its state if the owner has not applied yet, as `nyl apply` does for any release
+namespace, and the owner's later apply adopts it.
+
+**Releases that left the tree.** A Release that the tree no longer holds is
+purged after the new tree is applied: its resources are deleted by their
+`Delete` option, in reverse order with waits, and its release state is
+deleted, exactly as `nyl release delete` does. Which Releases left comes from
+Git, so it needs no cluster-wide listing: the Releases of the ownership index
+at the last receipt's `PublishedTree` commit (what the last complete
+execution applied) together with those of the index at the branch head
+(what a failed execution may already have published), minus the Releases of
+the new tree. The union matters: a run that fails after publishing a tree
+without a Release, before purging it, leaves the receipt at the older commit,
+so the next run still finds it. Only a Release whose latest revision names this
+unit incarnation as owner is purged; an unowned or foreign one is left and
+reported. Argo CD does this through the catalog's pruning and the Application
+finalizers; the direct reconciler does it itself.
+
+#### Fencing and ownership in the cluster
+
+The release state in the cluster (the `nyl.release.v1.<name>.<revision>`
+Secrets) gains a metadata member, recorded in each revision it writes
+(additive: it is a new key of the Secret, which `nyl release` readers that do
+not know it ignore):
+
+```yaml
+meta:
+  owner: {environment: dev, unit: kubernetes, uid: 91c3…}   # absent: applied outside orchestration
+  target: dev                      # the DeploymentTarget it was applied for, when known
+  publication:                     # absent: applied outside orchestration
+    repository: …, branch: deploy, pathPrefix: targets/dev, commit: 7be1…
+  teardown: {phase: 1}             # after phase 1 of a teardown
+```
+
+The owner uses the same `RenderIndexOwner` as the Git index, so one fence
+answers both questions (`ExecutionContext::incarnations`, the `fence`
+function of the driver). `ReleaseRecorder::reserve` already creates the next
+revision with a create that fails when it exists, so the revision number is a
+compare-and-swap and the claim is the reservation itself: two executions
+cannot both record revision N+1.
+
+| Latest revision's owner | Orchestrated apply |
+| --- | --- |
+| None, no revision | Create it, owned by this incarnation |
+| This incarnation | Proceed |
+| None (applied outside orchestration), same recorded `target` or none recorded | Adopt: the new revision records the owner, as the first orchestrated publication adopts an unowned index |
+| None, another recorded `target` | Refused: `NYL-KUBERNETES-RELEASE-FENCED`; another target's Release of this name lives here |
+| Another incarnation that is `gone` | Take it over (the new owner's apply prunes what its own revision no longer holds) |
+| Another incarnation that `exists` | `NYL-KUBERNETES-RELEASE-FENCED`: fenced until that unit's teardown completes or it is released with `nyl state forget` |
+| Another incarnation whose existence state cannot say | `NYL-KUBERNETES-RELEASE-OWNER-UNKNOWN`, failing closed |
+
+A refusal is category `ownership`, retryable, and happens in the preflight,
+before Git is touched, and again at `reserve` for the race. Two units that
+reach one Cluster's Release therefore fence like two units that reach one
+published prefix, and the Git owner and the cluster owner must both pass.
+Teardown and removal of a vanished Release check the same owner.
+
+A manual `nyl apply` against a Release an environment owns is refused by
+`nyl apply`, `nyl release rollback`, and `nyl release delete` with
+`NYL-RELEASE-OWNED-BY-UNIT`, as `publish-tree` is refused over an owned
+prefix, because a manual command cannot tell whether the unit still exists.
+The way out is deliberate: the same commands take `--take-over`, which
+records no owner (the next orchestrated apply adopts the Release). A manual
+apply of an unowned Release works as it does today and records the `target`
+when `--target` names one. A manual revision records no `publication`, so the
+reader below calls it unreadable until the next reconcile applies the
+publication again. Objects shared by two different Releases are not fenced
+beyond what the compile of one target checks (one owner per workload
+resource per cluster) and the collision rule above: server-side apply with
+`force` is the same last-writer-wins as for two manual releases today. That
+gap is an open question.
+
+#### Reading
+
+`observe: {}` makes the unit attest `accepted` and `healthy` and read the
+reconciler, which for a direct target is Nyl's own record in the cluster. A
+`DirectReader` implements `ReconcilerReader`
+(`nyl_units::kubernetes_publication::direct`), built by the one new match arm
+of `reconciler::reader` from the recorded `Direct` location, over the explicit
+`Connection`. `reconciler::evaluate`, the driver's observation, the
+orchestration engine, and state do not change: every rule is expressible in
+the neutral types.
+
+The deployments are the target's Releases. For each, the reader lists the
+Secrets labelled with the release name in the release namespace and decodes the
+latest revision and the latest `Deployed` one.
+
+| Reading | From |
+| --- | --- |
+| **Present** | The release has state, and either it is not marked `teardown`, or a tracked object that its `Delete` option deletes still exists |
+| **Running revision** | Latest revision `Deployed`, with a recorded `publication` for the target's destination: `Exact(<commit>)`, which the shared matching resolves against the branch exactly as it resolves an Argo CD revision (the directory tree and recorded inputs of the commit decide, not its identity, so unrelated commits on a shared branch are harmless). A latest revision applied outside orchestration, or from another destination: `Unreadable` with why and the fix |
+| **Mixed** | Latest revision `Failed` or still `Rendered` (an interrupted or partly failed apply, which applied some of its resources): `Mixed {last: <commit of the latest Deployed revision>, reason}`, which the shared rules state as `mixed`, so `accepted` and `healthy` fail until a full apply completes |
+| **Health** | The rollout status of the workload objects the latest `Deployed` revision tracks, below |
+| **Source** | None: there is no source the reconciler could be configured with, so no `other-source` finding |
+| **Deleting** | False |
+
+Health reads only workload kinds, with `kubectl rollout status` semantics, and
+folds them with the order `Degraded`, `Progressing`, `Unknown`, `Healthy`,
+naming the worst object in `reported`:
+
+| Kind | Healthy when | Progressing | Degraded |
+| --- | --- | --- | --- |
+| Deployment | Observed the current generation, updated and available replicas equal `spec.replicas`, no old replicas | Otherwise | `Progressing=False` with `ProgressDeadlineExceeded`; a tracked object that is missing |
+| StatefulSet | Observed generation, ready and updated replicas equal replicas, current revision equals update revision (`OnDelete`: ready equals replicas) | Otherwise | Missing |
+| DaemonSet | Observed generation, updated and available equal desired scheduled | Otherwise | Missing |
+| Job | `Complete` | Running | `Failed` |
+| ReplicaSet without a controller owner | Ready equals replicas | Otherwise | Missing |
+| Any other kind | Not read | | |
+
+A kind not in the table is not read, as an Argo CD resource without a health
+check counts as healthy once synced; a paused Deployment reports `Unknown`.
+A tracked object that does not exist is a finding (`Degraded`); one the credential cannot read is an error of the whole reading, never a finding.
+
+**Visibility and absence.** The reader's proof is `Proof::Anchors`. A release
+list that the credential may not make fails (HTTP 403) instead of returning
+less, so an empty answer means the Release has no state, but an empty answer
+from another cluster means the same, and that is what the anchor excludes. The
+recorded anchor is `release-state`, visible when at least one of the target's
+Releases has state: a state Secret exists only on a cluster where Nyl applied,
+and phase 1 of a teardown keeps it until the wait ends, so it holds exactly
+when removal is concluded. A reading with no state at all is `Hidden` with
+the reason (never applied, or another cluster: reconcile, or check the
+context), so `nyl attest` is unknown and a teardown wait `observation-failed`,
+never a `missing` finding or a concluded removal; one Release without state
+beside others that have it is `missing`. Independently, the connection fails
+closed when the context's server differs from the Cluster's declared
+destination server. Absent Releases are reported `Visible` when the list
+answered. A credential that may not `get` a tracked workload object makes
+the reading fail with `Forbidden` and the permission to grant, never `Unknown`
+health.
+
+Failure modes follow the Argo CD table: an unreachable API, a rejected or
+expired credential, or a forbidden read is `unknown` for `nyl attest` and
+`observation-failed` for the wait; a partial reading (one namespace of
+several fails) is unknown; the receipt's commit missing from the branch fails
+both attestations as for Argo CD. Credentials are `KUBECONFIG` and the
+declared context alone.
+
+`healthy` is not attested by `reconcile`: Argo CD reconciles asynchronously
+and direct apply synchronously, but both are read afterwards by `nyl attest`,
+so the evidence path is one. An option to wait for rollout in `reconcile`
+(`observe: {rolloutWait: …}`) is future work that `observe` being an object
+allows.
+
+#### Teardown
+
+The teardown keeps the engine's two phases and `teardownWait`, with direct
+meanings:
+
+1. **Delete.** The unit publishes the tree without its Release directories
+   (`without_workloads`: only `_nyl/index.json` stays, so the owner fence holds),
+   then purges every Release in reverse wave order: each tracked object is
+   deleted by `purge_release`, honoring its `Delete` option (`Delete=false`
+   keeps it, `Delete=confirm` keeps it because the driver never confirms), in
+   reverse apply order with waits for termination. The release state stays,
+   marked `teardown: {phase: 1}`. Git first, like a publication, so the record
+   never lags the cluster; that commit is phase 1's `published` evidence. A purge failure is a `Failed` outcome that a new run converges.
+2. **Remove the rest.** Once the wait ends: delete every revision of each
+   Release's state, then remove the files the index owns and the index
+   (`prepare_target_removal_fenced`). Cluster state goes first so the index's
+   owner keeps fencing until it is done; deleting what is already deleted is
+   idempotent.
+
+`teardownWait: observe` (the default with `observe: {}`) asks the reader which
+Releases are still present: state not marked `teardown`, or tracked
+deletable objects that still exist. `delay` and `manual` are unchanged. Removal
+is concluded only from the anchor and a successful list, so a context that
+cannot see the release state fails closed. No evaluation code changes:
+the present set is what `reconciler::evaluate::removal` returns as
+remaining.
+
+**Readiness.** The teardown settings recorded at resolution become the
+reconciler's own: `TeardownSettings` is tagged by reconciler kind, and a
+direct target records its owned Namespaces with their `deletePolicy`. The
+publication driver evaluates them (`readiness.rs`); the shell displays the
+findings unchanged.
+
+| Requirement | Setting | If unmet |
+| --- | --- | --- |
+| Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain (`NYL-TEARDOWN-NAMESPACES-REMAIN`) |
+| Resources with `Delete=false` or `Delete=confirm` | Not statically knowable beyond Namespaces | Not checked |
+| The credentials may delete | RBAC | Not checked |
+
+The Argo CD rows that stop a teardown (the catalog prunes, an Application
+deletion policy deletes workloads, a `Confirm` Namespace holds an
+Application's finalizer) have no counterpart, because nothing here holds a
+finalizer: a kept Namespace is a remnant, not a blocker, so a direct target
+has no blocking requirement and `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
+`NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`, and
+`NYL-TEARDOWN-CATALOG-REMAINS` never arise. Namespace policies mean: `prunePolicy`
+decides whether a Namespace a Release stops declaring is deleted by the next
+apply (`Confirm`, the default, keeps it tracked with the warning above),
+and `deletePolicy` whether the teardown deletes it (`Confirm` and `Retain` keep it, listed
+as a remnant).
+
+#### Recorded facts and keys
+
+A unit that observes records, under `/reconciler`, the neutral part and the
+location, exactly as for Argo CD:
+
+```yaml
+reconciler:
+  kind: direct
+  cluster: kind-dev
+  context: kind-dev                 # spec.live.context; recorded, never keyed
+  server: https://127.0.0.1:6443    # the Cluster's declared destination server; keyed (absent for a destination by name)
+  publication: {url: …, branch: deploy, pathPrefix: targets/dev}
+  expected:
+    - id: platform/web              # <group>/<release>; unique within the target
+      display: web/web              # <release namespace>/<release name>
+      role: workload
+      path: targets/dev/platform/web
+      release: platform/web
+      source: {repository: …, path: targets/dev/platform/web}
+      locator: {name: web, namespace: web, destinationNamespace: web}   # opaque to everything but the direct reader
+  anchors:
+    - {id: release-state}
+```
+
+`ReconcilerLocation::Direct(DirectLocation)` is the new variant, with its
+renderer next to Argo CD's in `nyl_render::gitops::observation`, derived from
+the compilation metadata (a Release's group, name, namespace, destination
+namespace, and directory) instead of the catalog's Application manifests.
+`unkeyed()` is `["/context"]` (`/publication/url` stays unkeyed for every
+kind), so renaming a kube context never re-executes the unit; the server, the
+Release identities, the paths, and the anchor key it, which the input record
+already covers because the Cluster and the target are recorded inputs. The
+index's `reconciler` member and the unit's `PublishedTree` record the kind.
+
+#### Observed values
+
+Observed values work unchanged in shape. Resolution records the owning
+deployment of each observed resource (`observationSources`) and the workload
+Cluster; `owning_application` becomes `owning_deployment`, which for a direct
+target finds the Release directory that renders the resource, a manifest
+without a namespace belonging to the Release's recorded destination namespace.
+At reading time the gate "the deployment runs the current publication" is the
+same restricted evaluation (`restricted_to` the owning deployment, the same
+`evaluate`) over the `DirectReader`, and the field is then read from the
+workload Cluster through the same context, which for a direct target is the
+delivery Cluster. `pending`, `failed`, and `NYL-KUBERNETES-OBSERVATION-UNOWNED`
+mean what they mean today.
+
+#### Previews and the shared catalog
+
+- `catalogApplication.shared` is invalid on a direct target, and a direct
+  target neither needs nor joins a shared catalog. The shared catalog's
+  include pattern syncs `_nyl/shared/<name>/` and `*/_nyl/catalog/*`, which a
+  direct tree does not contain, so a direct target may publish to a branch that
+  carries a shared catalog, without the `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`
+  rule that requires every target on that branch to share it. Its prefix still
+  must be disjoint from every other target's and from `_nyl/shared`.
+- An EnvironmentTemplate's inline target may declare `reconciler: direct`.
+  Instances of one template then fence by environment-qualified names exactly
+  as Argo CD instances do, now for Release namespaces and names
+  (`NYL-KUBERNETES-DIRECT-RELEASE-COLLISION`), checked over the sample
+  instances. Expiry, `teardown --all`, and `state delete` run the direct
+  teardown above.
+- The Argo CD name uniqueness rule is not evaluated for direct targets.
+- `nyl build --shared-catalog` on a direct target is refused with the
+  existing `NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`.
+
+#### End-to-end harness
+
+A follow-up adds the `nyl-e2e` crate: one scenario, run three ways against a
+Kind cluster with a local registry. It needs:
+
+- the reference platform scenario's Kubernetes publication, which changes only
+  its target between runs: `reconciler: direct`, an Argo CD target read
+  through the Kubernetes API (`access.method: kubernetes`), and an Argo CD
+  target read through the API server (`access.method: api`);
+- Kind with the local-registry recipe, so an image pushed by `OciImage` as
+  `localhost:5001/…` is pulled by the nodes under the same reference;
+- for the Argo CD runs, an Argo CD installed from a pinned manifest, a Git
+  endpoint the Argo CD pod can reach for the publication repository (the
+  repository URL Argo CD syncs is distinct from the push URL Nyl uses), the
+  catalog Application applied once, and, for the API method, `server.insecure`
+  so a loopback `http://127.0.0.1:<port>` address is valid, a local account
+  `nyl` with a policy granting `get` on the instance's Applications, and its
+  token admitted as `ARGOCD_AUTH_TOKEN`;
+- the unit's `env.passthrough: [KUBECONFIG]`, for the context to the Kind
+  cluster, which the Cluster declares as `spec.live.context`, for all three;
+- identical assertions: the same receipt, `accepted` and `healthy` after
+  `nyl attest`, the same observed value, and teardown to an empty cluster
+  with `teardownWait: observe`.
+
+Tier-1 scenarios cover the engine rules with test drivers and the fake observer
+as before, plus a `FakePublication` mode that mimics a direct target's
+attestation and wait; real direct apply is tested in `nyl-units` against
+`MockKubeClient` with an in-memory `ReleaseStorage`, and for real in the
+harness.
+
+#### Code homes and the driver boundary
+
+| Concern | Owner |
+| --- | --- |
+| `reconciler` field, validation, `Delivery`, tree without Applications, index `reconciler`, direct renderer of expected deployments, `without_workloads`, `TeardownSettings` for direct | `nyl-render` (`resources/gitops.rs`, `gitops/`) |
+| Apply, prune, purge, release state with `meta`, `verify_cluster_server`, `release_manifests` | `nyl-render` (`kubernetes/lifecycle.rs`, `kubernetes/state.rs`) |
+| Direct driver operations (preflight, waves, vanished Releases, fence, outcome mapping), `DirectReader`, health rules, readiness rows | `nyl-units` (`kubernetes_publication/direct/`) |
+| Wiring, `--take-over`, `ApplyEvent` rendering | `nyl` (the CLI role) |
+| Engine, state, `Driver`, `RemovalObservation`, `RecoveryPolicy`, `Outcome` | Unchanged: they never name `direct`, a release, or a kube object |
+
+The engine, the state formats, and the CLI workflows learn nothing: the
+driver already reports a deployment set, a reading, a removal, an owner
+fence, and an outcome through generic contracts, and the unit's `observe`
+stays kind-agnostic. The reader, health rules, fence variants, and codes
+(`NYL-KUBERNETES-RELEASE-FENCED`, `-RELEASE-OWNER-UNKNOWN`, `-RECONCILER-CHANGED`,
+`-CLUSTER-CONTEXT-MISSING`, `-DIRECT-RELEASE-COLLISION`,
+`-PRUNE-AWAITING-CONFIRMATION`) are the publication driver's. The only
+additions outside the driver are declaration and rendering of the target
+(`nyl-render` owns Kubernetes) and `ReleaseState` metadata.
+
+Open questions of this design:
+
+| Question | Needed by |
+| --- | --- |
+| A `Dedicated` shared-namespace owner for a direct target needs a place for its release state | Before direct targets are recommended for shared namespaces |
+| Objects two different Releases both declare are not fenced beyond the compile of one target | With the first direct preview use |
+| Whether `reconcile` may wait for rollout and attest `healthy` itself (`observe: {rolloutWait}`) | After the first direct runs |
+| Whether `nyl apply --target` should refuse the current-context fallback (the declared destination check stays either way) | With the implementation |
+| Skipping a Release whose latest revision already holds the same tree digest, to avoid a revision per execution | After revision churn is measured |
 
 ## Environment templates and previews
 
