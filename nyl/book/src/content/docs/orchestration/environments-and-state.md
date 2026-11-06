@@ -55,6 +55,15 @@ state exits 2 with `NYL-LEASE-BROKEN` and names `nyl recover -e <env>`, so
 the dead run's effects are recorded before anything else changes the
 environment. See [Breaking a lease](/nyl/orchestration/recovery/#breaking-a-lease).
 
+## Preview environments
+
+An [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
+declares what a preview looks like; each instance is created from it with
+`nyl state init --template` or `nyl reconcile --template`, lives only in state,
+and shares one state ref with the other instances through `state.path`. Every
+command names an instance with `-e` like a declared environment, and a plain
+run renders it at the source commit its record names.
+
 ## Local runs
 
 Every command that reads an environment's remote state keeps the clone's own

@@ -159,6 +159,7 @@ pub(crate) fn render(
 /// [`render`] with the commit the ownership index records as the tree's
 /// source, for a worktree that is a snapshot of files, not a checkout of
 /// it. `None` reads the worktree repository's head.
+#[allow(clippy::too_many_arguments)] // The render's inputs are independent facts of the call; a struct would only rename them.
 pub(crate) fn render_at(
     catalogue: &nyl_render::config::ResourceCatalogue,
     worktree: &std::path::Path,

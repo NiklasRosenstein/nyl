@@ -217,6 +217,17 @@
       "description": "An instance's parameters.",
       "type": "object"
     },
+    "sourceCommit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "An instance's source commit: the entry worktree's commit when\n`state init --template` or `reconcile --template` last created or\nupdated it. A run that is not entered from the instance's own source\nrenders at this commit."
+    },
     "template": {
       "description": "The EnvironmentTemplate of an instance.",
       "type": [

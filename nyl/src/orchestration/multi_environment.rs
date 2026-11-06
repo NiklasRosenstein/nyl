@@ -54,28 +54,7 @@ pub fn select(
             InstanceRequest::default()
         }
     };
-    let mut instances = BTreeMap::new();
-    let mut errors = BTreeMap::new();
-    let mut undeclared = Vec::new();
-    for name in names {
-        if environments
-            .iter()
-            .any(|environment| environment.metadata.name == *name)
-        {
-            continue;
-        }
-        match resolve_environment_with(&inventory, name, &hint(name)) {
-            Ok(resolved) => {
-                if let Some(found) = resolved.instance {
-                    instances.insert(resolved.name, found.descriptor());
-                }
-            }
-            Err(finding) => {
-                errors.insert(name.clone(), finding);
-            }
-        }
-        undeclared.push(name.clone());
-    }
+    let (instances, mut errors, undeclared) = known_instances(&inventory, names, &hint, offline);
     let inventory = inventory.with_instances(instances);
     let selection = selection_names(&environments, &groups, names, labels, group, &undeclared)?;
     if selection.is_empty() {
@@ -156,6 +135,50 @@ pub fn select(
             .collect(),
         errors,
     })
+}
+
+/// The instances commands across environments know: the ones state lists,
+/// and the named environments that are not declared, resolved with their
+/// `--template` and `--param` hints. A named environment that cannot be
+/// resolved is a finding of its own, and is left out of the instances.
+fn known_instances(
+    inventory: &GitOpsInventory,
+    names: &[String],
+    hint: &dyn Fn(&str) -> InstanceRequest,
+    offline: bool,
+) -> (
+    nyl_core::orchestration::instance::Instances,
+    BTreeMap<String, Finding>,
+    Vec<String>,
+) {
+    let (declared_environments, _) = declared(inventory);
+    let mut instances = nyl_core::orchestration::instance::Instances::new();
+    let mut errors = BTreeMap::new();
+    let mut undeclared = Vec::new();
+    let (listed, _) = super::project::list_instances(inventory, offline);
+    for instance in listed {
+        instances.insert(instance.name, instance.descriptor);
+    }
+    for name in names {
+        if declared_environments
+            .iter()
+            .any(|environment| environment.metadata.name == *name)
+        {
+            continue;
+        }
+        match resolve_environment_with(inventory, name, &hint(name)) {
+            Ok(resolved) => {
+                if let Some(found) = resolved.instance {
+                    instances.insert(resolved.name, found.descriptor());
+                }
+            }
+            Err(finding) => {
+                errors.insert(name.clone(), finding);
+            }
+        }
+        undeclared.push(name.clone());
+    }
+    (instances, errors, undeclared)
 }
 
 /// Stored incarnations keep their resource claims until they leave state,

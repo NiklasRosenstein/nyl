@@ -9,7 +9,7 @@ use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::instance::{InstanceDescriptor, InstanceTerms};
 use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
 use nyl_core::orchestration::state::{StateLocation, StateRecord};
-use nyl_core::resources::environment::{sharing_group, Environment, EnvironmentGroup};
+use nyl_core::resources::environment::{sharing_group, Environment, EnvironmentGroup, EnvironmentTemplate};
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
 use nyl_state::git::{CommitAuthor, Endpoint, GitStateStore};
 use serde_json::Value;
@@ -107,6 +107,7 @@ pub fn resolve_environment(
 ///   (`NYL-INSTANCE-NAME-TAKEN`).
 /// - The instance's parameters are its record's, with `--param` laid over
 ///   them, bound against the template at the entry worktree.
+#[allow(clippy::too_many_lines)] // One resolution: declared, else scan the templates' records, then bind the parameters.
 pub fn resolve_environment_with(
     inventory: &GitOpsInventory,
     name: &str,
@@ -150,22 +151,7 @@ pub fn resolve_environment_with(
             ));
         }
     }
-    let mut found = Vec::new();
-    for template in templates {
-        let state = nyl_render::gitops::instances::instance_state(template, &environment_name)?;
-        let mut skeleton = template.environment_skeleton(name);
-        skeleton.spec.state = state;
-        let located = locate(inventory, &skeleton, &groups)?;
-        let snapshot = open_store_mode(inventory, &located, None, request.offline)
-            .map_err(|error| unavailable(&error.to_string()))?
-            .snapshot(&located.location)
-            .map_err(|error| unavailable(&error.to_string()))?;
-        if let Some(record) = snapshot.record {
-            if record.environment == environment_name && record.template.is_some() {
-                found.push((template, located, record));
-            }
-        }
-    }
+    let mut found = find_records(inventory, &environment_name, &groups, templates, request)?;
     let (template, mut located, record) = match found.len() {
         0 => match &request.template {
             None => return Err(unknown()),
@@ -231,6 +217,35 @@ pub fn resolve_environment_with(
         record,
     });
     Ok(located)
+}
+
+/// The templates whose state location for `name` holds a `state.yaml` of
+/// that environment, with the location and the record.
+fn find_records<'a>(
+    inventory: &GitOpsInventory,
+    environment_name: &EnvironmentName,
+    groups: &[EnvironmentGroup],
+    templates: Vec<&'a EnvironmentTemplate>,
+    request: &InstanceRequest,
+) -> std::result::Result<Vec<(&'a EnvironmentTemplate, ResolvedEnvironment, StateRecord)>, Finding> {
+    let name = environment_name.as_str();
+    let mut found = Vec::new();
+    for template in templates {
+        let state = nyl_render::gitops::instances::instance_state(template, environment_name)?;
+        let mut skeleton = template.environment_skeleton(name);
+        skeleton.spec.state = state;
+        let located = locate(inventory, &skeleton, groups)?;
+        let snapshot = open_store_mode(inventory, &located, None, request.offline)
+            .map_err(|error| unavailable(&error.to_string()))?
+            .snapshot(&located.location)
+            .map_err(|error| unavailable(&error.to_string()))?;
+        if let Some(record) = snapshot.record {
+            if record.environment == *environment_name && record.template.is_some() {
+                found.push((template, located, record));
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn name_taken(name: &str, why: &str) -> Finding {
@@ -727,7 +742,7 @@ pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> (Vec<Listed
             continue;
         };
         let mut parent_location = location.clone();
-        parent_location.path = parent.trim_matches('/').to_owned();
+        parent.trim_matches('/').clone_into(&mut parent_location.path);
         let records = open_store_mode(inventory, &located, None, offline)
             .map_err(|error| error.to_string())
             .and_then(|store| store.list_records(&parent_location).map_err(|error| error.to_string()));

@@ -26,6 +26,7 @@ nyl reconcile -e dev --allow-teardown
 nyl reconcile -e dev --leaving --allow-teardown
 nyl reconcile -e dev --unit config --reapply --reason "rotate credentials"
 nyl reconcile -e dev --fail-fast
+nyl reconcile -e pr-123 --template preview --param pr=123
 ```
 
 The environment's state must exist: create it once with
@@ -33,6 +34,19 @@ The environment's state must exist: create it once with
 lease, executes waves of ready units until nothing is ready, writes one
 transition commit per state ref it changes, and releases the lease. A run
 that changes nothing writes no commit.
+
+## Preview instances
+
+`--template <name>` with one `-e <instance>` and `--param <name>=<value>`
+creates the instance of an
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
+or updates its parameters, as [`nyl state init --template`](/nyl/reference/cli/state/#nyl-state-init)
+does, and then reconciles it from this checkout: the run records the checkout's
+commit as the instance's source. Without `--template`, the environment is a
+declared Environment or an existing instance found by its record, and an
+instance renders at the source commit its record names, whichever checkout the
+command runs from; the report says so, and the environment record keeps
+`by: recorded`.
 
 ## Observed values
 
@@ -146,6 +160,7 @@ for qualified unit options and independent state transactions.
 | Option | Meaning |
 | --- | --- |
 | `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
+| `--template <name>`, `--param <name>=<value>` | Create or update `-e <instance>` of this EnvironmentTemplate before reconciling it. `--param` is repeatable and needs `--template`; one `-e` only. |
 | `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
 | `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--unit <name>`, `--units <a>,<b>` | Execute only these units, and do no lifecycle work. Resolution still covers the whole environment, and a named unit whose dependency has no current receipt stays blocked. An unknown name exits 1 with `NYL-UNIT-UNKNOWN`. |

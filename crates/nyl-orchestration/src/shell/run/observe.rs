@@ -400,7 +400,7 @@ fn read(shared: &Shared<'_>, job: &Job<'_>) -> Result<ObservedValues, String> {
                 deadline,
             };
             let ctx = ExecutionContext {
-                instances: &shared.context.instances,
+                instances: shared.context.instances,
                 secrets,
                 interactive: false,
                 artifacts: job.artifacts.clone(),

@@ -188,58 +188,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             fresh,
             template,
             params,
-        } => {
-            let requested = requested(common, wiring);
-            let request = InstanceRequest {
-                template: template.clone(),
-                params: match parse_params(params) {
-                    Ok(params) => params,
-                    Err(finding) => {
-                        return Ok(render(
-                            &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
-                                .refused(finding),
-                            common.output,
-                        ))
-                    }
-                },
-                offline: false,
-            };
-            run_with_instance(
-                common,
-                wiring,
-                Operation::StateInit.as_str(),
-                None,
-                false,
-                &request,
-                |ctx| match (&ctx.session.resolved.instance, template) {
-                    (Some(instance), Some(_)) => {
-                        let source_commit = match ctx.session.entry_commit() {
-                            Ok(commit) => commit,
-                            Err(finding) => {
-                                return StateOperationReport::new(ctx.environment.clone(), "state-init")
-                                    .refused(finding)
-                            }
-                        };
-                        let mut report = state::init_instance(
-                            ctx.context,
-                            &ctx.environment,
-                            ctx.location,
-                            &state::InstanceInit {
-                                template: &instance.template,
-                                params: &instance.params,
-                                source_commit: &source_commit,
-                                ttl: instance.terms.ttl,
-                            },
-                            *fresh,
-                            &requested,
-                        );
-                        report.warnings.extend(ctx.session.instance_warnings());
-                        report
-                    }
-                    _ => state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested),
-                },
-            )
-        }
+        } => run_init(common, wiring, *fresh, template.as_ref(), params),
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
             let requested = requested(common, wiring);
@@ -303,6 +252,63 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             ],
         ),
     }
+}
+
+/// `nyl state init`, for a declared environment or, with `--template`, an instance.
+fn run_init(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    fresh: bool,
+    template: Option<&String>,
+    params: &[String],
+) -> Result<CommandOutcome> {
+    let requested = requested(common, wiring);
+    let request = InstanceRequest {
+        template: template.cloned(),
+        params: match parse_params(params) {
+            Ok(params) => params,
+            Err(finding) => {
+                return Ok(render(
+                    &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
+                        .refused(finding),
+                    common.output,
+                ))
+            }
+        },
+        offline: false,
+    };
+    run_with_instance(
+        common,
+        wiring,
+        Operation::StateInit.as_str(),
+        None,
+        false,
+        &request,
+        |ctx| match (&ctx.session.resolved.instance, template) {
+            (Some(instance), Some(_)) => {
+                let source_commit = match ctx.session.entry_commit() {
+                    Ok(commit) => commit,
+                    Err(finding) => {
+                        return StateOperationReport::new(ctx.environment.clone(), "state-init").refused(finding)
+                    }
+                };
+                state::init_instance(
+                    ctx.context,
+                    &ctx.environment,
+                    ctx.location,
+                    &state::InstanceInit {
+                        template: &instance.template,
+                        params: &instance.params,
+                        source_commit: &source_commit,
+                        ttl: instance.terms.ttl,
+                    },
+                    fresh,
+                    &requested,
+                )
+            }
+            _ => state::init(ctx.context, &ctx.environment, ctx.location, fresh, &requested),
+        },
+    )
 }
 
 /// `nyl state move`: `old` holds `--desired-ref`, `--observed-ref`,
@@ -575,7 +581,7 @@ pub(crate) fn create_or_update_instance(
         wait: write.wait,
         cancellation: wiring.cancellation.clone(),
     };
-    let mut report = state::init_instance(
+    let report = state::init_instance(
         &context,
         &session.resolved.name,
         &session.resolved.location,
@@ -591,7 +597,6 @@ pub(crate) fn create_or_update_instance(
     if let Some(finding) = report.errors.first() {
         return Err(Stop::Finding(finding.clone()));
     }
-    report.warnings.extend(session.instance_warnings());
     Ok(report)
 }
 
