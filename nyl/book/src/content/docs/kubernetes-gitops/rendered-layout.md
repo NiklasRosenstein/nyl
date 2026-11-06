@@ -93,10 +93,10 @@ The versioned `_nyl/index.json` index records target identity, source provenance
 and SHA-256 hashes. Nyl preserves unowned files and rejects changes to indexed
 files that were made outside Nyl.
 
-Version 2 is what `render-tree` writes, version 3 adds the compilation
-metadata `publish-tree` records, and version 4, written by orchestrated
-publications, adds the `owner` that publishes the prefix: its environment,
-unit, and incarnation uid. Older versions stay readable, and the first
+Version 2 is what `render-tree` writes, and version 3 adds the compilation
+metadata `publish-tree` records. A version 3 index written by an orchestrated
+publication also names the `owner` that publishes the prefix: its environment,
+unit, and incarnation uid. Indexes without an owner stay readable, and the first
 orchestrated publication over one records its owner. A prefix that names an
 owner is not overwritten or removed by `render-tree`, `publish-tree`, or another
 unit incarnation that still exists (see

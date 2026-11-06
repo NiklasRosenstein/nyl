@@ -158,8 +158,8 @@ for example when the remote is unreachable.
 ## Ownership
 
 The published `_nyl/index.json` records the unit that owns the prefix: the
-environment, the unit, and the incarnation's uid (index version 4; indexes
-written before, as `publish-tree` writes them, name no owner and stay
+environment, the unit, and the incarnation's uid (the `owner` member of the
+version 3 index; indexes without one, as `publish-tree` writes them, stay
 readable). A publication or teardown refuses a prefix that names another
 incarnation while that incarnation still exists in its environment's state,
 active, held, deleting, or retained. It fails with

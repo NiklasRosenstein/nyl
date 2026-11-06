@@ -411,8 +411,8 @@ fn first_is(status: IncarnationStatus) -> Incarnations {
 }
 
 /// Catches a published prefix that records no owner, or a publication that
-/// rewrites it as a different version: an orchestrated publication writes
-/// index version 4 with the environment, the unit, and the incarnation's uid.
+/// rewrites it as a different version: an orchestrated publication writes a
+/// version 3 index with the environment, the unit, and the incarnation's uid.
 #[test]
 fn test_publication_records_its_unit_incarnation_as_the_owner_of_the_prefix() {
     let world = World::new();
@@ -424,7 +424,7 @@ fn test_publication_records_its_unit_incarnation_as_the_owner_of_the_prefix() {
         .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
         .unwrap();
     let index = published_index(&world);
-    assert_eq!(index["version"], 4);
+    assert_eq!(index["version"], 3);
     assert_eq!(
         owner(&index),
         json!({"environment": "dev", "unit": "kubernetes", "uid": FIRST})
@@ -509,7 +509,7 @@ fn test_a_prefix_owned_by_an_existing_incarnation_is_fenced_until_it_is_gone() {
 /// Catches a prefix published before orchestration owned it (index version 3,
 /// as `publish-tree` writes it) being refused or left without an owner: the
 /// first publication of a unit adopts it, without asking whether anyone else
-/// exists, and upgrades it to version 4.
+/// exists, and records its owner in it.
 #[test]
 fn test_a_prefix_without_an_owner_is_adopted_and_upgraded() {
     let world = World::new();
@@ -535,7 +535,6 @@ fn test_a_prefix_without_an_owner_is_adopted_and_upgraded() {
         ],
     );
     let mut index = published_index(&world);
-    index["version"] = 3.into();
     index.as_object_mut().unwrap().remove("owner");
     std::fs::write(
         other.join("dev/_nyl/index.json"),
@@ -559,7 +558,7 @@ fn test_a_prefix_without_an_owner_is_adopted_and_upgraded() {
     };
     assert!(matches!(outcome, Outcome::Succeeded { .. }), "{outcome:?}");
     let index = published_index(&world);
-    assert_eq!(index["version"], 4);
+    assert_eq!(index["version"], 3);
     assert_eq!(
         owner(&index),
         json!({"environment": "dev", "unit": "kubernetes", "uid": SECOND})
@@ -670,7 +669,7 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
     assert!(!files.iter().any(|path| path.starts_with("dev/")), "{files:?}");
     let index: Value = serde_json::from_str(&git(&world.bare(), &["show", "deploy:preview/_nyl/index.json"])).unwrap();
     assert_eq!(index["target"], "preview");
-    assert_eq!(index["version"], 4);
+    assert_eq!(index["version"], 3);
     assert_eq!(owner(&index)["unit"], "kubernetes");
     // The target's own values reach the render, and a changed one changes the key.
     let mut moved = inline_spec();

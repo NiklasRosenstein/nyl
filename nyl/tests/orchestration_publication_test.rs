@@ -377,7 +377,7 @@ fn test_inline_target_reconciles_and_tears_down_through_the_shell() {
     assert_eq!(unit["spec"]["target"]["name"], "dev-kubernetes");
     let index = deployed_index(&harness);
     assert_eq!(index["target"], "dev-kubernetes");
-    assert_eq!(index["version"], 4);
+    assert_eq!(index["version"], 3);
     assert_eq!(index["owner"]["unit"], "kubernetes");
     let deployment = published_deployment(&harness);
     assert!(deployment.contains("@sha256:"), "{deployment}");
