@@ -148,6 +148,7 @@ impl World {
             cache_dir: self.0.path().join("cache"),
             teardown_wait: None,
             incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+            dirty_source: false,
         }
     }
 }

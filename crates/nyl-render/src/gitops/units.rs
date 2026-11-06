@@ -161,7 +161,47 @@ pub fn render_direct_unit(
         })?
         .ok_or_else(|| NylError::config(format!("unit {name} renders to nothing")))?;
     apply_unit_defaults(inventory, &unit.envelope.kind, &mut spec);
+    if unit.is_publication() {
+        prepare_direct_publication(inventory, unit, environment, &mut spec)?;
+    }
     Ok((unit.envelope.clone(), spec))
+}
+
+/// The stable code of the refusal to build a publication unit that declares
+/// its DeploymentTarget inline without an environment.
+pub const INLINE_TARGET_NEEDS_ENVIRONMENT: &str = "NYL-KUBERNETES-BUILD-INLINE-TARGET";
+
+/// What a direct build of a publication unit renders beyond the other
+/// kinds: the unit as `environment` would render it, so its target is named
+/// and its Release input bindings expand into `releases`, which resolve
+/// against that environment's receipts like an orchestrated run's.
+///
+/// An inline target is named `<environment>-<unit>` and its templates read
+/// the environment, so there is nothing to build without one; a static
+/// target needs none, and its bindings that only orchestration resolves then
+/// fail the build with the reference and `-e`.
+fn prepare_direct_publication(
+    inventory: &GitOpsInventory,
+    unit: &DiscoveredUnit,
+    environment: Option<&Environment>,
+    spec: &mut Value,
+) -> Result<()> {
+    let declares_inline = spec
+        .get("target")
+        .and_then(Value::as_object)
+        .is_some_and(|target| target.contains_key("inline"));
+    if declares_inline && environment.is_none() {
+        let name = unit
+            .envelope
+            .name()
+            .map_err(|error| unit_invalid(&unit.location(), &error.to_string()))?;
+        return Err(NylError::config(format!(
+            "{INLINE_TARGET_NEEDS_ENVIRONMENT}: unit {name} declares its DeploymentTarget inline, which is named \
+             `<environment>-<unit>` and rendered with an environment's values; pass -e <environment> to build it"
+        )));
+    }
+    let environment = environment.map_or("", |environment| environment.metadata.name.as_str());
+    expand_publication_releases(inventory, unit, environment, spec)
 }
 
 fn apply_unit_defaults(inventory: &GitOpsInventory, kind: &str, spec: &mut Value) {
@@ -1200,6 +1240,69 @@ spec:
             unit(&source, "database").spec.as_ref().unwrap()["version"],
             json!("1.8.9")
         );
+    }
+
+    /// Catches a direct build of a publication unit rendering a different
+    /// spec from the environment's run: with `-e` it is the very spec the
+    /// environment renders (target named, bindings expanded into `releases`),
+    /// without `-e` a static target still expands its bindings, so they fail
+    /// the build by their need for an environment, and an inline target,
+    /// whose name and templates come from the environment, is refused with
+    /// its code.
+    #[test]
+    fn test_render_direct_unit_gives_a_publication_the_environments_spec() {
+        let name = UnitName::new("kubernetes").unwrap();
+        let direct = |worktree: &TempDir, environment: Option<&str>| {
+            let inventory = inventory(worktree);
+            let environment = environment
+                .map(|environment| {
+                    resolve_effective_environment(&inventory, &EnvironmentName::new(environment).unwrap())
+                })
+                .transpose()
+                .unwrap();
+            render_direct_unit(&inventory, &name, environment.as_ref())
+        };
+
+        let worktree = project(&[("platform.yaml", PLATFORM), ("units.yaml", UNITS)]);
+        let (_, spec) = direct(&worktree, Some("dev")).unwrap();
+        assert_eq!(
+            Some(&spec),
+            unit(&render(&worktree, "dev").unwrap(), "kubernetes").spec.as_ref()
+        );
+        // Without an environment, templates cannot read values.
+        let error = direct(&worktree, None).unwrap_err().to_string();
+        assert!(error.contains("pass -e <environment>"), "{error}");
+        let literal = project(&[
+            ("platform.yaml", PLATFORM),
+            (
+                "units.yaml",
+                &UNITS.replace("target: '{{ values.target }}'", "target: dev"),
+            ),
+        ]);
+        let (_, spec) = direct(&literal, None).unwrap();
+        assert!(spec["releases"]["web/web"]["image"]["fromUnit"].is_object(), "{spec}");
+
+        let worktree = inline_project(INLINE_UNIT);
+        fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+        let (_, spec) = direct(&worktree, Some("dev")).unwrap();
+        assert_eq!(
+            Some(&spec),
+            unit(&render(&worktree, "dev").unwrap(), "kubernetes").spec.as_ref()
+        );
+        assert_eq!(spec["target"]["name"], json!("dev-kubernetes"));
+        // Templates that read the environment fail first; an inline target
+        // without any is refused for its name, which only an environment gives.
+        let error = direct(&worktree, None).unwrap_err().to_string();
+        assert!(error.contains("pass -e <environment>"), "{error}");
+        let literal = INLINE_UNIT
+            .replace("'{{ environment.name }}-{{ values.region }}'", "previews")
+            .replace("'{{ values.region }}.example.com'", "example.com");
+        let worktree = inline_project(&literal);
+        fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+        let error = direct(&worktree, None).unwrap_err().to_string();
+        assert!(error.contains(INLINE_TARGET_NEEDS_ENVIRONMENT), "{error}");
+        assert!(error.contains("pass -e <environment>"), "{error}");
+        assert!(direct(&worktree, Some("dev")).is_ok());
     }
 
     #[test]

@@ -59,6 +59,12 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         clock: wiring.clock.as_ref(),
         deadline,
     };
+    // A driver that publishes from a direct build authors its commit with the
+    // identity the repository's Git configuration names; a build that writes
+    // nothing needs none, so a missing identity is only the driver's to report.
+    let identity = git2::Repository::discover(&args.path)
+        .ok()
+        .and_then(|repository| wiring.commit_identity(repository.path(), None).ok());
     let context = ExecutionContext {
         unit: nyl_core::orchestration::ids::UnitAddress::new(
             prepared.unit.unit.environment.clone(),
@@ -82,10 +88,11 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         now,
         observed: prepared.snapshot.observed.get(&prepared.unit.unit.name),
         tools: &tools,
-        commit_identity: None,
+        commit_identity: identity.as_ref(),
         cache_dir: prepared.workspace.path().join("cache"),
         teardown_wait: None,
         incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+        dirty_source: prepared.dirty,
         interactive: false,
     };
     let artifacts = match driver

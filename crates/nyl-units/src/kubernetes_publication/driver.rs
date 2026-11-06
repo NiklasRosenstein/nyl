@@ -21,6 +21,9 @@
 //!   [`super::run`]).
 //! - **Teardown readiness.** The driver evaluates the recorded settings
 //!   itself ([`super::readiness`]); the shell only displays the findings.
+//! - **Build.** `nyl build` renders the tree, compares it with the published
+//!   one (`--diff`), or publishes it (`--push`) when no environment owns the
+//!   target ([`super::build`]).
 //! - **Drift.** Drift is the destination branch no longer holding the tree
 //!   the unit renders: a dry publication that would commit something, or one
 //!   that finds an owned file modified outside Nyl. A comparison that cannot
@@ -44,7 +47,7 @@ use nyl_render::gitops::publication::{prepare_target_publication, PublicationAut
 use serde_json::{json, Value};
 
 use super::readiness::evaluate;
-use super::{plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target, KIND};
+use super::{build, plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
 
 /// The pointer, in the resolved spec, of the recorded teardown settings.
@@ -87,6 +90,7 @@ impl Driver for KubernetesPublicationDriver {
             reconcile: true,
             detect_drift: true,
             teardown: true,
+            build: true,
             ..Capabilities::default()
         }
     }
@@ -273,11 +277,11 @@ impl Driver for KubernetesPublicationDriver {
 
     fn build(
         &self,
-        _ctx: &ExecutionContext<'_>,
-        _unit: &DesiredUnit,
-        _options: &[OsString],
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        Ok(Supported::Unsupported)
+        build(&self.resource_catalogue, ctx, unit, options).map(Supported::Supported)
     }
 
     fn exec(

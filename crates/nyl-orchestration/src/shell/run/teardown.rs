@@ -1276,6 +1276,7 @@ fn call(
         cache_dir: context.cache_dir(),
         teardown_wait: job.completion,
         incarnations,
+        dirty_source: false,
     };
     let outcome = driver.teardown(&execution, job.unit);
     let killed = context.base.faults.at(FaultPoint::AfterEffect, Some(&name)) == FaultAction::Kill;

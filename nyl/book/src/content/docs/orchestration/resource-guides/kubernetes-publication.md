@@ -179,12 +179,66 @@ Each refusal has a code and a way out:
 | --- | --- |
 | `NYL-KUBERNETES-OWNER-FENCED` | Another unit incarnation that still exists owns the prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
 | `NYL-KUBERNETES-OWNER-UNKNOWN` | The owner's environment was renamed or removed, or its state cannot be read, so Nyl cannot tell whether the owner exists. Declare the environment again and tear its unit down, or release the prefix deliberately (below). |
-| `NYL-TREE-OWNED-BY-UNIT` | `publish-tree` or `render-tree` met a prefix an orchestrated unit owns, for example after `nyl state forget` released the unit. Publish through the environment that owns it, or release the prefix deliberately (below). |
+| `NYL-TREE-OWNED-BY-UNIT` | `publish-tree`, `render-tree`, or `nyl build -- --push` met a prefix an orchestrated unit owns, for example after `nyl state forget` released the unit. Publish through the environment that owns it, or release the prefix deliberately (below). |
 | `NYL-KUBERNETES-TARGET-CHANGED` | The unit's destination changed since it last published. Restore it, or replace the unit as described under [Inline targets](#inline-targets). |
 
 To release a prefix deliberately, commit to the publication branch a change to
 `<prefix>/_nyl/index.json` that removes its `owner` member and sets `version`
 to `3`. The prefix is then unowned, and the next publication adopts it.
+
+## Direct builds
+
+`nyl build` renders the unit's tree without orchestration: no lease, receipt, or
+state write, and nothing recorded. It renders the target as a run does, with
+the same renderer and the unit's Release inputs, and with no process
+environment or project secrets. Files come from the worktree, uncommitted
+changes included, or from `--source <revision>`. With `-e`, the target's
+`fromUnit` bindings resolve against that environment's current receipts, as
+`nyl get output` reads them; without it, they fail the build and name `-e`. The
+driver's own options follow `--`:
+
+```bash
+nyl build kubernetes -e dev
+nyl build kubernetes -e dev -- --diff
+nyl build kubernetes -- --push
+```
+
+A build prints one JSON document and exits 0:
+
+| Arguments | Prints |
+| --- | --- |
+| none | A `RenderedTree`: where the tree publishes (`repository`, `branch`, `pathPrefix`), the `target`, the digest of every file (`files`), and the `indexDigest` a publication of this tree would record. |
+| `--diff` | A `TreeDiff` comparing the render with the tree published at the destination: `changes` (`none`, `create` before anything is published at the prefix, or `update`), the `base` commit, the `owner` the published index names, and the `files` that differ, each `added`, `modified`, or `removed`. |
+| `--push` | The `PublishedTree` a run records: the commit, branch, and `indexDigest`. |
+
+`--diff` reads the destination and writes nothing, so it also compares a tree
+that an environment owns. Differences do not change the exit status, as in
+[`diff-tree`](/nyl/reference/cli/diff-tree/); read `changes`. Files in the
+prefix that the published `_nyl/index.json` does not record, such as state files
+other tools committed, are not part of the tree.
+
+`--push` publishes the render as one commit authored by the identity of the
+repository's Git configuration, and only for a target no environment owns. It
+refuses, before rendering or writing anything, with:
+
+| Code | Meaning and fix |
+| --- | --- |
+| `NYL-KUBERNETES-BUILD-TARGET-OWNED` | An Environment selects a publication unit that places the target, even one being torn down. Publish with `nyl reconcile -e <environment>`, or deselect the unit from that environment first. |
+| `NYL-TREE-OWNED-BY-UNIT` | The published index names a unit incarnation. A direct publication records no owner, so it cannot tell whether that unit still exists; release the prefix deliberately (see [Ownership](#ownership)). |
+| `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` | The worktree has uncommitted changes, which the index could not attribute to a commit. Commit them, or build a revision with `--source <revision>`. |
+| `NYL-KUBERNETES-BUILD-IDENTITY` | No identity to author the commit. Set `user.name` and `user.email` in the repository's Git configuration. |
+
+The index of a direct publication has version 3 and no owner, as `publish-tree`
+writes it, so an environment that later selects the unit adopts the prefix.
+`--diff` and `--push` are alternatives; any other argument fails with
+`NYL-KUBERNETES-BUILD-ARGUMENT`.
+
+A unit that declares its target [inline](#inline-targets) builds only with
+`-e`: the target is named `<environment>-<unit>` and rendered with the
+environment's values, so without it the build fails with
+`NYL-KUBERNETES-BUILD-INLINE-TARGET`. An environment that selects the unit owns
+its inline target, so `--push` is refused there too; `--diff` and the plain
+render work.
 
 ## Teardown
 

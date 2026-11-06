@@ -214,6 +214,7 @@ pub fn context_with<'a>(
         cache_dir: world.root.path().join("cache"),
         teardown_wait: None,
         incarnations,
+        dirty_source: false,
     }
 }
 

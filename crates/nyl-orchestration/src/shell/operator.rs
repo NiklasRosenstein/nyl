@@ -295,6 +295,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 cache_dir: context.cache_dir(),
                 teardown_wait: None,
                 incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+                dirty_source: false,
             };
             let status = match driver.exec(&execution, &unit, &options.arguments) {
                 Ok(Supported::Supported(status)) => status,

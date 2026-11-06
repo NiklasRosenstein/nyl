@@ -42,7 +42,7 @@ use nyl_render::gitops::publication::TeardownSettings;
 use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
-    evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, unit_target, validate_teardown_wait,
+    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, unit_target, validate_teardown_wait,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -102,6 +102,7 @@ impl Driver for FakePublication {
             reconcile: true,
             detect_drift: true,
             teardown: true,
+            build: true,
             ..Capabilities::default()
         }
     }
@@ -260,13 +261,15 @@ impl Driver for FakePublication {
         }
     }
 
+    /// A direct build is not scripted: it is the real driver's, so a scenario
+    /// that builds a publication sees what the built-in kind does.
     fn build(
         &self,
-        _ctx: &ExecutionContext<'_>,
-        _unit: &DesiredUnit,
-        _options: &[OsString],
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        Ok(Supported::Unsupported)
+        build(&self.resource_catalogue, ctx, unit, options).map(Supported::Supported)
     }
 
     fn exec(

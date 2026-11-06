@@ -892,6 +892,7 @@ mod tests {
             cache_dir: temp.join("cache"),
             teardown_wait: None,
             incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+            dirty_source: false,
         }
     }
     fn fixture() -> tempfile::TempDir {

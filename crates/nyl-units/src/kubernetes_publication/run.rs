@@ -49,8 +49,8 @@ use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, Artifac
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
-    prepare_target_publication_fenced, prepare_target_removal_fenced, render_target, without_workload_applications,
-    PublicationAuthor, RenderedTarget, TargetRender,
+    ensure_git_worktree, prepare_target_publication_fenced, prepare_target_removal_fenced, render_target,
+    without_workload_applications, PublicationAuthor, RenderedTarget, TargetRender,
 };
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::gitops::units::PublicationTarget;
@@ -143,6 +143,21 @@ pub(crate) fn render(
     spec: &Value,
     owner: Option<RenderIndexOwner>,
 ) -> DriverResult<RenderedTarget> {
+    render_at(catalogue, worktree, project_dir, cache_dir, spec, owner, None)
+}
+
+/// [`render`] with the commit the ownership index records as the tree's
+/// source, for a worktree that is a snapshot of files, not a checkout of
+/// it. `None` reads the worktree repository's head.
+pub(crate) fn render_at(
+    catalogue: &nyl_render::config::ResourceCatalogue,
+    worktree: &std::path::Path,
+    project_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    spec: &Value,
+    owner: Option<RenderIndexOwner>,
+    source_commit: Option<&str>,
+) -> DriverResult<RenderedTarget> {
     let target = publication_target(spec)?;
     let inputs = resolved_snapshot(spec)?;
     let inline = match &target {
@@ -151,6 +166,7 @@ pub(crate) fn render(
     };
     let target = target.name().to_owned();
     render_target(&TargetRender {
+        source_commit,
         selection: nyl_render::gitops::tree::partial::PublicationSelection::default(),
         publication_base: None,
         worktree,
@@ -177,6 +193,10 @@ pub(crate) fn resolution_inputs(
     ctx: &ResolutionContext<'_>,
     spec: &Value,
 ) -> DriverResult<(RenderedTarget, KeyInputs)> {
+    // A direct build resolves the unit over a snapshot of files, which the
+    // render needs as a Git worktree; a run's checkout already is one.
+    ensure_git_worktree(&ctx.worktree)
+        .map_err(|error| DriverError::before_effects(format!("cannot prepare the worktree for rendering: {error}")))?;
     let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec, None)?;
     let inputs = KeyInputs {
         files: rendered.input_record.clone(),
@@ -470,6 +490,29 @@ fn publish_with(
     unit: &DesiredUnit,
     outputs: Value,
 ) -> DriverResult<Outcome> {
+    author(ctx, unit)?;
+    let rendered = render()?;
+    let target = unit_target(resolved_spec(unit)?)?;
+    if let Some(outcome) = target_changed(ctx, unit, &rendered, &target) {
+        return Ok(outcome);
+    }
+    let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
+    publish_rendered(render, rendered, &message, ctx, unit, outputs)
+}
+
+/// Publish `rendered`, which `render` produces again when the branch head
+/// moves, as one commit with `message`, and record the `PublishedTree`
+/// artifact `tree`. Shared by an orchestrated publication and `nyl build
+/// --push`, which differ in what they render (the owner the index records)
+/// and in the checks before the publication.
+pub(crate) fn publish_rendered(
+    render: &dyn Fn() -> DriverResult<RenderedTarget>,
+    mut rendered: RenderedTarget,
+    message: &str,
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    outputs: Value,
+) -> DriverResult<Outcome> {
     let author = author(ctx, unit)?;
     let key = unit
         .execution_key
@@ -480,14 +523,9 @@ fn publish_with(
         .uid
         .clone()
         .ok_or_else(|| DriverError::before_effects("an executing unit has a uid"))?;
-    let mut rendered = render()?;
     let target = unit_target(resolved_spec(unit)?)?;
-    if let Some(outcome) = target_changed(ctx, unit, &rendered, &target) {
-        return Ok(outcome);
-    }
     let before = state_inputs(&rendered)?;
     let stateful = rendered.publication_base.is_some();
-    let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
     // Credential variables come from the execution's admitted environment
     // (PATH and the unit's declared passthrough), never from the process
     // environment.
@@ -497,7 +535,7 @@ fn publish_with(
         &Budget::new(ctx),
         &mut rendered,
         ("the publication", "publish the tree"),
-        |tree| prepare_target_publication_fenced(tree, &ctx.project_dir, &message, &author, &variable, Some(&takeover)),
+        |tree| prepare_target_publication_fenced(tree, &ctx.project_dir, message, &author, &variable, Some(&takeover)),
         nyl_render::gitops::publication::PreparedTarget::push,
         rebuild_from_state(render, &before, stateful, Ok),
     )?;

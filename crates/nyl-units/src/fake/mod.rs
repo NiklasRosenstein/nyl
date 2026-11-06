@@ -287,6 +287,7 @@ mod tests {
             cache_dir: directory.path().join("cache"),
             teardown_wait: None,
             incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+            dirty_source: false,
         }
     }
 
