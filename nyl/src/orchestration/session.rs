@@ -237,6 +237,9 @@ impl Session {
         if let Some(prefix) = self.keep_prefix() {
             sources = sources.with_kept_source(prefix);
         }
+        if let Some(reference) = self.source_ref() {
+            sources = sources.with_source_ref(reference);
+        }
         Ok(sources)
     }
 
@@ -247,6 +250,24 @@ impl Session {
     pub fn keep_prefix(&self) -> Option<String> {
         let id = self.resolved.instance.as_ref()?.record.as_ref()?.keep_id.as_ref()?;
         (!self.offline).then(|| nyl_orchestration::rules::keep::keep_prefix(id))
+    }
+
+    /// The `--source-ref` hint of the instance this session works on, as data
+    /// from the command line or the instance's record: the ref to fetch by name
+    /// from `origin` when the host will not serve the recorded commit by its
+    /// id. `None` for a declared environment, an instance that recorded none,
+    /// and a run without network access. Contract:
+    /// [Instances](../../../design/orchestration-core.md#instances).
+    pub fn source_ref(&self) -> Option<String> {
+        let instance = self.resolved.instance.as_ref()?;
+        (!self.offline)
+            .then(|| {
+                instance
+                    .source_ref
+                    .clone()
+                    .or_else(|| instance.record.as_ref()?.source_ref.clone())
+            })
+            .flatten()
     }
 
     /// Whether a write of the instance's record keeps its source commit: the

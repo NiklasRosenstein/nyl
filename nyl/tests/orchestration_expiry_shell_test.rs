@@ -305,6 +305,7 @@ fn test_a_restart_if_deleted_is_decided_under_the_lease() {
                 template: "preview",
                 params: &std::collections::BTreeMap::new(),
                 source_commit: &source_commit,
+                source_ref: None,
                 ttl: Some(nyl_core::orchestration::time::Duration::from_secs(7 * 86_400)),
                 keep: None,
             },

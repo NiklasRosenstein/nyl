@@ -295,6 +295,74 @@ fn test_a_commit_only_a_keep_ref_carries_is_fetched_through_it() {
     assert_eq!(std::fs::read_to_string(checkout.join("app.txt")).unwrap(), "kept");
 }
 
+/// A host that will not serve a commit by its id but serves the ref that
+/// carried it: the resolver has no by-id fetch (`with_origin_fetch` is not set,
+/// as when the host refuses it) and the instance recorded `--source-ref`, so the
+/// ref is fetched by name and the recorded commit is found. Catches the
+/// fallback missing, a fetched ref being written into the clone, and a
+/// resolver without the ref finding the commit anyway.
+#[test]
+fn test_a_commit_is_fetched_through_the_recorded_source_ref_when_it_cannot_be_fetched_by_id() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let head = commit(&origin, Some(world.c2), &[("app.txt", "pull request")], "head");
+    origin
+        .reference("refs/pull/1/head", head, true, "pull request")
+        .unwrap();
+    let this = SourceRepository::This;
+    let clone = Repository::open(world.clone_dir()).unwrap();
+    let refs = |clone: &Repository| {
+        clone
+            .references()
+            .unwrap()
+            .map(|reference| reference.unwrap().name().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = refs(&clone);
+
+    let without = world
+        .resolver()
+        .worktree(&this, &id(head), &world.root.path().join("workspace/without"))
+        .unwrap_err();
+    assert!(without.to_string().contains("does not exist"), "{without}");
+
+    let checkout = world.root.path().join("workspace/by-ref");
+    world
+        .resolver()
+        .with_source_ref("refs/pull/1/head")
+        .worktree(&this, &id(head), &checkout)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("app.txt")).unwrap(),
+        "pull request"
+    );
+    assert_eq!(refs(&clone), before, "fetching the hint writes no ref");
+}
+
+/// The ref is a hint, never the commit: it moved on to an unrelated commit and
+/// the recorded one is gone from the origin, so the recorded commit stays
+/// missing (`does not exist`, which the caller reports as
+/// `NYL-SOURCE-UNAVAILABLE`) and nothing is checked out from the ref's tip.
+#[test]
+fn test_a_moved_source_ref_never_stands_in_for_the_recorded_commit() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let unrelated = commit(&origin, Some(world.c2), &[("app.txt", "someone else")], "unrelated");
+    origin.reference("refs/pull/1/head", unrelated, true, "moved").unwrap();
+    let recorded = "0123456789abcdef0123456789abcdef01234567";
+    let checkout = world.root.path().join("workspace/moved");
+    let error = world
+        .resolver()
+        .with_source_ref("refs/pull/1/head")
+        .worktree(&SourceRepository::This, &CommitId::new(recorded).unwrap(), &checkout)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("does not exist") && error.to_string().contains(recorded),
+        "{error}"
+    );
+    assert!(!checkout.join("app.txt").exists(), "the ref's tip was not used");
+}
+
 /// An explicit full commit id the entry clone lacks, such as `--source <sha>`,
 /// is fetched from the clone's origin like a recorded commit, and only when the
 /// run has network access.

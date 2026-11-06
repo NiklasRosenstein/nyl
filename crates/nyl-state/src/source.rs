@@ -13,7 +13,11 @@
 //! - A commit the entry clone lacks is looked up in the retained snapshot
 //!   repository, then fetched from the instance's keep ref and, with
 //!   [`GitSourceResolver::with_origin_fetch`] (set for runs with network
-//!   access), by its exact id from the clone's `origin`.
+//!   access), by its exact id from the clone's `origin`, and last, for a host
+//!   that will not serve a commit by its id, through the instance's recorded
+//!   `--source-ref` ([`GitSourceResolver::with_source_ref`]): that ref is
+//!   fetched by name from `origin`, and the recorded commit must then be
+//!   present, never the ref's tip.
 //! - A repository named by URL is fetched through `nyl-git` (the user's own
 //!   `git`, as for state repositories) into a private namespace of the entry
 //!   clone, `refs/nyl-sources/<url digest>/{heads,tags}/…`, once per
@@ -68,6 +72,9 @@ pub struct GitSourceResolver {
     /// The prefix of the keep refs of the instance this resolver works for: a
     /// commit missing from the clone is fetched from its ref.
     kept: Option<String>,
+    /// The recorded `--source-ref` of the instance this resolver works for: a
+    /// full ref name of the clone's `origin` that carried its source commit.
+    source_ref: Option<String>,
     /// Whether a commit missing from the entry clone is fetched by its id
     /// from the clone's `origin`.
     origin_fetch: bool,
@@ -142,6 +149,7 @@ impl GitSourceResolver {
             fetched: Mutex::new(BTreeSet::new()),
             symlinks: Mutex::new(BTreeMap::new()),
             kept: None,
+            source_ref: None,
             origin_fetch: false,
         }
     }
@@ -168,6 +176,21 @@ impl GitSourceResolver {
         self
     }
 
+    /// Fetch a commit of the entry repository that the clone lacks by fetching
+    /// the instance's recorded `--source-ref` by name from `origin`, for a
+    /// host that refuses to serve a commit by its id but serves the ref
+    /// (GitHub's `refs/pull/<n>/head`). The ref is a place to look and no
+    /// more: the fetch names no destination, so it writes no ref, and the
+    /// caller then checks that the *recorded* commit is present, so a ref that
+    /// moved on to another commit delivers nothing. The caller sets it only
+    /// for runs with network access, and a failed fetch leaves the lookup to
+    /// report the commit missing.
+    #[must_use]
+    pub fn with_source_ref(mut self, reference: impl Into<String>) -> Self {
+        self.source_ref = Some(reference.into());
+        self
+    }
+
     /// The URL the entry clone's `origin` remote reads and writes, if it has one.
     fn origin_url(repository: &Repository) -> Option<String> {
         let remote = repository.find_remote("origin").ok()?;
@@ -186,6 +209,17 @@ impl GitSourceResolver {
             return;
         };
         let _ = nyl_git::fetch(repository.path(), &url, &[commit.as_str()], false, &self.auth);
+    }
+
+    /// Fetch the recorded source ref by name from the clone's `origin`, into no
+    /// ref: the objects land in the clone and `FETCH_HEAD` notes the tip,
+    /// which nothing reads. Failures leave the lookup to report the commit
+    /// missing.
+    fn fetch_source_ref(&self, repository: &Repository) {
+        let (Some(reference), Some(url)) = (&self.source_ref, Self::origin_url(repository)) else {
+            return;
+        };
+        let _ = nyl_git::fetch(repository.path(), &url, &[reference.as_str()], false, &self.auth);
     }
 
     /// Fetch the keep ref into a private ref of the entry clone, so a commit
@@ -353,6 +387,11 @@ impl GitSourceResolver {
         }
         if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
             self.fetch_from_origin(&source, commit);
+        }
+        // Last: the host may refuse a commit by its id and serve the ref that
+        // carried it. Only the recorded commit counts afterwards.
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            self.fetch_source_ref(&source);
         }
         let checked = {
             let found = source.find_commit(oid).map_err(|_| {
