@@ -229,8 +229,8 @@ impl Session {
         let mut sources = GitSourceResolver::new(&self.resolved.git_dir, auth)
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
             .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root());
-        // A recorded commit the clone lacks is fetched by its id from the project's origin,
-        // and an instance's keep ref is the fallback.
+        // A recorded commit the clone lacks is fetched first through the instance's keep ref,
+        // then by its id from the clone's origin.
         if !self.offline {
             sources = sources.with_origin_fetch();
         }
