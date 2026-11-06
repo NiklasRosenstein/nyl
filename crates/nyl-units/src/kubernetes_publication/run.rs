@@ -19,13 +19,12 @@
 //! (`rules::teardown_wait`), read from `teardownWait`.
 //!
 //! **Owner fencing.** Every tree this module renders for a unit records the
-//! unit incarnation in its ownership index (version 4: environment, unit,
-//! uid). A publication or removal over a prefix whose index names another
+//! unit incarnation in its ownership index (environment, unit, uid). A publication or removal over a prefix whose index names another
 //! incarnation takes it over only when the incarnation directory
 //! (`ExecutionContext::incarnations`) reports it gone from its environment's
 //! state, and otherwise fails with `NYL-KUBERNETES-OWNER-FENCED`
-//! ([`fence`]); a prefix whose index names no owner (version 2 or 3, as
-//! `publish-tree` writes) is taken over and upgraded.
+//! ([`fence`]); a prefix whose index names no owner (version 2, or version 3 as
+//! `publish-tree` writes it) is taken over and upgraded.
 //!
 //! A publication that loses the race for the branch head, before or at its
 //! push, built on a head that moved, so nothing was published. A tree that

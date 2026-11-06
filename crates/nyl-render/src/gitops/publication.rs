@@ -65,7 +65,7 @@ pub struct TargetRender<'a> {
     /// snapshot of files, names the commit the files stand for.
     pub source_commit: Option<&'a str>,
     /// The orchestration unit incarnation that publishes the tree; the
-    /// ownership index then records it (version 4) and fences the prefix.
+    /// ownership index then records it and fences the prefix.
     pub owner: Option<RenderIndexOwner>,
     /// Scoped replacement authority; empty selects the complete target.
     pub selection: super::tree::partial::PublicationSelection,
@@ -435,9 +435,9 @@ pub struct PublishedTree {
 /// passes a lookup over the execution's admitted environment, `publish-tree`
 /// one over the process environment. `author` is the commit's author and committer.
 ///
-/// Index v4 (owning environment and unit uid) is deferred to the
-/// KubernetesPublication driver (M5): the index is written as `publish-tree`
-/// writes it, so non-orchestrated output stays byte-identical.
+/// The published ownership index is the one `rendered` carries: it names an
+/// owner only when the render was given one (an orchestrated publication), so
+/// `publish-tree` output stays byte-identical.
 pub fn publish_target(
     rendered: &RenderedTarget,
     project_dir: &Path,
@@ -1875,10 +1875,10 @@ spec:
     }
 
     /// Catches an owner missing from, or leaking into, the published index:
-    /// a tree rendered for a unit records version 4 with that owner, and one
-    /// rendered without records version 3, as `publish-tree` writes it.
+    /// a tree rendered for a unit records that owner in its version 3 index,
+    /// and one rendered without records none, as `publish-tree` writes it.
     #[test]
-    fn test_render_target_records_its_owner_in_a_version_four_index() {
+    fn test_render_target_records_its_owner_in_the_index() {
         let (_repository, url) = publication_repository();
         let worktree = inline_project(&url);
         let owner = RenderIndexOwner {
@@ -1890,7 +1890,7 @@ spec:
             parse_index(&rendered.files[Path::new(DEFAULT_INDEX_PATH)], DEFAULT_INDEX_PATH).unwrap()
         };
         let owned = index(&render_inline(worktree.path(), &inline_dev(), Some(owner.clone())).unwrap());
-        assert_eq!((owned.version, owned.owner), (4, Some(owner)));
+        assert_eq!((owned.version, owned.owner), (3, Some(owner)));
         let plain = index(&render_inline(worktree.path(), &inline_dev(), None).unwrap());
         assert_eq!((plain.version, plain.owner), (3, None));
     }

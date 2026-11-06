@@ -591,10 +591,10 @@ spec:
   target's bindings invalid.
 - The ownership index of every tree the unit publishes records the owning
   environment and unit uid next to the existing target, cluster, and
-  publication identity. These are new index fields, so orchestrated
-  publications write index format version 4 with migrations from versions 2
-  and 3; non-orchestrated publications use version 3 for per-Release ownership
-  and mixed provenance (see [partial publication](partial-publication.md)). Publish and teardown refuse a prefix whose index names
+  publication identity. The `owner` is an optional member of the version 3
+  index, which also carries per-Release ownership and mixed provenance (see
+  [partial publication](partial-publication.md)); orchestrated publications
+  write it and non-orchestrated publications do not. Publish and teardown refuse a prefix whose index names
   another environment's or another incarnation's unit while that incarnation
   still exists in its environment's state, active, held, deleting, or
   retained. A
@@ -602,11 +602,12 @@ spec:
   gone: torn down, or released with `nyl state forget` (see
   [Deletion](#deletion)). The first publish of the new owner then records
   itself in the index.
-  - The index's `owner` is `{environment, unit, uid}`; version 4 is exactly
-    the version with an `owner` (owner: `nyl_render::gitops::reconcile`, with
-    a golden file). Versions 2 and 3 name no owner and stay readable. The
+  - The index's `owner` is `{environment, unit, uid}`; only version 3 can
+    name one (owner: `nyl_render::gitops::reconcile`, with a golden file).
+    Version 2, which is released, and a version 3 index without an `owner`,
+    as `publish-tree` writes it, name no owner and stay readable. The
     first orchestrated publication over one adopts it, if the target's
-    identity matches, and upgrades it to version 4 even when no manifest byte
+    identity matches, and records its owner even when no manifest byte
     changes. A publication that records no owner, such as `publish-tree` and
     `render-tree`, refuses a prefix whose index names an owner, because it
     cannot tell whether that unit still exists.
@@ -630,7 +631,7 @@ spec:
     orchestration refuses with `NYL-TREE-OWNED-BY-UNIT`. The way out of the
     last two, when the owner can no longer release the prefix, is deliberate:
     commit to the publication branch a change to `<prefix>/_nyl/index.json`
-    that removes `owner` and sets `version` to 3, which makes the prefix
+    that removes `owner`, which makes the prefix
     unowned, so the next publication adopts it. Drift detection over a fenced
     prefix is `unknown` with the same code.
   - Every answer of the directory reads state again, so an incarnation
@@ -848,7 +849,7 @@ it is read, the publication destination, and the Applications the target
 generates; an authored `argocd` is rejected), so `attest` and the teardown wait
 read the stored document. The strategies `delay`, `manual`, and `observe` work
 as the table below says. Inline targets,
-the version 4 ownership index, and owner fencing work as described above, in
+the owner in the ownership index, and owner fencing work as described above, in
 both phases of the teardown. Tier-1 tests keep the test kind
 `FakePublication` (scripted outcomes, the fake Argo CD observer
 `FakeObserver` for the `observe` wait, accepting inline targets and evaluating
