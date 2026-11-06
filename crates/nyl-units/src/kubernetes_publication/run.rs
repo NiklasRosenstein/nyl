@@ -140,10 +140,20 @@ pub(crate) fn render(
     worktree: &std::path::Path,
     project_dir: &std::path::Path,
     cache_dir: &std::path::Path,
+    instances: &nyl_core::orchestration::instance::Instances,
     spec: &Value,
     owner: Option<RenderIndexOwner>,
 ) -> DriverResult<RenderedTarget> {
-    render_at(catalogue, worktree, project_dir, cache_dir, spec, owner, None)
+    render_at(
+        catalogue,
+        worktree,
+        project_dir,
+        cache_dir,
+        instances,
+        spec,
+        owner,
+        None,
+    )
 }
 
 /// [`render`] with the commit the ownership index records as the tree's
@@ -154,6 +164,7 @@ pub(crate) fn render_at(
     worktree: &std::path::Path,
     project_dir: &std::path::Path,
     cache_dir: &std::path::Path,
+    instances: &nyl_core::orchestration::instance::Instances,
     spec: &Value,
     owner: Option<RenderIndexOwner>,
     source_commit: Option<&str>,
@@ -177,6 +188,7 @@ pub(crate) fn render_at(
         inputs: &inputs,
         cache_dir: Some(cache_dir),
         resource_catalogue: catalogue.clone(),
+        instances,
     })
     .map_err(|error| DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}")))
 }
@@ -193,7 +205,15 @@ pub(crate) fn resolution_inputs(
     ctx: &ResolutionContext<'_>,
     spec: &Value,
 ) -> DriverResult<(RenderedTarget, KeyInputs)> {
-    let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec, None)?;
+    let rendered = render(
+        catalogue,
+        &ctx.worktree,
+        &ctx.project_dir,
+        &ctx.cache_dir,
+        ctx.instances,
+        spec,
+        None,
+    )?;
     let inputs = KeyInputs {
         files: rendered.input_record.clone(),
         fingerprint: uncacheable_fingerprint(rendered.cacheable, ctx.now),
@@ -469,6 +489,7 @@ pub(crate) fn publish(
                 &ctx.worktree,
                 &ctx.project_dir,
                 &ctx.cache_dir,
+                ctx.instances,
                 spec,
                 Some(owner.clone()),
             )
@@ -584,6 +605,7 @@ pub(crate) fn teardown(
             &ctx.worktree,
             &ctx.project_dir,
             &ctx.cache_dir,
+            ctx.instances,
             spec,
             Some(owner.clone()),
         )
@@ -906,6 +928,7 @@ mod tests {
                 &ctx.worktree,
                 &ctx.project_dir,
                 &ctx.cache_dir,
+                ctx.instances,
                 &spec,
                 Some(unit_owner(&unit).unwrap()),
             );

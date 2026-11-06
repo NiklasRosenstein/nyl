@@ -307,6 +307,7 @@ impl Driver for KubernetesPublicationDriver {
             &ctx.worktree,
             &ctx.project_dir,
             &ctx.cache_dir,
+            ctx.instances,
             spec,
             Some(unit_owner(unit)?),
         )?;

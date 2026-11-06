@@ -66,6 +66,7 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         .ok()
         .and_then(|repository| wiring.commit_identity(repository.path(), None).ok());
     let context = ExecutionContext {
+        instances: &prepared.inventory.instances,
         unit: nyl_core::orchestration::ids::UnitAddress::new(
             prepared.unit.unit.environment.clone(),
             prepared.unit.unit.name.clone(),

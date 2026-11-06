@@ -339,6 +339,7 @@ mod tests {
         }));
         let process_env = BTreeMap::new();
         let run_context = RunContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             base: &base,
             sources: &Unused,
             renderer: &Unused,

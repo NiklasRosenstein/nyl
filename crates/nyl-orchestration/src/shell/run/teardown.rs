@@ -1256,6 +1256,7 @@ fn call(
         deadline,
     };
     let execution = ExecutionContext {
+        instances: &context.instances,
         secrets,
         interactive: false,
         artifacts: BTreeMap::new(),

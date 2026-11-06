@@ -112,6 +112,9 @@ pub struct RunContext<'a> {
     pub base: &'a Context<'a>,
     pub sources: &'a dyn SourceResolver,
     pub renderer: &'a dyn SourceRenderer,
+    /// The instances of EnvironmentTemplates the run knows from state: the
+    /// environment itself when it is one. Renders across environments include them.
+    pub instances: &'a nyl_core::orchestration::instance::Instances,
     pub drivers: &'a DriverSet,
     pub tools: &'a dyn ToolRunner,
     /// Live unit events; absent for callers that only consume the final report.
@@ -1088,6 +1091,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 deadline,
             };
             let context = ResolutionContext {
+                instances: self.context.instances,
                 source_roots,
                 environment: self.environment().clone(),
                 project_dir: project_path(&worktree, project_dir),
@@ -1860,6 +1864,7 @@ fn plan_unit(
         deadline: unit_timeout(context.drivers, unit).after(now),
     };
     let execution = ExecutionContext {
+        instances: context.instances,
         secrets,
         interactive: false,
         artifacts: BTreeMap::new(),

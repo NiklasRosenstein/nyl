@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use super::ids::EnvironmentName;
+
 use super::time::Duration;
 use crate::resources::units::DeletionPolicy;
 
@@ -42,3 +44,9 @@ pub struct InstanceTerms {
     /// The most instances of the template that may exist at once.
     pub max_instances: Option<u32>,
 }
+
+/// The instances known to a call, by environment name.
+pub type Instances = BTreeMap<EnvironmentName, InstanceDescriptor>;
+
+/// No known instances, for calls that have no state to read them from.
+pub static NO_INSTANCES: Instances = BTreeMap::new();

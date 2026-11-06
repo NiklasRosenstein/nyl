@@ -312,6 +312,7 @@ pub fn prepare(
         deadline,
     };
     let context = ResolutionContext {
+        instances: &prepared.inventory.instances,
         environment,
         worktree: prepared.worktree.clone(),
         project_dir: prepared.project_dir.clone(),

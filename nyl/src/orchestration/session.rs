@@ -23,8 +23,8 @@ use crate::cli::commands::reconcile::RunOutput;
 use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
 use crate::orchestration::project::{
-    declared, open_store, requested_by as requested_by_default, resolve_environment, resolve_environment_with,
-    InstanceRequest, ResolvedEnvironment,
+    declared, list_instances, open_store, requested_by as requested_by_default, resolve_environment,
+    resolve_environment_with, InstanceRequest, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use nyl_render::gitops::discover_gitops_inventory;
@@ -73,14 +73,33 @@ impl Session {
     /// (`--template`, `--param`), or reads state offline.
     pub fn open_with(path: &Path, environment: &str, request: &InstanceRequest) -> Result<Self, Stop> {
         let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
-        let resolved = resolve_environment_with(&inventory, environment, request)?;
-        // Every environment-wide function sees the instance like a declared environment.
-        let inventory = match &resolved.instance {
-            Some(instance) => {
-                inventory.with_instances(std::iter::once((resolved.name.clone(), instance.descriptor())).collect())
+        let mut resolved = resolve_environment_with(&inventory, environment, request)?;
+        // Every environment-wide function sees every instance like a declared
+        // environment: the ones state lists, and this one with the parameters
+        // this command resolved for it.
+        let (listed, warnings) = list_instances(&inventory, request.offline);
+        resolved.warnings.extend(warnings);
+        let mut instances = BTreeMap::new();
+        for instance in listed {
+            // An instance whose template no longer renders for its parameters
+            // is reported, and left out of checks across environments, so one
+            // stale preview never stops the other environments' runs.
+            let rendered = nyl_render::gitops::instances::find_template(&inventory, &instance.descriptor.template)
+                .map_or(Ok(()), |template| {
+                    nyl_render::gitops::instances::instantiate(template, &instance.name, &instance.descriptor.params)
+                        .map(|_| ())
+                });
+            match rendered {
+                Ok(()) => {
+                    instances.insert(instance.name, instance.descriptor);
+                }
+                Err(finding) => resolved.warnings.push(finding),
             }
-            None => inventory,
-        };
+        }
+        if let Some(instance) = &resolved.instance {
+            instances.insert(resolved.name.clone(), instance.descriptor());
+        }
+        let inventory = inventory.with_instances(instances);
         Ok(Self {
             inventory,
             resolved,
@@ -259,6 +278,7 @@ impl Session {
         let base = self.context(store, wiring, identity.map(ToString::to_string));
         let secrets = crate::orchestration::secrets::ProjectSecrets::new(&self.inventory.project_root);
         let context = RunContext {
+            instances: &self.inventory.instances,
             base: &base,
             sources: &sources,
             renderer: &renderer,

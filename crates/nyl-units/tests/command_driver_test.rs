@@ -71,6 +71,7 @@ impl World {
     ) -> ExecutionContext<'a> {
         let now = fixed_now();
         ExecutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             source_roots: std::collections::BTreeMap::default(),
             secrets: std::collections::BTreeMap::default(),
             artifacts: std::collections::BTreeMap::default(),
@@ -97,6 +98,7 @@ impl World {
     fn resolution<'a>(&self, tools: &'a ProcessRunner) -> ResolutionContext<'a> {
         let now = fixed_now();
         ResolutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             source_roots: std::collections::BTreeMap::default(),
             environment: EnvironmentName::new("dev").unwrap(),
             worktree: self.worktree(),

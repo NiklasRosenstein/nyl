@@ -195,6 +195,7 @@ pub fn context_with<'a>(
         .unwrap()
         .with_timezone(&chrono::Utc);
     ExecutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         source_roots: std::collections::BTreeMap::default(),
         secrets: std::collections::BTreeMap::default(),
         artifacts: std::collections::BTreeMap::default(),
@@ -222,6 +223,7 @@ pub fn key(driver: &dyn Driver, world: &World) -> ExecutionKey {
     let inputs = driver
         .execution_key_inputs(
             &ResolutionContext {
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
                 source_roots: std::collections::BTreeMap::default(),
                 environment: EnvironmentName::new("dev").unwrap(),
                 worktree: world.work(),
