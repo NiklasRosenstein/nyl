@@ -179,7 +179,11 @@ impl Script {
     /// name (a declared name it leaves out is pending), a scripted failure
     /// fails every one, and anything else, or nothing scripted, leaves every
     /// one pending. A scripted driver error is a driver error.
-    fn observed(&self, unit: &UnitName, names: &[String]) -> DriverResult<nyl_core::orchestration::driver::ObservedValues> {
+    fn observed(
+        &self,
+        unit: &UnitName,
+        names: &[String],
+    ) -> DriverResult<nyl_core::orchestration::driver::ObservedValues> {
         use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
         let each = |value: &dyn Fn(&str) -> ObservedValue| ObservedValues {
             values: names.iter().map(|name| (name.clone(), value(name))).collect(),
@@ -192,14 +196,14 @@ impl Script {
         Ok(match self.take(unit, DriverOperation::Observe) {
             None => pending("nothing is scripted"),
             Some(Scripted::Pending | Scripted::Drifted | Scripted::Uncertain) => pending("scripted pending"),
-            Some(Scripted::Succeeded { outputs }) => each(&|name| {
-                match outputs.as_ref().and_then(|outputs| outputs.get(name)) {
+            Some(Scripted::Succeeded { outputs }) => {
+                each(&|name| match outputs.as_ref().and_then(|outputs| outputs.get(name)) {
                     Some(value) => ObservedValue::Value { value: value.clone() },
                     None => ObservedValue::Pending {
                         reason: format!("scripted: no value for {name}"),
                     },
-                }
-            }),
+                })
+            }
             Some(Scripted::Failed { .. }) => each(&|_| ObservedValue::Failed {
                 reason: "scripted failure".to_owned(),
             }),

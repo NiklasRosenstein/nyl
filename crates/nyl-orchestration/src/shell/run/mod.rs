@@ -59,11 +59,11 @@ use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
     SourceResolver, StateError, TransitionChanges,
 };
-use nyl_core::orchestration::state::{Attestation, ObservationRecord};
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
     Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
 };
+use nyl_core::orchestration::state::{Attestation, ObservationRecord};
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::Environment;
 use nyl_core::resources::units::OutputDeclaration;

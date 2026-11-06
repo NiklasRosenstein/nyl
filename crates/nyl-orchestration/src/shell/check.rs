@@ -66,8 +66,8 @@ use crate::rules::checks::{
     attest_check, attestations, drift_check, drift_record, observe_check, settle_attestations, settle_drift, targets,
     warnings, Check, Target,
 };
-use crate::rules::observed_values::{self, SettleInputs};
 use crate::rules::drift::stored_drift_repair;
+use crate::rules::observed_values::{self, SettleInputs};
 use crate::rules::selection::execution_recovery;
 use crate::rules::sources::effective_commit;
 use crate::rules::unit_state::receipt_state;

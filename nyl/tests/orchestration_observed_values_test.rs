@@ -173,7 +173,13 @@ impl Driver for Observing {
     ) -> DriverResult<Supported<ObservedValues>> {
         let name = unit.unit.name.to_string();
         self.probe.observed_at.lock().unwrap().push((name.clone(), ctx.now));
-        let read = self.probe.reads.lock().unwrap().get_mut(&name).and_then(VecDeque::pop_front);
+        let read = self
+            .probe
+            .reads
+            .lock()
+            .unwrap()
+            .get_mut(&name)
+            .and_then(VecDeque::pop_front);
         match read {
             Some(Read::Values(values)) => Ok(Supported::Supported(ObservedValues {
                 values: values
@@ -381,7 +387,11 @@ spec:
     assert_eq!(shell.invoke(&["state", "init", "-e", "dev"]).exit, 0);
     let rejected = shell.invoke(&["reconcile", "-e", "dev"]);
     assert_eq!(rejected.exit, 1, "{}", rejected.stderr);
-    assert!(rejected.stderr.contains("NYL-OBSERVATIONS-UNSUPPORTED"), "{}", rejected.stderr);
+    assert!(
+        rejected.stderr.contains("NYL-OBSERVATIONS-UNSUPPORTED"),
+        "{}",
+        rejected.stderr
+    );
     assert!(rejected.stderr.contains("kind Command"), "{}", rejected.stderr);
 }
 
@@ -449,7 +459,11 @@ spec:
     }));
     assert_eq!(shell.invoke(&["state", "init", "-e", "dev"]).exit, 0);
     let rejected = shell.invoke(&["reconcile", "-e", "dev"]);
-    assert!(rejected.stderr.contains("also a declared output"), "{}", rejected.stderr);
+    assert!(
+        rejected.stderr.contains("also a declared output"),
+        "{}",
+        rejected.stderr
+    );
 }
 
 /// A value's whole path: pending after the producer executed (its consumer
@@ -463,9 +477,13 @@ spec:
 fn test_a_value_arrives_reaches_its_consumer_and_changes_without_the_producer_executing() {
     let harness = Harness::new("", "");
     let shell = &harness.shell;
-    harness
-        .probe
-        .script("lb", [Read::Values(vec![pending("ip", "no address yet"), pending("port", "no port")])]);
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            pending("ip", "no address yet"),
+            pending("port", "no port"),
+        ])],
+    );
     let first = harness.reconcile();
     assert_eq!(first.exit, 2, "{}", first.stderr);
     assert_eq!(
@@ -487,56 +505,95 @@ fn test_a_value_arrives_reaches_its_consumer_and_changes_without_the_producer_ex
     );
     assert!(first.stderr.contains("NYL-OBSERVATION-PENDING"), "{}", first.stderr);
     assert!(first.stderr.contains("no address yet"), "{}", first.stderr);
-    assert!(harness.lb_record().contains("pending: no address yet"), "{}", harness.lb_record());
+    assert!(
+        harness.lb_record().contains("pending: no address yet"),
+        "{}",
+        harness.lb_record()
+    );
     let unresolved = harness.get();
     assert_eq!(unresolved.exit, 1);
-    assert!(unresolved.stderr.contains("NYL-REFERENCE-UNRESOLVED"), "{}", unresolved.stderr);
+    assert!(
+        unresolved.stderr.contains("NYL-REFERENCE-UNRESOLVED"),
+        "{}",
+        unresolved.stderr
+    );
     // A plan and a status show the same blocker, from the recorded reason.
     for command in ["plan", "status"] {
         let shown = shell.invoke(&[command, "-e", "dev", "-o", "json"]);
-        assert_eq!(unit(&shown.report, "dns")["blockedBy"][0]["reason"], "observation-pending", "{command}");
-        assert!(shown.stderr.contains("NYL-OBSERVATION-PENDING"), "{command}: {}", shown.stderr);
+        assert_eq!(
+            unit(&shown.report, "dns")["blockedBy"][0]["reason"],
+            "observation-pending",
+            "{command}"
+        );
+        assert!(
+            shown.stderr.contains("NYL-OBSERVATION-PENDING"),
+            "{command}: {}",
+            shown.stderr
+        );
     }
 
     // The value arrives: the consumer runs in the run that reads it.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), pending("port", "no port")])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            pending("port", "no port"),
+        ])],
     );
     let arrived = harness.reconcile();
     assert_eq!(arrived.exit, 0, "{}", arrived.stderr);
     assert_eq!(unit(&arrived.report, "dns")["result"], "executed");
     assert_eq!(unit(&arrived.report, "lb")["result"], "current");
-    assert_eq!(arrived.report["environments"][0]["observationsChanged"], json!({"lb": ["ip"]}));
+    assert_eq!(
+        arrived.report["environments"][0]["observationsChanged"],
+        json!({"lb": ["ip"]})
+    );
     let commit = shell.message(OBSERVED);
     assert!(commit.contains("observationsChanged: {\"lb\":[\"ip\"]}"), "{commit}");
     assert_eq!(harness.get().stdout, "203.0.113.10\n");
     let record = harness.lb_record();
-    assert!(record.contains("value: \"203.0.113.10\"") && record.contains("pending: no port"), "{record}");
+    assert!(
+        record.contains("value: \"203.0.113.10\"") && record.contains("pending: no port"),
+        "{record}"
+    );
     let receipt_of_lb = shell.show(OBSERVED, "observed/units/lb.yaml");
 
     // Reading the same value again writes nothing.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), pending("port", "still no port")])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            pending("port", "still no port"),
+        ])],
     );
     let tip = shell.tip(OBSERVED);
     let again = harness.reconcile();
     assert_eq!(again.exit, 0, "{}", again.stderr);
-    assert!(results(&again.report).values().all(|result| result == "current"), "{:?}", results(&again.report));
+    assert!(
+        results(&again.report).values().all(|result| result == "current"),
+        "{:?}",
+        results(&again.report)
+    );
     assert_eq!(shell.tip(OBSERVED), tip, "an unchanged read writes no commit");
     assert!(again.report["environments"][0].get("observationsChanged").is_none());
 
     // The address changes by itself: dns runs again, lb does not.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.20")), pending("port", "no port")])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.20")),
+            pending("port", "no port"),
+        ])],
     );
     let executions = harness.probe.executions("lb").len();
     let changed = harness.reconcile();
     assert_eq!(unit(&changed.report, "dns")["result"], "executed");
     assert_eq!(unit(&changed.report, "lb")["result"], "current");
-    assert_eq!(harness.probe.executions("lb").len(), executions, "the producer did not execute");
+    assert_eq!(
+        harness.probe.executions("lb").len(),
+        executions,
+        "the producer did not execute"
+    );
     assert_eq!(shell.show(OBSERVED, "observed/units/lb.yaml"), receipt_of_lb);
     assert_eq!(harness.get().stdout, "203.0.113.20\n");
     // It is not drift: nothing was repaired.
@@ -553,7 +610,10 @@ fn test_a_failed_read_keeps_the_last_value_and_writes_nothing() {
     let harness = Harness::new("", "");
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
     );
     assert_eq!(harness.reconcile().exit, 0);
     let tip = harness.shell.tip(OBSERVED);
@@ -575,7 +635,11 @@ fn test_a_failed_read_keeps_the_last_value_and_writes_nothing() {
         [Read::Values(vec![value("ip", json!(7)), value("port", json!(443))])],
     );
     let wrong = harness.reconcile();
-    assert!(wrong.stderr.contains("NYL-OBSERVATION-FAILED") && wrong.stderr.contains("declared type"), "{}", wrong.stderr);
+    assert!(
+        wrong.stderr.contains("NYL-OBSERVATION-FAILED") && wrong.stderr.contains("declared type"),
+        "{}",
+        wrong.stderr
+    );
     assert_eq!(harness.get().stdout, "203.0.113.10\n");
 }
 
@@ -587,14 +651,16 @@ fn test_a_failed_read_keeps_the_last_value_and_writes_nothing() {
 #[test]
 fn test_observation_wait_polls_until_the_value_arrives_or_the_wait_passes() {
     let harness = Harness::new("  observationWait: 1m\n", "");
-    let pending_reads = |count: usize| {
-        (0..count).map(|_| Read::Values(vec![pending("ip", "no address"), pending("port", "no port")]))
-    };
+    let pending_reads =
+        |count: usize| (0..count).map(|_| Read::Values(vec![pending("ip", "no address"), pending("port", "no port")]));
     // Two pending polls, then the value: dns runs in the same run.
     harness.probe.script("lb", pending_reads(2));
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
     );
     let start = harness.shell.clock.now();
     let run = harness.reconcile();
@@ -638,7 +704,11 @@ fn test_observation_wait_polls_until_the_value_arrives_or_the_wait_passes() {
         polls.iter().map(|at| (*at - started).num_seconds()).collect::<Vec<_>>(),
         [0, 15, 30, 45, 60]
     );
-    assert!(unresolved.stderr.contains("NYL-OBSERVATION-PENDING"), "{}", unresolved.stderr);
+    assert!(
+        unresolved.stderr.contains("NYL-OBSERVATION-PENDING"),
+        "{}",
+        unresolved.stderr
+    );
 }
 
 /// With the default wait a run reads once and moves on: units it did not
@@ -646,7 +716,13 @@ fn test_observation_wait_polls_until_the_value_arrives_or_the_wait_passes() {
 #[test]
 fn test_without_a_wait_a_run_reads_once_per_receipt() {
     let harness = Harness::new("", "");
-    harness.probe.script("lb", [Read::Values(vec![pending("ip", "no address"), pending("port", "no port")])]);
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            pending("ip", "no address"),
+            pending("port", "no port"),
+        ])],
+    );
     let start = harness.shell.clock.now();
     let first = harness.reconcile();
     assert_eq!(first.exit, 2);
@@ -672,43 +748,115 @@ fn observe_json(shell: &shell::Harness, extra: &[&str]) -> nyl::orchestration::r
 fn test_observe_records_values_and_leaves_consumers_ready_for_the_next_reconcile() {
     let harness = Harness::new("", "");
     let shell = &harness.shell;
+    // The address is not there yet when the first run reads it: dns waits.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), value("port", json!(443))])],
+        [Read::Values(vec![
+            pending("ip", "no address yet"),
+            pending("port", "no port"),
+        ])],
     );
-    assert_eq!(harness.reconcile().exit, 0);
+    assert_eq!(harness.reconcile().exit, 2);
+    // `observe` finds it: dns can resolve now, which status and the report
+    // say, and the next reconcile executes it.
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
+    );
+    let found = observe_json(shell, &[]);
+    assert_eq!(found.exit, 0, "{}", found.stderr);
+    assert!(
+        found.stderr.contains("NYL-OBSERVATION-CHANGED") && found.stderr.contains("has a value now"),
+        "{}",
+        found.stderr
+    );
+    let waiting = shell.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(unit(&waiting.report, "dns")["state"], "ready", "{}", waiting.stderr);
+    assert!(
+        unit(&waiting.report, "dns")["message"]
+            .as_str()
+            .unwrap()
+            .contains("observed value ip of lb arrived"),
+        "{}",
+        unit(&waiting.report, "dns")["message"]
+    );
+    assert!(unit(&waiting.report, "dns").get("blockedBy").is_none());
+    assert_eq!(
+        unit(&shell.invoke(&["plan", "-e", "dev", "-o", "json"]).report, "dns")["state"],
+        "ready"
+    );
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
+    );
+    let ran = harness.reconcile();
+    assert_eq!(ran.exit, 0, "{}", ran.stderr);
+    assert_eq!(unit(&ran.report, "dns")["result"], "executed");
 
     // A pending value is exit 2, and records the pending state.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), pending("port", "no port")])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            pending("port", "no port"),
+        ])],
     );
     let pending_port = observe_json(shell, &[]);
     assert_eq!(pending_port.exit, 2, "{}", pending_port.stderr);
     assert_eq!(unit(&pending_port.report, "lb")["check"], "observed");
-    assert_eq!(unit(&pending_port.report, "lb")["observations"]["port"]["observation"], "pending");
-    assert_eq!(unit(&pending_port.report, "lb")["observations"]["ip"]["value"], "203.0.113.10");
-    assert!(pending_port.stderr.contains("NYL-OBSERVATION-PENDING"), "{}", pending_port.stderr);
-    assert!(shell.message(OBSERVED).starts_with("nyl: observe dev"), "{}", shell.message(OBSERVED));
+    assert_eq!(
+        unit(&pending_port.report, "lb")["observations"]["port"]["observation"],
+        "pending"
+    );
+    assert_eq!(
+        unit(&pending_port.report, "lb")["observations"]["ip"]["value"],
+        "203.0.113.10"
+    );
+    assert!(
+        pending_port.stderr.contains("NYL-OBSERVATION-PENDING"),
+        "{}",
+        pending_port.stderr
+    );
+    assert!(
+        shell.message(OBSERVED).starts_with("nyl: observe dev"),
+        "{}",
+        shell.message(OBSERVED)
+    );
     assert!(shell.message(OBSERVED).contains("Nyl-Operation: observe"));
 
     // A changed value: exit 0, one observed commit, no desired commit, and
     // the consumer named.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.30")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.30")),
+            value("port", json!(443)),
+        ])],
     );
     let desired = shell.tip("refs/heads/nyl/dev/desired");
     let observed = shell.tip(OBSERVED);
     let executions = harness.probe.executions("dns").len();
     let changed = observe_json(shell, &[]);
     assert_eq!(changed.exit, 0, "{}", changed.stderr);
-    assert_eq!(changed.report["environments"][0]["observationsChanged"], json!({"lb": ["ip", "port"]}));
+    assert_eq!(
+        changed.report["environments"][0]["observationsChanged"],
+        json!({"lb": ["ip", "port"]})
+    );
     assert!(changed.stderr.contains("NYL-OBSERVATION-CHANGED"), "{}", changed.stderr);
     assert!(changed.stderr.contains("nyl reconcile -e dev"), "{}", changed.stderr);
     assert_eq!(shell.tip("refs/heads/nyl/dev/desired"), desired);
     assert_ne!(shell.tip(OBSERVED), observed);
-    assert_eq!(harness.probe.executions("dns").len(), executions, "observe executes nothing");
+    assert_eq!(
+        harness.probe.executions("dns").len(),
+        executions,
+        "observe executes nothing"
+    );
     assert_eq!(harness.get().stdout, "203.0.113.30\n");
 
     // Status and plan show the consumer ready, with the reason.
@@ -717,7 +865,10 @@ fn test_observe_records_values_and_leaves_consumers_ready_for_the_next_reconcile
     assert_eq!(unit(&status.report, "dns")["state"], "ready");
     assert_eq!(unit(&status.report, "lb")["state"], "current");
     assert!(
-        unit(&status.report, "dns")["message"].as_str().unwrap().contains("observed value ip of lb changed"),
+        unit(&status.report, "dns")["message"]
+            .as_str()
+            .unwrap()
+            .contains("observed value ip of lb changed"),
         "{}",
         unit(&status.report, "dns")["message"]
     );
@@ -729,14 +880,23 @@ fn test_observe_records_values_and_leaves_consumers_ready_for_the_next_reconcile
     // The next reconcile executes it, and everything is current.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.30")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.30")),
+            value("port", json!(443)),
+        ])],
     );
     let run = harness.reconcile();
     assert_eq!(unit(&run.report, "dns")["result"], "executed");
     assert_eq!(shell.invoke(&["status", "-e", "dev"]).exit, 0);
 
     // `--unit` names units; a unit whose kind or spec reads nothing is unsupported.
-    harness.probe.script("lb", [Read::Values(vec![value("ip", json!("203.0.113.30")), value("port", json!(443))])]);
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.30")),
+            value("port", json!(443)),
+        ])],
+    );
     let only = observe_json(shell, &["--unit", "lb"]);
     assert_eq!(only.exit, 0, "{}", only.stderr);
     assert_eq!(only.report["environments"][0]["units"].as_object().unwrap().len(), 1);
@@ -757,10 +917,16 @@ fn test_a_value_older_than_its_max_age_stops_resolving() {
     let units = std::fs::read_to_string(harness._project.path().join("nyl/units.yaml"))
         .unwrap()
         .replacen("ip: {type: string, from", "ip: {type: string, maxAge: 10m, from", 1);
-    harness.shell.world.commit_files("main", "Age ip", &[("nyl/units.yaml", &units)]);
+    harness
+        .shell
+        .world
+        .commit_files("main", "Age ip", &[("nyl/units.yaml", &units)]);
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
     );
     assert_eq!(harness.reconcile().exit, 0);
     assert_eq!(harness.get().exit, 0);
@@ -778,7 +944,10 @@ fn test_a_value_older_than_its_max_age_stops_resolving() {
     // A successful read renews it.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
     );
     let renewed = harness.reconcile();
     assert_eq!(renewed.exit, 0, "{}", renewed.stderr);
@@ -794,23 +963,35 @@ fn test_a_new_receipt_starts_with_its_values_pending() {
     let harness = Harness::new("", "");
     harness.probe.script(
         "lb",
-        [Read::Values(vec![value("ip", json!("203.0.113.10")), value("port", json!(443))])],
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
     );
     assert_eq!(harness.reconcile().exit, 0);
     assert!(harness.lb_record().contains("203.0.113.10"));
     let units = std::fs::read_to_string(harness._project.path().join("nyl/units.yaml"))
         .unwrap()
         .replacen("command: [sh, -c, 'true']", "command: [sh, -c, 'true; true']", 1);
-    harness.shell.world.commit_files("main", "Change lb", &[("nyl/units.yaml", &units)]);
+    harness
+        .shell
+        .world
+        .commit_files("main", "Change lb", &[("nyl/units.yaml", &units)]);
     // The next read finds nothing yet: the old address is not the new receipt's.
     harness.probe.script(
         "lb",
-        [Read::Values(vec![pending("ip", "balancer not ready"), pending("port", "balancer not ready")])],
+        [Read::Values(vec![
+            pending("ip", "balancer not ready"),
+            pending("port", "balancer not ready"),
+        ])],
     );
     let run = harness.reconcile();
     assert_eq!(unit(&run.report, "lb")["result"], "executed");
     assert_eq!(unit(&run.report, "dns")["result"], "blocked");
     let record = harness.lb_record();
-    assert!(!record.contains("203.0.113.10") && record.contains("balancer not ready"), "{record}");
+    assert!(
+        !record.contains("203.0.113.10") && record.contains("balancer not ready"),
+        "{record}"
+    );
     assert_eq!(harness.get().exit, 1);
 }

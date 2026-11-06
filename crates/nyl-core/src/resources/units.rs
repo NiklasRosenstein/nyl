@@ -190,10 +190,9 @@ pub struct OutputDeclaration {
     pub sensitive: bool,
 }
 
+// Contract: design/orchestration-core.md, "Observed values".
 /// One observed value a unit declares: Nyl owns the type and age limit, and
 /// the kind's driver owns where the value is read from.
-///
-/// Contract: [Observed values](../../../../design/orchestration-core.md#observed-values).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationDeclaration {

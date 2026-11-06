@@ -37,6 +37,13 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   (`drift: clean`, `drifted`, or `unknown`). A current unit whose latest
   record is `drifted` has the state `drifted`: work for the next
   reconcile, like a changed unit.
+- **Observed values.** A consumer of an [observed value](/nyl/orchestration/runs/#observed-values)
+  whose recorded value no longer equals the one it resolved, or that was
+  blocked on a value that has arrived since, is `ready` and says which
+  observed value changed or arrived (`NYL-OBSERVATION-CHANGED`): work for the
+  next reconcile. A consumer still waiting for a value shows the blocker,
+  `observation-pending`, with the driver's reason (`NYL-OBSERVATION-PENDING`).
+  Status reads only recorded values.
 - **Teardowns.** A unit pending teardown warns with `NYL-TEARDOWN-PENDING`,
   naming `nyl reconcile --allow-teardown` for an omission (or `nyl teardown
   --unit` again for an explicit request) and `nyl state forget` to keep its

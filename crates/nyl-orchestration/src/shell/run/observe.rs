@@ -117,10 +117,8 @@ impl Observing {
     /// when the unit declares an `observationWait`; `timeout` bounds it.
     pub(super) fn executed(&mut self, unit: &DesiredUnit, receipt: &Receipt, timeout: Duration, now: Timestamp) {
         let wait = observed_values::observation_wait(unit);
-        let wait_until = (wait > Duration::default() && observed_values::declares(unit)).then(|| {
-            wait.after(receipt.finished_at)
-                .min(timeout.after(receipt.started_at))
-        });
+        let wait_until = (wait > Duration::default() && observed_values::declares(unit))
+            .then(|| wait.after(receipt.finished_at).min(timeout.after(receipt.started_at)));
         self.states.insert(
             unit.unit.name.clone(),
             ReadState {
@@ -148,9 +146,7 @@ impl Observing {
                 let current = Self::eligible(session, unit, observed)?;
                 let key = &current.receipt.as_ref()?.execution_key;
                 let due = match self.states.get(&unit.unit.name) {
-                    Some(state) if &state.key == key => {
-                        !state.read || (state.waiting(now) && now >= state.next_poll)
-                    }
+                    Some(state) if &state.key == key => !state.read || (state.waiting(now) && now >= state.next_poll),
                     _ => true,
                 };
                 due.then(|| unit.unit.name.clone())
@@ -236,7 +232,10 @@ impl Observing {
     ) -> bool {
         let name = &unit.unit.name;
         let environment = session.environment();
-        let key = unit.execution_key.clone().expect("a unit with a current receipt has a key");
+        let key = unit
+            .execution_key
+            .clone()
+            .expect("a unit with a current receipt has a key");
         let warn = |reason: &str| {
             Finding::new(
                 Code::ObservationFailed,
@@ -413,7 +412,7 @@ fn read(shared: &Shared<'_>, job: &Job<'_>) -> Result<ObservedValues, String> {
             let outcome = driver.observe(&ctx, unit, receipt);
             drop(ctx);
             if context.base.clock.now() >= deadline {
-                return Err(format!("timeout: reading the observed values passed the unit's deadline"));
+                return Err("timeout: reading the observed values passed the unit's deadline".to_owned());
             }
             match outcome {
                 Ok(Supported::Supported(values)) => Ok(values),

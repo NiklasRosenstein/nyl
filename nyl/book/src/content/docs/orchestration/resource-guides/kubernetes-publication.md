@@ -26,7 +26,8 @@ spec:
 environment: a target belongs to at most one environment, and a target no
 publication unit names rejects `fromUnit` bindings. `mode` is `publish`, the
 default, or `observe`, which publishes the same way and lets the unit read Argo CD
-(see [Observing Argo CD](#observing-argo-cd)). The common unit fields
+(see [Observing Argo CD](#observing-argo-cd)) and the live cluster (see
+[Observed values](#observed-values)). The common unit fields
 (`dependsOn`, `timeout`, `env`, and so on) apply; `timeout` defaults to `10m`.
 
 ## Inline targets
@@ -303,6 +304,68 @@ of it is `NYL-ATTESTATION-UNDECLARED`.
 
 `nyl attest --target` for a target no environment owns arrives with promotion
 (M6), as does `nyl attest --name … --result …`.
+
+## Observed values
+
+A unit with `mode: observe` can read a field of a resource its target renders
+from the live cluster, such as the address a cloud load balancer assigns to a
+published Service, and let other units use it. The declaration, the way the
+value is referenced, and how reconcile and `nyl observe` read it are the same
+for every kind (see [Observed values](/nyl/orchestration/runs/#observed-values)); this
+section is what belongs to the publication:
+
+```yaml
+spec:
+  mode: observe
+  observations:
+    ingressIp:
+      type: string
+      from:
+        resource: {apiVersion: v1, kind: Service, namespace: ingress, name: ingress-nginx}
+        pointer: /status/loadBalancer/ingress/0/ip
+  observationWait: 10m
+  env: {passthrough: [KUBECONFIG]}
+```
+
+`from.resource` names the resource as the Kubernetes API does (`namespace` only
+for a namespaced kind), and `pointer` is a [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901)
+into it. A unit in `mode: publish` that declares `observations` is rejected
+(`NYL-OBSERVATIONS-UNSUPPORTED`): reading is a use of Argo CD and cluster
+credentials that publishing alone does not need.
+
+- **Only what the target renders.** Resolution renders the target and checks
+  that one of its Releases renders the resource. A resource outside the
+  rendered tree is rejected with `NYL-KUBERNETES-OBSERVATION-UNOWNED`, so the
+  cluster the unit reads is the target's Cluster and nothing outside the
+  declaration. A manifest without `metadata.namespace` belongs to the namespace
+  its Application deploys to. Secrets are never read. Resolution records the
+  Application that owns each resource and the workload Cluster in the stored
+  document (`observationSources` and `workload`; an authored one is rejected),
+  so `observe` renders nothing.
+- **Only once its Application runs the publication.** Argo CD is read as
+  `nyl attest` reads it, and only the Application that owns the resource must
+  run the receipt's publication, matched as for
+  [`accepted`](#observing-argo-cd). An observation whose Application did not
+  change in a publication resolves at once, and a slow, unrelated Application
+  does not hold it back. Until then it is `pending`
+  (`application-not-running-publication`, naming the Application and why it
+  does not match); afterwards a pointer that does not resolve yet is `pending`
+  (`field-not-set`), because controllers fill in status after Argo CD applies
+  the manifest. A resource that does not exist after its Application runs the
+  publication, and a value of the wrong `type`, are `failed`.
+- **Which credential.** The workload Cluster may differ from the Argo CD
+  control-plane Cluster, so the resource is read through the workload Cluster's
+  own `spec.live.context`, in the kubeconfig the unit admits as `KUBECONFIG`
+  (one kubeconfig can hold both contexts, and `KUBECONFIG` may list several
+  files). Argo CD is read the way its ArgoCDInstance declares, with the
+  credential that access needs. Credentials come only from the unit's admitted
+  `env`: a missing one is a failed read that names the variable and the `env`
+  entry that admits it, and Nyl never falls back to the process environment, the
+  current kube context, `~/.kube/config`, or in-cluster configuration. A Cluster
+  without `spec.live.context` cannot be read. The declared context says how to
+  read, not what the unit produces, so changing it does not re-execute the unit.
+  Run [`nyl observe`](/nyl/reference/cli/observe/) from a job that holds these
+  credentials when the job that reconciles does not.
 
 ## Direct builds
 

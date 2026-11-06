@@ -9,12 +9,12 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M4 is complete, and M5 has begun: the `KubernetesPublication` unit publishes trees with image digests and infrastructure outputs, declares its target inline, tears down in two phases behind an owner fence, and builds, diffs, and pushes from `nyl build`, and observes Argo CD (the Kubernetes API of its control-plane Cluster or its API server) to attest `accepted` and `healthy` and to wait for removal. Units can require those attestations of their producers with `evidence: attested` or `attestations` in `dependsOn` and `fromUnit`. Continue with M5: observed values and preview environments.',
+    intro: 'M4 is complete, and M5 has begun: the `KubernetesPublication` unit publishes trees with image digests and infrastructure outputs, declares its target inline, tears down in two phases behind an owner fence, and builds, diffs, and pushes from `nyl build`, and observes Argo CD (the Kubernetes API of its control-plane Cluster or its API server) to attest `accepted` and `healthy` and to wait for removal. Units can require those attestations of their producers with `evidence: attested` or `attestations` in `dependsOn` and `fromUnit`, and can declare observed values their driver reads (`fromUnit: {unit, observation}`, `observationWait`, `nyl observe`), such as the load balancer address of a published Service. Continue with M5: preview environments.',
     steps: [
       { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: true },
       { text: 'Add publication observation (and the `observe` teardown wait) and its `accepted` and `healthy` attestations.', done: true },
       { text: 'Add attested evidence for dependents.', done: true },
-      { text: 'Add observed values.', done: false },
+      { text: 'Add observed values.', done: true },
       { text: 'Add preview environment templates, expiry, limits, and end-to-end reference scenarios.', done: false },
     ],
     outro: 'Promotion paths follow in M6.',
@@ -110,7 +110,7 @@ export const orchestrationRoadmap = {
         { text: 'Resolve `fromUnit` Release input bindings into an explicit pinned input snapshot for rendering.', done: true },
         { text: 'Distinguish `published` from `attested` evidence and named attestations for dependents.', done: true },
         { text: 'Add the publication unit\'s observe mode: read generated Argo CD Applications\' last successful sync and health, match them to publication commits by Application directory tree, and attest `accepted` and `healthy` through `nyl attest`, with each Application\'s running publication and health in the attestations\' details; the `observe` `teardownWait` strategy waits on the same reading. Argo CD is read through the Kubernetes API of the instance\'s control-plane Cluster or through its API server, declared on the ArgoCDInstance (`spec.access`), with credentials only from the unit\'s admitted environment.', done: true },
-        { text: 'Add observed values: the generic `observe` driver capability, `fromUnit: {unit, observation}`, re-observation in `reconcile` and a `nyl observe` command for jobs that hold the read credentials, `observationWait`, and the publication unit\'s reads of rendered resource fields once their Application runs the current publication (the `observed-value` walkthrough).', done: false },
+        { text: 'Add observed values: the generic `observe` driver capability, `fromUnit: {unit, observation}`, re-observation in `reconcile` and a `nyl observe` command for jobs that hold the read credentials, `observationWait`, and the publication unit\'s reads of rendered resource fields once their Application runs the current publication (the `observed-value` walkthrough).', done: true },
         { text: 'Document an end-to-end local/CI example.', done: false },
         { text: 'Declare the `build` capability for `KubernetesPublication`: `nyl build` renders the tree, `--diff` compares it with the published tree, and `--push` publishes only targets no environment owns.', done: true },
         { text: 'Support inline DeploymentTargets on `KubernetesPublication`, its two-phase teardown with the `delay` and `manual` `teardownWait` strategies, ownership-index owner fencing, and the teardown readiness check with its warnings.', done: true },

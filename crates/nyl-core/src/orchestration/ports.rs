@@ -14,8 +14,7 @@ use serde_json::Value;
 use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
 use super::state::{
     ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
-    Run, Signal,
-    StateLocation, StateRecord,
+    Run, Signal, StateLocation, StateRecord,
 };
 use super::time::{Duration, Timestamp};
 use crate::resources::environment::Environment;

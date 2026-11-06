@@ -1402,7 +1402,7 @@ mod tests {
 
     /// A unit `kubernetes` with a current receipt that declares `ip`
     /// (string) and `port` (integer, `maxAge` 10m), whose record holds `values`.
-    fn observing(world: &mut World, values: Value) {
+    fn observing(world: &mut World, values: &Value) {
         world.add(
             "kubernetes",
             json!({"observations": {
@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn test_resolve_reference_reads_the_recorded_observation_and_cites_it() {
         let mut world = World::new();
-        observing(&mut world, recorded_values());
+        observing(&mut world, &recorded_values());
         let ReferenceValue::Value { value, provenance } = world
             .resolve(json!({"unit": "kubernetes", "observation": "ip"}))
             .unwrap()
@@ -1449,7 +1449,7 @@ mod tests {
         assert_eq!(provenance.execution_key, key("kubernetes"));
         // `pointer` selects inside an object value like inside an output.
         let mut object = World::new();
-        observing(&mut object, recorded_values());
+        observing(&mut object, &recorded_values());
         object.desired.get_mut(&name("kubernetes")).unwrap().spec["observations"]["ip"]["type"] = json!("object");
         object.observations.get_mut(&name("kubernetes")).unwrap().values.insert(
             "ip".to_owned(),
@@ -1473,12 +1473,12 @@ mod tests {
         let reference = json!({"unit": "kubernetes", "observation": "ip"});
         let blocked = |world: &World, reference: Value| match world.resolve(reference).unwrap() {
             ReferenceValue::Blocked { reason, .. } => reason,
-            other => panic!("{other:?}"),
+            other @ ReferenceValue::Value { .. } => panic!("{other:?}"),
         };
         let mut world = World::new();
         observing(
             &mut world,
-            json!({"ip": {"pending": "field-not-set: /status/loadBalancer"}, "port": {"value": 443, "observedAt": "2026-09-24T09:50:00Z"}}),
+            &json!({"ip": {"pending": "field-not-set: /status/loadBalancer"}, "port": {"value": 443, "observedAt": "2026-09-24T09:50:00Z"}}),
         );
         assert_eq!(
             blocked(&world, reference.clone()),
@@ -1492,18 +1492,15 @@ mod tests {
         );
         // A record of an earlier receipt never satisfies a reference.
         let mut stale = World::new();
-        observing(&mut stale, recorded_values());
+        observing(&mut stale, &recorded_values());
         stale.observations.get_mut(&name("kubernetes")).unwrap().execution_key = key("kubernetes-old");
         assert!(blocked(&stale, reference.clone()).contains("not observed yet"));
         // `port` goes stale ten minutes after its last successful read; `ip` never does.
         let mut aged = World::new();
-        observing(&mut aged, recorded_values());
+        observing(&mut aged, &recorded_values());
         aged.now = "2026-09-24T10:01:00Z".parse().unwrap();
         assert!(blocked(&aged, json!({"unit": "kubernetes", "observation": "port"})).contains("maxAge of 10m"));
-        assert!(matches!(
-            aged.resolve(reference).unwrap(),
-            ReferenceValue::Value { .. }
-        ));
+        assert!(matches!(aged.resolve(reference).unwrap(), ReferenceValue::Value { .. }));
         // A producer without a current receipt blocks like for any reference.
         aged.observed.remove(&name("kubernetes"));
         assert_eq!(
@@ -1517,11 +1514,12 @@ mod tests {
     #[test]
     fn test_resolve_reference_rejects_undeclared_and_mixed_observation_references() {
         let mut world = World::new();
-        observing(&mut world, recorded_values());
+        observing(&mut world, &recorded_values());
         let error = |reference: Value| world.resolve(reference).unwrap_err();
         let undeclared = error(json!({"unit": "kubernetes", "observation": "host"}));
         assert!(
-            undeclared.message.contains("does not declare") && undeclared.message.contains("declared observations: ip, port"),
+            undeclared.message.contains("does not declare")
+                && undeclared.message.contains("declared observations: ip, port"),
             "{}",
             undeclared.message
         );
@@ -1531,9 +1529,11 @@ mod tests {
         assert!(error(json!({"unit": "kubernetes", "observation": "ip", "kind": "X"}))
             .message
             .contains("kind applies to artifact references only"));
-        assert!(error(json!({"unit": "kubernetes", "observation": "ip", "output": "ip"}))
-            .message
-            .contains("exactly one of output, artifact, and observation"));
+        assert!(
+            error(json!({"unit": "kubernetes", "observation": "ip", "output": "ip"}))
+                .message
+                .contains("exactly one of output, artifact, and observation")
+        );
     }
 
     /// Catches a re-read of an unchanged value rewriting its consumer's
@@ -1542,12 +1542,15 @@ mod tests {
     #[test]
     fn test_resolve_unit_keeps_the_citation_of_an_unchanged_observed_value() {
         let mut world = World::new();
-        observing(&mut world, recorded_values());
+        observing(&mut world, &recorded_values());
         let reader = json!({"values": {"address": {"fromUnit": {"unit": "kubernetes", "observation": "ip"}}}});
         let unit = desired("dns", "Command", reader, "dns");
         let first = resolve_unit(&world.view(), &unit);
         let pointer = nyl_core::orchestration::ids::JsonPointer::new("/values/address").unwrap();
-        assert_eq!(first.resolved_spec.as_ref().unwrap()["values"]["address"], json!("203.0.113.10"));
+        assert_eq!(
+            first.resolved_spec.as_ref().unwrap()["values"]["address"],
+            json!("203.0.113.10")
+        );
         // The consumer's stored document holds what the first resolution produced.
         let mut stored = unit.clone();
         stored.provenance = first.provenance.clone();
@@ -1570,7 +1573,10 @@ mod tests {
             panic!("a receipt citation")
         };
         assert_eq!(cited.observed_at, Some("2026-09-24T09:59:30Z".parse().unwrap()));
-        assert_eq!(changed.resolved_spec.unwrap()["values"]["address"], json!("203.0.113.20"));
+        assert_eq!(
+            changed.resolved_spec.unwrap()["values"]["address"],
+            json!("203.0.113.20")
+        );
     }
 
     /// Catches cross-environment references reading the consumer's own
@@ -1578,7 +1584,7 @@ mod tests {
     #[test]
     fn test_cross_environment_references_read_the_producers_observed_values() {
         let mut producer = World::new();
-        observing(&mut producer, recorded_values());
+        observing(&mut producer, &recorded_values());
         let mut consumer = World::new();
         let environment = EnvironmentName::new("infra").unwrap();
         let mut snapshot = nyl_core::orchestration::ports::EnvironmentSnapshot {
@@ -1597,14 +1603,22 @@ mod tests {
         };
         assert_eq!(value, json!("203.0.113.10"));
         assert_eq!(provenance.environment, Some(environment.clone()));
-        consumer.environments.get_mut(&environment).unwrap().observations.clear();
+        consumer
+            .environments
+            .get_mut(&environment)
+            .unwrap()
+            .observations
+            .clear();
         let ReferenceValue::Blocked { reason, .. } = consumer
             .resolve(json!({"environment": "infra", "unit": "kubernetes", "observation": "ip"}))
             .unwrap()
         else {
             panic!("no record in the producer environment")
         };
-        assert_eq!(reason, "observation ip of infra/kubernetes is pending: not observed yet");
+        assert_eq!(
+            reason,
+            "observation ip of infra/kubernetes is pending: not observed yet"
+        );
         // The qualified reason reads back for reports, with the environment.
         let waiting = observed_values::parse_reason(&reason).unwrap();
         assert_eq!(waiting.producer, "infra/kubernetes");
