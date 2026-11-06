@@ -78,6 +78,10 @@ pub struct GitOpsInventory {
     pub worktree_data_files: BTreeSet<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.
     pub resources: BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
+    /// Instances of EnvironmentTemplates the caller knows from state, by
+    /// name. Discovery finds none: which instances exist is not source.
+    pub instances:
+        BTreeMap<nyl_core::orchestration::ids::EnvironmentName, nyl_core::orchestration::instance::InstanceDescriptor>,
 }
 
 impl GitOpsInventory {
@@ -411,6 +415,7 @@ fn discover_project_inventory(
         worktree_yaml_files,
         worktree_data_files,
         resources,
+        instances: BTreeMap::new(),
     })
 }
 
@@ -592,6 +597,7 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
         GitOpsResource::ApplicationGroup(resource) => resource.metadata.labels.clone(),
         GitOpsResource::Environment(resource) => resource.metadata.labels.clone(),
         GitOpsResource::EnvironmentGroup(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::EnvironmentTemplate(resource) => resource.metadata.labels.clone(),
     }
 }
 

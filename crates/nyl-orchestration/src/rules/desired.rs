@@ -319,6 +319,29 @@ fn fenced_readiness(name: &UnitName, stored: &DesiredUnit) -> Readiness {
     }
 }
 
+/// An instance's EnvironmentTemplate `deletionPolicy: Teardown` overrides the
+/// policy of every selected unit whose kind supports teardown, an explicit
+/// `Retain` included, by writing it into the rendered spec, so the stored
+/// document and every later decision (omission, `teardown --all`, expiry)
+/// read one policy. Units of other kinds keep their own, which for a kind
+/// without teardown means they are left in place and dropped from state.
+///
+/// Contract: [Environment templates and previews](../../../../design/orchestration-core.md#environment-templates-and-previews).
+pub fn apply_instance_policy(source: &mut RenderedSource, drivers: &DriverSet) {
+    let Some(DeletionPolicy::Teardown) = source.instance.as_ref().and_then(|instance| instance.deletion_policy) else {
+        return;
+    };
+    for unit in source.units.values_mut().filter(|unit| unit.selected) {
+        let Some(spec) = unit.spec.as_mut() else { continue };
+        let supports_teardown = drivers
+            .get(&unit.envelope.api_version, &unit.envelope.kind)
+            .is_some_and(|driver| driver.capabilities(spec).teardown);
+        if let (true, Some(spec)) = (supports_teardown, spec.as_object_mut()) {
+            spec.insert("deletionPolicy".to_owned(), Value::String("Teardown".to_owned()));
+        }
+    }
+}
+
 /// The selected, enabled units: those rendered to a spec whose `enabled`
 /// is not `false`.
 pub fn ownership_set(source: &RenderedSource) -> BTreeMap<&UnitName, &RenderedUnit> {
@@ -880,6 +903,7 @@ mod tests {
                 "metadata": {"name": "dev"}
             }))
             .unwrap(),
+            instance: None,
             units: units
                 .into_iter()
                 .map(|(unit, rendered)| (name(unit), rendered))

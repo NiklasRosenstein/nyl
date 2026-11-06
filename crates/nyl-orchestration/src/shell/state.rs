@@ -207,6 +207,7 @@ pub fn init(
                     template: None,
                     params: BTreeMap::new(),
                     expires_at: None,
+                    source_commit: None,
                     location: location.clone(),
                     events: vec![event],
                 },
@@ -243,6 +244,134 @@ pub fn init(
                     json!("every unit becomes a new incarnation and executes again at the next reconcile"),
                 );
             }
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
+        },
+    )
+}
+
+/// What `nyl state init --template` records for an instance.
+#[derive(Debug, Clone)]
+pub struct InstanceInit<'a> {
+    /// The EnvironmentTemplate.
+    pub template: &'a str,
+    /// The instance's parameters, bound against the template.
+    pub params: &'a BTreeMap<String, Value>,
+    /// The entry worktree's commit: the source of the instance's later runs that are not entered from its own source.
+    pub source_commit: &'a nyl_core::orchestration::ids::CommitId,
+    /// The template's `ttl`: activity moves `expiresAt` to now plus this.
+    pub ttl: Option<nyl_core::orchestration::time::Duration>,
+}
+
+/// `nyl state init -e <instance> --template <template> --param …`: create the
+/// instance's `state.yaml`, or update the parameters, source commit, and
+/// expiry of an existing one. Like a declared environment's initialization it
+/// writes one transition commit and none when nothing changed, except that
+/// activity always extends the expiry.
+///
+/// Contract: [Instances](../../../../design/orchestration-core.md#instances).
+/// A deleted instance refuses (`NYL-STATE-DELETED`) until `--fresh` starts it
+/// over, which drops every unit's documents like it does for a declared
+/// environment.
+pub fn init_instance(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    instance: &InstanceInit<'_>,
+    fresh: bool,
+    requested: &Requested,
+) -> StateOperationReport {
+    if let Err(error) = context.store.prepare_init(location) {
+        return StateOperationReport::new(environment.clone(), Operation::StateInit.as_str())
+            .refused(store_error(environment, &error));
+    }
+    with_lease(
+        context,
+        environment,
+        Operation::StateInit,
+        location,
+        requested,
+        |held, report| {
+            report.details.insert("location".to_owned(), json!(describe(location)));
+            report.details.insert("template".to_owned(), json!(instance.template));
+            let snapshot = read(context, location, environment)?;
+            let now = held.lease.taken_at;
+            let expires_at = instance.ttl.map(|ttl| ttl.after(now));
+            let event = StateEvent::StateInitialized {
+                at: now,
+                by: context.requested_by.clone(),
+                reason: requested.reason.clone(),
+                fresh,
+            };
+            let mut changes = TransitionChanges::default();
+            let headline;
+            let record = match &snapshot.record {
+                None => {
+                    headline = "instance created";
+                    StateRecord {
+                        api_version: StateV1,
+                        kind: StateRecordKind,
+                        environment: environment.clone(),
+                        template: Some(instance.template.to_owned()),
+                        params: instance.params.clone(),
+                        expires_at,
+                        source_commit: Some(instance.source_commit.clone()),
+                        location: location.clone(),
+                        events: vec![event],
+                    }
+                }
+                Some(existing) => {
+                    if fresh {
+                        crate::rules::state_location::check_location(Some(existing), environment, location)?;
+                    } else {
+                        check_record(context.store, Some(existing), environment, location)?;
+                    }
+                    if existing.template.as_deref() != Some(instance.template) {
+                        return Err(Finding::new(
+                            Code::InstanceNameTaken,
+                            format!(
+                                "{environment} is {}, not an instance of EnvironmentTemplate {}",
+                                existing.template.as_deref().map_or_else(
+                                    || "a declared environment".to_owned(),
+                                    |template| format!("an instance of EnvironmentTemplate {template}")
+                                ),
+                                instance.template
+                            ),
+                            "environment names are unique across declared Environments and instances; pick another name",
+                        ));
+                    }
+                    check_remote_tips(context.store, location, environment)?;
+                    let mut record = existing.clone();
+                    if fresh {
+                        changes.desired = dropped(&snapshot.desired);
+                        changes.observed = dropped(&snapshot.observed);
+                        changes.artifacts = dropped(&snapshot.artifacts);
+                        record.events.push(event);
+                    }
+                    record.params = instance.params.clone();
+                    record.source_commit = Some(instance.source_commit.clone());
+                    record.expires_at = expires_at;
+                    if record == *existing {
+                        report
+                            .details
+                            .insert("note".to_owned(), json!("the instance is up to date"));
+                        return Ok(());
+                    }
+                    headline = if fresh {
+                        "instance restarted"
+                    } else {
+                        "instance updated"
+                    };
+                    record
+                }
+            };
+            report.details.insert("params".to_owned(), json!(instance.params));
+            if let Some(expires_at) = record.expires_at {
+                report.details.insert("expiresAt".to_owned(), json!(expires_at));
+            }
+            changes.record = Some(record);
+            let mut summary = summary(Operation::StateInit, environment, headline);
+            summary.details.insert("template".to_owned(), json!(instance.template));
+            summary.details.insert("params".to_owned(), json!(instance.params));
             commit(context, location, held, &snapshot, summary, changes, requested, report)
         },
     )

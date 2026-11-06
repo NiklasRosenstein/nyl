@@ -250,6 +250,8 @@ pub struct RunRequest {
     pub location: StateLocation,
     /// The entry worktree's commit, S when `source` is omitted.
     pub entry_commit: CommitId,
+    /// Whether `entry_commit` is an instance's recorded source commit, because the run is not entered from the instance's own source.
+    pub source_recorded: bool,
     /// Worktree-rooted directory of the entry `nyl.toml`, to locate the
     /// project at S.
     pub entry_project_dir: String,
@@ -707,10 +709,11 @@ impl<'r, 'a> Session<'r, 'a> {
             entry,
             &self.request.entry_commit,
             self.request.source_override.as_deref(),
+            self.request.source_recorded,
         );
         let commit = match &request {
             SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
-            SourceRequest::Entry(commit) => commit.clone(),
+            SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) => commit.clone(),
             SourceRequest::Revision(revision) | SourceRequest::Override(revision) => self.resolve_revision(revision)?,
             SourceRequest::Commit { revision, commit } => {
                 self.check_pin(commit, revision)?;
@@ -742,11 +745,12 @@ impl<'r, 'a> Session<'r, 'a> {
         let worktree = self
             .resolution_worktree(&source_commit)
             .map_err(|finding| vec![finding])?;
-        let rendered = self
+        let mut rendered = self
             .context
             .renderer
             .render(&worktree, self.environment(), &source_commit)
             .map_err(|error| vec![source_unavailable(&error.to_string())])?;
+        crate::rules::desired::apply_instance_policy(&mut rendered, self.context.drivers);
         let environment_spec = environment_spec(&rendered.environment, &self.request.entry);
         let desired = desire(
             &DesireInputs {
@@ -1144,6 +1148,14 @@ struct Keyed {
     fingerprint: Option<String>,
     commit: CommitId,
     attestations: Vec<String>,
+}
+
+/// Whether the instance's template authorizes omission teardown without `--allow-teardown`.
+fn instance_allows_teardown(rendered: &RenderedSource) -> bool {
+    rendered
+        .instance
+        .as_ref()
+        .is_some_and(|instance| instance.allow_teardown)
 }
 
 fn source_unavailable(message: &str) -> Finding {
@@ -1553,7 +1565,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
     }
     let options = TeardownOptions {
         approvals: Some(&request.approvals),
-        allow_teardown: request.lifecycle.allow_teardown,
+        allow_teardown: request.lifecycle.allow_teardown || instance_allows_teardown(&prepared.rendered),
         allow_dependents: request.lifecycle.allow_dependents,
         allow_incomplete: request.lifecycle.allow_incomplete,
         named: None,
@@ -2740,7 +2752,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 runs: &runs,
                 options: TeardownOptions {
                     approvals: Some(&request.approvals),
-                    allow_teardown: request.lifecycle.allow_teardown,
+                    allow_teardown: request.lifecycle.allow_teardown || instance_allows_teardown(&prepared.rendered),
                     allow_dependents: request.lifecycle.allow_dependents,
                     allow_incomplete: request.lifecycle.allow_incomplete,
                     named: None,

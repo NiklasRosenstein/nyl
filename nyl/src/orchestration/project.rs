@@ -1,15 +1,18 @@
 //! An environment of the project, resolved for a command: its Environment,
 //! the location of its state, and the Git state store that reaches it.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::EnvironmentName;
-use nyl_core::orchestration::ports::CommitIdentity;
-use nyl_core::orchestration::state::StateLocation;
+use nyl_core::orchestration::instance::{InstanceDescriptor, InstanceTerms};
+use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
+use nyl_core::orchestration::state::{StateLocation, StateRecord};
 use nyl_core::resources::environment::{sharing_group, Environment, EnvironmentGroup};
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
 use nyl_state::git::{CommitAuthor, Endpoint, GitStateStore};
+use serde_json::Value;
 
 use nyl_core::resources::InlineGitRepository;
 use nyl_render::gitops::GitOpsInventory;
@@ -28,6 +31,43 @@ pub struct ResolvedEnvironment {
     pub source_repository: String,
     /// How to reach the location's repository, when it is not the clone.
     pub endpoint: Option<Endpoint>,
+    /// Set when the environment is an instance of an EnvironmentTemplate.
+    pub instance: Option<ResolvedInstance>,
+}
+
+/// An instance of an EnvironmentTemplate, as a command resolved it: the
+/// template, the parameters recorded in `state.yaml` (with `--param` laid
+/// over them), and the record itself.
+pub struct ResolvedInstance {
+    pub template: String,
+    /// The parameters the instance renders with, bound against the template.
+    pub params: BTreeMap<String, Value>,
+    /// The template's terms for the instance.
+    pub terms: InstanceTerms,
+    /// The instance's `state.yaml`; `None` before `state init --template` created it.
+    pub record: Option<StateRecord>,
+}
+
+impl ResolvedInstance {
+    /// The descriptor every environment-wide function takes.
+    pub fn descriptor(&self) -> InstanceDescriptor {
+        InstanceDescriptor {
+            template: self.template.clone(),
+            params: self.params.clone(),
+        }
+    }
+}
+
+/// What a command says about the instance it names: `--template` and
+/// `--param`, which create or update it, and whether state is read offline.
+/// Without a template, the environment must be a declared Environment or an
+/// existing instance, found by its record.
+#[derive(Debug, Clone, Default)]
+pub struct InstanceRequest {
+    pub template: Option<String>,
+    pub params: BTreeMap<String, Value>,
+    /// `--local`: read the record without network access.
+    pub offline: bool,
 }
 
 /// The Environments and EnvironmentGroups the project declares.
@@ -45,26 +85,181 @@ pub fn declared(inventory: &GitOpsInventory) -> (Vec<Environment>, Vec<Environme
 }
 
 /// Resolve `name` against the project: its Environment, its group defaults,
-/// and where its state lives.
+/// and where its state lives. An instance of an EnvironmentTemplate resolves
+/// the same way once its record names it ([`resolve_environment_with`]).
 pub fn resolve_environment(
     inventory: &GitOpsInventory,
     name: &str,
 ) -> std::result::Result<ResolvedEnvironment, Finding> {
+    resolve_environment_with(inventory, name, &InstanceRequest::default())
+}
+
+/// [`resolve_environment`] with what the command says about an instance.
+///
+/// Contract: [Instances](../../../design/orchestration-core.md#instances).
+/// - A declared Environment resolves as before; `--template` for its name is
+///   `NYL-INSTANCE-NAME-TAKEN`.
+/// - Otherwise every EnvironmentTemplate's state location for the name is
+///   read, and the one whose `state.yaml` names this environment and
+///   template is the instance. Without `--template`, no such record means no
+///   such environment (`NYL-ENVIRONMENT-UNKNOWN`); with it, the instance is
+///   to be created, and a record of another template refuses
+///   (`NYL-INSTANCE-NAME-TAKEN`).
+/// - The instance's parameters are its record's, with `--param` laid over
+///   them, bound against the template at the entry worktree.
+pub fn resolve_environment_with(
+    inventory: &GitOpsInventory,
+    name: &str,
+    request: &InstanceRequest,
+) -> std::result::Result<ResolvedEnvironment, Finding> {
     let (environments, groups) = declared(inventory);
-    let Some(environment) = environments
+    if let Some(environment) = environments
         .into_iter()
         .find(|environment| environment.metadata.name == name)
-    else {
+    {
+        if let Some(template) = &request.template {
+            return Err(name_taken(
+                name,
+                &format!("is a declared Environment, so it cannot be an instance of {template}"),
+            ));
+        }
+        return locate(inventory, &environment, &groups);
+    }
+    if request.template.is_none() && !request.params.is_empty() {
         return Err(Finding::new(
-            Code::EnvironmentUnknown,
-            format!("the project declares no Environment {name:?}"),
-            "list the declared environments with `nyl get environments`",
+            Code::InstanceTemplateRequired,
+            "--param is recorded when an instance is created or updated, so it needs --template",
+            "name the EnvironmentTemplate with --template <name>",
         ));
+    }
+    let unknown = || {
+        Finding::new(
+            Code::EnvironmentUnknown,
+            format!("the project declares no Environment {name:?}, and no instance of an EnvironmentTemplate has that name"),
+            "list the declared environments with `nyl get environments`, or create an instance with `nyl state init -e <name> --template <template>`",
+        )
     };
+    let environment_name = EnvironmentName::new(name).map_err(|_| unknown())?;
+    let templates = nyl_render::gitops::instances::templates(inventory);
+    if let Some(template) = &request.template {
+        if !templates.iter().any(|candidate| candidate.metadata.name == *template) {
+            return Err(Finding::new(
+                Code::InstanceTemplateUnknown,
+                format!("the project declares no EnvironmentTemplate {template:?}"),
+                "list the templates with `nyl get environment-templates`",
+            ));
+        }
+    }
+    let mut found = Vec::new();
+    for template in templates {
+        let state = nyl_render::gitops::instances::instance_state(template, &environment_name)?;
+        let mut skeleton = template.environment_skeleton(name);
+        skeleton.spec.state = state;
+        let located = locate(inventory, &skeleton, &groups)?;
+        let snapshot = open_store_mode(inventory, &located, None, request.offline)
+            .map_err(|error| unavailable(&error.to_string()))?
+            .snapshot(&located.location)
+            .map_err(|error| unavailable(&error.to_string()))?;
+        if let Some(record) = snapshot.record {
+            if record.environment == environment_name && record.template.is_some() {
+                found.push((template, located, record));
+            }
+        }
+    }
+    let (template, mut located, record) = match found.len() {
+        0 => match &request.template {
+            None => return Err(unknown()),
+            Some(wanted) => {
+                let template = nyl_render::gitops::instances::find_template(inventory, wanted)
+                    .expect("the template was checked above");
+                let state = nyl_render::gitops::instances::instance_state(template, &environment_name)?;
+                let mut skeleton = template.environment_skeleton(name);
+                skeleton.spec.state = state;
+                (template, locate(inventory, &skeleton, &groups)?, None)
+            }
+        },
+        1 => {
+            let (template, located, record) = found.remove(0);
+            if let Some(wanted) = &request.template {
+                if *wanted != template.metadata.name {
+                    return Err(name_taken(
+                        name,
+                        &format!(
+                            "is an instance of EnvironmentTemplate {}, not {wanted}",
+                            template.metadata.name
+                        ),
+                    ));
+                }
+            }
+            (template, located, Some(record))
+        }
+        _ => {
+            return Err(Finding::new(
+                Code::InstanceAmbiguous,
+                format!(
+                    "{name} has state as an instance of several EnvironmentTemplates: {}",
+                    found
+                        .iter()
+                        .map(|(template, _, _)| template.metadata.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "give the templates distinct state locations, or delete one of the instances' state",
+            ))
+        }
+    };
+    if let Some(record) = &record {
+        let recorded = record.template.as_deref().unwrap_or_default();
+        if recorded != template.metadata.name {
+            return Err(name_taken(
+                name,
+                &format!(
+                    "is an instance of EnvironmentTemplate {recorded}, not {}",
+                    template.metadata.name
+                ),
+            ));
+        }
+    }
+    let mut given = record.as_ref().map(|record| record.params.clone()).unwrap_or_default();
+    given.extend(request.params.clone());
+    let (environment, terms) = nyl_render::gitops::instances::instantiate(template, &environment_name, &given)?;
+    located.environment = environment;
+    located.instance = Some(ResolvedInstance {
+        template: template.metadata.name.clone(),
+        params: terms.params.clone(),
+        terms,
+        record,
+    });
+    Ok(located)
+}
+
+fn name_taken(name: &str, why: &str) -> Finding {
+    Finding::new(
+        Code::InstanceNameTaken,
+        format!("environment {name} {why}"),
+        "environment names are unique across declared Environments and instances, because leases, run refs, and keep refs are named after them; pick another name",
+    )
+}
+
+fn unavailable(message: &str) -> Finding {
+    Finding::new(
+        Code::StateUnavailable,
+        format!("cannot read the state of the project's environments: {message}"),
+        "check access to the state repository, or run without network access with --local",
+    )
+}
+
+/// An Environment's state location and the endpoint that reaches it.
+fn locate(
+    inventory: &GitOpsInventory,
+    environment: &Environment,
+    groups: &[EnvironmentGroup],
+) -> std::result::Result<ResolvedEnvironment, Finding> {
+    let name = environment.metadata.name.as_str();
     let environment_name = environment
         .name()
         .map_err(|error| Finding::new(Code::EnvironmentUnknown, error.to_string(), "rename the Environment"))?;
-    let group = sharing_group(&environment, &groups)?;
+    let group = sharing_group(environment, groups)?;
     let repository = git2::Repository::discover(&inventory.project_root).map_err(|error| {
         Finding::new(
             Code::StateUnavailable,
@@ -102,7 +297,7 @@ pub fn resolve_environment(
         Finding::new(
             Code::StateUnavailable,
             format!("cannot resolve the state location of {name}: {message}"),
-            "fix spec.state of the Environment or its group",
+            "fix spec.state of the Environment, its template, or its group",
         )
     })?;
     let location = resolved.location;
@@ -122,12 +317,13 @@ pub fn resolve_environment(
     };
     Ok(ResolvedEnvironment {
         name: environment_name,
-        environment,
+        environment: environment.clone(),
         location,
         warnings: resolved.warnings,
         git_dir: repository.path().to_path_buf(),
         source_repository,
         endpoint,
+        instance: None,
     })
 }
 
@@ -157,13 +353,29 @@ pub fn open_store_mode(
         None => GitStateStore::read_only(&resolved.git_dir, auth),
     };
     store = store.strict_routing();
+    let mut routed = std::collections::BTreeSet::new();
+    let mut route = |store: GitStateStore, other: &ResolvedEnvironment| -> Result<GitStateStore> {
+        match &other.endpoint {
+            Some(endpoint) if routed.insert(other.location.repository.clone()) => configure_repository(
+                inventory,
+                &resolved.git_dir,
+                store,
+                &other.location.repository,
+                endpoint.clone(),
+            ),
+            _ => Ok(store),
+        }
+    };
     for environment in declared(inventory).0 {
         let Ok(other) = resolve_environment(inventory, &environment.metadata.name) else {
             continue;
         };
-        if let Some(endpoint) = other.endpoint {
-            store = configure_repository(inventory, resolved, store, &other.location.repository, endpoint)?;
-        }
+        store = route(store, &other)?;
+    }
+    // Instances of a template live in its repository, wherever its state is.
+    store = route(store, resolved)?;
+    for other in template_locations(inventory) {
+        store = route(store, &other)?;
     }
     Ok(if offline { store.offline() } else { store })
 }
@@ -171,7 +383,7 @@ pub fn open_store_mode(
 /// Route a repository identity through its own local object database.
 pub fn configure_repository(
     inventory: &GitOpsInventory,
-    resolved: &ResolvedEnvironment,
+    git_dir: &std::path::Path,
     mut store: GitStateStore,
     identity: &str,
     endpoint: Endpoint,
@@ -190,7 +402,7 @@ pub fn configure_repository(
             .then(|| inventory.project_root.join(path))
     };
     let direct = file_path.is_some() && endpoint.write.as_ref().is_none_or(|write| write == &endpoint.read);
-    let source = git2::Repository::open(&resolved.git_dir)
+    let source = git2::Repository::open(git_dir)
         .ok()
         .and_then(|repo| {
             repo.find_remote("origin")
@@ -201,7 +413,7 @@ pub fn configure_repository(
     let path = if let Some(path) = file_path {
         path
     } else if source {
-        resolved.git_dir.clone()
+        git_dir.to_path_buf()
     } else {
         let path = cache.state_repo_path(identity);
         store = store.with_managed_repository(&path);
@@ -383,4 +595,56 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
         return Err(finding_error(conflict));
     }
     Ok(warnings)
+}
+
+/// Sample instances of every template the project declares, which
+/// `nyl validate` checks as if they existed ([`nyl_render::gitops::instances::sample_instances`]).
+pub fn sample_instances(
+    inventory: &GitOpsInventory,
+) -> std::collections::BTreeMap<EnvironmentName, nyl_core::orchestration::instance::InstanceDescriptor> {
+    nyl_render::gitops::instances::templates(inventory)
+        .into_iter()
+        .flat_map(nyl_render::gitops::instances::sample_instances)
+        .collect()
+}
+
+/// Where each EnvironmentTemplate keeps the state of an instance, for
+/// routing its repository: the location of a sample instance.
+fn template_locations(inventory: &GitOpsInventory) -> Vec<ResolvedEnvironment> {
+    let (_, groups) = declared(inventory);
+    nyl_render::gitops::instances::templates(inventory)
+        .into_iter()
+        .filter_map(|template| {
+            let (name, _) = nyl_render::gitops::instances::sample_instances(template)
+                .into_iter()
+                .next()?;
+            let mut skeleton = template.environment_skeleton(name.as_str());
+            skeleton.spec.state = nyl_render::gitops::instances::instance_state(template, &name).ok()?;
+            locate(inventory, &skeleton, &groups).ok()
+        })
+        .collect()
+}
+
+/// `--param name=value` options as parameters: each value is parsed as YAML,
+/// so `123` is an integer and `pr-123` a string.
+pub fn parse_params(params: &[String]) -> std::result::Result<BTreeMap<String, Value>, Finding> {
+    let invalid = |message: String| {
+        Finding::new(
+            Code::InstanceParameterInvalid,
+            message,
+            "write each parameter as --param <name>=<value>, with the value as YAML",
+        )
+    };
+    let mut parsed = BTreeMap::new();
+    for param in params {
+        let Some((name, value)) = param.split_once('=') else {
+            return Err(invalid(format!("--param {param:?} is not <name>=<value>")));
+        };
+        let value = nyl_render::yaml::parse_yaml_value_k8s_compatible(value)
+            .map_err(|error| invalid(format!("--param {name}: the value {value:?} is not YAML: {error}")))?;
+        if parsed.insert(name.to_owned(), value).is_some() {
+            return Err(invalid(format!("--param {name} is given more than once")));
+        }
+    }
+    Ok(parsed)
 }

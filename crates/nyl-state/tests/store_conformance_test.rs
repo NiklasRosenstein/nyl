@@ -246,6 +246,7 @@ fn record(location: &StateLocation, name: &str) -> StateRecord {
         template: None,
         params: BTreeMap::new(),
         expires_at: None,
+        source_commit: None,
         location: location.clone(),
         events: Vec::new(),
     }

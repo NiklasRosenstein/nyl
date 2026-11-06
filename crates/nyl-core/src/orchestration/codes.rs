@@ -227,6 +227,19 @@ codes! {
     StateDeleted => "NYL-STATE-DELETED",
     /// `nyl state delete` refuses while units still have an incarnation.
     StateDeleteIncarnations => "NYL-STATE-DELETE-INCARNATIONS",
+    /// `--template` names no EnvironmentTemplate of the project.
+    InstanceTemplateUnknown => "NYL-INSTANCE-TEMPLATE-UNKNOWN",
+    /// An instance's parameters do not satisfy its template's declarations.
+    InstanceParameterInvalid => "NYL-INSTANCE-PARAMETER-INVALID",
+    /// An environment name is used by a declared Environment or by an
+    /// instance of another template.
+    InstanceNameTaken => "NYL-INSTANCE-NAME-TAKEN",
+    /// `--param` without `--template`: parameters are recorded when an instance is created or updated.
+    InstanceTemplateRequired => "NYL-INSTANCE-TEMPLATE-REQUIRED",
+    /// The state of an environment name belongs to instances of several templates.
+    InstanceAmbiguous => "NYL-INSTANCE-AMBIGUOUS",
+    /// An EnvironmentTemplate does not render to a valid Environment for an instance.
+    TemplateInvalid => "NYL-TEMPLATE-INVALID",
     /// `nyl hold` was delivered to the run holding the lease, through its
     /// signal ref: the run starts no held unit and writes the hold in its
     /// own transition commit. Exit 0.

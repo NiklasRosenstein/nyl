@@ -60,6 +60,7 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             None,
             args.local,
             wiring.drivers,
+            &crate::orchestration::project::InstanceRequest::default(),
         ),
         |environment, _selected, _planned, _unavailable| {
             let mut args = args.clone();

@@ -23,7 +23,8 @@ use crate::cli::commands::reconcile::RunOutput;
 use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
 use crate::orchestration::project::{
-    declared, open_store, requested_by as requested_by_default, resolve_environment, ResolvedEnvironment,
+    declared, open_store, requested_by as requested_by_default, resolve_environment, resolve_environment_with,
+    InstanceRequest, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use nyl_render::gitops::discover_gitops_inventory;
@@ -54,16 +55,58 @@ impl From<NylError> for Stop {
 
 /// The project and the environment a command works on.
 pub struct Session {
+    /// The project, with the instance this session works on as a known instance.
     pub inventory: GitOpsInventory,
     pub resolved: ResolvedEnvironment,
+    /// Whether the command was entered from the instance's own source: it
+    /// named `--template`, so the entry checkout is the instance's source.
+    entered: bool,
 }
 
 impl Session {
     /// Discover the project at `path` and resolve `environment` in it.
     pub fn open(path: &Path, environment: &str) -> Result<Self, Stop> {
+        Self::open_with(path, environment, &InstanceRequest::default())
+    }
+
+    /// [`Self::open`] for a command that may create or update an instance
+    /// (`--template`, `--param`), or reads state offline.
+    pub fn open_with(path: &Path, environment: &str, request: &InstanceRequest) -> Result<Self, Stop> {
         let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
-        let resolved = resolve_environment(&inventory, environment)?;
-        Ok(Self { inventory, resolved })
+        let resolved = resolve_environment_with(&inventory, environment, request)?;
+        // Every environment-wide function sees the instance like a declared environment.
+        let inventory = match &resolved.instance {
+            Some(instance) => {
+                inventory.with_instances(std::iter::once((resolved.name.clone(), instance.descriptor())).collect())
+            }
+            None => inventory,
+        };
+        Ok(Self {
+            inventory,
+            resolved,
+            entered: request.template.is_some(),
+        })
+    }
+
+    /// Findings about the instance a command created or updated: what makes
+    /// it unlikely to be removed unattended. None yet; the readiness warnings
+    /// belong to teardown.
+    pub fn instance_warnings(&self) -> Vec<Finding> {
+        Vec::new()
+    }
+
+    /// Whether the command was entered from the instance's own checkout.
+    pub fn entered(&self) -> bool {
+        self.entered
+    }
+
+    /// The instance's recorded source commit, which a run not entered from
+    /// the instance's own source renders at.
+    pub fn recorded_source(&self) -> Option<CommitId> {
+        if self.entered {
+            return None;
+        }
+        self.resolved.instance.as_ref()?.record.as_ref()?.source_commit.clone()
     }
 
     /// The Environment as the entry worktree declares it, with its group's
@@ -159,6 +202,7 @@ impl Session {
     pub fn renderer(&self) -> UnitSourceRenderer {
         UnitSourceRenderer::new(self.entry_project_dir(), crate::resource_catalogue())
             .with_previous_paths(self.previous_paths())
+            .with_instances(self.inventory.instances.clone())
     }
 
     /// The shell context of one command, working through `store`: the
@@ -272,7 +316,8 @@ impl Session {
             environment: self.resolved.name.clone(),
             entry: self.entry()?,
             location: self.resolved.location.clone(),
-            entry_commit: self.entry_commit()?,
+            entry_commit: self.recorded_source().map_or_else(|| self.entry_commit(), Ok)?,
+            source_recorded: self.recorded_source().is_some(),
             entry_project_dir: self.entry_project_dir(),
             units,
             concurrency: options.concurrency.max(1),
