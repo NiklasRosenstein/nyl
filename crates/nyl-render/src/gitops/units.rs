@@ -734,11 +734,19 @@ pub fn target_placements(inventory: &GitOpsInventory) -> Result<BTreeMap<String,
 }
 
 /// The inventory with every inline target the declared environments'
-/// enabled publication units declare, so that validation compiles them, and
-/// checks their generated Argo CD names against every other target's, like
-/// any target. A disabled unit is torn down from its stored document and
-/// contributes no target.
+/// enabled publication units declare, so that every compile checks them
+/// against every other target (publication prefixes that overlap, generated
+/// Argo CD names that collide), whether it runs in `nyl validate` or when a
+/// publication unit renders its own target. A disabled unit is torn down from
+/// its stored document and contributes none.
 pub fn with_inline_targets(inventory: &GitOpsInventory) -> Result<GitOpsInventory> {
+    with_inline_targets_except(inventory, None)
+}
+
+/// [`with_inline_targets`] without the inline target named `except`: the
+/// caller adds that one from the document it renders (a unit's stored spec),
+/// which may differ from what source declares now.
+pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&str>) -> Result<GitOpsInventory> {
     let (environments, _) = declared(inventory);
     if environments.is_empty() {
         return Ok(inventory.clone());
@@ -755,6 +763,9 @@ pub fn with_inline_targets(inventory: &GitOpsInventory) -> Result<GitOpsInventor
             let target =
                 PublicationTarget::from_spec(&spec).map_err(|message| unit_invalid(&unit.location(), &message))?;
             if let PublicationTarget::Inline(inline) = target {
+                if except == Some(inline.name.as_str()) {
+                    continue;
+                }
                 extended = extended
                     .with_inline_target(&inline.name, &inline.source_file, &inline.spec)
                     .map_err(|error| {

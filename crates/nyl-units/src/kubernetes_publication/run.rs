@@ -91,7 +91,9 @@ pub(crate) fn unit_owner(unit: &DesiredUnit) -> DriverResult<RenderIndexOwner> {
 /// Owner fencing: whether `own` may publish to, or remove, a prefix whose
 /// ownership index names `owner`. `Ok` once that incarnation no longer
 /// exists in its environment's state; otherwise why the prefix stays fenced,
-/// which fails closed when state cannot say.
+/// with its stable code and the fix: `NYL-KUBERNETES-OWNER-FENCED` while the
+/// owner exists, and `NYL-KUBERNETES-OWNER-UNKNOWN`, which fails closed, when
+/// state cannot say, such as for an environment that was renamed or removed.
 pub(crate) fn fence<'a>(
     ctx: &'a ExecutionContext<'_>,
 ) -> impl Fn(&RenderIndexOwner) -> std::result::Result<(), String> + 'a {
@@ -108,11 +110,13 @@ pub(crate) fn fence<'a>(
         match ctx.incarnations.status(&environment, &unit, &uid) {
             IncarnationStatus::Gone => Ok(()),
             IncarnationStatus::Exists => Err(format!(
-                "the prefix is owned by {owner}, which still exists in the state of environment {environment}; \
-                 it stays fenced until that unit's teardown completes or it is released with `nyl state forget`"
+                "NYL-KUBERNETES-OWNER-FENCED: the prefix is owned by {owner}, which still exists in the state of environment \
+                 {environment}; it stays fenced until that unit's teardown completes or it is released with `nyl state forget`"
             )),
             IncarnationStatus::Unknown(reason) => Err(format!(
-                "the prefix is owned by {owner}, and whether it still exists cannot be checked: {reason}"
+                "NYL-KUBERNETES-OWNER-UNKNOWN: the prefix is owned by {owner}, and whether it still exists cannot be checked: \
+                 {reason}. If the environment was renamed or removed, declare it again and tear the unit down, or {}",
+                nyl_render::gitops::reconcile::OWNED_PREFIX_FIX
             )),
         }
     }
@@ -345,8 +349,58 @@ fn fenced(message: &str) -> Outcome {
     Outcome::Failed {
         category: FailureCategory::Ownership,
         retryable: true,
-        message: format!("NYL-KUBERNETES-OWNER-FENCED: {message}"),
+        message: if message.starts_with("NYL-") {
+            message.to_owned()
+        } else {
+            format!("NYL-KUBERNETES-OWNER-FENCED: {message}")
+        },
     }
+}
+
+/// The destination the unit's current receipt published to, compared with
+/// the one its spec renders now. A unit publishes to one destination: its
+/// target's name and publication repository, branch, and prefix. Nothing
+/// in the engine replaces a unit when the destination changes, so the driver
+/// fails closed before any effect, instead of publishing a second tree under
+/// the new destination and leaving the old one, with its catalog, behind (or
+/// failing in the ownership index). Without a receipt, or one that predates
+/// the recorded `target`, only what it recorded is compared.
+fn target_changed(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    rendered: &RenderedTarget,
+    target: &str,
+) -> Option<Outcome> {
+    let published = ctx.artifacts.get("tree")?;
+    let recorded = |field: &str| published.spec.get(field).and_then(Value::as_str);
+    let now = &rendered.destination;
+    let changes = [
+        ("target", Some(target), recorded("target")),
+        ("repository", Some(now.repository.as_str()), recorded("repository")),
+        ("branch", Some(now.branch.as_str()), recorded("branch")),
+        ("pathPrefix", Some(now.path_prefix.as_str()), recorded("pathPrefix")),
+    ]
+    .into_iter()
+    .filter_map(|(field, now, before)| match (now, before) {
+        (Some(now), Some(before)) if now != before => Some(format!("{field} {before:?} became {now:?}")),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    if changes.is_empty() {
+        return None;
+    }
+    Some(Outcome::Failed {
+        category: FailureCategory::Ownership,
+        retryable: true,
+        message: format!(
+            "NYL-KUBERNETES-TARGET-CHANGED: the unit published to a destination that its spec no longer renders ({}); \
+             nothing was published. Restore the previous target, or replace the unit: run \
+             `nyl teardown -e {env} --unit {name}`, which removes the tree it published, then reconcile to publish the new target",
+            changes.join(", "),
+            env = unit.unit.environment,
+            name = unit.unit.name,
+        ),
+    })
 }
 
 /// What `plan` reports: the destroy a deleting unit's two phases amount to,
@@ -427,6 +481,10 @@ fn publish_with(
         .clone()
         .ok_or_else(|| DriverError::before_effects("an executing unit has a uid"))?;
     let mut rendered = render()?;
+    let target = unit_target(resolved_spec(unit)?)?;
+    if let Some(outcome) = target_changed(ctx, unit, &rendered, &target) {
+        return Ok(outcome);
+    }
     let before = state_inputs(&rendered)?;
     let stateful = rendered.publication_base.is_some();
     let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
@@ -467,6 +525,7 @@ fn publish_with(
                 "repository": published.repository,
                 "branch": published.branch,
                 "pathPrefix": published.path_prefix,
+                "target": target,
                 "commit": published.commit,
                 "indexDigest": published.index_digest,
             }),

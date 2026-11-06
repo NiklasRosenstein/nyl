@@ -235,7 +235,7 @@ impl Driver for KubernetesPublicationDriver {
                 },
                 // Another incarnation's prefix is not this unit's to compare; reconciling decides whether it takes it over.
                 Err(error) if error.is_owner_fenced() => Drift::Unknown {
-                    reason: format!("NYL-KUBERNETES-OWNER-FENCED: {error}"),
+                    reason: error.to_string(),
                 },
                 Err(error) => Drift::Unknown {
                     reason: format!("cannot compare the publication branch with the rendered tree: {error}"),

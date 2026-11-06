@@ -7286,7 +7286,7 @@ fn partial_index_format_roundtrips_versioned_golden_and_legacy_envelope() {
 
 /// Catches a change to version 4, the index orchestrated publications write
 /// (version 3 plus the owning unit incarnation): it must read and write back
-/// byte for byte, and its older versions must stay readable so the first
+/// as the same JSON document, and its older versions must stay readable so the first
 /// orchestrated publication over them can migrate them.
 #[test]
 fn owned_index_format_roundtrips_its_versioned_golden_and_reads_the_older_versions() {

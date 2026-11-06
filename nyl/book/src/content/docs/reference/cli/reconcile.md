@@ -211,6 +211,8 @@ Besides the codes above, a reconcile reports:
 | `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM` | A publication's target does not let its teardown complete; each names the setting that fixes it. |
 | `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS` | A publication's teardown leaves these objects behind. |
 | `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix, so nothing was published (a retryable failure). Tear that unit down or release it with `nyl state forget`; see [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership). |
+| `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read, so the fence holds. Declare the environment again and tear its unit down, or release the prefix as the same page describes. |
+| `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published, and nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile again. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting first. |
 | `NYL-STATE-DELETED` | The environment's state was deleted with `nyl state delete`. Remove the Environment, or start over with `nyl state init --fresh`. |

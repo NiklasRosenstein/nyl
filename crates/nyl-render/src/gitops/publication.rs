@@ -205,6 +205,11 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         request.worktree.join(relative)
     };
     let mut inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?;
+    // Every environment's inline targets join the inventory, so the compile's
+    // checks across targets see them whichever unit renders. The target this
+    // render is for comes from the document it was given.
+    inventory =
+        super::units::with_inline_targets_except(&inventory, request.inline.map(|inline| inline.name.as_str()))?;
     if let Some(inline) = request.inline {
         let spec = pinned_inline_spec(&inline.spec, request.inputs);
         inventory = inventory.with_inline_target(request.target, &inline.source_file, &spec)?;
@@ -1581,6 +1586,111 @@ spec:
         let mut unpinned = inline_dev();
         unpinned.spec["releaseInputs"] = json!({});
         assert!(render_inline(worktree.path(), &unpinned, None).is_ok());
+    }
+
+    const ENVIRONMENTS: &str = r"apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: dev}
+spec:
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values: {prefix: deploy}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: staging}
+spec:
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values: {prefix: STAGING_PREFIX}
+";
+
+    const PREVIEW_UNIT: &str = r"apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {preview: 'true'}
+spec:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      applicationGroupSelector: {matchLabels: {app: web}}
+      publication: {repositoryRef: {name: platform}, revision: deploy, pathPrefix: '{{ values.prefix }}'}
+      releaseInputs: {web/web: {image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}}}
+";
+
+    /// A project whose one publication unit, selected by `dev` and `staging`,
+    /// declares an inline target on the same Cluster, with `staging_prefix`
+    /// as staging's publication prefix and `group` as the ApplicationGroup.
+    fn two_environments(publication_url: &str, staging_prefix: &str, group: &str) -> TempDir {
+        let worktree = inline_project(publication_url);
+        fs::write(worktree.path().join("nyl/web.yaml"), group).unwrap();
+        fs::write(
+            worktree.path().join("nyl/environments.yaml"),
+            ENVIRONMENTS.replace("STAGING_PREFIX", staging_prefix),
+        )
+        .unwrap();
+        fs::write(worktree.path().join("nyl/units.yaml"), PREVIEW_UNIT).unwrap();
+        commit_all(&Repository::open(worktree.path()).unwrap());
+        worktree
+    }
+
+    /// What `dev`'s unit renders: its inline target, named by the environment.
+    fn dev_inline(prefix: &str) -> InlineTarget {
+        InlineTarget {
+            name: "dev-kubernetes".to_owned(),
+            source_file: PathBuf::from("units.yaml"),
+            spec: json!({
+                "clusterRef": {"name": "dev"},
+                "applicationGroupSelector": {"matchLabels": {"app": "web"}},
+                "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": prefix},
+            }),
+        }
+    }
+
+    /// A group whose Applications and AppProjects are named from their target.
+    const PER_TARGET_GROUP: &str = r"apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata:
+  name: web
+  labels: {app: web}
+spec:
+  applicationNamespace: argocd
+  source: {path: ../applications/web}
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
+  projectTemplate:
+    name: '{{ target.metadata.name }}-web'
+    destinations: [{server: '*', namespace: web}]
+";
+
+    /// Catches the checks across targets missing inline targets of other
+    /// environments when a unit renders its own: the one unit selected by `dev`
+    /// and `staging` on one Cluster generates colliding Application names in
+    /// both, which the render of either refuses, and a staging prefix nested
+    /// in dev's overlaps it, which the render also refuses, while disjoint
+    /// prefixes and per-target names render.
+    #[test]
+    fn test_render_target_checks_the_inline_targets_of_every_environment() {
+        let (_repository, url) = publication_repository();
+        let render_dev =
+            |worktree: &TempDir, prefix: &str| render_inline(worktree.path(), &dev_inline(prefix), None).map(|_| ());
+
+        let collision = two_environments(&url, "staging", GROUP);
+        let error = render_dev(&collision, "deploy").unwrap_err().to_string();
+        assert!(error.contains("default Release Application names"), "{error}");
+        assert!(
+            error.contains("dev-kubernetes") && error.contains("staging-kubernetes"),
+            "{error}"
+        );
+
+        let nested = two_environments(&url, "deploy/staging", PER_TARGET_GROUP);
+        let error = render_dev(&nested, "deploy").unwrap_err().to_string();
+        assert!(error.contains("overlap") || error.contains("prefix"), "{error}");
+        assert!(
+            error.contains("dev-kubernetes") && error.contains("staging-kubernetes"),
+            "{error}"
+        );
+
+        let disjoint = two_environments(&url, "staging", PER_TARGET_GROUP);
+        render_dev(&disjoint, "deploy").unwrap();
     }
 
     /// Catches an owner missing from, or leaking into, the published index:

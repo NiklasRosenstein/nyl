@@ -448,7 +448,7 @@ impl<'r, 'a> Session<'r, 'a> {
         Self {
             context,
             request,
-            incarnations: incarnations::StateIncarnations::new(context.base.store, &request.environments),
+            incarnations: incarnations::StateIncarnations::over(context.base.store, &request.environments),
             directory,
             default_branch: OnceCell::new(),
             revisions: RefCell::new(BTreeMap::new()),

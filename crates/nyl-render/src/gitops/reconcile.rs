@@ -417,16 +417,29 @@ fn ensure_same_owner(
     }
     Err(NylError::OwnerFenced(match &expected.owner {
         Some(next) => format!(
-            "Rendered ownership index {} is owned by {owner}, not by {next}; \
+            "NYL-KUBERNETES-OWNER-FENCED: rendered ownership index {} is owned by {owner}, not by {next}; \
              it stays fenced while that incarnation exists in its environment's state",
             path.display()
         ),
         None => format!(
-            "Rendered ownership index {} is owned by {owner}; a publication outside orchestration cannot overwrite or remove it",
+            "{OWNED_PREFIX_CODE}: rendered ownership index {} is owned by {owner}, and a publication outside \
+             orchestration cannot overwrite or remove it; {OWNED_PREFIX_FIX}",
             path.display()
         ),
     }))
 }
+
+/// The stable code of a refusal by a publication that records no owner, such
+/// as `publish-tree` and `render-tree`, of a prefix an orchestrated unit owns.
+pub const OWNED_PREFIX_CODE: &str = "NYL-TREE-OWNED-BY-UNIT";
+
+/// How to release a prefix deliberately: the way out when its owner can no
+/// longer release it, such as an environment that was renamed or removed, or
+/// a unit released with `nyl state forget`.
+pub const OWNED_PREFIX_FIX: &str =
+    "publish it through the environment that owns it, or release it deliberately: in a commit to the \
+     publication branch, remove the `owner` member from `<prefix>/_nyl/index.json` and set its `version` to 3, \
+     which makes the prefix unowned, so the next publication adopts it";
 
 fn is_unchanged(
     previous: Option<&RenderIndex>,
@@ -981,6 +994,9 @@ mod tests {
         let error = reconcile_with(&root, compiled(), ReconcileOptions::default()).unwrap_err();
         assert!(error.is_owner_fenced(), "{error}");
         assert!(error.to_string().contains("outside orchestration"), "{error}");
+        // The refusal carries its stable code and the way out when the owner is gone for good.
+        assert!(error.to_string().starts_with("NYL-TREE-OWNED-BY-UNIT:"), "{error}");
+        assert!(error.to_string().contains("remove the `owner` member"), "{error}");
         assert!(validate_rendered_tree_owner(&root, &compiled()).is_err());
         assert_eq!(read_index_owner(&root).unwrap(), Some(me.clone()));
 

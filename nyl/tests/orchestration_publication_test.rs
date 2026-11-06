@@ -280,21 +280,28 @@ fn test_owner_fencing_follows_whether_the_owning_incarnation_still_exists_in_sta
         .as_str()
         .unwrap()
         .to_owned();
-    for (environment, unit, owner_uid, why) in [
+    for (environment, unit, owner_uid, code, why) in [
         (
             "dev",
             "web-image",
             image_uid.as_str(),
+            "NYL-KUBERNETES-OWNER-FENCED",
             "still exists in the state of environment dev",
         ),
-        ("ghost", "kubernetes", uid.as_str(), "environment ghost is not declared"),
+        (
+            "ghost",
+            "kubernetes",
+            uid.as_str(),
+            "NYL-KUBERNETES-OWNER-UNKNOWN",
+            "environment ghost is not declared",
+        ),
     ] {
         rewrite_owner(&harness, environment, unit, owner_uid);
         let deploy = harness.tip("refs/heads/deploy");
         let fenced = teardown(&harness);
         assert_eq!(fenced.exit, 3, "{}\n{}", fenced.stderr, fenced.stdout);
         let message = fenced.report.to_string();
-        assert!(message.contains("NYL-KUBERNETES-OWNER-FENCED"), "{message}");
+        assert!(message.contains(code), "{message}");
         assert!(message.contains(why), "{message}");
         assert_eq!(harness.tip("refs/heads/deploy"), deploy, "nothing was published");
     }
@@ -411,6 +418,40 @@ fn test_inline_target_reconciles_and_tears_down_through_the_shell() {
         .files("refs/heads/deploy")
         .lines()
         .any(|path| path.starts_with("dev/")));
+}
+
+/// The checks across targets cover inline targets of other environments when
+/// a run renders its own: a unit selected by `dev` and `staging` on one
+/// Cluster generates colliding Application names, so `reconcile` of
+/// `dev` refuses it before anything is published. Catches the checks
+/// running only in `nyl validate`.
+#[test]
+fn test_reconcile_refuses_inline_targets_that_collide_across_environments() {
+    let harness = real_publication_harness();
+    declare_target_inline(&harness, "");
+    harness.world.commit_files(
+        "main",
+        "A staging environment selecting the same units",
+        &[(
+            "nyl/staging.yaml",
+            "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: staging\nspec:\n  unitSelector:\n    matchLabels: {dev: 'true'}\n  values: {backendDir: '%SCENARIO_TMP%/tofu'}\n  state:\n    repositoryRef: {name: platform}\n  allowUnprotectedSource: true\n",
+        )],
+    );
+    assert_eq!(invoke(&harness, &["state", "init", "-e", "dev"]).exit, 0);
+    // `plan` leaves the unit blocked on its producers, as it does for every
+    // render problem: the render happens once the inputs resolve.
+    let refused = invoke(&harness, &["reconcile", "-e", "dev", "-o", "json"]);
+    assert_ne!(refused.exit, 0, "{}", refused.report);
+    let output = format!("{}\n{}", refused.stderr, refused.report);
+    assert!(output.contains("default Release Application names"), "{output}");
+    assert!(
+        output.contains("dev-kubernetes") && output.contains("staging-kubernetes"),
+        "{output}"
+    );
+    assert!(
+        git_output(&harness.world.bare(), &["branch", "--list", "deploy"]).is_empty(),
+        "nothing was published"
+    );
 }
 
 /// `nyl validate` compiles an inline target with every other target, so a

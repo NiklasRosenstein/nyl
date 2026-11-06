@@ -534,8 +534,16 @@ spec:
   An inline target is named `<environment>-<unit>`, so adding or removing
   publication units never renames another unit's target. `target.name`
   overrides the name; it must be unique like every target name, declared or
-  inline. Changing the name, like any change to the target's identity,
-  replaces the unit through teardown.
+  inline. A unit publishes to one destination: its target's name and
+  publication repository, branch, and prefix, which each `PublishedTree`
+  records. The engine has no generic replacement on an identity change (only
+  a kind change replaces an incarnation), so a changed destination does not
+  move the published tree: the driver fails before any effect with
+  `NYL-KUBERNETES-TARGET-CHANGED`, retryable (restoring the destination
+  heals it), whose fix is to replace the unit with
+  `nyl teardown -e <env> --unit <u>`, which tears down the stored document's
+  old target, and then reconcile. A later milestone may let a driver declare
+  its identity fields so the engine replaces the unit itself.
 
   The unit renderer fills the target's `name` and `sourceFile`, the
   project-relative file that declares the unit (the file `valuesFrom` paths
@@ -565,10 +573,13 @@ spec:
   template their names, for example from `environment.name`. M2 extended the
   check from targets sharing an explicit ArgoCDInstance to this rule; inline
   targets and template instances join it with M5. Implementation status (M5):
-  `nyl validate` adds the inline targets of every environment's enabled
-  publication units to the inventory it compiles
-  (`gitops::units::with_inline_targets`); a disabled unit is torn down from
-  its stored document and contributes none. Template instances join with
+  the inline targets of every environment's enabled publication units join
+  the inventory of every compile that checks across targets, in `nyl validate`
+  and in every publication render (`gitops::units::with_inline_targets`,
+  where the rendering unit's own target comes from its stored document), so
+  prefix overlaps and Argo CD name collisions are found whichever entry point
+  compiles; a disabled unit is torn down from its stored document and
+  contributes none. Template instances join with
   EnvironmentTemplates.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
@@ -609,10 +620,19 @@ spec:
     (`unknown`: the environment is not declared at the source commit, or its
     state cannot be read). Calls that never publish, such as drift detection
     and `nyl build`, pass a directory that answers `unknown` for everything.
-  - A refused publication or removal fails with
-    `NYL-KUBERNETES-OWNER-FENCED`, category `ownership`, retryable, because
-    the next run reads state again; nothing was written. Drift detection over
-    a fenced prefix is `unknown` with the same code.
+  - A refused publication or removal fails with category `ownership`,
+    retryable, because the next run reads state again; nothing was written.
+    The code says why: `NYL-KUBERNETES-OWNER-FENCED` while the owner exists,
+    and `NYL-KUBERNETES-OWNER-UNKNOWN` when state cannot say (an environment
+    that was renamed or removed, or unreadable state). Publication outside
+    orchestration refuses with `NYL-TREE-OWNED-BY-UNIT`. The way out of the
+    last two, when the owner can no longer release the prefix, is deliberate:
+    commit to the publication branch a change to `<prefix>/_nyl/index.json`
+    that removes `owner` and sets `version` to 3, which makes the prefix
+    unowned, so the next publication adopts it. Drift detection over a fenced
+    prefix is `unknown` with the same code.
+  - Every answer of the directory reads state again, so an incarnation
+    created since an earlier answer is never taken over.
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
 - Its execution key covers the target render's complete input record from
@@ -1208,7 +1228,7 @@ their own kinds in `artifacts.gitops.nyl/v1`:
 | Kind | Published by, as | `spec` |
 | --- | --- | --- |
 | `ContainerImage` | `OciImage`, named `image` | `repository` (string), `digest` (`sha256:<hex>`), `reference` (`<repository>@<digest>`), `platforms` (list of strings), `tags` (list of strings) |
-| `PublishedTree` | `KubernetesPublication`, named `tree` | `repository` (publication URL), `branch` (string), `pathPrefix` (string), `commit` (commit ID), `indexDigest` (`sha256:<hex>` over the canonical JSON of `<prefix>/_nyl/index.json`) |
+| `PublishedTree` | `KubernetesPublication`, named `tree` | `repository` (publication URL), `branch` (string), `pathPrefix` (string), `target` (the DeploymentTarget's name), `commit` (commit ID), `indexDigest` (`sha256:<hex>` over the canonical JSON of `<prefix>/_nyl/index.json`) |
 
 Each kind publishes its artifacts under fixed names, so references name them
 without configuration. An artifact document has `apiVersion`, `kind`,

@@ -467,9 +467,12 @@ fn test_a_prefix_owned_by_an_existing_incarnation_is_fenced_until_it_is_gone() {
         };
         outcome
     };
-    for status in [
-        IncarnationStatus::Exists,
-        IncarnationStatus::Unknown("the state of environment dev cannot be read".to_owned()),
+    for (status, code) in [
+        (IncarnationStatus::Exists, "NYL-KUBERNETES-OWNER-FENCED"),
+        (
+            IncarnationStatus::Unknown("the state of environment dev cannot be read".to_owned()),
+            "NYL-KUBERNETES-OWNER-UNKNOWN",
+        ),
     ] {
         let Outcome::Failed {
             category,
@@ -481,11 +484,15 @@ fn test_a_prefix_owned_by_an_existing_incarnation_is_fenced_until_it_is_gone() {
         };
         assert_eq!(category, nyl_core::orchestration::state::FailureCategory::Ownership);
         assert!(retryable, "the next run reads state again");
-        assert!(message.starts_with("NYL-KUBERNETES-OWNER-FENCED:"), "{message}");
+        assert!(message.starts_with(&format!("{code}:")), "{message}");
         assert!(
             message.contains(&format!("unit dev/kubernetes (uid {FIRST})")),
             "{message}"
         );
+        if code.ends_with("UNKNOWN") {
+            // The way out of an owner that state can no longer answer for.
+            assert!(message.contains("remove the `owner` member"), "{message}");
+        }
         assert_eq!(git(&world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
     }
 
@@ -616,16 +623,11 @@ fn inline_spec() -> Value {
     spec
 }
 
-/// Catches an inline target going through any other path than a declared
-/// one: it keys the unit like a target (the render's input record names the
-/// target by its inline name), publishes beneath its own prefix with its own
-/// name in the ownership index, records the unit as owner, and tears down in
-/// two phases like every target.
-#[test]
-fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
+/// The world with its ApplicationGroup naming Applications and AppProjects
+/// from their target: they are unique among every target of the cluster,
+/// inline ones included.
+fn named_per_target() -> World {
     let world = World::new();
-    // Application and AppProject names are unique among every target of the
-    // cluster, inline ones included, so the group names them from their target.
     let group = world.work().join("nyl/web.yaml");
     let text = std::fs::read_to_string(&group).unwrap();
     std::fs::write(
@@ -639,6 +641,17 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
         &world.work(),
         &["commit", "--quiet", "--message", "Name applications per target"],
     );
+    world
+}
+
+/// Catches an inline target going through any other path than a declared
+/// one: it keys the unit like a target (the render's input record names the
+/// target by its inline name), publishes beneath its own prefix with its own
+/// name in the ownership index, records the unit as owner, and tears down in
+/// two phases like every target.
+#[test]
+fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
+    let world = named_per_target();
     let driver = real();
     let id = identity();
     let unit = resolved_unit(&driver, &world, inline_spec());
@@ -680,6 +693,73 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
     let [first] = driver.ownership_scopes(&dev, &inline_spec()).try_into().unwrap();
     let [second] = driver.ownership_scopes(&dev, &inline_spec()).try_into().unwrap();
     assert!(first.overlaps(&second));
+}
+
+/// Catches a renamed target publishing a second tree and orphaning the first,
+/// or failing in the ownership index with no way out: nothing in the engine
+/// replaces a unit when its destination changes, so the driver fails closed
+/// before any effect with `NYL-KUBERNETES-TARGET-CHANGED`, naming what changed
+/// and how to replace the unit. It holds with an explicit prefix, which stays
+/// while the name changes, and with the default prefix, which follows the name.
+#[test]
+fn test_a_changed_target_destination_fails_before_publishing_anything() {
+    let driver = real();
+    let id = identity();
+    let key = ExecutionKey::from_digest_of(b"key");
+    for (explicit_prefix, changed) in [
+        (true, "target \"preview\" became \"preview-2\""),
+        (false, "pathPrefix \"preview-1\" became \"preview-2\""),
+    ] {
+        let world = named_per_target();
+        let published = |spec: Value| desired(spec, key.clone());
+        let mut before = inline_spec();
+        if !explicit_prefix {
+            before["target"]["inline"]["publication"]
+                .as_object_mut()
+                .unwrap()
+                .remove("pathPrefix");
+            before["target"]["name"] = json!("preview-1");
+        }
+        let Supported::Supported(Outcome::Succeeded { artifacts, .. }) = driver
+            .reconcile(
+                &context(&world, DriverOperation::Reconcile, Some(&id)),
+                &published(before.clone()),
+            )
+            .unwrap()
+        else {
+            panic!("the first publication succeeds");
+        };
+        let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
+        assert_eq!(artifacts[0].spec["target"], before["target"]["name"]);
+
+        let mut renamed = before.clone();
+        renamed["target"]["name"] = json!("preview-2");
+        let mut ctx = context(&world, DriverOperation::Reconcile, Some(&id));
+        ctx.artifacts = artifacts
+            .into_iter()
+            .map(|artifact| ("tree".to_owned(), artifact))
+            .collect();
+        let Supported::Supported(Outcome::Failed { retryable, message, .. }) =
+            driver.reconcile(&ctx, &published(renamed.clone())).unwrap()
+        else {
+            panic!("a changed destination fails");
+        };
+        assert!(retryable, "restoring the name needs no recovery");
+        assert!(message.starts_with("NYL-KUBERNETES-TARGET-CHANGED:"), "{message}");
+        assert!(message.contains(changed), "{message}");
+        assert!(message.contains("nyl teardown -e dev --unit kubernetes"), "{message}");
+        assert_eq!(
+            git(&world.bare(), &["rev-parse", "refs/heads/deploy"]),
+            head,
+            "nothing was published"
+        );
+
+        // The unchanged destination still publishes.
+        let Supported::Supported(outcome) = driver.reconcile(&ctx, &published(before)).unwrap() else {
+            panic!("the driver reconciles");
+        };
+        assert!(matches!(outcome, Outcome::Succeeded { .. }), "{outcome:?}");
+    }
 }
 
 /// Catches two units publishing one DeploymentTarget going unnoticed.

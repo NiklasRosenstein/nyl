@@ -61,9 +61,19 @@ The unit's templates see the environment's `values` and `environment`, as the
 other unit fields do. The inline target is named `<environment>-<unit>`, here
 `dev-kubernetes`, so adding or removing publication units never renames another
 unit's target; `target.name` overrides the name. Target names are unique across
-declared and inline targets, and changing the name replaces the unit through
-teardown. Relative paths in `valuesFrom` start at the file that declares the
-unit.
+declared and inline targets. Relative paths in `valuesFrom` start at the file
+that declares the unit.
+
+A unit publishes to one destination, its target's name and publication
+repository, branch, and prefix. Changing any of them, such as renaming the
+target or the prefix, does not move the published tree: the next publication
+fails before writing anything with `NYL-KUBERNETES-TARGET-CHANGED`, naming what
+changed, until you restore the previous destination or replace the unit. To
+replace it, run `nyl teardown -e <env> --unit <unit>`, which removes the tree
+the unit published (its stored document still names the old target), and then
+reconcile, which publishes the new target as a new incarnation. `nyl plan`
+does not show the change, because a publication renders only once the units its
+target reads have run.
 
 From then on the target is an ordinary one. It is parsed as strictly as a
 declared target, rendered and published through the same compile and publish
@@ -75,6 +85,13 @@ on the same cluster and Argo CD namespace. Use `applicationNameTemplate` and
 ApplicationGroup. Its `fromUnit` bindings work as in a declared target. The
 renderer fills `target.name` and `target.sourceFile` (the file that declares the
 unit); writing `sourceFile` by hand is an error.
+
+Every publication render adds the inline targets of every declared
+environment's enabled units to the project's targets, so the checks across
+targets run when a unit resolves in `nyl reconcile`, as well as in
+`nyl validate`: a unit selected by `dev` and `staging` on one cluster whose
+Application names do not depend on the target, or prefixes that nest, fail the
+render of either environment's unit.
 
 ## Release inputs from other units
 
@@ -124,7 +141,7 @@ observe an input completely executes on every reconcile. Publishing an
 unchanged tree creates no commit.
 
 The unit records a `PublishedTree` artifact named `tree` with `repository`,
-`branch`, `pathPrefix`, `commit`, and `indexDigest`. The push is a
+`branch`, `pathPrefix`, `target`, `commit`, and `indexDigest`. The push is a
 compare-and-swap on the branch head. When another publication moved the head
 first, nothing was published, and the unit builds its commit again on the new
 head, up to three times and within its `timeout`. A target with
@@ -155,6 +172,19 @@ the owner's environment cannot be read, or the environment is no longer
 declared, the fence holds. The first orchestrated publication over a prefix
 without an owner adopts it and upgrades its index, and `publish-tree` refuses a
 prefix an orchestrated unit owns.
+
+Each refusal has a code and a way out:
+
+| Code | Meaning and fix |
+| --- | --- |
+| `NYL-KUBERNETES-OWNER-FENCED` | Another unit incarnation that still exists owns the prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
+| `NYL-KUBERNETES-OWNER-UNKNOWN` | The owner's environment was renamed or removed, or its state cannot be read, so Nyl cannot tell whether the owner exists. Declare the environment again and tear its unit down, or release the prefix deliberately (below). |
+| `NYL-TREE-OWNED-BY-UNIT` | `publish-tree` or `render-tree` met a prefix an orchestrated unit owns, for example after `nyl state forget` released the unit. Publish through the environment that owns it, or release the prefix deliberately (below). |
+| `NYL-KUBERNETES-TARGET-CHANGED` | The unit's destination changed since it last published. Restore it, or replace the unit as described under [Inline targets](#inline-targets). |
+
+To release a prefix deliberately, commit to the publication branch a change to
+`<prefix>/_nyl/index.json` that removes its `owner` member and sets `version`
+to `3`. The prefix is then unowned, and the next publication adopts it.
 
 ## Teardown
 

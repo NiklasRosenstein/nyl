@@ -264,6 +264,9 @@ incarnation owns, with `NYL-KUBERNETES-OWNER-FENCED`
 | `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM` | A publication's target does not let its teardown complete. Each names the setting that fixes it. |
 | `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS` | A publication's teardown leaves these objects behind. Each names the setting that removes them. |
 | `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
+| `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read. Declare the environment again and tear its unit down, or release the prefix as [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership) describes. |
+| `NYL-TREE-OWNED-BY-UNIT` | `publish-tree` or `render-tree` met a prefix an orchestrated unit owns, such as after `nyl state forget`. Publish through the owning environment, or release the prefix as above. |
+| `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published; nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile to publish the new target. |
 | `NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` | The `observe` teardown wait is not available yet. Use `delay` or `manual`. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting. Pass `--allow-teardown`, restore the old kind, or forget the old incarnation. |
