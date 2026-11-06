@@ -42,6 +42,9 @@ pub struct StateOperationReport {
     pub errors: Vec<Finding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Finding>,
+    /// The expiry an instance's record holds after the operation, when it has one.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<nyl_core::orchestration::time::Timestamp>,
     /// Operation specifics, such as the location moved to.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub details: BTreeMap<String, Value>,
@@ -59,6 +62,7 @@ impl StateOperationReport {
             commits: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            expires_at: None,
             details: BTreeMap::new(),
         }
     }

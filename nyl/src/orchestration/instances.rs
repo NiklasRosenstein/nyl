@@ -70,19 +70,12 @@ pub fn remove_expired(
 ) -> Result<EnvironmentRunReport, Stop> {
     let instance = session.resolved.instance.as_ref().expect("only an instance expires");
     // The decision the removal repeats under the lease: this expiry, reached.
-    let recorded = instance.record.as_ref().and_then(|record| record.expires_at);
-    let decided_on = recorded
-        .filter(|_| expiry::expired(recorded, instance.terms.ttl, wiring.clock.now()))
-        .ok_or_else(|| {
-            Finding::new(
-                Code::InstanceRenewed,
-                format!("{} is not expired, so nothing is removed", session.resolved.name),
-                format!(
-                    "run `nyl reconcile -e {}` again; the next run decides on the instance's current expiry",
-                    session.resolved.name
-                ),
-            )
-        })?;
+    let decided_on = expiry::decided_expiry(
+        &session.resolved.name,
+        instance.record.as_ref().and_then(|record| record.expires_at),
+        instance.terms.ttl,
+        wiring.clock.now(),
+    )?;
     let identity = wiring.commit_identity(&session.resolved.git_dir, removal.author)?;
     let authorized = expiry::removal_authorized(instance.terms.allow_teardown, removal.allow_teardown);
     let mut request = session.request(&RunOptions {
@@ -238,8 +231,7 @@ fn evict(name: &EnvironmentName, wiring: &Wiring<'_>, removal: &Removal<'_>) -> 
                 &codes,
             ))
         }
-        Err(Stop::Finding(finding)) if finding.code == Code::InstanceRenewed => Ok(EvictionResult::Renewed),
-        Err(Stop::Finding(_)) => Ok(EvictionResult::Incomplete),
+        Err(Stop::Finding(finding)) => Ok(expiry::eviction_result_of_stop(finding.code)),
         Err(error @ Stop::Error(_)) => Err(error),
     }
 }

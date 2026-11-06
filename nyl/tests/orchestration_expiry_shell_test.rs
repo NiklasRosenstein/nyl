@@ -15,7 +15,7 @@ use nyl_core::orchestration::state::{DeletionReason, Lifecycle};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::run::{Cancellation, LifecycleOptions, RunContext, RunMode, TeardownTarget};
-use nyl_orchestration::shell::state::{renew_instance, Requested};
+use nyl_orchestration::shell::state::{init_instance, renew_instance, InstanceInit, Requested, Restart};
 use nyl_orchestration::shell::teardown::{state_delete_detailed, Deletion};
 use nyl_units::process::ProcessRunner;
 use scenario::shell::{self, dev, shared_project};
@@ -247,4 +247,92 @@ fn test_a_renewal_leaves_a_teardown_that_started_and_undoes_the_rest() {
     for unit in ["network", "database", "web-image"] {
         assert_eq!(state(unit), Lifecycle::Active, "{unit} waited behind the teardown");
     }
+}
+
+/// Whether a deleted instance restarts is decided under the lease, on the
+/// record the write reads: the job that finds it deleted restarts it, and a
+/// second job that read the record before that, and so still thinks it deleted,
+/// finds it live and updates it without dropping the first job's documents.
+/// Catches two jobs for one pull request orphaning each other's resources.
+#[test]
+fn test_a_restart_if_deleted_is_decided_under_the_lease() {
+    let harness = expiring("2026-10-01T10:00:00Z");
+    // The fleet removed the preview: its files are gone and its record is the deleted marker.
+    let snapshot = harness.snapshot();
+    let mut record = snapshot.record.clone().unwrap();
+    record
+        .events
+        .push(nyl_core::orchestration::state::StateEvent::StateDeleted {
+            at: at("2026-10-02T00:00:00Z"),
+            by: "sweep".to_owned(),
+            reason: None,
+        });
+    let held = harness
+        .store
+        .take_lease(&harness.location, &dev(), &lease(&harness), None)
+        .unwrap();
+    let committed = harness
+        .store
+        .commit(
+            &harness.location,
+            &dev(),
+            &snapshot.tips,
+            &Transition {
+                message: "nyl: state-delete dev (staged)\n\nNyl-Operation: state-delete\n".to_owned(),
+                changes: TransitionChanges {
+                    clear: true,
+                    record: Some(record),
+                    ..TransitionChanges::default()
+                },
+            },
+            &held,
+        )
+        .unwrap();
+    harness
+        .store
+        .release_lease(&harness.location, &dev(), &committed.lease_version)
+        .unwrap();
+    assert!(harness.snapshot().record.unwrap().deleted().is_some());
+    assert!(harness.snapshot().desired.is_empty());
+
+    let source_commit = harness.job(&[], Cancellation::default()).request.entry_commit;
+    let write = || {
+        init_instance(
+            &harness.context(),
+            &dev(),
+            &harness.location,
+            &InstanceInit {
+                template: "preview",
+                params: &std::collections::BTreeMap::new(),
+                source_commit: &source_commit,
+                ttl: Some(nyl_core::orchestration::time::Duration::from_secs(7 * 86_400)),
+                keep: None,
+            },
+            Restart::IfDeleted,
+            &Requested::default(),
+        )
+    };
+    // Job 1 finds the record deleted under its lease, and restarts the instance.
+    let first = write();
+    assert_eq!(first.exit, 0, "{first:?}");
+    assert!(harness.snapshot().record.unwrap().deleted().is_none());
+    assert!(harness.reconcile(&[]).errors.is_empty());
+    let uids = harness
+        .snapshot()
+        .desired
+        .iter()
+        .map(|(name, unit)| (name.clone(), unit.unit.uid.clone()))
+        .collect::<Vec<_>>();
+    assert!(!uids.is_empty() && uids.iter().all(|(_, uid)| uid.is_some()));
+
+    // Job 2 saw the record deleted before that; under its lease it is live, so it only updates.
+    let second = write();
+    assert_eq!(second.exit, 0, "{second:?}");
+    let after = harness
+        .snapshot()
+        .desired
+        .iter()
+        .map(|(name, unit)| (name.clone(), unit.unit.uid.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(after, uids, "the first job's incarnations were not dropped");
 }

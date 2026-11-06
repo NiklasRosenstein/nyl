@@ -42,11 +42,24 @@ pub use workload::{KubeResourceReader, ResourceReader};
 
 pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]
-pub(crate) use readiness::{evaluate as evaluate_teardown_readiness, unattended_wait};
+pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
 pub(crate) use run::{plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target};
 pub(crate) use spec::teardown_wait;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use spec::validate_teardown_wait;
+
+/// What a teardown of `unit` that nobody attends would wait for, read from its
+/// declaration (resolved or not): a `manual` `teardownWait` stops it after
+/// phase 1. Shared by the kind and its fake, whose `Driver::unattended_teardown`
+/// it is.
+pub(crate) fn unattended_teardown(
+    unit: &nyl_core::orchestration::state::DesiredUnit,
+) -> Vec<nyl_core::orchestration::codes::Finding> {
+    let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+    readiness::unattended_wait(&unit.unit.environment, &unit.unit.name, teardown_wait(spec))
+        .into_iter()
+        .collect()
+}
 
 /// The kind's name.
 pub const KIND: &str = "KubernetesPublication";

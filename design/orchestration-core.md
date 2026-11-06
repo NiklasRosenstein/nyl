@@ -1306,22 +1306,25 @@ nyl get environments                                         # declared environm
   whose state was deleted as missing and creates it again, as a new instance
   under `maxInstances`, so a pull request whose preview the fleet job removed
   gets it back with its next push; `state init --template` still needs
-  `--fresh`.
+  `--fresh`. Whether the record is deleted is decided under the lease, on the
+  record the write reads: of two jobs that saw it deleted, the first restarts
+  the instance and the second finds it live and only updates it, so the second
+  never drops the first's documents.
 - With `keepSource` (the default), Nyl keeps each instance's recorded source
   commit fetchable with a keep ref in the source repository, so teardown after
   the pull request branch is deleted or squash-merged still finds its source.
   `keepSource: false` turns it off, and the pipeline should then remove
   instances before their branches disappear. The refs are
-  `refs/nyl-keep/<project>/<instance>/<commit>`, one per commit and never
-  moved:
-  - `<project>` is a digest of the project's directory in the source
-    repository, so two projects of one monorepo, with state in different
-    repositories, cannot collide on an instance name. The namespace does not
-    depend on `coordinationRefPrefix`, so moving an instance's state never
-    strands its refs, and it is reserved: a state ref or prefix inside it is
-    `NYL-STATE-REF-CONFLICT`. Moving the project's directory in the source
-    repository changes `<project>`, and with it where an instance's older
-    commits are looked up.
+  `refs/nyl-keep/<keepId>/<commit>`, one per commit and never moved:
+  - `<keepId>` is minted from the injected id generator when an instance first
+    keeps a commit and recorded in its `state.yaml` (`keepId`); every lookup and
+    release reads it from the record. It is unique across projects of one
+    source repository, and survives moves of the state and of the project
+    directory and renames of the template, because nothing about the name is
+    derived from where the instance lives. A restarted instance (a deleted
+    one that starts over) mints a new one. The namespace does not depend on
+    `coordinationRefPrefix`, and it is reserved: a state ref or prefix inside it
+    is `NYL-STATE-REF-CONFLICT`.
   - `state init --template` and `reconcile --template` create the ref of the
     commit they record under the lease, past every refusal and before the
     record is written, and remove the instance's other refs after the record is
@@ -1438,7 +1441,10 @@ expired from the moment `expiresAt` is reached.
   `--approve`, which name the new pull request's instance. Removal also waits for each publication's `teardownWait`: with the
   `manual` default of `mode: publish`, it stops after phase 1 until
   `--confirm-removed`, so templates meant to expire unattended use `observe`
-  or `delay`, and `state init --template` warns otherwise
+  or `delay`. A removal stuck in phase 1 needs `--confirm-removed` (or
+  `teardown --all` run again once the wait is over); until then the preview
+  is half torn down, every reconcile of it, the pull request job's included,
+  exits 2, and nothing recreates its workloads. `state init --template` warns otherwise
   (`NYL-TEARDOWN-WAIT-MANUAL`, read from the unit's declaration, so it shows
   before any producer ran; the unmet readiness requirements of the unit are
   shown for the units that can resolve then, and by `plan` for the rest). The decision is made
@@ -1629,7 +1635,7 @@ files cover every version, and a reader rejects a version it does not know.
 
 | Kind | Location | Content |
 | --- | --- | --- |
-| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
+| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `sourceCommit`, `keepId`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
 | `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, `admission` with the generation, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
 | `DeploymentAdmission` (M8) | `admission.yaml` on the admission ref | The current generation: ID, sequence, source commit and how it was chosen, semantic graph digest, and normalized authorizing actor, request, and reason; only a newer admission replaces it (see [Deployment admission](ci-execution.md#deployment-admission)) |
 | `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file; a held marker is a DesiredUnit with `lifecycle.state: held` and only the unit's environment and name (see [Deletion](#deletion)) |

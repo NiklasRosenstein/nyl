@@ -519,7 +519,7 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | --- | --- | --- |
 | `main` | People, through pull requests | Nyl: dev runs from its worktree; `protectedRefs` default |
 | `pr-<n>` | People | Nyl: each preview instance runs from its pull request job's worktree, recorded in state (`allowUnprotectedSource`) |
-| `refs/nyl-keep/<project>/<instance>/<commit>` | Nyl, when an instance records a new source commit (the previous commit's ref is removed after the record lands); removed by `state delete` | Nyl: teardown after the branch is gone |
+| `refs/nyl-keep/<keepId>/<commit>` | Nyl, when an instance records a new source commit (the previous commit's ref is removed after the record lands); removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
 | `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the fleet reconcile publishes the shared catalog under `_nyl/shared/previews/` | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |

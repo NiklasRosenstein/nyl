@@ -9,29 +9,28 @@
 //! The names are what keeps two instances, projects, and Nyl versions from
 //! disturbing each other:
 //!
-//! - `refs/nyl-keep/<project>/<instance>/<commit>`: one ref per commit that is
-//!   never moved. A new commit is kept first, the record that names it is
-//!   written, and only then are the instance's other refs removed, so the
-//!   recorded commit is never unkept.
-//! - `<project>` is a digest of the project's directory in the source
-//!   repository, so two projects of one monorepo with state in different
-//!   repositories cannot collide on an instance name.
-//! - The namespace is independent of `coordinationRefPrefix`, so moving an
-//!   instance's state never strands its refs, and reserved: a state ref under
-//!   it is a conflict ([`reserved_conflict`]).
+//! - `refs/nyl-keep/<keepId>/<commit>`: one ref per commit that is never
+//!   moved. A new commit is kept first, the record that names it is written,
+//!   and only then are the instance's other refs removed, so the recorded
+//!   commit is never unkept.
+//! - `<keepId>` is minted from the injected id generator when an instance
+//!   first keeps a commit and recorded in its `state.yaml`. It is unique
+//!   across projects of one source repository, and survives moves of the
+//!   state and of the project directory and renames of the template, because
+//!   nothing about the name is derived from where the instance lives.
+//! - The namespace is reserved: a state ref under it is a conflict
+//!   ([`reserved_conflict`]).
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, Uid};
 use nyl_core::orchestration::state::StateLocation;
 
 /// The namespace of every keep ref.
 pub const KEEP_NAMESPACE: &str = "refs/nyl-keep/";
 
-/// The prefix of `environment`'s keep refs in the project at `project_dir`,
-/// the worktree-rooted directory of its `nyl.toml`.
-pub fn keep_prefix(project_dir: &str, environment: &EnvironmentName) -> String {
-    let digest = nyl_core::digest::sha256_hex(project_dir.trim_matches('/').as_bytes());
-    format!("{KEEP_NAMESPACE}{}/{environment}", &digest[..12])
+/// The prefix of the keep refs of the instance whose record holds `keep_id`.
+pub fn keep_prefix(keep_id: &Uid) -> String {
+    format!("{KEEP_NAMESPACE}{keep_id}")
 }
 
 /// The keep ref of `commit` under `prefix`.
@@ -74,21 +73,16 @@ mod tests {
         EnvironmentName::new(text).unwrap()
     }
 
-    /// Catches two projects of one source repository sharing keep refs for an
-    /// instance of the same name, and a project whose refs change with its
-    /// state location.
+    /// Catches keep refs that depend on where an instance lives, which would
+    /// strand them when its state or project moves, or that collide between
+    /// instances.
     #[test]
-    fn test_keep_refs_are_named_by_project_instance_and_commit() {
+    fn test_keep_refs_are_named_by_keep_id_and_commit() {
         let commit = CommitId::new("a".repeat(40)).unwrap();
-        let first = keep_prefix("/team-a", &name("pr-1"));
-        let second = keep_prefix("/team-b", &name("pr-1"));
+        let first = keep_prefix(&Uid::new("00000000-0000-7000-8000-000000000001").unwrap());
+        let second = keep_prefix(&Uid::new("00000000-0000-7000-8000-000000000002").unwrap());
         assert_ne!(first, second);
-        assert!(first.starts_with("refs/nyl-keep/") && first.ends_with("/pr-1"));
-        assert_eq!(
-            keep_prefix("team-a/", &name("pr-1")),
-            first,
-            "the slashes around the directory do not matter"
-        );
+        assert_eq!(first, "refs/nyl-keep/00000000-0000-7000-8000-000000000001");
         let reference = keep_ref(&first, &commit);
         assert_eq!(reference, format!("{first}/{commit}"));
         assert_eq!(kept_commit(&first, &reference), Some(commit.as_str()));

@@ -75,7 +75,7 @@ new instance needs, then creates it, and `--allow-teardown` and
 `--allow-incomplete` authorize those removals like the options of
 [`nyl reconcile`](/nyl/reference/cli/reconcile/#preview-lifecycle) do. Unless
 the template sets `keepSource: false`, it creates a keep ref of the recorded
-commit, `refs/nyl-keep/<project>/<instance>/<commit>`, in the source repository
+commit, `refs/nyl-keep/<keepId>/<commit>`, in the source repository
 before recording it, and removes the instance's older ones afterwards; a
 repository that refuses the push refuses the command
 (`NYL-INSTANCE-KEEP-FAILED`, exit 1) before anything is written, which a

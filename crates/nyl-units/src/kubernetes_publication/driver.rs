@@ -378,10 +378,7 @@ impl Driver for KubernetesPublicationDriver {
 
     /// A `manual` `teardownWait` stops an unattended removal after phase 1.
     fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<nyl_core::orchestration::codes::Finding> {
-        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-        super::readiness::unattended_wait(&unit.unit.environment, &unit.unit.name, teardown_wait(spec))
-            .into_iter()
-            .collect()
+        super::unattended_teardown(unit)
     }
 
     /// The workload Applications Argo CD still reports, for the `observe`
