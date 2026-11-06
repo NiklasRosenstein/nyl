@@ -253,7 +253,13 @@ impl Driver for FakePublication {
         if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Teardown) {
             return Ok(Supported::Supported(outcome));
         }
-        teardown(&self.resource_catalogue, ctx, unit).map(Supported::Supported)
+        teardown(
+            &self.resource_catalogue,
+            ctx,
+            unit,
+            &crate::kubernetes_publication::direct::ClusterAccess::Live,
+        )
+        .map(Supported::Supported)
     }
 
     /// The readiness of the `teardownSettings` the stored document records;

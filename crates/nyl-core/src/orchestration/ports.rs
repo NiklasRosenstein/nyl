@@ -29,6 +29,19 @@ pub trait Clock: Send + Sync {
     fn wait(&self, duration: Duration);
 }
 
+/// A clock that stands still: `now` is fixed and a wait returns at once. For
+/// calls that never wait, such as `nyl build`.
+#[derive(Debug, Clone, Copy)]
+pub struct FrozenClock(pub Timestamp);
+
+impl Clock for FrozenClock {
+    fn now(&self) -> Timestamp {
+        self.0
+    }
+
+    fn wait(&self, _duration: Duration) {}
+}
+
 /// New identifiers: UUIDv7 uids for incarnations and run IDs.
 pub trait IdGenerator: Send + Sync {
     fn uid(&self) -> Uid;

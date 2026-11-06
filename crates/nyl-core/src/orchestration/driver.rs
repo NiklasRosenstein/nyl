@@ -527,6 +527,11 @@ pub struct ExecutionContext<'a> {
     /// across environments (placements, inline targets) includes like
     /// declared environments.
     pub instances: &'a super::instance::Instances,
+    /// The injected clock, for a driver that waits inside a call, such as a
+    /// publication that polls its reconciler until it is healthy. A driver
+    /// never reads the system clock: `now` is when the call started, and this
+    /// is what has passed since, and how to wait.
+    pub clock: &'a dyn super::ports::Clock,
 }
 
 /// How a driver's teardown wait after phase 1 ends

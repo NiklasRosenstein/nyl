@@ -877,6 +877,7 @@ mod tests {
         let now = "2026-10-28T12:00:00Z".parse().unwrap();
         ExecutionContext {
             instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+            clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
             unit: UnitAddress::new(EnvironmentName::new("dev").unwrap(), UnitName::new("web").unwrap()),
             operation: DriverOperation::Reconcile,
             worktree: root.into(),

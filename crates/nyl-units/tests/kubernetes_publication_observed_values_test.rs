@@ -308,7 +308,9 @@ fn test_resolution_records_the_owning_application_and_the_workload_cluster() {
         resolved["workload"],
         json!({"cluster": "dev", "context": "workload-admin"})
     );
-    let ReconcilerLocation::ArgoCd(location) = facts(&unit).location;
+    let ReconcilerLocation::ArgoCd(location) = facts(&unit).location else {
+        panic!("an Argo CD target records an Argo CD location")
+    };
     assert_eq!(location.cluster, "control", "Argo CD runs in another Cluster");
     assert_eq!(location.context.as_deref(), Some("argocd-admin"));
     assert!(driver.capabilities(&Live::spec(json!({}))).observed_values);

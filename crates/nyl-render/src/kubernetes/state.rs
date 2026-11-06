@@ -40,6 +40,49 @@ pub struct ReleaseInfo {
     pub resource_count: usize,
 }
 
+/// The publication a revision was applied for: the destination of the target
+/// tree and, when the revision was applied from a published commit, that commit.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#fencing-and-ownership-in-the-cluster).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleasePublication {
+    pub repository: String,
+    pub branch: String,
+    pub path_prefix: String,
+    /// The publication commit whose tree was applied; absent when applied by `nyl apply`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+impl ReleasePublication {
+    /// Whether `other` names the same destination (repository, branch, prefix),
+    /// whatever commit either applied.
+    pub fn same_destination(&self, other: &Self) -> bool {
+        self.repository == other.repository && self.branch == other.branch && self.path_prefix == other.path_prefix
+    }
+}
+
+/// What a revision records about who applied it and for which publication,
+/// stored beside the revision (the Secret's `meta` key). A revision applied
+/// without it, such as by an older `nyl`, has none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseMeta {
+    /// The orchestration unit incarnation that applied it; absent when applied outside orchestration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::gitops::reconcile::RenderIndexOwner>,
+    /// The publication it was applied for; absent when applied without a target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<ReleasePublication>,
+}
+
+impl ReleaseMeta {
+    /// Whether nothing is recorded.
+    pub fn is_empty(&self) -> bool {
+        self.owner.is_none() && self.publication.is_none()
+    }
+}
+
 /// State of a release revision
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseState {
@@ -61,6 +104,9 @@ pub struct ReleaseState {
     pub applied_at: Option<DateTime<Utc>>,
     /// Error message (if status is Failed)
     pub error: Option<String>,
+    /// Who applied the revision and for which publication.
+    #[serde(default)]
+    pub meta: ReleaseMeta,
 }
 
 /// Trait for storing and retrieving release state
@@ -282,6 +328,12 @@ impl KubernetesReleaseStorage {
         if let Some(error) = &release.error {
             data.insert("error".to_string(), Self::encode_base64(error));
         }
+        if !release.meta.is_empty() {
+            data.insert(
+                "meta".to_string(),
+                Self::encode_base64(&serde_json::to_string(&release.meta)?),
+            );
+        }
 
         // Validate total Secret size doesn't exceed 1MB
         let total_size: usize = data.values().map(|v| v.0.len()).sum();
@@ -385,6 +437,12 @@ impl KubernetesReleaseStorage {
             None
         };
 
+        let meta = match data.get("meta") {
+            Some(meta) => serde_json::from_str(&Self::decode_base64(meta)?)
+                .map_err(|e| NylError::Config(format!("Invalid meta in release Secret: {}", e)))?,
+            None => ReleaseMeta::default(),
+        };
+
         Ok(ReleaseState {
             release_name,
             release_namespace,
@@ -395,6 +453,7 @@ impl KubernetesReleaseStorage {
             rendered_at,
             applied_at,
             error,
+            meta,
         })
     }
 }
@@ -790,6 +849,7 @@ mod tests {
             rendered_at: Utc::now(),
             applied_at: None,
             error: None,
+            meta: ReleaseMeta::default(),
         }
     }
 
@@ -845,6 +905,7 @@ mod tests {
             rendered_at: Utc::now(),
             applied_at: None,
             error: None,
+            meta: ReleaseMeta::default(),
         };
 
         storage.save_release(&release).await.unwrap();
@@ -873,6 +934,7 @@ mod tests {
                 rendered_at: Utc::now(),
                 applied_at: Some(Utc::now()),
                 error: None,
+                meta: ReleaseMeta::default(),
             };
             storage.save_release(&release).await.unwrap();
         }
@@ -898,6 +960,7 @@ mod tests {
                 rendered_at: Utc::now(),
                 applied_at: Some(Utc::now()),
                 error: None,
+                meta: ReleaseMeta::default(),
             };
             storage.save_release(&release).await.unwrap();
         }
@@ -937,6 +1000,7 @@ mod tests {
             rendered_at: Utc::now(),
             applied_at: None,
             error: None,
+            meta: ReleaseMeta::default(),
         };
 
         storage.save_release(&release).await.unwrap();
@@ -1070,6 +1134,7 @@ mod tests {
             rendered_at: Utc::now(),
             applied_at: None,
             error: None,
+            meta: ReleaseMeta::default(),
         };
 
         let secret = KubernetesReleaseStorage::to_secret(&release).unwrap();
@@ -1102,6 +1167,7 @@ mod tests {
                 rendered_at: Utc::now(),
                 applied_at: Some(Utc::now()),
                 error: None,
+                meta: ReleaseMeta::default(),
             };
             storage.save_release(&release).await.unwrap();
         }
@@ -1134,6 +1200,7 @@ mod tests {
             rendered_at: Utc::now(),
             applied_at: Some(Utc::now()),
             error: None,
+            meta: ReleaseMeta::default(),
         };
 
         storage.save_release(&release).await.unwrap();
@@ -1166,6 +1233,7 @@ mod tests {
                 rendered_at: Utc::now(),
                 applied_at: Some(Utc::now()),
                 error: None,
+                meta: ReleaseMeta::default(),
             };
             storage.save_release(&release).await.unwrap();
         }
