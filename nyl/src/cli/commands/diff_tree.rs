@@ -241,6 +241,7 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
 async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
         let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+        nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
         let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target)?;
         let nyl_render::gitops::provenance::WorktreeSourceState { commit, dirty } =

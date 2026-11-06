@@ -551,13 +551,19 @@ environment on the same cluster produces, or when previews use dev's network.
   commit records. Nyl finds dependents by reading the declared environments'
   desired state and listing the templates' state locations, so a live
   instance's unit protects its producer like a declared consumer.
-- Omitting a producer from its environment is caught earlier: the sources of
-  every environment, instances at their recorded commits, are validated
-  together, so a consumer that still references a unit its producer no longer
-  selects is `NYL-REFERENCE-INVALID` (the reference is "outside its ownership
-  set"), and `--allow-dependents` does not override it. The consumer drops the
-  reference first, or the instance is removed; an expired instance being
-  removed is not rendered, so it never holds a producer back.
+- Omitting a producer from its environment is refused like its teardown: the
+  unit leaves the ownership set, its teardown is pending, and it waits
+  (`NYL-TEARDOWN-HAS-DEPENDENTS`) while a live instance's stored unit
+  references it, until `--allow-dependents`. The consumer, not the producer,
+  then carries the error: when the sources of the environments are validated
+  together (instances at their recorded commits), a consumer that still
+  references a unit its producer no longer selects is
+  `NYL-REFERENCE-INVALID` ("outside its ownership set"), reported on the
+  consumer's environment alone, so its own next run fails or blocks while the
+  producer's environment, and every unrelated one, runs. The same holds for a
+  reference that names an instance (`NYL-REFERENCE-INSTANCE-PRODUCER`): one
+  preview's bad reference never stops dev. An expired instance being removed
+  is not rendered, so it never holds a producer back.
 
 - References are structured objects, never template lookups, so every
   dependency edge is visible in the rendered spec. Templating may compute a
@@ -1162,10 +1168,11 @@ previews branch
   `selfPrunePolicy`, `labels`, `annotations`), which the target's own
   `catalogApplication` fields would otherwise carry; a target that declares
   both is invalid, and so is a shared catalog without a `pathPrefix`. Targets
-  that name one catalog describe it identically, because one manifest is
-  rendered for all of them. The checks that span targets fail with
+  that name one catalog render the same manifest (the shared block, but also the
+  ArgoCDInstance, its catalog defaults and destination, and the repository),
+  because one manifest is rendered for all of them. The checks that span targets fail with
   `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`, naming the targets: another
-  description of the catalog, another repository or revision for it, another
+  manifest for the catalog, another repository or revision for it, another
   or no catalog on a revision that carries one, a catalog name that is also
   a target's own catalog Application, and a target prefix that is, contains,
   or lies beneath the reserved prefix `_nyl/shared`.
@@ -1182,29 +1189,58 @@ previews branch
 - The manifest has one writer, and a target's publication only creates it:
   when the publication branch holds no tree at the catalog's prefix, the
   publication of a target that names it publishes the tree first, as its own
-  commit; when the branch holds the same manifest, nothing happens; when it
-  holds another, a publication leaves it alone, so pull requests running
-  different Nyl versions never overwrite each other, and records the result
-  (`created`, `current`, or `differs`) as `sharedCatalog` in the `PublishedTree`
-  artifact it records. The writer that replaces it is the build of any unit
+  commit, by compare-and-swap (a publication that loses the race for the branch
+  head reads the new head again, and stops as `current` or `differs` once
+  another has created the manifest); when the branch holds the same manifest,
+  nothing happens; when it holds another, a publication leaves it alone, so pull
+  requests running different Nyl versions never overwrite each other. It records
+  the result (`created`, `current`, or `differs`) as `sharedCatalog` in the
+  `PublishedTree` artifact it records, and for `differs` returns the warning
+  `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` (fix: the writer below) through the
+  driver's `warnings`, which the shell records with the receipt and shows in the
+  run report, `plan`, and `status` until the unit executes again. The writer
+  that replaces it is the build of any unit
   that names the catalog, at the revision whose Nyl version and declaration
   should win, usually the default branch's from a scheduled job:
   `nyl build <unit> -e <instance> -- --shared-catalog --push` (see
-  [Direct builds](#direct-builds)). The same arguments without `--push` print
+  [Direct builds](#direct-builds)). The build renders the unit's whole target,
+  so it needs a live instance (or declared environment) whose references
+  resolve; with no live instance nothing uses the catalog and no writer is
+  needed, because the first instance's publication creates it. The scheduled
+  job that reconciles the fleet runs the writer after it. The same arguments without `--push` print
   the rendered tree, and with `--diff` compare it with the branch. No
   environment owns the shared catalog, so that push is never refused as
   `NYL-KUBERNETES-BUILD-TARGET-OWNED`.
 - Nothing is reconciled from state: Git holds the other targets' files, and
   a publish removes only files in the publishing target's index.
 - Nyl renders the shared catalog, so the readiness table checks its settings,
-  read from the shared Application: whether it prunes, and its deletion
-  policy. The shared catalog prunes each target's objects as phase 1 and
+  read from the shared Application the branch holds, at resolution, not from
+  the manifest the instance renders: Argo CD runs what is published, so a pull
+  request that declares a pruning catalog over one that does not prune reports
+  the published settings, and its teardown is held. A branch without the
+  manifest yet has nothing that prunes, so the catalog rows are not checked
+  until it exists, and a branch that cannot be read fails the resolution,
+  closed. Whether it prunes, and its deletion policy, are the rows. The shared catalog prunes each target's objects as phase 1 and
   phase 2 remove them, so the target leaves no catalog remnant
   (`NYL-TEARDOWN-CATALOG-REMAINS` does not apply).
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
   the catalog rows become `external: not checked`, which the preflight reports
   without blocking, and `observe: {}` still checks that the Applications
   actually disappear.
+- A branch carries one shared catalog, dedicated to it: every other
+  `_nyl/shared/<other>/` tree on it refuses a publication or build with
+  `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`, because each self-managing catalog
+  syncs every target's catalog directory. Renaming or decommissioning a
+  catalog is a procedure, not an edit: delete its Argo CD Application with the
+  resources kept (non-cascading, so the targets' Applications survive), remove
+  `_nyl/shared/<old>/` in one commit (the files its index owns, then its
+  index, or release the prefix as for any owner), and only then publish the new
+  one; the old catalog's decommissioning with its resources would otherwise
+  cascade through every target. The branch also holds one project's targets:
+  a catalog's include pattern and sync are the same for everything on it.
+  One shared Application is one sync for every preview on the branch: a
+  manifest Argo CD rejects blocks all of them, and an `observe` wait reads
+  nothing past it and fails closed.
 - Phase 1 keeps the target's AppProjects and publishes the target's catalog
   directory without the workload Applications, and touches nothing outside the
   target's prefix. A target with a shared catalog generates no catalog

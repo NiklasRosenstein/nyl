@@ -412,22 +412,44 @@ is `catalog:<name>`, so no instance writes outside its prefix.
   published `_nyl/shared/previews/catalog.yaml` or from
   `nyl build <unit> -e <instance> -- --shared-catalog`, and it manages itself.
 - A publication never overwrites the manifest, so pull requests running
-  different Nyl versions do not fight over it. It records the result in the
-  `PublishedTree` artifact (`nyl get artifact kubernetes/tree -e <instance>`):
-  `sharedCatalog.result` is `created`, `current`, or `differs`. To replace the
-  manifest, for example after a Nyl upgrade or a change of the `shared` block,
-  run the build from the revision that should win, usually from the scheduled
-  job on the default branch:
+  different Nyl versions do not fight over it. Creating it is a
+  compare-and-swap: a publication that loses the race reads the new head and
+  leaves the winner's manifest. It records the result in the `PublishedTree`
+  artifact (`nyl get artifact kubernetes/tree -e <instance>`):
+  `sharedCatalog.result` is `created`, `current`, or `differs`, and for `differs`
+  it warns with `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` in the run, and in
+  `plan` and `status` until the unit executes again. To replace the manifest,
+  for example after a Nyl upgrade or a change of the `shared` block, run the
+  build from the revision that should win, in the scheduled job on the default
+  branch, after the fleet reconcile:
 
-  ```console
-  $ nyl build kubernetes -e pr-123 -- --shared-catalog --diff
-  $ nyl build kubernetes -e pr-123 -- --shared-catalog --push
+  ```yaml
+  # .github/workflows/previews-maintenance.yaml (nightly)
+  - run: nyl reconcile --template preview
+  # Any live instance names the unit's inline target, such as the newest open pull request.
+  - run: nyl build kubernetes -e pr-123 -- --shared-catalog --push
   ```
 
-  The build needs a live instance (or a declared environment) for the unit's
-  inline target, and a committed source and a commit identity for `--push`.
-- Teardown readiness reads the shared Application's `syncPolicy` and deletion
-  policy: it must prune for an instance's Applications to disappear. An instance
+  The build renders the unit's whole target, so it needs a live instance (or a
+  declared environment) whose references resolve, and a committed source and a
+  commit identity for `--push`. With no live instance nothing uses the catalog,
+  and the first instance's publication creates it.
+- Rename or decommission a catalog as a procedure: a branch carries one shared
+  catalog, and a second `_nyl/shared/<other>/` tree refuses every publication
+  and build (`NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`), because each
+  self-managing catalog syncs every target's catalog directory. Delete the old
+  Argo CD Application with its resources kept (a non-cascading delete, so the
+  previews' Applications stay), remove `_nyl/shared/<old>/` from the branch in
+  one commit, and only then publish the new catalog. Deleting it with its
+  resources would cascade through every preview.
+- Dedicate the branch to the one catalog and one project: its include pattern
+  and sync are the same for everything on it. One shared Application is also
+  one sync for every preview: a manifest Argo CD rejects blocks all of them,
+  and the `observe` teardown wait fails closed for all of them.
+- Teardown readiness reads the shared Application the branch holds (at
+  resolution, not the instance's own declaration) for its `syncPolicy` and
+  deletion policy: it must prune for an instance's Applications to disappear.
+  Until the manifest exists, the rows are not checked. An instance
   leaves nothing of its catalog behind, because the shared catalog prunes its
   objects; the catalog itself stays until it is decommissioned.
 - The targets that name one catalog publish to one repository and revision,
@@ -461,10 +483,12 @@ from a declared environment or from another instance, fails with
 A declared unit that an instance reads is protected like one that a declared
 environment reads: tearing it down, `nyl state delete --teardown` of its
 environment, and its replacement refuse with `NYL-TEARDOWN-HAS-DEPENDENTS`,
-naming the instance's units, until `--allow-dependents`. Dropping it from its
-environment's source is refused earlier, with `NYL-REFERENCE-INVALID`, while an
-instance's source still references it: change the instance, or remove it.
-An expired instance that is being removed does not hold its producers back.
+naming the instance's units, until `--allow-dependents`, and so does dropping it
+from its environment's source. The instance then fails its own next run with
+`NYL-REFERENCE-INVALID`, naming the unit its producer no longer selects, while
+dev and every other environment run on: a preview's bad reference, including one
+that names an instance, stops that preview alone. An expired instance that is
+being removed does not hold its producers back.
 
 ## See also
 

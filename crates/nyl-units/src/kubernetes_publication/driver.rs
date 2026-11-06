@@ -46,6 +46,7 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
+use super::run::shared_catalog_view;
 use nyl_core::orchestration::driver::{
     AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext,
     Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
@@ -250,7 +251,8 @@ impl Driver for KubernetesPublicationDriver {
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
         let (rendered, mut inputs) = resolution_inputs(&self.resource_catalogue, ctx, spec)?;
-        let settings = nyl_render::gitops::publication::teardown_settings(&rendered).map_err(|error| {
+        let view = shared_catalog_view(ctx, &rendered)?;
+        let settings = nyl_render::gitops::publication::teardown_settings_with(&rendered, &view).map_err(|error| {
             DriverError::before_effects(format!(
                 "cannot read the teardown settings of DeploymentTarget {:?}: {error}",
                 unit_target(spec).unwrap_or_default()

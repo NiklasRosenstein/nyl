@@ -63,6 +63,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
     let started = Instant::now();
     let initial = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+    nyl_render::gitops::shared_catalog::validate_with_samples(&initial)?;
     let target_name = resolve_deployment_target_name(&initial, args.target.as_deref())?;
     let target = initial
         .get(GitOpsResourceKind::DeploymentTarget, &target_name)

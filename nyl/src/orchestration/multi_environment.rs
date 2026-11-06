@@ -135,16 +135,7 @@ pub fn select(
         ownership_preflight(&inventory, &rendered_sources, &mut errors, drivers, &hint, &unlisted)?;
     }
     let ordered = if source_graph {
-        nyl_orchestration::rules::multi_environment::validate_available_sources(
-            &rendered_sources,
-            &errors
-                .keys()
-                .filter_map(|name| EnvironmentName::new(name).ok())
-                .chain(removing.iter().cloned())
-                .collect(),
-            &nyl_render::gitops::instances::instance_only_names(&inventory)
-                .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
-        )?
+        validate_rendered_sources(&inventory, &rendered_sources, &mut errors, &removing)?
     } else {
         order(&graph)?
     };
@@ -156,6 +147,30 @@ pub fn select(
             .collect(),
         errors,
     })
+}
+
+/// Validate the rendered sources of every environment together and order them.
+/// A consumer's bad reference is that environment's error, never the others'.
+fn validate_rendered_sources(
+    inventory: &GitOpsInventory,
+    rendered_sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    errors: &mut BTreeMap<String, Finding>,
+    removing: &BTreeSet<EnvironmentName>,
+) -> Result<Vec<EnvironmentName>, Stop> {
+    let validation = nyl_orchestration::rules::multi_environment::validate_available_sources(
+        rendered_sources,
+        &errors
+            .keys()
+            .filter_map(|name| EnvironmentName::new(name).ok())
+            .chain(removing.iter().cloned())
+            .collect(),
+        &nyl_render::gitops::instances::instance_only_names(inventory)
+            .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
+    )?;
+    for (name, finding) in validation.errors {
+        errors.entry(name.to_string()).or_insert(finding);
+    }
+    Ok(validation.order)
 }
 
 /// The instances commands across environments know: the ones state lists,

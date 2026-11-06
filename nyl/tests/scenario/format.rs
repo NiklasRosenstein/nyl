@@ -338,6 +338,8 @@ pub struct Expect {
     pub commits: Option<CommitCounts>,
     pub units: Option<BTreeMap<String, UnitExpectation>>,
     pub codes: Option<Vec<String>>,
+    /// Text the invocation printed, on stdout or stderr: each entry is a substring.
+    pub messages: Option<Vec<String>>,
     pub get: Option<GetExpectation>,
     pub deploy: Option<DeployExpectation>,
     pub promotion: Option<PromotionExpectation>,

@@ -696,6 +696,11 @@ pub struct Receipt {
     pub outputs: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactDigest>,
+    /// Coded findings the driver reported with the execution that produced
+    /// this receipt, recorded unchanged so `plan` and `status` show them
+    /// until the unit executes again. The engine does not interpret them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::orchestration::codes::Finding>,
 }
 
 fn empty_object() -> Value {

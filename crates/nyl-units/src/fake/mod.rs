@@ -477,6 +477,7 @@ mod tests {
             provenance: BTreeMap::new(),
             outputs: json!({}),
             artifacts: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 

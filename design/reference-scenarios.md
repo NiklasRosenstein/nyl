@@ -201,6 +201,7 @@ and to the harness's validation, together with the first scenario using them.
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
 | `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit, or `none` for a held marker or a unit held without an incarnation); from `nyl status`, `condition-state` (the condition shown next to the unit's state, or `null`) and `drift: {result}` (the latest drift record shown) |
 | `codes` | Stable error and warning codes the invocation reported |
+| `messages` | Text the invocation printed on stdout or stderr: each entry is a substring, such as a name a message must give |
 | `get` | `{args, value}` or `{args, json: {<pointer>: <value>}}` for a `nyl get` invocation after the step |
 | `deploy` | Files on a deploy branch after the step: `contains` (patterns that match a file), `unchanged` (the files that match are the ones the step started with), and `absent` (patterns that match no file) |
 | `promotion` | The PromotionRecord a `promote` step wrote: `path`, `sourceCommit` as a Git revision of `project.git` such as `main~1`, and `from.run` as the `id` of the `nyl` step whose run recorded the promoted state |
@@ -296,7 +297,7 @@ examples/platform/
     plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
     reconcile.yaml           # push to main: reconcile dev; promote dev-to-prod and reconcile prod behind an approval gate
     preview.yaml             # pull request opened/updated: reconcile -e pr-<n> --template preview --param pr=<n>; closed: state delete --teardown
-    previews-maintenance.yaml   # nightly: nyl reconcile --template preview
+    previews-maintenance.yaml   # nightly: nyl reconcile --template preview, then the shared catalog's writer: nyl build kubernetes -e <a live instance> -- --shared-catalog --push
 ```
 
 | Unit | dev | prod | preview |
@@ -521,7 +522,7 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | `pr-<n>` | People | Nyl: each preview instance runs from its pull request job's worktree, recorded in state (`allowUnprotectedSource`) |
 | `refs/nyl-keep/<keepId>/<commit>` | Nyl, when an instance records a new source commit (the previous commit's ref is removed after the record lands); removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
-| `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the fleet reconcile publishes the shared catalog under `_nyl/shared/previews/` | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
+| `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the first instance's publication creates the shared catalog under `_nyl/shared/previews/`, and the nightly job's `nyl build -- --shared-catalog --push` replaces it when it differs | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
 | `nyl/previews` | Nyl: every instance's state under its `state.path` | Nyl |
 | `refs/nyl/<env>/lease`, `refs/nyl/<env>/runs/<run-id>`, `refs/nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
@@ -675,8 +676,10 @@ Tier 1 variants:
 The preview project of these scenarios is `reference/preview`. It repeats the
 platform project with the `preview` template, one explicit ArgoCDInstance, and
 an ApplicationGroup whose Application and AppProject names come from the
-target's name. Its group declares its labels in block style: a group whose spec
-is templated is selected by labels read before it renders. A step asks whether
+target's name. Its group declares its labels in block style, a workaround for
+[#228](https://github.com/NiklasRosenstein/nyl/pull/228) (a templated
+`projectTemplate` drops a group whose labels are not block style), to remove
+when that fix lands. A step asks whether
 an instance is live with `nyl get environments <name>`, which exits 0 for an
 environment that exists and 1 for one that does not.
 

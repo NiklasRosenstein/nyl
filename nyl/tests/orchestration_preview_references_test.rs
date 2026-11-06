@@ -89,13 +89,20 @@ impl Harness {
     /// A project with `dev`, the preview template, and `units`, with dev's
     /// state initialized.
     fn new(units: &str) -> Self {
-        let project = project(&[
+        Self::with_files(units, &[])
+    }
+
+    /// [`Harness::new`] with more project files.
+    fn with_files(units: &str, extra: &[(&str, &str)]) -> Self {
+        let mut files = vec![
             NYL_TOML,
             ("nyl/platform.yaml", PLATFORM),
             ("nyl/dev.yaml", DEV),
             ("nyl/preview.yaml", TEMPLATE),
             ("nyl/units.yaml", units),
-        ]);
+        ];
+        files.extend_from_slice(extra);
+        let project = project(&files);
         let harness = Self {
             shell: shell::Harness::new(project.path(), true),
             _project: project,
@@ -106,6 +113,10 @@ impl Harness {
     }
 
     fn invoke(&self, args: &[&str]) -> CommandOutcome {
+        self.try_invoke(args).unwrap()
+    }
+
+    fn try_invoke(&self, args: &[&str]) -> Result<CommandOutcome, String> {
         let clone = self.shell.world.fresh_clone("main");
         let tools = ProcessRunner::new();
         let wiring = Wiring {
@@ -124,7 +135,10 @@ impl Harness {
         let argv = std::iter::once("nyl".to_owned())
             .chain(args.iter().map(|arg| (*arg).to_owned()))
             .chain(std::iter::once(clone.display().to_string()));
-        Cli::try_parse_from(argv).unwrap().execute_in_process(&wiring).unwrap()
+        Cli::try_parse_from(argv)
+            .unwrap()
+            .execute_in_process(&wiring)
+            .map_err(|error| error.to_string())
     }
 
     /// Create the preview instance `pr-<number>` and bring its state to exist.
@@ -222,12 +236,11 @@ fn assert_waits_for_the_instance(harness: &Harness) {
 /// unit in its own environment: an explicit teardown of it and `state delete
 /// --teardown` of its environment each refuse with `NYL-TEARDOWN-HAS-DEPENDENTS`
 /// naming the instance's unit and removing nothing, until `--allow-dependents`,
-/// which the transition commit records. Dropping the producer from its
-/// environment is refused earlier still: every environment's source, instances
-/// at their recorded commits, is validated together, so the instance's reference
-/// names a unit its producer no longer selects. Catches producer protection that
-/// does not see instance consumers, which only declared environments' state
-/// would show.
+/// which the transition commit records; so does dropping the producer from its
+/// environment in source. The instance's own next run then fails with
+/// `NYL-REFERENCE-INVALID`, naming the unit its producer no longer selects.
+/// Catches producer protection that does not see instance consumers, which
+/// only declared environments' state would show.
 #[test]
 fn test_a_declared_producers_teardown_and_omission_see_instance_consumers() {
     // An explicit teardown of the producer, then the override.
@@ -273,14 +286,16 @@ fn test_a_declared_producers_teardown_and_omission_see_instance_consumers() {
     );
     assert_waits_for_the_instance(&harness);
 
-    // Dropping the producer from its environment in source.
+    // Dropping the producer from its environment in source: refused like a
+    // teardown, until `--allow-dependents`. The instance's own next run then fails.
     let harness = consuming();
     harness.shell.world.commit_files(
         "main",
         "dev drops network",
         &[("nyl/units.yaml", &UNITS.replacen("scope: dev", "scope: gone", 1))],
     );
-    let refused = harness.invoke(&[
+    assert_waits_for_the_instance(&harness);
+    let allowed = harness.invoke(&[
         "reconcile",
         "-e",
         "dev",
@@ -289,18 +304,23 @@ fn test_a_declared_producers_teardown_and_omission_see_instance_consumers() {
         "-o",
         "json",
     ]);
-    assert_eq!(refused.exit, 1, "{}\n{}", refused.stderr, refused.stdout);
-    let text = format!("{}{}", refused.stderr, refused.stdout);
+    assert_eq!(allowed.exit, 0, "{}\n{}", allowed.stderr, allowed.stdout);
+    assert_eq!(unit(&allowed, "dev", "network")["result"], "removed");
+    let message = git_output(
+        &harness.shell.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/desired"],
+    );
+    assert!(
+        message.contains("allowExternalDependents") && message.contains("pr-1/site"),
+        "{message}"
+    );
+    let orphaned = harness.invoke(&["reconcile", "-e", "pr-1", "-o", "json"]);
+    assert_eq!(orphaned.exit, 1, "{}\n{}", orphaned.stderr, orphaned.stdout);
+    let text = format!("{}{}", orphaned.stderr, orphaned.stdout);
     assert!(
         text.contains("NYL-REFERENCE-INVALID") && text.contains("pr-1/site") && text.contains("dev/network"),
         "{text}"
     );
-    // Nothing was removed; once the instance is gone, the omission goes through.
-    let removed = harness.invoke(&["state", "delete", "-e", "pr-1", "--teardown", "-o", "json"]);
-    assert_eq!(removed.exit, 0, "{}\n{}", removed.stderr, removed.stdout);
-    let dropped = harness.invoke(&["reconcile", "-e", "dev", "--allow-teardown", "-o", "json"]);
-    assert_eq!(dropped.exit, 0, "{}\n{}", dropped.stderr, dropped.stdout);
-    assert_eq!(unit(&dropped, "dev", "network")["result"], "removed");
 }
 
 /// An instance is a consumer only: a unit that names one as the producer of a
@@ -345,11 +365,102 @@ fn test_an_instance_is_never_a_producer() {
     assert_eq!(refused.exit, 1, "{}\n{}", refused.stderr, refused.stdout);
     let text = format!("{}{}", refused.stderr, refused.stdout);
     assert!(text.contains("NYL-REFERENCE-INSTANCE-PRODUCER"), "{text}");
-    assert!(text.contains("pr-2/site") || text.contains("site"), "{text}");
+    assert!(text.contains("pr-2/site"), "{text}");
+    // The refusal is pr-2's alone: dev still reconciles.
+    let dev = harness.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(dev.exit, 0, "{}\n{}", dev.stderr, dev.stdout);
+    assert_eq!(unit(&dev, "dev", "network")["result"], "executed");
     // Nothing was written for pr-2's unit.
     assert!(!git_output(
         &harness.shell.world.bare(),
         &["ls-tree", "-r", "--name-only", "nyl/previews"]
     )
     .contains("pr-2/observed/units/site"),);
+}
+
+/// The shared-catalog rules hold for the tree commands too: a project whose
+/// template shares a catalog on `previews` and which also publishes a static
+/// target there fails `render-tree` of that target with the conflict code, as
+/// `nyl validate` does, although the tree commands compile from a plain
+/// inventory without instances. Catches a rule that only the orchestrated
+/// entry points enforce.
+#[test]
+fn test_tree_commands_enforce_the_shared_catalog_rules_over_template_instances() {
+    const SHARED_UNIT: &str = "\
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata: {name: kubernetes, labels: {scope: preview}}
+spec:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      applicationGroupSelector: {matchLabels: {app: web}}
+      catalogApplication: {shared: {name: previews}}
+      publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
+";
+    const CLUSTER_AND_GROUP: &str = "\
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata: {name: dev}
+spec:
+  destination: {server: 'https://kubernetes.default.svc'}
+  kubernetes: {kubeVersion: 1.31.4, apiVersions: [v1, v1/ConfigMap, v1/Namespace], clusterScopedKinds: [core/Namespace]}
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata: {name: web, labels: {app: web}}
+spec:
+  applicationNamespace: argocd
+  source: {path: ../applications/web}
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
+";
+    const RELEASE: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web, namespace: web}\n";
+    let target = |revision: &str| {
+        format!(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata: {{name: stray}}\nspec:\n  clusterRef: {{name: dev}}\n  applicationGroupSelector: {{matchLabels: {{app: web}}}}\n  publication: {{repositoryRef: {{name: platform}}, revision: {revision}, pathPrefix: stray}}\n"
+        )
+    };
+    let world = |revision: &str| {
+        Harness::with_files(
+            SHARED_UNIT,
+            &[
+                ("nyl/cluster.yaml", CLUSTER_AND_GROUP),
+                ("nyl/stray.yaml", &target(revision)),
+                ("applications/web/release.yaml", RELEASE),
+            ],
+        )
+    };
+    let run = |revision: &str| {
+        let harness = world(revision);
+        let clone = harness.shell.world.fresh_clone("main");
+        let output = TempDir::new().unwrap();
+        let output_dir = output.path().display().to_string();
+        let home = clone.with_extension("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut command = scenario::nyl_binary(
+            &clone,
+            &home,
+            &[
+                "render-tree",
+                "--target",
+                "stray",
+                "--output-dir",
+                &output_dir,
+                "--check",
+            ],
+        );
+        let output = command.output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    // On the revision that carries the shared catalog it is refused.
+    let (succeeded, text) = run("previews");
+    assert!(!succeeded, "{text}");
+    assert!(text.contains("NYL-KUBERNETES-SHARED-CATALOG-CONFLICT"), "{text}");
+    assert!(text.contains("stray"), "{text}");
+    // On another branch the same target renders.
+    let (succeeded, text) = run("elsewhere");
+    assert!(succeeded, "{text}");
 }

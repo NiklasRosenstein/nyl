@@ -16,7 +16,7 @@ export const orchestrationRoadmap = {
       { text: 'Add attested evidence for dependents.', done: true },
       { text: 'Add observed values.', done: true },
       { text: 'Add preview environment templates and their instances.', done: true },
-      { text: 'Add the shared catalog, cross-environment references to declared environments, and end-to-end reference scenarios for previews (preview expiry, instance limits, and source keep refs are in).', done: false },
+      { text: 'Finish the preview reference scenarios: scenario 2\'s closure steps 5 to 9 (a new commit, the squash-merge and deleted branch, the close job through the keep ref, and the listing), all three scenarios in both tiers with the real driver, and the end-to-end example. The shared catalog, cross-environment references, and scenario 3 are in.', done: false },
     ],
     outro: 'Promotion paths follow in M6.',
   },

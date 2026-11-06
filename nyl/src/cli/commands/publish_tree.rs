@@ -155,6 +155,7 @@ impl TreeRenderObserver for SilentTreeRenderObserver {}
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+    nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target_name)?;
     let nyl_render::gitops::provenance::WorktreeSourceState {
