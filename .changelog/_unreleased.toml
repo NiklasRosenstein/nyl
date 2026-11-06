@@ -1,0 +1,5 @@
+[[entries]]
+id = "40c0ae0d-91ca-4194-8aa9-b31c6cbade51"
+type = "feature"
+description = "Templates can serialize values as JSON with the `tojson` filter, for embedding configuration that Python-like list and mapping formatting would break"
+author = "@NiklasRosenstein"
