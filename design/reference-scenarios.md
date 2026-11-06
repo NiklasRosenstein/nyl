@@ -59,8 +59,8 @@ cargo test -p nyl --test scenario_harness_test
 cargo test -p nyl --features tier2 --test scenario_harness_test
 ```
 
-Tier 2 enables `test-clock` and the test publication driver. Image and
-infrastructure units use the real native drivers; tier 1 keeps its scripted
+Tier 2 enables `test-clock` and registers no fake kinds: image, infrastructure,
+and publication units use the real built-in drivers; tier 1 keeps its scripted
 fakes. Tier 2 runs each command as a separate binary process in a fresh checkout with its own
 home and explicit Git identity, passes time and admitted variables to that
 child only, and checks the same reports, state commits, and publication trees
@@ -77,7 +77,8 @@ The tiers are:
 - **Tier 2, the real tools.** The same steps run the real `nyl` binary as
   separate processes. The real `tofu` and `docker buildx` run against each
   scenario's own `registry:2` container on an ephemeral loopback port. The
-  publication driver remains fake until M5. Tier 2 scenarios compile only with
+  publication driver is the built-in `KubernetesPublication`, pushing to the
+  scenario's Git repository. Tier 2 scenarios compile only with
   the `tier2` Cargo feature; a missing `tofu`, `docker buildx`, or registry
   fails the test instead of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
   tools installed (OpenTofu 1.13.2, Terraform 1.9.8, Docker with Buildx, and
@@ -99,11 +100,21 @@ in for:
 | --- | --- | --- |
 | `FakeImage` | `OciImage` | Returns a digest derived from the execution key; publishes a `ContainerImage` artifact; declares `build` |
 | `FakeInfra` | `OpenTofu` | Keeps resources and outputs in a JSON file per backend key; reports plan and destroy digests for `bind: plan`; tears down |
-| `FakePublication` | `KubernetesPublication` | Writes a tree with an ownership index to the deploy branch and runs both teardown phases against the fake observer |
+| `FakePublication` | `KubernetesPublication` | Publishes through the same code as the real driver, and adds scripted outcomes, `mode: observe`, and scenario-declared teardown settings; runs both teardown phases against the fake observer |
 
-The scenario files name the real kinds; the harness maps them to fakes for the
-milestones that need it. Tier 1 keeps the fakes for images and OpenTofu even
-after the real drivers exist, so it never needs the tools.
+The scenario files name the real kinds; the harness maps them to fakes where a
+scenario scripts them. Tier 1 keeps the fakes for images and OpenTofu even
+after the real drivers exist, so it never needs the tools. `FakePublication`
+stays because a scenario can script a publication's outcome and answer
+`observe` with the fake Argo CD observer, which the real driver cannot; every
+other reached scenario also runs in tier 1 against the real
+`KubernetesPublication` driver (fake images and infrastructure around it), so
+the walkthroughs and the reference scenarios hold the real driver to the same
+checks. A scenario that needs the fake is listed with its reason in the
+harness (`FAKE_PUBLICATION`). The reference project's target is
+teardown-ready (its catalog prunes and its Namespaces are deleted with their
+Application), because the real driver reads readiness from the rendered
+target.
 
 Observe mode against a real Argo CD needs a cluster and stays a manual check;
 tier 1's fake observer covers its decisions.

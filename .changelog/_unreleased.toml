@@ -157,7 +157,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "ddbd3d3c-35fd-4949-842a-a0ed76e94c6f"
 type = "feature"
-description = "Orchestration preview: declare Environments of units whose state lives in Git, and run them with `nyl plan`, `reconcile`, `status`, `detect-drift`, `attest`, `teardown`, `hold`/`resume`, `recover`, `exec`, `build`, and `state`/`lease`. Built-in units cover constrained commands, OCI images built with Docker Buildx (`OciImage`), and Terraform and OpenTofu configurations run with their native tools. `reconcile --worktree` runs uncommitted changes from a snapshot. Orchestration is in development and does not yet publish Kubernetes trees"
+description = "Orchestration preview: declare Environments of units whose state lives in Git, and run them with `nyl plan`, `reconcile`, `status`, `detect-drift`, `attest`, `teardown`, `hold`/`resume`, `recover`, `exec`, `build`, and `state`/`lease`. Built-in units cover constrained commands, OCI images built with Docker Buildx (`OciImage`), and Terraform and OpenTofu configurations run with their native tools. `reconcile --worktree` runs uncommitted changes from a snapshot. Orchestration is in development"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -230,4 +230,10 @@ author = "@NiklasRosenstein"
 id = "01fc102c-cdf8-4d26-ba71-c205270082b8"
 type = "fix"
 description = "Unchanged Git LFS files no longer make the worktree look dirty, which blocked `publish-tree --require-clean` after a fresh CI checkout"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d73eec00-08f7-4582-90d0-eab32d080800"
+type = "feature"
+description = "Orchestration can publish Kubernetes trees: the `KubernetesPublication` unit renders its DeploymentTarget with the `fromUnit` Release inputs (image digests, infrastructure outputs) its environment resolved, publishes the tree and its ownership index to the target's branch with a compare-and-swap push, and tears it down in two phases. Its effective teardown settings are recorded when the unit is resolved, so `status` and `plan` report teardown readiness without rendering. `mode: observe` and inline targets are not available yet"
 author = "@NiklasRosenstein"

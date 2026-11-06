@@ -596,12 +596,21 @@ spec:
   `releases`, keyed by `<group>/<release>` and then by input, so the pointer to
   an input is `/releases/<group>~1<release>/<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
-  - Implementation status (M3): `releases` holds the bindings orchestration
-    resolves, `fromUnit` and `fromPromotion`; `value`, `fromFile`, `fromGit`,
-    and `fromPublication` inputs still enter the key through the render's
-    input record, and join `releases` with the KubernetesPublication driver
-    (M5) and PromotionPath selectors (M6). The renderer owns `releases`: an
-    authored `spec.releases` is rejected.
+  - Implementation status (M5): `releases` holds the bindings only
+    orchestration can resolve: `fromUnit`, resolved through the shared
+    reference resolver in both its `output` and `artifact` forms, and
+    `fromPromotion` once PromotionPath selectors exist (M6). The driver passes
+    `releases` to the render as the pinned input snapshot, which takes an
+    override's precedence over the binding and is checked against the
+    Release's declared input types, so an unusable value fails before
+    anything is published. `value`, `fromFile`, locked `fromGit`, and
+    `fromPublication` inputs resolve inside the render at the source commit
+    and enter the execution key through its input record, so a change to any
+    of them still re-executes the unit. Every resolved input, whatever its
+    source, is recorded in the published ownership index as
+    `@input/<group>/<release>/<input>` with the digest of its canonical
+    value. The renderer owns `releases`: an authored `spec.releases` is
+    rejected.
 - `fromPublication` is resolved like every other binding. Resolution reads the
   state file from the publication branch head B, or the carried file from the
   runner's working tree. The value enters the resolved spec and the execution
@@ -678,15 +687,22 @@ in two phases, both through Git:
    Unowned files in the prefix, such as state files committed by other tools,
    are preserved, as in every reconciliation.
 
-Implementation status (M3): the stand-in `FakePublication` kind carries out
-both phases through Git on the real publication path
-(`nyl_units::fake::publication`, with the tree changes in
+Implementation status (M5): the `KubernetesPublication` driver
+(`nyl_units::kubernetes_publication`) carries out both phases through Git on
+the real publication path (the tree changes are in
 `nyl_render::gitops::publication`), records the phase 1 commit as the wait's
 `phase1Commit`, and removes in phase 2 exactly the files of its own
-`_nyl/index.json`. The fake Argo CD observer (`FakeObserver`) stands in for
-`observe` in tests. Publication target ownership (ownership index v4) ships
-with the `KubernetesPublication` driver in M5; until then a teardown removes
-only the files its own index records.
+`_nyl/index.json`. A publication that loses the race for the branch head,
+before or at its compare-and-swap push, is built again on the new head, at
+most three times; any other failure of the push may have published and ends
+the call. The driver records the target's effective teardown settings at
+resolution (see Teardown readiness below). `mode: observe` is rejected with
+`NYL-KUBERNETES-MODE-UNSUPPORTED` until the driver can read Argo CD, and inline
+targets are not supported yet. Tier-1 tests keep the test kind
+`FakePublication` (scripted outcomes, the fake Argo CD observer
+`FakeObserver` for `observe`). Publication target ownership (ownership index
+v4) is not written yet; until then a teardown removes only the files its own
+index records.
 
 `teardownWait` decides when phase 1 counts as complete. The same point gates
 phase 2 and the teardown of the units the publication depends on, such as the
@@ -777,13 +793,21 @@ ref carries `nyl hold` to a running run (see [Deletion](#deletion)); each
 
 Teardown readiness is checked statically from the target's effective
 settings, as recorded in the unit's stored desired document, so `status`,
-`plan`, and a teardown agree without rendering. The driver reads them through
-`Driver::teardown_settings`, and `rules::teardown_readiness` evaluates them:
+`plan`, and a teardown agree without rendering. Resolution renders the target
+to compute the execution key; the driver reads the settings from that render
+(the catalog Application and workload Applications as Argo CD will see them,
+and the Namespaces the tree owns) and records them in the resolved spec under
+`teardownSettings` through `KeyInputs.recorded`, so an authored
+`teardownSettings` is rejected. The driver reads them back through
+`Driver::teardown_settings`, and `rules::teardown_readiness` evaluates them.
+A document resolved before the settings were recorded has none and no
+requirements. A tree without a catalog Application leaves the catalog to a
+parent Application, so its catalog rows are `external: not checked`:
 
 | Requirement | Setting | If unmet |
 | --- | --- | --- |
 | The catalog prunes removed workload Applications on its own | catalog `syncPolicy.automated` enabled with `prune: true` | Blocking: the Applications stay until someone syncs the catalog with pruning |
-| Deleting an Application deletes its workloads | catalog `applicationDeletionPolicy` is `Foreground` or `Background`, not `Orphan` | Blocking: workloads keep running without an Application |
+| Deleting an Application deletes its workloads | `applicationDeletionPolicy` of the catalog Application and of every workload Application is `Foreground` or `Background`, not `Orphan` (a workload Application without a finalizer makes the recorded policy `Orphan`, because the catalog's own finalizer does not delete the workloads of an Application it prunes) | Blocking: workloads keep running without an Application |
 | Owned Namespaces do not stop deletion | namespace `deletePolicy` is `Automatic` or `Retain`; the default `Confirm` renders `Delete=confirm`, which holds the Application's finalizer until someone confirms | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
 | Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain |
 | The catalog Application and AppProjects are removed | the target's catalog is owned by a parent (see Catalog ownership below) | Remnant: a self-managing catalog Application and its AppProjects remain after phase 2 |
@@ -2750,7 +2774,7 @@ trait Driver {
     fn credential_environment(&self, spec: &Spec, process_env: &EnvironmentSnapshot) -> Environment; // pure admission from the supplied snapshot
     fn attestations(&self, spec: &ResolvedSpec) -> Vec<AttestationName>; // names it can produce for this spec
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &ResolvedSpec) -> Vec<OwnershipScope>; // see Identity; an image tag prefix names the environment
-    fn execution_key_inputs(&self, ctx: &ResolutionContext, spec: &ResolvedSpec) -> Result<KeyInputs>; // selected files, excluded fields, fingerprint
+    fn execution_key_inputs(&self, ctx: &ResolutionContext, spec: &ResolvedSpec) -> Result<KeyInputs>; // selected files, excluded fields, fingerprint, recorded fields
 
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
@@ -2798,6 +2822,7 @@ enum Outcome {
 | `AttestationOutcome` | `name`, `result` (`pass` or `fail`), an optional `reason`, and driver-specific `details` recorded unchanged, such as each Application's running publication and health |
 | `ObservedValues` | Per declared observation: `Value(value)`, `Pending { reason }`, or `Failed { reason }`; Nyl checks values against the declared types, records them, and shows reasons unchanged (see [Observed values](#observed-values)) |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
+| `KeyInputs` | What resolution needs to compute an execution key: the selected `files` with their digests, the `excludedFields` of the resolved spec, an optional `fingerprint`, and `recorded` facts. Each recorded fact is a JSON Pointer to a member of the resolved spec and the value resolution writes there before it computes the key, so the stored desired document carries what the driver learned from its inputs. The engine stores a recorded value without interpreting it |
 | `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
