@@ -41,7 +41,7 @@ mod kube_api;
 pub mod live;
 
 pub use api_server::ApiServerReader;
-pub use kube_api::KubeApiReader;
+pub use kube_api::{Connection, KubeApiReader};
 
 /// Why Argo CD could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +165,7 @@ pub fn reader(
 pub const KUBECONFIG_ENV: &str = "KUBECONFIG";
 
 /// Run `future` on a thread with a current-thread runtime of its own.
-fn block_on<T: Send>(future: impl std::future::Future<Output = T> + Send) -> Result<T, ReadError> {
+pub(crate) fn block_on<T: Send>(future: impl std::future::Future<Output = T> + Send) -> Result<T, ReadError> {
     // Both clients build a TLS configuration, which needs a process-level
     // crypto provider; the binary installs one at start, and a library caller
     // may not have. Installing is idempotent: it fails only when one exists.

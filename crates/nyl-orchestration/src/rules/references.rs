@@ -40,14 +40,16 @@ use nyl_core::bindings::{resolve_document, Origin, Provided, Providers, Provisio
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId, UnitName};
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservedUnit, Provenance, Readiness, Receipt,
-    ReceiptProvenance,
+    ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservationRecord, ObservedUnit, Provenance, Readiness,
+    Receipt, ReceiptProvenance,
 };
+use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::units::{DependsOn, OutputDeclaration};
 use serde_json::Value;
 
 use super::evidence;
 use super::freshness::receipt_is_current;
+use super::observed_values::{self, Standing};
 
 /// A resolution error with the stable code it is reported with and its fix:
 /// [`Code::ReferenceInvalid`] unless it comes from an attestation
@@ -108,6 +110,12 @@ pub struct ReferenceView<'a> {
     /// The attestations recorded for the latest receipts, overlaid likewise,
     /// which consumers requiring evidence read (see [`super::evidence`]).
     pub attestations: &'a BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    /// The observed values recorded for the latest receipts, overlaid
+    /// likewise, which `fromUnit: {unit, observation}` references read (see
+    /// [`super::observed_values`]).
+    pub observations: &'a BTreeMap<UnitName, ObservationRecord>,
+    /// The time observed values' `maxAge` is judged at.
+    pub now: Timestamp,
     /// The observed commit the snapshot was read at, cited by provenance.
     pub observed_commit: Option<&'a CommitId>,
     /// This run, when receipts of `produced_in_run` came from it.
@@ -190,6 +198,7 @@ pub fn resolve_reference(
             reason: evidence::reason(&attestation, name.as_str(), waiting),
         });
     }
+    let mut observation = None;
     let whole = if let (Some(output), Some(declaration)) = (&source.output, declaration) {
         let Some(value) = receipt.outputs.get(output) else {
             return Err(ResolutionError::from(format!(
@@ -203,6 +212,36 @@ pub fn resolve_reference(
             )));
         }
         value.clone()
+    } else if let Some(wanted) = &source.observation {
+        let declared = observed_values::declarations(observed_values::spec_of(desired))?;
+        let declaration = declared
+            .get(wanted)
+            .expect("the static declaration check found the observation");
+        match observed_values::standing(
+            desired,
+            &receipt.execution_key,
+            declaration,
+            wanted,
+            view.observations.get(name),
+            view.now,
+        ) {
+            Standing::Pending { reason } => {
+                return Ok(ReferenceValue::Blocked {
+                    unit: name.clone(),
+                    reason: observed_values::reason(wanted, name.as_str(), &reason),
+                });
+            }
+            Standing::Value { value, observed_at } => {
+                if !declaration.observation_type.accepts(&value) {
+                    return Err(ResolutionError::from(format!(
+                        "reads observation {wanted:?} of unit {name}, whose recorded value is not of its declared type {:?}",
+                        declaration.observation_type
+                    )));
+                }
+                observation = Some((wanted.clone(), observed_at));
+                value
+            }
+        }
     } else {
         read_artifact(view, name, source, receipt)?
     };
@@ -226,6 +265,8 @@ pub fn resolve_reference(
                 view.observed_commit.cloned()
             },
             run: in_run.cloned(),
+            observation: observation.as_ref().map(|(name, _)| name.clone()),
+            observed_at: observation.map(|(_, observed_at)| observed_at),
         },
     })
 }
@@ -271,6 +312,8 @@ fn resolve_external(
         observed: &snapshot.observed,
         artifacts: &snapshot.artifacts,
         attestations: &snapshot.attestations,
+        observations: &snapshot.observations,
+        now: view.now,
         observed_commit: snapshot.tips.observed.as_ref(),
         run: None,
         produced_in_run: &BTreeSet::new(),
@@ -319,8 +362,8 @@ pub fn check_spec_declaration(
     spec: &Value,
     source: &UnitInputSource,
 ) -> Result<Option<OutputDeclaration>, String> {
-    match (&source.output, &source.artifact) {
-        (Some(output), None) => {
+    match (&source.output, &source.artifact, &source.observation) {
+        (Some(output), None, None) => {
             if let Some(kind) = &source.kind {
                 return Err(format!(
                     "asserts kind {kind:?} for output {output:?} of unit {name}; kind applies to artifact references only"
@@ -341,8 +384,28 @@ pub fn check_spec_declaration(
             Ok(Some(declaration.clone()))
         }
         // Artifact names are checked once kinds declare them (M5).
-        (None, Some(_)) => Ok(None),
-        _ => Err("must set exactly one of output and artifact".to_owned()),
+        (None, Some(_), None) => Ok(None),
+        (None, None, Some(observation)) => {
+            if let Some(kind) = &source.kind {
+                return Err(format!(
+                    "asserts kind {kind:?} for observation {observation:?} of unit {name}; kind applies to artifact references only"
+                ));
+            }
+            let declared = observed_values::declarations(spec).map_err(|error| format!("unit {name}: {error}"))?;
+            if declared.contains_key(observation) {
+                Ok(None)
+            } else if declared.is_empty() {
+                Err(format!(
+                    "reads observation {observation:?}, which unit {name} does not declare: it declares no observations"
+                ))
+            } else {
+                Err(format!(
+                    "reads observation {observation:?}, which unit {name} does not declare; declared observations: {}",
+                    declared.keys().cloned().collect::<Vec<_>>().join(", ")
+                ))
+            }
+        }
+        _ => Err("must set exactly one of output, artifact, and observation".to_owned()),
     }
 }
 
@@ -487,20 +550,36 @@ pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution 
             None => ResolutionError::from(issue),
         })
         .collect();
-    let stored = view.previous.get(&unit.unit.name).map(|previous| &previous.provenance);
+    let previous = view.previous.get(&unit.unit.name);
+    let stored = previous.map(|previous| &previous.provenance);
 
     let mut provenance = BTreeMap::new();
-    for (pointer, cited) in resolved.provenance {
+    for (raw, cited) in resolved.provenance {
         let Cited::Receipt(new) = cited else { continue };
-        let pointer = match JsonPointer::new(pointer.as_str()) {
+        let pointer = match JsonPointer::new(raw.as_str()) {
             Ok(pointer) => pointer,
             Err(error) => {
-                errors.push(format!("spec reference at {pointer:?}: {error}").into());
+                errors.push(format!("spec reference at {raw:?}: {error}").into());
                 continue;
             }
         };
+        // An observed value changes while the receipt stays: its citation is
+        // kept only while the consumer still resolves the same value, so a
+        // re-read of an unchanged value (a new `observedAt`) rewrites nothing.
+        let same_value = || {
+            previous
+                .and_then(|previous| previous.resolved_spec.as_ref())
+                .and_then(|spec| spec.pointer(&raw))
+                == resolved.value.pointer(&raw)
+        };
         let citation = match stored.and_then(|stored| stored.get(&pointer)) {
-            Some(Provenance::Receipt(stored)) if same_receipt(stored, &new) => stored.clone(),
+            Some(Provenance::Receipt(stored))
+                if same_receipt(stored, &new)
+                    && stored.observation == new.observation
+                    && (new.observation.is_none() || stored.observed_at == new.observed_at || same_value()) =>
+            {
+                stored.clone()
+            }
             _ => new,
         };
         provenance.insert(pointer, Provenance::Receipt(citation));
@@ -676,6 +755,8 @@ mod tests {
         observed: BTreeMap<UnitName, ObservedUnit>,
         artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
         attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+        observations: BTreeMap<UnitName, ObservationRecord>,
+        now: Timestamp,
         previous: BTreeMap<UnitName, DesiredUnit>,
         produced_in_run: BTreeSet<UnitName>,
         observed_commit: CommitId,
@@ -700,6 +781,8 @@ mod tests {
                 observed: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
                 attestations: BTreeMap::new(),
+                observations: BTreeMap::new(),
+                now: "2026-09-24T10:00:00Z".parse().unwrap(),
                 previous: BTreeMap::new(),
                 produced_in_run: BTreeSet::new(),
                 observed_commit: commit(COMMIT),
@@ -740,6 +823,8 @@ mod tests {
                 observed: &self.observed,
                 artifacts: &self.artifacts,
                 attestations: &self.attestations,
+                observations: &self.observations,
+                now: self.now,
                 observed_commit: Some(&self.observed_commit),
                 run: Some(&self.run),
                 produced_in_run: &self.produced_in_run,

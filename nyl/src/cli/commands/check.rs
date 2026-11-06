@@ -1,15 +1,18 @@
-//! `nyl detect-drift -e <env>` and `nyl attest -e <env>`: check the
-//! current receipts with their drivers and record the drift records, or the
-//! driver attestations, in one observed commit.
+//! `nyl detect-drift -e <env>`, `nyl attest -e <env>`, and `nyl observe -e
+//! <env>`: check the current receipts with their drivers and record the
+//! drift records, the driver attestations, or the observed values, in one
+//! observed commit.
 //!
 //! Contract: [Drift](../../../../design/orchestration-core.md#drift),
 //! [Attestations](../../../../design/orchestration-core.md#attestations),
+//! [Observed values](../../../../design/orchestration-core.md#observed-values),
 //! [Commands](../../../../design/orchestration-core.md#commands), and
 //! [Inspection](../../../../design/orchestration-core.md#inspection).
-//! Exit categories: 0 every checked unit clean, or its attestations pass;
+//! Exit categories: 0 every checked unit clean, its attestations pass, or
+//! every observation has a value;
 //! 2 a unit could not be checked (no current receipt, a kind that cannot
-//! run the check, or an unknown result) or the lease is held; 3 drift or a
-//! failing attestation; 4 cancelled by SIGINT or SIGTERM
+//! run the check, or an unknown result), an observation is pending or
+//! failed, or the lease is held; 3 drift or a failing attestation; 4 cancelled by SIGINT or SIGTERM
 //! (`NYL-RUN-CANCELLED`, nothing recorded); 1 error; the most severe wins.
 //!
 //! A drifted unit's `NYL-DRIFT-DETECTED` fix says what the next reconcile
@@ -109,7 +112,7 @@ pub fn run(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> Result<Comman
 
 fn run_one(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment[0])?;
-    // A check writes drift records or attestations, so it needs a commit identity.
+    // A check writes drift records, attestations, or observed values, so it needs a commit identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
     let mut request = session.request(&RunOptions {
         units: &args.units,
@@ -134,6 +137,7 @@ fn run_one(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> std::result::
     let operation = match check {
         Check::DetectDrift => nyl_orchestration::shell::check::detect_drift,
         Check::Attest => nyl_orchestration::shell::check::attest,
+        Check::Observe => nyl_orchestration::shell::check::observe,
     };
     let report = session.run(wiring, &store, Some(&identity), &request, operation)?;
     let exit = report.exit().code();

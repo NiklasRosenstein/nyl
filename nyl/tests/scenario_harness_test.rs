@@ -722,28 +722,20 @@ fn test_summary_lists_and_lease_break_are_read_from_the_summary() {
     );
 }
 
-/// Scenarios that need `FakePublication` in tier 1, with why: the real
-/// driver cannot be scripted, and does not read observed values yet (it
-/// attests `accepted` and `healthy` from Argo CD, which no scenario scripts).
-const FAKE_PUBLICATION: [(&str, &str); 1] = [(
-    "walkthroughs/observed-value",
-    "scripts the observer of a publication in mode observe",
-)];
-
-/// Tier 1 keeps the test kinds, which scenarios script, but a scenario that
-/// scripts no publication also holds the real `KubernetesPublication`
-/// driver to its contract: every walkthrough and reference scenario passes
-/// the same checks with images and infrastructure faked and publication real.
+/// Tier 1 keeps the test kinds, which scenarios script, but every scenario
+/// also holds the real `KubernetesPublication` driver to its contract: every
+/// walkthrough and reference scenario passes the same checks with images and
+/// infrastructure faked and publication real. The real driver's live reads
+/// (Argo CD and the workload Cluster) are scripted like the fakes are, so a
+/// scenario that observes values runs against it too.
 #[test]
 fn test_reached_scenarios_pass_in_tier_one_with_the_real_publication_driver() {
     let (loaded, problems) = scenario::load_all();
     assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let fake = FAKE_PUBLICATION.into_iter().collect::<BTreeMap<_, _>>();
     let runnable = loaded
         .iter()
         .filter(|loaded| loaded.scenario.milestone <= REACHED)
         .filter(|loaded| loaded.scenario.tiers.contains(&1))
-        .filter(|loaded| !fake.contains_key(loaded.name.as_str()))
         .collect::<Vec<_>>();
     assert!(
         runnable.iter().any(|loaded| loaded.name == "reference/platform"),

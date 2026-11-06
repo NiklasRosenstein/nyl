@@ -67,7 +67,7 @@ pub(super) fn recorded(rendered: &RenderedTarget) -> DriverResult<Value> {
         .map_err(|error| DriverError::before_effects(format!("cannot record the Argo CD facts: {error}")))
 }
 
-fn observation_of(unit: &DesiredUnit) -> Result<ArgoCdObservation, String> {
+pub(super) fn observation_of(unit: &DesiredUnit) -> Result<ArgoCdObservation, String> {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     let facts = spec.pointer(ARGOCD).ok_or_else(|| {
         "the unit records no Argo CD facts: it was resolved before it observed Argo CD; reconcile it so it records them".to_owned()
@@ -77,7 +77,7 @@ fn observation_of(unit: &DesiredUnit) -> Result<ArgoCdObservation, String> {
 
 /// What a reading may take: until `deadline`, at most [`READING`], at
 /// least one second.
-fn budget(
+pub(super) fn budget(
     now: nyl_core::orchestration::time::Timestamp,
     deadline: nyl_core::orchestration::time::Timestamp,
 ) -> Duration {
@@ -89,7 +89,7 @@ fn budget(
 
 /// Every namespace the target's Applications live in, with the Applications
 /// each holds, as `reader` reports them.
-fn read_all(
+pub(super) fn read_all(
     reader: &dyn ArgoReader,
     observation: &ArgoCdObservation,
 ) -> Result<std::collections::BTreeMap<(String, String), Value>, ReadError> {
@@ -111,7 +111,7 @@ fn read_all(
 /// credential could have seen. A listing leaves out what the credential may
 /// not get and still succeeds, so an absence proves nothing until the reader
 /// says the credential may get the Application (`can-i` for the API server).
-fn ensure_gone_is_visible<'a>(
+pub(super) fn ensure_gone_is_visible<'a>(
     reader: &dyn ArgoReader,
     observation: &ArgoCdObservation,
     live: &std::collections::BTreeMap<(String, String), Value>,
@@ -164,7 +164,7 @@ fn ensure_gone_is_visible<'a>(
 ///
 /// A target with no workload Application has nothing to conclude and needs no
 /// anchor.
-fn ensure_anchored(
+pub(super) fn ensure_anchored(
     reader: &dyn ArgoReader,
     observation: &ArgoCdObservation,
     live: &std::collections::BTreeMap<(String, String), Value>,

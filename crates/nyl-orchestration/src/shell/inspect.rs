@@ -168,7 +168,7 @@ pub enum GetValue {
     },
 }
 
-/// `nyl get output u/o` and `nyl get artifact u/n`: resolve `source` like a
+/// `nyl get output u/o`, `nyl get artifact u/n`, and `nyl get observation u/o`: resolve `source` like a
 /// `fromUnit` reference against `snapshot`. Unresolvable is
 /// [`Code::ReferenceUnresolved`](nyl_core::orchestration::codes::Code::ReferenceUnresolved),
 /// unless `allow_stale` finds an older value.
@@ -176,17 +176,23 @@ pub enum GetValue {
 /// The stale form resolves through the same resolver, against a view in
 /// which the producer's desired document names its latest receipt's uid and
 /// execution key, so the declaration, digest, and pointer checks still apply.
+/// `now` judges an observed value's `maxAge`.
 pub fn get_value(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     source: &UnitInputSource,
     allow_stale: bool,
+    now: nyl_core::orchestration::time::Timestamp,
 ) -> Result<GetValue, Finding> {
     let unresolved = |message: String| {
         Finding::new(
             Code::ReferenceUnresolved,
             format!("{}: {message}", describe(source)),
-            "run nyl reconcile so the unit has a current receipt, or pass --allow-stale for its latest value",
+            if source.observation.is_some() {
+                "run `nyl observe` so the value is recorded for the unit's current receipt (the unit needs one: run nyl reconcile first), or pass --allow-stale for its latest value"
+            } else {
+                "run nyl reconcile so the unit has a current receipt, or pass --allow-stale for its latest value"
+            },
         )
     };
     let produced = BTreeSet::new();
@@ -199,6 +205,8 @@ pub fn get_value(
                 observed: &snapshot.observed,
                 artifacts: &snapshot.artifacts,
                 attestations: &snapshot.attestations,
+                observations: &snapshot.observations,
+                now,
                 observed_commit: snapshot.tips.observed.as_ref(),
                 run: None,
                 produced_in_run: &produced,
@@ -242,12 +250,13 @@ pub fn get_value(
     }
 }
 
-/// `unit/output` or `unit/artifact`, as the command names it.
+/// `unit/output`, `unit/artifact`, or `unit/observation`, as the command names it.
 fn describe(source: &UnitInputSource) -> String {
     let name = source
         .output
         .as_ref()
         .or(source.artifact.as_ref())
+        .or(source.observation.as_ref())
         .map_or("", String::as_str);
     format!("{}/{name}", source.unit)
 }
@@ -255,6 +264,7 @@ fn describe(source: &UnitInputSource) -> String {
 #[cfg(test)]
 mod tests {
     use nyl_core::orchestration::state::Receipt;
+    use nyl_core::orchestration::time::Timestamp;
     use serde_json::json;
 
     use super::*;
@@ -320,13 +330,13 @@ mod tests {
     #[test]
     fn test_get_value_resolves_like_a_reference() {
         assert_eq!(
-            get_value(&dev(), &snapshot('a', 'a'), &output(), false).unwrap(),
+            get_value(&dev(), &snapshot('a', 'a'), &output(), false, Timestamp::UNIX_EPOCH).unwrap(),
             GetValue::Value(json!("vpc-1"))
         );
         let stale = snapshot('b', 'a');
-        let error = get_value(&dev(), &stale, &output(), false).unwrap_err();
+        let error = get_value(&dev(), &stale, &output(), false, Timestamp::UNIX_EPOCH).unwrap_err();
         assert_eq!(error.code, Code::ReferenceUnresolved);
-        match get_value(&dev(), &stale, &output(), true).unwrap() {
+        match get_value(&dev(), &stale, &output(), true, Timestamp::UNIX_EPOCH).unwrap() {
             GetValue::Stale { value, warning } => {
                 assert_eq!(value, json!("vpc-1"));
                 assert_eq!(warning.code, Code::ReferenceStale);
@@ -335,7 +345,7 @@ mod tests {
         }
         let undeclared: UnitInputSource =
             serde_json::from_value(json!({"unit": "network", "output": "subnet"})).unwrap();
-        assert!(get_value(&dev(), &stale, &undeclared, true).is_err());
+        assert!(get_value(&dev(), &stale, &undeclared, true, Timestamp::UNIX_EPOCH).is_err());
     }
 
     /// Catches `get unit` synthesizing documents for a unit state lacks.

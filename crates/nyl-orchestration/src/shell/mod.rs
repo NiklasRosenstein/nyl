@@ -47,6 +47,14 @@ pub struct Settings {
     /// attest writes nothing; beyond it, a system that is re-verified keeps
     /// a fresh attestation, so a `maxAttestationAge` above this is satisfiable.
     pub attestation_refresh: Duration,
+    /// How old the last successful read of an unchanged observed value gets
+    /// before a run or `nyl observe` records it again with a new time.
+    /// Within it, a repeated read writes nothing; beyond it, a value that is
+    /// re-read stays fresh, so a `maxAge` above this is satisfiable.
+    pub observation_refresh: Duration,
+    /// How often a run that waits for a pending observed value
+    /// (`observationWait`) reads it again.
+    pub observation_poll: Duration,
 }
 
 impl Default for Settings {
@@ -56,6 +64,8 @@ impl Default for Settings {
             lease_grace: Duration::from_mins(10),
             lease_poll: Duration::from_secs(15),
             attestation_refresh: Duration::from_mins(15),
+            observation_refresh: Duration::from_mins(60),
+            observation_poll: Duration::from_secs(15),
         }
     }
 }

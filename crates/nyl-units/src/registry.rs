@@ -30,8 +30,10 @@ pub fn builtin(catalogue: nyl_render::config::ResourceCatalogue) -> DriverSet {
 
 /// [`with_test_kinds`] with the real `KubernetesPublication` driver instead of
 /// `FakePublication`: fake images and infrastructure around the driver that
-/// publishes to Git. Scenarios whose publication needs no script, and no
-/// `mode: observe`, run against it.
+/// publishes to Git. Its observed values are read through the script
+/// ([`ScriptedLive`](crate::fake::ScriptedLive)) instead of Argo CD and the
+/// workload Cluster, which the stub-based driver tests cover; everything else
+/// of the driver, such as resolving and publishing, is the built-in one.
 #[cfg(any(test, feature = "test-kinds"))]
 pub fn with_real_publication(
     script: &crate::fake::Script,
@@ -41,7 +43,11 @@ pub fn with_real_publication(
     use nyl_core::constants::API_VERSION_UNITS;
     use nyl_core::orchestration::driver::Driver;
 
-    let mut drivers = builtin(catalogue);
+    let mut drivers = builtin(catalogue.clone());
+    drivers.register(Arc::new(
+        crate::kubernetes_publication::KubernetesPublicationDriver::new(catalogue)
+            .with_live_reader(Arc::new(crate::fake::ScriptedLive::new(script.clone()))),
+    ));
     let image: Arc<dyn Driver> = Arc::new(FakeImage::new(script.clone()));
     let infra: Arc<dyn Driver> = Arc::new(FakeInfra::new(script.clone()));
     for (kind, fake) in [("OciImage", &image), ("OpenTofu", &infra), ("Terraform", &infra)] {

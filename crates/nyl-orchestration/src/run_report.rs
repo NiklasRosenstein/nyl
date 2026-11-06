@@ -33,6 +33,8 @@ pub enum ReportKind {
     DetectDriftReport,
     /// `nyl attest`: per unit its [`UnitCheck`] with its attestations.
     AttestReport,
+    /// `nyl observe`: per unit its [`UnitCheck`] with its observations.
+    ObserveReport,
     /// `nyl teardown`: per unit its [`UnitResult`], exit categories as for reconcile.
     TeardownReport,
 }
@@ -204,6 +206,10 @@ pub struct EnvironmentRunReport {
     /// `reapplied`, with the requester and reason.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reapplied: Vec<UnitName>,
+    /// Per unit, the observed values whose recorded value or `pending` state
+    /// the operation changed: the transition summary's `observationsChanged`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub observations_changed: BTreeMap<UnitName, Vec<String>>,
     /// The transition commits written, by state ref side (`desired`, `observed`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
@@ -231,6 +237,7 @@ impl EnvironmentRunReport {
             recovered: Vec::new(),
             drift_repaired: Vec::new(),
             reapplied: Vec::new(),
+            observations_changed: BTreeMap::new(),
             commits: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -306,6 +313,12 @@ impl EnvironmentRunReport {
             reapplied: None,
             details: BTreeMap::new(),
         };
+        if !self.observations_changed.is_empty() {
+            summary.details.insert(
+                "observationsChanged".to_owned(),
+                serde_json::json!(self.observations_changed),
+            );
+        }
         for (name, unit) in &self.units {
             if let (Some(approval), Some(serde_json::Value::Object(entry))) =
                 (&unit.approval, summary.units.get_mut(name))
@@ -388,7 +401,9 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 | UnitResult::TearingDown { .. },
             ) => ExitCategory::Incomplete,
         },
-        ReportKind::DetectDriftReport | ReportKind::AttestReport => crate::rules::checks::unit_exit(unit),
+        ReportKind::DetectDriftReport | ReportKind::AttestReport | ReportKind::ObserveReport => {
+            crate::rules::checks::unit_exit(unit)
+        }
         ReportKind::StatusReport => match (unit.state, unit.condition) {
             // A held or deleting unit with a condition exits by its
             // condition, which still needs a run or `nyl recover`.
@@ -591,6 +606,21 @@ pub struct UnitCheck {
     /// The driver's attestations of the current receipt, by name (`attest`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub attestations: BTreeMap<String, AttestationResult>,
+    /// Each declared observation as the read found it, by name (`observe`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub observations: BTreeMap<String, ObservationStatus>,
+}
+
+/// One observed value as a `nyl observe` read found it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "observation", rename_all = "kebab-case")]
+pub enum ObservationStatus {
+    /// The read found a value, which is now recorded.
+    Value { value: serde_json::Value },
+    /// The system holds no value for the current receipt yet.
+    Pending { reason: String },
+    /// The read failed; the last recorded value for the receipt stays usable.
+    Failed { reason: String },
 }
 
 impl From<CheckResult> for UnitCheck {
@@ -599,6 +629,7 @@ impl From<CheckResult> for UnitCheck {
         Self {
             result,
             attestations: BTreeMap::new(),
+            observations: BTreeMap::new(),
         }
     }
 }
@@ -615,6 +646,9 @@ pub enum CheckResult {
     },
     /// `attest`: the driver attested the receipt; the results are the attestations.
     Attested,
+    /// `observe`: the driver read the unit's observed values; the results are
+    /// the observations.
+    Observed,
     Unknown {
         reason: String,
     },
@@ -631,6 +665,7 @@ impl CheckResult {
             Self::Clean => "clean",
             Self::Drifted { .. } => "drifted",
             Self::Attested => "attested",
+            Self::Observed => "observed",
             Self::Unknown { .. } => "unknown",
             Self::NoReceipt => "no-receipt",
             Self::Unsupported => "unsupported",
@@ -698,13 +733,17 @@ pub struct BlockedBy {
     /// The producer, when a reference waits for one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<UnitName>,
-    /// A stable reason: `no-current-receipt`, `attestation-pending`, or
-    /// `attestation-failing`.
+    /// A stable reason: `no-current-receipt`, `attestation-pending`,
+    /// `attestation-failing`, or `observation-pending`.
     pub reason: String,
     /// The attestation of `unit` the consumer waits for, for the two
     /// attestation reasons.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attestation: Option<String>,
+    /// The observed value of `unit` the consumer waits for, for
+    /// `observation-pending`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
 }
 
 #[cfg(test)]
@@ -791,6 +830,7 @@ mod tests {
             unit: Some(unit_name("network")),
             reason: "no-current-receipt".to_owned(),
             attestation: None,
+            observation: None,
         });
         let mut plan = report(vec![("database", waiting)]);
         plan.finish(ReportKind::PlanReport);

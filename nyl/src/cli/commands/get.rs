@@ -3,7 +3,7 @@
 //! Contract: [Inspection](../../../../design/orchestration-core.md#inspection).
 //! State forms read one snapshot through a read-only store and never take
 //! the lease. Document and table forms exit 0 whenever they can read the
-//! requested state; `get output` and `get artifact` resolve like the
+//! requested state; `get output`, `get artifact`, and `get observation` resolve like the
 //! matching `fromUnit` reference and exit 1 when it would not resolve.
 
 use std::collections::BTreeMap;
@@ -71,6 +71,8 @@ enum GetCommand {
     Output(GetValueArgs),
     /// Get an artifact or a value inside it, resolved like a fromUnit reference.
     Artifact(GetValueArgs),
+    /// Get an observed value, resolved like a fromUnit reference.
+    Observation(GetValueArgs),
     /// Get the artifacts of the units' latest receipts.
     Artifacts(GetStateArgs),
 }
@@ -205,13 +207,19 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::Output(value) => {
             let environment = required_environment(&value.state, "get output")?;
             state_form(&value.path, environment, &value.state, |snapshot, env| {
-                value_form(value, false, env, snapshot)
+                value_form(value, ValueKind::Output, env, snapshot, wiring.clock.now())
             })
         }
         GetCommand::Artifact(value) => {
             let environment = required_environment(&value.state, "get artifact")?;
             state_form(&value.path, environment, &value.state, |snapshot, env| {
-                value_form(value, true, env, snapshot)
+                value_form(value, ValueKind::Artifact, env, snapshot, wiring.clock.now())
+            })
+        }
+        GetCommand::Observation(value) => {
+            let environment = required_environment(&value.state, "get observation")?;
+            state_form(&value.path, environment, &value.state, |snapshot, env| {
+                value_form(value, ValueKind::Observation, env, snapshot, wiring.clock.now())
             })
         }
         GetCommand::Artifacts(artifacts) => {
@@ -430,35 +438,46 @@ fn split_reference(reference: &str) -> Option<(&str, &str)> {
         .filter(|(unit, name)| !unit.is_empty() && !name.is_empty())
 }
 
-/// `nyl get output` and `nyl get artifact`: one value, resolved like `fromUnit`.
+/// What a value form of `get` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueKind {
+    Output,
+    Artifact,
+    Observation,
+}
+
+/// `nyl get output`, `get artifact`, and `get observation`: one value,
+/// resolved like `fromUnit`; `now` judges an observed value's `maxAge`.
 fn value_form(
     args: &GetValueArgs,
-    artifact: bool,
+    kind: ValueKind,
     environment: &nyl_core::orchestration::ids::EnvironmentName,
     snapshot: &EnvironmentSnapshot,
+    now: nyl_core::orchestration::time::Timestamp,
 ) -> Result<CommandOutcome> {
     let Some((unit, name)) = split_reference(&args.reference) else {
         return Ok(refused(&Finding::new(
             Code::ReferenceInvalid,
             format!("{:?} is not of the form <unit>/<name>", args.reference),
-            if artifact {
-                "name the artifact as <unit>/<artifact>, such as web-image/image"
-            } else {
-                "name the output as <unit>/<output>, such as network/vpcId"
+            match kind {
+                ValueKind::Artifact => "name the artifact as <unit>/<artifact>, such as web-image/image",
+                ValueKind::Output => "name the output as <unit>/<output>, such as network/vpcId",
+                ValueKind::Observation => "name the observed value as <unit>/<observation>, such as kubernetes/ingressIp",
             },
         )));
     };
     let source = UnitInputSource {
         environment: None,
         unit: unit.to_owned(),
-        output: (!artifact).then(|| name.to_owned()),
-        artifact: artifact.then(|| name.to_owned()),
+        output: (kind == ValueKind::Output).then(|| name.to_owned()),
+        artifact: (kind == ValueKind::Artifact).then(|| name.to_owned()),
+        observation: (kind == ValueKind::Observation).then(|| name.to_owned()),
         kind: None,
         pointer: args.pointer.clone(),
         evidence: None,
         attestations: Vec::new(),
     };
-    let (value, warning) = match inspect::get_value(environment, snapshot, &source, args.allow_stale) {
+    let (value, warning) = match inspect::get_value(environment, snapshot, &source, args.allow_stale, now) {
         Ok(GetValue::Value(value)) => (value, None),
         Ok(GetValue::Stale { value, warning }) => (value, Some(warning)),
         Err(finding) => return Ok(refused(&finding)),

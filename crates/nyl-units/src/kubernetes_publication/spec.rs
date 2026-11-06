@@ -21,20 +21,21 @@ const KIND_FIELDS: [&str; 4] = ["target", "mode", "teardownWait", "releases"];
 /// Validate a rendered spec, references still as expressions.
 pub(super) fn validate(spec: &Value) -> Result<(), String> {
     let spec = spec.as_object().ok_or("spec must be a mapping")?;
-    for field in ["observations", "observationWait"] {
-        if spec.contains_key(field) {
-            return Err(format!(
-                "spec.{field} (observed values) is not available yet: mode: observe attests `accepted` and `healthy` \
-                 from Argo CD, but reading resource fields arrives later; remove it"
-            ));
-        }
-    }
     if spec.contains_key("argocd") {
         return Err(
             "spec.argocd is recorded from the target's ArgoCDInstance when the unit is resolved and must not be written by hand; \
              declare the instance's access in its ArgoCDInstance spec.access instead"
                 .to_owned(),
         );
+    }
+    for field in [OBSERVATION_SOURCES, WORKLOAD] {
+        if spec.contains_key(field.trim_start_matches('/')) {
+            return Err(format!(
+                "spec.{} is recorded from the rendered target when the unit is resolved and must not be written by hand; \
+                 declare what to read under spec.observations instead",
+                field.trim_start_matches('/')
+            ));
+        }
     }
     if spec.contains_key("teardownSettings") {
         return Err(
@@ -69,6 +70,7 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
     if let Some(wait) = spec.get("teardownWait") {
         validate_teardown_wait(wait)?;
     }
+    observation_sources(&Value::Object(spec.clone()))?;
     if let Some(releases) = spec.get("releases") {
         let releases = releases
             .as_object()
@@ -81,6 +83,84 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The pointer, in the resolved spec, of the Application that owns each
+/// observed resource, recorded at resolution.
+pub(super) const OBSERVATION_SOURCES: &str = "/observationSources";
+
+/// The pointer, in the resolved spec, of the workload Cluster the observed
+/// resources are read from, recorded at resolution.
+pub(super) const WORKLOAD: &str = "/workload";
+
+/// What one observation reads: a field of a resource the target renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ObservationSource {
+    pub resource: nyl_render::gitops::observation::ResourceRef,
+    /// A JSON Pointer into the live resource.
+    pub pointer: String,
+}
+
+/// The `from` sources of `spec.observations`, by observation name:
+/// `{resource: {apiVersion, kind, namespace?, name}, pointer}`. Nothing here
+/// needs the rendered target; whether the target renders the resource is
+/// checked when the unit is resolved. Secrets are never read.
+pub(super) fn observation_sources(spec: &Value) -> Result<std::collections::BTreeMap<String, ObservationSource>, String> {
+    let mut sources = std::collections::BTreeMap::new();
+    let Some(observations) = spec.get("observations") else {
+        return Ok(sources);
+    };
+    let observations = observations
+        .as_object()
+        .ok_or("spec.observations must be a mapping of observation names")?;
+    for (name, declaration) in observations {
+        let field = format!("spec.observations.{name}.from");
+        let from = declaration
+            .get("from")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{field} is required: {{resource: {{apiVersion, kind, namespace, name}}, pointer}}"))?;
+        if let Some(key) = from.keys().find(|key| !matches!(key.as_str(), "resource" | "pointer")) {
+            return Err(format!("{field} has unknown field {key:?}; it has resource and pointer"));
+        }
+        let resource = from
+            .get("resource")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{field}.resource is required: {{apiVersion, kind, namespace, name}}"))?;
+        if let Some(key) = resource
+            .keys()
+            .find(|key| !matches!(key.as_str(), "apiVersion" | "kind" | "namespace" | "name"))
+        {
+            return Err(format!(
+                "{field}.resource has unknown field {key:?}; it has apiVersion, kind, namespace, and name"
+            ));
+        }
+        let text = |key: &str| -> Result<Option<String>, String> {
+            match resource.get(key) {
+                None => Ok(None),
+                Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+                Some(_) => Err(format!("{field}.resource.{key} must be a non-empty string")),
+            }
+        };
+        let require = |key: &str| text(key)?.ok_or_else(|| format!("{field}.resource.{key} is required"));
+        let resource = nyl_render::gitops::observation::ResourceRef {
+            api_version: require("apiVersion")?,
+            kind: require("kind")?,
+            namespace: text("namespace")?,
+            name: require("name")?,
+        };
+        if resource.kind == "Secret" && resource.api_version == "v1" {
+            return Err(format!(
+                "{field}.resource is a Secret, which an observation never reads: observed values are recorded in state and referenced by other units"
+            ));
+        }
+        let pointer = match from.get("pointer") {
+            Some(Value::String(pointer)) => pointer.clone(),
+            _ => return Err(format!("{field}.pointer is required: a JSON Pointer into the resource, such as /status/loadBalancer/ingress/0/ip")),
+        };
+        nyl_core::json_pointer::validate(&format!("{field}.pointer"), &pointer).map_err(|error| error.to_string())?;
+        sources.insert(name.clone(), ObservationSource { resource, pointer });
+    }
+    Ok(sources)
 }
 
 /// How a unit's teardown waits after phase 1, from its stored spec: the
@@ -199,11 +279,50 @@ mod tests {
         assert!(validate(&json!({"target": "dev", "mode": "observe", "teardownWait": {"strategy": "manual"}})).is_ok());
         assert!(invalid(&json!({"target": "dev", "mode": "apply"})).contains("must be publish or observe"));
         assert!(invalid(&json!({"target": "dev", "argocd": {}})).contains("must not be written by hand"));
-        let observations = invalid(&json!({"target": "dev", "mode": "observe", "observations": {}}));
-        assert!(
-            observations.contains("observed values") && observations.contains("not available yet"),
-            "{observations}"
-        );
+        assert!(invalid(&json!({"target": "dev", "observationSources": {}})).contains("must not be written by hand"));
+        assert!(invalid(&json!({"target": "dev", "workload": {}})).contains("must not be written by hand"));
+    }
+
+    fn observing(from: &Value) -> Value {
+        json!({"target": "dev", "mode": "observe", "observations": {"ip": {"type": "string", "from": from}}})
+    }
+
+    /// Catches a source the driver would only fail on at read time, or a
+    /// Secret that reaches state through an observed value: the declaration
+    /// is checked before a unit is stored.
+    #[test]
+    fn test_validate_checks_what_an_observation_reads() {
+        let service = json!({"apiVersion": "v1", "kind": "Service", "namespace": "ingress", "name": "ingress-nginx"});
+        assert!(validate(&observing(
+            &json!({"resource": service, "pointer": "/status/loadBalancer/ingress/0/ip"})
+        ))
+        .is_ok());
+        let sources = observation_sources(&observing(&json!({"resource": service, "pointer": "/status/x"}))).unwrap();
+        assert_eq!(sources["ip"].resource.name, "ingress-nginx");
+        assert_eq!(sources["ip"].resource.namespace.as_deref(), Some("ingress"));
+        let cluster_scoped = json!({"apiVersion": "v1", "kind": "Namespace", "name": "ingress"});
+        assert!(validate(&observing(&json!({"resource": cluster_scoped, "pointer": "/status/phase"}))).is_ok());
+        for (from, expected) in [
+            (json!({"pointer": "/a"}), "resource is required"),
+            (json!({"resource": service}), "pointer is required"),
+            (json!({"resource": service, "pointer": "a"}), "JSON Pointer"),
+            (json!({"resource": service, "pointer": "/a", "other": 1}), "unknown field \"other\""),
+            (
+                json!({"resource": {"apiVersion": "v1", "kind": "Service"}, "pointer": "/a"}),
+                "name is required",
+            ),
+            (
+                json!({"resource": {"apiVersion": "v1", "kind": "Service", "name": "x", "extra": 1}, "pointer": "/a"}),
+                "unknown field \"extra\"",
+            ),
+            (
+                json!({"resource": {"apiVersion": "v1", "kind": "Secret", "namespace": "a", "name": "x"}, "pointer": "/data"}),
+                "never reads",
+            ),
+        ] {
+            let message = invalid(&observing(&from));
+            assert!(message.contains(expected), "{from}: {message}");
+        }
     }
 
     /// Catches a publication waiting for the wrong thing: `mode: observe`
