@@ -352,3 +352,141 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
         "the message names the sample instances: {output}"
     );
 }
+
+fn instance_uid(harness: &harness::Harness, instance: &str, unit: &str) -> String {
+    let text = scenario::world::git_output(
+        &harness.world.bare(),
+        &["show", &format!("nyl/previews:{instance}/desired/units/{unit}.yaml")],
+    );
+    let document: Value = serde_saphyr::from_str(&text).unwrap();
+    document["unit"]["uid"].as_str().unwrap().to_owned()
+}
+
+fn reconcile_instance(harness: &harness::Harness, pr: &str) -> CommandOutcome {
+    invoke(
+        harness,
+        &[
+            "reconcile",
+            "-e",
+            &format!("pr-{pr}"),
+            "--template",
+            "preview",
+            "--param",
+            &format!("pr={pr}"),
+            "-o",
+            "json",
+        ],
+    )
+}
+
+/// An instance that starts over (`state init --fresh`) gets a new incarnation
+/// of its publication, and takes over the prefix its previous incarnation
+/// published: the fence must answer for the instance's own state, where the old
+/// owner no longer exists. Catches an instance stuck on `NYL-KUBERNETES-OWNER-UNKNOWN`
+/// after a fresh start.
+#[test]
+fn test_an_instance_that_starts_over_takes_over_its_own_prefix() {
+    let project = preview_project();
+    let harness = real_publication_harness(project.path());
+    assert_eq!(reconcile_instance(&harness, "1").exit, 0);
+    let before = instance_uid(&harness, "pr-1", "kubernetes");
+    let fresh = invoke(
+        &harness,
+        &[
+            "state",
+            "init",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+            "--fresh",
+        ],
+    );
+    assert_eq!(fresh.exit, 0, "{}", fresh.stderr);
+    let again = reconcile_instance(&harness, "1");
+    assert_eq!(again.exit, 0, "{}\n{}", again.stderr, again.stdout);
+    assert_ne!(
+        instance_uid(&harness, "pr-1", "kubernetes"),
+        before,
+        "a new incarnation published"
+    );
+    assert!(harness
+        .show("refs/heads/previews", "pr-1/_nyl/index.json")
+        .contains(&instance_uid(&harness, "pr-1", "kubernetes")));
+}
+
+/// Another environment's publication meeting a prefix an instance owns is
+/// fenced while the instance's incarnation exists in its state, and takes the
+/// prefix over once the instance is deleted. Catches fencing that cannot see
+/// instances: it would call a live instance's owner unknown.
+#[test]
+fn test_a_prefix_owned_by_a_live_instance_fences_until_the_instance_is_deleted() {
+    let project = preview_project();
+    let harness = real_publication_harness(project.path());
+    assert_eq!(reconcile_instance(&harness, "1").exit, 0);
+    let owner = instance_uid(&harness, "pr-1", "kubernetes");
+    assert_eq!(invoke(&harness, &["state", "init", "-e", "dev"]).exit, 0);
+    assert_eq!(invoke(&harness, &["reconcile", "-e", "dev", "-o", "json"]).exit, 0);
+
+    // dev's prefix now carries the instance's incarnation as its owner.
+    let index_path = "dev/_nyl/index.json";
+    let mut index: Value = serde_json::from_str(&harness.show("refs/heads/deploy", index_path)).unwrap();
+    index["owner"] = serde_json::json!({"environment": "pr-1", "unit": "kubernetes", "uid": owner});
+    harness.world.commit_files(
+        "deploy",
+        "The instance published dev's prefix",
+        &[(index_path, &(serde_json::to_string_pretty(&index).unwrap() + "\n"))],
+    );
+    let teardown = |harness: &harness::Harness| {
+        invoke(
+            harness,
+            &[
+                "teardown",
+                "-e",
+                "dev",
+                "--unit",
+                "kubernetes",
+                "--allow-incomplete",
+                "-o",
+                "json",
+            ],
+        )
+    };
+    let fenced = teardown(&harness);
+    assert_eq!(fenced.exit, 3, "{}\n{}", fenced.stderr, fenced.stdout);
+    let message = fenced.report.to_string();
+    assert!(message.contains("NYL-KUBERNETES-OWNER-FENCED"), "{message}");
+    assert!(
+        message.contains("still exists in the state of environment pr-1"),
+        "{message}"
+    );
+
+    // Close the instance, then the prefix is nobody's.
+    let closing = invoke(&harness, &["state", "delete", "-e", "pr-1", "--teardown", "-o", "json"]);
+    assert_eq!(closing.exit, 2, "{}", closing.stderr);
+    let confirmed = invoke(
+        &harness,
+        &[
+            "teardown",
+            "-e",
+            "pr-1",
+            "--unit",
+            "kubernetes",
+            "--confirm-removed",
+            "--reason",
+            "checked",
+            "-o",
+            "json",
+        ],
+    );
+    assert_eq!(confirmed.exit, 0, "{}", confirmed.stderr);
+    assert_eq!(
+        invoke(&harness, &["state", "delete", "-e", "pr-1", "--teardown"]).exit,
+        0
+    );
+    let taken = teardown(&harness);
+    assert_ne!(taken.exit, 3, "{}\n{}", taken.stderr, taken.stdout);
+    assert!(!taken.report.to_string().contains("OWNER-"), "{}", taken.report);
+}

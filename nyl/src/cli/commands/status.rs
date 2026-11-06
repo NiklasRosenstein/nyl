@@ -75,7 +75,7 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 }
 
 fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
-    let session = Session::open(&args.path, &args.environment[0])?;
+    let session = Session::open_offline(&args.path, &args.environment[0], args.local)?;
     let store = if args.local {
         session.offline_store(None)?
     } else {

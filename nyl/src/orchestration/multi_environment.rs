@@ -54,7 +54,7 @@ pub fn select(
             InstanceRequest::default()
         }
     };
-    let (instances, mut errors, undeclared) = known_instances(&inventory, names, &hint, offline);
+    let (instances, mut errors, undeclared, unlisted) = known_instances(&inventory, names, &hint, offline);
     let inventory = inventory.with_instances(instances);
     let selection = selection_names(&environments, &groups, names, labels, group, &undeclared)?;
     if selection.is_empty() {
@@ -77,8 +77,13 @@ pub fn select(
         .with_instances(inventory.instances.clone());
     let mut graph = BTreeMap::new();
     let mut rendered_sources = BTreeMap::new();
-    let all = nyl_render::gitops::instances::environment_names(&inventory)
+    let mut all = nyl_render::gitops::instances::environment_names(&inventory)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
+    // A named environment that could not be resolved still takes part, so its
+    // finding is reported instead of the name vanishing from the selection.
+    all.extend(errors.keys().filter_map(|name| EnvironmentName::new(name).ok()));
+    all.sort();
+    all.dedup();
     for name in all {
         if errors.contains_key(name.as_str()) {
             graph.insert(name, BTreeSet::new());
@@ -114,7 +119,7 @@ pub fn select(
         }
     }
     if source_graph {
-        ownership_preflight(&inventory, &rendered_sources, &mut errors, drivers, &hint)?;
+        ownership_preflight(&inventory, &rendered_sources, &mut errors, drivers, &hint, &unlisted)?;
     }
     let ordered = if source_graph {
         nyl_orchestration::rules::multi_environment::validate_available_sources(
@@ -150,13 +155,15 @@ fn known_instances(
     nyl_core::orchestration::instance::Instances,
     BTreeMap<String, Finding>,
     Vec<String>,
+    Vec<String>,
 ) {
     let (declared_environments, _) = declared(inventory);
     let mut instances = nyl_core::orchestration::instance::Instances::new();
     let mut errors = BTreeMap::new();
     let mut undeclared = Vec::new();
-    let (listed, _) = super::project::list_instances(inventory, offline);
-    for instance in listed {
+    let listing = super::project::list_instances(inventory, offline);
+    let unlisted = listing.unavailable;
+    for instance in listing.instances {
         instances.insert(instance.name, instance.descriptor);
     }
     for name in names {
@@ -178,7 +185,7 @@ fn known_instances(
         }
         undeclared.push(name.clone());
     }
-    (instances, errors, undeclared)
+    (instances, errors, undeclared, unlisted)
 }
 
 /// Stored incarnations keep their resource claims until they leave state,
@@ -189,9 +196,14 @@ fn ownership_preflight(
     errors: &mut BTreeMap<String, Finding>,
     drivers: &nyl_core::orchestration::driver::DriverSet,
     hint: &dyn Fn(&str) -> InstanceRequest,
+    unlisted: &[String],
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
-    let mut unknown = Vec::new();
+    // Instances that could not be listed hold claims nobody can check.
+    let mut unknown = unlisted
+        .iter()
+        .map(|template| format!("the instances of EnvironmentTemplate {template}"))
+        .collect::<Vec<_>>();
     for name in nyl_render::gitops::instances::environment_names(inventory)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?
     {

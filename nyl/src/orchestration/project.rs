@@ -151,11 +151,34 @@ pub fn resolve_environment_with(
             ));
         }
     }
-    let mut found = find_records(inventory, &environment_name, &groups, templates, request)?;
-    let (template, mut located, record) = match found.len() {
-        0 => match &request.template {
-            None => return Err(unknown()),
-            Some(wanted) => {
+    let found = find_records(inventory, &environment_name, &groups, templates, request)?;
+    // A record belongs to the template it names. Templates that share a state
+    // location see each other's records there, which are taken names, not
+    // instances of themselves.
+    let (mut owned, foreign): (Vec<_>, Vec<_>) = found
+        .into_iter()
+        .partition(|(template, _, record)| record.template.as_deref() == Some(template.metadata.name.as_str()));
+    let (template, mut located, record) = match owned.len() {
+        0 => match (&request.template, foreign.first()) {
+            (Some(_), Some((_, _, other))) => {
+                return Err(name_taken(
+                    name,
+                    &format!(
+                        "is an instance of EnvironmentTemplate {}",
+                        other.template.as_deref().unwrap_or_default()
+                    ),
+                ));
+            }
+            (None, Some((_, _, other))) => {
+                let recorded = other.template.as_deref().unwrap_or_default();
+                return Err(Finding::new(
+                    Code::InstanceTemplateUnknown,
+                    format!("{name} is an instance of EnvironmentTemplate {recorded}, which this checkout does not declare"),
+                    "run Nyl from a checkout that declares the template; renaming or removing a template needs `nyl state move --template`",
+                ));
+            }
+            (None, None) => return Err(unknown()),
+            (Some(wanted), None) => {
                 let template = nyl_render::gitops::instances::find_template(inventory, wanted)
                     .expect("the template was checked above");
                 let state = nyl_render::gitops::instances::instance_state(template, &environment_name)?;
@@ -165,7 +188,7 @@ pub fn resolve_environment_with(
             }
         },
         1 => {
-            let (template, located, record) = found.remove(0);
+            let (template, located, record) = owned.remove(0);
             if let Some(wanted) = &request.template {
                 if *wanted != template.metadata.name {
                     return Err(name_taken(
@@ -184,7 +207,7 @@ pub fn resolve_environment_with(
                 Code::InstanceAmbiguous,
                 format!(
                     "{name} has state as an instance of several EnvironmentTemplates: {}",
-                    found
+                    owned
                         .iter()
                         .map(|(template, _, _)| template.metadata.name.as_str())
                         .collect::<Vec<_>>()
@@ -194,18 +217,6 @@ pub fn resolve_environment_with(
             ))
         }
     };
-    if let Some(record) = &record {
-        let recorded = record.template.as_deref().unwrap_or_default();
-        if recorded != template.metadata.name {
-            return Err(name_taken(
-                name,
-                &format!(
-                    "is an instance of EnvironmentTemplate {recorded}, not {}",
-                    template.metadata.name
-                ),
-            ));
-        }
-    }
     let mut given = record.as_ref().map(|record| record.params.clone()).unwrap_or_default();
     given.extend(request.params.clone());
     let (environment, terms) = nyl_render::gitops::instances::instantiate(template, &environment_name, &given)?;
@@ -246,6 +257,26 @@ fn find_records<'a>(
         }
     }
     Ok(found)
+}
+
+/// Where the instance `name` of `template` keeps its state, from the
+/// template alone: nothing is read, so every listed instance can be placed.
+pub fn instance_location(
+    inventory: &GitOpsInventory,
+    name: &EnvironmentName,
+    template: &str,
+) -> std::result::Result<StateLocation, Finding> {
+    let template = nyl_render::gitops::instances::find_template(inventory, template).ok_or_else(|| {
+        Finding::new(
+            Code::InstanceTemplateUnknown,
+            format!("{name} is an instance of EnvironmentTemplate {template}, which this checkout does not declare"),
+            "run Nyl from a checkout that declares the template; renaming or removing a template needs `nyl state move --template`",
+        )
+    })?;
+    let mut skeleton = template.environment_skeleton(name.as_str());
+    skeleton.spec.state = nyl_render::gitops::instances::instance_state(template, name)?;
+    let (_, groups) = declared(inventory);
+    Ok(locate(inventory, &skeleton, &groups)?.location)
 }
 
 fn name_taken(name: &str, why: &str) -> Finding {
@@ -717,14 +748,14 @@ const SENTINEL_NAME: &str = "nyl-instance-sentinel";
 /// one location to list, and a `state.path` must end in the environment's
 /// name to be a directory per instance; instances of such a template are
 /// found by name only. Deleted instances are not listed. A location that
-/// cannot be read is a warning, not a failure of the command that lists it.
-pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> (Vec<ListedInstance>, Vec<Finding>) {
-    let mut listed = Vec::new();
-    let mut warnings = Vec::new();
+/// cannot be read is a warning of the command that lists it, and the template is
+/// reported in [`Listing::unavailable`] so checks across environments fail closed.
+pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> Listing {
+    let mut listing = Listing::default();
     let Ok(sentinel) = EnvironmentName::new(SENTINEL_NAME) else {
-        return (listed, warnings);
+        return listing;
     };
-    let (_, groups) = declared(inventory);
+    let (declared_environments, groups) = declared(inventory);
     for template in nyl_render::gitops::instances::templates(inventory) {
         let Ok(state) = nyl_render::gitops::instances::instance_state(template, &sentinel) else {
             continue;
@@ -749,11 +780,38 @@ pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> (Vec<Listed
         match records {
             Ok(records) => {
                 for record in records {
-                    if record.template.as_deref() != Some(template.metadata.name.as_str()) || record.deleted().is_some()
-                    {
+                    if record.template.as_deref() != Some(template.metadata.name.as_str()) {
                         continue;
                     }
-                    listed.push(ListedInstance {
+                    // A deleted instance holds no incarnation, and its location still answers
+                    // that, so a fence on its old prefix reads Gone rather than unknown.
+                    if record.deleted().is_some() {
+                        listing.deleted.push(ListedInstance {
+                            name: record.environment.clone(),
+                            descriptor: InstanceDescriptor {
+                                template: template.metadata.name.clone(),
+                                params: record.params.clone(),
+                            },
+                            record,
+                        });
+                        continue;
+                    }
+                    // A declared Environment of the same name wins: leases, run refs and
+                    // state are named after it, so the instance is a taken name, not shadowed silently.
+                    if declared_environments
+                        .iter()
+                        .any(|environment| environment.metadata.name == record.environment.as_str())
+                    {
+                        listing.warnings.push(name_taken(
+                            record.environment.as_str(),
+                            &format!(
+                                "is a declared Environment now, and also the recorded instance of EnvironmentTemplate {}; the instance is ignored until its state is deleted or the Environment is renamed",
+                                template.metadata.name
+                            ),
+                        ));
+                        continue;
+                    }
+                    listing.instances.push(ListedInstance {
                         name: record.environment.clone(),
                         descriptor: InstanceDescriptor {
                             template: template.metadata.name.clone(),
@@ -763,15 +821,32 @@ pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> (Vec<Listed
                     });
                 }
             }
-            Err(message) => warnings.push(Finding::new(
-                Code::StateUnavailable,
-                format!(
-                    "cannot list the instances of EnvironmentTemplate {}: {message}",
-                    template.metadata.name
-                ),
-                "check access to the template's state repository; checks across environments skip its instances meanwhile",
-            )),
+            Err(message) => {
+                listing.warnings.push(Finding::new(
+                    Code::StateUnavailable,
+                    format!(
+                        "cannot list the instances of EnvironmentTemplate {}: {message}",
+                        template.metadata.name
+                    ),
+                    "check access to the template's state repository, or run without network access with --local; checks that need every environment's state refuse until the listing works",
+                ));
+                listing.unavailable.push(template.metadata.name.clone());
+            }
         }
     }
-    (listed, warnings)
+    listing
+}
+
+/// What listing the instances of every template found.
+#[derive(Default)]
+pub struct Listing {
+    pub instances: Vec<ListedInstance>,
+    /// Instances whose state was deleted: not live, but their locations are
+    /// still where their old incarnations are looked up.
+    pub deleted: Vec<ListedInstance>,
+    /// Why a listing is incomplete.
+    pub warnings: Vec<Finding>,
+    /// Templates whose state location could not be read: their instances are
+    /// unknown, so a check across environments must treat them as unavailable.
+    pub unavailable: Vec<String>,
 }

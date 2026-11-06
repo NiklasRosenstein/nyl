@@ -570,6 +570,28 @@ mod tests {
         }
     }
 
+    /// Catches an instance not entered from its own checkout following the
+    /// checkout: it renders at its record's commit and records that choice,
+    /// unless its template names a revision or the run overrides the source.
+    #[test]
+    fn test_a_recorded_source_is_used_only_without_a_source_of_its_own() {
+        let recorded = commit('e');
+        let request = |spec: &Value, override_revision: Option<&str>| {
+            source_request(&environment(spec), &recorded, override_revision, true)
+        };
+        let plain = request(&json!({}), None);
+        assert_eq!(plain, SourceRequest::Recorded(recorded.clone()));
+        assert_eq!(plain.choice(), SourceChoice::Recorded);
+        assert_eq!(
+            request(&json!({"source": {"revision": "release/prod"}}), None),
+            SourceRequest::Revision("release/prod".to_owned())
+        );
+        assert_eq!(
+            request(&json!({}), Some("hotfix")),
+            SourceRequest::Override("hotfix".to_owned())
+        );
+    }
+
     /// Catches a promoted source silently running from the entry commit.
     #[test]
     fn test_promoted_source_is_reported_unsupported() {
