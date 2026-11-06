@@ -105,4 +105,3 @@ metadata:
   labels: {dev: 'true', prod: 'true'}
 spec:
   target: '{{ values.target }}'
-  mode: publish

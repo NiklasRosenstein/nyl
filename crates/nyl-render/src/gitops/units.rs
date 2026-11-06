@@ -1006,7 +1006,6 @@ metadata:
   labels: {dev: 'true'}
 spec:
   target: '{{ values.target }}'
-  mode: publish
 ";
 
     const IMAGE: &str = r#"{% set registry = "registry.invalid" %}
@@ -1313,7 +1312,6 @@ spec:
             unit(&source, "kubernetes").spec,
             Some(json!({
                 "target": "dev",
-                "mode": "publish",
                 "releases": {
                     "web/web": {
                         "image": {"fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
@@ -1598,7 +1596,10 @@ spec:
                 "  source: {path: ../infra/database}\n",
                 "  enabled: false\n  source: {path: ../infra/database}\n",
             )
-            .replace("  mode: publish\n", "  mode: publish\n  enabled: false\n");
+            .replace(
+                "  target: '{{ values.target }}'\n",
+                "  target: '{{ values.target }}'\n  enabled: false\n",
+            );
         let image = IMAGE.replace("  repository:", "  enabled: false\n  repository:");
         let worktree = project(&[
             ("platform.yaml", PLATFORM),

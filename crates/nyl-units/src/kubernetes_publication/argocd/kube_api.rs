@@ -23,7 +23,8 @@ use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client};
 use serde_json::Value;
 
-use super::{block_on, ArgoReader, ReadError, ReadErrorKind, KUBECONFIG_ENV};
+use super::{ArgoQueries, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, KUBECONFIG_ENV};
+use crate::kubernetes_publication::reconciler::{block_on, Proof};
 
 /// Reads Applications through a kubeconfig context.
 pub struct KubeApiReader {
@@ -31,6 +32,8 @@ pub struct KubeApiReader {
     context: String,
     kubeconfig: Vec<PathBuf>,
     budget: Duration,
+    /// The instance's namespace, where its AppProjects live.
+    namespace: String,
 }
 
 impl KubeApiReader {
@@ -75,7 +78,15 @@ impl KubeApiReader {
             context: context.to_owned(),
             kubeconfig: files,
             budget,
+            namespace: super::DEFAULT_NAMESPACE.to_owned(),
         })
+    }
+
+    /// Read the instance that lives in `namespace`.
+    #[must_use]
+    pub fn in_namespace(mut self, namespace: &str) -> Self {
+        namespace.clone_into(&mut self.namespace);
+        self
     }
 
     async fn client(&self) -> Result<Client, ReadError> {
@@ -192,13 +203,40 @@ impl KubeApiReader {
     }
 }
 
-impl ArgoReader for KubeApiReader {
-    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+impl KubeApiReader {
+    /// The Applications in `namespace` by name, each as Argo CD serves it.
+    pub fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
         self.list("Application", "applications", namespace)
     }
 
-    fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError> {
+    /// Whether the AppProject `name` of `namespace` is in the listing.
+    pub fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError> {
         Ok(self.list("AppProject", "appprojects", namespace)?.contains_key(name))
+    }
+}
+
+impl ArgoQueries for KubeApiReader {
+    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+        KubeApiReader::applications(self, namespace)
+    }
+
+    /// The Kubernetes API fails a list the context may not make instead of
+    /// filtering it, so there is no per-Application question to ask.
+    fn can_get(&self, _rbac_name: &str) -> Result<bool, ReadError> {
+        Ok(true)
+    }
+
+    fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError> {
+        KubeApiReader::project_exists(self, namespace, name)
+    }
+}
+
+impl ReconcilerReader for KubeApiReader {
+    /// A missing Application means something only when the reading shows what
+    /// only the Argo CD that runs the target has: the listing of a context for
+    /// another Argo CD is an empty success.
+    fn read(&self, request: &ReadRequest<'_>) -> Result<Reading, ReadError> {
+        super::read_argocd(self, &self.namespace, Proof::Anchors, request)
     }
 }
 
