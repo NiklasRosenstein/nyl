@@ -916,13 +916,17 @@ pub enum GitOpsResourceKind {
     Environment,
     #[value(name = "EnvironmentGroup", alias = "environment-group")]
     EnvironmentGroup,
+    #[value(name = "EnvironmentTemplate", alias = "environment-template")]
+    EnvironmentTemplate,
 }
 
 impl GitOpsResourceKind {
     /// API version of this control resource.
     pub const fn api_version(self) -> &'static str {
         match self {
-            Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
+            Self::GitRepository | Self::Environment | Self::EnvironmentGroup | Self::EnvironmentTemplate => {
+                API_VERSION_GITOPS
+            }
             Self::Cluster => API_VERSION,
             _ => API_VERSION_K8S_GITOPS,
         }
@@ -938,6 +942,7 @@ impl GitOpsResourceKind {
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
             Self::Environment => nyl_core::resources::environment::KIND_ENVIRONMENT,
             Self::EnvironmentGroup => nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP,
+            Self::EnvironmentTemplate => nyl_core::resources::environment::KIND_ENVIRONMENT_TEMPLATE,
         }
     }
 
@@ -951,6 +956,7 @@ impl GitOpsResourceKind {
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
             nyl_core::resources::environment::KIND_ENVIRONMENT => Some(Self::Environment),
             nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
+            nyl_core::resources::environment::KIND_ENVIRONMENT_TEMPLATE => Some(Self::EnvironmentTemplate),
             _ => None,
         }
     }
@@ -965,10 +971,11 @@ impl GitOpsResourceKind {
             Self::ApplicationGroup => "application-group.schema.json",
             Self::Environment => "environment.schema.json",
             Self::EnvironmentGroup => "environment-group.schema.json",
+            Self::EnvironmentTemplate => "environment-template.schema.json",
         }
     }
 
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 9] {
         [
             Self::GitRepository,
             Self::Cluster,
@@ -978,6 +985,7 @@ impl GitOpsResourceKind {
             Self::ApplicationGroup,
             Self::Environment,
             Self::EnvironmentGroup,
+            Self::EnvironmentTemplate,
         ]
     }
 }
@@ -1000,6 +1008,9 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         }
         GitOpsResourceKind::EnvironmentGroup => {
             serde_json::to_value(schema_for!(nyl_core::resources::environment::EnvironmentGroup))
+        }
+        GitOpsResourceKind::EnvironmentTemplate => {
+            serde_json::to_value(schema_for!(nyl_core::resources::environment::EnvironmentTemplate))
         }
     }
     .expect("schema serialization should never fail");
@@ -1043,6 +1054,7 @@ pub enum GitOpsResource {
     ApplicationGroup(Box<ApplicationGroup>),
     Environment(Box<nyl_core::resources::environment::Environment>),
     EnvironmentGroup(nyl_core::resources::environment::EnvironmentGroup),
+    EnvironmentTemplate(Box<nyl_core::resources::environment::EnvironmentTemplate>),
 }
 
 /// True when the manifest advertises the GitOps API and one of its known kinds.
@@ -1104,35 +1116,39 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
     let mut value = value.clone();
     nyl_core::resources::schema::canonicalize_api_version(&mut value);
     let value = &value;
-    let resource =
-        match identity.kind {
-            GitOpsResourceKind::GitRepository => {
-                GitOpsResource::GitRepository(nyl_core::resources::parse_resource(value, KIND_GIT_REPOSITORY)?)
-            }
-            GitOpsResourceKind::Cluster => {
-                GitOpsResource::Cluster(nyl_core::resources::parse_resource(value, KIND_CLUSTER)?)
-            }
-            GitOpsResourceKind::ArgoCDInstance => {
-                GitOpsResource::ArgoCDInstance(nyl_core::resources::parse_resource(value, KIND_ARGOCD_INSTANCE)?)
-            }
-            GitOpsResourceKind::DeploymentTarget => {
-                let mut target: DeploymentTarget = nyl_core::resources::parse_resource(value, KIND_DEPLOYMENT_TARGET)?;
-                target.apply_defaults();
-                GitOpsResource::DeploymentTarget(target)
-            }
-            GitOpsResourceKind::AppProjectDefinition => GitOpsResource::AppProjectDefinition(
-                nyl_core::resources::parse_resource(value, KIND_APP_PROJECT_DEFINITION)?,
-            ),
-            GitOpsResourceKind::ApplicationGroup => GitOpsResource::ApplicationGroup(Box::new(
-                nyl_core::resources::parse_resource(value, KIND_APPLICATION_GROUP)?,
-            )),
-            GitOpsResourceKind::Environment => GitOpsResource::Environment(Box::new(
-                nyl_core::resources::parse_resource(value, nyl_core::resources::environment::KIND_ENVIRONMENT)?,
-            )),
-            GitOpsResourceKind::EnvironmentGroup => GitOpsResource::EnvironmentGroup(
-                nyl_core::resources::parse_resource(value, nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP)?,
-            ),
-        };
+    let resource = match identity.kind {
+        GitOpsResourceKind::GitRepository => {
+            GitOpsResource::GitRepository(nyl_core::resources::parse_resource(value, KIND_GIT_REPOSITORY)?)
+        }
+        GitOpsResourceKind::Cluster => {
+            GitOpsResource::Cluster(nyl_core::resources::parse_resource(value, KIND_CLUSTER)?)
+        }
+        GitOpsResourceKind::ArgoCDInstance => {
+            GitOpsResource::ArgoCDInstance(nyl_core::resources::parse_resource(value, KIND_ARGOCD_INSTANCE)?)
+        }
+        GitOpsResourceKind::DeploymentTarget => {
+            let mut target: DeploymentTarget = nyl_core::resources::parse_resource(value, KIND_DEPLOYMENT_TARGET)?;
+            target.apply_defaults();
+            GitOpsResource::DeploymentTarget(target)
+        }
+        GitOpsResourceKind::AppProjectDefinition => GitOpsResource::AppProjectDefinition(
+            nyl_core::resources::parse_resource(value, KIND_APP_PROJECT_DEFINITION)?,
+        ),
+        GitOpsResourceKind::ApplicationGroup => GitOpsResource::ApplicationGroup(Box::new(
+            nyl_core::resources::parse_resource(value, KIND_APPLICATION_GROUP)?,
+        )),
+        GitOpsResourceKind::Environment => GitOpsResource::Environment(Box::new(nyl_core::resources::parse_resource(
+            value,
+            nyl_core::resources::environment::KIND_ENVIRONMENT,
+        )?)),
+        GitOpsResourceKind::EnvironmentGroup => GitOpsResource::EnvironmentGroup(nyl_core::resources::parse_resource(
+            value,
+            nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP,
+        )?),
+        GitOpsResourceKind::EnvironmentTemplate => GitOpsResource::EnvironmentTemplate(Box::new(
+            nyl_core::resources::parse_resource(value, nyl_core::resources::environment::KIND_ENVIRONMENT_TEMPLATE)?,
+        )),
+    };
     resource.validate()?;
     Ok(Some(resource))
 }
@@ -1148,6 +1164,7 @@ impl GitOpsResource {
             Self::ApplicationGroup(resource) => resource.validate(),
             Self::Environment(resource) => resource.validate(),
             Self::EnvironmentGroup(resource) => resource.validate(),
+            Self::EnvironmentTemplate(resource) => resource.validate(),
         }
     }
 }

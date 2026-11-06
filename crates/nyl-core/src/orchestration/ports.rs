@@ -711,6 +711,8 @@ pub struct RenderedSource {
     pub project_dir: String,
     /// The Environment with group defaults applied.
     pub environment: Environment,
+    /// The template's terms when the environment is an instance, read at this commit.
+    pub instance: Option<super::instance::InstanceTerms>,
     pub units: BTreeMap<UnitName, RenderedUnit>,
 }
 

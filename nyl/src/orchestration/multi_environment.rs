@@ -13,7 +13,7 @@ use nyl_core::orchestration::ports::{
 use nyl_orchestration::rules::multi_environment::{dependencies, order};
 use nyl_orchestration::run_report::ReportKind;
 
-use super::project::declared;
+use super::project::{declared, resolve_environment_with, InstanceRequest};
 use super::run::CommandOutcome;
 use super::session::{pretty_json, stopped, Stop};
 use crate::cli::commands::reconcile::RunOutput;
@@ -39,10 +39,45 @@ pub fn select(
     source_override: Option<&str>,
     offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
+    instance: &InstanceRequest,
 ) -> Result<Selection, Stop> {
     let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let (environments, groups) = declared(&inventory);
-    let selection = selection_names(&environments, &groups, names, labels, group)?;
+    // Named environments that are not declared are instances of an
+    // EnvironmentTemplate, known by their records; `--template` and
+    // `--param` name the one being created or updated.
+    let hint = |name: &str| InstanceRequest {
+        offline,
+        ..if names.len() == 1 && names[0] == name {
+            instance.clone()
+        } else {
+            InstanceRequest::default()
+        }
+    };
+    let mut instances = BTreeMap::new();
+    let mut errors = BTreeMap::new();
+    let mut undeclared = Vec::new();
+    for name in names {
+        if environments
+            .iter()
+            .any(|environment| environment.metadata.name == *name)
+        {
+            continue;
+        }
+        match resolve_environment_with(&inventory, name, &hint(name)) {
+            Ok(resolved) => {
+                if let Some(found) = resolved.instance {
+                    instances.insert(resolved.name, found.descriptor());
+                }
+            }
+            Err(finding) => {
+                errors.insert(name.clone(), finding);
+            }
+        }
+        undeclared.push(name.clone());
+    }
+    let inventory = inventory.with_instances(instances);
+    let selection = selection_names(&environments, &groups, names, labels, group, &undeclared)?;
     if selection.is_empty() {
         return Ok(Selection {
             names: Vec::new(),
@@ -59,14 +94,17 @@ pub fn select(
     let commit = CommitId::new(commit.id().to_string())
         .map_err(|error| Finding::new(Code::SourceUnavailable, error.to_string(), "check out a source commit"))?;
     let renderer = UnitSourceRenderer::new(super::session::project_dir(&inventory), crate::resource_catalogue())
-        .with_previous_paths(inventory.project_config.config.project.previous_paths.clone());
+        .with_previous_paths(inventory.project_config.config.project.previous_paths.clone())
+        .with_instances(inventory.instances.clone());
     let mut graph = BTreeMap::new();
     let mut rendered_sources = BTreeMap::new();
-    let mut errors = BTreeMap::new();
-    for environment in environments {
-        let name = environment
-            .name()
-            .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
+    let all = nyl_render::gitops::instances::environment_names(&inventory)
+        .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
+    for name in all {
+        if errors.contains_key(name.as_str()) {
+            graph.insert(name, BTreeSet::new());
+            continue;
+        }
         match read_environment(
             &inventory,
             &name,
@@ -74,7 +112,7 @@ pub fn select(
             &renderer,
             source_graph,
             source_override.filter(|_| selection.contains(name.as_str())),
-            offline,
+            &hint(name.as_str()),
         ) {
             Ok((dependencies, rendered)) => {
                 graph.insert(name.clone(), dependencies);
@@ -131,11 +169,17 @@ fn ownership_preflight(
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
     let mut unknown = Vec::new();
-    for environment in declared(inventory).0 {
-        let name = environment
-            .name()
-            .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
-        match snapshot(inventory, &name, offline) {
+    for name in nyl_render::gitops::instances::environment_names(inventory)
+        .map_err(|error| nyl_render::NylError::config(error.to_string()))?
+    {
+        match snapshot(
+            inventory,
+            &name,
+            &InstanceRequest {
+                offline,
+                ..InstanceRequest::default()
+            },
+        ) {
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
             }
@@ -166,9 +210,13 @@ fn ownership_preflight(
     Ok(())
 }
 
-fn snapshot(inventory: &GitOpsInventory, name: &EnvironmentName, offline: bool) -> Result<EnvironmentSnapshot, Stop> {
-    let resolved = super::project::resolve_environment(inventory, name.as_str())?;
-    let store = super::project::open_store_mode(inventory, &resolved, None, offline)?;
+fn snapshot(
+    inventory: &GitOpsInventory,
+    name: &EnvironmentName,
+    request: &InstanceRequest,
+) -> Result<EnvironmentSnapshot, Stop> {
+    let resolved = resolve_environment_with(inventory, name.as_str(), request)?;
+    let store = super::project::open_store_mode(inventory, &resolved, None, request.offline)?;
     store.snapshot(&resolved.location).map_err(|error| {
         Finding::new(
             Code::StateUnavailable,
@@ -187,10 +235,10 @@ fn read_environment(
     renderer: &UnitSourceRenderer,
     source_graph: bool,
     source_override: Option<&str>,
-    offline: bool,
+    request: &InstanceRequest,
 ) -> Result<(BTreeSet<EnvironmentName>, Option<RenderedSource>), Stop> {
     if !source_graph {
-        let snapshot = snapshot(inventory, name, offline)?;
+        let snapshot = snapshot(inventory, name, request)?;
         return Ok((
             snapshot
                 .desired
@@ -201,7 +249,7 @@ fn read_environment(
             None,
         ));
     }
-    let resolved = super::project::resolve_environment(inventory, name.as_str())?;
+    let resolved = resolve_environment_with(inventory, name.as_str(), request)?;
     let (_, groups) = declared(inventory);
     let entry = nyl_core::resources::environment::effective_environment(&resolved.environment, &groups)?;
     if let Some(finding) = nyl_orchestration::rules::sources::unsupported_source(&entry) {
@@ -209,9 +257,16 @@ fn read_environment(
     }
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
     let sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
-    let source_commit = match source_request(&entry, commit, source_override) {
+    // An instance not entered from its own checkout renders at its recorded commit.
+    let recorded = resolved
+        .instance
+        .as_ref()
+        .filter(|_| request.template.is_none())
+        .and_then(|instance| instance.record.as_ref()?.source_commit.clone());
+    let commit = recorded.as_ref().unwrap_or(commit);
+    let source_commit = match source_request(&entry, commit, source_override, recorded.is_some()) {
         SourceRequest::Worktree(snapshot) => snapshot.commit,
-        SourceRequest::Entry(commit) | SourceRequest::Commit { commit, .. } => commit,
+        SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) | SourceRequest::Commit { commit, .. } => commit,
         SourceRequest::Revision(revision) | SourceRequest::Override(revision) => sources
             .resolve_revision(&SourceRepository::This, &revision)
             .map_err(|error| {
@@ -259,6 +314,7 @@ fn selection_names(
     names: &[String],
     labels: Option<&str>,
     group: Option<&str>,
+    undeclared: &[String],
 ) -> Result<BTreeSet<String>, Stop> {
     let matches = if let Some(group) = group {
         groups
@@ -311,6 +367,7 @@ fn selection_names(
             }
         })
         .map(|environment| environment.metadata.name.clone())
+        .chain(undeclared.iter().cloned())
         .collect::<BTreeSet<_>>();
     for name in names {
         if !selection.contains(name) {

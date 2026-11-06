@@ -12,7 +12,8 @@ use nyl_orchestration::rules::{
     sources,
 };
 use nyl_render::gitops::discover_gitops_inventory;
-use nyl_render::gitops::units::{render_direct_unit, resolve_effective_environment};
+use nyl_render::gitops::instances::resolve_environment as resolve_effective_environment;
+use nyl_render::gitops::units::render_direct_unit;
 use nyl_render::gitops::GitOpsInventory;
 use nyl_render::{NylError, Result};
 use nyl_state::source::GitSourceResolver;
@@ -84,6 +85,17 @@ pub fn prepare(
     };
     let name = UnitName::new(name).map_err(config)?;
     let selected = environment.map(EnvironmentName::new).transpose().map_err(config)?;
+    // An instance of an EnvironmentTemplate is known by its record.
+    let selected_environment = selected
+        .as_ref()
+        .map(|name| resolve_environment(&entry, name.as_str()).map_err(config))
+        .transpose()?;
+    let inventory = match selected_environment.as_ref().zip(selected.as_ref()) {
+        Some((resolved, name)) if resolved.instance.is_some() => inventory.with_instances(
+            std::iter::once((name.clone(), resolved.instance.as_ref().expect("checked").descriptor())).collect(),
+        ),
+        _ => inventory,
+    };
     let effective = selected
         .as_ref()
         .map(|name| resolve_effective_environment(&inventory, name))
@@ -97,8 +109,8 @@ pub fn prepare(
     let mut snapshot = EnvironmentSnapshot::default();
     let mut environments = BTreeMap::new();
     if let Some(environment) = selected.as_ref() {
-        let resolved = resolve_environment(&entry, environment.as_str()).map_err(config)?;
-        snapshot = open_store(&entry, &resolved, None)?
+        let resolved = selected_environment.as_ref().expect("selected");
+        snapshot = open_store(&entry, resolved, None)?
             .snapshot(&resolved.location)
             .map_err(config)?;
         for name in nyl_orchestration::rules::multi_environment::dependencies(&spec) {
@@ -204,7 +216,7 @@ pub fn prepare(
             let default = resolver.default_branch(&lock.repository).map_err(config)?;
             let refs = effective.as_ref().map_or_else(
                 || vec![default.clone(), lock.revision.clone()],
-                |environment| sources::pin_refs(environment, &default, Some(&lock.revision)),
+                |environment| sources::pin_refs(&environment.environment, &default, Some(&lock.revision)),
             );
             if resolver
                 .reachable_from(&lock.repository, locked, &refs)

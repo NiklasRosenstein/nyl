@@ -158,6 +158,11 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
     }
     let inventory = nyl_render::gitops::discover_gitops_inventory(project_root, None, crate::resource_catalogue())?;
     nyl_render::gitops::validate_gitops_inventory(&inventory)?;
+    // Which instances exist is state, which validation never reads: each
+    // template is checked through sample instances, so names that would
+    // collide across instances are found before any exists.
+    let samples = crate::orchestration::project::sample_instances(&inventory);
+    let inventory = inventory.with_instances(samples);
     report.warnings.extend(
         crate::orchestration::project::validate_environments(&inventory)?
             .into_iter()
@@ -203,15 +208,14 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     let renderer = nyl_render::gitops::units::UnitSourceRenderer::new(
         crate::orchestration::session::project_dir(inventory),
         crate::resource_catalogue(),
-    );
+    )
+    .with_instances(inventory.instances.clone());
     // The worktree is rendered as it is, committed or not; the commit only labels it.
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
-    let (environments, _) = crate::orchestration::project::declared(inventory);
+    let names: Vec<EnvironmentName> = nyl_render::gitops::instances::environment_names(inventory)?;
     let mut issues = Vec::new();
     let mut rendered_sources = std::collections::BTreeMap::new();
-    for environment in &environments {
-        let name =
-            EnvironmentName::new(&environment.metadata.name).map_err(|error| NylError::config(error.to_string()))?;
+    for name in names {
         let source = renderer
             .render(&inventory.worktree_root, &name, &commit)
             .map_err(|error| NylError::config(error.to_string()))?;

@@ -281,6 +281,7 @@ impl Harness {
                 entry,
                 location: self.location.clone(),
                 entry_commit,
+                source_recorded: false,
                 entry_project_dir: "/nyl".to_owned(),
                 units: (!units.is_empty()).then(|| units.iter().map(|name| unit(name)).collect()),
                 concurrency: run::DEFAULT_CONCURRENCY,

@@ -43,8 +43,8 @@ use std::path::{Path, PathBuf};
 use nyl_core::bindings::{InputBinding, InputDeclaration, InputType};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
+use nyl_core::orchestration::instance::InstanceDescriptor;
 use nyl_core::orchestration::ports::{RenderedSource, RenderedUnit, SourceError, SourceRenderer, SourceResult};
-use nyl_core::resources::environment::{effective_environment, Environment, EnvironmentGroup};
 use nyl_core::resources::units::{is_builtin_unit_api_version, UnitEnvelope, UnitMetadata};
 use nyl_core::template_syntax::has_template_syntax;
 use serde_json::{Map, Value};
@@ -52,6 +52,7 @@ use serde_json::{Map, Value};
 use super::discovery::{
     scan_static_envelope_fields, scan_static_metadata_labels, split_yaml_documents, top_level_value,
 };
+use super::instances::{environment_names, resolve_environment, EffectiveEnvironment};
 use super::GitOpsInventory;
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::template::TemplateEngine;
@@ -142,7 +143,7 @@ pub fn discover_units(inventory: &GitOpsInventory) -> Result<BTreeMap<UnitName, 
 pub fn render_direct_unit(
     inventory: &GitOpsInventory,
     name: &UnitName,
-    environment: Option<&Environment>,
+    environment: Option<&EffectiveEnvironment>,
 ) -> Result<(UnitEnvelope, Value)> {
     let units = discover_units(inventory)?;
     let unit = units
@@ -183,7 +184,7 @@ pub const INLINE_TARGET_NEEDS_ENVIRONMENT: &str = "NYL-KUBERNETES-BUILD-INLINE-T
 fn prepare_direct_publication(
     inventory: &GitOpsInventory,
     unit: &DiscoveredUnit,
-    environment: Option<&Environment>,
+    environment: Option<&EffectiveEnvironment>,
     spec: &mut Value,
 ) -> Result<()> {
     let declares_inline = spec
@@ -200,7 +201,7 @@ fn prepare_direct_publication(
              `<environment>-<unit>` and rendered with an environment's values; pass -e <environment> to build it"
         )));
     }
-    let environment = environment.map_or("", |environment| environment.metadata.name.as_str());
+    let environment = environment.map_or("", |environment| environment.environment.metadata.name.as_str());
     expand_publication_releases(inventory, unit, environment, spec)
 }
 
@@ -292,6 +293,8 @@ pub struct UnitSourceRenderer {
     /// `[project] previous_paths` of the entry `nyl.toml`.
     previous_paths: Vec<String>,
     resource_catalogue: crate::config::ResourceCatalogue,
+    /// Instances of EnvironmentTemplates the caller read from state.
+    instances: BTreeMap<EnvironmentName, InstanceDescriptor>,
 }
 
 impl UnitSourceRenderer {
@@ -302,7 +305,16 @@ impl UnitSourceRenderer {
             entry_project_dir: entry_project_dir.into(),
             previous_paths: Vec::new(),
             resource_catalogue,
+            instances: BTreeMap::new(),
         }
+    }
+
+    /// Render these instances of EnvironmentTemplates, and include them in every
+    /// environment-wide check, with the template as the rendered source declares it.
+    #[must_use]
+    pub fn with_instances(mut self, instances: BTreeMap<EnvironmentName, InstanceDescriptor>) -> Self {
+        self.instances = instances;
+        self
     }
 
     /// Also look for the project at the entry `nyl.toml`'s
@@ -322,8 +334,9 @@ impl UnitSourceRenderer {
         let same = self.entry_project_dir.trim_start_matches('/');
         let located =
             crate::util::project_path::locate_checkout_project(worktree, Path::new(same), &[], &self.previous_paths)?;
-        let inventory = super::discover_gitops_inventory(&located.directory, None, self.resource_catalogue.clone())?;
-        let effective = resolve_effective_environment(&inventory, environment)?;
+        let inventory = super::discover_gitops_inventory(&located.directory, None, self.resource_catalogue.clone())?
+            .with_instances(self.instances.clone());
+        let effective = resolve_environment(&inventory, environment)?;
         let units = discover_units(&inventory)?;
         let mut rendered = render_environment_units(&inventory, &units, &effective)?;
         let units = units
@@ -355,7 +368,8 @@ impl UnitSourceRenderer {
                 .collect(),
             source_commit: commit.clone(),
             project_dir: worktree_rooted(&inventory, Path::new("")),
-            environment: effective,
+            environment: effective.environment,
+            instance: effective.instance,
             units,
         })
     }
@@ -390,44 +404,15 @@ fn worktree_rooted(inventory: &GitOpsInventory, project_relative: &Path) -> Stri
     format!("/{relative}")
 }
 
-/// Declared Environments and EnvironmentGroups of the inventory.
-fn declared(inventory: &GitOpsInventory) -> (Vec<&Environment>, Vec<EnvironmentGroup>) {
-    let mut environments = Vec::new();
-    let mut groups = Vec::new();
-    for discovered in inventory.resources.values() {
-        match &discovered.resource {
-            Some(GitOpsResource::Environment(environment)) => environments.push(environment.as_ref()),
-            Some(GitOpsResource::EnvironmentGroup(group)) => groups.push(group.clone()),
-            _ => {}
-        }
-    }
-    (environments, groups)
-}
-
-/// The Environment `name` with its group defaults applied, through the one
-/// group rule of nyl-core.
-pub fn resolve_effective_environment(inventory: &GitOpsInventory, name: &EnvironmentName) -> Result<Environment> {
-    let (environments, groups) = declared(inventory);
-    let environment = environments
-        .into_iter()
-        .find(|environment| environment.metadata.name == name.as_str())
-        .ok_or_else(|| {
-            NylError::config(format!(
-                "{}: Environment {name} is not declared in this project",
-                Code::EnvironmentUnknown
-            ))
-        })?;
-    effective_environment(environment, &groups).map_err(|finding| NylError::config(finding.to_string()))
-}
-
 /// Render the units `environment` selects, by name; a document that renders
 /// to nothing maps to `None`. Unselected units are absent.
 fn render_environment_units(
     inventory: &GitOpsInventory,
     units: &BTreeMap<UnitName, DiscoveredUnit>,
-    environment: &Environment,
+    effective: &EffectiveEnvironment,
 ) -> Result<BTreeMap<UnitName, Option<Value>>> {
-    let context = unit_template_context(environment);
+    let context = unit_template_context(effective);
+    let environment = &effective.environment;
     let selector = &environment.spec.unit_selector.match_labels;
     let mut rendered = BTreeMap::new();
     for (name, unit) in units {
@@ -457,16 +442,21 @@ fn render_environment_units(
 /// The only context unit templates see: the effective `values` and the
 /// sanitized Environment (`name`, `labels`, `values`). Never secrets, state
 /// locations, or the process environment.
-fn unit_template_context(environment: &Environment) -> Value {
+fn unit_template_context(effective: &EffectiveEnvironment) -> Value {
+    let environment = &effective.environment;
     let values = Value::Object(environment.spec.values.clone().into_iter().collect::<Map<_, _>>());
-    serde_json::json!({
+    let mut context = serde_json::json!({
         "values": values,
         "environment": {
             "name": environment.metadata.name,
             "labels": environment.metadata.labels,
             "values": values,
         },
-    })
+    });
+    if let Some(params) = effective.params() {
+        context["params"] = serde_json::to_value(params).unwrap_or(Value::Null);
+    }
+    context
 }
 
 /// Render one unit document. The rendered envelope must equal the literal
@@ -734,15 +724,14 @@ fn spec_enabled(spec: &Value) -> bool {
 /// with `enabled: false`, because a unit being deleted still owns its target
 /// until its teardown completes.
 pub fn target_placements(inventory: &GitOpsInventory) -> Result<BTreeMap<String, EnvironmentName>> {
-    let (environments, _) = declared(inventory);
-    if environments.is_empty() {
+    let names = environment_names(inventory)?;
+    if names.is_empty() {
         return Ok(BTreeMap::new());
     }
     let units = discover_units(inventory)?;
     let mut placements: BTreeMap<String, (EnvironmentName, String)> = BTreeMap::new();
-    for environment in environments {
-        let name = environment.name()?;
-        let effective = resolve_effective_environment(inventory, &name)?;
+    for name in names {
+        let effective = resolve_environment(inventory, &name)?;
         let rendered = render_environment_units(inventory, &units, &effective)?;
         for (unit_name, spec) in &rendered {
             let unit = &units[unit_name];
@@ -788,14 +777,14 @@ pub fn with_inline_targets(inventory: &GitOpsInventory) -> Result<GitOpsInventor
 /// caller adds that one from the document it renders (a unit's stored spec),
 /// which may differ from what source declares now.
 pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&str>) -> Result<GitOpsInventory> {
-    let (environments, _) = declared(inventory);
-    if environments.is_empty() {
+    let names = environment_names(inventory)?;
+    if names.is_empty() {
         return Ok(inventory.clone());
     }
     let units = discover_units(inventory)?;
     let mut extended = inventory.clone();
-    for environment in environments {
-        let effective = resolve_effective_environment(inventory, &environment.name()?)?;
+    for environment in names {
+        let effective = resolve_environment(inventory, &environment)?;
         for (unit_name, spec) in render_environment_units(inventory, &units, &effective)? {
             let unit = &units[&unit_name];
             let Some(spec) = spec.filter(|spec| unit.is_publication() && spec_enabled(spec)) else {
@@ -810,10 +799,7 @@ pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&s
                 extended = extended
                     .with_inline_target(&inline.name, &inline.source_file, &inline.spec)
                     .map_err(|error| {
-                        NylError::config(format!(
-                            "unit {unit_name} of Environment {}: {error}",
-                            environment.metadata.name
-                        ))
+                        NylError::config(format!("unit {unit_name} of Environment {environment}: {error}"))
                     })?;
             }
         }
@@ -840,7 +826,7 @@ pub fn check_unit_bindings(
 ) -> Result<Vec<String>> {
     let deployment_target = static_target(inventory, target)
         .map_err(|reason| NylError::config(format!("DeploymentTarget {target:?} {reason}")))?;
-    let effective = resolve_effective_environment(inventory, environment)?;
+    let effective = resolve_environment(inventory, environment)?;
     let units = discover_units(inventory)?;
     let rendered = render_environment_units(inventory, &units, &effective)?;
     let placed_by_enabled_unit = rendered.iter().any(|(name, spec)| {
@@ -865,7 +851,7 @@ pub fn check_unit_bindings(
             } else {
                 let name =
                     EnvironmentName::new(producer_environment).map_err(|error| NylError::config(error.to_string()))?;
-                let producer = resolve_effective_environment(inventory, &name)?;
+                let producer = resolve_environment(inventory, &name)?;
                 external = render_environment_units(inventory, &units, &producer)?;
                 &external
             };
@@ -1280,9 +1266,7 @@ spec:
         let direct = |worktree: &TempDir, environment: Option<&str>| {
             let inventory = inventory(worktree);
             let environment = environment
-                .map(|environment| {
-                    resolve_effective_environment(&inventory, &EnvironmentName::new(environment).unwrap())
-                })
+                .map(|environment| resolve_environment(&inventory, &EnvironmentName::new(environment).unwrap()))
                 .transpose()
                 .unwrap();
             render_direct_unit(&inventory, &name, environment.as_ref())

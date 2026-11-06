@@ -63,6 +63,14 @@ enum GetCommand {
     /// Get Environment declarations.
     #[command(alias = "environment")]
     Environments(GetResourceArgs),
+    /// Get EnvironmentTemplate declarations.
+    #[command(
+        name = "environment-templates",
+        alias = "environment-template",
+        alias = "template",
+        alias = "templates"
+    )]
+    EnvironmentTemplates(GetResourceArgs),
     /// Get unit declarations, or with -e the units' state.
     Units(GetUnitsArgs),
     /// Get one unit's persisted desired and observed documents.
@@ -192,6 +200,7 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::AppProjects(selection) => declarations(GitOpsResourceKind::AppProjectDefinition, selection),
         GetCommand::ApplicationGroups(selection) => declarations(GitOpsResourceKind::ApplicationGroup, selection),
         GetCommand::Environments(selection) => declarations(GitOpsResourceKind::Environment, selection),
+        GetCommand::EnvironmentTemplates(selection) => declarations(GitOpsResourceKind::EnvironmentTemplate, selection),
         GetCommand::Units(units) => match &units.state.environment {
             None => unit_declarations(&units.path, units.state.output),
             Some(environment) => state_form(&units.path, environment, &units.state, |snapshot, env| {
@@ -709,6 +718,7 @@ fn resources_table(kind: GitOpsResourceKind, resources: &[&DiscoveredGitOpsResou
         GitOpsResourceKind::ApplicationGroup => vec!["NAME", "PROJECT", "SOURCE", "FILE"],
         GitOpsResourceKind::Environment => vec!["NAME", "UNITS", "STATE", "FILE"],
         GitOpsResourceKind::EnvironmentGroup => vec!["NAME", "SELECTOR", "FILE"],
+        GitOpsResourceKind::EnvironmentTemplate => vec!["NAME", "PARAMETERS", "UNITS", "FILE"],
     };
     let rows = resources
         .iter()
@@ -808,6 +818,12 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
             selector(&group.spec.environment_selector.match_labels),
             file,
         ],
+        Some(GitOpsResource::EnvironmentTemplate(template)) => vec![
+            name.clone(),
+            template.spec.parameters.keys().cloned().collect::<Vec<_>>().join(","),
+            selector(&template.spec.unit_selector.match_labels),
+            file,
+        ],
         None => templated_resource_row(kind, name, file),
     }
 }
@@ -870,5 +886,11 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
         GitOpsResourceKind::AppProjectDefinition | GitOpsResourceKind::EnvironmentGroup => {
             vec![name.to_owned(), "<templated>".to_owned(), file]
         }
+        GitOpsResourceKind::EnvironmentTemplate => vec![
+            name.to_owned(),
+            "<templated>".to_owned(),
+            "<templated>".to_owned(),
+            file,
+        ],
     }
 }
