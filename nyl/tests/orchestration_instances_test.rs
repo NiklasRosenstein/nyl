@@ -664,7 +664,10 @@ fn test_local_reads_do_not_reach_the_remote_to_find_an_instance() {
 /// listing quietly shrinking the checks to the instances that could be read.
 #[test]
 fn test_a_template_that_cannot_be_listed_fails_checks_across_environments_closed() {
-    let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: dev\nspec:\n  unitSelector: {matchLabels: {dev: 'true'}}\n  allowUnprotectedSource: true\n  state: {repositoryRef: {name: platform}}\n";
+    // The unit's script reads `values.dir` and `values.tag`, which a template
+    // supplies for its instances: dev declares its own, so the script writes
+    // beneath the scenario's directory instead of the filesystem root.
+    let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: dev\nspec:\n  unitSelector: {matchLabels: {dev: 'true'}}\n  allowUnprotectedSource: true\n  values: {dir: '%SCENARIO_TMP%/dev', tag: dev}\n  state: {repositoryRef: {name: platform}}\n";
     let broken = TEMPLATE.replace(
         "    repositoryRef: {name: platform}\n",
         "    repository: {repoURL: 'file:///nonexistent/nyl/state.git'}\n",
