@@ -313,7 +313,7 @@ impl LiveReader for ClusterReader {
                     ObservedValue::Pending {
                         reason: format!(
                             "{NOT_RUNNING}: Application {} does not run the publication {} yet ({}){}",
-                            source.deployment,
+                            label(request, &source.deployment),
                             request.commit,
                             finding.state.name(),
                             finding
@@ -330,7 +330,10 @@ impl LiveReader for ClusterReader {
                 values.insert(
                     name.clone(),
                     ObservedValue::Failed {
-                        reason: format!("the evaluation of Application {} is missing", source.deployment),
+                        reason: format!(
+                            "the evaluation of Application {} is missing",
+                            label(request, &source.deployment)
+                        ),
                     },
                 );
                 continue;
@@ -343,14 +346,33 @@ impl LiveReader for ClusterReader {
                     budget(request.now, request.deadline),
                 )
             });
-            values.insert(name.clone(), read_field(reading, source));
+            values.insert(
+                name.clone(),
+                read_field(reading, source, label(request, &source.deployment)),
+            );
         }
         values
     }
 }
 
+/// What messages call the deployment `id` of the reconciler facts: its
+/// display name, `<namespace>/<name>` for an Argo CD Application.
+fn label<'a>(request: &'a LiveRequest<'_>, id: &'a str) -> &'a str {
+    request
+        .reconciler
+        .expected
+        .deployments
+        .iter()
+        .find(|deployment| deployment.id == id)
+        .map_or(id, |deployment| deployment.label())
+}
+
 /// One field of one live resource.
-fn read_field(reader: &Result<KubeResourceReader, ReadError>, source: &ObservedSource) -> ObservedValue {
+fn read_field(
+    reader: &Result<KubeResourceReader, ReadError>,
+    source: &ObservedSource,
+    deployment: &str,
+) -> ObservedValue {
     let reader = match reader {
         Ok(reader) => reader,
         Err(error) => {
@@ -364,7 +386,7 @@ fn read_field(reader: &Result<KubeResourceReader, ReadError>, source: &ObservedS
         Ok(None) => ObservedValue::Failed {
             reason: format!(
                 "{} does not exist in the workload Cluster, although Application {} runs the publication that renders it: check that the Cluster's spec.live.context is the workload Cluster",
-                source.resource, source.deployment
+                source.resource, deployment
             ),
         },
         Ok(Some(object)) => match nyl_core::json_pointer::resolve(&object, &source.pointer) {

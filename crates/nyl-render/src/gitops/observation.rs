@@ -70,6 +70,16 @@ pub enum ReconcilerLocation {
 }
 
 impl ReconcilerLocation {
+    /// The recorded fields of this kind's location (JSON Pointers relative to
+    /// the facts) that say only how the reconciler is read, never what the
+    /// unit produces: renaming a kube context or moving an API server must
+    /// not re-execute the unit. A new kind names its own.
+    pub fn unkeyed(&self) -> &'static [&'static str] {
+        match self {
+            Self::ArgoCd(_) => &["/access", "/context"],
+        }
+    }
+
     /// The reconciler's kind and name, as an attestation's details name them:
     /// `{kind, instance, ...}` with whatever identifies how it is read.
     pub fn summary(&self) -> Value {
@@ -159,6 +169,10 @@ impl Source {
 pub struct ExpectedDeployment {
     /// What readings and findings call it, unique within the target.
     pub id: String,
+    /// What messages call it for a person, qualified where the id is not
+    /// (Argo CD: `<namespace>/<name>`); the id when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display: String,
     pub role: DeploymentRole,
     /// The directory it deploys, from the publication repository's root.
     pub path: String,
@@ -170,6 +184,17 @@ pub struct ExpectedDeployment {
     /// How the reconciler names it, opaque to everything but that kind's reader.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub locator: Value,
+}
+
+impl ExpectedDeployment {
+    /// The name messages use for it.
+    pub fn label(&self) -> &str {
+        if self.display.is_empty() {
+            &self.id
+        } else {
+            &self.display
+        }
+    }
 }
 
 /// A thing only the reconciler that runs this target has, such as a catalog
@@ -247,6 +272,19 @@ pub struct ReconcilerFacts {
 }
 
 impl ReconcilerFacts {
+    /// The fields of these facts, as JSON Pointers below `prefix` (where they
+    /// are recorded), that stay out of the unit's key: the location's own
+    /// ([`ReconcilerLocation::unkeyed`]) and the URL the publication branch is
+    /// read from. Everything else the render derives keys the unit.
+    pub fn unkeyed(&self, prefix: &str) -> Vec<String> {
+        self.location
+            .unkeyed()
+            .iter()
+            .chain(&["/publication/url"])
+            .map(|field| format!("{prefix}{field}"))
+            .collect()
+    }
+
     /// The reconciler facts of a rendered target: the reconciler of its
     /// target decides the kind.
     pub fn of(rendered: &RenderedTarget) -> Result<Self> {
@@ -332,6 +370,7 @@ impl GeneratedApplication {
     pub fn expected(&self, instance_namespace: &str) -> ExpectedDeployment {
         ExpectedDeployment {
             id: self.id(instance_namespace),
+            display: format!("{}/{}", self.namespace, self.name),
             role: self.role,
             path: self.path.clone(),
             release: self.release.clone(),
@@ -1348,7 +1387,7 @@ mod tests {
                 "access": {"method": "kubernetes"},
                 "publication": {"url": "https://example.invalid/deploy.git", "branch": "deploy", "pathPrefix": "dev"},
                 "expected": [{
-                    "id": "web", "role": "workload", "path": "dev/web/web", "release": "web/web",
+                    "id": "web", "display": "argocd/web", "role": "workload", "path": "dev/web/web", "release": "web/web",
                     "source": {"repository": "https://example.invalid/deploy.git", "path": "dev/web/web",
                                "options": {"directory": {"recurse": true}}},
                     "locator": {"namespace": "argocd", "name": "web", "project": "web"}

@@ -661,7 +661,7 @@ spec:
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
 - Its execution key covers the target render's complete input record from
-  Nyl's dependency recorder, plus `mode`: every file and directory listing,
+  Nyl's dependency recorder, plus the resolved spec (`observe`, the Release inputs under `releases`) and the recorded `reconciler` facts of a unit that observes (everything the render derives from them, never how the reconciler is read): every file and directory listing,
   value, chart, Kubernetes capability, resolved source identity, and external
   tool fingerprint that can affect rendered bytes. Resolution renders the
   target to obtain it, through the render cache, so an unchanged target is
