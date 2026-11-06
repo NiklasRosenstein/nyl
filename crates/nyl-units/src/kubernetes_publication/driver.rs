@@ -16,8 +16,8 @@
 //!   (`NYL-UNIT-OWNERSHIP-OVERLAP`); the destination (repository, revision,
 //!   and prefix) belongs to the target, and the ownership index refuses a
 //!   tree owned by another target at publication. The index also records
-//!   the owning unit incarnation (version 4), and publication and teardown
-//!   refuse a prefix another existing incarnation owns (owner fencing, see
+//!   the owning unit incarnation, and publication and teardown refuse a
+//!   prefix another existing incarnation owns (owner fencing, see
 //!   [`super::run`]).
 //! - **Teardown readiness.** The driver evaluates the recorded settings
 //!   itself ([`super::readiness`]); the shell only displays the findings.

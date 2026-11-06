@@ -12,13 +12,13 @@ use crate::{NylError, Result};
 
 /// Index version without compilation metadata, written by `render-tree`.
 pub const RENDER_INDEX_VERSION: u32 = 2;
-/// Index version carrying per-Release compilation metadata, written by publications.
+/// Index version carrying per-Release compilation metadata, written by
+/// publications, and optionally the owning orchestration unit, written by
+/// orchestrated publications (`KubernetesPublication`). An index without an
+/// owner (every version 2 index and a version 3 index written by
+/// `publish-tree`) stays readable: the first orchestrated publication over
+/// one records its owner.
 pub const COMPILED_RENDER_INDEX_VERSION: u32 = 3;
-/// Index version 3 plus the owning orchestration unit, written by orchestrated
-/// publications (`KubernetesPublication`). Versions 2 and 3 name no owner and
-/// stay readable: the first orchestrated publication over one records its
-/// owner and upgrades it.
-pub const OWNED_RENDER_INDEX_VERSION: u32 = 4;
 pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
 const TRANSACTION_PATH: &str = "_nyl/transaction.json";
 
@@ -44,7 +44,7 @@ pub struct ReconcileOptions {
     /// as a state file whose `fromPublication` binding no longer declares
     /// `carryFileFromWorktree` and which other tools now commit.
     pub release: BTreeSet<PathBuf>,
-    /// The owner of an existing version 4 index that the caller established
+    /// The owner of an existing index that the caller established
     /// is gone, so the new owner takes the prefix over. Any other owner
     /// named by the index refuses the reconciliation.
     pub take_over_from: Option<RenderIndexOwner>,
@@ -65,8 +65,9 @@ pub struct RenderIndexPublication {
     pub path_prefix: String,
 }
 
-/// The orchestration unit incarnation that owns a published prefix, as index
-/// version 4 records it: the environment, the unit, and the incarnation's uid.
+/// The orchestration unit incarnation that owns a published prefix, as a
+/// version 3 index records it: the environment, the unit, and the
+/// incarnation's uid.
 ///
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// ownership index. Owner fencing: [`ensure_same_owner`] refuses to
@@ -100,10 +101,10 @@ pub struct RenderIndex {
     pub dirty: bool,
     pub inputs: BTreeMap<String, String>,
     pub files: BTreeMap<String, String>,
-    /// Version 3 compilation metadata; absent in legacy version 2 indexes.
+    /// Version 3 compilation metadata; absent in version 2 indexes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compilation: Option<serde_json::Value>,
-    /// The owning orchestration unit; present exactly in version 4 indexes.
+    /// The owning orchestration unit; only a version 3 index can name one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<RenderIndexOwner>,
 }
@@ -131,10 +132,9 @@ impl RenderIndex {
         }
     }
 
-    /// Record the orchestration unit that owns this index: version 4.
+    /// Record the orchestration unit that owns this index.
     #[must_use]
     pub fn owned_by(mut self, owner: RenderIndexOwner) -> Self {
-        self.version = OWNED_RENDER_INDEX_VERSION;
         self.owner = Some(owner);
         self
     }
@@ -192,7 +192,7 @@ pub fn validate_rendered_tree_owner(output_root: &Path, expected: &RenderIndex) 
 }
 
 /// The owner the ownership index beneath `output_root` records, if the
-/// prefix has an index with one (version 4).
+/// prefix has an index with one.
 pub fn read_index_owner(output_root: &Path) -> Result<Option<RenderIndexOwner>> {
     let index_path = output_root.join(DEFAULT_INDEX_PATH);
     reject_symlink_components(output_root, output_root)?;
@@ -375,11 +375,11 @@ fn remove_empty_parents(output_root: &Path, relative: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Refuse an index that belongs to another target, publication, or (from
-/// version 4) another orchestration unit incarnation.
+/// Refuse an index that belongs to another target, publication, or another
+/// orchestration unit incarnation.
 ///
-/// An index without an owner (versions 2 and 3) is taken over by an owned
-/// publication, which then records itself. An index with an owner is
+/// An index without an owner (version 2, or version 3 from `publish-tree`) is
+/// taken over by an owned publication, which then records itself. An index with an owner is
 /// reconciled only by that owner, by a caller that established the owner is
 /// gone (`options.take_over_from`), and never by a publication that records
 /// no owner, such as `publish-tree`, which cannot tell whether the unit still
@@ -438,7 +438,7 @@ pub const OWNED_PREFIX_CODE: &str = "NYL-TREE-OWNED-BY-UNIT";
 /// a unit released with `nyl state forget`.
 pub const OWNED_PREFIX_FIX: &str =
     "publish it through the environment that owns it, or release it deliberately: in a commit to the \
-     publication branch, remove the `owner` member from `<prefix>/_nyl/index.json` and set its `version` to 3, \
+     publication branch, remove the `owner` member from `<prefix>/_nyl/index.json`, \
      which makes the prefix unowned, so the next publication adopts it";
 
 fn is_unchanged(
@@ -527,13 +527,7 @@ pub fn read_indexed_files(
 pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
     let index: RenderIndex = serde_json::from_slice(bytes)
         .map_err(|error| NylError::config(format!("Invalid rendered ownership index {origin}: {error}")))?;
-    if ![
-        RENDER_INDEX_VERSION,
-        COMPILED_RENDER_INDEX_VERSION,
-        OWNED_RENDER_INDEX_VERSION,
-    ]
-    .contains(&index.version)
-    {
+    if ![RENDER_INDEX_VERSION, COMPILED_RENDER_INDEX_VERSION].contains(&index.version) {
         return Err(NylError::config(format!(
             "Unsupported rendered ownership index version {} in {origin}",
             index.version
@@ -544,9 +538,9 @@ pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
             "Rendered index compilation metadata does not match its version",
         ));
     }
-    if (index.version == OWNED_RENDER_INDEX_VERSION) != index.owner.is_some() {
+    if index.version == RENDER_INDEX_VERSION && index.owner.is_some() {
         return Err(NylError::config(
-            "Rendered index owner does not match its version; only version 4 names an owner",
+            "Rendered index owner does not match its version; only version 3 names an owner",
         ));
     }
     Ok(index)
@@ -923,7 +917,7 @@ mod tests {
     }
 
     /// An index as an orchestrated publication writes it: version 3
-    /// compilation metadata plus `owner`, which makes version 4.
+    /// compilation metadata plus `owner`.
     fn owned(owner: RenderIndexOwner) -> RenderIndex {
         let mut index = index();
         index.version = COMPILED_RENDER_INDEX_VERSION;
@@ -933,10 +927,9 @@ mod tests {
         index.owned_by(owner)
     }
 
-    /// A version 3 index, as `publish-tree` writes it.
+    /// A version 3 index without an owner, as `publish-tree` writes it.
     fn compiled() -> RenderIndex {
         let mut index = owned(owner("kubernetes", "u1"));
-        index.version = COMPILED_RENDER_INDEX_VERSION;
         index.owner = None;
         index
     }
@@ -947,31 +940,28 @@ mod tests {
     }
 
     /// Catches an index naming an owner under a version that cannot carry
-    /// one, and the reverse: version 4 is exactly the version with an owner.
+    /// one: only version 3 can, and an owner is optional there.
     #[test]
-    fn test_index_versions_two_to_four_are_checked_against_their_fields() {
+    fn test_index_owner_is_only_valid_in_version_three() {
         let bytes = |index: &RenderIndex| serde_json::to_vec(index).unwrap();
         assert!(parse_index(&bytes(&index()), "v2").is_ok());
         assert!(parse_index(&bytes(&compiled()), "v3").is_ok());
-        let version4 = owned(owner("kubernetes", "u1"));
-        assert_eq!(version4.version, OWNED_RENDER_INDEX_VERSION);
-        assert!(parse_index(&bytes(&version4), "v4").is_ok());
+        let owned = owned(owner("kubernetes", "u1"));
+        assert_eq!(owned.version, COMPILED_RENDER_INDEX_VERSION);
+        assert!(parse_index(&bytes(&owned), "v3-owned").is_ok());
 
-        let mut ownerless = version4.clone();
-        ownerless.owner = None;
-        assert!(parse_index(&bytes(&ownerless), "v4").is_err());
-        let mut fenced_v3 = compiled();
-        fenced_v3.owner = Some(owner("kubernetes", "u1"));
-        assert!(parse_index(&bytes(&fenced_v3), "v3").is_err());
-        let mut v5 = version4;
-        v5.version = 5;
-        assert!(parse_index(&bytes(&v5), "v5").is_err());
+        let mut owned_v2 = index();
+        owned_v2.owner = Some(owner("kubernetes", "u1"));
+        assert!(parse_index(&bytes(&owned_v2), "v2-owned").is_err());
+        let mut unsupported = owned;
+        unsupported.version = 9;
+        assert!(parse_index(&bytes(&unsupported), "unsupported").is_err());
     }
 
     /// Catches an owner being lost, or a publication outside orchestration
     /// overwriting an owned prefix: the owner reconciles it again, an index
-    /// without an owner (versions 2 and 3) is adopted and upgraded, and
-    /// nothing else may change or remove it.
+    /// without an owner (version 2, or version 3 as `publish-tree` writes it)
+    /// is adopted, and nothing else may change or remove it.
     #[test]
     fn test_owner_fencing_refuses_every_owner_but_the_recorded_one() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -979,10 +969,16 @@ mod tests {
         let me = owner("kubernetes", "u1");
         let other = owner("kubernetes", "u2");
 
-        // Version 3 (no owner) is adopted by the first orchestrated publication.
+        // A released version 2 index is adopted by the first orchestrated publication.
+        let released = temp.path().join("released");
+        reconcile_with(&released, index(), ReconcileOptions::default()).unwrap();
+        let adopted = reconcile_with(&released, owned(me.clone()), ReconcileOptions::default()).unwrap();
+        assert_eq!((adopted.version, adopted.owner.as_ref()), (3, Some(&me)));
+
+        // So is a version 3 index without an owner, as `publish-tree` writes it.
         reconcile_with(&root, compiled(), ReconcileOptions::default()).unwrap();
         let adopted = reconcile_with(&root, owned(me.clone()), ReconcileOptions::default()).unwrap();
-        assert_eq!((adopted.version, adopted.owner.as_ref()), (4, Some(&me)));
+        assert_eq!((adopted.version, adopted.owner.as_ref()), (3, Some(&me)));
 
         // The owner again, and no change at all.
         reconcile_with(&root, owned(me.clone()), ReconcileOptions::default()).unwrap();
