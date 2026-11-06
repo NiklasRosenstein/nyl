@@ -187,6 +187,15 @@ fn incarnations(environment: &EnvironmentName, units: &[UnitName]) -> Finding {
 pub fn state_delete(context: &RunContext<'_>, request: &RunRequest, teardown: bool) -> StateOperationReport {
     let Deletion { mut report, teardown } = state_delete_detailed(context, request, teardown);
     if let Some(teardown) = teardown {
+        // A teardown that completed still has warnings for the person running the
+        // command, such as a `--source` substitution; the stopped case copied them already.
+        for run in &teardown.environments {
+            for warning in &run.warnings {
+                if !report.warnings.contains(warning) {
+                    report.warnings.push(warning.clone());
+                }
+            }
+        }
         report.details.insert(
             "teardown".to_owned(),
             serde_json::to_value(&teardown).expect("reports serialize"),

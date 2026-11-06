@@ -875,6 +875,44 @@ fn test_the_closed_job_fetches_the_recorded_commit_from_the_pull_request_ref() {
     assert!(!exists(&harness, "pr-9") && deleted(&harness, "pr-9"));
 }
 
+/// The fallback of a close job that cannot fetch the recorded commit: `state
+/// delete --teardown --source <default branch>` fails without it, and with it
+/// removes the instance and says on stderr that the files came from another
+/// revision. Catches a substitution that is only recorded, where the person
+/// running the job never sees it.
+#[test]
+fn test_state_delete_with_source_warns_about_the_substitution() {
+    let (_directory, harness) = world(TEMPLATE, UNITS);
+    harness.world.branch(&scenario::format::BranchStep {
+        name: "pr-9".to_owned(),
+        from: "main".to_owned(),
+    });
+    harness
+        .world
+        .commit_files("pr-9", "A change", &[("nyl/note.txt", "one")]);
+    let created = invoke(
+        &harness,
+        "pr-9",
+        &["reconcile", "-e", "pr-9", "--template", "preview", "--param", "pr=9"],
+    );
+    assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
+    delete_pull_request_branch(&harness, "pr-9");
+
+    let refused = invoke(&harness, "main", &["state", "delete", "-e", "pr-9", "--teardown"]);
+    assert_eq!(refused.exit, 1, "{}\n{}", refused.stderr, refused.stdout);
+    assert!(refused.stderr.contains("--source <revision>"), "{}", refused.stderr);
+    assert!(exists(&harness, "pr-9"), "nothing was removed");
+
+    let closed = invoke(
+        &harness,
+        "main",
+        &["state", "delete", "-e", "pr-9", "--teardown", "--source", "main"],
+    );
+    assert_eq!(closed.exit, 0, "{}\n{}", closed.stderr, closed.stdout);
+    assert!(closed.stderr.contains("NYL-SOURCE-OVERRIDE"), "{}", closed.stderr);
+    assert!(!exists(&harness, "pr-9") && deleted(&harness, "pr-9"));
+}
+
 /// `state move --template` moves the state of every instance of a template to
 /// its configured location, found by listing the old one: after the template's
 /// `state.path` changed, the instances are unknown until they move, and move
