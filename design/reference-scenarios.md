@@ -68,7 +68,9 @@ fakes. Tier 2 runs each command as a separate binary process in a fresh checkout
 home and explicit Git identity, passes time and admitted variables to that
 child only, and checks the same reports, state commits, and publication trees
 as tier 1. Scripted drivers, fault injection, pauses, and steps marked
-`tier: 1` remain exclusive to tier 1.
+`tier: 1` remain exclusive to tier 1. Tier 2 runs no `attest`, `observe`, or
+observe-wait step, because there is no Argo CD or workload Cluster to read: the
+scenarios that do are tier 1 only.
 
 The tiers are:
 
@@ -653,12 +655,10 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 Tier 1 variants:
 
 - **No keep ref.** With `keepSource: false`, step 7 fails and suggests
-  `--source`; `nyl state delete -e pr-123 --teardown --source main` warns about
-  the substituted source, records it, and succeeds. The shell tests
-  (`orchestration_expiry_test`) run it with Command units. A unit whose spec
-  pins its `source` to the recorded commit, as OpenTofu's does, still tears
-  down at that commit under `--source`, so the variant is not a scenario file
-  until `--source` replaces the pin.
+  `--source`; `nyl state delete -e pr-123 --teardown --source main` takes the
+  units' files, an OpenTofu unit's pinned `source` included, from `main`,
+  records the substitution, and succeeds. Scenario
+  `reference/preview-no-keep-ref` runs it.
 - **Name collision.** With an `applicationNameTemplate` that ignores the
   target's name, `nyl validate` rejects the template because two instances
   would generate the same Argo CD names. Scenario
@@ -715,7 +715,7 @@ environment that exists and 1 for one that does not.
 | --- | --- |
 | M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants; the [crash-injection scenarios](#crash-injection) at every killable fault point |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
-| M5 | All three scenarios in both tiers, with the real `KubernetesPublication`: `reference/platform` (scenario 1, with the exit criterion's published values and static render), `reference/preview-closed` (scenario 2), and `reference/preview` (scenario 3), plus the tier-1 variants `preview-manual-wait`, `preview-not-ready`, and `preview-name-collision`; the `attested-evidence` and `observed-value` walkthroughs also run with the real driver |
+| M5 | All three scenarios in both tiers, with the real `KubernetesPublication`: `reference/platform` (scenario 1, with the exit criterion's published values and static render), `reference/preview-closed` (scenario 2), and `reference/preview` (scenario 3), plus the tier-1 variants `preview-manual-wait`, `preview-not-ready`, `preview-no-keep-ref`, and `preview-name-collision`; the `attested-evidence` and `observed-value` walkthroughs also run with the real driver |
 | M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path; a fifth adds `prod-hotfix` and `hotfix-to-prod`, promotes a fix from `release/prod`, has the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, and covers `--supersede` with a range |
 
 The reference project grows with the milestones. A milestone's fixture omits

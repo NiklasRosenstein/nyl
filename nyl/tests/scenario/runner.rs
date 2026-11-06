@@ -612,6 +612,15 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 ));
             }
         }
+        if let Some(expected) = &expect.source_chosen_by {
+            let chosen = self.source_choice(environment)?;
+            if !subset(expected, &chosen) {
+                return Err(format!(
+                    "sourceChosenBy is {chosen} instead of {expected}; {}",
+                    describe()
+                ));
+            }
+        }
         if let Some(keep) = &expect.keep_refs {
             self.check_keep_refs(keep)?;
         }
@@ -875,6 +884,36 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             }
         }
         Ok(())
+    }
+
+    /// The `sourceChosenBy` of `environment`'s record in the state repository:
+    /// beside its own refs, or under its name in a shared one.
+    fn source_choice(&self, environment: &str) -> Result<Value, String> {
+        let bare = self.world.bare();
+        let refs = git_output(&bare, &["for-each-ref", "--format=%(refname)", "refs/heads/nyl/"]);
+        let candidates = std::iter::once(format!("refs/heads/nyl/{environment}/desired:desired/environment.yaml"))
+            .chain(
+                refs.lines()
+                    .map(|reference| format!("{reference}:{environment}/desired/environment.yaml")),
+            );
+        for candidate in candidates {
+            let shown = std::process::Command::new("git")
+                .current_dir(&bare)
+                .args(["show", &candidate])
+                .output()
+                .map_err(|error| error.to_string())?;
+            if shown.status.success() {
+                let record: Value = serde_saphyr::from_str(&String::from_utf8_lossy(&shown.stdout))
+                    .map_err(|error| format!("{candidate}: {error}"))?;
+                return record
+                    .get("sourceChosenBy")
+                    .cloned()
+                    .ok_or_else(|| format!("{candidate} has no sourceChosenBy"));
+            }
+        }
+        Err(format!(
+            "no environment record of {environment} in the state repository"
+        ))
     }
 
     /// The keep refs of `project.git` against `expected`.
@@ -1229,28 +1268,17 @@ fn names(list: Option<&Value>) -> BTreeSet<String> {
 }
 
 /// Whether `nyl <args>` is an orchestration command, which runs in-process in
-/// tier 1 and prints its report as JSON when asked.
+/// tier 1 and prints its report as JSON when asked: the command line's own
+/// answer, [`Cli::is_orchestration`]. Arguments that do not parse run
+/// in-process, where the parse error is reported.
 fn is_orchestration_command(args: &[String]) -> bool {
-    matches!(
-        args.first().map(String::as_str),
-        Some(
-            "build"
-                | "exec"
-                | "plan"
-                | "reconcile"
-                | "status"
-                | "get"
-                | "state"
-                | "lease"
-                | "detect-drift"
-                | "attest"
-                | "observe"
-                | "recover"
-                | "teardown"
-                | "hold"
-                | "resume"
-        )
-    )
+    let argv = std::iter::once("nyl")
+        .chain(args.iter().map(String::as_str))
+        .chain(std::iter::once("."));
+    match Cli::try_parse_from(argv) {
+        Ok(cli) => cli.is_orchestration(),
+        Err(_) => true,
+    }
 }
 
 /// Whether `nyl <args>`, an orchestration command, takes `--output json`:

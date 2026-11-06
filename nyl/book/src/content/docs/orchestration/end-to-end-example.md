@@ -373,7 +373,7 @@ releaseInputs:
 ```
 
 [`nyl publish-tree`](/nyl/reference/cli/publish-tree/) renders and publishes it
-with no state, no units, and no tools:
+executes no units and needs none of their tools:
 
 ```console
 $ nyl publish-tree --target static
@@ -413,9 +413,10 @@ branch once the first preview has published it. See
 ## Run it in CI
 
 Every job below runs the commands you ran locally from a fresh checkout. What
-differs is who may push and which credentials the job holds. Nyl reads nothing
-else: not the process environment, not the kube context, not files outside the
-repository.
+differs is who may push and which credentials the job holds. Nothing else
+changes what Nyl renders or runs: it does not read the process environment
+beyond the variables a unit admits (CI run metadata such as `GITHUB_RUN_ID` only
+annotates what it records), the kube context, or files outside the repository.
 
 ### Credentials and the variables units admit
 
@@ -476,6 +477,7 @@ below, so they are shown once:
 
 ```yaml
 env:
+  NYL_VERSION: X.Y.Z                       # a release that includes orchestration
   DOCKER_CONFIG: ${{ runner.temp }}/docker
   NYL_GIT_TOKEN: ${{ github.token }}
   ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_READ_TOKEN }}     # or write KUBECONFIG from a secret
@@ -494,7 +496,7 @@ steps:
 ```
 
 The identity is what Nyl commits state and trees as; without one a command that
-writes fails with `NYL-COMMIT-IDENTITY-MISSING`. Pin `NYL_VERSION` to a release
+writes fails with `NYL-COMMIT-IDENTITY-MISSING`. Set `NYL_VERSION` to a release
 that includes orchestration.
 
 ### Reconcile on main
@@ -649,7 +651,10 @@ runs in the next reconcile without publishing again.
 name: preview
 on: {pull_request: {types: [opened, synchronize, reopened]}}
 permissions: {contents: write}
-concurrency: {group: 'preview-${{ github.event.number }}', cancel-in-progress: true}
+# One job per pull request at a time, and never cancelled: a job that applies
+# OpenTofu and pushes state must finish (the next one queues, and the close job
+# shares the group).
+concurrency: {group: 'preview-${{ github.event.number }}', cancel-in-progress: false}
 jobs:
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository
@@ -699,8 +704,8 @@ kubernetes  KubernetesPublication  executed  reason: no receipt
   observed: 459f51e197c71835fd335e865e531ada35cdb8d2
   instance: template preview, expires at 2026-10-01T12:00:00+00:00; expiry extended
 $ nyl get environments
-NAME  TEMPLATE  UNITS         STATE                                                                                                            EXPIRES               FILE
-dev   -         stage=dev     shop@nyl/dev/desired                                                                                             -                     platform.yaml#document-7
+NAME  TEMPLATE  UNITS         STATE                                   EXPIRES               FILE
+dev   -         stage=dev     shop@nyl/dev/desired                    -                     platform.yaml#document-7
 pr-1  preview   preview=true  file:///tmp/shop/shop.git@nyl/previews  2026-10-01T11:00:00Z  -
 pr-2  preview   preview=true  file:///tmp/shop/shop.git@nyl/previews  2026-10-01T12:00:00Z  -
 ```
@@ -772,21 +777,27 @@ which it kept fetchable through a keep ref until now:
 name: preview-close
 on: {pull_request: {types: [closed]}}
 permissions: {contents: write}
+concurrency: {group: 'preview-${{ github.event.number }}', cancel-in-progress: false}
 jobs:
   close:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      # …the checkout (of the default branch), tools, and login steps above
+      # The default branch, not the pull request's merge commit.
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.event.repository.default_branch }}', fetch-depth: 0, persist-credentials: false}
+      # …the tools, login, and Nyl steps above
       - run: |
           pr="pr-${{ github.event.number }}"
-          if nyl get environments "$pr" > /dev/null; then
+          instances=$(nyl get environments)      # a failure fails the job
+          if echo "$instances" | awk -v pr="$pr" '$1 == pr {found = 1} END {exit !found}'; then
             nyl state delete -e "$pr" --teardown --wait-lease 10m
           fi
 ```
 
-`nyl get environments <name>` exits 0 for an instance that exists and 1 for one
-that does not, so a pull request that never had a preview skips the removal. The
+The job reads the listing and removes only an instance that is in it, so a
+pull request that never had a preview skips the removal, while a listing that
+fails (an exit other than 0) fails the job instead of passing as "no preview". The
 removal is `teardown --all` and then `state delete`: the publication removes
 its Applications from the catalog first and waits two minutes (the template's
 `delay`) for Argo CD, then its files. The database is destroyed, the image unit

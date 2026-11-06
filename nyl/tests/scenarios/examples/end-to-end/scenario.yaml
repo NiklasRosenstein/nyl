@@ -4,7 +4,7 @@
 # requests get previews that are closed with the pull request or expire; the
 # shared catalog's writer runs. The commands are the ones the guide's local and
 # CI workflows run, in both tiers.
-contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request
+contract: nyl/book/src/content/docs/orchestration/end-to-end-example.md#the-project
 milestone: M5
 steps:
   - nyl: [validate]
@@ -39,7 +39,10 @@ steps:
       deploy:
         branch: static
         contains: ['static/web/**']
-        mentions: {'static/web/**': ['shop.db.internal']}
+        mentions:
+          'static/web/**':
+            - 'registry.example.com/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+            - shop.db.internal
 
   # A pull request job creates its preview, and a second one gets its own.
   - branch: {name: pr-1, from: main}
