@@ -1,0 +1,229 @@
+//! Reading Applications from the Kubernetes API of the Argo CD control-plane
+//! Cluster.
+//!
+//! Contract: [Kubernetes publications](../../../../../design/promotion.md#kubernetes-publications),
+//! access method `kubernetes`. The Applications are `applications.argoproj.io`
+//! objects in the instance's namespace (or the namespace an ApplicationGroup
+//! names). The connection is explicit end to end: the kubeconfig is the file
+//! the unit admits as `KUBECONFIG` (a list of files, as for `kubectl`, is
+//! merged), and the context is the control-plane Cluster's declared
+//! `spec.live.context`. Nothing falls back to the kubeconfig's current
+//! context, `~/.kube/config`, or in-cluster configuration, so the same
+//! declaration reads the same cluster wherever it runs. The kubeconfig's own
+//! credentials, including its exec plugins, authenticate as it defines them.
+//! A proxy comes only from the kubeconfig (`proxy-url`), never from the
+//! process's `HTTPS_PROXY`.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use kube::api::{ApiResource, DynamicObject, ListParams};
+use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::{Api, Client};
+use serde_json::Value;
+
+use super::{block_on, ArgoReader, ReadError, ReadErrorKind, KUBECONFIG_ENV};
+
+/// Reads Applications through a kubeconfig context.
+pub struct KubeApiReader {
+    cluster: String,
+    context: String,
+    kubeconfig: Vec<PathBuf>,
+    budget: Duration,
+}
+
+impl KubeApiReader {
+    /// A reader of the Cluster named `cluster` through `context` (its
+    /// `spec.live.context`), reading the files of `kubeconfig` (the
+    /// admitted `KUBECONFIG`). Each reading ends within `budget`.
+    pub fn new(
+        cluster: &str,
+        context: Option<&str>,
+        kubeconfig: Option<&str>,
+        budget: Duration,
+    ) -> Result<Self, ReadError> {
+        let context = context.filter(|context| !context.is_empty()).ok_or_else(|| {
+            ReadError::new(
+                ReadErrorKind::Declaration,
+                format!(
+                    "the Kubernetes access method needs the local kubeconfig context of Cluster {cluster}: set its \
+                     spec.live.context (Nyl never uses the current context), or declare the ArgoCDInstance's \
+                     spec.access with method api"
+                ),
+            )
+        })?;
+        let files = kubeconfig
+            .map(|paths| {
+                std::env::split_paths(paths)
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|files| !files.is_empty())
+            .ok_or_else(|| {
+                ReadError::new(
+                    ReadErrorKind::Credentials,
+                    format!(
+                        "no kubeconfig is admitted to read Cluster {cluster} (context {context}): add {KUBECONFIG_ENV} \
+                         to the unit's env.passthrough so the runner's kubeconfig file is used (the project's \
+                         kube context and ~/.kube/config are never read implicitly)"
+                    ),
+                )
+            })?;
+        Ok(Self {
+            cluster: cluster.to_owned(),
+            context: context.to_owned(),
+            kubeconfig: files,
+            budget,
+        })
+    }
+
+    async fn client(&self) -> Result<Client, ReadError> {
+        let declaration = |detail: String| ReadError::new(ReadErrorKind::Declaration, detail);
+        let mut merged: Option<Kubeconfig> = None;
+        for path in &self.kubeconfig {
+            let file = Kubeconfig::read_from(path)
+                .map_err(|error| declaration(format!("cannot read the kubeconfig {}: {error}", path.display())))?;
+            merged = Some(match merged {
+                Some(merged) => merged
+                    .merge(file)
+                    .map_err(|error| declaration(format!("cannot merge the kubeconfig {}: {error}", path.display())))?,
+                None => file,
+            });
+        }
+        let kubeconfig = merged.ok_or_else(|| declaration("no kubeconfig file".to_owned()))?;
+        if !kubeconfig.contexts.iter().any(|named| named.name == self.context) {
+            return Err(declaration(format!(
+                "the admitted kubeconfig has no context {:?}, which Cluster {} declares as spec.live.context",
+                self.context, self.cluster
+            )));
+        }
+        let declares_proxy = kubeconfig
+            .contexts
+            .iter()
+            .find(|named| named.name == self.context)
+            .and_then(|named| named.context.as_ref())
+            .and_then(|context| {
+                kubeconfig
+                    .clusters
+                    .iter()
+                    .find(|cluster| cluster.name == context.cluster)
+            })
+            .and_then(|named| named.cluster.as_ref())
+            .is_some_and(|cluster| cluster.proxy_url.as_deref().is_some_and(|proxy| !proxy.is_empty()));
+        let mut config = kube::Config::from_custom_kubeconfig(
+            kubeconfig,
+            &KubeConfigOptions {
+                context: Some(self.context.clone()),
+                ..KubeConfigOptions::default()
+            },
+        )
+        .await
+        .map_err(|error| {
+            ReadError::new(
+                ReadErrorKind::Credentials,
+                format!(
+                    "cannot use context {:?} of the admitted kubeconfig: {error}",
+                    self.context
+                ),
+            )
+        })?;
+        // kube reads HTTPS_PROXY from the process environment when the
+        // kubeconfig names no proxy; nothing outside the declaration and the
+        // admitted environment may steer the connection, so only a proxy the
+        // kubeconfig itself declares is kept.
+        if !declares_proxy {
+            config.proxy_url = None;
+        }
+        config.connect_timeout = Some(self.budget.min(Duration::from_secs(10)));
+        config.read_timeout = Some(self.budget);
+        Client::try_from(config).map_err(|error| {
+            ReadError::new(
+                ReadErrorKind::Unreachable,
+                format!("cannot connect through context {:?}: {error}", self.context),
+            )
+        })
+    }
+}
+
+impl ArgoReader for KubeApiReader {
+    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+        let budget = self.budget;
+        block_on(async {
+            tokio::time::timeout(budget, async {
+                let client = self.client().await?;
+                let resource = ApiResource {
+                    group: "argoproj.io".to_owned(),
+                    version: "v1alpha1".to_owned(),
+                    api_version: "argoproj.io/v1alpha1".to_owned(),
+                    kind: "Application".to_owned(),
+                    plural: "applications".to_owned(),
+                };
+                let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &resource);
+                let list = api
+                    .list(&ListParams::default())
+                    .await
+                    .map_err(|error| self.list_error(&error, namespace))?;
+                list.items
+                    .into_iter()
+                    .map(|application| {
+                        let name = application.metadata.name.clone().ok_or_else(|| {
+                            ReadError::new(
+                                ReadErrorKind::Malformed,
+                                "an Application in the list has no name".to_owned(),
+                            )
+                        })?;
+                        let value = serde_json::to_value(&application)
+                            .map_err(|error| ReadError::new(ReadErrorKind::Malformed, error.to_string()))?;
+                        Ok((name, value))
+                    })
+                    .collect()
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(ReadError::new(
+                    ReadErrorKind::Unreachable,
+                    format!(
+                        "reading Applications of namespace {namespace} through context {:?} took longer than {}s",
+                        self.context,
+                        budget.as_secs()
+                    ),
+                ))
+            })
+        })?
+    }
+}
+
+impl KubeApiReader {
+    fn list_error(&self, error: &kube::Error, namespace: &str) -> ReadError {
+        let context = &self.context;
+        match error {
+            kube::Error::Api(status) if status.code == 401 => ReadError::new(
+                ReadErrorKind::Rejected,
+                format!(
+                    "the Kubernetes API of context {context:?} rejected the kubeconfig's credentials (HTTP 401): \
+                     they are invalid or have expired; log in again or refresh the admitted kubeconfig"
+                ),
+            ),
+            kube::Error::Api(status) if status.code == 403 => ReadError::new(
+                ReadErrorKind::Forbidden,
+                format!(
+                    "context {context:?} may not list applications.argoproj.io in namespace {namespace} (HTTP 403): \
+                     grant its user `list` on applications there"
+                ),
+            ),
+            kube::Error::Api(status) if status.code == 404 => ReadError::new(
+                ReadErrorKind::Declaration,
+                format!(
+                    "context {context:?} serves no applications.argoproj.io: it is not the Argo CD control-plane Cluster \
+                     {}; fix Cluster {}'s spec.live.context",
+                    self.cluster, self.cluster
+                ),
+            ),
+            other => ReadError::new(
+                ReadErrorKind::Unreachable,
+                format!("cannot list Applications through context {context:?}: {other}"),
+            ),
+        }
+    }
+}

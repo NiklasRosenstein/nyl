@@ -927,8 +927,7 @@ impl Reconcile<'_, '_, '_> {
                 from: context.base.runner.clone(),
             }
         } else {
-            let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-            let strategy = crate::rules::teardown_wait::strategy(spec);
+            let strategy = super::wait::strategy(context, &unit);
             let now = context.base.clock.now();
             let end = crate::rules::teardown_wait::ends(strategy, &waiting)
                 .unwrap_or_else(|| unit_timeout(context.drivers, &unit).after(now))

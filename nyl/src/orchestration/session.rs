@@ -224,7 +224,6 @@ impl Session {
             process_env: &wiring.process_env,
             secrets: Some(&secrets),
             commit_identity: identity,
-            observer: wiring.observer,
             progress: wiring.progress,
             prompt: wiring.prompt,
         };

@@ -151,6 +151,10 @@ pub struct RenderedTarget {
     /// The target Cluster's recorded Kubernetes capabilities, which the
     /// cleanup-scope check uses to resolve resource scope.
     pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
+    /// The target's Argo CD instance and how Nyl reads it. Declaration only:
+    /// it enters no rendered byte, and a driver that observes records it at
+    /// resolution ([`super::observation::ArgoCdObservation`]).
+    pub argocd: super::observation::ArgoCdLocation,
 }
 
 impl RenderedTarget {
@@ -293,6 +297,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         reconcile: compiled.reconcile_options(false),
         publication_base: compiled.publication_base.clone(),
         cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
+        argocd: super::tree::argocd_location(&inventory, &compiled.target)?,
     })
 }
 
@@ -693,6 +698,13 @@ pub fn index_digest(index: &RenderIndex) -> Result<String> {
         "sha256:{}",
         nyl_core::digest::sha256_hex(&nyl_core::digest::canonical_json_bytes(index)?)
     ))
+}
+
+/// The Git authentication of the project in `project_dir`: its `nyl.toml`'s
+/// `[[git.credentials]]`, reading only the variables they name through
+/// `variable`.
+pub fn project_auth(project_dir: &Path, variable: &dyn Fn(&str) -> Option<String>) -> Result<GitAuth> {
+    project_git_auth(&load_project_file(project_dir)?, variable)
 }
 
 /// The project's `nyl.toml` in `project_dir`, or the defaults without one.

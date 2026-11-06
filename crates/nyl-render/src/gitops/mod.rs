@@ -7,6 +7,7 @@ pub mod direct_inputs;
 pub mod discovery;
 pub mod inputs;
 pub mod layout;
+pub mod observation;
 pub mod project_scope;
 pub mod provenance;
 pub mod publication;

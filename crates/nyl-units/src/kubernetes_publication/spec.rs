@@ -5,9 +5,10 @@
 //! every unit shares. `target` names a static DeploymentTarget, or declares
 //! one inline (`{inline, name?}`), in which case the renderer fills the
 //! target's `name` and `sourceFile`. `releases` is filled by the renderer
-//! from the target's `releaseInputs`, and `teardownSettings` is recorded by
-//! the driver at resolution; neither is authored.
+//! from the target's `releaseInputs`, and `teardownSettings` and `argocd`
+//! are recorded by the driver at resolution; none is authored.
 
+use nyl_core::orchestration::driver::WaitStrategy;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::units::COMMON_UNIT_FIELDS;
 use nyl_render::gitops::units::PublicationTarget;
@@ -23,9 +24,17 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
     for field in ["observations", "observationWait"] {
         if spec.contains_key(field) {
             return Err(format!(
-                "spec.{field} needs mode: observe, which is not available yet; remove it and publish with mode: publish"
+                "spec.{field} (observed values) is not available yet: mode: observe attests `accepted` and `healthy` \
+                 from Argo CD, but reading resource fields arrives later; remove it"
             ));
         }
+    }
+    if spec.contains_key("argocd") {
+        return Err(
+            "spec.argocd is recorded from the target's ArgoCDInstance when the unit is resolved and must not be written by hand; \
+             declare the instance's access in its ArgoCDInstance spec.access instead"
+                .to_owned(),
+        );
     }
     if spec.contains_key("teardownSettings") {
         return Err(
@@ -54,25 +63,11 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
     }
     match spec.get("mode") {
         None => {}
-        Some(Value::String(mode)) if mode == "publish" => {}
-        Some(Value::String(mode)) if mode == "observe" => {
-            return Err(
-                "NYL-KUBERNETES-MODE-UNSUPPORTED: spec.mode observe is not available yet, so Argo CD cannot be read; \
-                 use mode: publish, which publishes the tree and records the PublishedTree artifact"
-                    .to_owned(),
-            )
-        }
+        Some(Value::String(mode)) if mode == "publish" || mode == "observe" => {}
         Some(other) => return Err(format!("spec.mode must be publish or observe, got {other}")),
     }
     if let Some(wait) = spec.get("teardownWait") {
         validate_teardown_wait(wait)?;
-        if wait.get("strategy").and_then(Value::as_str) == Some("observe") {
-            return Err(
-                "NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED: spec.teardownWait.strategy observe needs to read Argo CD, which is not available yet; \
-                 use strategy delay with a duration, or manual and confirm with nyl teardown --confirm-removed"
-                    .to_owned(),
-            );
-        }
     }
     if let Some(releases) = spec.get("releases") {
         let releases = releases
@@ -86,6 +81,28 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// How a unit's teardown waits after phase 1, from its stored spec: the
+/// declared `teardownWait`, else `observe` for `mode: observe` and `manual`
+/// for `mode: publish`. Validation rejects an unknown strategy and a `delay`
+/// without a valid `duration` before a document is stored; a stored document
+/// that still carries one reads as `manual`, the only strategy that never ends
+/// a wait without an operator.
+pub(crate) fn teardown_wait(spec: &Value) -> WaitStrategy {
+    match spec.pointer("/teardownWait/strategy").and_then(Value::as_str) {
+        Some("observe") => WaitStrategy::Observe,
+        Some("delay") => spec
+            .pointer("/teardownWait/duration")
+            .and_then(Value::as_str)
+            .and_then(|duration| duration.parse::<Duration>().ok())
+            .map_or(WaitStrategy::Manual, |duration| WaitStrategy::Delay { duration }),
+        Some(_) => WaitStrategy::Manual,
+        None => match spec.get("mode").and_then(Value::as_str) {
+            Some("observe") => WaitStrategy::Observe,
+            _ => WaitStrategy::Manual,
+        },
+    }
 }
 
 /// `teardownWait`: `{strategy: observe|delay|manual, duration?}`, where
@@ -172,28 +189,50 @@ mod tests {
         assert!(invalid(&json!({"target": {"inline": {"publication": publication}}})).contains("spec.target.name"));
     }
 
-    /// Catches `observe` waiting forever, or being accepted and ending every
-    /// teardown as uncertain, while nothing can read Argo CD.
+    /// Catches the observing declarations being rejected (the `observe`
+    /// strategy and mode work), and the fields only the driver records or a
+    /// later milestone reads being accepted from an author.
     #[test]
-    fn test_validate_rejects_the_observe_teardown_wait_with_its_own_code() {
-        let message = invalid(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}}));
+    fn test_validate_accepts_observation_and_rejects_recorded_and_unavailable_fields() {
+        assert!(validate(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}})).is_ok());
+        assert!(validate(&json!({"target": "dev", "mode": "observe"})).is_ok());
+        assert!(validate(&json!({"target": "dev", "mode": "observe", "teardownWait": {"strategy": "manual"}})).is_ok());
+        assert!(invalid(&json!({"target": "dev", "mode": "apply"})).contains("must be publish or observe"));
+        assert!(invalid(&json!({"target": "dev", "argocd": {}})).contains("must not be written by hand"));
+        let observations = invalid(&json!({"target": "dev", "mode": "observe", "observations": {}}));
         assert!(
-            message.starts_with("NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED:"),
-            "{message}"
+            observations.contains("observed values") && observations.contains("not available yet"),
+            "{observations}"
         );
-        assert!(message.contains("delay") && message.contains("manual"), "{message}");
-        assert!(validate(&json!({"target": "dev", "teardownWait": {"strategy": "manual"}})).is_ok());
     }
 
-    /// Catches observe mode being accepted before anything can read Argo CD,
-    /// which would publish and then promise health it never checks.
+    /// Catches a publication waiting for the wrong thing: `mode: observe`
+    /// must observe and `mode: publish` must wait for an operator unless
+    /// `teardownWait` says otherwise, and a stored delay without a usable
+    /// duration must never complete by itself.
     #[test]
-    fn test_validate_rejects_observe_mode_with_its_own_code() {
-        let message = invalid(&json!({"target": "dev", "mode": "observe"}));
-        assert!(message.starts_with("NYL-KUBERNETES-MODE-UNSUPPORTED:"), "{message}");
-        assert!(message.contains("mode: publish"), "{message}");
-        assert!(invalid(&json!({"target": "dev", "mode": "apply"})).contains("must be publish or observe"));
-        assert!(invalid(&json!({"target": "dev", "observations": {}})).contains("needs mode: observe"));
+    fn test_teardown_wait_reads_the_declaration_with_defaults_by_mode() {
+        assert_eq!(teardown_wait(&json!({"mode": "observe"})), WaitStrategy::Observe);
+        assert_eq!(teardown_wait(&json!({"mode": "publish"})), WaitStrategy::Manual);
+        assert_eq!(teardown_wait(&json!({})), WaitStrategy::Manual);
+        assert_eq!(
+            teardown_wait(&json!({"mode": "observe", "teardownWait": {"strategy": "delay", "duration": "10m"}})),
+            WaitStrategy::Delay {
+                duration: Duration::from_mins(10)
+            }
+        );
+        assert_eq!(
+            teardown_wait(&json!({"mode": "publish", "teardownWait": {"strategy": "observe"}})),
+            WaitStrategy::Observe
+        );
+        assert_eq!(
+            teardown_wait(&json!({"mode": "observe", "teardownWait": {"strategy": "manual"}})),
+            WaitStrategy::Manual
+        );
+        assert_eq!(
+            teardown_wait(&json!({"teardownWait": {"strategy": "delay"}})),
+            WaitStrategy::Manual
+        );
     }
 
     #[test]

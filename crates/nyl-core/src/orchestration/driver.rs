@@ -491,6 +491,42 @@ pub struct ExecutionContext<'a> {
     pub dirty_source: bool,
 }
 
+/// How a driver's teardown wait after phase 1 ends
+/// ([`Driver::teardown_wait`]); the decisions are `rules::teardown_wait`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitStrategy {
+    /// The driver reports nothing remaining ([`Driver::observe_removal`]).
+    Observe,
+    /// `duration` after the phase 1 commit; the teardown is recorded as not observed.
+    Delay { duration: super::time::Duration },
+    /// An operator confirms; the wait never keeps a run waiting.
+    Manual,
+}
+
+/// What [`Driver::observe_removal`] receives: the unit's admitted
+/// credentials and the time its reading must finish by.
+#[derive(Debug, Clone)]
+pub struct RemovalContext {
+    pub unit: UnitAddress,
+    /// Admitted variables and secrets, by name; masking of secret values is the runner's.
+    pub env: BTreeMap<String, String>,
+    /// Explicit credential-helper keys, resolved only for this driver call.
+    pub secrets: BTreeMap<String, String>,
+    /// The injected clock's time when the reading starts.
+    pub now: Timestamp,
+    /// The end of the wait: a reading takes no longer than this allows.
+    pub deadline: Timestamp,
+}
+
+/// What a driver observed of the effects a teardown's first phase removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalObservation {
+    /// What still exists, named for display; empty when everything is gone.
+    Remaining(Vec<String>),
+    /// The driver could not read it, such as for missing credentials.
+    Failed(String),
+}
+
 /// How a teardown's wait after phase 1 ended, decided by the orchestration
 /// shell (`rules::teardown_wait`) and recorded in the transition commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -721,6 +757,27 @@ pub trait Driver: Send + Sync {
     /// ([`KeyInputs::recorded`]).
     fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let _ = unit;
+        Ok(Supported::Unsupported)
+    }
+    /// How a teardown of this spec waits after phase 1 (`teardownWait`), read
+    /// from the stored document with the kind's defaults; the shell never
+    /// reads the spec itself. `Manual` by default, the only strategy that
+    /// never ends a wait without an operator, so a document the driver cannot
+    /// read waits for one.
+    fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
+        let _ = spec;
+        WaitStrategy::Manual
+    }
+    /// Whether what a teardown's first phase removes is gone, for the
+    /// `observe` `teardownWait` strategy: the shell asks again until the
+    /// driver reports nothing remaining, the wait's deadline passes, or the
+    /// reading fails. `ctx` carries the unit's admitted credentials and no
+    /// checkout, because the unit may be torn down from its stored document
+    /// alone. Unsupported by default (the wait is then `observation-failed`).
+    ///
+    /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit), Teardown.
+    fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
+        let _ = (ctx, unit);
         Ok(Supported::Unsupported)
     }
     /// `nyl build`; unsupported by default.

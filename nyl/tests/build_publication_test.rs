@@ -37,7 +37,6 @@ fn wiring<'a>(harness: &'a harness::Harness, tools: &'a ProcessRunner) -> Wiring
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     }
 }

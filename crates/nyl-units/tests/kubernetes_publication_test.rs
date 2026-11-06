@@ -365,10 +365,11 @@ fn test_drift_compares_the_branch_with_the_rendered_tree_without_publishing() {
     assert!(summary.contains("modified outside Nyl"), "{summary}");
 }
 
-/// Catches observe mode, the `observe` teardown wait, and a hand-written
-/// `teardownSettings` being accepted before the driver can honor them.
+/// Catches a hand-written `teardownSettings` or `argocd`, which only the
+/// driver records at resolution, being accepted, and a `delay` without a
+/// duration.
 #[test]
-fn test_validation_rejects_what_the_driver_cannot_do_yet() {
+fn test_validation_rejects_what_only_the_driver_records() {
     let driver = real();
     let with = |field: &str, value: Value| {
         let mut spec = spec();
@@ -376,11 +377,12 @@ fn test_validation_rejects_what_the_driver_cannot_do_yet() {
         driver.validate_spec(&spec)
     };
     assert!(driver.validate_spec(&spec()).is_ok());
-    let observe = with("mode", json!("observe")).unwrap_err();
-    assert!(observe.starts_with("NYL-KUBERNETES-MODE-UNSUPPORTED"), "{observe}");
-    let wait = with("teardownWait", json!({"strategy": "observe"})).unwrap_err();
-    assert!(wait.starts_with("NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED"), "{wait}");
+    assert!(with("mode", json!("observe")).is_ok());
+    assert!(with("teardownWait", json!({"strategy": "observe"})).is_ok());
     assert!(with("teardownSettings", json!({"catalogPrunes": true}))
+        .unwrap_err()
+        .contains("must not be written by hand"));
+    assert!(with("argocd", json!({"instance": "x"}))
         .unwrap_err()
         .contains("must not be written by hand"));
     assert!(with("teardownWait", json!({"strategy": "delay"})).is_err());

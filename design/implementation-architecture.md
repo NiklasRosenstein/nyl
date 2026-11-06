@@ -29,7 +29,7 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
-| `nyl-core` | The resources orchestration reads (GitRepository, Environment, EnvironmentGroup, the fields every unit shares), the resource catalogue machinery, state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-core` | The resources orchestration reads (GitRepository, Environment, EnvironmentGroup, the fields every unit shares), the resource catalogue machinery, state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
 | `nyl-collections` | Domain resource rules shared by rendering and orchestration: schema validation and defaulting, identity, membership, ownership claims, the reference closure, bundle assembly, transition rules ([domain resources](domain-resources.md#code-homes)) | Git, processes, network, clock, environment, and every Nyl crate except `nyl-core` |
 | `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
 | `nyl-render` | Kubernetes rendering and Kubernetes GitOps, including their resources (Release, HelmChart, Component, RemoteManifest, Cluster, DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) and their catalogue descriptors | Orchestration crates |
@@ -209,7 +209,9 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   reject unknown versions. Schemas are generated from the Rust types through the
   existing schemars pipeline.
 - Traits stay small: `StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`,
-  `ArgoObserver`, `Clock`, `IdGenerator`. `SourceResolver` covers every Git
+  `Clock`, `IdGenerator`. Reading Argo CD is a driver's: the publication driver
+  owns it behind one reader trait with two implementations, so the shell and
+  the core know no Argo CD type. `SourceResolver` covers every Git
   operation on sources that decisions depend on: resolving revisions,
   reachability checks against protected refs, fetching commits, worktrees at a
   commit, and keep refs. Each has an in-memory or fake implementation used by
