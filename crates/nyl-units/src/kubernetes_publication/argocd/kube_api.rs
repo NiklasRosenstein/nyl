@@ -94,6 +94,12 @@ impl Connection {
     }
 
     pub(crate) async fn client(&self) -> Result<Client, ReadError> {
+        self.client_for(None).await
+    }
+
+    /// The client, after checking that the context's server is the one the
+    /// Cluster declares (`declared_server`, when it can be compared).
+    pub(crate) async fn client_for(&self, declared_server: Option<&str>) -> Result<Client, ReadError> {
         let declaration = |detail: String| ReadError::new(ReadErrorKind::Declaration, detail);
         let mut merged: Option<Kubeconfig> = None;
         for path in &self.kubeconfig {
@@ -143,6 +149,10 @@ impl Connection {
                 ),
             )
         })?;
+        if let Some(declared) = declared_server {
+            nyl_render::kubernetes::verify_server(&self.cluster, declared, &config.cluster_url.to_string())
+                .map_err(|error| ReadError::new(ReadErrorKind::Declaration, error.to_string()))?;
+        }
         // kube reads HTTPS_PROXY from the process environment when the
         // kubeconfig names no proxy; nothing outside the declaration and the
         // admitted environment may steer the connection, so only a proxy the

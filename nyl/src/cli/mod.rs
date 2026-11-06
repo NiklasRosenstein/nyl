@@ -2,7 +2,6 @@ pub(crate) mod apply_output;
 pub mod commands;
 pub mod filter;
 pub mod git_auth;
-pub(crate) mod namespace_resolution;
 pub(crate) mod presentation;
 pub(crate) mod resource_file;
 mod signals;

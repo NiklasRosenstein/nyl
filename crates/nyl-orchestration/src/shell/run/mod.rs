@@ -1961,6 +1961,7 @@ fn plan_unit(
     };
     let execution = ExecutionContext {
         instances: context.instances,
+        clock: context.base.clock,
         secrets,
         interactive: false,
         artifacts: BTreeMap::new(),

@@ -176,7 +176,7 @@ impl SharedCatalogManifest {
             reconcile: super::reconcile::ReconcileOptions::default(),
             publication_base: None,
             cluster_kubernetes: None,
-            argocd: rendered.argocd.clone(),
+            delivery: rendered.delivery.clone(),
             workload: rendered.workload.clone(),
             shared_catalog: None,
         })
@@ -270,6 +270,12 @@ pub fn validate_shared_catalogs(inventory: &GitOpsInventory) -> Result<()> {
         let Some(GitOpsResource::DeploymentTarget(target)) = discovered.resource.as_ref() else {
             continue;
         };
+        // A direct target's tree has no catalog directory for a shared
+        // catalog's include pattern to sync, so it neither shares one nor
+        // conflicts with one.
+        if target.is_direct() {
+            continue;
+        }
         let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
         members.push(Member {
             target,

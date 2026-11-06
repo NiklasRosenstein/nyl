@@ -278,6 +278,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
             };
             let execution = ExecutionContext {
                 instances: context.instances,
+                clock: base.clock,
                 unit: nyl_core::orchestration::ids::UnitAddress::new(request.environment.clone(), options.unit.clone()),
                 operation: DriverOperation::Exec,
                 worktree,

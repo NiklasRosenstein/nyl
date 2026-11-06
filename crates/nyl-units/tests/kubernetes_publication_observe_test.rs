@@ -281,7 +281,9 @@ fn facts(unit: &DesiredUnit) -> ReconcilerFacts {
 }
 
 fn location(facts: &ReconcilerFacts) -> &ArgoCdLocation {
-    let ReconcilerLocation::ArgoCd(location) = &facts.location;
+    let ReconcilerLocation::ArgoCd(location) = &facts.location else {
+        panic!("an Argo CD target records an Argo CD location")
+    };
     location
 }
 

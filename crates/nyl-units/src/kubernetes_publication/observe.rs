@@ -108,7 +108,12 @@ pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverRe
             "the receipt records no PublishedTree artifact, so there is no publication to attest".to_owned(),
         );
     };
-    let reader = match reader(&facts.location, &ctx.env, budget(ctx.now, ctx.deadline)) {
+    let reader = match reader(
+        &facts.location,
+        &facts.expected.publication,
+        &ctx.env,
+        budget(ctx.now, ctx.deadline),
+    ) {
         Ok(reader) => reader,
         Err(error) => return unknown(error.message),
     };
@@ -157,7 +162,12 @@ pub(super) fn observe_removal(ctx: &RemovalContext, unit: &DesiredUnit) -> Remov
         Ok(facts) => facts,
         Err(reason) => return RemovalObservation::Failed(reason),
     };
-    let reader = match reader(&facts.location, &ctx.env, budget(ctx.now, ctx.deadline)) {
+    let reader = match reader(
+        &facts.location,
+        &facts.expected.publication,
+        &ctx.env,
+        budget(ctx.now, ctx.deadline),
+    ) {
         Ok(reader) => reader,
         Err(error) => return RemovalObservation::Failed(error.message),
     };

@@ -370,9 +370,12 @@ pub struct DeploymentTargetSpec {
     /// Project-local workload Cluster. Defaults to the target name when omitted.
     #[serde(rename = "clusterRef", skip_serializing_if = "Option::is_none")]
     pub cluster_ref: Option<LocalReference>,
-    /// Project-local ArgoCDInstance. Required when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace.
+    /// Project-local ArgoCDInstance. Required for an Argo CD target when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace. Not allowed with `reconciler.direct`.
     #[serde(rename = "argocdRef", skip_serializing_if = "Option::is_none")]
     pub argocd_ref: Option<LocalReference>,
+    /// Who applies the rendered Releases. Omitted: Argo CD, which syncs the published tree. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciler: Option<TargetReconciler>,
     /// Matches literal ApplicationGroup metadata labels before rendering their specs. An empty selector matches all groups.
     #[serde(rename = "applicationGroupSelector", default)]
     pub application_group_selector: LabelSelector,
@@ -391,6 +394,22 @@ pub struct DeploymentTargetSpec {
     #[serde(rename = "releaseInputs", default, skip_serializing_if = "BTreeMap::is_empty")]
     pub release_inputs: super::release_inputs::ReleaseInputBindings,
 }
+
+/// The reconciler that applies a target's Releases: exactly one member.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TargetReconciler {
+    /// Nyl applies the target's Releases to its Cluster, in the order of `nyl apply`, and prunes by release state. Takes no options yet; write `direct: {}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<DirectReconciler>,
+}
+
+/// Options of the direct reconciler. None yet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DirectReconciler {}
 
 /// One ordinary configuration file contributing template values, without templating or recursive includes.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1373,6 +1392,14 @@ impl DeploymentTarget {
             .map_or(self.metadata.name.as_str(), |reference| reference.name.as_str())
     }
 
+    /// Whether Nyl applies this target's Releases itself (`reconciler.direct`).
+    pub fn is_direct(&self) -> bool {
+        self.spec
+            .reconciler
+            .as_ref()
+            .is_some_and(|reconciler| reconciler.direct.is_some())
+    }
+
     pub fn publication_path_prefix(&self) -> &str {
         self.spec
             .publication
@@ -1391,6 +1418,24 @@ impl DeploymentTarget {
         validate_static_required("spec.clusterRef.name", self.cluster_name())?;
         if let Some(reference) = &self.spec.argocd_ref {
             validate_static_required("spec.argocdRef.name", &reference.name)?;
+        }
+        if let Some(reconciler) = &self.spec.reconciler {
+            if reconciler.direct.is_none() {
+                return Err(CoreError::config(
+                    "spec.reconciler must name a reconciler: write `reconciler: {direct: {}}` or omit it for Argo CD",
+                ));
+            }
+            if self.spec.argocd_ref.is_some() {
+                return Err(CoreError::config(
+                    "spec.reconciler.direct and spec.argocdRef are mutually exclusive: a direct target is applied by Nyl and generates no Argo CD Application",
+                ));
+            }
+            let catalog = &self.spec.catalog_application;
+            if !catalog.enabled || catalog.shared.is_some() || catalog.has_target_settings() {
+                return Err(CoreError::config(
+                    "spec.reconciler.direct generates no catalog Application, so spec.catalogApplication must be omitted",
+                ));
+            }
         }
         self.spec.publication.validate()?;
         for source in &self.spec.values_from {

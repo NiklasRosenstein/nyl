@@ -86,6 +86,10 @@ codes! {
     ReferenceInvalid => "NYL-REFERENCE-INVALID",
     /// A target's publication found the shared catalog manifest on the branch different from the one it renders; it left it alone. A warning.
     KubernetesSharedCatalogDiffers => "NYL-KUBERNETES-SHARED-CATALOG-DIFFERS",
+    /// A direct target's apply kept objects whose `Prune=confirm` sync option awaits a confirmation the driver never gives. A warning.
+    KubernetesPruneAwaitingConfirmation => "NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION",
+    /// A direct target's apply found a Release that left the tree and is not this unit's to purge, and left it. A warning.
+    KubernetesReleaseLeftBehind => "NYL-KUBERNETES-RELEASE-LEFT-BEHIND",
     /// A cross-environment reference or `dependsOn` entry names an instance of an EnvironmentTemplate as its producer. Instances are consumers only.
     ReferenceInstanceProducer => "NYL-REFERENCE-INSTANCE-PRODUCER",
     /// A `nyl get` value form found no current receipt to read.

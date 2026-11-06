@@ -5,8 +5,13 @@
 /// - YAML serialization/deserialization with serde-norway
 /// - Resource validation
 mod client;
+mod cluster_server;
 mod diff;
+pub mod fence;
 pub mod field_manager;
+pub mod lifecycle;
+pub mod memory;
+mod namespace_resolution;
 mod ordering;
 pub mod prune;
 mod resource;
@@ -14,13 +19,16 @@ mod state;
 
 pub use client::{builtin_scope, is_known_cluster_scoped_gvk};
 pub use client::{DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
+pub use cluster_server::{verifiable_cluster_server, verify_cluster_server, verify_server};
 pub use diff::DiffEngine;
+pub use memory::InMemoryReleaseStorage;
+pub use namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
 pub use resource::{ApplyOutcome, GroupVersionKind, ObjectIdentity, ResourceKey};
 pub use state::{
-    enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseState,
-    ReleaseStatus, ReleaseStorage,
+    enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseMeta,
+    ReleasePublication, ReleaseState, ReleaseStatus, ReleaseStorage,
 };
 
 use serde::{Deserialize, Serialize};

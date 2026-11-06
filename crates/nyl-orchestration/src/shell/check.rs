@@ -530,6 +530,7 @@ fn check_unit(
     };
     let ctx = ExecutionContext {
         instances: context.instances,
+        clock: context.base.clock,
         secrets,
         interactive: false,
         artifacts: snapshot.artifacts.get(name).cloned().unwrap_or_default(),

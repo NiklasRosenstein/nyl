@@ -685,6 +685,7 @@ mod tests {
             health,
             reported: None,
             deleting: false,
+            terminal: false,
             source: Some(generated_source(path)),
             synced_source: Some(generated_source(path)),
         }
