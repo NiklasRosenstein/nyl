@@ -875,6 +875,10 @@ pub struct ObservationRecord {
     pub unit: UnitIdentity,
     #[serde(rename = "executionKey")]
     pub execution_key: ExecutionKey,
+    /// The run that produced the receipt the record was read for. A receipt
+    /// is new with every execution, even one with the same key, so a record
+    /// names it by its run too.
+    pub run: RunId,
     /// When the record was last written: a recorded read, never a read that
     /// changed nothing.
     pub at: Timestamp,

@@ -2523,12 +2523,16 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 // owes a wait for (`observationWait`), then resolve again.
                 if request.mode == RunMode::Reconcile && life.stopped.is_none() {
                     let now = context.base.clock.now();
-                    if let Some(until) = observing.next_poll(now) {
-                        let seconds = (until - now).num_seconds().max(1);
+                    if let Some(until) = observing.next_poll(now, context.base.settings.observation_poll) {
+                        // Whole seconds, rounded up, so the clock is at or past
+                        // the poll when the run wakes; at least one, so a poll
+                        // that is due already does not spin.
+                        let delta = until - now;
+                        let seconds = delta.num_seconds() + i64::from(delta.subsec_nanos() > 0);
                         context
                             .base
                             .clock
-                            .wait(Duration::from_secs(u64::try_from(seconds).unwrap_or(1)));
+                            .wait(Duration::from_secs(u64::try_from(seconds).unwrap_or(1).max(1)));
                         continue;
                     }
                 }

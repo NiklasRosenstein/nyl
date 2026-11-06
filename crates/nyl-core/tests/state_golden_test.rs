@@ -188,7 +188,7 @@ fn samples() -> Vec<(&'static str, Value)> {
             "observation-record.v1.yaml",
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord", "unit": identity("kubernetes", "KubernetesPublication"),
-                "executionKey": KEY, "at": "2026-09-25T16:40:00Z",
+                "executionKey": KEY, "run": RUN, "at": "2026-09-25T16:40:00Z",
                 "values": {
                     "ingressIp": {"value": "203.0.113.10", "observedAt": "2026-09-25T16:40:00Z"},
                     "ingressPort": {"pending": "field-not-set: /status/loadBalancer/ingress/0/port"}

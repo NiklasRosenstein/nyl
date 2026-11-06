@@ -598,7 +598,7 @@ fn check_unit(
             };
             let settled = observed_values::settle(&SettleInputs {
                 unit,
-                key: &receipt.execution_key,
+                receipt,
                 declared: &declared,
                 stored: snapshot.observations.get(name),
                 readings: &readings,
@@ -607,10 +607,10 @@ fn check_unit(
             });
             Checked {
                 name: name.clone(),
-                result: observe_check(&readings, &declared),
+                result: observe_check(&settled, &declared),
                 records: Some(Records::Observations {
-                    record: settled.record,
-                    changed: settled.changed,
+                    record: settled.record.clone(),
+                    changed: settled.changed.clone(),
                 }),
                 message: None,
                 error: None,

@@ -45,6 +45,10 @@
       ],
       "description": "One observation in an [`ObservationRecord`]."
     },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
     "StateV1": {
       "const": "gitops.nyl/v1"
     },
@@ -110,6 +114,10 @@
     "kind": {
       "$ref": "#/$defs/ObservationRecordKind"
     },
+    "run": {
+      "$ref": "#/$defs/RunId",
+      "description": "The run that produced the receipt the record was read for. A receipt\nis new with every execution, even one with the same key, so a record\nnames it by its run too."
+    },
     "unit": {
       "$ref": "#/$defs/UnitIdentity"
     },
@@ -126,6 +134,7 @@
     "kind",
     "unit",
     "executionKey",
+    "run",
     "at",
     "values"
   ],

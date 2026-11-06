@@ -756,7 +756,7 @@ fn test_drift_records_observations_and_attestations_round_trip_on_the_observed_r
         .unwrap();
         let observations: ObservationRecord = serde_json::from_value(json!({
             "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord", "unit": identity,
-            "executionKey": KEY, "at": "2026-09-24T10:00:00Z",
+            "executionKey": KEY, "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "at": "2026-09-24T10:00:00Z",
             "values": {"ip": {"value": "203.0.113.10", "observedAt": "2026-09-24T10:00:00Z"},
                        "port": {"pending": "no port yet"}}
         }))

@@ -43,9 +43,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use nyl_core::bindings::unit_references;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
-use nyl_core::orchestration::ids::{ExecutionKey, UnitName};
+use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::state::{
-    BlockedReason, DesiredUnit, Lifecycle, ObservationRecord, ObservationRecordKind, ObservedUnit, Readiness,
+    BlockedReason, DesiredUnit, Lifecycle, ObservationRecord, ObservationRecordKind, ObservedUnit, Readiness, Receipt,
     RecordedObservation, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
@@ -88,9 +88,11 @@ pub fn observation_wait(unit: &DesiredUnit) -> Duration {
         .unwrap_or_default()
 }
 
-/// Whether `record` was read for `unit`'s receipt with `key`.
-fn belongs_to(record: &ObservationRecord, unit: &DesiredUnit, key: &ExecutionKey) -> bool {
-    &record.execution_key == key && record.unit.uid == unit.unit.uid
+/// Whether `record` was read for `unit`'s `receipt`: the same incarnation,
+/// execution key, and run, so a receipt that replaced another with the same
+/// key still starts with every observation pending.
+fn belongs_to(record: &ObservationRecord, unit: &DesiredUnit, receipt: &Receipt) -> bool {
+    record.execution_key == receipt.execution_key && record.run == receipt.run && record.unit.uid == unit.unit.uid
 }
 
 /// What a read left recorded.
@@ -110,9 +112,9 @@ pub struct Settled {
 
 /// What [`settle`] reads.
 pub struct SettleInputs<'a> {
-    /// The unit whose current receipt (`key`) was read.
+    /// The unit whose current `receipt` was read.
     pub unit: &'a DesiredUnit,
-    pub key: &'a ExecutionKey,
+    pub receipt: &'a Receipt,
     pub declared: &'a BTreeMap<String, ObservationDeclaration>,
     /// The stored record; used only when it belongs to this receipt.
     pub stored: Option<&'a ObservationRecord>,
@@ -128,7 +130,7 @@ pub struct SettleInputs<'a> {
 pub fn settle(inputs: &SettleInputs<'_>) -> Settled {
     let stored = inputs
         .stored
-        .filter(|record| belongs_to(record, inputs.unit, inputs.key));
+        .filter(|record| belongs_to(record, inputs.unit, inputs.receipt));
     let mut values = BTreeMap::new();
     let mut changed = BTreeSet::new();
     let mut failed = BTreeMap::new();
@@ -205,7 +207,8 @@ pub fn settle(inputs: &SettleInputs<'_>) -> Settled {
             api_version: StateV1,
             kind: ObservationRecordKind,
             unit: inputs.unit.unit.clone(),
-            execution_key: inputs.key.clone(),
+            execution_key: inputs.receipt.execution_key.clone(),
+            run: inputs.receipt.run.clone(),
             at: inputs.now,
             values,
         })
@@ -231,19 +234,19 @@ pub enum Standing {
     },
 }
 
-/// The standing of observation `name` of `unit`, whose current receipt has
-/// `key`, at `now`: the value recorded for that receipt unless it is older
+/// The standing of observation `name` of `unit`, whose current receipt is
+/// `receipt`, at `now`: the value recorded for that receipt unless it is older
 /// than the declaration's `maxAge`.
 pub fn standing(
     unit: &DesiredUnit,
-    key: &ExecutionKey,
+    receipt: &Receipt,
     declaration: &ObservationDeclaration,
     name: &str,
     record: Option<&ObservationRecord>,
     now: Timestamp,
 ) -> Standing {
     let entry = record
-        .filter(|record| belongs_to(record, unit, key))
+        .filter(|record| belongs_to(record, unit, receipt))
         .and_then(|record| record.values.get(name));
     match entry {
         None => Standing::Pending {
@@ -283,7 +286,9 @@ pub fn changes(
                 .get(*unit)
                 .and_then(|observed| observed.receipt.as_ref().map(|r| (observed, r)));
             !receipt.is_some_and(|(observed, receipt)| {
-                receipt.execution_key == record.execution_key && observed.unit.uid == record.unit.uid
+                receipt.execution_key == record.execution_key
+                    && receipt.run == record.run
+                    && observed.unit.uid == record.unit.uid
             })
         })
         .map(|(unit, _)| (unit.clone(), None))
@@ -375,11 +380,11 @@ pub fn changed_consumers(
         if !receipt_is_current(producer_document, observed.get(producer)) {
             return None;
         }
-        let key = producer_document.execution_key.as_ref()?;
+        let receipt = observed.get(producer)?.receipt.as_ref()?;
         let declaration = declarations(spec_of(producer_document)).ok()?.remove(observation)?;
         match standing(
             producer_document,
-            key,
+            receipt,
             &declaration,
             observation,
             records.get(producer),
@@ -529,12 +534,17 @@ mod tests {
         }
     }
 
+    /// The producer's current receipt: key `a`, run [`RUN`](super::super::fixtures::RUN).
+    fn receipt_a() -> Receipt {
+        observed_numbered("kubernetes", 1, Some(hex_key('a'))).receipt.unwrap()
+    }
+
     fn settled(stored: Option<&ObservationRecord>, readings: &ObservedValues, now: Timestamp) -> Settled {
         let unit = producer();
-        let key = hex_key('a');
+        let receipt = receipt_a();
         settle(&SettleInputs {
             unit: &unit,
-            key: &key,
+            receipt: &receipt,
             declared: &declared(),
             stored,
             readings,
@@ -708,7 +718,7 @@ mod tests {
     #[test]
     fn test_standing_requires_the_receipt_and_honors_max_age() {
         let unit = producer();
-        let key = hex_key('a');
+        let key = receipt_a();
         let record = settled(
             None,
             &readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]),
@@ -717,7 +727,7 @@ mod tests {
         .record
         .unwrap();
         let declared = declared();
-        let standing_of = |name: &str, record: Option<&ObservationRecord>, key: &ExecutionKey, now| {
+        let standing_of = |name: &str, record: Option<&ObservationRecord>, key: &Receipt, now| {
             standing(&unit, key, &declared[name], name, record, now)
         };
         assert_eq!(
@@ -727,9 +737,16 @@ mod tests {
                 observed_at: at(0)
             }
         );
-        let other_key = hex_key('b');
+        let other_key = observed_numbered("kubernetes", 1, Some(hex_key('b'))).receipt.unwrap();
         assert!(matches!(
             standing_of("ip", Some(&record), &other_key, at(1)),
+            Standing::Pending { .. }
+        ));
+        // The same key, produced by another run: a new receipt, so nothing is read for it yet.
+        let mut reexecuted = receipt_a();
+        reexecuted.run = super::super::fixtures::run(super::super::fixtures::RUN_2);
+        assert!(matches!(
+            standing_of("ip", Some(&record), &reexecuted, at(1)),
             Standing::Pending { .. }
         ));
         assert!(matches!(standing_of("ip", None, &key, at(1)), Standing::Pending { .. }));
@@ -777,6 +794,13 @@ mod tests {
         )]);
         assert_eq!(
             changes(&stored, &replaced),
+            BTreeMap::from([(name("kubernetes"), None)])
+        );
+        // A re-execution with the same key is a new receipt too: its run differs.
+        let mut reexecuted = observed_numbered("kubernetes", 1, Some(hex_key('a')));
+        reexecuted.receipt.as_mut().unwrap().run = super::super::fixtures::run(super::super::fixtures::RUN_2);
+        assert_eq!(
+            changes(&stored, &BTreeMap::from([(name("kubernetes"), reexecuted)])),
             BTreeMap::from([(name("kubernetes"), None)])
         );
         assert_eq!(
@@ -849,11 +873,11 @@ mod tests {
             observed_numbered("kubernetes", 1, Some(hex_key('a'))),
         )]);
         let unit = declared_object.clone();
-        let key = hex_key('a');
+        let receipt = receipt_a();
         let declaration = declarations(&unit.spec).unwrap();
         let record = settle(&SettleInputs {
             unit: &unit,
-            key: &key,
+            receipt: &receipt,
             declared: &declaration,
             stored: None,
             readings: &readings(&[("ip", value(json!({"host": "203.0.113.20", "other": 1})))]),

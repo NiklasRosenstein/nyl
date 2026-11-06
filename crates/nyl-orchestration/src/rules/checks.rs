@@ -30,14 +30,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{
-    AttestationOutcome, DriftDetection, DriverOperation, DriverSet, ObservedValue, ObservedValues, RecoveryPolicy,
-};
+use nyl_core::orchestration::driver::{AttestationOutcome, DriftDetection, DriverOperation, DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
     ArtifactUnit, Attestation, AttestationKind, AttestationResult, DesiredUnit, Drift, DriftRecord, DriftRecordKind,
-    Operation, Receipt, StateV1,
+    Operation, Receipt, RecordedObservation, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::DriftRepair;
@@ -45,6 +43,7 @@ use nyl_core::resources::units::ObservationDeclaration;
 use serde_json::json;
 
 use crate::rules::freshness::receipt_is_current;
+use crate::rules::observed_values::Settled;
 use crate::run_report::{CheckResult, ExitCategory, ObservationStatus, ReportKind, UnitCheck, UnitReport};
 
 /// The check an invocation runs against current receipts.
@@ -295,22 +294,32 @@ pub fn attest_check(attestations: &BTreeMap<String, Attestation>) -> UnitCheck {
     }
 }
 
-/// What `nyl observe` reports for a unit: each declared observation as this
-/// read found it.
-pub fn observe_check(readings: &ObservedValues, declared: &BTreeMap<String, ObservationDeclaration>) -> UnitCheck {
+/// What `nyl observe` reports for a unit: each declared observation as the
+/// read left it after the engine's checks ([`super::observed_values::settle`]):
+/// `failed` for a failed read, a value of the wrong type included, `pending`,
+/// else the value now recorded. The report and the record agree.
+pub fn observe_check(settled: &Settled, declared: &BTreeMap<String, ObservationDeclaration>) -> UnitCheck {
     UnitCheck {
         result: CheckResult::Observed,
         attestations: BTreeMap::new(),
         observations: declared
             .keys()
             .map(|name| {
-                let status = match readings.values.get(name) {
-                    Some(ObservedValue::Value { value }) => ObservationStatus::Value { value: value.clone() },
-                    Some(ObservedValue::Pending { reason }) => ObservationStatus::Pending { reason: reason.clone() },
-                    Some(ObservedValue::Failed { reason }) => ObservationStatus::Failed { reason: reason.clone() },
-                    None => ObservationStatus::Failed {
-                        reason: format!("the driver reported nothing for observation {name}"),
-                    },
+                let status = if let Some(reason) = settled.failed.get(name) {
+                    ObservationStatus::Failed { reason: reason.clone() }
+                } else if let Some(reason) = settled.pending.get(name) {
+                    ObservationStatus::Pending { reason: reason.clone() }
+                } else if let Some(value) = settled
+                    .record
+                    .as_ref()
+                    .and_then(|record| record.values.get(name))
+                    .and_then(RecordedObservation::value)
+                {
+                    ObservationStatus::Value { value: value.clone() }
+                } else {
+                    ObservationStatus::Failed {
+                        reason: format!("nothing is recorded for observation {name}"),
+                    }
                 };
                 (name.clone(), status)
             })
@@ -462,6 +471,7 @@ fn drift_fix(
 mod tests {
     use std::sync::Arc;
 
+    use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
     use serde_json::Value;
 
     use super::*;
@@ -576,9 +586,22 @@ mod tests {
                 ("port".to_owned(), port),
             ]),
         };
+        let settled = |readings: &ObservedValues| {
+            let unit = desired_numbered("lb", 1, Some(hex_key('a')));
+            let receipt = observed_numbered("lb", 1, Some(hex_key('a'))).receipt.unwrap();
+            crate::rules::observed_values::settle(&crate::rules::observed_values::SettleInputs {
+                unit: &unit,
+                receipt: &receipt,
+                declared: &declared,
+                stored: None,
+                readings,
+                now: at(1),
+                refresh: Duration::from_mins(60),
+            })
+        };
         let check = |port| {
             let unit = UnitReport {
-                check: Some(observe_check(&readings(port), &declared)),
+                check: Some(observe_check(&settled(&readings(port)), &declared)),
                 ..UnitReport::new("Command")
             };
             let findings = warnings(
@@ -612,15 +635,21 @@ mod tests {
         );
         // A name the driver left out is failed.
         let missing = observe_check(
-            &ObservedValues {
+            &settled(&ObservedValues {
                 values: BTreeMap::new(),
-            },
+            }),
             &declared,
         );
         assert!(missing
             .observations
             .values()
             .all(|status| matches!(status, ObservationStatus::Failed { .. })));
+        // A value of the wrong type is a failed read, as the record has it,
+        // not a value with exit 0.
+        assert_eq!(
+            check(ObservedValue::Value { value: json!("https") }),
+            (ExitCategory::Incomplete, vec![Code::ObservationFailed])
+        );
     }
 
     /// Catches a second check of an unchanged unit writing a commit only

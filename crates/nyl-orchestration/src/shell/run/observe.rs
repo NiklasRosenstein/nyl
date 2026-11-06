@@ -38,11 +38,12 @@ struct ReadState {
 }
 
 impl ReadState {
-    /// Whether the run still owes a poll at `now`: a declared value has none,
-    /// and the wait has not ended. A poll at the wait's own end counts, so the
-    /// last read is made when the wait is up, not a poll interval before.
-    fn waiting(&self, now: Timestamp) -> bool {
-        self.unresolved && self.wait_until.is_some_and(|until| now <= until)
+    /// Whether the run still owes a poll: a declared value has none, and the
+    /// wait is open. The wait closes only with a read that started at or after
+    /// its end, so the last read is made when the wait is up, however the
+    /// clock lands relative to it.
+    fn waiting(&self) -> bool {
+        self.unresolved && self.wait_until.is_some()
     }
 }
 
@@ -146,7 +147,7 @@ impl Observing {
                 let current = Self::eligible(session, unit, observed)?;
                 let key = &current.receipt.as_ref()?.execution_key;
                 let due = match self.states.get(&unit.unit.name) {
-                    Some(state) if &state.key == key => !state.read || (state.waiting(now) && now >= state.next_poll),
+                    Some(state) if &state.key == key => !state.read || (state.waiting() && now >= state.next_poll),
                     _ => true,
                 };
                 due.then(|| unit.unit.name.clone())
@@ -155,10 +156,12 @@ impl Observing {
     }
 
     /// When the next poll of a unit the run still waits for is due, if any.
-    pub(super) fn next_poll(&self, now: Timestamp) -> Option<Timestamp> {
+    /// A wait that no read closed a poll interval after its end is given up,
+    /// so a unit that stopped being readable never keeps the run waiting.
+    pub(super) fn next_poll(&self, now: Timestamp, poll: Duration) -> Option<Timestamp> {
         self.states
             .values()
-            .filter(|state| state.waiting(now))
+            .filter(|state| state.waiting() && state.wait_until.is_some_and(|until| now < poll.after(until)))
             .map(|state| state.next_poll)
             .min()
     }
@@ -201,6 +204,7 @@ impl Observing {
                     slot,
                 })
                 .collect();
+            let started = context.base.clock.now();
             let readings: Vec<Reading> = std::thread::scope(|scope| {
                 let handles: Vec<_> = jobs
                     .into_iter()
@@ -213,7 +217,17 @@ impl Observing {
             });
             let now = context.base.clock.now();
             for reading in readings {
-                any |= self.record(session, &reading, &resolved.units[&reading.name], observations, now);
+                any |= self.record(
+                    session,
+                    &reading,
+                    &resolved.units[&reading.name],
+                    observed[&reading.name]
+                        .receipt
+                        .as_ref()
+                        .expect("a unit with a current receipt has one"),
+                    observations,
+                    (started, now),
+                );
             }
         }
         let _ = std::fs::remove_dir_all(&directory);
@@ -227,15 +241,13 @@ impl Observing {
         session: &Session<'_, '_>,
         reading: &Reading,
         unit: &DesiredUnit,
+        receipt: &Receipt,
         observations: &mut BTreeMap<UnitName, ObservationRecord>,
-        now: Timestamp,
+        (started, now): (Timestamp, Timestamp),
     ) -> bool {
         let name = &unit.unit.name;
         let environment = session.environment();
-        let key = unit
-            .execution_key
-            .clone()
-            .expect("a unit with a current receipt has a key");
+        let key = receipt.execution_key.clone();
         let warn = |reason: &str| {
             Finding::new(
                 Code::ObservationFailed,
@@ -255,13 +267,13 @@ impl Observing {
             Err(message) => {
                 self.warnings.insert(name.clone(), vec![warn(message)]);
                 // Nothing was read: the unit stays unresolved for its wait.
-                self.settle_state(name, &key, observations.get(name), &declared, now, session);
+                self.settle_state(name, &key, observations.get(name), &declared, (started, now), session);
                 return false;
             }
         };
         let settled = observed_values::settle(&SettleInputs {
             unit,
-            key: &key,
+            receipt,
             declared: &declared,
             stored: observations.get(name),
             readings: &readings,
@@ -290,7 +302,7 @@ impl Observing {
         } else {
             self.warnings.insert(name.clone(), findings);
         }
-        self.settle_state(name, &key, settled.record.as_ref(), &declared, now, session);
+        self.settle_state(name, &key, settled.record.as_ref(), &declared, (started, now), session);
         record_changed
     }
 
@@ -302,7 +314,7 @@ impl Observing {
         key: &ExecutionKey,
         record: Option<&ObservationRecord>,
         declared: &BTreeMap<String, nyl_core::resources::units::ObservationDeclaration>,
-        now: Timestamp,
+        (started, now): (Timestamp, Timestamp),
         session: &Session<'_, '_>,
     ) {
         let unresolved = declared.keys().any(|observation| {
@@ -336,7 +348,7 @@ impl Observing {
         // The next poll is a poll interval away, or the wait's end when that
         // comes first; a read made at the end closes the wait.
         state.next_poll = poll.after(now).min(state.wait_until.unwrap_or(Timestamp::MAX_UTC));
-        if state.wait_until.is_some_and(|until| now >= until) {
+        if state.wait_until.is_some_and(|until| started >= until) {
             state.wait_until = None;
         }
     }
