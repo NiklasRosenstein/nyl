@@ -12,7 +12,10 @@ mod argocd_stub;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use argocd_stub::{application, applications, argocd_api, kube_api, kubeconfig, Response, Stub};
+use argocd_stub::{
+    application, applications, applications_none, argocd_api, argocd_api_with_policy, kube_api, kubeconfig, Response,
+    Stub,
+};
 use nyl_units::kubernetes_publication::argocd::{ApiServerReader, ArgoReader, KubeApiReader, ReadErrorKind};
 use serde_json::{json, Value};
 
@@ -221,5 +224,34 @@ fn test_kube_api_reader_reports_denial_missing_crd_and_unreachable() {
     assert_eq!(
         reader(&gone).applications("argocd").unwrap_err().kind,
         ReadErrorKind::Unreachable
+    );
+}
+
+/// Catches the API reader answering `can_get` from anything but Argo CD's own
+/// `can-i`: the question carries the token and the policy name, and `no`,
+/// an error, and an unintelligible answer are each told apart.
+#[test]
+fn test_api_server_reader_asks_argocd_whether_the_token_may_get_an_application() {
+    let denied = applications_none();
+    let server = argocd_api_with_policy("s3cret", applications(Vec::new()), denied.clone());
+    let reader = ApiServerReader::new(&server.url(), "ARGOCD_AUTH_TOKEN", Some("s3cret"), None, BUDGET).unwrap();
+    assert!(reader.can_get("default/web").unwrap());
+    denied.lock().unwrap().push("default/team-a/web".to_owned());
+    assert!(!reader.can_get("default/team-a/web").unwrap());
+    assert!(reader.can_get("default/api").unwrap());
+    let request = &server.requests()[0];
+    assert_eq!(request.path(), "/api/v1/account/can-i/applications/get/default/web");
+    assert_eq!(request.headers["authorization"], "Bearer s3cret");
+
+    let expired = ApiServerReader::new(&server.url(), "T", Some("expired"), None, BUDGET).unwrap();
+    assert_eq!(
+        expired.can_get("default/web").unwrap_err().kind,
+        ReadErrorKind::Rejected
+    );
+    let odd = Stub::start(|_| Response::json(200, &json!({"value": "maybe"})));
+    let reader = ApiServerReader::new(&odd.url(), "T", Some("tok"), None, BUDGET).unwrap();
+    assert_eq!(
+        reader.can_get("default/web").unwrap_err().kind,
+        ReadErrorKind::Malformed
     );
 }

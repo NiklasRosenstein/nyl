@@ -124,7 +124,21 @@ address, so the token is never sent in the clear.
 | Needs | Access to the control-plane Cluster's API | The API server reachable from the runner |
 | Permission | `list` on `applications.argoproj.io` | `get` on Applications |
 
+The token also needs `can-i` (it asks Argo CD whether it may `get` an
+Application that its list does not show, so it never concludes an Application is
+gone from a list that hides what it may not read).
+
 A credential that is not admitted is an error that names the variable and the
 `env` entry that admits it. The process's own environment, including its proxy
 settings, is never read: the API method uses an `HTTPS_PROXY` the unit admits,
 and the Kubernetes method a `proxy-url` its kubeconfig declares.
+
+One exception: a kubeconfig's `exec` plugin or auth provider is started with the
+whole process environment, as `kubectl` does, because the Kubernetes client
+cannot restrict it. What it reads is the kubeconfig's own declaration; use the
+`api` method where the process environment must stay out of the reading.
+
+Editing `access`, or moving the control-plane Cluster's `live.context`,
+republishes nothing, re-executes no unit, and resets no attestation. Adding
+`access` to an instance, or removing it, changes the instance file's digest in
+published ownership indexes once.

@@ -12,12 +12,14 @@
 //!   OutOfSync as soon as a newer one is published. The sync *result*
 //!   (`status.operationState.syncResult`) is not read either, because Argo
 //!   CD also records selective and dry-run syncs there as succeeded.
-//! - An operation newer than that entry that is **not** a complete, finished
-//!   sync leaves the Application running a mix of revisions, which proves no
-//!   revision: a selective sync (`operation.sync.resources`), a full sync
-//!   that failed or errored (it may have applied part of its revision), and
-//!   one still running or terminating. A dry run changes nothing and is
-//!   ignored.
+//! - An operation newer than that entry (or as new: timestamps have second
+//!   resolution) that is **not** a completed full sync leaves the Application
+//!   running a mix of revisions, which proves no revision: a selective sync
+//!   (`operation.sync.resources`), a full sync that failed or errored (it may
+//!   have applied part of its revision), and one still running or
+//!   terminating. A dry run changes nothing itself, but `operationState`
+//!   holds only the latest operation, so a dry run after the entry may hide a
+//!   selective sync before it: it counts as a mix too.
 //! - **Health** is `status.health.status`, Argo CD's live health, as
 //!   reported.
 
@@ -30,8 +32,12 @@ pub enum Mixed {
     /// A selective sync newer than the newest history entry.
     SelectiveSync,
     /// A full sync newer than the newest history entry that has not
-    /// succeeded, with its phase (`Running`, `Failed`, `Error`, ...).
+    /// succeeded, with its phase (`Running`, `Failed`, `Error`, ...), or an
+    /// operation that is no sync (`non-sync operation`).
     UnfinishedSync(String),
+    /// A dry run is the latest operation after the newest history entry, so
+    /// an earlier selective sync may be hidden behind it.
+    DryRun,
 }
 
 /// The revision an Application runs.
@@ -42,8 +48,8 @@ pub enum Running {
     /// A single revision: the newest history entry's.
     Revision {
         revision: String,
-        /// The `source.path` the entry synced, when it records one.
-        source_path: Option<String>,
+        /// The `source` the entry synced, when it records one.
+        source: Option<Value>,
     },
     /// A newer operation leaves a mix of revisions.
     Mixed { history: Option<String>, why: Mixed },
@@ -58,8 +64,8 @@ pub struct LiveApplication {
     pub deleting: bool,
     /// `status.health.status`, such as `Healthy`; `None` before Argo CD reports one.
     pub health: Option<String>,
-    /// `spec.source.path` as it is now.
-    pub source_path: Option<String>,
+    /// `spec.source` as it is now.
+    pub source: Option<Value>,
     pub running: Running,
 }
 
@@ -76,7 +82,7 @@ impl LiveApplication {
                 .pointer("/metadata/deletionTimestamp")
                 .is_some_and(|value| !value.is_null()),
             health: text("/status/health/status").filter(|status| !status.is_empty()),
-            source_path: text("/spec/source/path"),
+            source: application.pointer("/spec/source").cloned(),
             running: running(application),
         })
     }
@@ -99,11 +105,10 @@ fn running(application: &Value) -> Running {
     match revision {
         Some(revision) => Running::Revision {
             revision,
-            source_path: newest
-                .pointer("/source/path")
-                .or_else(|| newest.pointer("/sources/0/path"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            source: newest
+                .get("source")
+                .or_else(|| newest.pointer("/sources/0"))
+                .cloned(),
         },
         None => Running::Unreadable(
             "the newest status.history entry names no single revision (a multi-source Application is not one Nyl generates)"
@@ -137,13 +142,10 @@ fn single_revision(entry: &Value) -> Option<String> {
     }
 }
 
-/// An operation newer than the history entry that leaves a mix, if any.
+/// An operation newer than the history entry that leaves a mix, if any: any
+/// operation as new as the entry that is not a completed full sync.
 fn newer_operation(application: &Value, newest: &Value) -> Option<Mixed> {
     let operation = application.pointer("/status/operationState")?;
-    let sync = operation.pointer("/operation/sync")?;
-    if sync.get("dryRun").and_then(Value::as_bool) == Some(true) {
-        return None;
-    }
     let time = |value: &Value, field: &str| {
         value
             .get(field)
@@ -155,21 +157,30 @@ fn newer_operation(application: &Value, newest: &Value) -> Option<Mixed> {
     // (`deployStartedAt`); the operation, when it began.
     let history_time = time(newest, "deployedAt").or_else(|| time(newest, "deployStartedAt"));
     let started = time(operation, "startedAt");
-    // Times that cannot be compared leave the order unknown: assume newer, so
-    // an unreadable operation never vouches for a revision.
+    // `>=`: times have second resolution, so an operation that began in the
+    // second the entry finished may be a later one. Times that cannot be
+    // compared leave the order unknown: assume newer, so an unreadable
+    // operation never vouches for a revision. The operation that produced the
+    // entry is itself a completed full sync, which is no mix.
     let newer = match (started, history_time) {
-        (Some(started), Some(history)) => started > history,
+        (Some(started), Some(history)) => started >= history,
         _ => true,
     };
     if !newer {
         return None;
     }
+    let Some(sync) = operation.pointer("/operation/sync") else {
+        return Some(Mixed::UnfinishedSync("non-sync operation".to_owned()));
+    };
     let selective = sync
         .get("resources")
         .and_then(Value::as_array)
         .is_some_and(|resources| !resources.is_empty());
     if selective {
         return Some(Mixed::SelectiveSync);
+    }
+    if sync.get("dryRun").and_then(Value::as_bool) == Some(true) {
+        return Some(Mixed::DryRun);
     }
     match operation.get("phase").and_then(Value::as_str) {
         Some("Succeeded") => None,
@@ -216,11 +227,11 @@ mod tests {
             live.running,
             Running::Revision {
                 revision: "c3".to_owned(),
-                source_path: Some("dev/web/web".to_owned())
+                source: Some(json!({"path": "dev/web/web", "repoURL": "https://example.invalid/deploy.git"}))
             }
         );
         assert_eq!(live.health.as_deref(), Some("Healthy"));
-        assert_eq!(live.source_path.as_deref(), Some("dev/web/web"));
+        assert_eq!(live.source.as_ref().unwrap()["path"], "dev/web/web");
         assert!(!live.deleting);
     }
 
@@ -278,31 +289,77 @@ mod tests {
         }
     }
 
-    /// Catches the operation behind the newest entry, a dry run, or a
-    /// successful full sync being mistaken for a mix.
+    /// Catches an operation older than the newest entry, or a completed full
+    /// sync, being mistaken for a mix.
     #[test]
-    fn test_older_operations_dry_runs_and_full_syncs_leave_no_mix() {
+    fn test_older_operations_and_completed_full_syncs_leave_no_mix() {
         let selective_before = json!({
             "history": [entry(2, "c2", "2026-01-02T00:00:00Z")],
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-01T00:00:00Z",
                                "operation": {"sync": {"resources": [{"kind": "Deployment"}]}}},
-        });
-        let dry_run = json!({
-            "history": [entry(1, "c1", "2026-01-01T00:00:00Z")],
-            "operationState": {"phase": "Succeeded", "startedAt": "2026-01-02T00:00:00Z",
-                               "operation": {"sync": {"dryRun": true, "resources": [{"kind": "Deployment"}]}}},
         });
         let full_succeeded = json!({
             "history": [entry(1, "c1", "2026-01-01T00:00:00Z")],
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-02T00:00:00Z",
                                "operation": {"sync": {"revision": "c2"}}},
         });
-        for status in [selective_before, dry_run, full_succeeded] {
+        // The operation that produced the entry, in the same second.
+        let producer = json!({
+            "history": [entry(1, "c1", "2026-01-01T00:00:00Z")],
+            "operationState": {"phase": "Succeeded", "startedAt": "2026-01-01T00:00:00Z",
+                               "operation": {"sync": {"revision": "c1"}}},
+        });
+        for status in [selective_before, full_succeeded, producer] {
             assert!(
                 matches!(parse(status.clone()).running, Running::Revision { .. }),
                 "{status}"
             );
         }
+    }
+
+    /// Catches a dry run hiding an earlier selective sync: `operationState`
+    /// holds only the latest operation, so the history `c`, a selective
+    /// sync of `Deployment/web` at `d`, and then `--dry-run` would read as
+    /// running `c` while `web` runs `d`. A dry run newer than the entry
+    /// leaves a mix, and so does a selective sync that began in the second
+    /// the entry finished.
+    #[test]
+    fn test_a_dry_run_after_the_history_hides_an_earlier_selective_sync() {
+        let dry_run = json!({
+            "history": [entry(5, "c", "2026-01-01T00:00:00Z")],
+            "operationState": {"phase": "Succeeded", "startedAt": "2026-01-03T00:00:00Z",
+                               "operation": {"sync": {"dryRun": true, "revision": "d"}}},
+        });
+        assert_eq!(
+            parse(dry_run).running,
+            Running::Mixed {
+                history: Some("c".to_owned()),
+                why: Mixed::DryRun
+            }
+        );
+        let same_second = json!({
+            "history": [entry(5, "c", "2026-01-01T00:00:00Z")],
+            "operationState": {"phase": "Succeeded", "startedAt": "2026-01-01T00:00:00Z",
+                               "operation": {"sync": {"resources": [{"kind": "Deployment", "name": "web"}]}}},
+        });
+        assert!(matches!(
+            parse(same_second).running,
+            Running::Mixed {
+                why: Mixed::SelectiveSync,
+                ..
+            }
+        ));
+        let other = json!({
+            "history": [entry(5, "c", "2026-01-01T00:00:00Z")],
+            "operationState": {"phase": "Succeeded", "startedAt": "2026-01-03T00:00:00Z", "operation": {}},
+        });
+        assert!(matches!(
+            parse(other).running,
+            Running::Mixed {
+                why: Mixed::UnfinishedSync(_),
+                ..
+            }
+        ));
     }
 
     /// Catches an operation whose time cannot be compared with the entry's

@@ -169,6 +169,12 @@ fn serve(mut connection: TcpStream, requests: &Mutex<Vec<Request>>, handler: &Ha
 /// An Application as Argo CD serves it: the directory it sources, the
 /// revisions its full syncs deployed (oldest first), and its live health.
 pub fn application(name: &str, namespace: &str, path: &str, revisions: &[&str], health: &str) -> Value {
+    let source = json!({"repoURL": "https://example.invalid/deploy.git", "path": path});
+    application_with_source(name, namespace, &source, revisions, health)
+}
+
+/// [`application`] sourcing exactly `source` (its `path` names the directory).
+pub fn application_with_source(name: &str, namespace: &str, source: &Value, revisions: &[&str], health: &str) -> Value {
     let history = revisions
         .iter()
         .enumerate()
@@ -178,7 +184,7 @@ pub fn application(name: &str, namespace: &str, path: &str, revisions: &[&str], 
                 "revision": revision,
                 "deployedAt": format!("2026-01-0{}T00:00:00Z", index + 1),
                 "deployStartedAt": format!("2026-01-0{}T00:00:00Z", index + 1),
-                "source": {"repoURL": "https://example.invalid/deploy.git", "path": path},
+                "source": source,
             })
         })
         .collect::<Vec<_>>();
@@ -186,7 +192,7 @@ pub fn application(name: &str, namespace: &str, path: &str, revisions: &[&str], 
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Application",
         "metadata": {"name": name, "namespace": namespace},
-        "spec": {"project": "default", "source": {"path": path, "repoURL": "https://example.invalid/deploy.git"}},
+        "spec": {"project": "default", "source": source},
         "status": {
             "sync": {"status": "OutOfSync"},
             "health": {"status": health},
@@ -205,15 +211,38 @@ pub fn applications(applications: Vec<Value>) -> Applications {
 /// The Argo CD API server: lists `applications` of the namespace in
 /// `appNamespace` for requests that carry `Bearer <token>`, else HTTP 401.
 pub fn argocd_api(token: &'static str, applications: Applications) -> Stub {
+    argocd_api_with_policy(token, applications, applications_none())
+}
+
+/// The policy names (`<project>/<name>`, `<project>/<namespace>/<name>`) the
+/// token may not get, whatever the list holds; `*` denies every one.
+pub type Denied = Arc<Mutex<Vec<String>>>;
+
+pub fn applications_none() -> Denied {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// [`argocd_api`] with a policy: like Argo CD, the list answers success with
+/// whatever `applications` holds (a token that sees nothing gets an empty one),
+/// and `can-i` answers `no` for the names in `denied`.
+pub fn argocd_api_with_policy(token: &'static str, applications: Applications, denied: Denied) -> Stub {
     Stub::start(move |request| {
-        if request.path() != "/api/v1/applications" {
-            return Response::json(404, &json!({"error": "not found", "code": 5}));
-        }
         if request.headers.get("authorization").map(String::as_str) != Some(&format!("Bearer {token}")) {
             return Response::json(
                 401,
                 &json!({"error": "invalid session: token has invalid claims: token is expired", "code": 16}),
             );
+        }
+        if let Some(name) = request.path().strip_prefix("/api/v1/account/can-i/applications/get/") {
+            let no = denied
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|denied| denied == "*" || denied == name);
+            return Response::json(200, &json!({"value": if no { "no" } else { "yes" }}));
+        }
+        if request.path() != "/api/v1/applications" {
+            return Response::json(404, &json!({"error": "not found", "code": 5}));
         }
         let namespace = request.query("appNamespace");
         let items = applications

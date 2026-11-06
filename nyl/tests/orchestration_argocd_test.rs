@@ -16,7 +16,7 @@ mod scenario;
 
 use std::path::Path;
 
-use argocd_stub::{application, applications, kube_api, kubeconfig, Applications, Stub};
+use argocd_stub::{application_with_source, applications, kube_api, kubeconfig, Applications, Stub};
 use scenario::shell::{self as harness, shared_project};
 use scenario::world::git_output;
 use serde_json::Value;
@@ -116,34 +116,64 @@ impl Observed {
         git_output(&self.shell.world.bare(), &["rev-parse", "refs/heads/deploy"])
     }
 
-    /// The Applications the stored unit records, as `(name, namespace, path, role)`.
-    fn applications(&self) -> Vec<(String, String, String, String)> {
+    /// The Applications the stored unit records, as `(name, namespace, source)`
+    /// with the source as Argo CD serves it (a target revision added).
+    fn applications(&self) -> Vec<(String, String, Value)> {
         let text = git_output(
             &self.shell.world.bare(),
             &["show", "refs/heads/nyl/dev/desired:desired/units/kubernetes.yaml"],
         );
         let unit: Value = serde_saphyr::from_str(&text).unwrap();
-        unit["resolvedSpec"]["argocd"]["applications"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|app| {
-                let text = |field: &str| app[field].as_str().unwrap().to_owned();
-                (text("name"), text("namespace"), text("path"), text("role"))
-            })
-            .collect()
+        served_sources(&unit)
     }
 
     /// Argo CD reports every Application running `revision` with `health`,
     /// except the ones `without` names.
     fn serve(&self, revision: &str, health: &str, without: &[&str]) {
+        self.serve_with(revision, |name| {
+            if without.contains(&name) {
+                None
+            } else {
+                Some(health.to_owned())
+            }
+        });
+    }
+
+    /// Argo CD reports each Application `health_of` names running `revision`.
+    fn serve_with(&self, revision: &str, health_of: impl Fn(&str) -> Option<String>) {
         *self.served.lock().unwrap() = self
             .applications()
             .iter()
-            .filter(|(name, ..)| !without.contains(&name.as_str()))
-            .map(|(name, namespace, path, _)| application(name, namespace, path, &[revision], health))
+            .filter_map(|(name, namespace, source)| {
+                Some(application_with_source(
+                    name,
+                    namespace,
+                    source,
+                    &[revision],
+                    &health_of(name)?,
+                ))
+            })
             .collect();
     }
+}
+
+/// The `(name, namespace, source)` of each Application a stored unit records,
+/// the source as Argo CD serves it.
+fn served_sources(unit: &Value) -> Vec<(String, String, Value)> {
+    unit["resolvedSpec"]["argocd"]["applications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|app| {
+            let mut source = app["source"].clone();
+            source["targetRevision"] = Value::String("deploy".to_owned());
+            (
+                app["name"].as_str().unwrap().to_owned(),
+                app["namespace"].as_str().unwrap().to_owned(),
+                source,
+            )
+        })
+        .collect()
 }
 
 fn unit(report: &Value) -> &Value {
@@ -197,23 +227,43 @@ fn test_attest_records_accepted_and_healthy_from_argocd() {
     assert_eq!(observed.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
     assert_eq!(tip(), after);
 
+    // An unchanged result is written again once the stored attestation is
+    // older than the refresh interval (15 minutes), so an attestation a CI job
+    // re-verifies stays fresh for `maxAttestationAge`: within the interval
+    // nothing is written (above), beyond it the time moves.
+    observed
+        .shell
+        .clock
+        .advance(nyl_core::orchestration::time::Duration::from_mins(16));
+    assert_eq!(observed.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    let refreshed = tip();
+    assert_ne!(
+        refreshed, after,
+        "a stale attestation of an unchanged system is refreshed"
+    );
+    let record: Value = serde_saphyr::from_str(&git_output(
+        &observed.shell.world.bare(),
+        &[
+            "show",
+            &format!("{OBSERVED}:observed/units/kubernetes/attestations.yaml"),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        record["attestations"]["healthy"]["details"],
+        document["attestations"]["healthy"]["details"]
+    );
+    assert_eq!(observed.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    assert_eq!(tip(), refreshed);
+
     // A degraded workload fails `healthy`, not `accepted`.
     observed
         .shell
         .clock
         .advance(nyl_core::orchestration::time::Duration::from_mins(5));
-    observed.serve(&published, "Degraded", &["dev-catalog"]);
-    *observed.served.lock().unwrap() = {
-        let mut apps = observed.served.lock().unwrap().clone();
-        apps.push(application(
-            "dev-catalog",
-            "argocd",
-            "dev/_nyl/catalog",
-            &[&published],
-            "Healthy",
-        ));
-        apps
-    };
+    observed.serve_with(&published, |name| {
+        Some(if name == "dev-catalog" { "Healthy" } else { "Degraded" }.to_owned())
+    });
     let degraded = observed.shell.invoke(&["attest", "-e", "dev", "-o", "json"]);
     assert_eq!(degraded.exit, 3, "{}", degraded.stderr);
     assert_eq!(unit(&degraded.report)["attestations"]["accepted"], "pass");
@@ -354,20 +404,9 @@ fn test_attest_reads_the_argocd_api_server_with_the_admitted_token() {
     );
     let unit_document: Value = serde_saphyr::from_str(&stored).unwrap();
     assert_eq!(unit_document["resolvedSpec"]["argocd"]["access"]["method"], "api");
-    *served.lock().unwrap() = unit_document["resolvedSpec"]["argocd"]["applications"]
-        .as_array()
-        .unwrap()
+    *served.lock().unwrap() = served_sources(&unit_document)
         .iter()
-        .map(|app| {
-            let text = |field: &str| app[field].as_str().unwrap().to_owned();
-            application(
-                &text("name"),
-                &text("namespace"),
-                &text("path"),
-                &[&published],
-                "Healthy",
-            )
-        })
+        .map(|(name, namespace, source)| application_with_source(name, namespace, source, &[&published], "Healthy"))
         .collect();
     let attested = shell.invoke(&["attest", "-e", "dev", "-o", "json"]);
     assert_eq!(attested.exit, 0, "{}", attested.stderr);
@@ -390,4 +429,50 @@ fn test_attest_reads_the_argocd_api_server_with_the_admitted_token() {
         expired.stderr
     );
     assert_eq!(git_output(&shell.world.bare(), &["rev-parse", OBSERVED]), tip);
+}
+
+/// Moving how Argo CD is read, here the control-plane context's name, changes
+/// no result: the next reconcile finds the receipt current, publishes nothing,
+/// and the attestations of the receipt stay. Catches credential plumbing
+/// re-executing a unit and resetting its evidence.
+#[test]
+fn test_renaming_the_kube_context_neither_executes_the_unit_nor_resets_its_attestations() {
+    let observed = Observed::new("{strategy: manual}");
+    let published = observed.head();
+    observed.serve(&published, "Healthy", &[]);
+    assert_eq!(observed.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    let record = || {
+        git_output(
+            &observed.shell.world.bare(),
+            &[
+                "show",
+                &format!("{OBSERVED}:observed/units/kubernetes/attestations.yaml"),
+            ],
+        )
+    };
+    let before = record();
+
+    let platform = git_output(&observed.shell.world.bare(), &["show", "main:nyl/platform.yaml"]);
+    assert!(platform.contains("context: argocd-admin"));
+    observed.shell.world.commit_files(
+        "main",
+        "Rename the context",
+        &[(
+            "nyl/platform.yaml",
+            &platform.replace("context: argocd-admin", "context: renamed"),
+        )],
+    );
+    let again = observed.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(again.exit, 0, "{}", again.stderr);
+    assert_ne!(unit(&again.report)["result"], "executed", "{}", again.report);
+    assert_eq!(observed.head(), published, "a commit was published");
+    assert_eq!(record(), before, "the attestations were reset");
+    let stored = git_output(
+        &observed.shell.world.bare(),
+        &["show", "refs/heads/nyl/dev/desired:desired/units/kubernetes.yaml"],
+    );
+    assert!(
+        stored.contains("context: renamed"),
+        "the stored document records the new context: {stored}"
+    );
 }

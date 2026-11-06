@@ -1608,7 +1608,11 @@ attestations:
   capability), and records the results with `source: {driver: attest}` and
   the driver's `details`, such as each Application's running publication
   and health, in one observed commit; it writes nothing when nothing
-  changed. Units whose kind does not attest are left out; one named with
+  changed, where an attestation whose result is unchanged counts as unchanged
+  until it is older than the refresh interval (default 15 minutes), after
+  which it is written again with its new time
+  (`rules::checks::settle_attestations`), so a re-verified system stays fresh
+  for `maxAttestationAge` and an unreachable one does not. Units whose kind does not attest are left out; one named with
   `--unit` is reported `unsupported` (`NYL-ATTEST-UNSUPPORTED`).
 - `nyl attest --name <n> --result pass|fail` records an external
   attestation (see the [promotion contract](promotion.md#health-evidence)).
@@ -2915,6 +2919,7 @@ revisions, and locked `fromGit` bindings.
 | Concurrency per wave | 4 | `nyl.toml`, `--concurrency` |
 | Lease grace period | 10 minutes | `nyl.toml` |
 | `resolutionTimeout` | 30 minutes | `nyl.toml` |
+| Attestation refresh | 15 minutes | `nyl.toml` |
 | `timeout` | Command 30m, Terraform/OpenTofu 60m, OciImage 60m, KubernetesPublication 10m | unit `timeout` |
 
 ## Drivers
@@ -2993,7 +2998,7 @@ enum Outcome {
 | `KeyInputs` | What resolution needs to compute an execution key: the selected `files` with their digests, the `excludedFields` of the resolved spec, an optional `fingerprint`, and `recorded` facts. Each recorded fact is a JSON Pointer to a member of the resolved spec and the value resolution writes there before it computes the key, so the stored desired document carries what the driver learned from its inputs. The engine stores a recorded value without interpreting it |
 | `TeardownReadiness` | What the driver found about whether the unit's teardown can complete: `blocking` requirements and `remnants` a teardown leaves, each a finding with a stable code and the setting that fixes it, and `not_checked` requirements the driver cannot see. The driver evaluates its own requirements (the publication driver from the settings it recorded at resolution: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog); the shell only displays the findings, keeps a unit with a blocking one pending teardown, and warns in `plan` and `reconcile` |
 | `WaitStrategy` | How a teardown waits after phase 1: `Observe`, `Delay { duration }`, or `Manual`. The driver reads it from the stored spec with its defaults (the publication driver: `teardownWait`, else `observe` for `mode: observe` and `manual` for `mode: publish`); `rules::teardown_wait` decides what each strategy does, and the shell reads no spec field itself |
-| `RemovalObservation` | What `observe_removal` found: `Remaining(names)` of what phase 1 removes that still exists (empty when all is gone), or `Failed(reason)` when the driver could not read it, shown unchanged as `observation-failed`; its `RemovalContext` carries the unit's admitted credentials and the wait's deadline, and no checkout, because a unit is torn down from its stored document |
+| `RemovalObservation` | What `observe_removal` found: `Remaining(names)` of what phase 1 removes that still exists (empty when all is gone), or `Failed(reason)` when the driver could not read it, shown unchanged as `observation-failed`; its `RemovalContext` carries the unit's admitted credentials (shown by name only in `Debug`) and the wait's deadline, and no checkout, because a unit is torn down from its stored document |
 | `IncarnationDirectory` | `ExecutionContext.incarnations`: whether a named unit incarnation (environment, unit, uid) still exists in its environment's state, as `exists`, `gone`, or `unknown` with a reason. A driver that fences a native resource by owner asks it about the owner it finds recorded; the shell answers from the declared environments' state without knowing what is fenced |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |

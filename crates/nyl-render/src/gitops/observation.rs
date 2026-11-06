@@ -62,7 +62,7 @@ pub enum ApplicationRole {
 }
 
 /// An Argo CD Application the target generates.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GeneratedApplication {
     pub role: ApplicationRole,
@@ -71,9 +71,21 @@ pub struct GeneratedApplication {
     pub namespace: String,
     /// The directory it sources, from the publication repository's root.
     pub path: String,
+    /// The Argo CD project it belongs to (`spec.project`), which Argo CD's
+    /// policy names it by. Empty in a document recorded before it was.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
     /// `<applicationGroup>/<release>` for a Release's Application.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
+    /// The generated `spec.source` without `targetRevision` (the revision is
+    /// what an observer reads, not a setting to compare): the repository, the
+    /// directory, and how Argo CD renders it (`directory.recurse`, and any
+    /// `exclude`, `include`, or tool block). An Application edited in the
+    /// cluster to render the directory differently no longer matches it.
+    /// Null in a document recorded before it was.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub source: Value,
 }
 
 /// Where the target publishes, as a reader of the branch needs it.
@@ -162,6 +174,11 @@ pub fn generated_applications(rendered: &RenderedTarget) -> Result<Vec<Generated
                     path.display()
                 )));
             };
+            let mut generated_source = manifest.pointer("/spec/source").cloned().unwrap_or(Value::Null);
+            if let Some(object) = generated_source.as_object_mut() {
+                object.remove("targetRevision");
+            }
+            let project = text("/spec/project").unwrap_or_default();
             applications.push(GeneratedApplication {
                 role: if source == catalog_source {
                     ApplicationRole::Catalog
@@ -172,10 +189,12 @@ pub fn generated_applications(rendered: &RenderedTarget) -> Result<Vec<Generated
                 name,
                 namespace,
                 path: source,
+                project,
+                source: generated_source,
             });
         }
     }
-    applications.sort();
+    applications.sort_by(|a, b| (a.role, &a.name, &a.namespace).cmp(&(b.role, &b.name, &b.namespace)));
     Ok(applications)
 }
 
@@ -285,9 +304,10 @@ pub enum RunningMatch {
 
 /// Match the revision an Application runs to the target's publication
 /// commits. A revision that is another target's commit, or a write-back
-/// outside the Application's directory, matches the publication whose
-/// directory tree and recorded inputs it shares; one that changed the
-/// directory without publishing matches none.
+/// outside the Application's directory, matches the newest publication at or
+/// before it, whose directory tree and recorded inputs it shares; one that
+/// changed the directory without publishing matches none, even when it
+/// restored the tree of an older publication.
 pub fn running_publication(
     history: &dyn PublicationHistory,
     application: ApplicationTree<'_>,
@@ -302,9 +322,14 @@ pub fn running_publication(
     for commit in &commits {
         equal.push(equivalent(history, application, commit, running)?);
     }
-    let Some(newest) = equal.iter().position(|equal| *equal) else {
+    // The newest publication at or before the running revision is what Nyl
+    // says the revision holds, so it must be the one that matches: a commit
+    // that restores an older tree by hand, or edits the directory, matches
+    // none, however well an older publication would fit.
+    if !equal.first().copied().unwrap_or(false) {
         return Ok(RunningMatch::NoPublication);
-    };
+    }
+    let newest = 0;
     // The run: consecutive equivalent commits from the newest match back.
     let mut oldest = newest;
     while oldest + 1 < commits.len() && equal[oldest + 1] {
@@ -592,6 +617,23 @@ mod tests {
         assert_eq!((matched.recorded.as_str(), matched.newest.as_str()), ("p2", "p2"));
     }
 
+    /// Catches a hand edit that restores an older publication's tree being
+    /// credited to that publication: the newest publication before the
+    /// revision holds another tree, so the revision is no publication.
+    #[test]
+    fn test_a_hand_edited_revert_matches_no_publication() {
+        let mut history = script(&[("p1", "tree-a"), ("p2", "tree-b")]);
+        history.chain.push("revert");
+        history.directories.insert(("revert", "dev/web/web"), "tree-a");
+        history
+            .inputs
+            .insert(("revert", "web/web"), vec![("@input/web/web/image", "sha256:1")]);
+        assert_eq!(
+            running_publication(&history, WEB, "revert", 10).unwrap(),
+            RunningMatch::NoPublication
+        );
+    }
+
     /// Catches a commit that edited the Application's directory without
     /// publishing being credited to the publication before it, which would
     /// let a hand-edited tree attest as the published one.
@@ -793,7 +835,9 @@ mod tests {
                 name: "web".to_owned(),
                 namespace: "argocd".to_owned(),
                 path: "dev/web/web".to_owned(),
+                project: "default".to_owned(),
                 release: Some("web/web".to_owned()),
+                source: serde_json::json!({"repoURL": "https://example.invalid/deploy.git", "path": "dev/web/web"}),
             }],
         };
         let value = serde_json::to_value(&facts).unwrap();
@@ -803,7 +847,8 @@ mod tests {
                 "instance": "prod", "namespace": "argocd", "cluster": "control", "context": "control-admin",
                 "access": {"method": "kubernetes"},
                 "publication": {"url": "https://example.invalid/deploy.git", "branch": "deploy", "pathPrefix": "dev"},
-                "applications": [{"role": "workload", "name": "web", "namespace": "argocd", "path": "dev/web/web", "release": "web/web"}],
+                "applications": [{"role": "workload", "name": "web", "namespace": "argocd", "path": "dev/web/web", "project": "default", "release": "web/web",
+                                  "source": {"repoURL": "https://example.invalid/deploy.git", "path": "dev/web/web"}}],
             })
         );
         assert_eq!(serde_json::from_value::<ArgoCdObservation>(value).unwrap(), facts);

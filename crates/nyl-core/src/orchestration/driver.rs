@@ -505,7 +505,7 @@ pub enum WaitStrategy {
 
 /// What [`Driver::observe_removal`] receives: the unit's admitted
 /// credentials and the time its reading must finish by.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemovalContext {
     pub unit: UnitAddress,
     /// Admitted variables and secrets, by name; masking of secret values is the runner's.
@@ -516,6 +516,20 @@ pub struct RemovalContext {
     pub now: Timestamp,
     /// The end of the wait: a reading takes no longer than this allows.
     pub deadline: Timestamp,
+}
+
+/// `env` and `secrets` can hold credentials, so only their names are shown.
+impl std::fmt::Debug for RemovalContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemovalContext")
+            .field("unit", &self.unit)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("secrets", &self.secrets.keys().collect::<Vec<_>>())
+            .field("now", &self.now)
+            .field("deadline", &self.deadline)
+            .finish()
+    }
 }
 
 /// What a driver observed of the effects a teardown's first phase removes.
@@ -921,5 +935,32 @@ mod record_tests {
             );
         }
         assert_eq!(spec, json!({"target": "dev", "nested": {"keep": 1}}));
+    }
+}
+
+#[cfg(test)]
+mod removal_context_tests {
+    use super::*;
+
+    /// Catches a credential reaching a log or a panic message through the
+    /// derived `Debug` of the context a driver's reading receives.
+    #[test]
+    fn test_removal_context_debug_names_credentials_without_their_values() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let context = RemovalContext {
+            unit: "dev/kubernetes".parse().unwrap(),
+            env: BTreeMap::from([("ARGOCD_AUTH_TOKEN".to_owned(), "s3cret-token".to_owned())]),
+            secrets: BTreeMap::from([("registry".to_owned(), "hunter2".to_owned())]),
+            now,
+            deadline: now,
+        };
+        let shown = format!("{context:?}");
+        assert!(
+            shown.contains("ARGOCD_AUTH_TOKEN") && shown.contains("registry"),
+            "{shown}"
+        );
+        assert!(!shown.contains("s3cret-token") && !shown.contains("hunter2"), "{shown}");
     }
 }
