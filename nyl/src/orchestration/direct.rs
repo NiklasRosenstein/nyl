@@ -467,6 +467,11 @@ pub fn snapshot_entry(
             root.worktree.clone_from(&destination);
         }
     }
+    // The snapshot is a Git worktree with those files committed, so tools that
+    // discover a project the way Nyl does (through Git visibility) work on it.
+    // The commit is fixed and stands for no source commit: the unit's own
+    // source commit stays in `unit.source_commit`.
+    nyl_render::gitops::publication::ensure_git_worktree(&destination)?;
     prepared.worktree = destination;
     Ok(())
 }

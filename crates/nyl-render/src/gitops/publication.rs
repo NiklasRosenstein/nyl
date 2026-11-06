@@ -656,9 +656,11 @@ pub fn diff_target_publication(
 /// they see in a checkout. A directory that is a worktree already is left as
 /// it is.
 ///
-/// A direct build reads a private snapshot of the files, not a checkout; the
-/// commit this makes stands for no source commit, which is why the render
-/// takes the source commit as a [`TargetRender::source_commit`] instead.
+/// The commit is deterministic (fixed signature, time 0) and stands for no
+/// source commit, which is why a render of such a worktree takes the source
+/// commit as a [`TargetRender::source_commit`] instead. The orchestration
+/// shell makes a direct operation's snapshot one; drivers never write to the
+/// worktree they are given.
 pub fn ensure_git_worktree(worktree: &Path) -> Result<()> {
     if worktree.join(".git").exists() {
         return Ok(());

@@ -24,9 +24,7 @@ use std::ffi::OsString;
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{DriverError, DriverResult, ExecutionContext, Outcome};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit};
-use nyl_render::gitops::publication::{
-    diff_target_publication, ensure_git_worktree, index_digest, FileChange, RenderedTarget,
-};
+use nyl_render::gitops::publication::{diff_target_publication, index_digest, FileChange, RenderedTarget};
 use nyl_render::gitops::reconcile::{parse_index, DEFAULT_INDEX_PATH};
 use serde_json::{json, Value};
 
@@ -85,10 +83,6 @@ pub(crate) fn build(
     let mode = Mode::parse(args)?;
     let spec = resolved_spec(unit)?;
     let target = unit_target(spec)?;
-    // A direct build reads a snapshot of files, which discovery and the
-    // render need as a Git worktree.
-    ensure_git_worktree(&ctx.worktree)
-        .map_err(|error| DriverError::before_effects(format!("cannot prepare the build worktree: {error}")))?;
     if mode == Mode::Push {
         refuse_owned(catalogue, ctx, unit, &target)?;
     }
@@ -127,37 +121,26 @@ pub(crate) fn build(
 }
 
 /// Refuse `--push` unless publishing from this call is the only claim on the
-/// target: a direct publication is outside orchestration, so a target an
+/// target. A direct publication is outside orchestration, so a target an
 /// environment owns must go through `reconcile`, which holds the lease and
 /// records the receipt. Ownership is read from both places that declare it:
 ///
 /// - the declaration: a publication unit an environment selects places its
-///   target into that environment, even a unit being torn down;
+///   target into that environment, even a unit being torn down (checked here,
+///   first, so the most useful refusal comes before any about the author);
 /// - the published ownership index: a prefix that names a unit incarnation
-///   refuses a publication that records no owner
-///   (`NYL-TREE-OWNED-BY-UNIT`, at the push).
+///   refuses a publication that records no owner (`NYL-TREE-OWNED-BY-UNIT`,
+///   found when the publication prepares, after the build's own render).
 ///
 /// The source must also be committed: the index attributes the tree to a
 /// commit, which a worktree with uncommitted changes does not reproduce.
+/// Last, the commit needs an author.
 fn refuse_owned(
     catalogue: &nyl_render::config::ResourceCatalogue,
     ctx: &ExecutionContext<'_>,
     unit: &DesiredUnit,
     target: &str,
 ) -> DriverResult<()> {
-    if ctx.commit_identity.is_none() {
-        return Err(DriverError::before_effects(format!(
-            "{IDENTITY}: --push commits to the publication branch and needs an identity to author the commit; \
-             set user.name and user.email in the repository's Git configuration"
-        )));
-    }
-    if ctx.dirty_source {
-        return Err(DriverError::before_effects(format!(
-            "{DIRTY_SOURCE}: the worktree has uncommitted changes, so the tree cannot be attributed to the source commit; \
-             commit them, or build a committed revision with `nyl build {name} --source <revision> -- --push`",
-            name = unit.unit.name,
-        )));
-    }
     let inventory = nyl_render::gitops::discover_gitops_inventory(&ctx.project_dir, None, catalogue.clone())
         .map_err(|error| DriverError::before_effects(format!("cannot discover the project: {error}")))?;
     let placements = nyl_render::gitops::units::target_placements(&inventory).map_err(|error| {
@@ -168,6 +151,19 @@ fn refuse_owned(
             "{TARGET_OWNED}: DeploymentTarget {target} is owned by Environment {environment}, whose publication unit places it; \
              a direct build cannot publish it. Publish it with `nyl reconcile -e {environment}`, or deselect the unit from \
              that environment first"
+        )));
+    }
+    if ctx.dirty_source {
+        return Err(DriverError::before_effects(format!(
+            "{DIRTY_SOURCE}: the worktree has uncommitted changes, so the tree cannot be attributed to the source commit; \
+             commit them, or build a committed revision with `nyl build {name} --source <revision> -- --push`",
+            name = unit.unit.name,
+        )));
+    }
+    if ctx.commit_identity.is_none() {
+        return Err(DriverError::before_effects(format!(
+            "{IDENTITY}: --push commits to the publication branch and needs an identity to author the commit; \
+             set user.name and user.email in the repository's Git configuration"
         )));
     }
     Ok(())

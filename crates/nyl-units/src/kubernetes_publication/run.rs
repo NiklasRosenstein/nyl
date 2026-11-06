@@ -49,8 +49,8 @@ use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, Artifac
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
-    ensure_git_worktree, prepare_target_publication_fenced, prepare_target_removal_fenced, render_target,
-    without_workload_applications, PublicationAuthor, RenderedTarget, TargetRender,
+    prepare_target_publication_fenced, prepare_target_removal_fenced, render_target, without_workload_applications,
+    PublicationAuthor, RenderedTarget, TargetRender,
 };
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::gitops::units::PublicationTarget;
@@ -193,10 +193,6 @@ pub(crate) fn resolution_inputs(
     ctx: &ResolutionContext<'_>,
     spec: &Value,
 ) -> DriverResult<(RenderedTarget, KeyInputs)> {
-    // A direct build resolves the unit over a snapshot of files, which the
-    // render needs as a Git worktree; a run's checkout already is one.
-    ensure_git_worktree(&ctx.worktree)
-        .map_err(|error| DriverError::before_effects(format!("cannot prepare the worktree for rendering: {error}")))?;
     let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec, None)?;
     let inputs = KeyInputs {
         files: rendered.input_record.clone(),

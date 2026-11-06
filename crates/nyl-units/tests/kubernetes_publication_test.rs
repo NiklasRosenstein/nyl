@@ -623,23 +623,33 @@ fn inline_spec() -> Value {
     spec
 }
 
-/// The world with its ApplicationGroup naming Applications and AppProjects
-/// from their target: they are unique among every target of the cluster,
-/// inline ones included.
-fn named_per_target() -> World {
+/// The world whose only target is the inline one: no declared target
+/// selects the ApplicationGroup too, so the Applications and AppProject the
+/// group generates for the inline target are unique on the cluster, and no
+/// Environment selects the unit whose inline spec the tests pass directly.
+fn inline_only() -> World {
     let world = World::new();
-    let group = world.work().join("nyl/web.yaml");
-    let text = std::fs::read_to_string(&group).unwrap();
-    std::fs::write(
-        &group,
-        text.trim_end().to_owned()
-            + "\n  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n    destinations: [{server: '*', namespace: web}]\n",
-    )
-    .unwrap();
+    let edit = |path: &str, from: &str, to: &str| {
+        let file = world.work().join(path);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(from), "{path} holds {from:?}");
+        std::fs::write(file, text.replace(from, to)).unwrap();
+    };
+    let platform = world.work().join("nyl/platform.yaml");
+    let text = std::fs::read_to_string(&platform).unwrap();
+    let documents = text
+        .split("---\n")
+        .filter(|document| !document.contains("kind: DeploymentTarget"));
+    std::fs::write(&platform, documents.collect::<Vec<_>>().join("---\n")).unwrap();
+    edit(
+        "nyl/units.yaml",
+        "name: kubernetes\n  labels: {dev: 'true'}",
+        "name: kubernetes\n  labels: {standalone: 'true'}",
+    );
     git(&world.work(), &["add", "--all"]);
     git(
         &world.work(),
-        &["commit", "--quiet", "--message", "Name applications per target"],
+        &["commit", "--quiet", "--message", "Declare only the inline target"],
     );
     world
 }
@@ -651,7 +661,7 @@ fn named_per_target() -> World {
 /// two phases like every target.
 #[test]
 fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
-    let world = named_per_target();
+    let world = inline_only();
     let driver = real();
     let id = identity();
     let unit = resolved_unit(&driver, &world, inline_spec());
@@ -668,6 +678,42 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
     let files = world.files("deploy");
     assert!(files.contains(&"preview/_nyl/index.json".to_owned()), "{files:?}");
     assert!(!files.iter().any(|path| path.starts_with("dev/")), "{files:?}");
+    // The group the inline target selects is published: its workload
+    // Application in the catalog and the Release's files beneath the prefix.
+    let workload_applications = || {
+        world
+            .files("deploy")
+            .iter()
+            .filter(|path| path.starts_with("preview/_nyl/catalog/"))
+            .map(|path| git(&world.bare(), &["show", &format!("deploy:{path}")]))
+            .filter(|text| text.contains("kind: Application") && text.contains("path: preview/web"))
+            .count()
+    };
+    assert!(
+        workload_applications() > 0,
+        "the group's Application is published: {files:?}"
+    );
+    let release_files = |branch_files: &[String]| {
+        branch_files
+            .iter()
+            .filter(|path| path.starts_with("preview/web/"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let published_files = release_files(&files);
+    assert!(
+        !published_files.is_empty(),
+        "the Release's files are published: {files:?}"
+    );
+    let deployment = published_files
+        .iter()
+        .map(|path| git(&world.bare(), &["show", &format!("deploy:{path}")]))
+        .find(|text| text.contains("kind: Deployment"))
+        .expect("the Deployment is published");
+    assert!(
+        deployment.contains("registry.invalid:5000/web@sha256:0123"),
+        "{deployment}"
+    );
     let index: Value = serde_json::from_str(&git(&world.bare(), &["show", "deploy:preview/_nyl/index.json"])).unwrap();
     assert_eq!(index["target"], "preview");
     assert_eq!(index["version"], 4);
@@ -684,6 +730,13 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
         panic!("phase 1 waits");
     };
     assert!(published.is_some());
+    // Phase 1 removes the workload Application and keeps the Release's files.
+    assert_eq!(workload_applications(), 0, "phase 1 removes the group's Application");
+    assert_eq!(
+        release_files(&world.files("deploy")),
+        published_files,
+        "phase 1 keeps the Release's files"
+    );
     ctx.teardown_wait = Some(nyl_core::orchestration::driver::WaitCompletion::Delayed);
     driver.teardown(&ctx, &deleting).unwrap();
     assert!(!world.files("deploy").iter().any(|path| path.starts_with("preview/")));
@@ -710,7 +763,7 @@ fn test_a_changed_target_destination_fails_before_publishing_anything() {
         (true, "target \"preview\" became \"preview-2\""),
         (false, "pathPrefix \"preview-1\" became \"preview-2\""),
     ] {
-        let world = named_per_target();
+        let world = inline_only();
         let published = |spec: Value| desired(spec, key.clone());
         let mut before = inline_spec();
         if !explicit_prefix {
