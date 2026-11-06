@@ -104,6 +104,12 @@ pub trait ArgoReader {
         let _ = rbac_name;
         Ok(true)
     }
+
+    /// Whether the AppProject `name` of `namespace` is visible to the
+    /// credential. Phase 1 of a teardown keeps a target's AppProjects, so one
+    /// the reading shows proves the credential reaches the Argo CD that runs
+    /// the target. Absence, or a credential that may not read it, is `false`.
+    fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError>;
 }
 
 /// The name Argo CD's policy and its `can-i` endpoint know an Application by:

@@ -32,6 +32,7 @@ use nyl_render::gitops::observation::{
     ApplicationRole, ArgoCdObservation, GeneratedApplication, GitPublicationHistory,
 };
 use nyl_render::gitops::publication::RenderedTarget;
+use nyl_render::resources::ArgoCDAccessMethod;
 use serde_json::Value;
 
 use super::argocd::evaluate::evaluate;
@@ -146,6 +147,83 @@ fn ensure_gone_is_visible<'a>(
     Ok(())
 }
 
+/// Fail unless the reading shows something phase 1 of a teardown keeps and
+/// that only the Argo CD running this target has, so that a credential or
+/// context for another Argo CD (an empty list that is a success) is never
+/// mistaken for a target whose Applications are gone:
+///
+/// - the catalog Application, when the target generates one, must be in the
+///   reading;
+/// - without one (`catalogApplication.shared`, or `enabled: false`), the
+///   AppProjects the target's Applications belong to must be visible: phase 1
+///   keeps the generated ones, and an externally owned one is a project the
+///   target depends on. The `default` project exists in every Argo CD and
+///   anchors nothing;
+/// - with neither, the Kubernetes method fails closed (a context cannot be
+///   shown to reach this target), and the API method relies on `can-i` alone.
+///
+/// A target with no workload Application has nothing to conclude and needs no
+/// anchor.
+fn ensure_anchored(
+    reader: &dyn ArgoReader,
+    observation: &ArgoCdObservation,
+    live: &std::collections::BTreeMap<(String, String), Value>,
+) -> Result<(), ReadError> {
+    if observation.workload_applications().next().is_none() {
+        return Ok(());
+    }
+    if let Some(catalog) = observation
+        .applications
+        .iter()
+        .find(|application| application.role == ApplicationRole::Catalog)
+    {
+        if live.contains_key(&(catalog.namespace.clone(), catalog.name.clone())) {
+            return Ok(());
+        }
+        return Err(ReadError::new(
+            ReadErrorKind::Forbidden,
+            format!(
+                "the catalog Application {}/{} is not in the reading, so the credential or context does not see this \
+                 target's Applications and their absence would prove nothing (if the catalog was never applied, \
+                 apply it first): check that the ArgoCDInstance's access reaches the Argo CD that runs this target \
+                 and may read its Applications",
+                catalog.namespace, catalog.name
+            ),
+        ));
+    }
+    let projects = observation
+        .applications
+        .iter()
+        .map(|application| application.project.as_str())
+        .filter(|project| !project.is_empty() && *project != "default")
+        .collect::<std::collections::BTreeSet<_>>();
+    for project in &projects {
+        if !reader.project_exists(&observation.location.namespace, project)? {
+            return Err(ReadError::new(
+                ReadErrorKind::Forbidden,
+                format!(
+                    "the target generates no catalog Application, and its AppProject {project} is not visible in \
+                     namespace {}, so the credential or context does not see this target's Argo CD and the absence of \
+                     its Applications would prove nothing: check that the ArgoCDInstance's access reaches the Argo CD \
+                     that runs this target and may read its projects",
+                    observation.location.namespace
+                ),
+            ));
+        }
+    }
+    if projects.is_empty() && observation.location.access.method == ArgoCDAccessMethod::Kubernetes {
+        return Err(ReadError::new(
+            ReadErrorKind::Declaration,
+            "the target generates no catalog Application and no AppProject other than `default`, so nothing shows that \
+             the Kubernetes context reaches the Argo CD that runs it; Nyl will not conclude anything from an empty list: \
+             declare the ArgoCDInstance's access with method api, which asks Argo CD whether the token may get each \
+             Application"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// `nyl attest`: `accepted` and `healthy` of the receipt's publication.
 pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<AttestationCheck> {
     let unknown = |reason: String| Ok(AttestationCheck::Unknown { reason });
@@ -168,6 +246,12 @@ pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverRe
         Err(error) => return unknown(error.message),
     };
     let live = match read_all(reader.as_ref(), &observation).and_then(|live| {
+        // The Kubernetes method has no per-Application `can-i`, so a context
+        // for another Argo CD is told apart by what only this target's Argo CD
+        // has. The API method asks Argo CD about each missing Application.
+        if observation.location.access.method == ArgoCDAccessMethod::Kubernetes {
+            ensure_anchored(reader.as_ref(), &observation, &live)?;
+        }
         ensure_gone_is_visible(reader.as_ref(), &observation, &live, observation.applications.iter())?;
         Ok(live)
     }) {
@@ -204,30 +288,13 @@ pub(super) fn observe_removal(ctx: &RemovalContext, unit: &DesiredUnit) -> Remov
         Err(error) => return RemovalObservation::Failed(error.message),
     };
     let live = match read_all(reader.as_ref(), &observation).and_then(|live| {
-        // Removal is concluded only from what the credential showed it could
-        // see: the catalog Application stays through phase 1, so a reading
-        // that lacks it came from a credential or context that sees none of
-        // this target (another project's role, a token without policy, another
-        // Argo CD), and every workload would read as gone.
-        if let Some(catalog) = observation
-            .applications
-            .iter()
-            .find(|application| application.role == ApplicationRole::Catalog)
-        {
-            if !live.contains_key(&(catalog.namespace.clone(), catalog.name.clone())) {
-                return Err(ReadError::new(
-                    ReadErrorKind::Forbidden,
-                    format!(
-                        "the catalog Application {}/{} is not in the reading, which phase 1 keeps, so the credential or \
-                         context does not see this target's Applications and their absence would prove nothing: check \
-                         that the ArgoCDInstance's access reaches the Argo CD that runs this target and may read its \
-                         Applications",
-                        catalog.namespace, catalog.name
-                    ),
-                ));
-            }
-        }
-        ensure_gone_is_visible(reader.as_ref(), &observation, &live, observation.workload_applications())?;
+        ensure_anchored(reader.as_ref(), &observation, &live)?;
+        ensure_gone_is_visible(
+            reader.as_ref(),
+            &observation,
+            &live,
+            observation.workload_applications(),
+        )?;
         Ok(live)
     }) {
         Ok(live) => live,
