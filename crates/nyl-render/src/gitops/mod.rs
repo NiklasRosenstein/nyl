@@ -32,7 +32,7 @@ pub use layout::{
 };
 pub use reconcile::{
     reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, DesiredFiles,
-    ReconcileOptions, RenderIndex, RenderIndexPublication,
+    ReconcileOptions, RenderIndex, RenderIndexOwner, RenderIndexPublication,
 };
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,

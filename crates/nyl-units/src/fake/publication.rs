@@ -22,22 +22,28 @@
 //! settings at resolution, the fake reads the same shape from a
 //! `teardownSettings` that a scenario declares (`catalogPrunes`,
 //! `applicationDeletionPolicy`, `namespaceDeletePolicies`,
-//! `catalogOwnedByParent`). A document without it records no settings, so
-//! the fake reports readiness as unsupported (no requirements).
+//! `catalogOwnedByParent`) and evaluates it with the real driver's readiness
+//! rules. A document without it records no settings, so the fake reports
+//! readiness as unsupported (no requirements).
 
 use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
     Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, TeardownSettings,
+    Supported, TeardownReadiness,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
 use serde_json::{json, Value};
 
-use super::{required_str, Script, ScriptedOutcome};
-use crate::kubernetes_publication::{plan, publish, resolution_inputs, teardown, validate_teardown_wait};
+use super::{Script, ScriptedOutcome};
+use nyl_render::gitops::publication::TeardownSettings;
+use nyl_render::gitops::units::PublicationTarget;
+
+use crate::kubernetes_publication::{
+    evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, unit_target, validate_teardown_wait,
+};
 
 pub(super) const KIND: &str = "FakePublication";
 
@@ -114,7 +120,7 @@ impl Driver for FakePublication {
             "type": "object",
             "required": ["target"],
             "properties": {
-                "target": {"type": "string"},
+                "target": {"type": ["string", "object"]},
                 "mode": {"type": "string", "enum": ["publish", "observe"]},
                 "teardownWait": {
                     "type": "object",
@@ -150,8 +156,10 @@ impl Driver for FakePublication {
         if !spec.is_object() {
             return Err("spec must be a mapping".to_owned());
         }
-        if spec.get("target").and_then(Value::as_str).is_none() {
-            return Err("spec.target is required and must be a string".to_owned());
+        match PublicationTarget::from_spec(spec) {
+            Ok(PublicationTarget::Static(_)) => {}
+            Ok(PublicationTarget::Inline(inline)) => inline.validate().map_err(|error| error.to_string())?,
+            Err(message) => return Err(message),
         }
         match spec.get("mode") {
             None => {}
@@ -192,7 +200,7 @@ impl Driver for FakePublication {
     }
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
-        required_str(spec, "/target")?;
+        unit_target(spec)?;
         resolution_inputs(&self.resource_catalogue, ctx, spec).map(|(_, inputs)| inputs)
     }
 
@@ -234,14 +242,20 @@ impl Driver for FakePublication {
         teardown(&self.resource_catalogue, ctx, unit).map(Supported::Supported)
     }
 
-    /// The `teardownSettings` the stored document records; unsupported
-    /// (no requirements) when it records none.
-    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+    /// The readiness of the `teardownSettings` the stored document records;
+    /// unsupported (no requirements) when it records none.
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
         match spec.get("teardownSettings") {
             None => Ok(Supported::Unsupported),
             Some(settings) => Self::recorded_settings(settings)
-                .map(Supported::Supported)
+                .map(|settings| {
+                    Supported::Supported(evaluate_teardown_readiness(
+                        &unit.unit.environment,
+                        &unit.unit.name,
+                        &settings,
+                    ))
+                })
                 .map_err(DriverError::before_effects),
         }
     }

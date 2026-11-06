@@ -13,10 +13,19 @@
 //!    and publish nothing.
 //! 2. Once the run passes the wait's completion
 //!    (`ExecutionContext::teardown_wait`), remove exactly the files the
-//!    ownership index records (`prepare_target_removal`).
+//!    ownership index records (`prepare_target_removal_fenced`).
 //!
 //! When the wait ends is the orchestration shell's decision
 //! (`rules::teardown_wait`), read from `teardownWait`.
+//!
+//! **Owner fencing.** Every tree this module renders for a unit records the
+//! unit incarnation in its ownership index (version 4: environment, unit,
+//! uid). A publication or removal over a prefix whose index names another
+//! incarnation takes it over only when the incarnation directory
+//! (`ExecutionContext::incarnations`) reports it gone from its environment's
+//! state, and otherwise fails with `NYL-KUBERNETES-OWNER-FENCED`
+//! ([`fence`]); a prefix whose index names no owner (version 2 or 3, as
+//! `publish-tree` writes) is taken over and upgraded.
 //!
 //! A publication that loses the race for the branch head, before or at its
 //! push, built on a head that moved, so nothing was published. A tree that
@@ -31,17 +40,20 @@
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
-    Change, DriverError, DriverResult, ExecutionContext, KeyInputs, Outcome, PlanReport, ResolutionContext,
+    Change, DriverError, DriverResult, ExecutionContext, IncarnationStatus, KeyInputs, Outcome, PlanReport,
+    ResolutionContext,
 };
-use nyl_core::orchestration::ids::CommitId;
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, FailureCategory};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
-    prepare_target_publication, prepare_target_removal, render_target, without_workload_applications,
+    prepare_target_publication_fenced, prepare_target_removal_fenced, render_target, without_workload_applications,
     PublicationAuthor, RenderedTarget, TargetRender,
 };
+use nyl_render::gitops::reconcile::RenderIndexOwner;
+use nyl_render::gitops::units::PublicationTarget;
 use serde_json::{json, Value};
 
 use crate::command::{is_deleting, resolved_spec};
@@ -52,11 +64,58 @@ pub(crate) const PHASE_APPLICATIONS_REMOVED: &str = "applications-removed";
 /// How often a publication is built again on a branch head that moved.
 const PUBLISH_ATTEMPTS: usize = 3;
 
-/// The DeploymentTarget a resolved spec names.
-pub(crate) fn unit_target(spec: &Value) -> DriverResult<&str> {
-    spec.get("target")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DriverError::before_effects("spec.target must be a string"))
+/// The DeploymentTarget a resolved spec names or declares inline.
+pub(crate) fn publication_target(spec: &Value) -> DriverResult<PublicationTarget> {
+    PublicationTarget::from_spec(spec).map_err(DriverError::before_effects)
+}
+
+/// The name of the DeploymentTarget a resolved spec names or declares inline.
+pub(crate) fn unit_target(spec: &Value) -> DriverResult<String> {
+    publication_target(spec).map(|target| target.name().to_owned())
+}
+
+/// The incarnation a unit's published trees record as their owner.
+pub(crate) fn unit_owner(unit: &DesiredUnit) -> DriverResult<RenderIndexOwner> {
+    let uid = unit
+        .unit
+        .uid
+        .as_ref()
+        .ok_or_else(|| DriverError::before_effects("an executing unit has a uid"))?;
+    Ok(RenderIndexOwner {
+        environment: unit.unit.environment.to_string(),
+        unit: unit.unit.name.to_string(),
+        uid: uid.to_string(),
+    })
+}
+
+/// Owner fencing: whether `own` may publish to, or remove, a prefix whose
+/// ownership index names `owner`. `Ok` once that incarnation no longer
+/// exists in its environment's state; otherwise why the prefix stays fenced,
+/// which fails closed when state cannot say.
+pub(crate) fn fence<'a>(
+    ctx: &'a ExecutionContext<'_>,
+) -> impl Fn(&RenderIndexOwner) -> std::result::Result<(), String> + 'a {
+    move |owner| {
+        let (Ok(environment), Ok(unit), Ok(uid)) = (
+            EnvironmentName::new(&owner.environment),
+            UnitName::new(&owner.unit),
+            Uid::new(&owner.uid),
+        ) else {
+            return Err(format!(
+                "the ownership index names {owner}, which is not a valid unit identity"
+            ));
+        };
+        match ctx.incarnations.status(&environment, &unit, &uid) {
+            IncarnationStatus::Gone => Ok(()),
+            IncarnationStatus::Exists => Err(format!(
+                "the prefix is owned by {owner}, which still exists in the state of environment {environment}; \
+                 it stays fenced until that unit's teardown completes or it is released with `nyl state forget`"
+            )),
+            IncarnationStatus::Unknown(reason) => Err(format!(
+                "the prefix is owned by {owner}, and whether it still exists cannot be checked: {reason}"
+            )),
+        }
+    }
 }
 
 /// The resolved `spec.releases` as the pinned input snapshot of the render.
@@ -68,23 +127,33 @@ pub(crate) fn resolved_snapshot(spec: &Value) -> DriverResult<InputSnapshot> {
         .map_err(|error| DriverError::before_effects(format!("spec.releases: {error}")))
 }
 
-/// Render the target `spec` names at `worktree`, with its resolved Release
-/// inputs as a pinned snapshot.
+/// Render the target `spec` names or declares inline at `worktree`, with its
+/// resolved Release inputs as a pinned snapshot. The tree's ownership index
+/// records `owner`; resolution renders without one, because it only reads
+/// the input record and publishes nothing.
 pub(crate) fn render(
     catalogue: &nyl_render::config::ResourceCatalogue,
     worktree: &std::path::Path,
     project_dir: &std::path::Path,
     cache_dir: &std::path::Path,
     spec: &Value,
+    owner: Option<RenderIndexOwner>,
 ) -> DriverResult<RenderedTarget> {
-    let target = unit_target(spec)?;
+    let target = publication_target(spec)?;
     let inputs = resolved_snapshot(spec)?;
+    let inline = match &target {
+        PublicationTarget::Inline(inline) => Some(inline),
+        PublicationTarget::Static(_) => None,
+    };
+    let target = target.name().to_owned();
     render_target(&TargetRender {
         selection: nyl_render::gitops::tree::partial::PublicationSelection::default(),
         publication_base: None,
         worktree,
         project_dir,
-        target,
+        target: &target,
+        inline,
+        owner,
         inputs: &inputs,
         cache_dir: Some(cache_dir),
         resource_catalogue: catalogue.clone(),
@@ -104,7 +173,7 @@ pub(crate) fn resolution_inputs(
     ctx: &ResolutionContext<'_>,
     spec: &Value,
 ) -> DriverResult<(RenderedTarget, KeyInputs)> {
-    let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
+    let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec, None)?;
     let inputs = KeyInputs {
         files: rendered.input_record.clone(),
         fingerprint: uncacheable_fingerprint(rendered.cacheable, ctx.now),
@@ -146,6 +215,8 @@ enum Rebuilt {
 enum Attempted<R> {
     Done(R),
     StateChanged(String),
+    /// The prefix is owned by another unit incarnation that still exists.
+    Fenced(String),
 }
 
 /// The time a call may spend, from the context's timeout, measured from its start.
@@ -190,6 +261,7 @@ fn with_retries<T, P, R>(
                 Err(error) => return Err(DriverError::after_effects(format!("cannot {pushed}: {error}"))),
             },
             Err(error) if error.is_stale_publication() => error,
+            Err(error) if error.is_owner_fenced() => return Ok(Attempted::Fenced(error.to_string())),
             Err(error) => {
                 return Err(DriverError::before_effects(format!(
                     "cannot prepare {prepared}: {error}"
@@ -265,6 +337,18 @@ fn state_changed(message: &str) -> Outcome {
     }
 }
 
+/// The outcome of a call that ended without publishing or removing anything
+/// because another unit incarnation still owns the prefix. Nothing was
+/// written, and the next run reads state again, so it retries on its own once
+/// the other incarnation is gone.
+fn fenced(message: &str) -> Outcome {
+    Outcome::Failed {
+        category: FailureCategory::Ownership,
+        retryable: true,
+        message: format!("NYL-KUBERNETES-OWNER-FENCED: {message}"),
+    }
+}
+
 /// What `plan` reports: the destroy a deleting unit's two phases amount to,
 /// or whether the published tree is current for the execution key.
 pub(crate) fn plan(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> PlanReport {
@@ -307,8 +391,18 @@ pub(crate) fn publish(
     outputs: Value,
 ) -> DriverResult<Outcome> {
     let spec = resolved_spec(unit)?;
+    let owner = unit_owner(unit)?;
     publish_with(
-        &|| render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec),
+        &|| {
+            render(
+                catalogue,
+                &ctx.worktree,
+                &ctx.project_dir,
+                &ctx.cache_dir,
+                spec,
+                Some(owner.clone()),
+            )
+        },
         ctx,
         unit,
         outputs,
@@ -340,17 +434,19 @@ fn publish_with(
     // (PATH and the unit's declared passthrough), never from the process
     // environment.
     let variable = |name: &str| ctx.env.get(name).cloned();
+    let takeover = fence(ctx);
     let published = with_retries(
         &Budget::new(ctx),
         &mut rendered,
         ("the publication", "publish the tree"),
-        |tree| prepare_target_publication(tree, &ctx.project_dir, &message, &author, &variable),
+        |tree| prepare_target_publication_fenced(tree, &ctx.project_dir, &message, &author, &variable, Some(&takeover)),
         nyl_render::gitops::publication::PreparedTarget::push,
         rebuild_from_state(render, &before, stateful, Ok),
     )?;
     let published = match published {
         Attempted::Done(published) => published,
         Attempted::StateChanged(message) => return Ok(state_changed(&message)),
+        Attempted::Fenced(message) => return Ok(fenced(&message)),
     };
     Ok(Outcome::Succeeded {
         versions: std::collections::BTreeMap::new(),
@@ -388,8 +484,19 @@ pub(crate) fn teardown(
 ) -> DriverResult<Outcome> {
     let author = author(ctx, unit)?;
     let spec = resolved_spec(unit)?;
-    let render = || render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec);
+    let owner = unit_owner(unit)?;
+    let render = || {
+        render(
+            catalogue,
+            &ctx.worktree,
+            &ctx.project_dir,
+            &ctx.cache_dir,
+            spec,
+            Some(owner.clone()),
+        )
+    };
     let variable = |name: &str| ctx.env.get(name).cloned();
+    let takeover = fence(ctx);
     if ctx.teardown_wait.is_some() {
         // Phase 2: the wait ended; remove exactly what the index owns. The
         // render only identifies the owner and the destination, so a moved
@@ -399,14 +506,17 @@ pub(crate) fn teardown(
             "nyl: teardown {}/{}: remove the owned files",
             unit.unit.environment, unit.unit.name
         );
-        with_retries(
+        let removed = with_retries(
             &Budget::new(ctx),
             &mut rendered,
             ("the removal", "remove the tree"),
-            |tree| prepare_target_removal(tree, &ctx.project_dir, &message, &author, &variable),
+            |tree| prepare_target_removal_fenced(tree, &ctx.project_dir, &message, &author, &variable, Some(&takeover)),
             nyl_render::gitops::publication::PreparedRemoval::push,
             |_| Ok(Rebuilt::Ready),
         )?;
+        if let Attempted::Fenced(message) = removed {
+            return Ok(fenced(&message));
+        }
         return Ok(Outcome::Succeeded {
             versions: std::collections::BTreeMap::new(),
             outputs: json!({}),
@@ -439,13 +549,14 @@ pub(crate) fn teardown(
         &Budget::new(ctx),
         &mut phase1,
         ("phase 1 of the teardown", "publish phase 1 of the teardown"),
-        |tree| prepare_target_publication(tree, &ctx.project_dir, &message, &author, &variable),
+        |tree| prepare_target_publication_fenced(tree, &ctx.project_dir, &message, &author, &variable, Some(&takeover)),
         nyl_render::gitops::publication::PreparedTarget::push,
         rebuild_from_state(&render, &before, stateful, phase1_of),
     )?;
     let published = match published {
         Attempted::Done(published) => published,
         Attempted::StateChanged(message) => return Ok(state_changed(&message)),
+        Attempted::Fenced(message) => return Ok(fenced(&message)),
     };
     let commit = CommitId::new(published.commit)
         .map_err(|error| DriverError::after_effects(format!("phase 1 commit: {error}")))?;
@@ -697,7 +808,14 @@ mod tests {
         ctx.deadline = ctx.now + chrono::Duration::minutes(10);
         let renders = std::cell::Cell::new(0);
         let render = || {
-            let rendered = super::render(&catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, &spec);
+            let rendered = super::render(
+                &catalogue,
+                &ctx.worktree,
+                &ctx.project_dir,
+                &ctx.cache_dir,
+                &spec,
+                Some(unit_owner(&unit).unwrap()),
+            );
             renders.set(renders.get() + 1);
             if renders.get() == 1 {
                 concurrent();

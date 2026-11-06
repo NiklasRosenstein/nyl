@@ -17,7 +17,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ids::{ChangeDigest, CommitId, EnvironmentName, UnitAddress};
+use super::codes::Finding;
+use super::ids::{ChangeDigest, CommitId, EnvironmentName, Uid, UnitAddress, UnitName};
 use super::ports::CommitIdentity;
 use super::state::{ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, ObservedUnit, Receipt};
 use super::time::Timestamp;
@@ -479,6 +480,9 @@ pub struct ExecutionContext<'a> {
     /// the driver runs phase 2; `None` while the wait has not ended, and for
     /// every other call. Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit), Teardown.
     pub teardown_wait: Option<WaitCompletion>,
+    /// Whether other unit incarnations still exist in their environments'
+    /// state, for a driver that fences resources by owner.
+    pub incarnations: &'a dyn IncarnationDirectory,
 }
 
 /// How a teardown's wait after phase 1 ended, decided by the orchestration
@@ -502,24 +506,71 @@ pub enum WaitCompletion {
     Incomplete,
 }
 
-/// A target's settings that decide whether its teardown can complete,
-/// read statically by its driver. Contract: [Kubernetes publication
-/// unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
-/// teardown readiness; `rules::teardown_readiness` evaluates it.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TeardownSettings {
-    /// Whether the catalog prunes removed workload Applications on its own
-    /// (`syncPolicy.automated` with `prune: true`); `None` when a parent the
-    /// project writes syncs it, which Nyl cannot see (`external: not checked`).
-    pub catalog_prunes: Option<bool>,
-    /// The catalog's `applicationDeletionPolicy`, such as `Foreground` or `Orphan`; `None` when external.
-    pub application_deletion_policy: Option<String>,
-    /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
-    pub namespace_delete_policies: BTreeMap<String, String>,
-    /// Whether a parent owns the target's catalog, so phase 2 removes the
-    /// catalog Application and AppProjects too.
-    pub catalog_owned_by_parent: bool,
+/// What a driver's static check of its unit's teardown found: the preflight
+/// every teardown runs, and the readiness `status`, `plan`, and `get units
+/// -o wide` show. The driver evaluates its own requirements; shared code
+/// only coordinates and displays the findings, which carry stable codes and
+/// the setting that fixes each.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeardownReadiness {
+    /// Unmet requirements that decide whether the teardown can succeed. They
+    /// keep the unit pending teardown unless the invocation passes
+    /// `--allow-incomplete`.
+    pub blocking: Vec<Finding>,
+    /// What a teardown that succeeds leaves behind.
+    pub remnants: Vec<Finding>,
+    /// Requirements the driver cannot see, which never block.
+    pub not_checked: Vec<String>,
+}
+
+impl TeardownReadiness {
+    /// Whether no blocking requirement is unmet.
+    pub fn ready(&self) -> bool {
+        self.blocking.is_empty()
+    }
+}
+
+/// Whether a unit incarnation still exists in its environment's state.
+///
+/// A driver that fences a native resource by owner asks this about the
+/// incarnation it finds recorded as the owner, so a unit takes a resource
+/// over only once the previous owner is gone from state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncarnationStatus {
+    /// The environment's state holds the incarnation, active, held,
+    /// deleting, or retained.
+    Exists,
+    /// The environment's state holds no such incarnation: its teardown
+    /// completed, or it was released with `nyl state forget`.
+    Gone,
+    /// State could not tell, such as an environment that is not declared or
+    /// a state location that cannot be read. A driver fails closed.
+    Unknown(String),
+}
+
+/// The lookup of [`IncarnationStatus`] for one invocation. Contract:
+/// [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// ownership index.
+pub trait IncarnationDirectory: Send + Sync {
+    /// Whether incarnation `uid` of unit `unit` still exists in `environment`.
+    fn status(&self, environment: &EnvironmentName, unit: &UnitName, uid: &Uid) -> IncarnationStatus;
+}
+
+/// A directory that knows nothing: every incarnation is
+/// [`IncarnationStatus::Unknown`]. For calls that never take an owned
+/// resource over.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnknownIncarnations;
+
+impl IncarnationDirectory for UnknownIncarnations {
+    fn status(&self, environment: &EnvironmentName, unit: &UnitName, _uid: &Uid) -> IncarnationStatus {
+        IncarnationStatus::Unknown(format!(
+            "this call has no access to the state of environment {environment} for unit {unit}"
+        ))
+    }
 }
 
 /// What resolution provides to compute execution-key inputs.
@@ -654,15 +705,15 @@ pub trait Driver: Send + Sync {
         let _ = (ctx, unit);
         Ok(Supported::Unsupported)
     }
-    /// The settings that decide whether the unit's teardown can complete,
-    /// for the teardown preflight and the readiness `status`, `get units -e
-    /// -o wide`, `plan`, and `reconcile` report; unsupported by default (no
-    /// requirements). Read statically from the stored desired document
-    /// alone (resolution records the target's effective settings in the
-    /// resolved spec), so commands that never render source, such as
-    /// `status`, can ask it, and the answer matches what a teardown of that
-    /// document would do.
-    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+    /// What the driver finds, from the stored desired document alone, about
+    /// whether the unit's teardown can complete: the readiness the teardown
+    /// preflight, `status`, `get units -e -o wide`, `plan`, and `reconcile`
+    /// report. Unsupported by default (no requirements). Read statically, so
+    /// commands that never render source, such as `status`, can ask it, and
+    /// the answer matches what a teardown of that document would do; a
+    /// driver records what it needs at resolution
+    /// ([`KeyInputs::recorded`]).
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let _ = unit;
         Ok(Supported::Unsupported)
     }
@@ -807,48 +858,5 @@ mod record_tests {
             );
         }
         assert_eq!(spec, json!({"target": "dev", "nested": {"keep": 1}}));
-    }
-
-    /// Catches a serde rename of `TeardownSettings` breaking every stored
-    /// publication: the recorded settings live in desired documents, which
-    /// are read back strictly, so their camelCase keys are a persisted format.
-    #[test]
-    fn test_recorded_teardown_settings_have_a_pinned_json_shape() {
-        let settings = TeardownSettings {
-            catalog_prunes: Some(true),
-            application_deletion_policy: Some("Foreground".to_owned()),
-            namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
-            catalog_owned_by_parent: false,
-        };
-        let stored = json!({
-            "catalogPrunes": true,
-            "applicationDeletionPolicy": "Foreground",
-            "namespaceDeletePolicies": {"web": "Confirm"},
-            "catalogOwnedByParent": false,
-        });
-        assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
-        assert_eq!(serde_json::from_value::<TeardownSettings>(stored).unwrap(), settings);
-        // A catalog a parent owns records the settings Nyl cannot see as null.
-        let external = json!({
-            "catalogPrunes": null,
-            "applicationDeletionPolicy": null,
-            "namespaceDeletePolicies": {},
-            "catalogOwnedByParent": true,
-        });
-        assert_eq!(
-            serde_json::from_value::<TeardownSettings>(external.clone()).unwrap(),
-            TeardownSettings {
-                catalog_owned_by_parent: true,
-                ..TeardownSettings::default()
-            }
-        );
-        assert_eq!(
-            serde_json::to_value(TeardownSettings {
-                catalog_owned_by_parent: true,
-                ..TeardownSettings::default()
-            })
-            .unwrap(),
-            external
-        );
     }
 }

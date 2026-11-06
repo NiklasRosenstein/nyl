@@ -311,6 +311,7 @@ fn publish_compiled(
             ignore_project_scope_contraction: args.project_scope.ignore_project_scope_contraction,
             cluster_kubernetes: compiled.cluster.spec.kubernetes.as_ref(),
             publication_base: compiled.publication_base.as_ref(),
+            takeover: None,
             auth: &auth,
         },
         &message,

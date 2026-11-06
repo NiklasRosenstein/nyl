@@ -92,6 +92,11 @@ pub enum NylError {
     #[error("{0}")]
     PublicationMoved(String),
 
+    /// A published prefix is owned by another orchestration unit
+    /// incarnation. See [`NylError::is_owner_fenced`].
+    #[error("{0}")]
+    OwnerFenced(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -178,6 +183,12 @@ impl NylError {
     /// modified outside Nyl.
     pub fn is_owned_file_modified(&self) -> bool {
         matches!(self, NylError::OwnedFileModified(_))
+    }
+
+    /// Whether a publication or removal was refused because the prefix's
+    /// ownership index names another owner.
+    pub fn is_owner_fenced(&self) -> bool {
+        matches!(self, NylError::OwnerFenced(_))
     }
 
     /// Whether a publication lost its race for the branch head, before the

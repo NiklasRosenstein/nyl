@@ -7201,6 +7201,8 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
     Repository::clone(fixture.path().to_str().unwrap(), checkout.path()).unwrap();
     change_partial_api(&checkout);
     let rendered = render_target(&TargetRender {
+        inline: None,
+        owner: None,
         resource_catalogue: nyl::resource_catalogue(),
         worktree: checkout.path(),
         project_dir: checkout.path(),
@@ -7280,6 +7282,35 @@ fn partial_index_format_roundtrips_versioned_golden_and_legacy_envelope() {
     legacy.as_object_mut().unwrap().remove("compilation");
     let index = parse_index(&serde_json::to_vec(&legacy).unwrap(), "index-v2.json").unwrap();
     assert_eq!(serde_json::to_value(index).unwrap(), legacy);
+}
+
+/// Catches a change to version 4, the index orchestrated publications write
+/// (version 3 plus the owning unit incarnation): it must read and write back
+/// byte for byte, and its older versions must stay readable so the first
+/// orchestrated publication over them can migrate them.
+#[test]
+fn owned_index_format_roundtrips_its_versioned_golden_and_reads_the_older_versions() {
+    use nyl_render::gitops::reconcile::parse_index;
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/partial-publication/index-v4.json")).unwrap();
+    let index = parse_index(&serde_json::to_vec(&golden).unwrap(), "index-v4.json").unwrap();
+    assert_eq!(serde_json::to_value(&index).unwrap(), golden);
+    assert_eq!(
+        golden["owner"],
+        serde_json::json!({"environment": "dev", "unit": "kubernetes", "uid": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90"})
+    );
+
+    // Dropping the owner leaves exactly the version 3 golden, which stays readable.
+    let version3: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/partial-publication/index-v3.json")).unwrap();
+    let mut without_owner = golden;
+    without_owner["version"] = 3.into();
+    without_owner.as_object_mut().unwrap().remove("owner");
+    assert_eq!(without_owner, version3);
+    assert!(parse_index(&serde_json::to_vec(&version3).unwrap(), "index-v3.json")
+        .unwrap()
+        .owner
+        .is_none());
 }
 
 #[test]
@@ -7383,6 +7414,8 @@ fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
     // The shared publication API also keeps the published generation when only
     // imperative settings and the source revision change.
     let rendered = render_target(&TargetRender {
+        inline: None,
+        owner: None,
         resource_catalogue: nyl::resource_catalogue(),
         worktree: fixture.path(),
         project_dir: fixture.path(),

@@ -8,9 +8,8 @@
 
 mod publication_world;
 
-use std::collections::BTreeMap;
-
-use nyl_core::orchestration::driver::{Driver, Supported, TeardownSettings};
+use nyl_core::orchestration::codes::Code;
+use nyl_core::orchestration::driver::{Driver, Supported};
 use nyl_core::orchestration::ids::ExecutionKey;
 use nyl_units::fake::{FakePublication, Script};
 use publication_world::{conformance, desired, spec};
@@ -46,9 +45,11 @@ fn test_fake_publication_plans_a_deleting_unit_as_destroy() {
 }
 
 /// Catches `status` or `plan` showing readiness from anything but the
-/// stored document, or claiming requirements for a document that records none.
+/// stored document, or claiming requirements for a document that records
+/// none: the fake evaluates the settings a scenario records with the real
+/// driver's readiness rules.
 #[test]
-fn test_fake_publication_teardown_settings_come_from_the_stored_document() {
+fn test_fake_publication_readiness_comes_from_the_stored_document() {
     let driver = fake();
     let mut recorded = spec();
     recorded["teardownSettings"] = json!({
@@ -58,30 +59,30 @@ fn test_fake_publication_teardown_settings_come_from_the_stored_document() {
         "catalogOwnedByParent": true,
     });
     let unit = desired(recorded, ExecutionKey::from_digest_of(b"key"));
-    assert_eq!(
-        driver.teardown_settings(&unit).unwrap(),
-        Supported::Supported(TeardownSettings {
-            catalog_prunes: Some(false),
-            application_deletion_policy: Some("Foreground".to_owned()),
-            namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
-            catalog_owned_by_parent: true,
-        })
-    );
-
-    // A parent-owned catalog records its settings as external.
-    let mut external = spec();
-    external["teardownSettings"] = json!({"catalogOwnedByParent": true});
-    let unit = desired(external, ExecutionKey::from_digest_of(b"key"));
-    let Supported::Supported(settings) = driver.teardown_settings(&unit).unwrap() else {
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
         panic!("recorded settings are supported");
     };
     assert_eq!(
-        (settings.catalog_prunes, settings.application_deletion_policy),
-        (None, None)
+        readiness
+            .blocking
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownCatalogManualSync, Code::TeardownNamespaceConfirm]
     );
 
+    // A parent-owned catalog records its settings as external: nothing blocks.
+    let mut external = spec();
+    external["teardownSettings"] = json!({"catalogOwnedByParent": true});
+    let unit = desired(external, ExecutionKey::from_digest_of(b"key"));
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
+        panic!("recorded settings are supported");
+    };
+    assert!(readiness.ready());
+    assert_eq!(readiness.not_checked.len(), 2);
+
     let unit = desired(spec(), ExecutionKey::from_digest_of(b"key"));
-    assert_eq!(driver.teardown_settings(&unit).unwrap(), Supported::Unsupported);
+    assert_eq!(driver.teardown_readiness(&unit).unwrap(), Supported::Unsupported);
 }
 
 /// Catches a stored `teardownWait` that the wait rule cannot read, such

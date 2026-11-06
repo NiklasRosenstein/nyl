@@ -20,7 +20,6 @@ pub mod sources;
 pub mod state_location;
 pub mod takeover;
 pub mod teardown;
-pub mod teardown_readiness;
 pub mod teardown_wait;
 pub mod transitions;
 pub mod unit_state;
