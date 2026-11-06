@@ -3138,19 +3138,37 @@ pub(super) fn render_effective_control(
 /// the only way a selected group leaves a target without an error: a template
 /// that fails to render, or renders anything but one ApplicationGroup with the
 /// static identity, is an error.
+///
+/// Targets selected the group by its literal labels before rendering, so the
+/// rendered `metadata.labels` must equal them; this is where that invariant is
+/// enforced for every reader of discovery's labels.
 pub(super) fn render_effective_group(
     discovered: &super::DiscoveredGitOpsResource,
     session: &RenderSession,
 ) -> Result<Option<ApplicationGroup>> {
-    match render_effective_control(discovered, session)? {
-        None => Ok(None),
-        Some(GitOpsResource::ApplicationGroup(group)) => Ok(Some(*group)),
-        Some(_) => Err(NylError::config(format!(
-            "GitOps resource {} document {} is not an ApplicationGroup after target rendering",
-            discovered.source_path.display(),
-            discovered.document_index
-        ))),
+    // `render_effective_control` already checks that the kind is unchanged, so
+    // the other variants are unreachable; the error keeps this total.
+    let group = match render_effective_control(discovered, session)? {
+        None => return Ok(None),
+        Some(GitOpsResource::ApplicationGroup(group)) => *group,
+        Some(_) => {
+            return Err(NylError::config(format!(
+                "GitOps resource {} document {} is not an ApplicationGroup after target rendering",
+                discovered.source_path.display(),
+                discovered.document_index
+            )))
+        }
+    };
+    if group.metadata.labels != discovered.static_labels {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {:?} renders metadata.labels {:?}, but targets selected it by the literal labels {:?} in {}; write metadata.labels literally, without templating, because targets select on them before rendering",
+            group.metadata.name,
+            group.metadata.labels,
+            discovered.static_labels,
+            discovered.source_path.display()
+        )));
     }
+    Ok(Some(group))
 }
 
 struct ResolvedGroupSource {
@@ -4281,6 +4299,36 @@ spec:
             let error = compile_production(&directory).unwrap_err().to_string();
             assert!(error.contains(fragment), "{error}");
         }
+    }
+
+    /// Targets select on the labels discovery read; a group whose rendered labels
+    /// differ from them is an error rather than a silently different selection.
+    #[test]
+    fn test_selected_group_whose_rendered_labels_differ_from_the_selected_ones_is_an_error() {
+        // The labels sit below a template expression, which discovery's scanner
+        // cannot see through: it reads none, the render has `environment`.
+        let document = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: workloads\n{{ \"  labels: {environment: production}\" }}\nspec:\n  applicationNamespace: argocd\n";
+        let directory = templated_group_project(document);
+        let inventory =
+            crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
+        let discovered = inventory
+            .get(GitOpsResourceKind::ApplicationGroup, "workloads")
+            .unwrap();
+        assert!(discovered.static_labels.is_empty());
+        let Some(GitOpsResource::DeploymentTarget(target)) = &inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .unwrap()
+            .resource
+        else {
+            panic!("the target is static");
+        };
+        let (cluster, _) = resolve_cluster(&inventory, target.cluster_name()).unwrap();
+        let session =
+            RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster).unwrap();
+
+        let error = render_effective_group(discovered, &session).unwrap_err().to_string();
+        assert!(error.contains("targets selected it by the literal labels"), "{error}");
+        assert!(error.contains("environment"), "{error}");
     }
 
     #[cfg(unix)]

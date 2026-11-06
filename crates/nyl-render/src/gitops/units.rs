@@ -958,9 +958,20 @@ spec:
     }
 
     #[test]
+    fn test_discovery_rejects_a_conditional_label() {
+        let conditional = "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: seed\n  labels:\n    dev: 'true'\n{% if true %}    extra: x\n{% endif %}\nspec: {}\n";
+        let worktree = project(&[("platform.yaml", PLATFORM), ("seed.yaml", conditional)]);
+        let error = render(&worktree, "dev").unwrap_err().0;
+        assert!(error.contains("metadata.labels must be literal"), "{error}");
+        assert!(error.contains("seed.yaml document 1"), "{error}");
+    }
+
+    #[test]
     fn test_render_rejects_a_changed_envelope() {
-        let changed = "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: seed\n  labels:\n    dev: 'true'\n{% if true %}    extra: x\n{% endif %}\nspec: {}\n";
-        let worktree = project(&[("platform.yaml", PLATFORM), ("seed.yaml", changed)]);
+        // The scanner cannot see the labels the expression writes.
+        let changed = "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: seed\n{{ \"  labels: {dev: 'true'}\" }}\nspec: {}\n";
+        let platform = PLATFORM.replace("    matchLabels: {dev: 'true'}\n", "    matchLabels: {}\n");
+        let worktree = project(&[("platform.yaml", &platform), ("seed.yaml", changed)]);
         let error = render(&worktree, "dev").unwrap_err().0;
         assert!(error.contains("rendering changed its envelope"), "{error}");
         assert!(error.contains("seed.yaml document 1"), "{error}");

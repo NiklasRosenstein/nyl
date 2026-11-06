@@ -188,9 +188,12 @@ result that is not one ApplicationGroup with the same identity is an error;
 Nyl never drops a selected group silently. Its API version, kind, and metadata
 name remain static, and so do its `metadata.labels`, which targets select on
 before rendering. A document that is valid YAML before rendering may write them
-in any form; one that is not, such as a spec wrapped in `{% if %}`, must write
-them as a block mapping or a one-line `{key: value}` mapping, and Nyl rejects
-any other form instead of reading it as no labels. Remote
+in any YAML form, with string values and no template syntax. One that is not,
+such as a spec wrapped in `{% if %}`, must write them directly under `metadata`
+as a block mapping of plain `key: value` lines or a one-line `{key: value}`
+mapping, with no template syntax among them or on an unindented line right after
+a block, and no anchors, aliases, or merge keys. Nyl rejects any other form instead of reading it as fewer labels, and
+rejects a group whose rendered labels differ from the literal ones. Remote
 source coordinates and commit locks must remain statically parseable for
 `nyl update source-locks`.
 
