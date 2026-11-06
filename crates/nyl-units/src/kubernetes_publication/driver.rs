@@ -260,15 +260,12 @@ impl Driver for KubernetesPublicationDriver {
             .map_err(|error| DriverError::before_effects(format!("cannot record the teardown settings: {error}")))?;
         inputs.recorded.insert(TEARDOWN_SETTINGS.to_owned(), settings);
         if observe::observes(spec) {
-            inputs
-                .recorded
-                .insert(RECONCILER.to_owned(), observe::recorded(&rendered)?);
+            let (facts, unkeyed) = observe::recorded(&rendered)?;
+            inputs.recorded.insert(RECONCILER.to_owned(), facts);
             // How the reconciler is read (the declared access, the
             // control-plane context, the URL the branch is read from) changes
             // no result: only what the target expects of it keys the unit.
-            inputs
-                .excluded_fields
-                .extend(observe::UNKEYED.iter().map(|field| (*field).to_owned()));
+            inputs.excluded_fields.extend(unkeyed);
         }
         // What an observation reads must be rendered by the target: the
         // owning Application and the workload Cluster are recorded, and the

@@ -44,18 +44,6 @@ use super::reconciler::{reader, ReadRequest};
 /// The pointer, in the resolved spec, of the recorded reconciler facts.
 pub(super) const RECONCILER: &str = "/reconciler";
 
-/// The recorded facts that do not key the unit: they say how the reconciler
-/// and the publication branch are read, never what the unit produces, so
-/// renaming a kube context, moving the API server, or changing the Cluster's
-/// access never re-executes the unit. The stored document still carries
-/// them. Only the deployments and anchors the render derives, with the
-/// reconciler's identity and the publication's branch and prefix, key it.
-pub(super) const UNKEYED: [&str; 3] = [
-    "/reconciler/access",
-    "/reconciler/context",
-    "/reconciler/publication/url",
-];
-
 /// The longest one reading of the reconciler takes.
 const READING: Duration = Duration::from_secs(30);
 
@@ -65,13 +53,22 @@ pub(super) fn observes(spec: &Value) -> bool {
 }
 
 /// The facts a unit records when it observes: the JSON of
-/// [`ReconcilerFacts`] for `rendered`.
-pub(super) fn recorded(rendered: &RenderedTarget) -> DriverResult<Value> {
+/// [`ReconcilerFacts`] for `rendered`, and the recorded fields that do not key
+/// the unit. They say how the reconciler and the publication branch are read,
+/// never what the unit produces, so renaming a kube context, moving the API
+/// server, or changing the Cluster's access never re-executes the unit; the
+/// stored document still carries them. Which fields those are is the
+/// reconciler kind's ([`ReconcilerFacts::unkeyed`]); only the deployments and
+/// anchors the render derives, with the reconciler's identity and the
+/// publication's branch and prefix, key the unit.
+pub(super) fn recorded(rendered: &RenderedTarget) -> DriverResult<(Value, Vec<String>)> {
     let facts = ReconcilerFacts::of(rendered).map_err(|error| {
         DriverError::before_effects(format!("cannot read the reconciler facts of the target: {error}"))
     })?;
-    serde_json::to_value(facts)
-        .map_err(|error| DriverError::before_effects(format!("cannot record the reconciler facts: {error}")))
+    let unkeyed = facts.unkeyed(RECONCILER);
+    let facts = serde_json::to_value(facts)
+        .map_err(|error| DriverError::before_effects(format!("cannot record the reconciler facts: {error}")))?;
+    Ok((facts, unkeyed))
 }
 
 pub(super) fn facts_of(unit: &DesiredUnit) -> Result<ReconcilerFacts, String> {
