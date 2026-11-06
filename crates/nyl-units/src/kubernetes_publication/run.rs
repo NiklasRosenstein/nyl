@@ -907,7 +907,6 @@ mod tests {
         let catalogue = crate::fake::test_catalogue();
         let spec = json!({
             "target": "dev",
-            "mode": "publish",
             "releases": {"web/web": {"image": "registry.invalid:5000/web@sha256:0123"}}
         });
         let unit = world::desired(

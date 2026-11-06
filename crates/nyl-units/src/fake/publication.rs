@@ -4,8 +4,8 @@
 //! The real driver ([`crate::kubernetes_publication`]) is the built-in kind.
 //! This fake delegates every publish and teardown to the same operations, so
 //! it publishes the same bytes, and adds what a scenario needs from a test
-//! kind: scripted outcomes ([`Script`]), `mode: observe` (answered by the
-//! fake Argo CD observer, [`super::FakeObserver`], and by scripted observed
+//! kind: scripted outcomes ([`Script`]), `observe: {}` (answered by the
+//! fake reconciler observer, [`super::FakeObserver`], and by scripted observed
 //! values), and `teardownSettings`
 //! that a scenario declares.
 //!
@@ -13,7 +13,7 @@
 //! and [Artifacts](../../../../design/orchestration-core.md#artifacts);
 //! [Fake kinds](../../../../design/reference-scenarios.md#fake-kinds).
 //!
-//! After resolution the spec is `{target, mode: publish|observe,
+//! After resolution the spec is `{target, observe?: {},
 //! teardownWait?, teardownSettings?, releases: {"<group>/<release>":
 //! {<input>: <value>}}}`. The execution key's inputs are the render's
 //! portable input record, so a change to any file the target reads, or to a
@@ -44,7 +44,7 @@ use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
     build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unit_target,
-    validate_teardown_wait,
+    validate_observe,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -105,7 +105,7 @@ impl Driver for FakePublication {
             detect_drift: true,
             teardown: true,
             build: true,
-            observed_values: spec.get("mode").and_then(Value::as_str) == Some("observe"),
+            observed_values: spec.get("observe").is_some(),
             ..Capabilities::default()
         }
     }
@@ -125,7 +125,7 @@ impl Driver for FakePublication {
             "required": ["target"],
             "properties": {
                 "target": {"type": ["string", "object"]},
-                "mode": {"type": "string", "enum": ["publish", "observe"]},
+                "observe": {"type": "object", "additionalProperties": false},
                 "teardownWait": {
                     "type": "object",
                     "required": ["strategy"],
@@ -165,14 +165,7 @@ impl Driver for FakePublication {
             Ok(PublicationTarget::Inline(inline)) => inline.validate().map_err(|error| error.to_string())?,
             Err(message) => return Err(message),
         }
-        match spec.get("mode") {
-            None => {}
-            Some(Value::String(mode)) if mode == "publish" || mode == "observe" => {}
-            Some(other) => return Err(format!("spec.mode must be publish or observe, got {other}")),
-        }
-        if let Some(wait) = spec.get("teardownWait") {
-            validate_teardown_wait(wait)?;
-        }
+        validate_observe(spec.as_object().expect("a mapping"))?;
         if let Some(settings) = spec.get("teardownSettings") {
             Self::recorded_settings(settings)?;
         }
@@ -329,12 +322,15 @@ mod tests {
     fn test_validate_spec_checks_field_types() {
         let driver = FakePublication::new(Script::new(), crate::fake::test_catalogue());
         assert!(driver
-            .validate_spec(&json!({"target": "dev", "mode": "publish", "releases": {"web/web": {"image": "x"}}}))
+            .validate_spec(&json!({"target": "dev", "observe": {}, "releases": {"web/web": {"image": "x"}}}))
             .is_ok());
-        assert!(driver.validate_spec(&json!({"mode": "publish"})).is_err());
+        assert!(driver.validate_spec(&json!({"observe": {}})).is_err());
         assert!(driver.validate_spec(&json!({"target": 1})).is_err());
         assert!(driver
-            .validate_spec(&json!({"target": "dev", "mode": "apply"}))
+            .validate_spec(&json!({"target": "dev", "observe": {"interval": "1m"}}))
+            .is_err());
+        assert!(driver
+            .validate_spec(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}}))
             .is_err());
         assert!(driver.validate_spec(&json!({"target": "dev", "releases": []})).is_err());
         assert!(driver

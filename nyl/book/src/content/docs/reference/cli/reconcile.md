@@ -244,7 +244,7 @@ Besides the codes above, a reconcile reports:
 | `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read, so the fence holds. Declare the environment again and tear its unit down, or release the prefix as the same page describes. |
 | `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published, and nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile again. |
 | `NYL-KUBERNETES-OBSERVATION-UNOWNED` | A publication observes a resource its target does not render. Observe a resource one of the target's Releases renders. |
-| `NYL-OBSERVATIONS-UNSUPPORTED` | A unit declares `observations`, but its kind cannot read observed values for its spec, such as a Command, or a publication in `mode: publish`. |
+| `NYL-OBSERVATIONS-UNSUPPORTED` | A unit declares `observations`, but its kind cannot read observed values for its spec, such as a Command, or a publication that does not declare `observe: {}`. |
 | `NYL-OBSERVATION-PENDING` | A consumer waits for an observed value that its producer's current receipt has none of yet. Run `nyl observe` or `nyl reconcile` once the system holds it, or give the producer an `observationWait`. |
 | `NYL-OBSERVATION-FAILED` | An observed value could not be read; the last recorded value stays usable. Fix the cause, such as missing credentials. |
 | `NYL-OBSERVATION-CHANGED` | Reported by `nyl status` and `nyl observe`: an observed value changed or arrived, so its consumers are ready for the next reconcile. |

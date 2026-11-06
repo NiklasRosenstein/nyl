@@ -289,7 +289,7 @@ mod tests {
     }
 
     fn unit(teardown_wait: &serde_json::Value) -> DesiredUnit {
-        let spec = json!({"target": "dev", "mode": "publish", "teardownWait": teardown_wait});
+        let spec = json!({"target": "dev", "teardownWait": teardown_wait});
         DesiredUnit {
             api_version: StateV1,
             kind: DesiredUnitKind,

@@ -129,7 +129,6 @@ impl World {
 pub fn spec() -> Value {
     json!({
         "target": "dev",
-        "mode": "publish",
         "releases": {
             "web/web": {
                 "image": "registry.invalid:5000/web@sha256:0123",
