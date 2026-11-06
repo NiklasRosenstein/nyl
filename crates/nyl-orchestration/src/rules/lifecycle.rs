@@ -10,6 +10,8 @@ use nyl_core::orchestration::state::{
 
 /// What happened to a unit's lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A receipt is large and an event is a short-lived value, one per transition, so boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// The unit left the ownership set (`omission`, `expired`) or its kind
     /// changed (`kind-change`), with the intent of its deletion policy.

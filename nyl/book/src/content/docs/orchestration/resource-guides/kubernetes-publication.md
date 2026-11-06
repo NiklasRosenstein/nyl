@@ -407,8 +407,11 @@ manifest, and no environment owns the catalog, so it is not refused as
 `NYL-KUBERNETES-BUILD-TARGET-OWNED`; the dirty-source and identity refusals
 apply. A target that shares no catalog fails with
 `NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`. A run's publication only creates the
-manifest, and records `sharedCatalog.result` (`created`, `current`, or
-`differs`) in its `PublishedTree`.
+manifest (by compare-and-swap), and records `sharedCatalog.result` (`created`,
+`current`, or `differs`) in its `PublishedTree`; `differs` also warns with
+`NYL-KUBERNETES-SHARED-CATALOG-DIFFERS`, shown in the run, `plan`, and `status`.
+Another `_nyl/shared/<name>/` tree on the branch refuses with
+`NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`.
 
 `--diff` reads the destination and writes nothing, so it also compares a tree
 that an environment owns. Differences do not change the exit status, as in

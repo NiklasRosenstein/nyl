@@ -260,6 +260,7 @@ impl Driver for FakeInfra {
             outputs,
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
 
@@ -329,6 +330,7 @@ impl Driver for FakeInfra {
             outputs: json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
 

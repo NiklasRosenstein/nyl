@@ -294,6 +294,7 @@ fn receipt(key: &ExecutionKey) -> Receipt {
         provenance: BTreeMap::new(),
         outputs: json!({}),
         artifacts: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -799,7 +800,14 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
         (unit, outcome)
     };
 
-    let (first, outcome) = publish("pr-1", pruning.clone());
+    // Before the manifest exists nothing prunes yet, so the catalog rows are not checked.
+    let before = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    assert_eq!(
+        before.resolved_spec.as_ref().unwrap()["teardownSettings"]["catalogPrunes"],
+        Value::Null
+    );
+
+    let (_, outcome) = publish("pr-1", pruning.clone());
     assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "created");
     let files = world.files("deploy");
     for path in [
@@ -827,10 +835,18 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
             .any(|path| git(&world.bare(), &["show", &format!("deploy:{path}")]).contains("path: pr-1/_nyl/catalog")),
         "the target's tree holds no catalog Application of its own"
     );
-    // Readiness is read from the shared Application, whose catalog the project does not own.
+    // Readiness is read from the shared Application the branch holds, which the project does not own.
+    let first = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
     let settings = first.resolved_spec.as_ref().unwrap()["teardownSettings"].clone();
     assert_eq!(settings["catalogPrunes"], true, "{settings}");
     assert_eq!(settings["catalogOwnedByParent"], true, "{settings}");
+    // A target that declares another manifest is read as published: this one prunes,
+    // whatever the declaration says.
+    let declared = resolved_unit(&driver, &world, preview_spec("pr-3", json!({"name": "previews"})));
+    assert_eq!(
+        declared.resolved_spec.as_ref().unwrap()["teardownSettings"]["catalogPrunes"],
+        true
+    );
 
     // A second target finds the same manifest and writes nothing outside its prefix.
     let head = git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]);
@@ -841,6 +857,18 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
     // A target that renders another manifest leaves the published one alone.
     let (_, outcome) = publish("pr-3", json!({"name": "previews"}));
     assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "differs");
+    let Outcome::Succeeded { warnings, .. } = &outcome else {
+        panic!("the publication succeeds");
+    };
+    assert_eq!(
+        warnings.iter().map(|finding| finding.code).collect::<Vec<_>>(),
+        vec![Code::KubernetesSharedCatalogDiffers]
+    );
+    assert!(
+        warnings[0].fix.contains("--shared-catalog --push"),
+        "{}",
+        warnings[0].fix
+    );
     assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
 
     // The build is the writer: --diff reads, --push replaces.
@@ -892,6 +920,77 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
         error.to_string().contains("NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG"),
         "{error}"
     );
+}
+
+/// Catches teardown readiness trusting the instance's own declaration over
+/// what Argo CD runs: the branch's manifest does not prune, a pull request
+/// declares a pruning one, and the unit must still report that the catalog
+/// does not prune, so its teardown is held instead of orphaning workloads.
+/// Another shared catalog on the branch refuses with the conflict code.
+#[test]
+fn test_readiness_reads_the_published_shared_catalog_and_another_catalog_conflicts() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let unit = resolved_unit(&driver, &world, preview_spec("pr-1", json!({"name": "previews"})));
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+        .unwrap();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let declared = resolved_unit(&driver, &world, preview_spec("pr-2", pruning));
+    let settings = &declared.resolved_spec.as_ref().unwrap()["teardownSettings"];
+    assert_eq!(settings["catalogPrunes"], false, "{settings}");
+    let readiness = driver.teardown_readiness(&declared).unwrap();
+    let Supported::Supported(readiness) = readiness else {
+        panic!("the driver checks readiness");
+    };
+    assert!(
+        readiness
+            .blocking
+            .iter()
+            .any(|finding| finding.code == Code::TeardownCatalogManualSync),
+        "{:?}",
+        readiness.blocking
+    );
+
+    // A renamed catalog leaves the old one on the branch.
+    let error = driver
+        .execution_key_inputs(
+            &ResolutionContext {
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+                source_roots: BTreeMap::default(),
+                environment: EnvironmentName::new("dev").unwrap(),
+                worktree: world.work(),
+                project_dir: world.work().join("nyl"),
+                env: BTreeMap::new(),
+                deadline: chrono::Utc::now(),
+                now: chrono::Utc::now(),
+                tools: &NoTools,
+                cache_dir: world.root.path().join("cache"),
+            },
+            &preview_spec("pr-2", json!({"name": "renamed"})),
+        )
+        .expect_err("two shared catalogs on one branch conflict");
+    assert!(
+        error.to_string().contains("NYL-KUBERNETES-SHARED-CATALOG-CONFLICT"),
+        "{error}"
+    );
+    let outcome = driver.reconcile(
+        &context(&world, DriverOperation::Reconcile, Some(&id)),
+        &unit_with_renamed(&unit),
+    );
+    assert!(outcome.is_err(), "a publication refuses to add a second catalog");
+}
+
+/// `unit` published to a catalog named `renamed`.
+fn unit_with_renamed(
+    unit: &nyl_core::orchestration::state::DesiredUnit,
+) -> nyl_core::orchestration::state::DesiredUnit {
+    let mut renamed = unit.clone();
+    let spec = renamed.resolved_spec.as_mut().unwrap();
+    spec["target"]["inline"]["catalogApplication"]["shared"]["name"] = json!("renamed");
+    renamed.spec = spec.clone();
+    renamed
 }
 
 /// Catches a renamed target publishing a second tree and orphaning the first,

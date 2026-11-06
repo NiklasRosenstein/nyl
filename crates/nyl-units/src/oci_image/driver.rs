@@ -258,6 +258,8 @@ fn tool(
         interactive: false,
     })
 }
+// The error is the call's final `Outcome`, returned as it is.
+#[allow(clippy::result_large_err)]
 fn completed(exit: ToolExit, effects: bool) -> Result<Vec<u8>, Outcome> {
     match exit {
         ToolExit::Exited { code: 0, stdout, .. } => Ok(stdout),
@@ -654,6 +656,7 @@ impl Driver for OciImageDriver {
                 outputs: json!({}),
                 artifacts: vec![artifact],
                 attestations: Vec::new(),
+                warnings: Vec::new(),
             },
             Err(outcome) => outcome,
         }))
@@ -1050,6 +1053,7 @@ mod tests {
                 kind: "ContainerImage".into(),
                 digest: image.digest(),
             }],
+            warnings: Vec::new(),
         };
         *docker.inspection.lock().unwrap() = Some(ToolExit::Exited {
             code: 1,

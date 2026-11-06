@@ -58,6 +58,7 @@ impl Driver for OperatorDriver {
             outputs: serde_json::json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
     fn detect_drift(

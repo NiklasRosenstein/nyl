@@ -693,42 +693,116 @@ pub enum SharedCatalogState {
     Differs(Vec<PathBuf>),
 }
 
+/// What the publication branch holds of a shared catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedCatalogInspection {
+    pub state: SharedCatalogState,
+    /// The Application of the manifest the branch holds at the catalog's prefix.
+    pub published: Option<serde_json::Value>,
+}
+
 /// Compare `shared`, a target's shared catalog tree ([`RenderedTarget::shared_catalog`]),
-/// with the publication branch, reading it and writing nothing. A prefix whose
-/// index names another owner than the catalog refuses with
-/// [`NylError::OwnerFenced`], so nothing mistakes a unit's tree for the catalog's.
+/// with the publication branch, reading it and writing nothing.
+///
+/// - A prefix whose index names another owner than the catalog refuses with
+///   [`NylError::OwnerFenced`], so nothing mistakes a unit's tree for the catalog's.
+/// - Another shared catalog's tree on the branch refuses with
+///   `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`: a catalog that was renamed
+///   leaves the old self-managing Application, whose include pattern still
+///   syncs every target's catalog directory and gives the Applications two owners.
 ///
 /// Contract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).
-pub fn shared_catalog_state(
+pub fn inspect_shared_catalog(
     shared: &RenderedTarget,
     project_dir: &Path,
     variable: &dyn Fn(&str) -> Option<String>,
-) -> Result<SharedCatalogState> {
-    let diff = diff_target_publication(shared, project_dir, variable)?;
+) -> Result<SharedCatalogInspection> {
+    let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
+    let branch = writable_branch_name(&shared.destination.branch)?;
+    let push_url = &shared.destination.push_url;
+    let prefix = shared.destination.path_prefix.as_str();
     let index_bytes = shared
         .files
         .get(Path::new(DEFAULT_INDEX_PATH))
         .ok_or_else(|| NylError::config("the shared catalog tree has no ownership index"))?;
     let expected = parse_index(index_bytes, DEFAULT_INDEX_PATH)?.owner;
-    if let Some(owner) = diff
-        .published_owner
-        .as_ref()
-        .filter(|owner| Some(*owner) != expected.as_ref())
-    {
+    let scratch = tempfile::TempDir::new()?;
+    let repository = Repository::init(scratch.path())
+        .and_then(|repository| {
+            repository.remote("origin", push_url)?;
+            Ok(repository)
+        })
+        .map_err(|error| NylError::config(format!("Failed to read {}: {error}", nyl_git::sanitize_url(push_url))))?;
+    fetch_branch(&repository, push_url, branch, &auth)?;
+    let Some(base) = remote_branch_oid(&repository, branch) else {
+        return Ok(SharedCatalogInspection {
+            state: SharedCatalogState::Missing,
+            published: None,
+        });
+    };
+    let tree = repository
+        .find_commit(base)
+        .and_then(|commit| commit.tree())
+        .map_err(crate::git::GitError::from)?;
+    let own = prefix.rsplit('/').next().unwrap_or_default();
+    if let Ok(entry) = tree.get_path(Path::new(super::shared_catalog::SHARED_ROOT)) {
+        if let Ok(root) = entry.to_object(&repository).and_then(|object| object.peel_to_tree()) {
+            let others = root
+                .iter()
+                .map(|entry| String::from_utf8_lossy(entry.name_bytes()).into_owned())
+                .filter(|name| name != own)
+                .collect::<Vec<_>>();
+            if !others.is_empty() {
+                return Err(NylError::config(format!(
+                    "{}: the branch {} holds the shared catalog {} besides {own:?}; each self-managing shared catalog syncs every target's catalog directory, which gives the Applications two owners. {}",
+                    super::shared_catalog::SHARED_CATALOG_CONFLICT_CODE,
+                    shared.destination.branch,
+                    others.join(", "),
+                    super::shared_catalog::DECOMMISSION_FIX
+                )));
+            }
+        }
+    }
+    let Some(index) = read_tree_file(&repository, &tree, prefix, DEFAULT_INDEX_PATH)? else {
+        return Ok(SharedCatalogInspection {
+            state: SharedCatalogState::Missing,
+            published: None,
+        });
+    };
+    let owner = parse_index(&index, DEFAULT_INDEX_PATH)?.owner;
+    if let Some(owner) = owner.as_ref().filter(|owner| Some(*owner) != expected.as_ref()) {
         return Err(NylError::OwnerFenced(format!(
-            "NYL-KUBERNETES-OWNER-FENCED: the shared catalog prefix {} is owned by {owner}, not by {}; {}",
-            shared.destination.path_prefix,
+            "NYL-KUBERNETES-OWNER-FENCED: the shared catalog prefix {prefix} is owned by {owner}, not by {}; {}",
             expected.map_or_else(String::new, |owner| owner.to_string()),
             super::reconcile::OWNED_PREFIX_FIX
         )));
     }
-    Ok(if !diff.published {
-        SharedCatalogState::Missing
-    } else if diff.files.is_empty() {
+    let manifest = read_tree_file(&repository, &tree, prefix, super::shared_catalog::SHARED_MANIFEST)?;
+    let published = manifest
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|text| serde_saphyr::from_multiple::<serde_json::Value>(text).ok())
+        .and_then(|documents| documents.into_iter().next());
+    let state = if manifest.as_deref()
+        == shared
+            .files
+            .get(Path::new(super::shared_catalog::SHARED_MANIFEST))
+            .map(Vec::as_slice)
+    {
         SharedCatalogState::Current
     } else {
-        SharedCatalogState::Differs(diff.files.into_keys().collect())
-    })
+        SharedCatalogState::Differs(vec![PathBuf::from(super::shared_catalog::SHARED_MANIFEST)])
+    };
+    Ok(SharedCatalogInspection { state, published })
+}
+
+/// [`inspect_shared_catalog`]'s state alone.
+pub fn shared_catalog_state(
+    shared: &RenderedTarget,
+    project_dir: &Path,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<SharedCatalogState> {
+    inspect_shared_catalog(shared, project_dir, variable).map(|inspection| inspection.state)
 }
 
 /// Make `worktree`, a plain copy of a project's Git-visible files, a Git
@@ -1173,6 +1247,25 @@ pub struct TeardownSettings {
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
 pub fn teardown_settings(rendered: &RenderedTarget) -> Result<TeardownSettings> {
+    teardown_settings_with(rendered, &SharedCatalogView::Rendered)
+}
+
+/// Which manifest of a shared catalog the teardown readiness reads. Argo CD
+/// runs what the branch holds, not what one target renders, so a driver that
+/// can read the branch passes what it found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SharedCatalogView {
+    /// The manifest the target renders: the branch holds it, or nothing reads the branch.
+    Rendered,
+    /// The branch holds no manifest yet, so no Application prunes or deletes
+    /// anything: the catalog rows are not checked.
+    NotChecked,
+    /// The Application the branch holds, which another declaration or Nyl version wrote.
+    Published(serde_json::Value),
+}
+
+/// [`teardown_settings`], reading the shared catalog's Application as `view` says.
+pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogView) -> Result<TeardownSettings> {
     use serde_json::Value;
 
     let catalog_source = catalog_source(&rendered.destination.path_prefix);
@@ -1216,7 +1309,11 @@ pub fn teardown_settings(rendered: &RenderedTarget) -> Result<TeardownSettings> 
     // until it is decommissioned, so no remnant of the target's catalog remains.
     let owned_by_parent = catalog.is_none();
     if let Some(shared) = &rendered.shared_catalog {
-        catalog = shared_application(shared)?;
+        catalog = match view {
+            SharedCatalogView::Rendered => shared_application(shared)?,
+            SharedCatalogView::NotChecked => None,
+            SharedCatalogView::Published(application) => Some(application.clone()),
+        };
     }
     let catalog_prunes = catalog.as_ref().map(|application| {
         application

@@ -34,6 +34,10 @@ use nyl_core::resources::InlineGitRepository;
 /// The stable code of every shared-catalog rule that spans targets.
 pub const SHARED_CATALOG_CONFLICT_CODE: &str = "NYL-KUBERNETES-SHARED-CATALOG-CONFLICT";
 
+/// How to decommission or rename a shared catalog, which an error that finds a second one names.
+pub const DECOMMISSION_FIX: &str = "To rename or decommission a shared catalog, first delete its Argo CD Application with its resources kept (non-cascading), \
+     then remove `_nyl/shared/<old>/` from the branch in one commit, and only then publish the new one";
+
 /// The reserved directory that holds the shared catalogs of a publication branch.
 pub const SHARED_ROOT: &str = "_nyl/shared";
 
@@ -179,12 +183,29 @@ impl SharedCatalogManifest {
     }
 }
 
+/// [`validate_shared_catalogs`] over `inventory` as `nyl validate` sees it:
+/// with a sample instance of every EnvironmentTemplate and the inline targets
+/// of every environment's publication units, none of which a plain inventory
+/// holds. State-free, so the tree commands (`render-tree`, `publish-tree`,
+/// `diff-tree`) that compile a target from a plain inventory enforce the same
+/// rules, such as that a revision carrying a shared catalog holds nothing else.
+pub fn validate_with_samples(inventory: &GitOpsInventory) -> Result<()> {
+    let samples = super::instances::templates(inventory)
+        .into_iter()
+        .flat_map(super::instances::sample_instances)
+        .collect();
+    let extended = super::units::with_inline_targets(&inventory.clone().with_instances(samples))?;
+    validate_shared_catalogs(&extended)
+}
+
 /// A target that takes part in the checks across targets.
 struct Member<'a> {
     target: &'a DeploymentTarget,
     /// The publication repository and branch, as the checks compare them.
     repository: (String, String),
     shared: Option<&'a SharedCatalogApplication>,
+    /// The Application the target renders for `shared`.
+    manifest: Option<SharedCatalogManifest>,
 }
 
 fn conflict(message: String) -> NylError {
@@ -218,6 +239,7 @@ pub fn validate_shared_catalogs(inventory: &GitOpsInventory) -> Result<()> {
                 normalize_branch_revision(&target.spec.publication.revision).to_owned(),
             ),
             shared: target.spec.catalog_application.shared.as_deref(),
+            manifest: super::tree::shared_manifest_of(inventory, target)?,
         });
     }
     check_reserved_prefix(&members)?;
@@ -264,9 +286,11 @@ fn check_catalog_descriptions(members: &[Member<'_>]) -> Result<()> {
                 first.target.metadata.name, member.target.metadata.name, shared.name
             )));
         }
-        if first.shared != member.shared {
+        // The rendered manifest covers what the declared block does not: the
+        // ArgoCDInstance (namespace, destination, catalog defaults) and the repository.
+        if first.manifest != member.manifest {
             return Err(conflict(format!(
-                "DeploymentTargets {:?} and {:?} share catalog {:?} but describe it differently; one manifest is rendered for every target that shares it, so declare the same shared block, or give them different catalogs",
+                "DeploymentTargets {:?} and {:?} share catalog {:?} but render different manifests (another shared block, ArgoCDInstance, or catalog defaults); one manifest is rendered for every target that shares it, so declare the same shared block, or give them different catalogs",
                 first.target.metadata.name, member.target.metadata.name, shared.name
             )));
         }
@@ -410,7 +434,26 @@ spec:
         ];
         let error = validate(&different).unwrap_err();
         assert!(
-            error.contains(SHARED_CATALOG_CONFLICT_CODE) && error.contains("describe it differently"),
+            error.contains(SHARED_CATALOG_CONFLICT_CODE) && error.contains("render different manifests"),
+            "{error}"
+        );
+
+        // The same block over another ArgoCDInstance renders another Application.
+        let instances = "---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {name: one}\nspec: {clusterRef: {name: dev}, namespace: argocd}\n---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {name: two}\nspec: {clusterRef: {name: dev}, namespace: elsewhere}\n";
+        let with_instance = |name: &str, instance: &str| {
+            target(name, "previews", name, PREVIEWS).replace(
+                "  clusterRef: {name: dev}\n",
+                &format!("  clusterRef: {{name: dev}}\n  argocdRef: {{name: {instance}}}\n"),
+            )
+        };
+        let across = [
+            instances.to_owned(),
+            with_instance("pr-1", "one"),
+            with_instance("pr-2", "two"),
+        ];
+        let error = validate(&across).unwrap_err();
+        assert!(
+            error.contains(SHARED_CATALOG_CONFLICT_CODE) && error.contains("render different manifests"),
             "{error}"
         );
 

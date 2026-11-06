@@ -105,6 +105,7 @@ pub fn receipt(seed: &str, outputs: Value, artifacts: Vec<ArtifactDigest>) -> Re
         provenance: BTreeMap::new(),
         outputs,
         artifacts,
+        warnings: Vec::new(),
     }
 }
 

@@ -1409,6 +1409,14 @@ fn declared_outputs(spec: &Value) -> BTreeMap<String, OutputDeclaration> {
 
 /// A unit's stored blocked reasons in the report's form, and the warnings
 /// of those that wait for attestations or observed values.
+/// The coded warnings the unit's driver reported with its current receipt.
+fn receipt_warnings(observed: Option<&ObservedUnit>) -> Vec<Finding> {
+    observed
+        .and_then(|observed| observed.receipt.as_ref())
+        .map(|receipt| receipt.warnings.clone())
+        .unwrap_or_default()
+}
+
 fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<BlockedBy>, Vec<Finding>) {
     let Readiness::Blocked { reasons } = &unit.readiness else {
         return (Vec::new(), Vec::new());
@@ -1569,6 +1577,8 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
         entry.message = condition_message(unit, current);
         (entry.blocked_by, entry.warnings) = blocked_report(environment, unit);
+        // What the driver warned about when it executed, until it executes again.
+        entry.warnings.extend(receipt_warnings(current));
         entry.state = Some(if skipped.get(name) == Some(&Skipped::ManualApproval) {
             UnitState::AwaitingApproval
         } else if drifted.contains(name) {

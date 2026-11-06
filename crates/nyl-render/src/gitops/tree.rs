@@ -343,6 +343,26 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
     Ok(())
 }
 
+/// The shared catalog Application `target` declares, rendered from the
+/// ArgoCDInstance and publication repository it resolves to, or `None` for a
+/// target that shares none. Targets that name one catalog must render equal ones.
+pub(super) fn shared_manifest_of(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<Option<super::shared_catalog::SharedCatalogManifest>> {
+    let Some(shared) = target.spec.catalog_application.shared.as_deref() else {
+        return Ok(None);
+    };
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+    let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
+    super::shared_catalog::manifest(shared, target, &repository, &argocd).map(Some)
+}
+
 pub(super) fn normalize_branch_revision(revision: &str) -> &str {
     revision.strip_prefix("refs/heads/").unwrap_or(revision)
 }
@@ -2475,8 +2495,8 @@ fn validate_argocd_name_collisions(
                     shared.name, target.metadata.name
                 )));
             }
-            // Targets that share a catalog must agree on it, which
-            // `validate_shared_catalogs` checks on the rendered manifest.
+            // Targets that share a catalog must render the same manifest, which
+            // `validate_shared_catalogs` checks across them.
             shared_owners.entry(key).or_insert_with(|| target.metadata.name.clone());
         }
         if target.spec.catalog_application.generates_application() {

@@ -567,6 +567,11 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 }
             }
         }
+        for message in expect.messages.iter().flatten() {
+            if !outcome.stdout.contains(message) && !outcome.stderr.contains(message) {
+                return Err(format!("the output does not contain {message:?}; {}", describe()));
+            }
+        }
         if let Some(units) = &expect.units {
             let status = units
                 .values()

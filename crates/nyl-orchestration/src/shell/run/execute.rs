@@ -334,6 +334,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             outputs,
             artifacts,
             attestations: Vec::new(),
+            warnings: Vec::new(),
         })),
         Inspected::NotApplied => driver.reconcile(&call(DriverOperation::Reconcile, started), unit),
     };
@@ -369,13 +370,15 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             artifacts,
             mut versions,
             attestations,
+            warnings: driver_warnings,
         } => {
             let key = unit
                 .execution_key
                 .clone()
                 .expect("an executed unit has an execution key");
             let (outputs, warnings) = recorded_outputs(unit, outputs);
-            execution.warnings = warnings;
+            // The driver's own coded warnings are recorded with the receipt, unchanged.
+            execution.warnings = warnings.into_iter().chain(driver_warnings.iter().cloned()).collect();
             let (set, digests) = recorded_artifacts(shared.environment, unit, &key, artifacts);
             execution.result = if uncertain {
                 UnitResult::Recovered {
@@ -402,6 +405,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 provenance: unit.provenance.clone(),
                 outputs,
                 artifacts: digests,
+                warnings: driver_warnings,
             };
             // Only names the unit declares are recorded; a declared name the
             // driver left out stays pending for `nyl attest` or a later run.
