@@ -169,25 +169,16 @@ pub struct EnvironmentTemplateSpec {
     /// The most instances of this template that may exist at once, expired ones included until they are removed. At the limit, `state init --template` and `reconcile --template` refuse to create another instance (exit 2) and name the expired instances that could be removed; `--make-room` removes them first, oldest expiry first and only as many as needed. Needs `state.path` ending in `{{ environment.name }}` so Nyl can list the instances. Omitted, unlimited.
     #[serde(rename = "maxInstances", default, skip_serializing_if = "Option::is_none")]
     pub max_instances: Option<u32>,
-    /// Keep each instance's recorded source commit fetchable with a keep ref of its own, `refs/nyl-keep/<keepId>/<commit>`, in the source repository, so teardown still finds its source after the pull request branch is gone. `nyl state delete` removes the refs. Needs push access to `refs/nyl-keep/*` in the source repository, which a read-only token (GitHub's default `contents: read`, a fork pull request) lacks: without it `state init --template` and `reconcile --template` refuse (`NYL-INSTANCE-KEEP-FAILED`), so grant the access or set `false`, and then remove instances before their branches disappear. Default `true`.
-    #[serde(rename = "keepSource", default = "default_true", skip_serializing_if = "is_true")]
+    /// Opt in to keeping each instance's recorded source commit fetchable with a keep ref of its own, `refs/nyl-keep/<keepId>/<commit>`, in the source repository, for instances that may expire (`ttl`) long after their pull request branches are gone. `nyl state delete` removes the refs. Needs push access to `refs/nyl-keep/*` in the source repository, which a read-only token (GitHub's default `contents: read`, a fork pull request) lacks: without it `state init --template` and `reconcile --template` refuse (`NYL-INSTANCE-KEEP-FAILED`), so grant the access or leave `false`. Omitted, `false`: tear an instance down in the pull request closed job, which fetches the recorded commit by its id from the project's origin; GitHub keeps `refs/pull/<n>/head` and GitLab `refs/merge-requests/<n>/head` after the branch is deleted.
+    #[serde(rename = "keepSource", default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_source: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for EnvironmentTemplateSpec {
-    /// A template that declares nothing: `keepSource` is on, like an omitted field.
+    /// A template that declares nothing: `keepSource` is off, like an omitted field.
     fn default() -> Self {
         serde_json::from_value(serde_json::json!({})).expect("an empty spec deserializes")
     }
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if passes a reference.
-fn is_true(value: &bool) -> bool {
-    *value
 }
 
 /// Whether reconcile repairs drift on its own.

@@ -220,6 +220,51 @@ fn test_worktree_is_a_clean_detached_checkout_of_the_commit() {
     );
 }
 
+/// A commit that only a pull request ref of the origin carries (no branch
+/// does, as after a squash merge and a branch deletion) is fetched by its id
+/// from the entry clone's origin when the run has network access, and is
+/// missing without it. Catches a close job on a default-branch clone that
+/// cannot find the commit its instance recorded, and a `--local` run that
+/// reaches for the network.
+#[test]
+fn test_a_commit_only_a_pull_request_ref_carries_is_fetched_from_origin() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let c4 = commit(&origin, Some(world.c2), &[("app.txt", "pull request")], "c4");
+    origin.reference("refs/pull/1/head", c4, true, "pull request").unwrap();
+    let this = SourceRepository::This;
+    let clone = Repository::open(world.clone_dir()).unwrap();
+    assert!(clone.find_commit(c4).is_err(), "the clone starts without the commit");
+
+    let offline = world.resolver();
+    let refused = offline
+        .worktree(&this, &id(c4), &world.root.path().join("workspace/offline"))
+        .unwrap_err();
+    assert!(refused.to_string().contains("does not exist"), "{refused}");
+    assert!(clone.find_commit(c4).is_err(), "no network, so nothing was fetched");
+
+    let online = world.resolver().with_origin_fetch();
+    let checkout = world.root.path().join("workspace/online");
+    online.worktree(&this, &id(c4), &checkout).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("app.txt")).unwrap(),
+        "pull request"
+    );
+
+    // Only the recorded id is asked for: a commit the origin does not have stays missing.
+    let absent = "0123456789abcdef0123456789abcdef01234567";
+    let missing = world
+        .resolver()
+        .with_origin_fetch()
+        .worktree(
+            &this,
+            &CommitId::new(absent).unwrap(),
+            &world.root.path().join("workspace/absent"),
+        )
+        .unwrap_err();
+    assert!(missing.to_string().contains(absent), "{missing}");
+}
+
 #[test]
 fn test_default_branch_follows_origin_head_then_local_head() {
     let world = World::new();

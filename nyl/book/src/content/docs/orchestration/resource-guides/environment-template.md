@@ -108,8 +108,72 @@ nobody is there to pass it for a preview.
 
 Remove an instance with `nyl state delete -e pr-123 --teardown`: it tears
 down every unit, dependents first, and removes the instance's files from the
-shared ref, leaving only the deleted marker in its `state.yaml`. See
+shared ref, leaving only the deleted marker in its `state.yaml`. A preview's
+pull request closed job runs it, see [the pull request closed
+job](#the-pull-request-closed-job); see also
 [Deletion](/nyl/orchestration/deletion/).
+
+## The pull request closed job
+
+Tear a preview down when its pull request closes. The job runs on
+`pull_request: closed`, checks out the **default branch**, and removes the
+instance at the commit its record names, with no override:
+
+```yaml
+# .github/workflows/preview-close.yaml
+name: preview-close
+on: {pull_request: {types: [closed]}}
+permissions: {contents: write}
+# The group is the preview job's: a close job waits for a running preview job
+# of the same pull request and neither is ever cancelled half way through
+# an apply.
+concurrency: {group: 'preview-${{ github.event.number }}', cancel-in-progress: false}
+jobs:
+  close:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.event.repository.default_branch }}', fetch-depth: 0, persist-credentials: false}
+      # …install Nyl and log in to the tools the units use
+      - run: nyl state delete -e "pr-${{ github.event.number }}" --teardown --wait-lease 10m
+```
+
+The default branch is enough because a command that lacks the recorded commit
+fetches it by its id from the clone's `origin` (see [Source keep
+refs](#source-keep-refs)). GitHub keeps `refs/pull/<n>/head`, the pull
+request's last head, after the branch is deleted and after a squash merge, so
+the commit is still there when the job runs; the instance's record names that
+last head, because the pull request job records each push's commit. With
+`persist-credentials: false` the checkout holds no token, so the fetch
+authenticates as the project's `[[git.credentials]]` say, as the state pushes
+of the same job do.
+`cancel-in-progress: false` and the shared group matter: a close job that
+overlapped a preview job could remove an instance the other job is still
+creating.
+
+The close job is the recommended teardown; it needs no keep refs and no
+extra permissions. Two situations need more:
+
+- **The commit cannot be fetched**, because the host keeps no pull request ref
+  (a self-hosted Git server without one), the job's token cannot read it, or the
+  job runs with `--local`. The teardown fails before any effect, names the unit
+  and the commit, and suggests `--source`. `nyl state delete -e pr-123 --teardown
+  --source main` takes the units' source files from the default branch
+  instead, warns about the substitution, and records it in the transition
+  commit. It is safe when the default branch's configuration for those units
+  can still destroy what the instance recorded: the same providers and
+  backend, no unit configuration removed since, and every rename covered by a
+  `moved` block. A squash merge of the pull request itself is the best case,
+  because the default branch then holds exactly the pull request's
+  configuration; a pull request that was closed unmerged, or that changed
+  the units long before, is the worst. A mismatch makes the teardown fail
+  at the unit, or destroy something else, so check the warning.
+- **A preview may expire, through the fleet, long after its branch is
+  gone**, for example an abandoned pull request whose close job failed. Set
+  [`keepSource: true`](#source-keep-refs): Nyl then keeps each instance's
+  recorded commit with a keep ref of its own, which needs push access to
+  `refs/nyl-keep/*`.
 
 ## Validation
 
@@ -186,7 +250,9 @@ spec:
   `busy` and does not fail the job, and a later run removes it if it is
   expired. Removing an expired instance renders nothing from source, so a pull
   request branch that is gone does not keep it alive; the teardown of a unit
-  that needs its files does, until `--source <revision>` supplies them.
+  that needs its files fails when the recorded commit can be neither fetched
+  from the origin nor kept by `keepSource: true`, until `--source <revision>`
+  supplies them.
 
 A removal waits for each publication's `teardownWait`, and the default
 `manual` waits for a person to confirm with `--confirm-removed`. Until someone
@@ -202,19 +268,31 @@ resolve.
 ## Source keep refs
 
 Teardown needs the instance's source files, and a closed pull request's branch
-may be gone. With `keepSource`, the default, each instance's recorded source
-commit is kept fetchable through a ref of its own in the source repository,
-`refs/nyl-keep/<keepId>/<commit>`, and `state delete` removes them.
+may be gone. By default Nyl pushes nothing to the source repository: the
+instance is torn down by the pull request closed job, while its recorded commit
+is still reachable. A command that needs the recorded commit and finds that
+the clone lacks it fetches it **by its exact id from the clone's `origin`**,
+with the credentials Nyl uses for the other Git fetches. GitHub keeps a pull
+request's commits reachable through `refs/pull/<n>/head` and GitLab through
+`refs/merge-requests/<n>/head`, also after the branch is deleted or the pull
+request is squash-merged, so a closed job that checked out only the default
+branch still finds the commit. Nothing but the recorded id is requested from
+the declared origin; if the host refuses, the command reports the commit as
+missing, as `--source <revision>` expects. A run with `--local` fetches
+nothing. A template whose previews may expire, through the fleet,
+long after their branches are gone sets `keepSource: true`: each instance's
+recorded source commit is then kept fetchable through a ref of its own in the
+source repository, `refs/nyl-keep/<keepId>/<commit>`, and `state delete`
+removes them.
 
-:::caution[Preview jobs need push access to `refs/nyl-keep/*`]
+:::caution[`keepSource: true` needs push access to `refs/nyl-keep/*`]
 `state init --template` and `reconcile --template` create the ref before they
 record the commit, and **refuse when the source repository refuses it**
 (`NYL-INSTANCE-KEEP-FAILED`, exit 1, nothing written). A read-only token cannot
 push it: GitHub's default `permissions: contents: read`, and the token of a pull
 request from a fork. Either give the preview job a token that may push
-`refs/nyl-keep/*`, or set `keepSource: false` on the template and remove
-instances before their branches disappear (or tear them down with
-`--source <revision>`).
+`refs/nyl-keep/*`, or leave `keepSource` off and tear instances down in the
+pull request closed job (or with `--source <revision>`).
 :::
 
 How it works: a new commit is kept before the record names it and the

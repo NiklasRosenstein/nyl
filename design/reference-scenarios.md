@@ -644,7 +644,7 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | The instance is created: its `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, recording `pr-123`'s commit as its source and `expiresAt` now plus 7 days |
-| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; the keep ref of `pr-123`'s tip commit exists in the source repository |
+| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; the template sets `keepSource: true`, so the keep ref of `pr-123`'s tip commit exists in the source repository |
 | 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
@@ -654,11 +654,18 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 
 Tier 1 variants:
 
-- **No keep ref.** With `keepSource: false`, step 7 fails and suggests
-  `--source`; `nyl state delete -e pr-123 --teardown --source main` takes the
-  units' files, an OpenTofu unit's pinned `source` included, from `main`,
-  records the substitution, and succeeds. Scenario
+- **No keep ref.** The template omits `keepSource`, as is the default, so
+  nothing keeps the commit but its branch: step 3 pushes no keep ref. With the
+  branch gone and no ref of the host naming the commit, step 7 fails and
+  suggests `--source`; `nyl state delete -e pr-123 --teardown --source main`
+  takes the units' files, an OpenTofu unit's pinned `source` included, from
+  `main`, records the substitution, and succeeds. Scenario
   `reference/preview-no-keep-ref` runs it.
+- **Pull request ref.** The same template, on a host that keeps the pull
+  request's head under `refs/pull/123/head` after the branch is deleted, as
+  GitHub does: step 7 succeeds with no keep ref and no `--source`, because the
+  close job at `main` fetches the recorded commit by its id from the origin.
+  Scenario `reference/preview-pull-request-ref` runs it.
 - **Name collision.** With an `applicationNameTemplate` that ignores the
   target's name, `nyl validate` rejects the template because two instances
   would generate the same Argo CD names. Scenario

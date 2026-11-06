@@ -228,6 +228,16 @@ spec:
   `reconcile -e <instance> --template <name> --param …` moves an instance's
   recorded commit to its entry worktree, so a job run from another checkout
   never moves an instance.
+- A recorded source commit that the entry clone lacks is looked up in the
+  retained worktree snapshots of the state repository, then fetched through
+  the instance's keep ref (`keepSource`), and then by its exact id from the
+  clone's `origin`, with the credentials of the other Git fetches. Only the
+  declared origin is contacted and only the recorded id is requested; a failed
+  fetch leaves the commit missing, which the caller reports, and `--local`
+  fetches nothing. A host that keeps a pull request's commits reachable after
+  its branch is gone (GitHub's `refs/pull/<n>/head`, GitLab's
+  `refs/merge-requests/<n>/head`) therefore serves a closed job running on a
+  checkout of the default branch.
 - An EnvironmentTemplate takes the same field and may template it from
   `params`, for example `revision: 'refs/pull/{{ params.pr }}/merge'`.
 - `--source <rev>` overrides S for one single-environment `plan`,
@@ -1246,7 +1256,7 @@ spec:
     observedRef: nyl/previews
     path: '{{ environment.name }}'       # all instances share one ref
   allowUnprotectedSource: true           # instances run from pull request branches
-  keepSource: true                       # default: keep each instance's source commit fetchable
+  # keepSource: true                     # opt in: keep refs for instances that outlive their branches
   deletionPolicy: Teardown               # forced for every unit kind that supports teardown
   allowTeardown: true                    # omission teardown without --allow-teardown
   ttl: 7d
@@ -1282,9 +1292,10 @@ project; credentials do, and that is a property of the pipeline:
 - Teams that want template changes reviewed before they take effect protect
   the template files with code-owner review; Nyl still reads the template at
   the instance's source commit.
-- The source repository takes the instances' keep refs
-  (`refs/nyl-keep/*`, see [Instances](#instances)), so preview jobs need push
-  access to that namespace, or the template sets `keepSource: false`.
+- A template that sets `keepSource: true` makes the source repository take
+  the instances' keep refs (`refs/nyl-keep/*`, see [Instances](#instances)),
+  so its preview jobs need push access to that namespace. By default nothing
+  is pushed to the source repository.
 - State may live in one ref for every environment through `state.path`, in
   one ref per template, or in one ref per instance. Branch protection follows
   the layout: the more state a ref holds, the more a preview credential can
@@ -1425,12 +1436,14 @@ nyl get environments                                         # declared environm
   record the write reads: of two jobs that saw it deleted, the first restarts
   the instance and the second finds it live and only updates it, so the second
   never drops the first's documents.
-- With `keepSource` (the default), Nyl keeps each instance's recorded source
-  commit fetchable with a keep ref in the source repository, so teardown after
-  the pull request branch is deleted or squash-merged still finds its source.
-  `keepSource: false` turns it off, and the pipeline should then remove
-  instances before their branches disappear. The refs are
-  `refs/nyl-keep/<keepId>/<commit>`, one per commit and never moved:
+- By default Nyl pushes nothing to the source repository: an instance is torn
+  down by the pull request closed job, which runs `state delete -e <instance>
+  --teardown` while the recorded commit is still reachable. With `keepSource:
+  true` (an opt-in, for previews that may expire, through the fleet, long after
+  their branches are gone), Nyl keeps each instance's recorded source commit
+  fetchable with a keep ref in the source repository, so teardown after the
+  pull request branch is deleted or squash-merged still finds its source. The
+  refs are `refs/nyl-keep/<keepId>/<commit>`, one per commit and never moved:
   - `<keepId>` is minted from the injected id generator when an instance first
     keeps a commit and recorded in its `state.yaml` (`keepId`); every lookup and
     release reads it from the record. It is unique across projects of one
@@ -1451,13 +1464,21 @@ nyl get environments                                         # declared environm
     than promise a teardown it cannot deliver. The keep refs need push access
     to `refs/nyl-keep/*`, which a read-only token does not have, such as
     GitHub's default `contents: read` or a fork pull request's; the finding
-    names both ways out: grant the access, or set `keepSource: false`. A
+    names both ways out: grant the access, or leave `keepSource` off. A
     run with `--local` pushes nothing.
   - Every command that needs a recorded commit the clone lacks fetches it from
     its ref. `state delete` removes the instance's refs after its deleted
     marker is committed, and leaves a ref that does not name the commit its
     name says (not this instance's) with a warning; a ref that cannot be
     removed is a warning too, because it is no reason to keep the state.
+- The recommended teardown is the pull request closed job: it checks out the
+  default branch and runs `state delete -e <instance> --teardown`, with no
+  `--source`. The recorded commit is the pull request's last head, which the
+  host keeps reachable through its pull request ref after the branch is
+  deleted or squash-merged, and Nyl fetches it by id from `origin` (see
+  [Source](#source)); no keep ref is needed. A host without such a ref, a
+  closed job run with `--local`, and previews that expire through the fleet
+  long after their branches are gone need `keepSource: true` or `--source`.
 - When an instance's recorded source commit cannot be fetched, teardown fails
   with a message suggesting `--source <revision>`. `nyl teardown --all` and
   `nyl state delete --teardown` accept `--source` to take the units' source
