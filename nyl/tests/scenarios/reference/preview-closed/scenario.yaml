@@ -25,7 +25,14 @@ steps:
       executed: [web-image, database, kubernetes]
       deploy:
         branch: previews
-        contains: ['pr-123/web/**', 'pr-123/_nyl/index.json', '_nyl/shared/previews/catalog.yaml']
+        contains:
+          - 'pr-123/web/**'
+          - 'pr-123/_nyl/index.json'
+          - 'pr-123/_nyl/catalog/application.argoproj.io/argocd/pr-123-kubernetes-web.yaml'
+          - 'pr-123/_nyl/catalog/appproject.argoproj.io/argocd/pr-123-kubernetes-web.yaml'
+          - '_nyl/shared/previews/catalog.yaml'
+        # The instance has no catalog Application of its own: the shared one manages it.
+        absent: ['pr-123/_nyl/catalog/application.argoproj.io/*/*-catalog.yaml']
       keep-refs: {count: 1, kept: [pr-123]}
   - nyl: [get, environments, pr-123]
     exit: 0
@@ -41,7 +48,12 @@ steps:
       executed: [web-image, database, kubernetes]
       deploy:
         branch: previews
-        contains: ['pr-124/web/**']
+        # Argo CD names differ per instance: each is named after its target.
+        contains:
+          - 'pr-124/web/**'
+          - 'pr-124/_nyl/catalog/application.argoproj.io/argocd/pr-124-kubernetes-web.yaml'
+          - 'pr-124/_nyl/catalog/appproject.argoproj.io/argocd/pr-124-kubernetes-web.yaml'
+        absent: ['pr-124/_nyl/catalog/application.argoproj.io/*/*-catalog.yaml']
         unchanged: ['pr-123/**', '_nyl/shared/previews/**']
       keep-refs: {count: 2, kept: [pr-123, pr-124]}
 
@@ -87,6 +99,7 @@ steps:
     expect:
       executed: []
       source: pr-124
+      source-chosen-by: {by: recorded}
 
   # Step 9: dev and pr-124 are listed; pr-123 is gone.
   - {nyl: [get, environments, dev], exit: 0}

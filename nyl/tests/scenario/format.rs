@@ -360,6 +360,10 @@ pub struct Expect {
     /// The commit a reconcile ran its first environment at, as a Git revision
     /// of `project.git`, such as `pr-124`.
     pub source: Option<String>,
+    /// How the run's environment record says its source was chosen
+    /// (`sourceChosenBy`), compared on the fields given, such as `{by: recorded}`.
+    #[serde(rename = "source-chosen-by")]
+    pub source_chosen_by: Option<Value>,
     /// The keep refs of preview instances' source commits in `project.git`.
     #[serde(rename = "keep-refs")]
     pub keep_refs: Option<KeepRefsExpectation>,
