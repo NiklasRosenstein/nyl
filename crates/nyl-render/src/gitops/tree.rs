@@ -2255,6 +2255,21 @@ pub(super) fn argocd_location(
     })
 }
 
+/// The workload Cluster `target` renders into, with its declared local
+/// context (`spec.live.context`), read from the declaration like
+/// [`argocd_location`] so that a render served from a cache holds the
+/// context as it stands.
+pub(super) fn workload_cluster(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<super::observation::WorkloadCluster> {
+    let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
+    Ok(super::observation::WorkloadCluster {
+        cluster: cluster.metadata.name,
+        context: cluster.spec.live.map(|live| live.context),
+    })
+}
+
 fn resolve_argocd_instance(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,

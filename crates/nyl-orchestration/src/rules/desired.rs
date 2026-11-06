@@ -1495,4 +1495,44 @@ mod tests {
             .any(|error| error.message.contains("/nyl/units.yaml")));
         assert!(desired.units.is_empty());
     }
+
+    /// Catches observations accepted for a kind that reads none (the
+    /// declaration would never be read, and a consumer would wait forever),
+    /// and rejected for one that does; the code names the kind.
+    #[test]
+    fn test_observations_need_a_kind_that_reads_observed_values() {
+        let observations = json!({"ip": {"type": "string", "from": {"any": "thing"}}});
+        let units = source(vec![
+            (
+                "plain",
+                rendered(TEST_KIND, true, Some(json!({"observations": observations}))),
+            ),
+            (
+                "reads",
+                rendered(
+                    TEST_KIND,
+                    true,
+                    Some(json!({"observes": true, "observations": observations})),
+                ),
+            ),
+            ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
+        ]);
+        let desired = run_desire(&units, &EnvironmentSnapshot::default());
+        assert_eq!(desired.errors.len(), 1, "{:?}", desired.errors);
+        assert_eq!(desired.errors[0].code, Code::ObservationsUnsupported);
+        assert!(
+            desired.errors[0].message.contains("unit plain") && desired.errors[0].message.contains("kind Test"),
+            "{}",
+            desired.errors[0].message
+        );
+        // An empty declaration declares nothing, so every kind accepts it.
+        let accepted = run_desire(
+            &source(vec![
+                ("reads", rendered(TEST_KIND, true, Some(json!({"observes": true, "observations": observations})))),
+                ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
+            ]),
+            &EnvironmentSnapshot::default(),
+        );
+        assert!(accepted.errors.is_empty(), "{:?}", accepted.errors);
+    }
 }

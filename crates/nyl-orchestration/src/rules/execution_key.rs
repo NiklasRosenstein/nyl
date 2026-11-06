@@ -7,8 +7,10 @@
 //! `apiVersion`, `kind`, the driver's `behaviorVersion`, the resolved spec,
 //! the selected source files' digests, and the fingerprint output. The
 //! resolved spec omits the common fields `enabled`, `dependsOn`, `approval`,
-//! `deletionPolicy`, and `timeout`, the fields the driver excludes, and the
-//! `commit` of every Git source field. Provenance, readiness, lifecycle, the
+//! `deletionPolicy`, `timeout`, and `observationWait`, the fields the driver
+//! excludes, and the `commit` of every Git source field. `observations`
+//! stays in the key, like `outputs`: a changed declaration reads other
+//! values for the receipt, so it is another execution. Provenance, readiness, lifecycle, the
 //! Nyl version, and tool versions never enter it. `outputs` does.
 
 use nyl_core::digest::canonical_json_bytes;
@@ -17,7 +19,14 @@ use nyl_core::orchestration::ids::ExecutionKey;
 use serde_json::{json, Value};
 
 /// Common fields that change how a unit runs but not its result.
-pub const EXCLUDED_COMMON_FIELDS: [&str; 5] = ["/enabled", "/dependsOn", "/approval", "/deletionPolicy", "/timeout"];
+pub const EXCLUDED_COMMON_FIELDS: [&str; 6] = [
+    "/enabled",
+    "/dependsOn",
+    "/approval",
+    "/deletionPolicy",
+    "/timeout",
+    "/observationWait",
+];
 
 /// Largest fingerprint output a desired document stores: 4 KiB.
 pub const STORED_FINGERPRINT_BYTES: usize = 4096;
@@ -138,6 +147,7 @@ mod tests {
         object.insert("approval".to_owned(), json!("manual"));
         object.insert("deletionPolicy".to_owned(), json!("Retain"));
         object.insert("timeout".to_owned(), json!("5m"));
+        object.insert("observationWait".to_owned(), json!("10m"));
         object.insert("builder".to_owned(), json!("remote"));
         changed["source"]["commit"] = json!("b".repeat(40));
         assert_eq!(key(&changed, &inputs, 1), original);
@@ -153,6 +163,11 @@ mod tests {
         let mut outputs = base();
         outputs["outputs"]["other"] = json!({"type": "string"});
         assert_ne!(key(&outputs, &inputs, 1), original);
+
+        // What is read for the receipt is part of what the unit is.
+        let mut observations = base();
+        observations["observations"] = json!({"ip": {"type": "string", "from": {"resource": {"name": "web"}}}});
+        assert_ne!(key(&observations, &inputs, 1), original);
 
         let files = KeyInputs {
             files: BTreeMap::from([("/infra/main.tf".to_owned(), "sha256:00".to_owned())]),

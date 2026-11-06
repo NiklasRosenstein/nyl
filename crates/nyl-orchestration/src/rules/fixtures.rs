@@ -226,7 +226,8 @@ pub fn lease_record(id: &str, deadline: Timestamp) -> Lease {
 
 /// A driver of `units.gitops.nyl/v1` kind `kind`. Its execution recovery
 /// policy is `converge` when the spec sets `idempotent: true`, `inspect`
-/// when it sets `inspect: true`, else `manual`; it attests with `attests: true`. The `Publication` kind tears
+/// when it sets `inspect: true`, else `manual`; it attests with `attests: true`
+/// and reads observed values with `observes: true`. The `Publication` kind tears
 /// down and claims `spec.prefix` in one repository; `spec.broken` fails
 /// validation.
 pub struct TestDriver {
@@ -250,6 +251,7 @@ impl Driver for TestDriver {
         Capabilities {
             teardown: self.kind == "Publication",
             attest: spec["attests"] == json!(true),
+            observed_values: spec["observes"] == json!(true),
             ..Capabilities::default()
         }
     }

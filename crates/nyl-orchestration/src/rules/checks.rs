@@ -531,6 +531,87 @@ mod tests {
         );
     }
 
+    /// Catches `observe` covering units that read nothing for their spec:
+    /// only a unit that declares observations and whose kind reads them is
+    /// checked, and `--unit` reports the others as unsupported.
+    #[test]
+    fn test_targets_for_observe_cover_units_that_declare_observations_their_kind_reads() {
+        let mut snapshot = snapshot();
+        let declaring = json!({"observes": true, "observations": {"ip": {"type": "string", "from": {}}}});
+        for unit in ["network", "database", "web"] {
+            let desired = snapshot.desired.get_mut(&name(unit)).unwrap();
+            desired.spec = declaring.clone();
+        }
+        // `cache` reads observed values but declares none.
+        snapshot.desired.get_mut(&name("cache")).unwrap().spec = json!({"observes": true});
+        let drivers = drivers();
+        assert_eq!(
+            targets(Check::Observe, &snapshot, None, &drivers),
+            BTreeMap::from([
+                (name("database"), Target::NoReceipt),
+                (name("network"), Target::Check),
+                (name("web"), Target::NoReceipt),
+            ])
+        );
+        let named = BTreeSet::from([name("network"), name("cache")]);
+        assert_eq!(
+            targets(Check::Observe, &snapshot, Some(&named), &drivers),
+            BTreeMap::from([(name("cache"), Target::Unsupported), (name("network"), Target::Check)])
+        );
+    }
+
+    /// Catches `observe` exiting 0 while a value is pending or failed, which
+    /// a scheduled job would read as healthy, and a pending or failed
+    /// observation without its own code and fix.
+    #[test]
+    fn test_observe_exits_and_warns_by_each_observation() {
+        let declared: BTreeMap<String, ObservationDeclaration> = serde_json::from_value(json!({
+            "ip": {"type": "string", "from": {}}, "port": {"type": "integer", "from": {}}
+        }))
+        .unwrap();
+        let readings = |port: ObservedValue| ObservedValues {
+            values: BTreeMap::from([
+                ("ip".to_owned(), ObservedValue::Value { value: json!("203.0.113.10") }),
+                ("port".to_owned(), port),
+            ]),
+        };
+        let check = |port| {
+            let unit = UnitReport {
+                check: Some(observe_check(&readings(port), &declared)),
+                ..UnitReport::new("Command")
+            };
+            let findings = warnings(
+                Check::Observe,
+                &env(),
+                &name("lb"),
+                unit.check.as_ref().unwrap(),
+                None,
+                DriftRepair::Converge,
+            );
+            (unit_exit(&unit), findings.iter().map(|finding| finding.code).collect::<Vec<_>>())
+        };
+        assert_eq!(check(ObservedValue::Value { value: json!(443) }), (ExitCategory::Ok, vec![]));
+        assert_eq!(
+            check(ObservedValue::Pending { reason: "no port".to_owned() }),
+            (ExitCategory::Incomplete, vec![Code::ObservationPending])
+        );
+        assert_eq!(
+            check(ObservedValue::Failed { reason: "no credentials".to_owned() }),
+            (ExitCategory::Incomplete, vec![Code::ObservationFailed])
+        );
+        // A name the driver left out is failed.
+        let missing = observe_check(
+            &ObservedValues {
+                values: BTreeMap::new(),
+            },
+            &declared,
+        );
+        assert!(missing
+            .observations
+            .values()
+            .all(|status| matches!(status, ObservationStatus::Failed { .. })));
+    }
+
     /// Catches a second check of an unchanged unit writing a commit only
     /// because time moved on, and a changed result not being written.
     #[test]

@@ -38,8 +38,11 @@ struct ReadState {
 }
 
 impl ReadState {
+    /// Whether the run still owes a poll at `now`: a declared value has none,
+    /// and the wait has not ended. A poll at the wait's own end counts, so the
+    /// last read is made when the wait is up, not a poll interval before.
     fn waiting(&self, now: Timestamp) -> bool {
-        self.unresolved && self.wait_until.is_some_and(|until| now < until)
+        self.unresolved && self.wait_until.is_some_and(|until| now <= until)
     }
 }
 
@@ -160,7 +163,7 @@ impl Observing {
         self.states
             .values()
             .filter(|state| state.waiting(now))
-            .map(|state| state.next_poll.min(state.wait_until.unwrap_or(state.next_poll)))
+            .map(|state| state.next_poll)
             .min()
     }
 
@@ -331,7 +334,12 @@ impl Observing {
         }
         state.read = true;
         state.unresolved = unresolved;
-        state.next_poll = poll.after(now);
+        // The next poll is a poll interval away, or the wait's end when that
+        // comes first; a read made at the end closes the wait.
+        state.next_poll = poll.after(now).min(state.wait_until.unwrap_or(Timestamp::MAX_UTC));
+        if state.wait_until.is_some_and(|until| now >= until) {
+            state.wait_until = None;
+        }
     }
 }
 
