@@ -696,9 +696,15 @@ fn test_a_template_that_cannot_be_listed_fails_checks_across_environments_closed
     // supplies for its instances: dev declares its own, so the script writes
     // beneath the scenario's directory instead of the filesystem root.
     let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: dev\nspec:\n  unitSelector: {matchLabels: {dev: 'true'}}\n  allowUnprotectedSource: true\n  values: {dir: '%SCENARIO_TMP%/dev', tag: dev}\n  state: {repositoryRef: {name: platform}}\n";
+    // A local repository that does not exist. Its URL names a path beneath a
+    // fresh directory, as every local state URL of the tests does:
+    // `file:///nonexistent/...` names no drive on Windows, so Nyl rejects it as
+    // an invalid local URL instead of failing to list it.
+    let missing = tempfile::TempDir::new().unwrap();
+    let missing_url = reqwest::Url::from_file_path(missing.path().join("nyl/state.git")).unwrap();
     let broken = TEMPLATE.replace(
         "    repositoryRef: {name: platform}\n",
-        "    repository: {repoURL: 'file:///nonexistent/nyl/state.git'}\n",
+        &format!("    repository: {{repoURL: '{missing_url}'}}\n"),
     );
     let unit = UNITS.replace("preview: 'true'", "dev: 'true'");
     let (_directory, harness) = world(&[
@@ -706,7 +712,8 @@ fn test_a_template_that_cannot_be_listed_fails_checks_across_environments_closed
         ("nyl/preview.yaml", &broken),
         ("nyl/units.yaml", &unit),
     ]);
-    assert_eq!(invoke(&harness, "main", &["state", "init", "-e", "dev"]).exit, 0);
+    let init = invoke(&harness, "main", &["state", "init", "-e", "dev"]);
+    assert_eq!(init.exit, 0, "{}\n{}", init.stderr, init.stdout);
     let status = invoke(&harness, "main", &["status", "-e", "dev"]);
     assert_eq!(status.exit, 0, "{}", status.stderr);
     assert!(
