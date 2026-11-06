@@ -235,17 +235,24 @@ impl Session {
         Ok(sources)
     }
 
-    /// The prefix of the keep refs of the instance this session works on:
-    /// `None` for a declared environment, a template with `keepSource: false`,
-    /// and a run without network access. Contract:
+    /// The prefix of the keep refs the instance this session works on
+    /// recorded, read from its `keepId`: `None` for a declared environment, an
+    /// instance that kept nothing, and a run without network access. Contract:
     /// [Instances](../../../design/orchestration-core.md#instances), `keepSource`.
     pub fn keep_prefix(&self) -> Option<String> {
-        self.resolved
-            .instance
-            .as_ref()
-            .filter(|instance| instance.terms.keep_source)?;
-        (!self.offline)
-            .then(|| nyl_orchestration::rules::keep::keep_prefix(&self.entry_project_dir(), &self.resolved.name))
+        let id = self.resolved.instance.as_ref()?.record.as_ref()?.keep_id.as_ref()?;
+        (!self.offline).then(|| nyl_orchestration::rules::keep::keep_prefix(id))
+    }
+
+    /// Whether a write of the instance's record keeps its source commit: the
+    /// template says `keepSource` and the run has network access.
+    pub fn keeps_source(&self) -> bool {
+        !self.offline
+            && self
+                .resolved
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.terms.keep_source)
     }
 
     /// Wire explicit working-file capture through the shared source shell.

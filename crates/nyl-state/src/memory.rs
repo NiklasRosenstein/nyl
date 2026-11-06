@@ -885,6 +885,7 @@ mod tests {
                     params: BTreeMap::new(),
                     expires_at: None,
                     source_commit: None,
+                    keep_id: None,
                     location: location.clone(),
                     events: Vec::new(),
                 }),

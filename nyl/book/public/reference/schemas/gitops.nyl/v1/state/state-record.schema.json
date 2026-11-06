@@ -180,6 +180,10 @@
     },
     "StateV1": {
       "const": "gitops.nyl/v1"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -205,6 +209,17 @@
         "string",
         "null"
       ]
+    },
+    "keepId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Uid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The identity of an instance's keep refs in the source repository,\n`refs/nyl-keep/<keepId>/<commit>`: minted when the instance first\nkeeps a commit, unique across projects, and surviving moves of the\nstate, of the project, and renames of the template."
     },
     "kind": {
       "$ref": "#/$defs/StateRecordKind"

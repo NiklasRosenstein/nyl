@@ -287,6 +287,17 @@ impl EnvironmentRunReport {
         }
     }
 
+    /// The fleet reconcile's rule for an instance another run holds: when the
+    /// report's errors say the lease is held, it is [`Self::mark_busy`]; a
+    /// held lease is not a failure of the run that skips it. Whether it did.
+    pub fn skip_when_busy(&mut self) -> bool {
+        let held = self.errors.iter().any(|finding| finding.code == Code::LeaseHeld);
+        if held {
+            self.mark_busy();
+        }
+        held
+    }
+
     /// Report the instance as skipped because another run holds its lease:
     /// the fleet reconcile's `busy`, which is not a failure. The lease
     /// findings become warnings, and the exit category no longer counts the

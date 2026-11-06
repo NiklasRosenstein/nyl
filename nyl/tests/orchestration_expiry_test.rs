@@ -631,10 +631,11 @@ fn test_max_instances_needs_a_listable_state_location() {
 
 /// The keep refs of `instance` in the source repository, by name and commit.
 fn keep_refs(harness: &harness::Harness, instance: &str) -> Vec<(String, String)> {
-    let prefix = nyl_orchestration::rules::keep::keep_prefix(
-        "/nyl",
-        &nyl_core::orchestration::ids::EnvironmentName::new(instance).unwrap(),
-    );
+    // The refs are named by the keep id the instance's record holds, which survives its deletion marker.
+    let Some(id) = record(harness, instance)["keepId"].as_str().map(str::to_owned) else {
+        return Vec::new();
+    };
+    let prefix = nyl_orchestration::rules::keep::keep_prefix(&nyl_core::orchestration::ids::Uid::new(id).unwrap());
     git_output(
         &harness.world.bare(),
         &[
@@ -738,10 +739,8 @@ fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
 fn test_state_delete_leaves_a_keep_ref_that_is_not_the_instances() {
     let (_directory, harness) = world(TEMPLATE, UNITS);
     open(&harness, 9);
-    let prefix = nyl_orchestration::rules::keep::keep_prefix(
-        "/nyl",
-        &nyl_core::orchestration::ids::EnvironmentName::new("pr-9").unwrap(),
-    );
+    let id = record(&harness, "pr-9")["keepId"].as_str().unwrap().to_owned();
+    let prefix = nyl_orchestration::rules::keep::keep_prefix(&nyl_core::orchestration::ids::Uid::new(id).unwrap());
     let foreign = format!("{prefix}/{}", "f".repeat(40));
     scenario::world::git(
         &harness.world.bare(),
@@ -946,6 +945,8 @@ fn test_state_move_template_renames_the_template_of_its_instances() {
             &TEMPLATE.replace("name: preview}", "name: previews}"),
         )],
     );
+    let keep_id = record(&harness, "pr-1")["keepId"].clone();
+    assert!(keep_id.is_string(), "the instance recorded the id of its keep refs");
     let orphaned = invoke(&harness, "main", &["reconcile", "-e", "pr-1", "--no-extend"]);
     assert_eq!(orphaned.exit, 1, "{}", orphaned.stderr);
     assert!(
@@ -970,6 +971,11 @@ fn test_state_move_template_renames_the_template_of_its_instances() {
     );
     assert_eq!(moved.exit, 0, "{}\n{}", moved.stderr, moved.stdout);
     assert_eq!(record(&harness, "pr-1")["template"], "previews");
+    assert_eq!(
+        record(&harness, "pr-1")["keepId"],
+        keep_id,
+        "a rename does not strand the keep refs"
+    );
     // The instance renders at its recorded commit, which predates the rename,
     // so its pull request job moves it to a commit that declares the new name.
     let job = invoke(

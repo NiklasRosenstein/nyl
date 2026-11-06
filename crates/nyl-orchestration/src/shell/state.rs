@@ -208,6 +208,7 @@ pub fn init(
                     params: BTreeMap::new(),
                     expires_at: None,
                     source_commit: None,
+                    keep_id: None,
                     location: location.clone(),
                     events: vec![event],
                 },
@@ -249,25 +250,25 @@ pub fn init(
     )
 }
 
-/// Where an instance's source commit is kept fetchable (`keepSource`): the
-/// source repository's resolver and the prefix of the instance's keep refs.
-#[derive(Clone, Copy)]
-pub struct KeepSource<'a> {
-    pub sources: &'a dyn nyl_core::orchestration::ports::SourceResolver,
-    pub prefix: &'a str,
-}
-
-impl std::fmt::Debug for KeepSource<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("KeepSource")
-            .field("prefix", &self.prefix)
-            .finish()
-    }
+/// Whether `nyl state init --template` starts a deleted instance over.
+///
+/// The decision is made under the lease, on the record the write reads, never
+/// on one read before it: two jobs that saw the instance deleted cannot both
+/// restart it and drop each other's documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restart {
+    /// A deleted instance refuses (`NYL-STATE-DELETED`).
+    Never,
+    /// `--fresh`: start over whatever the record holds, dropping every unit's documents.
+    Always,
+    /// The pull request job: a record that is still deleted when the lease is
+    /// held restarts, one that another job already restarted takes the normal
+    /// update path.
+    IfDeleted,
 }
 
 /// What `nyl state init --template` records for an instance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InstanceInit<'a> {
     /// The EnvironmentTemplate.
     pub template: &'a str,
@@ -277,9 +278,10 @@ pub struct InstanceInit<'a> {
     pub source_commit: &'a nyl_core::orchestration::ids::CommitId,
     /// The template's `ttl`: activity moves `expiresAt` to now plus this.
     pub ttl: Option<nyl_core::orchestration::time::Duration>,
-    /// Keep `source_commit` fetchable before it is recorded; `None` for
-    /// `keepSource: false` and for a run without network access.
-    pub keep: Option<KeepSource<'a>>,
+    /// Keep `source_commit` fetchable before it is recorded, through this
+    /// source repository's keep refs; `None` for `keepSource: false` and for
+    /// a run without network access.
+    pub keep: Option<&'a dyn nyl_core::orchestration::ports::SourceResolver>,
 }
 
 /// `nyl state init -e <instance> --template <template> --param …`: create the
@@ -291,14 +293,15 @@ pub struct InstanceInit<'a> {
 /// Contract: [Instances](../../../../design/orchestration-core.md#instances).
 /// A deleted instance refuses (`NYL-STATE-DELETED`) until `--fresh` starts it
 /// over, which drops every unit's documents like it does for a declared
-/// environment.
+/// environment, or the pull request job's [`Restart::IfDeleted`] does when the
+/// record is still deleted under the lease.
 #[allow(clippy::too_many_lines)] // One initialization: refusals, keep ref, record, renewal of the units, commit.
 pub fn init_instance(
     context: &Context<'_>,
     environment: &EnvironmentName,
     location: &StateLocation,
     instance: &InstanceInit<'_>,
-    fresh: bool,
+    restart: Restart,
     requested: &Requested,
 ) -> StateOperationReport {
     if let Err(error) = context.store.prepare_init(location) {
@@ -315,6 +318,14 @@ pub fn init_instance(
             report.details.insert("location".to_owned(), json!(describe(location)));
             report.details.insert("template".to_owned(), json!(instance.template));
             let snapshot = read(context, location, environment)?;
+            let fresh = match restart {
+                Restart::Never => false,
+                Restart::Always => true,
+                Restart::IfDeleted => snapshot
+                    .record
+                    .as_ref()
+                    .is_some_and(|record| record.deleted().is_some()),
+            };
             let now = held.lease.taken_at;
             let expires_at = crate::rules::expiry::extended(instance.ttl, now);
             let event = StateEvent::StateInitialized {
@@ -325,9 +336,10 @@ pub fn init_instance(
             };
             let mut changes = TransitionChanges::default();
             let headline;
+            let keep_id: Option<nyl_core::orchestration::ids::Uid>;
             let record = match &snapshot.record {
                 None => {
-                    keep_source(instance, environment)?;
+                    keep_id = keep_source(context, instance, environment, None)?;
                     headline = "instance created";
                     StateRecord {
                         api_version: StateV1,
@@ -337,6 +349,7 @@ pub fn init_instance(
                         params: instance.params.clone(),
                         expires_at,
                         source_commit: Some(instance.source_commit.clone()),
+                        keep_id: keep_id.clone(),
                         location: location.clone(),
                         events: vec![event],
                     }
@@ -363,8 +376,15 @@ pub fn init_instance(
                     }
                     check_remote_tips(context.store, location, environment)?;
                     // Past every refusal: the commit the record will name is kept before it is recorded.
-                    keep_source(instance, environment)?;
+                    // A restart is a new life, with keep refs of its own.
+                    keep_id = keep_source(
+                        context,
+                        instance,
+                        environment,
+                        existing.keep_id.as_ref().filter(|_| !fresh),
+                    )?;
                     let mut record = existing.clone();
+                    record.keep_id.clone_from(&keep_id);
                     if fresh {
                         changes.desired = dropped(&snapshot.desired);
                         changes.observed = dropped(&snapshot.observed);
@@ -378,9 +398,7 @@ pub fn init_instance(
                     record.source_commit = Some(instance.source_commit.clone());
                     record.expires_at = expires_at;
                     if record == *existing && changes.desired.is_empty() {
-                        if let Some(expires_at) = record.expires_at {
-                            report.details.insert("expiresAt".to_owned(), json!(expires_at));
-                        }
+                        report.expires_at = record.expires_at;
                         report
                             .details
                             .insert("note".to_owned(), json!("the instance is up to date"));
@@ -395,44 +413,52 @@ pub fn init_instance(
                 }
             };
             report.details.insert("params".to_owned(), json!(instance.params));
-            if let Some(expires_at) = record.expires_at {
-                report.details.insert("expiresAt".to_owned(), json!(expires_at));
-            }
+            report.expires_at = record.expires_at;
+            let kept = keep_id.as_ref().map(crate::rules::keep::keep_prefix);
             changes.record = Some(record);
             let mut summary = summary(Operation::StateInit, environment, headline);
             summary.details.insert("template".to_owned(), json!(instance.template));
             summary.details.insert("params".to_owned(), json!(instance.params));
             commit(context, location, held, &snapshot, summary, changes, requested, report)?;
-            release_older_keep_refs(instance, report);
+            if let Some(prefix) = kept {
+                release_older_keep_refs(instance, &prefix, report);
+            }
             Ok(())
         },
     )
 }
 
 /// The record names the new commit now, so the instance's other keep refs go.
-fn release_older_keep_refs(instance: &InstanceInit<'_>, report: &mut StateOperationReport) {
-    let Some(keep) = instance.keep else {
+fn release_older_keep_refs(instance: &InstanceInit<'_>, prefix: &str, report: &mut StateOperationReport) {
+    let Some(sources) = instance.keep else {
         return;
     };
-    match keep.sources.release(keep.prefix, Some(instance.source_commit)) {
+    match sources.release(prefix, Some(instance.source_commit)) {
         Ok(foreign) => report
             .warnings
             .extend(foreign.iter().map(|reference| foreign_keep_ref(reference))),
-        Err(error) => report
-            .warnings
-            .push(keep_release_warning(keep.prefix, &error.to_string())),
+        Err(error) => report.warnings.push(keep_release_warning(prefix, &error.to_string())),
     }
 }
 
-/// Keep `instance`'s source commit fetchable before a record names it:
-/// a ref of its own, so the commit the record names now stays kept whatever
-/// happens next. `NYL-INSTANCE-KEEP-FAILED` when it cannot be pushed.
-fn keep_source(instance: &InstanceInit<'_>, environment: &EnvironmentName) -> Result<(), Finding> {
-    let Some(keep) = instance.keep else {
-        return Ok(());
+/// Keep `instance`'s source commit fetchable before a record names it: a
+/// ref of its own under the instance's keep id (`existing`, or one minted
+/// from the injected generator for an instance that has none), so the commit
+/// the record names now stays kept whatever happens next. Returns the keep id
+/// to record; `None` when nothing is kept. `NYL-INSTANCE-KEEP-FAILED` when it
+/// cannot be pushed.
+fn keep_source(
+    context: &Context<'_>,
+    instance: &InstanceInit<'_>,
+    environment: &EnvironmentName,
+    existing: Option<&nyl_core::orchestration::ids::Uid>,
+) -> Result<Option<nyl_core::orchestration::ids::Uid>, Finding> {
+    let Some(sources) = instance.keep else {
+        return Ok(existing.cloned());
     };
-    let reference = crate::rules::keep::keep_ref(keep.prefix, instance.source_commit);
-    keep.sources.keep(&reference, instance.source_commit).map_err(|error| {
+    let id = existing.cloned().unwrap_or_else(|| context.ids.uid());
+    let reference = crate::rules::keep::keep_ref(&crate::rules::keep::keep_prefix(&id), instance.source_commit);
+    sources.keep(&reference, instance.source_commit).map_err(|error| {
         Finding::new(
             Code::InstanceKeepFailed,
             format!(
@@ -444,7 +470,8 @@ fn keep_source(instance: &InstanceInit<'_>, environment: &EnvironmentName) -> Re
                 instance.template
             ),
         )
-    })
+    })?;
+    Ok(Some(id))
 }
 
 /// The warning for a keep ref that does not name the commit its name says.
@@ -498,9 +525,7 @@ pub fn renew_instance(
                     "expiry applies to instances of an EnvironmentTemplate",
                 ));
             }
-            if let Some(expires_at) = expires_at {
-                report.details.insert("expiresAt".to_owned(), json!(expires_at));
-            }
+            report.expires_at = expires_at;
             // A removal recorded but not started is undone in the same commit.
             let units = crate::rules::expiry::renew_units(&snapshot.desired);
             if record.expires_at == expires_at && units.is_empty() {

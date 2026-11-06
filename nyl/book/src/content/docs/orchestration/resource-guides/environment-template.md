@@ -189,7 +189,9 @@ spec:
   that needs its files does, until `--source <revision>` supplies them.
 
 A removal waits for each publication's `teardownWait`, and the default
-`manual` waits for a person to confirm with `--confirm-removed`. A template
+`manual` waits for a person to confirm with `--confirm-removed`. Until someone
+does, the preview is half torn down: every reconcile of it, a pull request job's
+included, exits 2, and nothing recreates its workloads. A template
 whose previews should expire unattended sets `observe` or `delay` on its
 publications; `state init --template` warns (`NYL-TEARDOWN-WAIT-MANUAL`)
 about a `manual` wait and about every unmet teardown requirement of the units
@@ -202,7 +204,7 @@ resolve.
 Teardown needs the instance's source files, and a closed pull request's branch
 may be gone. With `keepSource`, the default, each instance's recorded source
 commit is kept fetchable through a ref of its own in the source repository,
-`refs/nyl-keep/<project>/<instance>/<commit>`, and `state delete` removes them.
+`refs/nyl-keep/<keepId>/<commit>`, and `state delete` removes them.
 
 :::caution[Preview jobs need push access to `refs/nyl-keep/*`]
 `state init --template` and `reconcile --template` create the ref before they
@@ -217,10 +219,11 @@ instances before their branches disappear (or tear them down with
 
 How it works: a new commit is kept before the record names it and the
 instance's older refs are removed after the record is committed, so the
-recorded commit is never unkept and a refused write pushes nothing. `<project>`
-is a digest of the project's directory in the repository, so two projects of one
-monorepo cannot collide on an instance name, and the refs do not depend on the
-state's `coordinationRefPrefix`; that namespace is reserved
+recorded commit is never unkept and a refused write pushes nothing. `<keepId>`
+is minted when the instance first keeps a commit and recorded in its
+`state.yaml`, so it is unique across projects of one monorepo and survives moves
+of the state or the project and renames of the template; the refs do not depend
+on the state's `coordinationRefPrefix`, and that namespace is reserved
 (`NYL-STATE-REF-CONFLICT` for a state ref inside it). A ref that does not name
 the commit its name says is not the instance's, and `state delete` leaves it
 with a warning. Every command that needs the recorded commit fetches it from

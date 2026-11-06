@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use clap::{Args, Subcommand, ValueEnum};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::StateStore as _;
+use nyl_core::orchestration::ports::{SourceResolver, StateStore as _};
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
@@ -403,7 +403,11 @@ fn run_init(
                     reason: common.reason.as_deref(),
                     wait: common.wait_lease,
                     local: false,
-                    fresh,
+                    restart: if fresh {
+                        state::Restart::Always
+                    } else {
+                        state::Restart::Never
+                    },
                     make_room,
                     removal: &removal,
                 };
@@ -428,7 +432,6 @@ fn run_init(
                         ))
                     }
                 };
-                let prefix = ctx.session.keep_prefix();
                 let mut report = state::init_instance(
                     ctx.context,
                     &ctx.environment,
@@ -438,12 +441,13 @@ fn run_init(
                         params: &instance.params,
                         source_commit: &source_commit,
                         ttl: instance.terms.ttl,
-                        keep: prefix.as_deref().map(|prefix| state::KeepSource {
-                            sources: &sources,
-                            prefix,
-                        }),
+                        keep: ctx.session.keeps_source().then_some(&sources as &dyn SourceResolver),
                     },
-                    fresh,
+                    if fresh {
+                        state::Restart::Always
+                    } else {
+                        state::Restart::Never
+                    },
                     &requested,
                 );
                 if !evicted.is_empty() {
@@ -962,7 +966,8 @@ pub(crate) struct InstanceWrite<'a> {
     pub(crate) wait: Option<Duration>,
     /// `--local`: write to the clone's state branches without the remote.
     pub(crate) local: bool,
-    pub(crate) fresh: bool,
+    /// Whether a deleted instance starts over, decided under the lease.
+    pub(crate) restart: state::Restart,
     /// `--make-room`: at `maxInstances`, remove expired instances first.
     pub(crate) make_room: bool,
     /// How the removal of an expired instance, for `--make-room`, is authorized.
@@ -992,7 +997,7 @@ pub(crate) fn prepare_instance_write(
     let new = instance
         .record
         .as_ref()
-        .is_none_or(|record| write.fresh && record.deleted().is_some());
+        .is_none_or(|record| write.restart != state::Restart::Never && record.deleted().is_some());
     if new {
         crate::orchestration::instances::admit(session, wiring, write.make_room, write.removal)
     } else {
@@ -1033,7 +1038,6 @@ pub(crate) fn create_or_update_instance(
         cancellation: wiring.cancellation.clone(),
     };
     let sources = session.sources()?;
-    let prefix = session.keep_prefix();
     let report = state::init_instance(
         &context,
         &session.resolved.name,
@@ -1043,12 +1047,9 @@ pub(crate) fn create_or_update_instance(
             params: &instance.params,
             source_commit: &source_commit,
             ttl: instance.terms.ttl,
-            keep: prefix.as_deref().map(|prefix| state::KeepSource {
-                sources: &sources,
-                prefix,
-            }),
+            keep: session.keeps_source().then_some(&sources as &dyn SourceResolver),
         },
-        write.fresh,
+        write.restart,
         &requested,
     );
     if let Some(finding) = report.errors.first() {

@@ -530,27 +530,23 @@ fn reconcile(
                 wait: args.wait_lease,
                 local: args.local,
                 // An instance the fleet removed is gone, and its pull request's next
-                // job creates it again: a deleted record counts as missing here.
-                fresh: session
-                    .resolved
-                    .instance
-                    .as_ref()
-                    .and_then(|instance| instance.record.as_ref())
-                    .is_some_and(|record| record.deleted().is_some()),
+                // job creates it again: a record that is still deleted under the lease
+                // counts as missing here.
+                restart: nyl_orchestration::shell::state::Restart::IfDeleted,
                 make_room: args.make_room,
                 removal: &removal,
             },
         )?;
         evicted = gone;
-        extended = Some(recorded_expiry(&written));
+        extended = Some(written.expires_at);
     } else if let Some(instance) = &session.resolved.instance {
         let expires_at = instance.record.as_ref().and_then(|record| record.expires_at);
         match expiry::decide(intent(args, fleet), expires_at, instance.terms.ttl, now) {
             Disposition::Remove => {
                 let mut report = RunReport::new(ReportKind::ReconcileReport);
                 let mut environment = remove_expired(&session, wiring, &removal)?;
-                if fleet && environment.errors.iter().any(|finding| finding.code == Code::LeaseHeld) {
-                    environment.mark_busy();
+                if fleet {
+                    environment.skip_when_busy();
                 }
                 report.environments.push(environment);
                 let exit = report.exit().code();
@@ -626,8 +622,8 @@ fn reconcile(
             ));
         }
         // A fleet run skips an instance another run holds: busy, not failed.
-        if fleet && environment.errors.iter().any(|finding| finding.code == Code::LeaseHeld) {
-            environment.mark_busy();
+        if fleet {
+            environment.skip_when_busy();
         }
     }
     let exit = report.exit().code();
@@ -667,18 +663,8 @@ fn extend_expiry(
     );
     match report.errors.first() {
         Some(finding) => Err(Stop::Finding(finding.clone())),
-        None => Ok(recorded_expiry(&report)),
+        None => Ok(report.expires_at),
     }
-}
-
-/// The `expiresAt` a state write recorded, as its report states it.
-fn recorded_expiry(
-    report: &nyl_orchestration::report::StateOperationReport,
-) -> Option<nyl_core::orchestration::time::Timestamp> {
-    report
-        .details
-        .get("expiresAt")
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 #[cfg(test)]

@@ -81,6 +81,27 @@ pub fn decide(intent: Intent, expires_at: Option<Timestamp>, ttl: Option<Duratio
     }
 }
 
+/// The `expiresAt` a removal of `environment` is decided on: the record's,
+/// when the instance is expired at `now`. An instance that is not (renewed
+/// since a listing, or never expired) is `NYL-INSTANCE-RENEWED`, exit 2, and
+/// nothing is removed.
+pub fn decided_expiry(
+    environment: &EnvironmentName,
+    expires_at: Option<Timestamp>,
+    ttl: Option<Duration>,
+    now: Timestamp,
+) -> Result<Timestamp, Finding> {
+    expires_at.filter(|_| expired(expires_at, ttl, now)).ok_or_else(|| {
+        Finding::new(
+            Code::InstanceRenewed,
+            format!("{environment} is not expired, so nothing is removed"),
+            format!(
+                "run `nyl reconcile -e {environment}` again; the next run decides on the instance's current expiry"
+            ),
+        )
+    })
+}
+
 /// The check a removal repeats under the lease: the record still holds the
 /// `expiresAt` the decision was made on. Anything else means another run
 /// renewed or removed the instance meanwhile, so nothing is torn down
@@ -171,13 +192,20 @@ pub enum EvictionResult {
 
 /// The eviction result of a removal reported as `action` with `error_codes`.
 pub fn eviction_result(action: InstanceAction, error_codes: &[Code]) -> EvictionResult {
-    if action == InstanceAction::Removed {
+    // State already deleted: another job removed the instance first.
+    if action == InstanceAction::Removed || error_codes.contains(&Code::StateDeleted) {
         EvictionResult::Removed
     } else if error_codes.contains(&Code::InstanceRenewed) {
         EvictionResult::Renewed
     } else {
         EvictionResult::Incomplete
     }
+}
+
+/// The eviction result of a removal that stopped with the finding `code`
+/// before it reported anything.
+pub fn eviction_result_of_stop(code: Code) -> EvictionResult {
+    eviction_result(InstanceAction::RemovalIncomplete, &[code])
 }
 
 /// An instance of a template that counts against `maxInstances`.
@@ -461,6 +489,7 @@ mod tests {
             params: std::collections::BTreeMap::new(),
             expires_at,
             source_commit: None,
+            keep_id: None,
             location: nyl_core::orchestration::state::StateLocation {
                 repository: "local".to_owned(),
                 desired_ref: "d".to_owned(),
@@ -691,5 +720,24 @@ mod tests {
             EvictionResult::Incomplete
         );
         assert_eq!(eviction_result(InstanceAction::Removed, &[]), EvictionResult::Removed);
+        assert_eq!(eviction_result_of_stop(Code::StateDeleted), EvictionResult::Removed);
+        assert_eq!(eviction_result_of_stop(Code::InstanceRenewed), EvictionResult::Renewed);
+        assert_eq!(
+            eviction_result_of_stop(Code::StateUnavailable),
+            EvictionResult::Incomplete
+        );
+
+        let environment = name("pr-1");
+        let expires = Some(at("2026-10-01T10:00:00Z"));
+        assert_eq!(
+            decided_expiry(&environment, expires, TTL, at("2026-10-02T00:00:00Z")),
+            Ok(at("2026-10-01T10:00:00Z"))
+        );
+        for (expires_at, now) in [(expires, "2026-09-30T00:00:00Z"), (None, "2026-10-02T00:00:00Z")] {
+            assert_eq!(
+                decided_expiry(&environment, expires_at, TTL, at(now)).unwrap_err().code,
+                Code::InstanceRenewed
+            );
+        }
     }
 }

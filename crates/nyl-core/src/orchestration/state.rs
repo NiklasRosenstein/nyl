@@ -174,6 +174,12 @@ pub struct StateRecord {
     /// renders at this commit.
     #[serde(rename = "sourceCommit", default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
+    /// The identity of an instance's keep refs in the source repository,
+    /// `refs/nyl-keep/<keepId>/<commit>`: minted when the instance first
+    /// keeps a commit, unique across projects, and surviving moves of the
+    /// state, of the project, and renames of the template.
+    #[serde(rename = "keepId", default, skip_serializing_if = "Option::is_none")]
+    pub keep_id: Option<Uid>,
     pub location: StateLocation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<StateEvent>,
