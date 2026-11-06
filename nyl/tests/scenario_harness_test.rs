@@ -727,7 +727,7 @@ fn test_summary_lists_and_lease_break_are_read_from_the_summary() {
 /// attests `accepted` and `healthy` from Argo CD, which no scenario scripts).
 const FAKE_PUBLICATION: [(&str, &str); 1] = [(
     "walkthroughs/observed-value",
-    "scripts the observer of a publication in mode observe",
+    "scripts the observer of a publication that declares `observe: {}`",
 )];
 
 /// Tier 1 keeps the test kinds, which scenarios script, but a scenario that

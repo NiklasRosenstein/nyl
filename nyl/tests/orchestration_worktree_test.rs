@@ -301,7 +301,7 @@ fn test_local_worktree_run_retains_its_snapshot_in_the_configured_local_reposito
 #[test]
 fn test_worktree_source_policy_comes_from_the_driver_for_any_kind() {
     use scenario::shell::{project as test_project, Harness, ENVIRONMENT, NYL_TOML};
-    let fixture = test_project(&[NYL_TOML,("nyl/environment.yaml", ENVIRONMENT),("nyl/publisher.yaml", "apiVersion: units.gitops.nyl/v1\nkind: OtherPublisher\nmetadata: {name: publisher, labels: {dev: 'true'}}\nspec: {target: unused, mode: publish}\n")]);
+    let fixture = test_project(&[NYL_TOML,("nyl/environment.yaml", ENVIRONMENT),("nyl/publisher.yaml", "apiVersion: units.gitops.nyl/v1\nkind: OtherPublisher\nmetadata: {name: publisher, labels: {dev: 'true'}}\nspec: {target: unused}\n")]);
     let mut harness = Harness::new(fixture.path(), true);
     harness.drivers.register_as(
         "units.gitops.nyl/v1",

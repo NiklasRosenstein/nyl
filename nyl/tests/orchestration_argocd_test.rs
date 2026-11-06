@@ -1,5 +1,5 @@
 //! `nyl attest` and the `observe` teardown wait of a `KubernetesPublication`
-//! in observe mode, end to end through the orchestration shell with the real
+//! with `observe: {}`, end to end through the orchestration shell with the real
 //! publication driver: it publishes to the world's `project.git`, and Argo CD
 //! is a local fake of the Kubernetes API of the control-plane Cluster. The
 //! Cluster's local context and the kubeconfig the unit admits are the only
