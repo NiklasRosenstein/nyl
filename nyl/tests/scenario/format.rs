@@ -451,6 +451,9 @@ pub struct DeployExpectation {
     pub contains: Vec<String>,
     #[serde(default)]
     pub unchanged: Vec<String>,
+    /// Patterns that match no file on the branch after the step.
+    #[serde(default)]
+    pub absent: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

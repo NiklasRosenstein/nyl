@@ -785,6 +785,11 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 ));
             }
         }
+        for pattern in &deploy.absent {
+            if let Some(path) = after.keys().find(|path| glob_matches(pattern, path)) {
+                return Err(format!("{} still has {path}, which matches {pattern}", deploy.branch));
+            }
+        }
         for pattern in &deploy.unchanged {
             let select = |tree: &BTreeMap<String, String>| {
                 tree.iter()
