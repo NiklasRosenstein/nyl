@@ -208,6 +208,7 @@ pub fn init(
                     params: BTreeMap::new(),
                     expires_at: None,
                     source_commit: None,
+                    source_ref: None,
                     keep_id: None,
                     location: location.clone(),
                     events: vec![event],
@@ -276,6 +277,10 @@ pub struct InstanceInit<'a> {
     pub params: &'a BTreeMap<String, Value>,
     /// The entry worktree's commit: the source of the instance's later runs that are not entered from its own source.
     pub source_commit: &'a nyl_core::orchestration::ids::CommitId,
+    /// `--source-ref`: where the host serves `source_commit` from when it will
+    /// not serve it by its id, recorded next to it. `None` keeps what the
+    /// record already holds; a hint only, validated by name and never fetched here.
+    pub source_ref: Option<&'a str>,
     /// The template's `ttl`: activity moves `expiresAt` to now plus this.
     pub ttl: Option<nyl_core::orchestration::time::Duration>,
     /// Keep `source_commit` fetchable before it is recorded, through this
@@ -349,6 +354,7 @@ pub fn init_instance(
                         params: instance.params.clone(),
                         expires_at,
                         source_commit: Some(instance.source_commit.clone()),
+                        source_ref: instance.source_ref.map(str::to_owned),
                         keep_id: keep_id.clone(),
                         location: location.clone(),
                         events: vec![event],
@@ -396,6 +402,9 @@ pub fn init_instance(
                     }
                     record.params = instance.params.clone();
                     record.source_commit = Some(instance.source_commit.clone());
+                    if let Some(source_ref) = instance.source_ref {
+                        record.source_ref = Some(source_ref.to_owned());
+                    }
                     record.expires_at = expires_at;
                     if record == *existing && changes.desired.is_empty() {
                         report.expires_at = record.expires_at;
