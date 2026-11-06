@@ -231,3 +231,9 @@ id = "01fc102c-cdf8-4d26-ba71-c205270082b8"
 type = "fix"
 description = "Unchanged Git LFS files no longer make the worktree look dirty, which blocked `publish-tree --require-clean` after a fresh CI checkout"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "630f9659-a268-4d91-9f19-383f1f55decf"
+type = "fix"
+description = "An ApplicationGroup whose spec uses templating that its typed parse rejects before rendering, such as `projectTemplate.name: '{{ target.metadata.name }}-web'`, is no longer silently left out of a target when it writes `metadata.labels` in flow style or with a trailing comment: targets select on the labels the document declares, and a group that renders to no document is recorded as omitted"
+author = "@NiklasRosenstein"

@@ -183,7 +183,14 @@ ordinary release overrides are rejected.
 ## Structural templating
 
 The ApplicationGroup `spec` can vary per target or render to no document to
-omit the group. Its API version, kind, and metadata name remain static. Remote
+omit the group, which then counts as `enabled: false` for that target. Any other
+result that is not one ApplicationGroup with the same identity is an error;
+Nyl never drops a selected group silently. Its API version, kind, and metadata
+name remain static, and so do its `metadata.labels`, which targets select on
+before rendering. A document that is valid YAML before rendering may write them
+in any form; one that is not, such as a spec wrapped in `{% if %}`, must write
+them as a block mapping or a one-line `{key: value}` mapping, and Nyl rejects
+any other form instead of reading it as no labels. Remote
 source coordinates and commit locks must remain statically parseable for
 `nyl update source-locks`.
 

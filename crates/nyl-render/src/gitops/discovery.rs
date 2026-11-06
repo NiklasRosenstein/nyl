@@ -477,13 +477,13 @@ fn discover_document(
     relative_path: &Path,
     catalogue: &crate::config::ResourceCatalogue,
 ) -> Result<Option<(GitOpsInventoryKey, DiscoveredGitOpsResource)>> {
-    let envelope = crate::yaml::parse_yaml_documents_k8s_compatible(document)
+    let parsed = crate::yaml::parse_yaml_documents_k8s_compatible(document)
         .ok()
-        .and_then(|documents| (documents.len() == 1).then(|| documents[0].clone()))
-        .unwrap_or_else(|| {
-            let (api_version, kind, name) = scan_static_envelope_fields(document);
-            serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
-        });
+        .and_then(|documents| (documents.len() == 1).then(|| documents[0].clone()));
+    let envelope = parsed.clone().unwrap_or_else(|| {
+        let (api_version, kind, name) = scan_static_envelope_fields(document);
+        serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
+    });
     nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
         NylError::config(format!(
             "{} document {}: {error}",
@@ -519,7 +519,19 @@ fn discover_document(
         Err(_) if templatable && has_template => None,
         Err(error) => return Err(error),
     };
-    let static_labels = resource.as_ref().map_or(scanned_labels, resource_metadata_labels);
+    // A templated spec can fail the typed parse. That must not change the
+    // labels selection sees: they are the document's own wherever it is valid
+    // YAML, and only a document that is not valid YAML before rendering falls
+    // back to the line scanner.
+    let static_labels = match &resource {
+        Some(resource) => resource_metadata_labels(resource),
+        None => parsed
+            .as_ref()
+            .map(declared_metadata_labels)
+            .transpose()?
+            .flatten()
+            .unwrap_or(scanned_labels),
+    };
     let key = GitOpsInventoryKey::new(identity.kind, identity.name.clone());
     let discovered = DiscoveredGitOpsResource {
         source_path: relative_path.to_path_buf(),
@@ -546,6 +558,33 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
     }
 }
 
+/// The `metadata.labels` of a document that parses as YAML before rendering,
+/// or `None` when they are not a mapping of strings, so the caller falls back
+/// to the line scanner. Like the scanner, it rejects template syntax: targets
+/// select on labels before anything renders.
+fn declared_metadata_labels(document: &serde_json::Value) -> Result<Option<BTreeMap<String, String>>> {
+    let Some(labels) = document.pointer("/metadata/labels") else {
+        return Ok(Some(BTreeMap::new()));
+    };
+    let Some(labels) = labels.as_object() else {
+        return Ok(None);
+    };
+    let mut declared = BTreeMap::new();
+    for (key, value) in labels {
+        let Some(value) = value.as_str() else {
+            return Ok(None);
+        };
+        if nyl_core::template_syntax::has_template_syntax(key) || nyl_core::template_syntax::has_template_syntax(value)
+        {
+            return Err(NylError::config(
+                "GitOps resource metadata.labels must be static because targets select them before rendering",
+            ));
+        }
+        declared.insert(key.clone(), value.to_owned());
+    }
+    Ok(Some(declared))
+}
+
 pub(super) fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<String, String>> {
     let mut labels = BTreeMap::new();
     let mut metadata_indent = None;
@@ -557,40 +596,33 @@ pub(super) fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<Str
         }
         let indent = line.len() - trimmed.len();
         if indent == 0 {
-            metadata_indent = trimmed
-                .strip_prefix("metadata:")
-                .is_some_and(|tail| tail.trim().is_empty())
-                .then_some(indent);
+            metadata_indent = opens_block(trimmed, "metadata").then_some(indent);
             labels_indent = None;
             continue;
         }
         if metadata_indent.is_some_and(|parent| indent > parent) {
-            if labels_indent.is_none()
-                && trimmed
-                    .strip_prefix("labels:")
-                    .is_some_and(|tail| tail.trim().is_empty())
-            {
-                labels_indent = Some(indent);
-                continue;
+            if labels_indent.is_none() {
+                if let Some(tail) = trimmed.strip_prefix("labels:") {
+                    let tail = strip_yaml_comment(tail).trim();
+                    if tail.is_empty() {
+                        labels_indent = Some(indent);
+                    } else if let Some(pairs) = tail.strip_prefix('{').and_then(|tail| tail.strip_suffix('}')) {
+                        for pair in pairs.split(',').filter(|pair| !pair.trim().is_empty()) {
+                            let (key, value) = pair.split_once(':').unwrap_or((pair, ""));
+                            insert_static_label(&mut labels, key, value)?;
+                        }
+                    } else if !matches!(tail, "null" | "~") {
+                        // Never read as no labels: a group would silently match no target.
+                        return Err(NylError::config(
+                            "GitOps resource metadata.labels must be a block mapping or a one-line flow mapping in a document that is not valid YAML before rendering, because targets select on them before rendering",
+                        ));
+                    }
+                    continue;
+                }
             }
             if labels_indent.is_some_and(|parent| indent > parent) {
                 if let Some((key, value)) = trimmed.split_once(':') {
-                    let key = parse_static_scalar(key);
-                    let value = parse_static_scalar(value);
-                    if key.contains("{{")
-                        || value.contains("{{")
-                        || key.contains("{%")
-                        || value.contains("{%")
-                        || key.contains("{#")
-                        || value.contains("{#")
-                    {
-                        return Err(NylError::config(
-                            "GitOps resource metadata.labels must be static because targets select them before rendering",
-                        ));
-                    }
-                    if !key.is_empty() && !value.is_empty() {
-                        labels.insert(key.to_owned(), value.to_owned());
-                    }
+                    insert_static_label(&mut labels, key, value)?;
                 }
             } else if labels_indent.is_some() {
                 labels_indent = None;
@@ -598,6 +630,28 @@ pub(super) fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<Str
         }
     }
     Ok(labels)
+}
+
+/// Whether `line` is `key:` opening a nested block, allowing a trailing comment.
+fn opens_block(line: &str, key: &str) -> bool {
+    line.strip_prefix(key)
+        .and_then(|tail| tail.strip_prefix(':'))
+        .is_some_and(|tail| strip_yaml_comment(tail).trim().is_empty())
+}
+
+/// Record one scanned label, rejecting template syntax: targets select on labels before rendering.
+fn insert_static_label(labels: &mut BTreeMap<String, String>, key: &str, value: &str) -> Result<()> {
+    let key = parse_static_scalar(key);
+    let value = parse_static_scalar(value);
+    if nyl_core::template_syntax::has_template_syntax(key) || nyl_core::template_syntax::has_template_syntax(value) {
+        return Err(NylError::config(
+            "GitOps resource metadata.labels must be static because targets select them before rendering",
+        ));
+    }
+    if !key.is_empty() && !value.is_empty() {
+        labels.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(())
 }
 
 fn parse_complete_resource(document: &str, contextual_path: &Path) -> Result<GitOpsResource> {
@@ -655,10 +709,7 @@ pub(super) fn scan_static_envelope_fields(document: &str) -> (Option<String>, Op
                 api_version = Some(value.to_owned());
             } else if let Some(value) = static_mapping_value(trimmed, "kind") {
                 kind = Some(value.to_owned());
-            } else if trimmed
-                .strip_prefix("metadata:")
-                .is_some_and(|tail| tail.trim().is_empty())
-            {
+            } else if opens_block(trimmed, "metadata") {
                 metadata_indent = Some(indent);
             }
         } else if metadata_indent.is_some_and(|parent| indent > parent) {
@@ -991,6 +1042,90 @@ spec:
             )
             .is_none());
         assert!(group.resource.is_none());
+    }
+
+    /// A group document with `labels` and a templated `projectTemplate.name`,
+    /// which fails the typed parse before rendering. With `wrapped`, a statement
+    /// around the spec also makes it invalid YAML, so only the line scanner reads it.
+    fn templated_group_document(labels: &str, wrapped: bool) -> String {
+        let spec =
+            "spec:\n  applicationNamespace: argocd\n  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n"
+                .to_owned();
+        let spec = if wrapped {
+            format!("{{% if values.enabled %}}\n{spec}{{% endif %}}\n")
+        } else {
+            spec
+        };
+        format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: web\n{labels}{spec}")
+    }
+
+    /// Templating that the typed parse rejects must not change which labels
+    /// targets select on, whichever YAML form they are written in.
+    #[test]
+    fn test_templated_group_keeps_its_labels_whatever_their_yaml_form() {
+        let (temporary, _repository) = project();
+        for wrapped in [false, true] {
+            for (index, labels) in [
+                "  labels:\n    environment: production\n    tier: web\n",
+                "  labels: {environment: production, tier: web}\n",
+                "  labels: {environment: 'production', \"tier\": \"web\"} # selected by targets\n",
+                "  labels: # selected by targets\n    environment: production\n    tier: web\n",
+                "  labels:\n    \"environment\": 'production'\n    tier: \"web\"\n",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                fs::write(
+                    temporary.path().join("group.yaml"),
+                    templated_group_document(labels, wrapped),
+                )
+                .unwrap();
+                let inventory =
+                    discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
+                let group = inventory.get(GitOpsResourceKind::ApplicationGroup, "web").unwrap();
+                assert!(group.resource.is_none(), "form {index} defers its spec");
+                assert_eq!(
+                    group.static_labels,
+                    BTreeMap::from([
+                        ("environment".to_owned(), "production".to_owned()),
+                        ("tier".to_owned(), "web".to_owned())
+                    ]),
+                    "form {index}, wrapped {wrapped}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_templated_group_rejects_labels_it_cannot_read_statically() {
+        let (temporary, _repository) = project();
+        for wrapped in [false, true] {
+            for (labels, fragment) in [
+                (
+                    "  labels: {environment: '{{ values.stage }}'}\n",
+                    "metadata.labels must be static",
+                ),
+                (
+                    "  labels:\n    environment: '{{ values.stage }}'\n",
+                    "metadata.labels must be static",
+                ),
+                // A form the scanner cannot read never means "no labels".
+                (
+                    "  labels: [environment]\n",
+                    "metadata.labels must be a block mapping or a one-line flow mapping",
+                ),
+            ] {
+                fs::write(
+                    temporary.path().join("group.yaml"),
+                    templated_group_document(labels, wrapped),
+                )
+                .unwrap();
+                let error = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(fragment), "{labels:?}, wrapped {wrapped}: {error}");
+            }
+        }
     }
 
     #[cfg(unix)]
