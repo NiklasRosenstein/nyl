@@ -61,14 +61,6 @@ fn keeping(template: &str) -> String {
     format!("{template}  keepSource: true\n")
 }
 
-/// What a host does after a pull request branch is deleted: no branch carries
-/// its commits, and unreferenced objects are gone. Objects a ref still names
-/// (a keep ref, GitHub's `refs/pull/<n>/head`) stay fetchable.
-fn delete_pull_request_branch(harness: &harness::Harness, branch: &str) {
-    harness.world.delete_branch(branch);
-    scenario::world::git(&harness.world.bare(), &["gc", "--quiet", "--prune=now"]);
-}
-
 const DAY: u64 = 24 * 60;
 
 fn world(template: &str, units: &str) -> (tempfile::TempDir, harness::Harness) {
@@ -722,8 +714,9 @@ fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
     );
 
     // The pull request is closed and its branch deleted: a job in a fresh
-    // clone of `main` does not have the commit, and finds it through the ref.
-    delete_pull_request_branch(&harness, "pr-9");
+    // clone of `main` does not have the commit, and finds it through the keep ref,
+    // which the resolver tries before fetching the id from the origin.
+    harness.world.delete_branch("pr-9");
     let plain = invoke(
         &harness,
         "main",
@@ -828,7 +821,7 @@ fn test_keep_refs_are_off_by_default() {
     );
     assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
     assert!(keep_refs(&harness, "pr-9").is_empty());
-    delete_pull_request_branch(&harness, "pr-9");
+    harness.world.delete_branch("pr-9");
     let plain = invoke(&harness, "main", &["reconcile", "-e", "pr-9", "--no-extend"]);
     assert_ne!(plain.exit, 0, "{}\n{}", plain.stderr, plain.stdout);
     assert!(plain.stderr.contains("does not exist"), "{}", plain.stderr);
@@ -859,7 +852,7 @@ fn test_the_closed_job_fetches_the_recorded_commit_from_the_pull_request_ref() {
     let recorded = harness.world.rev_parse("pr-9");
     assert!(keep_refs(&harness, "pr-9").is_empty());
     scenario::world::git(&harness.world.bare(), &["update-ref", "refs/pull/9/head", &recorded]);
-    delete_pull_request_branch(&harness, "pr-9");
+    harness.world.delete_branch("pr-9");
 
     let offline = invoke(&harness, "main", &["reconcile", "-e", "pr-9", "--no-extend", "--local"]);
     assert_ne!(offline.exit, 0, "{}\n{}", offline.stderr, offline.stdout);
@@ -1077,7 +1070,7 @@ fn test_a_lost_source_commit_fails_only_that_instances_removal() {
     harness.advance(5 * DAY);
     open(&harness, 1);
     harness.advance(3 * DAY);
-    delete_pull_request_branch(&harness, "pr-9");
+    harness.world.delete_branch("pr-9");
 
     let sweep = invoke(&harness, "main", &["reconcile", "--template", "preview", "-o", "json"]);
     assert_ne!(sweep.exit, 0, "{}\n{}", sweep.stderr, sweep.stdout);

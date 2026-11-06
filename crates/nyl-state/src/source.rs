@@ -176,7 +176,7 @@ impl GitSourceResolver {
     }
 
     /// Fetch `commit` by its id from the entry clone's `origin`. Only the
-    /// declared origin and only the recorded id are asked for. Failures leave
+    /// clone's `origin` remote and only the recorded id are asked for. Failures leave
     /// the lookup to report the commit as missing.
     fn fetch_from_origin(&self, repository: &Repository, commit: &CommitId) {
         if !self.origin_fetch {
@@ -743,6 +743,14 @@ impl SourceResolver for GitSourceResolver {
             let oid = Oid::from_str(revision).map_err(|_| missing())?;
             if !Self::commit_exists(&repo, oid) {
                 self.fetch_one(&repo, repository, revision, None);
+            }
+            // An explicit full id the entry clone lacks is fetched from its origin like a
+            // recorded commit (online runs only).
+            if *repository == SourceRepository::This
+                && !Self::commit_exists(&repo, oid)
+                && self.snapshot_repository(oid).is_none()
+            {
+                self.fetch_from_origin(&repo, &commit_id(oid)?);
             }
             return if Self::commit_exists(&repo, oid)
                 || (*repository == SourceRepository::This && self.snapshot_repository(oid).is_some())
