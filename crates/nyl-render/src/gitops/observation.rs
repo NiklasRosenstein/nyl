@@ -70,6 +70,16 @@ pub enum ReconcilerLocation {
 }
 
 impl ReconcilerLocation {
+    /// The recorded fields of this kind's location (JSON Pointers relative to
+    /// the facts) that say only how the reconciler is read, never what the
+    /// unit produces: renaming a kube context or moving an API server must
+    /// not re-execute the unit. A new kind names its own.
+    pub fn unkeyed(&self) -> &'static [&'static str] {
+        match self {
+            Self::ArgoCd(_) => &["/access", "/context"],
+        }
+    }
+
     /// The reconciler's kind and name, as an attestation's details name them:
     /// `{kind, instance, ...}` with whatever identifies how it is read.
     pub fn summary(&self) -> Value {
@@ -247,6 +257,19 @@ pub struct ReconcilerFacts {
 }
 
 impl ReconcilerFacts {
+    /// The fields of these facts, as JSON Pointers below `prefix` (where they
+    /// are recorded), that stay out of the unit's key: the location's own
+    /// ([`ReconcilerLocation::unkeyed`]) and the URL the publication branch is
+    /// read from. Everything else the render derives keys the unit.
+    pub fn unkeyed(&self, prefix: &str) -> Vec<String> {
+        self.location
+            .unkeyed()
+            .iter()
+            .chain(&["/publication/url"])
+            .map(|field| format!("{prefix}{field}"))
+            .collect()
+    }
+
     /// The reconciler facts of a rendered target: the reconciler of its
     /// target decides the kind.
     pub fn of(rendered: &RenderedTarget) -> Result<Self> {

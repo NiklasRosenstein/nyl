@@ -32,9 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use nyl_render::gitops::observation::{
-    Anchor, ArgoCdAnchor, ArgoCdApplication, ArgoCdLocation, DeploymentRole, ExpectedDeployment,
-};
+use nyl_render::gitops::observation::{Anchor, ArgoCdAnchor, ArgoCdApplication, ArgoCdLocation, ExpectedDeployment};
 use nyl_render::resources::ArgoCDAccessMethod;
 use serde_json::Value;
 
@@ -148,10 +146,10 @@ fn locator_error(what: &str) -> ReadError {
 ///   did not record is a [`ReadErrorKind::Declaration`] error, since Argo CD's
 ///   policy names an Application by it.
 /// - The anchors are established when the reader's proof rests on them or
-///   the caller concludes from absence, and only for a target with a
-///   workload deployment (one without has nothing to conclude): the catalog
+///   the caller concludes from absence, before any `can-i`: the catalog
 ///   Application must be in the listing, and each AppProject must be visible.
-///   The first one that is not ends the check.
+///   The first one that is not ends the check, and nothing more is asked of
+///   Argo CD, so that the anchor's error is the one shown.
 /// - With no anchor at all, the Kubernetes method can show nothing about
 ///   which Argo CD its context reaches, so the reading is unprovable and says
 ///   to declare the instance's access with method api.
@@ -179,11 +177,9 @@ fn read_argocd(
                 .map_err(|_| locator_error(&format!("anchor {}", anchor.id)))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let workload = request
-        .deployments
-        .iter()
-        .any(|deployment| deployment.role == DeploymentRole::Workload);
-    let establish = workload && (request.concluding_absence || proof == Proof::Anchors);
+    // Whether a target needs anchors at all (it needs none without a workload
+    // deployment) is the shared evaluation's rule, not the reader's.
+    let establish = request.concluding_absence || proof == Proof::Anchors;
 
     let namespaces = applications
         .iter()
@@ -205,7 +201,9 @@ fn read_argocd(
         }
     }
 
-    let (deployments, absent) = observe_each(queries, namespace, &applications, &live)?;
+    // The anchors come before the per-Application `can-i`: when one is not
+    // visible, its error and fix are what the user must see, so nothing more
+    // is asked of Argo CD.
     let mut established = BTreeMap::new();
     let mut unprovable = None;
     if establish {
@@ -220,6 +218,10 @@ fn read_argocd(
             );
         }
     }
+    let anchored = !established
+        .values()
+        .any(|visibility| matches!(visibility, Visibility::Hidden(_)));
+    let (deployments, absent) = observe_each(queries, namespace, &applications, &live, anchored)?;
     Ok(Reading {
         deployments,
         anchors: established,
@@ -235,12 +237,14 @@ type Live = BTreeMap<(String, String), Value>;
 type Observations = (BTreeMap<String, Observed>, BTreeMap<String, Visibility>);
 
 /// Each expected deployment as an [`Observed`] one when `live` has its
-/// Application, else the credential's answer about it.
+/// Application, else the credential's answer about it (`ask`: whether to
+/// put the question to Argo CD at all).
 fn observe_each(
     queries: &dyn ArgoQueries,
     namespace: &str,
     applications: &[(&ExpectedDeployment, ArgoCdApplication)],
     live: &Live,
+    ask: bool,
 ) -> Result<Observations, ReadError> {
     let mut deployments = BTreeMap::new();
     let mut absent = BTreeMap::new();
@@ -249,11 +253,21 @@ fn observe_each(
             let observed = live::parse(application).unwrap_or_else(|error| Observed {
                 running: Running::Unreadable(error),
                 health: Health::Unknown,
+                reported: None,
                 deleting: false,
                 source: None,
                 synced_source: None,
             });
             deployments.insert(deployment.id.clone(), observed);
+            continue;
+        }
+        if !ask {
+            absent.insert(
+                deployment.id.clone(),
+                Visibility::Hidden(
+                    "not asked: an anchor of the reading is not visible, which has to be fixed first".to_owned(),
+                ),
+            );
             continue;
         }
         if locator.project.is_empty() {
@@ -326,7 +340,9 @@ fn establish_anchors(
 
 #[cfg(test)]
 mod tests {
-    use nyl_render::gitops::observation::Source;
+    use std::cell::RefCell;
+
+    use nyl_render::gitops::observation::{DeploymentRole, Source};
     use serde_json::json;
 
     use super::*;
@@ -336,6 +352,8 @@ mod tests {
         applications: BTreeMap<String, Vec<(String, Value)>>,
         projects: BTreeSet<String>,
         denied: BTreeSet<String>,
+        /// The `can-i` questions put to it.
+        asked: RefCell<Vec<String>>,
     }
 
     impl ArgoQueries for Fake {
@@ -349,6 +367,7 @@ mod tests {
                 .collect())
         }
         fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
+            self.asked.borrow_mut().push(rbac_name.to_owned());
             Ok(!self.denied.contains(rbac_name))
         }
         fn project_exists(&self, _: &str, name: &str) -> Result<bool, ReadError> {
@@ -396,6 +415,7 @@ mod tests {
             applications: BTreeMap::from([("argocd".to_owned(), vec![live_application("web")])]),
             projects: BTreeSet::new(),
             denied: BTreeSet::from(["api/team-a/api".to_owned()]),
+            asked: RefCell::default(),
         };
         let anchors = [Anchor {
             id: "project/web".to_owned(),
@@ -435,6 +455,7 @@ mod tests {
             applications: BTreeMap::new(),
             projects: BTreeSet::new(),
             denied: BTreeSet::new(),
+            asked: RefCell::default(),
         };
         let deployments = [deployment(DeploymentRole::Workload, "argocd", "web", "default")];
         let request = ReadRequest {
@@ -459,6 +480,51 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind, ReadErrorKind::Declaration);
         assert!(error.message.contains("no Argo CD project"), "{error}");
+    }
+
+    /// Catches `can-i` being asked before the anchors, which would bury an
+    /// anchor's error and fix under per-Application ones: with an anchor that
+    /// is not visible nothing is asked of Argo CD, an absent deployment says
+    /// so, and even an Application whose project was never recorded does not
+    /// get ahead of the anchor.
+    #[test]
+    fn test_a_hidden_anchor_comes_before_any_can_i() {
+        let fake = Fake {
+            applications: BTreeMap::new(),
+            projects: BTreeSet::new(),
+            denied: BTreeSet::new(),
+            asked: RefCell::default(),
+        };
+        let deployments = [
+            deployment(DeploymentRole::Workload, "argocd", "web", "web"),
+            deployment(DeploymentRole::Workload, "argocd", "api", ""),
+        ];
+        let anchors = [Anchor {
+            id: "project/web".to_owned(),
+            locator: json!({"project": {"name": "web"}}),
+        }];
+        let request = ReadRequest {
+            deployments: &deployments,
+            anchors: &anchors,
+            concluding_absence: true,
+        };
+        let reading = read_argocd(&fake, "argocd", Proof::PerDeployment, &request).unwrap();
+        assert!(
+            matches!(&reading.anchors["project/web"], Visibility::Hidden(reason) if reason.contains("AppProject web"))
+        );
+        assert!(fake.asked.borrow().is_empty(), "{:?}", fake.asked.borrow());
+        assert!(reading
+            .absent
+            .values()
+            .all(|visibility| matches!(visibility, Visibility::Hidden(reason) if reason.starts_with("not asked"))));
+        // Once the anchor is visible the question is asked, project or not.
+        let visible = Fake {
+            projects: BTreeSet::from(["web".to_owned()]),
+            ..fake
+        };
+        let error = read_argocd(&visible, "argocd", Proof::PerDeployment, &request).unwrap_err();
+        assert_eq!(error.kind, ReadErrorKind::Declaration);
+        assert_eq!(visible.asked.borrow().as_slice(), ["web/web"]);
     }
 
     #[test]
