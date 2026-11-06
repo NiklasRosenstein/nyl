@@ -78,8 +78,13 @@ impl World {
         world
     }
 
+    /// The URL of `project.git` in the form Nyl records for it: the driver
+    /// reports its repository through URL normalization, which turns a
+    /// Windows path into `file:///D:/...`, so the URL is built the same way.
     pub fn project_url(&self) -> String {
-        format!("file://{}", self.root.path().join("project.git").display())
+        reqwest::Url::from_file_path(self.bare())
+            .expect("the test repository has an absolute path")
+            .to_string()
     }
 
     pub fn work(&self) -> PathBuf {
