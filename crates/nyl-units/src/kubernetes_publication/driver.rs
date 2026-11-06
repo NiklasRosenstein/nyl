@@ -400,11 +400,13 @@ impl Driver for KubernetesPublicationDriver {
             Some(settings) => {
                 let settings: TeardownSettings = serde_json::from_value(settings.clone())
                     .map_err(|error| DriverError::before_effects(format!("spec.teardownSettings: {error}")))?;
-                Ok(Supported::Supported(evaluate(
+                let mut readiness = evaluate(&unit.unit.environment, &unit.unit.name, &settings);
+                readiness.unattended.extend(super::readiness::unattended_wait(
                     &unit.unit.environment,
                     &unit.unit.name,
-                    &settings,
-                )))
+                    teardown_wait(spec),
+                ));
+                Ok(Supported::Supported(readiness))
             }
         }
     }

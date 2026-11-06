@@ -333,7 +333,8 @@ pub fn plan(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
 }
 
 /// The teardown requirements the environment's units do not meet, as
-/// `plan` would warn about them, without a report of anything else: what
+/// `plan` would warn about them, and what an unattended removal would wait
+/// for, without a report of anything else: what
 /// `nyl state init --template` shows, because every instance is torn down
 /// some day. The units render at the request's source and resolve against
 /// the environment's state; nothing is written. The findings are the
@@ -376,10 +377,12 @@ pub fn teardown_readiness_preview(
                 },
                 &held_view,
             );
-            Ok(crate::rules::teardown::readiness_warnings(
+            let mut findings = crate::rules::teardown::readiness_warnings(context.drivers, resolved.units.values());
+            findings.extend(crate::rules::teardown::unattended_warnings(
                 context.drivers,
                 resolved.units.values(),
-            ))
+            ));
+            Ok(findings)
         };
         let result = preview();
         session.clean();

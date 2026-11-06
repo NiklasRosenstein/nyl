@@ -27,6 +27,8 @@ nyl reconcile -e dev --leaving --allow-teardown
 nyl reconcile -e dev --unit config --reapply --reason "rotate credentials"
 nyl reconcile -e dev --fail-fast
 nyl reconcile -e pr-123 --template preview --param pr=123
+nyl reconcile -e pr-123 --renew
+nyl reconcile --template preview
 ```
 
 The environment's state must exist: create it once with
@@ -47,6 +49,59 @@ declared Environment or an existing instance found by its record, and an
 instance renders at the source commit its record names, whichever checkout the
 command runs from; the report says so, and the environment record keeps
 `by: recorded`.
+
+## Preview lifecycle
+
+Instances expire, and a reconcile is how they stay alive or are removed. The
+full rules are in
+[expiry, limits, and the fleet](/nyl/orchestration/resource-guides/environment-template/#expiry-limits-and-the-fleet);
+the options are:
+
+| Command | An instance that is live | An instance that is expired |
+| --- | --- | --- |
+| `reconcile -e <instance>` | extends `expiresAt` to now plus `ttl`, then reconciles | removes it |
+| `reconcile -e <instance> --no-extend` | reconciles without extending | removes it |
+| `reconcile -e <instance> --renew` | extends, then reconciles | extends, then reconciles |
+| `reconcile -e <instance> --template <name> --param …` | creates or updates it, extends, then reconciles | the same: updating an active pull request never removes its preview |
+| `reconcile --template <name>` | reconciles at its own recorded commit, without extending | removes it |
+
+- **Removal** runs `teardown --all` and then `state delete`, the way [`nyl state
+  delete --teardown`](/nyl/reference/cli/state/#nyl-state-delete) does, and
+  reports the instance as `removed` under `instance.action` (`-o json`). The
+  state stays while any unit has an incarnation, so a teardown that waits,
+  fails, or is uncertain leaves the instance in place (`removal-incomplete`),
+  and the exit is that of the teardown: 2 for a wait, 3 for a failure, 4 for
+  an uncertain outcome. The teardown starts only when the template sets
+  `allowTeardown` or the run passes `--allow-teardown`; otherwise the units
+  are recorded as pending teardown and the run exits 2
+  (`NYL-INSTANCE-REMOVAL-PENDING`, `removal-pending`). `--allow-dependents`,
+  `--allow-incomplete`, `--approve`, `--source`, and `--confirm-removed`
+  (through [`nyl teardown`](/nyl/reference/cli/teardown/)) apply as they do to a
+  teardown. A removal decided on one `expiresAt` repeats the check under the
+  lease, so an instance another run renewed meanwhile is kept
+  (`NYL-INSTANCE-RENEWED`, exit 2).
+- **`--renew`** keeps an expired instance. **`--no-extend`** reconciles an
+  instance as maintenance. They conflict, and `--no-extend` conflicts with
+  `--template`. Both are rejected for a declared Environment, which has no
+  expiry, and `--renew`, `--param`, `--make-room`, `--source`, and
+  `--worktree` for the fleet (`NYL-INSTANCE-OPTION-INVALID`).
+- **`--make-room`**, with `--template` and `-e`, removes expired instances of
+  a template at `maxInstances` first, oldest expiry first and only as many as
+  the new instance needs, then creates the instance; without it the run exits 2
+  (`NYL-INSTANCE-LIMIT`) and names the expired instances that could go.
+- **`reconcile --template <name>` without `-e`** is the scheduled fleet job. It
+  finds the template's instances by listing its state location, reconciles each
+  live one at its own recorded source commit, removes the expired ones, and
+  never extends an expiry. An instance whose lease another run holds is
+  skipped and reported as `busy` (`instance.action`), which does not fail the
+  run: the exit category reflects only the instances it processed. With no
+  instance it exits 0. The template's state location must be listable
+  (`NYL-INSTANCE-NOT-LISTABLE`).
+
+`status`, `plan`, and `nyl get environments` show an expired instance until a
+reconcile removes it, and warn with `NYL-INSTANCE-EXPIRED`. Every instance
+report carries `instance.template`, `instance.expiresAt`, and
+`instance.expired`.
 
 ## Observed values
 

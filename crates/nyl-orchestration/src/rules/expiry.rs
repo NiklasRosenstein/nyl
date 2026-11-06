@@ -64,12 +64,10 @@ pub fn extended(ttl: Option<Duration>, now: Timestamp) -> Option<Timestamp> {
 /// What a reconcile with `intent` does with an instance whose record holds
 /// `expires_at`.
 pub fn decide(intent: Intent, expires_at: Option<Timestamp>, ttl: Option<Duration>, now: Timestamp) -> Disposition {
-    match intent {
-        Intent::Renew => Disposition::Reconcile { extend: true },
-        Intent::Maintenance if expired(expires_at, ttl, now) => Disposition::Remove,
-        Intent::Maintenance => Disposition::Reconcile { extend: false },
-        Intent::Activity if expired(expires_at, ttl, now) => Disposition::Remove,
-        Intent::Activity => Disposition::Reconcile { extend: true },
+    match (intent, expired(expires_at, ttl, now)) {
+        (Intent::Maintenance | Intent::Activity, true) => Disposition::Remove,
+        (Intent::Maintenance, false) => Disposition::Reconcile { extend: false },
+        (Intent::Renew, _) | (Intent::Activity, false) => Disposition::Reconcile { extend: true },
     }
 }
 

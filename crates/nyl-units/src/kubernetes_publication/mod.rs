@@ -42,7 +42,7 @@ pub use workload::{KubeResourceReader, ResourceReader};
 
 pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]
-pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
+pub(crate) use readiness::{evaluate as evaluate_teardown_readiness, unattended_wait};
 pub(crate) use run::{plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target};
 pub(crate) use spec::teardown_wait;
 #[cfg(any(test, feature = "test-kinds"))]

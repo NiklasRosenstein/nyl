@@ -18,6 +18,7 @@
         "exec",
         "ci-admit",
         "state-init",
+        "state-renew",
         "state-move",
         "state-delete",
         "state-forget",

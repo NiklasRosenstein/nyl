@@ -43,8 +43,8 @@ use nyl_render::gitops::publication::TeardownSettings;
 use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
-    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unit_target,
-    validate_teardown_wait,
+    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unattended_wait,
+    unit_target, validate_teardown_wait,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -271,11 +271,13 @@ impl Driver for FakePublication {
             None => Ok(Supported::Unsupported),
             Some(settings) => Self::recorded_settings(settings)
                 .map(|settings| {
-                    Supported::Supported(evaluate_teardown_readiness(
+                    let mut readiness = evaluate_teardown_readiness(&unit.unit.environment, &unit.unit.name, &settings);
+                    readiness.unattended.extend(unattended_wait(
                         &unit.unit.environment,
                         &unit.unit.name,
-                        &settings,
-                    ))
+                        teardown_wait(spec),
+                    ));
+                    Supported::Supported(readiness)
                 })
                 .map_err(DriverError::before_effects),
         }
