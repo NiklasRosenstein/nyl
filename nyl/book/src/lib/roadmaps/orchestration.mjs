@@ -1,4 +1,4 @@
-// The orchestration roadmap, milestones M1 to M9, rendered on the Orchestration
+// The orchestration roadmap, milestones M1 to M10, rendered on the Orchestration
 // roadmap page. ROADMAP.md records the direction; progress lives here. Tick an
 // item in the change that ships it, and set `done` on a milestone only when
 // its exit criterion is met.
@@ -170,6 +170,21 @@ export const orchestrationRoadmap = {
       id: 'M9',
       summary: 'Team-owned, typed declarations that units implement and Releases read, the fourth layer of Nyl.',
       delegate: 'domain-modeling',
+    },
+    {
+      id: 'M10',
+      title: 'Direct reconciler for Kubernetes publications',
+      summary: 'A DeploymentTarget that Nyl applies itself, with no Argo CD, through the same publication unit.',
+      needs: ['M5'],
+      exitCriterion: 'The platform scenario\'s Kubernetes publication runs three ways against Kind with a local registry, changing only the target\'s reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server. Each publishes the same tree, attests the same `accepted` and `healthy` for the same receipt, reads the same observed value, and tears down to an empty cluster with `teardownWait: observe`; a second unit, environment, or manual `nyl apply` cannot take over a Release an environment owns.',
+      items: [
+        { text: 'Specify the direct reconciler in the design contracts: the target-level declaration, publication before apply, fencing in the cluster, the direct reader, and teardown ([contract](https://github.com/NiklasRosenstein/nyl/blob/develop/design/orchestration-core.md#direct-reconciler)).', done: true },
+        { text: 'Add `reconciler: {direct: {}}` to DeploymentTarget with its exclusivity validation, a tree without Applications, AppProjects, or a catalog, and the reconciler in the ownership index\'s identity, so a target never switches reconciler by an edit.', done: false },
+        { text: 'Move `nyl apply`\'s apply, prune, purge, and release-state mechanics from the command into `nyl-render`, called by both the command and the publication driver, with the owner and the publication commit recorded in the release state.', done: false },
+        { text: 'Apply a direct target from `KubernetesPublication`: publish, then apply each Release in waves, fence Releases by owner, purge Releases that left the tree, and tear down in two phases behind `teardownWait` with the direct readiness rows.', done: false },
+        { text: 'Read a direct target for `nyl attest`, the `observe` teardown wait, observed values, and drift: a `DirectReader` over the release state and rollout status, with the release-state anchor, behind the unchanged shared evaluation.', done: false },
+        { text: 'Add the `nyl-e2e` crate: one scenario run direct, through Argo CD read by the Kubernetes API, and through Argo CD read by its API server, against Kind with a local registry and a local Argo CD install.', done: false },
+      ],
     },
   ],
 };
