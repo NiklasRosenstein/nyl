@@ -7,6 +7,7 @@ members = [
     "crates/nyl-render",
     "crates/nyl-state",
     "crates/nyl-orchestration",
+    "crates/nyl-e2e",
 ]
 resolver = "2"
 
