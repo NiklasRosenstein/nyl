@@ -133,8 +133,10 @@ fn is_project_cache_status(repository: &Repository, project_root: &Path, status_
 /// project-relative path, plus the `@`-prefixed digests of its resolved
 /// Release inputs: the `inputs` map of the ownership index.
 ///
-/// The Cluster document is hashed without its local `live` connection
-/// settings, which never affect rendered bytes.
+/// Every Cluster document is hashed without its local `live` connection
+/// settings, which never affect rendered bytes (the target's Cluster always
+/// through its normalized form; another one, such as the control-plane Cluster
+/// of the ArgoCDInstance, when it declares `live`).
 pub fn hash_inputs(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -> Result<BTreeMap<String, String>> {
     let cluster_resource = inventory
         .get(GitOpsResourceKind::Cluster, &compiled.cluster.metadata.name)
@@ -174,6 +176,26 @@ pub fn hash_inputs(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -
                     std::str::from_utf8(&cluster_bytes).expect("JSON serialization is UTF-8"),
                     &format!("Cluster '{}'", compiled.cluster.metadata.name),
                 )?;
+            }
+            // Every other Cluster document in the file that declares `live`
+            // (the ArgoCDInstance's control-plane Cluster, for one) is hashed
+            // without it too, so moving a kube context never changes the
+            // index. A Cluster without `live` keeps its bytes as written.
+            for discovered in inventory.resources.values().filter(|discovered| {
+                &discovered.source_path == relative && discovered.identity.kind == GitOpsResourceKind::Cluster
+            }) {
+                if let Some(GitOpsResource::Cluster(cluster)) = &discovered.resource {
+                    if cluster.spec.live.is_some() && cluster.metadata.name != compiled.cluster.metadata.name {
+                        let mut render_cluster = cluster.clone();
+                        render_cluster.spec.live = None;
+                        replace(
+                            &discovered.raw_document,
+                            std::str::from_utf8(&serde_json::to_vec(&render_cluster)?)
+                                .expect("JSON serialization is UTF-8"),
+                            &format!("Cluster '{}'", cluster.metadata.name),
+                        )?;
+                    }
+                }
             }
             // An ArgoCDInstance that declares `spec.access` is hashed without
             // it: how Nyl reads Argo CD never affects rendered bytes, so

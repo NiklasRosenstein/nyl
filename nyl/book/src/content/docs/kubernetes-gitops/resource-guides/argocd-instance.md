@@ -124,7 +124,9 @@ address, so the token is never sent in the clear.
 | Needs | Access to the control-plane Cluster's API | The API server reachable from the runner |
 | Permission | `list` on `applications.argoproj.io` | `get` on Applications |
 
-The token also needs `can-i` (it asks Argo CD whether it may `get` an
+For a target that generates no catalog Application (`catalogApplication.enabled:
+false` or a shared catalog) the token also needs `get` on its AppProjects, which
+anchor the teardown wait. The token also needs `can-i` (it asks Argo CD whether it may `get` an
 Application that its list does not show, so it never concludes an Application is
 gone from a list that hides what it may not read).
 
@@ -138,7 +140,7 @@ whole process environment, as `kubectl` does, because the Kubernetes client
 cannot restrict it. What it reads is the kubeconfig's own declaration; use the
 `api` method where the process environment must stay out of the reading.
 
-Editing `access`, or moving the control-plane Cluster's `live.context`,
-republishes nothing, re-executes no unit, and resets no attestation. Adding
+Editing `access`, or moving the control-plane Cluster's `live.context` (hashed
+without `live` like the workload Cluster's), republishes nothing, re-executes no unit, and resets no attestation. Adding
 `access` to an instance, or removing it, changes the instance file's digest in
 published ownership indexes once.

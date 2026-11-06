@@ -257,8 +257,10 @@ sync, differs from the generated one, such as an edited `directory.recurse`,
 Applications the token may not read and still answers success, so with the API
 server Nyl asks Argo CD (`can-i`) about every Application the list lacks: a token that may not
 get it makes the unit `unknown`, and only an Application the token could see
-counts as `missing`. The Kubernetes method cannot tell a missing Application
-from a context for another Argo CD, so point `spec.live.context` at the control
+counts as `missing`. With the Kubernetes method, a reading without the target's catalog Application
+(or, without a catalog, its AppProjects) makes the unit `unknown` instead of
+`missing`: a context for another Argo CD never records a failure. Apply the
+catalog before the first attest, and point `spec.live.context` at the control
 plane that runs the target. A target that generates no
 Application attests both vacuously.
 
@@ -349,8 +351,10 @@ or `{strategy: observe}` (the default for `mode: observe`: phase 1 completes
 once Argo CD no longer has any of the target's workload Applications, read as
 [Observing Argo CD](#observing-argo-cd) describes, within the unit's `timeout`;
 the wait concludes removal only from what the credential could see: the catalog
-Application must be in the same reading, and with the API server each missing
-Application needs Argo CD's `can-i` to say the token may get it).
+Application must be in the same reading (for a target without one, its
+AppProjects must be visible; with the Kubernetes method and neither, the wait
+fails closed and the API method is the way out), and with the API server each
+missing Application needs Argo CD's `can-i` to say the token may get it).
 A unit that waits by observing records the same Argo CD facts at resolution and
 needs the same credential admitted; without one, or when Argo CD cannot be
 read, the teardown is uncertain with `observation-failed` and the reason.

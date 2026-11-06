@@ -87,6 +87,42 @@ impl ApiServerReader {
 }
 
 impl ArgoReader for ApiServerReader {
+    /// `GET <server>/api/v1/projects/<name>`: visible on success; Argo CD
+    /// answers 404, or 403 for a token that may not get it, otherwise.
+    fn project_exists(&self, _namespace: &str, name: &str) -> Result<bool, ReadError> {
+        let mut url = self.server.clone();
+        let path = format!("{}/api/v1/projects/{name}", url.path().trim_end_matches('/'));
+        url.set_path(&path);
+        let server = self.server.as_str().to_owned();
+        let (token, budget, proxy) = (self.token.clone(), self.budget, self.proxy.clone());
+        block_on(async move {
+            let client = client(budget, proxy.as_deref())?;
+            let unreachable = |error: reqwest::Error| {
+                ReadError::new(
+                    ReadErrorKind::Unreachable,
+                    format!(
+                        "cannot ask Argo CD at {server} for project {name}: {}",
+                        error.without_url()
+                    ),
+                )
+            };
+            let response = client
+                .get(url)
+                .bearer_auth(&token)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(unreachable)?;
+            let status = response.status();
+            let body = response.text().await.map_err(unreachable)?;
+            match status {
+                status if status.is_success() => Ok(true),
+                StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => Ok(false),
+                status => Err(failure(status, &body, &server)),
+            }
+        })?
+    }
+
     fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
         let url = self.can_i_url(rbac_name);
         let server = self.server.as_str().to_owned();

@@ -146,8 +146,9 @@ impl KubeApiReader {
     }
 }
 
-impl ArgoReader for KubeApiReader {
-    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+impl KubeApiReader {
+    /// The `plural` objects (of `kind`) of `namespace`, by name, each as served.
+    fn list(&self, kind: &str, plural: &str, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
         let budget = self.budget;
         block_on(async {
             tokio::time::timeout(budget, async {
@@ -156,24 +157,21 @@ impl ArgoReader for KubeApiReader {
                     group: "argoproj.io".to_owned(),
                     version: "v1alpha1".to_owned(),
                     api_version: "argoproj.io/v1alpha1".to_owned(),
-                    kind: "Application".to_owned(),
-                    plural: "applications".to_owned(),
+                    kind: kind.to_owned(),
+                    plural: plural.to_owned(),
                 };
                 let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &resource);
                 let list = api
                     .list(&ListParams::default())
                     .await
-                    .map_err(|error| self.list_error(&error, namespace))?;
+                    .map_err(|error| self.list_error(&error, plural, namespace))?;
                 list.items
                     .into_iter()
-                    .map(|application| {
-                        let name = application.metadata.name.clone().ok_or_else(|| {
-                            ReadError::new(
-                                ReadErrorKind::Malformed,
-                                "an Application in the list has no name".to_owned(),
-                            )
+                    .map(|object| {
+                        let name = object.metadata.name.clone().ok_or_else(|| {
+                            ReadError::new(ReadErrorKind::Malformed, format!("a {kind} in the list has no name"))
                         })?;
-                        let value = serde_json::to_value(&application)
+                        let value = serde_json::to_value(&object)
                             .map_err(|error| ReadError::new(ReadErrorKind::Malformed, error.to_string()))?;
                         Ok((name, value))
                     })
@@ -184,7 +182,7 @@ impl ArgoReader for KubeApiReader {
                 Err(ReadError::new(
                     ReadErrorKind::Unreachable,
                     format!(
-                        "reading Applications of namespace {namespace} through context {:?} took longer than {}s",
+                        "reading {plural} of namespace {namespace} through context {:?} took longer than {}s",
                         self.context,
                         budget.as_secs()
                     ),
@@ -194,8 +192,18 @@ impl ArgoReader for KubeApiReader {
     }
 }
 
+impl ArgoReader for KubeApiReader {
+    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+        self.list("Application", "applications", namespace)
+    }
+
+    fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError> {
+        Ok(self.list("AppProject", "appprojects", namespace)?.contains_key(name))
+    }
+}
+
 impl KubeApiReader {
-    fn list_error(&self, error: &kube::Error, namespace: &str) -> ReadError {
+    fn list_error(&self, error: &kube::Error, plural: &str, namespace: &str) -> ReadError {
         let context = &self.context;
         match error {
             kube::Error::Api(status) if status.code == 401 => ReadError::new(
@@ -208,14 +216,14 @@ impl KubeApiReader {
             kube::Error::Api(status) if status.code == 403 => ReadError::new(
                 ReadErrorKind::Forbidden,
                 format!(
-                    "context {context:?} may not list applications.argoproj.io in namespace {namespace} (HTTP 403): \
-                     grant its user `list` on applications there"
+                    "context {context:?} may not list {plural}.argoproj.io in namespace {namespace} (HTTP 403): \
+                     grant its user `list` on {plural} there"
                 ),
             ),
             kube::Error::Api(status) if status.code == 404 => ReadError::new(
                 ReadErrorKind::Declaration,
                 format!(
-                    "context {context:?} serves no applications.argoproj.io: it is not the Argo CD control-plane Cluster \
+                    "context {context:?} serves no {plural}.argoproj.io: it is not the Argo CD control-plane Cluster \
                      {}; fix Cluster {}'s spec.live.context",
                     self.cluster, self.cluster
                 ),

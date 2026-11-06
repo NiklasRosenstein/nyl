@@ -14,7 +14,7 @@ mod publication_world;
 use std::collections::BTreeMap;
 
 use argocd_stub::{
-    application_with_source, applications, applications_none, argocd_api_with_policy, kube_api, kubeconfig,
+    application_with_source, applications, applications_none, argocd_api_full, kube_api_with_projects, kubeconfig,
     Applications, Denied, Response, Stub,
 };
 use nyl_core::orchestration::driver::{
@@ -58,19 +58,28 @@ struct Observed {
     served: Applications,
     /// What the API server's `can-i` denies the token.
     denied: Denied,
+    /// The AppProjects the fake serves.
+    projects: Applications,
     env: BTreeMap<String, String>,
     _directory: tempfile::TempDir,
 }
 
 impl Observed {
     fn new(method: Method) -> Self {
+        Self::with_catalog(method, true)
+    }
+
+    /// `catalog: false` is a target that generates no catalog Application
+    /// (`catalogApplication.enabled: false`, as a shared catalog does).
+    fn with_catalog(method: Method, catalog: bool) -> Self {
         let world = World::new();
         let served = applications(Vec::new());
+        let projects = applications(Vec::new());
         let directory = tempfile::TempDir::new().unwrap();
         let denied = applications_none();
         let (stub, env) = match method {
             Method::Kubernetes => {
-                let stub = kube_api(served.clone());
+                let stub = kube_api_with_projects(served.clone(), projects.clone());
                 let file = directory.path().join("kubeconfig");
                 kubeconfig(&file, "argocd-admin", &stub.url());
                 (
@@ -79,7 +88,7 @@ impl Observed {
                 )
             }
             Method::Api => (
-                argocd_api_with_policy(TOKEN, served.clone(), denied.clone()),
+                argocd_api_full(TOKEN, served.clone(), denied.clone(), projects.clone()),
                 BTreeMap::from([("ARGOCD_AUTH_TOKEN".to_owned(), TOKEN.to_owned())]),
             ),
         };
@@ -90,6 +99,12 @@ impl Observed {
             "  kubernetes:\n    kubeVersion: 1.31.4",
             "  live: {context: argocd-admin}\n  kubernetes:\n    kubeVersion: 1.31.4",
         );
+        if !catalog {
+            text = text.replace(
+                "  publication:\n    repositoryRef: {name: platform}\n",
+                "  catalogApplication:\n    enabled: false\n  publication:\n    repositoryRef: {name: platform}\n",
+            );
+        }
         if method == Method::Api {
             text = text.replace(
                 "  clusterRef: {name: dev}\n  applicationGroupSelector",
@@ -111,6 +126,7 @@ impl Observed {
             stub,
             served,
             denied,
+            projects,
             env,
             _directory: directory,
         }
@@ -822,4 +838,165 @@ fn test_attest_does_not_record_a_failure_for_applications_the_token_cannot_see()
     let result = outcomes(observed.attest(&driver, &unit, &tree));
     assert_eq!(result[0].1, AttestationResult::Fail);
     assert_eq!(result[0].3["applications"][1]["state"], "missing");
+}
+
+impl Observed {
+    /// The AppProject `name` exists in the fake Argo CD.
+    fn serve_project(&self, name: &str) {
+        self.projects
+            .lock()
+            .unwrap()
+            .push(json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "AppProject", "metadata": {"name": name, "namespace": "argocd"}}));
+    }
+}
+
+/// A target without a catalog Application (`catalogApplication.enabled:
+/// false`, or a shared catalog) has no Application phase 1 keeps, so its
+/// AppProjects anchor the teardown wait instead, under both methods. Catches a
+/// context for another Argo CD (an empty list that is a success) completing the
+/// wait while the workloads still run: phase 2 and the teardown of the
+/// databases and roles behind them would run under live workloads.
+#[test]
+fn test_removal_without_a_catalog_application_is_anchored_by_the_projects() {
+    let driver = real();
+    for method in [Method::Kubernetes, Method::Api] {
+        let observed = Observed::with_catalog(method, false);
+        let unit = observed.resolve(&driver, {
+            let mut spec = spec();
+            spec["teardownWait"] = json!({"strategy": "observe"});
+            spec
+        });
+        let facts = facts(&unit);
+        assert!(
+            facts
+                .applications
+                .iter()
+                .all(|app| app.role == ApplicationRole::Workload),
+            "{:?}",
+            facts.applications
+        );
+        assert_eq!(facts.applications[0].project, "web");
+
+        // The credential reaches another Argo CD: no project of this target.
+        let RemovalObservation::Failed(reason) = observed.removal(&driver, &unit) else {
+            panic!("{method:?}: an empty reading from another Argo CD completed the wait");
+        };
+        assert!(
+            reason.contains("AppProject web is not visible in namespace argocd"),
+            "{method:?}: {reason}"
+        );
+        // The same context for attest: unknown, never a recorded failure.
+        let tree = {
+            let (tree, _) = observed.publish(&driver, &unit);
+            tree
+        };
+        if method == Method::Kubernetes {
+            let reason = unknown(observed.attest(&driver, &unit, &tree));
+            assert!(reason.contains("AppProject web is not visible"), "{reason}");
+        }
+
+        // Its project is visible: the workload is gone, or it still runs.
+        observed.serve_project("web");
+        assert_eq!(
+            observed.removal(&driver, &unit),
+            RemovalObservation::Remaining(Vec::new()),
+            "{method:?}"
+        );
+        observed.serve(&unit, |_| Some("c".repeat(40)), |_| "Healthy");
+        assert_eq!(
+            observed.removal(&driver, &unit),
+            RemovalObservation::Remaining(vec!["web".to_owned()]),
+            "{method:?}"
+        );
+    }
+}
+
+/// With neither a catalog Application nor an AppProject of its own to show
+/// (every Application in `default`, which every Argo CD has), nothing proves a
+/// Kubernetes context reaches this target: the wait fails closed. The API
+/// method relies on `can-i` for each Application, so an Application it may get
+/// that is gone completes the wait.
+#[test]
+fn test_removal_with_nothing_to_anchor_fails_closed_for_kubernetes_only() {
+    let driver = real();
+    for method in [Method::Kubernetes, Method::Api] {
+        let observed = Observed::with_catalog(method, false);
+        let mut unit = observed.resolve(&driver, {
+            let mut spec = spec();
+            spec["teardownWait"] = json!({"strategy": "observe"});
+            spec
+        });
+        unit.resolved_spec.as_mut().unwrap()["argocd"]["applications"][0]["project"] = json!("default");
+        match method {
+            Method::Kubernetes => {
+                let RemovalObservation::Failed(reason) = observed.removal(&driver, &unit) else {
+                    panic!("a Kubernetes context was trusted with nothing to anchor it");
+                };
+                assert!(
+                    reason.contains("nothing shows that the Kubernetes context reaches the Argo CD"),
+                    "{reason}"
+                );
+            }
+            Method::Api => {
+                assert_eq!(
+                    observed.removal(&driver, &unit),
+                    RemovalObservation::Remaining(Vec::new())
+                );
+                *observed.denied.lock().unwrap() = vec!["*".to_owned()];
+                assert!(matches!(
+                    observed.removal(&driver, &unit),
+                    RemovalObservation::Failed(_)
+                ));
+            }
+        }
+    }
+}
+
+/// `attest` with the Kubernetes method and a context for another Argo CD is
+/// unknown, not a recorded `missing` failure: the catalog Application is not in
+/// the reading, which no honest Argo CD of this target lacks once it applied it.
+#[test]
+fn test_attest_with_a_context_for_another_argocd_is_unknown() {
+    let driver = real();
+    let observed = Observed::new(Method::Kubernetes);
+    let unit = observed.resolve(&driver, Observed::driver_spec(json!({})));
+    let (tree, _) = observed.publish(&driver, &unit);
+    let reason = unknown(observed.attest(&driver, &unit, &tree));
+    assert!(
+        reason.contains("the catalog Application argocd/dev-catalog is not in the reading"),
+        "{reason}"
+    );
+}
+
+/// The control-plane Cluster's `live.context` is local configuration like the
+/// workload Cluster's: moving it changes no published byte (so no drift, no
+/// republication). Catches the control-plane Cluster being hashed raw into
+/// the index.
+#[test]
+fn test_moving_the_control_plane_context_changes_no_published_byte() {
+    let driver = real();
+    let observed = Observed::new(Method::Api);
+    // The instance's control-plane Cluster is another one, with its own `live`.
+    observed.edit_platform(|text| {
+        let text = text.replace("  clusterRef: {name: dev}\n  namespace: argocd", "  clusterRef: {name: control}\n  namespace: argocd");
+        format!(
+            "{text}---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: control\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  live: {{context: control-admin}}\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]\n    clusterScopedKinds: [core/Namespace]\n"
+        )
+    });
+    let unit = observed.resolve(&driver, Observed::driver_spec(json!({})));
+    observed.publish(&driver, &unit);
+    let index = observed.index_bytes();
+    let head = git(&observed.world.bare(), &["rev-parse", "refs/heads/deploy"]);
+
+    observed.edit_platform(|text| text.replace("control-admin", "renamed-control-admin"));
+    let moved = observed.resolve(&driver, Observed::driver_spec(json!({})));
+    assert_eq!(facts(&moved).location.cluster, "control");
+    assert_eq!(facts(&moved).location.context.as_deref(), Some("renamed-control-admin"));
+    observed.publish(&driver, &moved);
+    assert_eq!(
+        observed.index_bytes(),
+        index,
+        "the index moved with the control-plane context"
+    );
+    assert_eq!(git(&observed.world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
 }

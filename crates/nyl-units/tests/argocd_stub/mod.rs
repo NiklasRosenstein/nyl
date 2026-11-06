@@ -226,6 +226,17 @@ pub fn applications_none() -> Denied {
 /// whatever `applications` holds (a token that sees nothing gets an empty one),
 /// and `can-i` answers `no` for the names in `denied`.
 pub fn argocd_api_with_policy(token: &'static str, applications: Applications, denied: Denied) -> Stub {
+    argocd_api_full(token, applications, denied, self::applications(Vec::new()))
+}
+
+/// [`argocd_api_with_policy`] that also serves `GET /api/v1/projects/<name>`
+/// for the AppProjects in `projects` (404 for any other).
+pub fn argocd_api_full(
+    token: &'static str,
+    applications: Applications,
+    denied: Denied,
+    projects: Applications,
+) -> Stub {
     Stub::start(move |request| {
         if request.headers.get("authorization").map(String::as_str) != Some(&format!("Bearer {token}")) {
             return Response::json(
@@ -240,6 +251,18 @@ pub fn argocd_api_with_policy(token: &'static str, applications: Applications, d
                 .iter()
                 .any(|denied| denied == "*" || denied == name);
             return Response::json(200, &json!({"value": if no { "no" } else { "yes" }}));
+        }
+        if let Some(name) = request.path().strip_prefix("/api/v1/projects/") {
+            let found = projects
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|project| project.pointer("/metadata/name").and_then(Value::as_str) == Some(name))
+                .cloned();
+            return found.map_or_else(
+                || Response::json(404, &json!({"error": "not found", "code": 5})),
+                |project| Response::json(200, &project),
+            );
         }
         if request.path() != "/api/v1/applications" {
             return Response::json(404, &json!({"error": "not found", "code": 5}));
@@ -263,19 +286,29 @@ pub fn argocd_api_with_policy(token: &'static str, applications: Applications, d
 /// The Kubernetes API of a cluster that runs Argo CD: serves the
 /// `applications.argoproj.io` list of each namespace.
 pub fn kube_api(applications: Applications) -> Stub {
+    kube_api_with_projects(applications, self::applications(Vec::new()))
+}
+
+/// [`kube_api`] that also serves the `appprojects` of each namespace.
+pub fn kube_api_with_projects(applications: Applications, projects: Applications) -> Stub {
     Stub::start(move |request| {
-        let Some(namespace) = request
-            .path()
-            .strip_prefix("/apis/argoproj.io/v1alpha1/namespaces/")
-            .and_then(|rest| rest.strip_suffix("/applications"))
-        else {
+        let rest = request.path().strip_prefix("/apis/argoproj.io/v1alpha1/namespaces/");
+        let (list, kind) = if rest.is_some_and(|rest| rest.ends_with("/appprojects")) {
+            (&projects, "AppProjectList")
+        } else {
+            (&applications, "ApplicationList")
+        };
+        let Some(namespace) = rest.and_then(|rest| {
+            rest.strip_suffix("/applications")
+                .or_else(|| rest.strip_suffix("/appprojects"))
+        }) else {
             return Response::json(
                 404,
                 &json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404,
                         "message": format!("{} not found", request.path())}),
             );
         };
-        let items = applications
+        let items = list
             .lock()
             .unwrap()
             .iter()
@@ -284,7 +317,7 @@ pub fn kube_api(applications: Applications) -> Stub {
             .collect::<Vec<_>>();
         Response::json(
             200,
-            &json!({"apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationList", "metadata": {"resourceVersion": "1"}, "items": items}),
+            &json!({"apiVersion": "argoproj.io/v1alpha1", "kind": kind, "metadata": {"resourceVersion": "1"}, "items": items}),
         )
     })
 }
