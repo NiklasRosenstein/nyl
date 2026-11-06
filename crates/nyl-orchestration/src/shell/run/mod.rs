@@ -952,12 +952,21 @@ impl<'r, 'a> Session<'r, 'a> {
                     resolution
                         .errors
                         .iter()
-                        .map(|error| {
-                            Finding::new(
+                        .map(|error| match crate::rules::evidence::error_code(error) {
+                            Some(code) => Finding::new(
+                                code,
+                                format!("unit {name}: {error}"),
+                                if code == Code::AttestationExternalUnsupported {
+                                    "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6): require only the names the producer's driver observes"
+                                } else {
+                                    "require an attestation the producer declares, or declare it in the producer's `spec.attestations`"
+                                },
+                            ),
+                            None => Finding::new(
                                 Code::ReferenceInvalid,
                                 format!("unit {name}: {error}"),
                                 "correct the reference so that it names a declared, non-sensitive output or a listed artifact of a unit in the ownership set",
-                            )
+                            ),
                         })
                         .collect(),
                 );
@@ -1869,6 +1878,7 @@ fn plan_unit(
                 .blocked_by
                 .extend(plan.blocked_by.into_iter().map(|pointer| BlockedBy {
                     pointer,
+                    environment: None,
                     unit: None,
                     reason: "needed-to-plan".to_owned(),
                     attestation: None,

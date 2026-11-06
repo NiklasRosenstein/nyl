@@ -636,15 +636,21 @@ pub fn detail(unit: &UnitReport) -> String {
         Some(
             unit.blocked_by
                 .iter()
-                .map(|blocked| match (&blocked.unit, &blocked.attestation) {
-                    (Some(producer), Some(attestation)) => format!(
-                        "{} waits for attestation {attestation} of {producer} ({})",
-                        blocked.pointer, blocked.reason
-                    ),
-                    (Some(producer), None) => {
-                        format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason)
+                .map(|blocked| {
+                    let producer = blocked.unit.as_ref().map(|unit| match &blocked.environment {
+                        Some(environment) => format!("{environment}/{unit}"),
+                        None => unit.to_string(),
+                    });
+                    match (producer, &blocked.attestation) {
+                        (Some(producer), Some(attestation)) => format!(
+                            "{} waits for attestation {attestation} of {producer} ({})",
+                            blocked.pointer, blocked.reason
+                        ),
+                        (Some(producer), None) => {
+                            format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason)
+                        }
+                        (None, _) => format!("{}: {}", blocked.pointer, blocked.reason),
                     }
-                    (None, _) => format!("{}: {}", blocked.pointer, blocked.reason),
                 })
                 .collect::<Vec<_>>()
                 .join("; "),
@@ -826,6 +832,28 @@ mod tests {
         });
         unit.receipt_nyl_version = Some("1.0".to_owned());
         assert_eq!(detail(&unit), "waiting; receipt Nyl version: 1.0");
+    }
+
+    /// Catches the table dropping what a consumer waits for when the
+    /// producer lives in another environment: it names the attestation and
+    /// the qualified producer, as the JSON does.
+    #[test]
+    fn test_blocked_detail_names_the_attestation_and_the_producer_across_environments() {
+        let mut unit = UnitReport::new("Command");
+        for (reason, environment) in [("attestation-pending", Some("infra")), ("attestation-failing", None)] {
+            unit.blocked_by.push(nyl_orchestration::run_report::BlockedBy {
+                pointer: "/dependsOn/0".to_owned(),
+                environment: environment.map(|name| nyl_core::orchestration::ids::EnvironmentName::new(name).unwrap()),
+                unit: Some(nyl_core::orchestration::ids::UnitName::new("network").unwrap()),
+                reason: reason.to_owned(),
+                attestation: Some("healthy".to_owned()),
+            });
+        }
+        assert_eq!(
+            detail(&unit),
+            "/dependsOn/0 waits for attestation healthy of infra/network (attestation-pending); \
+             /dependsOn/0 waits for attestation healthy of network (attestation-failing)"
+        );
     }
 
     /// Catches the table and the JSON telling different stories: both come

@@ -15,7 +15,8 @@
 //! ([`super::references::check_declaration`]): it reads an output its
 //! producer declares as non-sensitive, and an attestation a reference or
 //! `dependsOn` entry requires must be one its producer declares
-//! (`NYL-ATTESTATION-UNDECLARED`, see [`super::evidence`]).
+//! (`NYL-ATTESTATION-UNDECLARED`, or `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for a
+//! name only an external source supplies; see [`super::evidence`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,9 +124,10 @@ fn depends_on_edges(
             }
         };
         if let Err(error) = evidence::required(entry.evidence(), entry.attestations(), &units[&producer]) {
-            findings.push(attestation_undeclared(
+            findings.push(attestation_requirement(
                 consumer,
                 &format!("spec.dependsOn[{index}] {error}"),
+                &error,
                 &units[&producer],
             ));
             continue;
@@ -197,9 +199,10 @@ fn reference_edges(
             &source.attestations,
             &units[&producer],
         ) {
-            findings.push(attestation_undeclared(
+            findings.push(attestation_requirement(
                 consumer,
                 &format!("the reference at {:?} {error}", reference.pointer),
+                &error,
                 &units[&producer],
             ));
             continue;
@@ -227,22 +230,47 @@ fn reference_edges(
     }
 }
 
-/// `NYL-ATTESTATION-UNDECLARED` for one reference or `dependsOn` entry.
-fn attestation_undeclared(consumer: &UnitName, message: &str, producer: &DesiredUnit) -> Finding {
-    let declared = evidence::declared(producer);
-    let fix = if declared.is_empty() {
-        format!(
-            "remove the attestation requirement, or declare the attestation on {}: its kind may produce some for another spec, and `spec.attestations: [{{name, from: external}}]` declares one only an external source supplies",
-            producer.unit.name
-        )
-    } else {
-        format!(
-            "require one of {}, or declare the attestation in {}'s `spec.attestations`",
-            declared.iter().cloned().collect::<Vec<_>>().join(", "),
-            producer.unit.name
-        )
+/// `NYL-ATTESTATION-UNDECLARED` or `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for
+/// one reference or `dependsOn` entry.
+fn attestation_requirement(
+    consumer: &UnitName,
+    message: &str,
+    error: &evidence::RequirementError,
+    producer: &DesiredUnit,
+) -> Finding {
+    let fix = match error {
+        evidence::RequirementError::External(_) => {
+            let recordable = evidence::recordable(producer);
+            if recordable.is_empty() {
+                format!(
+                    "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6); remove the requirement, or have {}'s kind declare an attestation it observes itself",
+                    producer.unit.name
+                )
+            } else {
+                format!(
+                    "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6); require only the names {}'s driver observes, such as `attestations: [{}]`, instead of the external one or `evidence: attested`",
+                    producer.unit.name,
+                    recordable.iter().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        evidence::RequirementError::Undeclared(_) => {
+            let declared = evidence::declared(producer);
+            if declared.is_empty() {
+                format!(
+                    "remove the attestation requirement, or declare the attestation on {}: its kind may produce some for another spec",
+                    producer.unit.name
+                )
+            } else {
+                format!(
+                    "require one of {}, or declare the attestation in {}'s `spec.attestations`",
+                    declared.iter().cloned().collect::<Vec<_>>().join(", "),
+                    producer.unit.name
+                )
+            }
+        }
     };
-    Finding::new(Code::AttestationUndeclared, format!("unit {consumer}: {message}"), fix)
+    Finding::new(error.code(), format!("unit {consumer}: {message}"), fix)
 }
 
 /// Direct producers of every node.
@@ -521,8 +549,7 @@ mod tests {
     /// declared name and `evidence: attested` on a unit declaring none pass.
     #[test]
     fn test_extract_requires_declared_attestations() {
-        let declaring =
-            json!({"outputs": {"host": {"type": "string"}}, "attestations": [{"name": "qa", "from": "external"}]});
+        let declaring = json!({"outputs": {"host": {"type": "string"}}, "attestations": [{"name": "qa", "from": "external"}, {"name": "smoke"}]});
         let ok = graph(&[
             ("db", "Command", declaring.clone()),
             ("plain", "Command", json!({})),
@@ -530,8 +557,8 @@ mod tests {
                 "app",
                 "Command",
                 json!({
-                    "dependsOn": [{"unit": "db", "attestations": ["qa"]}, {"unit": "plain", "evidence": "attested"}],
-                    "x": {"fromUnit": {"unit": "db", "output": "host", "evidence": "attested"}},
+                    "dependsOn": [{"unit": "db", "attestations": ["smoke"]}, {"unit": "plain", "evidence": "attested"}],
+                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["smoke"]}},
                 }),
             ),
         ])
@@ -539,13 +566,13 @@ mod tests {
         assert_eq!(ok.edges.len(), 3);
 
         let findings = graph(&[
-            ("db", "Command", declaring),
+            ("db", "Command", declaring.clone()),
             (
                 "app",
                 "Command",
                 json!({
                     "dependsOn": [{"unit": "db", "attestations": ["healthy"]}],
-                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["smoke"]}},
+                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["nope"]}},
                 }),
             ),
         ])
@@ -563,5 +590,38 @@ mod tests {
             "{}",
             findings[1].message
         );
+    }
+
+    /// Catches a consumer that would wait forever for an attestation only an
+    /// external source supplies, which Nyl cannot record yet: naming it, and
+    /// `evidence: attested` on a producer that declares one, are errors in
+    /// `dependsOn` and in references with their own code and a fix naming
+    /// what can be required instead.
+    #[test]
+    fn test_extract_rejects_requirements_only_an_external_source_could_meet() {
+        let declaring = json!({"outputs": {"host": {"type": "string"}}, "attestations": [{"name": "qa", "from": "external"}, {"name": "smoke"}]});
+        let findings = graph(&[
+            ("db", "Command", declaring),
+            (
+                "app",
+                "Command",
+                json!({
+                    "dependsOn": [{"unit": "db", "attestations": ["qa"]}, {"unit": "db", "evidence": "attested"}],
+                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["smoke", "qa"]}},
+                    "y": {"fromUnit": {"unit": "db", "output": "host", "evidence": "attested"}},
+                }),
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(findings.len(), 4, "{findings:?}");
+        for finding in &findings {
+            assert_eq!(finding.code, Code::AttestationExternalUnsupported, "{finding:?}");
+            assert!(finding.message.contains("\"qa\""), "{}", finding.message);
+            assert!(
+                finding.fix.contains("cannot be recorded yet") && finding.fix.contains("attestations: [smoke]"),
+                "{}",
+                finding.fix
+            );
+        }
     }
 }

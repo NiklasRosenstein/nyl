@@ -692,6 +692,9 @@ pub enum ReceiptState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockedBy {
     pub pointer: String,
+    /// The producer's environment, when it is another environment's unit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentName>,
     /// The producer, when a reference waits for one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<UnitName>,
@@ -784,6 +787,7 @@ mod tests {
         let mut waiting = UnitReport::new("Command");
         waiting.blocked_by.push(BlockedBy {
             pointer: "/values/vpc".to_owned(),
+            environment: None,
             unit: Some(unit_name("network")),
             reason: "no-current-receipt".to_owned(),
             attestation: None,

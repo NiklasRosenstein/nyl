@@ -123,7 +123,8 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
     // Static checks against the producer's declaration come first, so an
     // invalid reference fails even while its producer has no receipt.
     let declaration = check_declaration(name, desired, source)?;
-    let required = evidence::required(source.evidence.unwrap_or_default(), &source.attestations, desired)?;
+    let required = evidence::required(source.evidence.unwrap_or_default(), &source.attestations, desired)
+        .map_err(|error| error.to_string())?;
     let observed = view.observed.get(name);
     if !receipt_is_current(desired, observed) {
         return Ok(ReferenceValue::Blocked {
@@ -508,6 +509,14 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
                                 "{field} references unit {environment}/{name} outside the ownership set"
                             ));
                         }
+                        // An undeclared attestation is an error even before the producer has a receipt.
+                        Some((_, desired))
+                            if evidence::required(entry.evidence(), entry.attestations(), desired).is_err() =>
+                        {
+                            if let Err(error) = evidence::required(entry.evidence(), entry.attestations(), desired) {
+                                errors.push(format!("{field} {error}"));
+                            }
+                        }
                         Some((name, desired)) if receipt_is_current(desired, snapshot.observed.get(name)) => {
                             let observed = snapshot.observed.get(name).expect("a current receipt exists");
                             for reason in unmet_reasons(
@@ -582,6 +591,7 @@ fn unmet_reasons(
 mod tests {
     use serde_json::json;
 
+    use nyl_core::orchestration::codes::Code;
     use nyl_core::orchestration::state::AttestationResult;
 
     use super::super::fixtures::*;
@@ -1113,5 +1123,108 @@ mod tests {
                 }]
             }
         );
+    }
+
+    /// A producer environment whose `network` has no receipt yet: it declares
+    /// `healthy` (its driver's) and `qa` (external only) and is the world's
+    /// only `network`.
+    fn producer_without_receipt() -> World {
+        let mut world = World::new();
+        attest(&mut world, &["healthy"], &[]);
+        world
+            .desired
+            .get_mut(&name("network"))
+            .unwrap()
+            .spec
+            .as_object_mut()
+            .unwrap()
+            .insert("attestations".to_owned(), json!([{"name": "qa", "from": "external"}]));
+        let producer = nyl_core::orchestration::ports::EnvironmentSnapshot {
+            desired: world.desired.clone(),
+            ..Default::default()
+        };
+        world
+            .environments
+            .insert(EnvironmentName::new("infra").unwrap(), producer);
+        world.desired.clear();
+        world.observed.clear();
+        world.attestations.clear();
+        world
+    }
+
+    /// Catches a cross-environment `dependsOn` entry whose attestation
+    /// requirement can never be met being reported as a wait for a receipt:
+    /// an undeclared name, an external-only name, and `evidence: attested`
+    /// on a producer that declares an external-only one are resolution
+    /// errors with their own codes even before the producer has a receipt,
+    /// as for a producer in the same environment, and block nothing.
+    #[test]
+    fn test_cross_environment_depends_on_rejects_unmeetable_attestations_before_the_receipt_check() {
+        let world = producer_without_receipt();
+        for (entry, code, text) in [
+            (
+                json!({"environment": "infra", "unit": "network", "attestations": ["helthy"]}),
+                Code::AttestationUndeclared,
+                "requires attestation \"helthy\" of unit network",
+            ),
+            (
+                json!({"environment": "infra", "unit": "network", "attestations": ["qa"]}),
+                Code::AttestationExternalUnsupported,
+                "requires attestation \"qa\" of unit network",
+            ),
+            (
+                json!({"environment": "infra", "unit": "network", "evidence": "attested"}),
+                Code::AttestationExternalUnsupported,
+                "which only an external source supplies",
+            ),
+        ] {
+            let unit = desired("smoke", "Command", json!({ "dependsOn": [entry] }), "smoke");
+            let resolution = resolve_unit(&world.view(), &unit);
+            assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
+            assert!(
+                resolution.errors[0].starts_with("spec.dependsOn[0] ") && resolution.errors[0].contains(text),
+                "{:?}",
+                resolution.errors
+            );
+            assert_eq!(evidence::error_code(&resolution.errors[0]), Some(code));
+            assert_eq!(resolution.readiness, Readiness::Ready, "nothing waits on an error");
+        }
+        // A name the driver observes still waits for the receipt, as before.
+        let unit = desired(
+            "smoke",
+            "Command",
+            json!({"dependsOn": [{"environment": "infra", "unit": "network", "attestations": ["healthy"]}]}),
+            "smoke",
+        );
+        let resolution = resolve_unit(&world.view(), &unit);
+        assert!(resolution.errors.is_empty(), "{:?}", resolution.errors);
+        assert_eq!(
+            resolution.readiness,
+            Readiness::Blocked {
+                reasons: vec![BlockedReason {
+                    pointer: "/dependsOn/0".to_owned(),
+                    reason: "infra/network has no current receipt".to_owned(),
+                }]
+            }
+        );
+    }
+
+    /// Catches an external-only attestation reaching a reference as a wait
+    /// that never ends: `fromUnit` requirements on one are resolution
+    /// errors, named or through `evidence: attested`.
+    #[test]
+    fn test_from_unit_rejects_external_only_attestations() {
+        let world = producer_without_receipt();
+        for reference in [
+            json!({"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["qa"]}),
+            json!({"environment": "infra", "unit": "network", "output": "vpcId", "evidence": "attested"}),
+        ] {
+            let error = world.resolve(reference).unwrap_err();
+            assert_eq!(
+                evidence::error_code(&error),
+                Some(Code::AttestationExternalUnsupported),
+                "{error}"
+            );
+        }
     }
 }

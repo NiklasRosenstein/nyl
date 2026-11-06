@@ -377,7 +377,14 @@ spec:
   producer's attestations to require instead of all it declares (see
   [Attestations](#attestations)). Naming an attestation the producer does not
   declare is a resolution error (`NYL-ATTESTATION-UNDECLARED`, also reported by
-  `nyl validate`). A consumer whose producer lacks the evidence is `blocked` on
+  `nyl validate`). So is a requirement that would include a name declared
+  only with `from: external`, by name or through `evidence: attested`
+  (`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`, also reported by `nyl validate`):
+  nothing can record an external attestation until `nyl attest --name …
+  --result …` ships (M6), so the consumer would wait forever. Its fix says so
+  and names the attestations the producer's driver observes. For a producer
+  in another environment, `nyl validate` cannot see the names its driver
+  reports, so `plan` and `reconcile` report these errors. A consumer whose producer lacks the evidence is `blocked` on
   it, exit 2, until the producer's current receipt has every required
   attestation passing (owner: `rules::evidence`):
 
@@ -389,7 +396,8 @@ spec:
   A plan, status, or reconcile report shows the consumer `blocked` at the
   entry or reference with `blockedBy` reason `attestation-pending` (none is
   recorded for the producer's current receipt) or `attestation-failing` (the
-  recorded one is `fail`), naming the producer and the attestation, and the
+  recorded one is `fail`), naming the producer (with its environment, when it is another
+  environment's unit) and the attestation, and the
   warnings `NYL-ATTESTATION-PENDING` or `NYL-ATTESTATION-FAILING`. Each
   warning carries its fix: `nyl attest -e <env>` and a new reconcile, or
   fixing what failed. A producer without a current receipt is blocked first
@@ -1713,6 +1721,18 @@ again only after the producer's new receipt exists and re-resolution changes
 the consumer's execution key. A producer recreated with a new uid and the same
 outputs therefore leaves its consumers current: re-resolution cites the new
 receipt and the consumers' execution keys stay the same.
+
+The same holds for a consumer that only has a `dependsOn` entry, with or
+without required attestations: the entry orders the units and gates the
+consumer on the producer's current receipt and attestations, but contributes
+no value to the consumer's execution key. A producer's new receipt, once
+attested, therefore leaves such a consumer `current`; it does not run again.
+A smoke test that must run against each new version of its producer consumes
+something that changes with it, such as `fromUnit` of an output or artifact
+field that carries the version, image digest, or endpoint, whose changed value
+changes the consumer's execution key. It also keeps the evidence gate: with
+`attestations` on the same reference, the new value is read only once the new
+receipt's attestations pass.
 
 ### Observed values
 
