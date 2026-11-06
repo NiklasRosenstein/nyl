@@ -199,7 +199,10 @@ mod tests {
         let engine = TemplateEngine::new();
         let context = serde_json::json!({"values": {"target": {"inline": {"prefix": "pr-1", "ports": [80, 443]}}}});
         let rendered = engine.render("target: {{ values.target | tojson }}", &context).unwrap();
-        assert_eq!(rendered, r#"target: {"inline": {"ports": [80, 443], "prefix": "pr-1"}}"#);
+        assert_eq!(
+            rendered,
+            r#"target: {"inline": {"ports": [80, 443], "prefix": "pr-1"}}"#
+        );
     }
 
     #[test]

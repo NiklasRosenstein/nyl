@@ -289,7 +289,7 @@ fn sample_value(input_type: InputType, index: usize) -> Value {
     match input_type {
         InputType::String => json!(format!("sample{}", index + 1)),
         InputType::Integer | InputType::Number => json!(index + 1),
-        InputType::Boolean => json!(index % 2 == 0),
+        InputType::Boolean => json!(index.is_multiple_of(2)),
         InputType::Object => Value::Object(Map::new()),
         InputType::Array => json!([]),
     }

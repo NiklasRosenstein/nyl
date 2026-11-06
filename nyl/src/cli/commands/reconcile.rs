@@ -144,21 +144,29 @@ fn instance_request(args: &ReconcileArgs) -> std::result::Result<InstanceRequest
     })
 }
 
+/// `--template` creates or updates exactly one instance.
+fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
+    if args.template.is_none() || args.environment.len() == 1 {
+        return None;
+    }
+    Some(stopped(
+        ReportKind::ReconcileReport,
+        args.environment.first().map_or("local", String::as_str),
+        args.output,
+        nyl_core::orchestration::codes::Finding::new(
+            nyl_core::orchestration::codes::Code::InstanceTemplateRequired,
+            "--template creates or updates exactly one instance",
+            "name the instance with one -e <name>",
+        )
+        .into(),
+    ))
+}
+
 /// Run the command in-process with `wiring`.
 pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     use crate::orchestration::multi_environment::{dispatch, select};
-    if args.template.is_some() && args.environment.len() != 1 {
-        return Ok(stopped(
-            ReportKind::ReconcileReport,
-            args.environment.first().map_or("local", String::as_str),
-            args.output,
-            nyl_core::orchestration::codes::Finding::new(
-                nyl_core::orchestration::codes::Code::InstanceTemplateRequired,
-                "--template creates or updates exactly one instance",
-                "name the instance with one -e <name>",
-            )
-            .into(),
-        ));
+    if let Some(outcome) = template_selection_error(args) {
+        return Ok(outcome);
     }
     let snapshot = if args.worktree {
         let capture = || -> std::result::Result<_, Stop> {

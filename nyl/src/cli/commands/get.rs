@@ -949,7 +949,8 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
         GitOpsResourceKind::GitRepository
         | GitOpsResourceKind::ArgoCDInstance
         | GitOpsResourceKind::ApplicationGroup
-        | GitOpsResourceKind::Environment => vec![
+        | GitOpsResourceKind::Environment
+        | GitOpsResourceKind::EnvironmentTemplate => vec![
             name.to_owned(),
             "<templated>".to_owned(),
             "<templated>".to_owned(),
@@ -958,11 +959,5 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
         GitOpsResourceKind::AppProjectDefinition | GitOpsResourceKind::EnvironmentGroup => {
             vec![name.to_owned(), "<templated>".to_owned(), file]
         }
-        GitOpsResourceKind::EnvironmentTemplate => vec![
-            name.to_owned(),
-            "<templated>".to_owned(),
-            "<templated>".to_owned(),
-            file,
-        ],
     }
 }

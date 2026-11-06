@@ -107,13 +107,6 @@ impl Session {
         })
     }
 
-    /// Findings about the instance a command created or updated: what makes
-    /// it unlikely to be removed unattended. None yet; the readiness warnings
-    /// belong to teardown.
-    pub fn instance_warnings(&self) -> Vec<Finding> {
-        Vec::new()
-    }
-
     /// Whether the command was entered from the instance's own checkout.
     pub fn entered(&self) -> bool {
         self.entered

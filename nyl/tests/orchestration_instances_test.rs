@@ -238,9 +238,7 @@ fn test_reconcile_runs_an_instance_from_its_recorded_source() {
 /// instance that silently comes back.
 #[test]
 fn test_state_delete_tears_an_instance_down_and_leaves_its_neighbour() {
-    let retained = UNITS
-        .replace("  idempotent: true\n", "  idempotent: true\n")
-        .replace("  idempotent: true", "  idempotent: true\n  deletionPolicy: Retain");
+    let retained = UNITS.replace("  idempotent: true", "  idempotent: true\n  deletionPolicy: Retain");
     let (_directory, harness) = world(&[("nyl/units.yaml", &retained)]);
     for pr in ["1", "2"] {
         let created = invoke(

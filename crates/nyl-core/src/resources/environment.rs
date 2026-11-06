@@ -464,14 +464,11 @@ impl EnvironmentTemplate {
         }
         let mut bound = BTreeMap::new();
         for (name, declaration) in declared {
-            let value = match given.get(name).or(declaration.default.as_ref()) {
-                Some(value) => value,
-                None => {
-                    return Err(format!(
-                        "parameter {name:?} of EnvironmentTemplate {} has no default; pass --param {name}=<value>",
-                        self.metadata.name
-                    ))
-                }
+            let Some(value) = given.get(name).or(declaration.default.as_ref()) else {
+                return Err(format!(
+                    "parameter {name:?} of EnvironmentTemplate {} has no default; pass --param {name}=<value>",
+                    self.metadata.name
+                ));
             };
             declaration
                 .check(value)
