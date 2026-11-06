@@ -249,6 +249,41 @@ spec:
     assert!(planned.stderr.contains("qa, smoke"), "{}", planned.stderr);
 }
 
+/// Catches a consumer that waits forever for an attestation only a person or
+/// an external system could supply, which Nyl cannot record yet: a name
+/// declared `from: external`, required by name or through `evidence:
+/// attested`, fails every run with `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`
+/// before anything executes, and the fix names what can be required instead.
+#[test]
+fn test_requiring_an_external_attestation_is_an_error_before_anything_runs() {
+    for requirement in ["attestations: [qa]", "evidence: attested"] {
+        let harness = Harness::new(&format!(
+            "---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: gated
+  labels: {{dev: 'true'}}
+spec:
+  command: [sh, -c, 'true']
+  dependsOn: [{{unit: svc, {requirement}}}]
+"
+        ));
+        let planned = harness.shell.invoke(&["reconcile", "-e", "dev"]);
+        assert_eq!(planned.exit, 1, "{requirement}: {}", planned.stderr);
+        assert!(
+            planned.stderr.contains("NYL-ATTESTATION-EXTERNAL-UNSUPPORTED"),
+            "{requirement}: {}",
+            planned.stderr
+        );
+        assert!(
+            planned.stderr.contains("cannot be recorded yet") && planned.stderr.contains("attestations: [smoke]"),
+            "{requirement}: {}",
+            planned.stderr
+        );
+    }
+}
+
 /// A producer that attests itself in `command` unblocks its consumer in a
 /// later wave of the same run, records the attestation with `source: {driver:
 /// reconcile}` for the receipt it wrote, and, when the result is `fail`, keeps

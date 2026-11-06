@@ -109,6 +109,8 @@ codes! {
     UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
     /// A reference or `dependsOn` entry requires an attestation its producer does not declare.
     AttestationUndeclared => "NYL-ATTESTATION-UNDECLARED",
+    /// A reference or `dependsOn` entry requires an attestation only an external source supplies, which Nyl cannot record yet.
+    AttestationExternalUnsupported => "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED",
     /// A consumer waits for an attestation of its producer's current receipt that is not recorded yet.
     AttestationPending => "NYL-ATTESTATION-PENDING",
     /// A consumer waits for an attestation of its producer's current receipt that is recorded as failing.

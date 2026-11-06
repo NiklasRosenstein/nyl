@@ -82,7 +82,8 @@ before reading state, with the same codes: `NYL-UNIT-INVALID`,
 `NYL-UNIT-OWNERSHIP-OVERLAP`, `NYL-DEPENDENCY-UNKNOWN`, `NYL-DEPENDENCY-CYCLE`,
 `NYL-REFERENCE-INVALID` for a reference to an output its producer does not
 declare or marks `sensitive`, and `NYL-ATTESTATION-UNDECLARED` for a `dependsOn` entry or
-reference that requires an attestation its producer does not declare. An `artifact`
+reference that requires an attestation its producer does not declare, and
+`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for one that requires an attestation only an external source supplies. An `artifact`
 reference between units is checked only for the producer's existence. A
 `KubernetesPublication` unit places the DeploymentTarget its `spec.target`
 names into that Environment. A target placed by publication units of two

@@ -105,6 +105,14 @@ values:
   mode](/nyl/orchestration/resource-guides/kubernetes-publication/), and the
   names in its `spec.attestations`. Naming another is an error
   (`NYL-ATTESTATION-UNDECLARED`), which `nyl validate` reports too.
+- An attestation declared with `from: external` is supplied only by a person
+  or an external system, and Nyl cannot record those yet
+  (`nyl attest --name … --result …` arrives with promotion). Requiring one,
+  by name or through `evidence: attested` on a producer that declares one, is
+  an error (`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`) rather than a consumer
+  that waits forever; require the names the producer's driver observes
+  instead. `nyl validate` reports it for producers in the same environment;
+  for another environment's producer, `plan` and `reconcile` do.
 - An attestation counts only for the receipt it names. A producer that
   executes again starts with its attestations pending, and a pass recorded
   for the earlier receipt no longer counts.
@@ -124,7 +132,22 @@ wave of the run in which its producer attested itself. Requiring an attestation
 adds no age limit: the recorded pass for the current receipt is enough, and a
 re-verified system simply keeps it fresh. A consumer that already ran stays
 `current` when the producer is attested again after executing, provided its own
-inputs did not change. The attestation `maxAttestationAge` limit belongs to
+inputs did not change.
+
+A `dependsOn` entry gates a consumer but gives it no input, so a consumer with
+only `dependsOn` does not run again when only its producer's receipt changes:
+once the new receipt has its attestations, the consumer is `current` and
+nothing executes. To run a smoke test against each new version, make the
+version an input: read an output or artifact field of the producer that
+changes with it, such as its version, image digest, or endpoint, with
+`fromUnit`. When the value changes, the consumer's execution key changes and
+it runs, after the new receipt's attestations pass if the reference requires
+them:
+
+```yaml
+values:
+  version: {fromUnit: {unit: service, output: version, attestations: [healthy]}}
+``` The attestation `maxAttestationAge` limit belongs to
 promotion paths.
 
 ## Source commit
