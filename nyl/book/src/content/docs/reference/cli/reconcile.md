@@ -44,7 +44,10 @@ creates the instance of an
 [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
 or updates its parameters, as [`nyl state init --template`](/nyl/reference/cli/state/#nyl-state-init)
 does, and then reconciles it from this checkout: the run records the checkout's
-commit as the instance's source. Without `--template`, the environment is a
+commit as the instance's source. `--source-ref <ref>` records a full ref name of
+`origin` next to that commit, for hosts that will not serve a commit by its id;
+[`nyl state init`](/nyl/reference/cli/state/#nyl-state-init) says how it is
+used. It needs `--template` and one `-e`. Without `--template`, the environment is a
 declared Environment or an existing instance found by its record, and an
 instance renders at the source commit its record names, whichever checkout the
 command runs from; the report says so, and the environment record keeps
@@ -84,7 +87,7 @@ the options are:
   recorded as pending and has not started. **`--no-extend`** reconciles an
   instance as maintenance. They conflict, and `--no-extend` conflicts with
   `--template`. Both are rejected for a declared Environment, which has no
-  expiry, and `--renew`, `--param`, `--make-room`, `--source`, and
+  expiry, and `--renew`, `--param`, `--source-ref`, `--make-room`, `--source`, and
   `--worktree` for the fleet; every one of these is exit 1 with
   `NYL-INSTANCE-OPTION-INVALID`.
 - **`--make-room`**, with `--template` and `-e`, removes expired instances of
@@ -218,6 +221,7 @@ for qualified unit options and independent state transactions.
 | --- | --- |
 | `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
 | `--template <name>`, `--param <name>=<value>` | Create or update `-e <instance>` of this EnvironmentTemplate before reconciling it. `--param` is repeatable and needs `--template`; one `-e` only. |
+| `--source-ref <ref>` | With `--template` and `-e`, record this full ref name of `origin` next to the instance's source commit, where a host that will not serve the commit by its id serves it by ref. Checked by syntax only; omitted, the recorded one stays. |
 | `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
 | `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--unit <name>`, `--units <a>,<b>` | Execute only these units, and do no lifecycle work. Resolution still covers the whole environment, and a named unit whose dependency has no current receipt stays blocked. An unknown name exits 1 with `NYL-UNIT-UNKNOWN`. |

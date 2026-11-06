@@ -231,10 +231,30 @@ spec:
 - A recorded source commit that the entry clone lacks is looked up in the
   retained worktree snapshots of the state repository, then fetched through
   the instance's keep ref (`keepSource`), and then by its exact id from the
-  clone's `origin`, with the credentials of the other Git fetches. Only the
-  clone's `origin` remote is contacted and only the recorded id is requested; a failed
+  clone's `origin`, with the credentials of the other Git fetches, and last,
+  for a host that will not serve a commit by its id, through the instance's
+  recorded `sourceRef` (below). Only the clone's `origin` remote is contacted and only
+  the recorded id, or the recorded ref, is requested; a failed
   fetch leaves the commit missing, which the caller reports, and `--local`
-  fetches nothing. A host that keeps a pull request's commits reachable after
+  fetches nothing.
+- `--source-ref <ref>` on `nyl reconcile -e <instance> --template <name>` and
+  `nyl state init --template`, the commands that record an instance's commit,
+  records a full ref name of the source repository's `origin` in the
+  instance's `state.yaml` as `sourceRef`, next to `sourceCommit`. It is a
+  hint, validated by its syntax alone (a full name under `refs/` following
+  `git check-ref-format`; `NYL-INSTANCE-OPTION-INVALID` otherwise, before
+  anything is written) with no network check. It is a flag of the job and not
+  a field of the template, so a template is not specific to a pull request
+  and works the same locally. A run that passes it overwrites the recorded
+  ref; a run without it keeps the recorded one. The resolver is given the
+  recorded ref as data from the instance record (never read globally), and
+  after the local clone, the keep ref, and the fetch by id all miss, fetches
+  that ref by name from `origin` with the same credentials, online only,
+  writing no ref. It then checks whether the recorded commit is present; it
+  never uses the ref's tip. If the commit is still absent the caller reports
+  it missing as before (`NYL-SOURCE-UNAVAILABLE`), so a ref that moved on, or
+  one the host dropped, can never substitute another commit for the recorded
+  one. Rendering and teardown always use the recorded commit. A host that keeps a pull request's commits reachable after
   its branch is gone (GitHub's `refs/pull/<n>/head`, GitLab's
   `refs/merge-requests/<n>/head`) therefore serves a closed job running on a
   checkout of the default branch.

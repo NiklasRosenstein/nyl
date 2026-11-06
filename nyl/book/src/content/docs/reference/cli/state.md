@@ -67,6 +67,19 @@ declarations (`NYL-INSTANCE-PARAMETER-INVALID`), and `--param` without
 `--template` (`NYL-INSTANCE-TEMPLATE-REQUIRED`), all with exit 1 before anything
 is written. `--fresh` with `--template` starts a deleted instance over.
 
+`--source-ref <ref>`, with `--template`, records a full ref name of the source
+repository's `origin` (such as `refs/pull/123/head`) in `state.yaml` next to the
+source commit. It is a hint for hosts that will not serve a commit by its id: a
+later command that lacks the recorded commit and cannot get it by its id or
+through a keep ref fetches that ref by name and looks for the recorded commit in
+it. The commit is always the recorded one, never the ref's tip, so a ref that has
+moved on delivers nothing and the commit is reported missing
+(`NYL-SOURCE-UNAVAILABLE`). The ref is checked by its syntax only, with no
+network access: anything that is not a full name under `refs/` is exit 1 with
+`NYL-INSTANCE-OPTION-INVALID` before anything is written. A run that passes it
+overwrites the recorded ref; a run without it keeps the recorded one, so a local
+run never erases what CI recorded. `--local` fetches nothing.
+
 Creating an instance also checks the template's `maxInstances` and keeps its
 source: at the limit it refuses with exit 2 (`NYL-INSTANCE-LIMIT`), writes
 nothing, and names the expired instances that could be removed;

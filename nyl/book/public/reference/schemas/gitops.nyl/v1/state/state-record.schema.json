@@ -243,6 +243,13 @@
       ],
       "description": "An instance's source commit: the entry worktree's commit when\n`state init --template` or `reconcile --template` last created or\nupdated it. A run that is not entered from the instance's own source\nrenders at this commit."
     },
+    "sourceRef": {
+      "description": "A hint for fetching `sourceCommit`, a full ref name of the source\nrepository's `origin` that carried it when the run that recorded it\npassed `--source-ref` (GitHub's `refs/pull/<n>/head`, for a host that\nrefuses to serve a commit by its id). Only a place to look: it is never\nresolved to a commit, and a run without the option keeps the value.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "template": {
       "description": "The EnvironmentTemplate of an instance.",
       "type": [
