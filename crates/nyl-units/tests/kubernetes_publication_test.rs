@@ -1088,6 +1088,67 @@ fn test_the_writer_never_rekeys_previews_and_a_teardown_reads_the_catalog_again(
     assert!(matches!(teardown(&stale), Outcome::Waiting { .. }));
 }
 
+/// A branch that cannot be read, and a manifest that is no Application, are
+/// recorded as readings of their own and block teardown readiness, rather than
+/// failing the resolution or passing as "not checked": a catalog that cannot be
+/// shown to prune is not trusted to. Catches both reading as harmless.
+#[test]
+fn test_an_unreadable_branch_and_an_unparseable_manifest_are_recorded_and_block_readiness() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let first = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &first)
+        .unwrap();
+    let blocked = |unit: &nyl_core::orchestration::state::DesiredUnit| {
+        let Supported::Supported(readiness) = driver.teardown_readiness(unit).unwrap() else {
+            panic!("the driver checks readiness");
+        };
+        readiness.blocking.into_iter().find(|finding| {
+            finding.code == Code::TeardownCatalogManualSync && finding.message.contains("cannot be shown to prune")
+        })
+    };
+    assert!(blocked(&resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()))).is_none());
+
+    // A manifest on the branch that is no YAML at all.
+    let checkout = world.root.path().join("edit");
+    git(
+        world.root.path(),
+        &["clone", "--quiet", "--branch", "deploy", &world.project_url(), "edit"],
+    );
+    std::fs::write(checkout.join("_nyl/shared/previews/catalog.yaml"), "a: [unclosed\n").unwrap();
+    git(
+        &checkout,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-am",
+            "break",
+        ],
+    );
+    git(&checkout, &["push", "--quiet", "origin", "deploy"]);
+    let unparseable = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    let reading = &unparseable.resolved_spec.as_ref().unwrap()["sharedCatalogReading"];
+    assert_eq!(reading["result"], "unparseable", "{reading}");
+    assert!(reading["problem"].is_string(), "{reading}");
+    assert!(blocked(&unparseable).is_some());
+
+    // A branch that cannot be fetched.
+    let moved = world.root.path().join("moved.git");
+    std::fs::rename(world.bare(), &moved).unwrap();
+    let unreadable = resolved_unit(&driver, &world, preview_spec("pr-1", pruning));
+    let reading = &unreadable.resolved_spec.as_ref().unwrap()["sharedCatalogReading"];
+    assert_eq!(reading["result"], "unreadable", "{reading}");
+    assert!(blocked(&unreadable).is_some());
+    std::fs::rename(moved, world.bare()).unwrap();
+}
+
 /// Catches a renamed target publishing a second tree and orphaning the first,
 /// or failing in the ownership index with no way out: nothing in the engine
 /// replaces a unit when its destination changes, so the driver fails closed
