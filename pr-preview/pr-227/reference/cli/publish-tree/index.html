@@ -90,13 +90,12 @@ Nyl is invoked from a project subdirectory.</p>
 working-tree render explicitly; the ownership index records <code dir="auto">dirty: true</code> and
 the commit message includes <code dir="auto">Nyl-Source-Dirty: true</code>. The two options are
 mutually exclusive.</p>
-<p>A prefix that an orchestrated <code dir="auto">KubernetesPublication</code> unit owns (its index is
-version 4 and names the unit) is refused with <code dir="auto">NYL-TREE-OWNED-BY-UNIT</code>, as it
+<p>A prefix that an orchestrated <code dir="auto">KubernetesPublication</code> unit owns (its index names the unit
+in an <code dir="auto">owner</code> member) is refused with <code dir="auto">NYL-TREE-OWNED-BY-UNIT</code>, as it
 is by <a href="/nyl/pr-preview/pr-227/reference/cli/render-tree/"><code dir="auto">render-tree</code></a>, because Nyl cannot tell
 here whether the unit still exists. Publish through the environment that owns
 it, or release the prefix after <code dir="auto">nyl state forget</code> by removing the <code dir="auto">owner</code>
-member from <code dir="auto">&#x3C;prefix>/_nyl/index.json</code> and setting its <code dir="auto">version</code> to <code dir="auto">3</code> in a
-commit to the publication branch; see
+member from <code dir="auto">&#x3C;prefix>/_nyl/index.json</code> in a commit to the publication branch; see
 <a href="/nyl/pr-preview/pr-227/orchestration/resource-guides/kubernetes-publication/#ownership">Ownership</a>.</p>
 <p>Nyl clones the destination branch into a clean checkout, reconciles indexed
 files, stages only the selected target prefix, commits the result, fetches the
