@@ -146,7 +146,7 @@ fn test_build_of_an_environments_publication_renders_diffs_and_refuses_to_push()
     );
 
     let refused = build(&harness, &["-e", "dev", "--", "--push"]);
-    assert_eq!(refused.exit, 1);
+    assert_eq!(refused.exit, 3, "a driver refusal is a failed build");
     assert!(
         refused.stderr.contains("NYL-KUBERNETES-BUILD-TARGET-OWNED"),
         "{}",
@@ -213,7 +213,7 @@ fn test_push_refuses_a_worktree_with_uncommitted_changes() {
     std::fs::write(clone.join("notes.txt"), "not committed\n").unwrap();
     let run = |extra: &[&str]| build_in(&harness, &clone, extra);
     let refused = run(&["--", "--push"]);
-    assert_eq!(refused.exit, 1);
+    assert_eq!(refused.exit, 3);
     assert!(
         refused.stderr.contains("NYL-KUBERNETES-BUILD-DIRTY-SOURCE"),
         "{}",
@@ -282,7 +282,7 @@ fn test_inline_target_builds_only_with_an_environment() {
     assert_eq!(diff.report["spec"]["changes"], "create");
 
     let pushed = build(&harness, &["-e", "dev", "--", "--push"]);
-    assert_eq!(pushed.exit, 1);
+    assert_eq!(pushed.exit, 3);
     assert!(
         pushed.stderr.contains("NYL-KUBERNETES-BUILD-TARGET-OWNED"),
         "{}",

@@ -208,7 +208,7 @@ A build prints one JSON document and exits 0:
 | Arguments | Prints |
 | --- | --- |
 | none | A `RenderedTree`: where the tree publishes (`repository`, `branch`, `pathPrefix`), the `target`, the digest of every file (`files`), and the `indexDigest` a publication of this tree would record. |
-| `--diff` | A `TreeDiff` comparing the render with the tree published at the destination: `changes` (`none`, `create` before anything is published at the prefix, or `update`), the `base` commit, the `owner` the published index names, and the `files` that differ, each `added`, `modified`, or `removed`. |
+| `--diff` | A `TreeDiff` comparing the render with the tree published at the destination: `changes` (`none`, `create` before anything is published at the prefix, or `update`), the `base` commit, the `owner` the published index names, and the `files` that differ, each `added`, `modified`, or `removed`. Only files are compared, not `_nyl/index.json`: `changes: none` can still be followed by a `--push` commit that only updates the index, for example with a new `sourceCommit`. |
 | `--push` | The `PublishedTree` a run records: the commit, branch, and `indexDigest`. |
 
 `--diff` reads the destination and writes nothing, so it also compares a tree
@@ -219,7 +219,7 @@ other tools committed, are not part of the tree.
 
 `--push` publishes the render as one commit authored by the identity of the
 repository's Git configuration, and only for a target no environment owns. It
-refuses, before rendering or writing anything, with:
+refuses, before anything is published, with the codes below. The first, `NYL-KUBERNETES-BUILD-TARGET-OWNED`, then `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` and `NYL-KUBERNETES-BUILD-IDENTITY`, are checked before the build's own render; `NYL-TREE-OWNED-BY-UNIT` is found when the publication prepares, after it. A refusal is a failed build, exit 3:
 
 | Code | Meaning and fix |
 | --- | --- |

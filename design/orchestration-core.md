@@ -744,8 +744,9 @@ orchestration:
   process environment, and no project secrets. It owns nothing, takes no
   lease, and writes no receipt or state. The files are those of the
   worktree, uncommitted changes included, or of `--source <rev>`; the
-  render reads them as a Git worktree, and the ownership index names the
-  unit's source commit, never a snapshot's.
+  orchestration shell hands the driver a snapshot of them committed as a
+  Git worktree (one fixed commit), which the render needs, and the ownership
+  index names the unit's source commit, never the snapshot's.
 - Without `-e`, a target whose Release inputs bind `fromUnit` fails like any
   reference (`-e` names the way out). A unit that declares its target inline
   cannot be built without `-e`: the inline target is named
@@ -763,14 +764,20 @@ orchestration:
   published index names, and the `files` that differ with their `change`
   (`added`, `modified`, or `removed`). The ownership index is compared by the
   files it records, and files in the prefix that it does not own are not part
-  of the tree. A difference is not a failure: like `diff-tree`, the exit is
+  of the tree. The comparison is of files only: `changes: none` can still be
+  followed by a `--push` commit that only updates `_nyl/index.json`, such as
+  for a new `sourceCommit`. A difference is not a failure: like `diff-tree`, the exit is
   0 whether or not the trees differ, and a pipeline reads `changes`. An owned
   prefix can be compared, because only publishing is fenced.
 - `--push` publishes the render as one commit, by compare-and-swap with the
   retries of a run's publication, and prints the `PublishedTree` document a
   run records, without recording it. It publishes only a target no
-  environment owns, and refuses otherwise, before anything is rendered or
-  written, with a stable code and the fix:
+  environment owns, and refuses otherwise, before anything is published,
+  with a stable code and the fix. `NYL-KUBERNETES-BUILD-TARGET-OWNED`,
+  `NYL-KUBERNETES-BUILD-DIRTY-SOURCE`, and `NYL-KUBERNETES-BUILD-IDENTITY`,
+  checked in that order, come before the build's own render and clone (the
+  unit was prepared, and so rendered for its key, before the driver ran);
+  `NYL-TREE-OWNED-BY-UNIT` comes when the publication prepares, after them:
   - `NYL-KUBERNETES-BUILD-TARGET-OWNED` when a publication unit that an
     Environment selects places the target (`target_placements`: even a unit
     being torn down, because it owns its target until its teardown

@@ -95,10 +95,21 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         dirty_source: prepared.dirty,
         interactive: false,
     };
-    let artifacts = match driver
-        .build(&context, &prepared.unit, &args.arguments)
-        .map_err(|error| NylError::config(error.to_string()))?
-    {
+    // A driver that fails or refuses the build ends it with exit 3, the
+    // contract's "the build failed"; preparation and capability errors above
+    // are errors (exit 1).
+    let built = match driver.build(&context, &prepared.unit, &args.arguments) {
+        Ok(built) => built,
+        Err(error) => {
+            return Ok(CommandOutcome {
+                exit: 3,
+                report: serde_json::json!({ "error": error.to_string() }),
+                stdout: String::new(),
+                stderr: format!("error: {error}\n"),
+            })
+        }
+    };
+    let artifacts = match built {
         Supported::Supported(artifacts) => artifacts,
         Supported::Unsupported => {
             return Err(NylError::config(

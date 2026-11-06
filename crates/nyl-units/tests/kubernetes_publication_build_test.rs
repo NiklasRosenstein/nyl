@@ -15,6 +15,7 @@ use nyl_core::orchestration::driver::{Driver, DriverOperation, DriverResult, Exe
 use nyl_core::orchestration::ids::ExecutionKey;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit};
+use nyl_render::gitops::publication::ensure_git_worktree;
 use nyl_units::kubernetes_publication::KubernetesPublicationDriver;
 use publication_world::{context, desired, git, spec, World};
 use serde_json::{json, Value};
@@ -137,9 +138,9 @@ fn test_build_renders_the_tree_and_publishes_nothing() {
 }
 
 /// Catches a direct build rendering from the files it is given any
-/// differently from a checkout: the build reads a snapshot of the
-/// worktree's files with no Git metadata, which must discover and render the
-/// same tree, and the ownership index must name the unit's source commit,
+/// differently from a checkout: the shell hands over a snapshot of the
+/// worktree's files made a Git worktree with one fixed commit, which must
+/// discover and render the same tree, and the ownership index must name the unit's source commit,
 /// not the snapshot's own.
 #[test]
 fn test_build_renders_a_snapshot_of_files_like_a_checkout() {
@@ -148,6 +149,7 @@ fn test_build_renders_a_snapshot_of_files_like_a_checkout() {
     let snapshot = world.root.path().join("snapshot");
     copy_without_git(&world.work(), &snapshot);
     assert!(!snapshot.join(".git").exists());
+    ensure_git_worktree(&snapshot).unwrap();
     let mut ctx = context(&world, DriverOperation::Build, None);
     ctx.worktree = snapshot.clone();
     ctx.project_dir = snapshot.join("nyl");
@@ -158,6 +160,7 @@ fn test_build_renders_a_snapshot_of_files_like_a_checkout() {
     let standalone = standalone();
     let snapshot = standalone.root.path().join("snapshot");
     copy_without_git(&standalone.work(), &snapshot);
+    ensure_git_worktree(&snapshot).unwrap();
     let id = identity();
     let mut ctx = context(&standalone, DriverOperation::Build, Some(&id));
     ctx.worktree = snapshot.clone();
