@@ -1,0 +1,95 @@
+# The end-to-end example of the Orchestration guide
+# (nyl/book/src/content/docs/orchestration/end-to-end-example.md): dev builds an
+# image, applies OpenTofu, and publishes manifests that consume both; pull
+# requests get previews that are closed with the pull request or expire; the
+# shared catalog's writer runs. The commands are the ones the guide's local and
+# CI workflows run, in both tiers.
+contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request
+milestone: M5
+steps:
+  - nyl: [validate]
+    exit: 0
+
+  # Locally or on main: state is created once, then one reconcile builds the
+  # image, applies OpenTofu, and publishes the tree that consumes both.
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [database, web-image, kubernetes]
+      deploy:
+        branch: deploy
+        contains: ['dev/web/**', 'dev/_nyl/index.json']
+        mentions:
+          'dev/web/**':
+            - [get, artifact, web-image/image, -e, dev, --pointer, /reference]
+            - [get, output, database/connection, -e, dev, --pointer, /host]
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+
+  # The same Release renders with static inputs in a target no environment
+  # uses, without orchestration.
+  - nyl: [publish-tree, --target, static]
+    exit: 0
+    expect:
+      deploy:
+        branch: static
+        contains: ['static/web/**']
+        mentions: {'static/web/**': ['shop.db.internal']}
+
+  # A pull request job creates its preview, and a second one gets its own.
+  - branch: {name: pr-1, from: main}
+  - commit: {branch: pr-1, message: "Change the banner", apply: patches/page}
+  - nyl: [reconcile, -e, pr-1, --template, preview, --param, pr=1]
+    at: pr-1
+    exit: 0
+    expect:
+      executed: [database, web-image, kubernetes]
+      deploy:
+        branch: previews
+        contains: ['pr-1/web/**', '_nyl/shared/previews/catalog.yaml']
+      keep-refs: {count: 1, kept: [pr-1]}
+  - branch: {name: pr-2, from: main}
+  - commit: {branch: pr-2, message: "Change the banner, differently", apply: patches/another}
+  - nyl: [reconcile, -e, pr-2, --template, preview, --param, pr=2]
+    at: pr-2
+    exit: 0
+    expect:
+      executed: [database, web-image, kubernetes]
+      deploy:
+        branch: previews
+        contains: ['pr-2/web/**']
+        unchanged: ['pr-1/**', '_nyl/shared/previews/**']
+
+  # The scheduled writer of the shared catalog finds nothing to change.
+  - nyl: [build, kubernetes, -e, pr-2, --, --shared-catalog, --push]
+    exit: 0
+    expect:
+      deploy: {branch: previews, unchanged: ['_nyl/shared/previews/**', 'pr-1/**', 'pr-2/**']}
+
+  # pr-1 is squash-merged: its close job removes the preview through the keep ref.
+  - squash-merge: {branch: pr-1, into: main}
+  - delete-branch: pr-1
+  - nyl: [state, delete, -e, pr-1, --teardown]
+    exit: 0
+    expect:
+      outcome: done
+      deploy: {branch: previews, absent: ['pr-1/**'], contains: ['pr-2/web/**']}
+      keep-refs: {count: 1, kept: [pr-2]}
+
+  # pr-2 is abandoned: the scheduled fleet job removes it once it expires.
+  - clock: {advance: 6d}
+  - nyl: [reconcile, --template, preview]
+    exit: 0
+    expect:
+      deploy: {branch: previews, contains: ['pr-2/web/**']}
+  - clock: {advance: 2d}
+  - nyl: [reconcile, --template, preview]
+    exit: 0
+    expect:
+      deploy: {branch: previews, absent: ['pr-2/**']}
+  - {nyl: [get, environments, pr-2], exit: 1}
