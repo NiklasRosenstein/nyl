@@ -87,6 +87,23 @@ impl DiscoveredUnit {
         format!("{} document {}", slash_path(&self.source_path), self.document_index)
     }
 
+    /// Whether this document may declare its publication target inline, which
+    /// only rendering shows for a templated document: a publication unit whose
+    /// document is not statically parseable, or whose `spec.target` is not a
+    /// plain, untemplated name.
+    pub fn may_declare_inline_target(&self) -> bool {
+        if !self.is_publication() {
+            return false;
+        }
+        match serde_saphyr::from_str::<Value>(&self.raw_document) {
+            Ok(document) => match document.pointer("/spec/target") {
+                Some(Value::String(name)) => name.contains("{{") || name.contains("{%"),
+                _ => true,
+            },
+            Err(_) => true,
+        }
+    }
+
     fn is_publication(&self) -> bool {
         is_builtin_unit_api_version(&self.envelope.api_version) && self.envelope.kind == KIND_KUBERNETES_PUBLICATION
     }

@@ -191,9 +191,9 @@ impl SharedCatalogManifest {
 /// rules, such as that a revision carrying a shared catalog holds nothing else.
 pub fn validate_with_samples(inventory: &GitOpsInventory) -> Result<()> {
     // Rendering every environment's units is only worth it, and only a new way
-    // to fail, for a project that declares a shared catalog somewhere: in a
-    // target, an inline target of a unit, or a template's values.
-    if !declares_shared_catalog(inventory) {
+    // to fail, for a project that can declare a shared catalog somewhere the
+    // plain inventory does not show.
+    if !may_declare_shared_catalog(inventory) {
         return validate_shared_catalogs(inventory);
     }
     let samples = super::instances::templates(inventory)
@@ -204,16 +204,37 @@ pub fn validate_with_samples(inventory: &GitOpsInventory) -> Result<()> {
     validate_shared_catalogs(&extended)
 }
 
-/// Whether any YAML file of the project mentions `catalogApplication` followed
-/// by `shared`, as a target, a unit's inline target, or a template does.
-/// Conservative: a file that merely mentions both counts.
-fn declares_shared_catalog(inventory: &GitOpsInventory) -> bool {
-    inventory.yaml_files.iter().any(|file| {
-        std::fs::read_to_string(inventory.project_root.join(file)).is_ok_and(|text| {
-            text.find("catalogApplication")
-                .is_some_and(|at| text[at..].contains("shared"))
-        })
-    })
+/// Whether a shared catalog may be declared where only expansion shows it.
+/// Structural and closed: false only when the inventory provably has none of
+/// these.
+///
+/// - a parsed DeploymentTarget declares `catalogApplication.shared`;
+/// - a DeploymentTarget could not be parsed statically, because its spec is
+///   deferred;
+/// - the project has an EnvironmentTemplate, whose instances render units;
+/// - a publication unit declares its target inline, or could do so: its
+///   document is not statically parseable (templated), or its `target` is
+///   not a plain name.
+fn may_declare_shared_catalog(inventory: &GitOpsInventory) -> bool {
+    let targets = inventory
+        .resources
+        .values()
+        .filter(|discovered| discovered.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget);
+    for discovered in targets {
+        match discovered.resource.as_ref() {
+            Some(GitOpsResource::DeploymentTarget(target)) if target.spec.catalog_application.shared.is_none() => {}
+            _ => return true,
+        }
+    }
+    if !super::instances::templates(inventory).is_empty() {
+        return true;
+    }
+    let Ok(units) = super::units::discover_units(inventory) else {
+        return true;
+    };
+    units
+        .values()
+        .any(super::units::DiscoveredUnit::may_declare_inline_target)
 }
 
 /// A target that takes part in the checks across targets.
@@ -514,5 +535,54 @@ spec:
         )];
         let error = validate(&both).unwrap_err();
         assert!(error.contains("belong in the shared block"), "{error}");
+    }
+
+    /// The gate of the tree commands is structural and closed: a project
+    /// is expanded when a parsed target shares a catalog, a template exists, or a
+    /// publication unit may declare its target inline (a mapping, a templated
+    /// name, or a document that is not statically parseable); only a project
+    /// with static targets and no such unit is left alone, so it keeps its
+    /// exit codes. Catches a templated or inline shared declaration skipping
+    /// the rules, and a plain project being rendered for nothing.
+    #[test]
+    fn test_the_gate_expands_only_what_may_declare_a_shared_catalog() {
+        let gate = |files: &[(&str, &str)]| {
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path();
+            std::fs::write(root.join("nyl.toml"), "[project]\n").unwrap();
+            std::fs::write(
+                root.join("platform.yaml"),
+                format!("{BASE}{}", target("static", "deploy", "static", "{enabled: true}")),
+            )
+            .unwrap();
+            for (name, text) in files {
+                std::fs::write(root.join(name), text).unwrap();
+            }
+            git2::Repository::init(root).unwrap();
+            let inventory = discover_gitops_inventory(root, None, crate::config::test_catalogue()).unwrap();
+            may_declare_shared_catalog(&inventory)
+        };
+        let unit = |spec: &str| {
+            format!("apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {{name: kubernetes}}\nspec:\n{spec}")
+        };
+        // Static targets only, and publication units that name a static target.
+        assert!(!gate(&[]));
+        assert!(!gate(&[("units.yaml", &unit("  target: static\n"))]));
+        // A parsed target that shares, a template, an inline target, a templated name,
+        // and a document that is not YAML before rendering.
+        assert!(gate(&[("shared.yaml", &target("pr", "previews", "pr", PREVIEWS))]));
+        assert!(gate(&[(
+            "template.yaml",
+            "apiVersion: gitops.nyl/v1\nkind: EnvironmentTemplate\nmetadata: {name: preview}\nspec:\n  unitSelector: {matchLabels: {preview: 'true'}}\n  state: {path: '{{ environment.name }}'}\n"
+        )]));
+        assert!(gate(&[(
+            "units.yaml",
+            &unit("  target:\n    inline: {clusterRef: {name: dev}, publication: {repositoryRef: {name: platform}, revision: x}}\n")
+        )]));
+        assert!(gate(&[("units.yaml", &unit("  target: '{{ values.target }}'\n"))]));
+        assert!(gate(&[(
+            "units.yaml",
+            &unit("  target: {{ values.target | tojson }}\n")
+        )]));
     }
 }
