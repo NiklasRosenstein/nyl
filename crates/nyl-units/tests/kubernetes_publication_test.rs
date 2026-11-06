@@ -366,9 +366,9 @@ fn test_drift_compares_the_branch_with_the_rendered_tree_without_publishing() {
     assert!(summary.contains("modified outside Nyl"), "{summary}");
 }
 
-/// Catches a hand-written `teardownSettings` or `argocd`, which only the
-/// driver records at resolution, being accepted, and a `delay` without a
-/// duration.
+/// Catches a hand-written `teardownSettings` or `reconciler`, which only the
+/// driver records at resolution, being accepted, the removed `mode` field
+/// lingering, an `observe` with options, and a `delay` without a duration.
 #[test]
 fn test_validation_rejects_what_only_the_driver_records() {
     let driver = real();
@@ -378,12 +378,18 @@ fn test_validation_rejects_what_only_the_driver_records() {
         driver.validate_spec(&spec)
     };
     assert!(driver.validate_spec(&spec()).is_ok());
-    assert!(with("mode", json!("observe")).is_ok());
-    assert!(with("teardownWait", json!({"strategy": "observe"})).is_ok());
+    assert!(with("observe", json!({})).is_ok());
+    assert!(with("observe", json!({"interval": "5m"}))
+        .unwrap_err()
+        .contains("unknown field"));
+    assert!(with("mode", json!("observe")).unwrap_err().contains("unknown field"));
+    assert!(with("teardownWait", json!({"strategy": "observe"}))
+        .unwrap_err()
+        .contains("observe: {}"));
     assert!(with("teardownSettings", json!({"catalogPrunes": true}))
         .unwrap_err()
         .contains("must not be written by hand"));
-    assert!(with("argocd", json!({"instance": "x"}))
+    assert!(with("reconciler", json!({"instance": "x"}))
         .unwrap_err()
         .contains("must not be written by hand"));
     assert!(with("teardownWait", json!({"strategy": "delay"})).is_err());

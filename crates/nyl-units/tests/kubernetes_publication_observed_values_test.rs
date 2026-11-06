@@ -24,7 +24,7 @@ use nyl_core::orchestration::driver::{
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId};
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Receipt};
-use nyl_render::gitops::observation::ArgoCdObservation;
+use nyl_render::gitops::observation::{ReconcilerFacts, ReconcilerLocation};
 use nyl_units::kubernetes_publication::KubernetesPublicationDriver;
 use publication_world::{context, desired, git, spec, NoTools, World};
 use serde_json::{json, Value};
@@ -142,7 +142,7 @@ impl Live {
 
     fn spec(observations: Value) -> Value {
         let mut spec = spec();
-        spec["mode"] = json!("observe");
+        spec["observe"] = json!({});
         spec["observations"] = observations;
         spec
     }
@@ -220,15 +220,25 @@ impl Live {
     fn serve(&self, unit: &DesiredUnit, running: impl Fn(&str) -> Option<String>) {
         let facts = facts(unit);
         *self.served.lock().unwrap() = facts
-            .applications
+            .expected
+            .deployments
             .iter()
-            .filter_map(|app| {
-                let revision = running(&app.name)?;
-                let mut source = app.source.clone();
+            .filter_map(|deployment| {
+                let (namespace, name) = (
+                    deployment.locator["namespace"].as_str().unwrap(),
+                    deployment.locator["name"].as_str().unwrap(),
+                );
+                let revision = running(name)?;
+                let mut source = deployment.source.options.clone();
+                if source.is_null() {
+                    source = json!({});
+                }
+                source["repoURL"] = json!(deployment.source.repository);
+                source["path"] = json!(deployment.source.path);
                 source["targetRevision"] = json!("deploy");
                 Some(application_with_source(
-                    &app.name,
-                    &app.namespace,
+                    name,
+                    namespace,
                     &source,
                     &[&revision],
                     "Healthy",
@@ -247,8 +257,8 @@ impl Live {
     }
 }
 
-fn facts(unit: &DesiredUnit) -> ArgoCdObservation {
-    serde_json::from_value(unit.resolved_spec.as_ref().unwrap()["argocd"].clone()).unwrap()
+fn facts(unit: &DesiredUnit) -> ReconcilerFacts {
+    serde_json::from_value(unit.resolved_spec.as_ref().unwrap()["reconciler"].clone()).unwrap()
 }
 
 fn receipt(unit: &DesiredUnit) -> Receipt {
@@ -284,7 +294,7 @@ fn failed_reason(value: &ObservedValue) -> &str {
 /// Catches resolution recording nothing about what an observation reads, or
 /// the wrong cluster: the owning Application (so `observe` renders nothing)
 /// and the workload Cluster with its own context, which is not the
-/// control-plane Cluster's. A publish-mode unit records none, and the
+/// control-plane Cluster's. A unit without `observe` records none, and the
 /// context, which says only how to read, never keys the unit.
 #[test]
 fn test_resolution_records_the_owning_application_and_the_workload_cluster() {
@@ -292,20 +302,14 @@ fn test_resolution_records_the_owning_application_and_the_workload_cluster() {
     let live = Live::new(Method::Kubernetes);
     let unit = live.resolve(&driver, Live::spec(json!({"ready": replicas()}))).unwrap();
     let resolved = unit.resolved_spec.as_ref().unwrap();
-    assert_eq!(
-        resolved["observationSources"],
-        json!({"ready": {"application": {"namespace": "argocd", "name": "web"}}})
-    );
+    assert_eq!(resolved["observationSources"], json!({"ready": {"deployment": "web"}}));
     assert_eq!(
         resolved["workload"],
         json!({"cluster": "dev", "context": "workload-admin"})
     );
-    assert_eq!(
-        facts(&unit).location.cluster,
-        "control",
-        "Argo CD runs in another Cluster"
-    );
-    assert_eq!(facts(&unit).location.context.as_deref(), Some("argocd-admin"));
+    let ReconcilerLocation::ArgoCd(location) = facts(&unit).location;
+    assert_eq!(location.cluster, "control", "Argo CD runs in another Cluster");
+    assert_eq!(location.context.as_deref(), Some("argocd-admin"));
     assert!(driver.capabilities(&Live::spec(json!({}))).observed_values);
     assert!(!driver.capabilities(&spec()).observed_values);
     let publishing = live.resolve(&driver, spec()).unwrap();
@@ -378,7 +382,7 @@ fn test_observe_reads_the_field_only_once_its_application_runs_the_publication()
         live.serve(&unit, |name| (name == "dev-catalog").then(|| "0".repeat(40)));
         let reason = pending_reason(&ready(&live)).to_owned();
         assert!(
-            reason.starts_with("application-not-running-publication:") && reason.contains("argocd/web"),
+            reason.starts_with("application-not-running-publication:") && reason.contains("Application web"),
             "{method:?}: {reason}"
         );
         // It runs an older publication.

@@ -26,4 +26,3 @@ metadata:
   labels: {dev: 'true'}
 spec:
   target: '{{ values.target }}'
-  mode: publish

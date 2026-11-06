@@ -1,5 +1,6 @@
-//! What an Argo CD Application reports, reduced to what attestation reads:
-//! the revision it runs, its live health, and whether it is being deleted.
+//! What an Argo CD Application reports, mapped into what a reading holds
+//! ([`Observed`]): the revision it runs, its live health, its source, and
+//! whether it is being deleted.
 //!
 //! Contract: [Kubernetes publications](../../../../../design/promotion.md#kubernetes-publications),
 //! running revision. Both access methods return the Application as Argo CD
@@ -14,21 +15,29 @@
 //!   CD also records selective and dry-run syncs there as succeeded.
 //! - An operation newer than that entry (or as new: timestamps have second
 //!   resolution) that is **not** a completed full sync leaves the Application
-//!   running a mix of revisions, which proves no revision: a selective sync
-//!   (`operation.sync.resources`), a full sync that failed or errored (it may
-//!   have applied part of its revision), and one still running or
-//!   terminating. A dry run changes nothing itself, but `operationState`
-//!   holds only the latest operation, so a dry run after the entry may hide a
-//!   selective sync before it: it counts as a mix too.
-//! - **Health** is `status.health.status`, Argo CD's live health, as
-//!   reported.
+//!   running a mix of revisions, which proves no revision
+//!   ([`Running::Mixed`]): a selective sync (`operation.sync.resources`), a
+//!   full sync that failed or errored (it may have applied part of its
+//!   revision), and one still running or terminating. A dry run changes
+//!   nothing itself, but `operationState` holds only the latest operation, so
+//!   a dry run after the entry may hide a selective sync before it: it counts
+//!   as a mix too.
+//! - **Health** is `status.health.status`, Argo CD's live health, mapped to
+//!   [`Health`]: `Healthy`, `Progressing`, and `Degraded` as reported, and
+//!   anything else (`Suspended`, `Missing`, `Unknown`, nothing) as
+//!   [`Health::Unknown`], which is never a pass.
+//! - The **source** is `spec.source` as it is now and the `source` the newest
+//!   history entry synced, each as a [`Source`](nyl_render::gitops::observation::Source).
 
 use chrono::{DateTime, Utc};
+use nyl_render::gitops::observation::argocd_source;
 use serde_json::Value;
+
+use crate::kubernetes_publication::reconciler::{Health, Observed, Running};
 
 /// Why an Application runs no single revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Mixed {
+enum Why {
     /// A selective sync newer than the newest history entry.
     SelectiveSync,
     /// A full sync newer than the newest history entry that has not
@@ -40,55 +49,57 @@ pub enum Mixed {
     DryRun,
 }
 
-/// The revision an Application runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Running {
-    /// No history entry: no full sync has completed.
-    NeverSynced,
-    /// A single revision: the newest history entry's.
-    Revision {
-        revision: String,
-        /// The `source` the entry synced, when it records one.
-        source: Option<Value>,
-    },
-    /// A newer operation leaves a mix of revisions.
-    Mixed { history: Option<String>, why: Mixed },
-    /// The newest history entry names no single revision.
-    Unreadable(String),
-}
-
-/// An Application as attestation reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveApplication {
-    /// `metadata.deletionTimestamp` is set: Argo CD is removing it.
-    pub deleting: bool,
-    /// `status.health.status`, such as `Healthy`; `None` before Argo CD reports one.
-    pub health: Option<String>,
-    /// `spec.source` as it is now.
-    pub source: Option<Value>,
-    pub running: Running,
-}
-
-impl LiveApplication {
-    /// Read an Application document. A document that is no Application
-    /// object is an error; one without `status` has simply never synced.
-    pub fn parse(application: &Value) -> Result<Self, String> {
-        if !application.is_object() {
-            return Err("an Application must be a JSON object".to_owned());
+impl Why {
+    fn reason(self) -> String {
+        match self {
+            Self::SelectiveSync => {
+                "a selective sync newer than its last full sync leaves it running a mix of revisions: sync the whole Application".to_owned()
+            }
+            Self::DryRun => {
+                "a dry run is its latest operation, so an earlier selective sync may be hidden behind it: sync the whole Application".to_owned()
+            }
+            Self::UnfinishedSync(phase) => format!(
+                "a full sync newer than its last completed one is {phase}, so it may run part of another revision: \
+                 wait for it, or sync again"
+            ),
         }
-        let text = |pointer: &str| application.pointer(pointer).and_then(Value::as_str).map(str::to_owned);
-        Ok(Self {
-            deleting: application
-                .pointer("/metadata/deletionTimestamp")
-                .is_some_and(|value| !value.is_null()),
-            health: text("/status/health/status").filter(|status| !status.is_empty()),
-            source: application.pointer("/spec/source").cloned(),
-            running: running(application),
-        })
     }
 }
 
-fn running(application: &Value) -> Running {
+/// Read an Application document as a reading holds it. A document that is
+/// no Application object is an error; one without `status` has simply never
+/// synced.
+pub fn parse(application: &Value) -> Result<Observed, String> {
+    if !application.is_object() {
+        return Err("an Application must be a JSON object".to_owned());
+    }
+    let (running, synced_source) = running(application);
+    Ok(Observed {
+        running,
+        health: health(application),
+        deleting: application
+            .pointer("/metadata/deletionTimestamp")
+            .is_some_and(|value| !value.is_null()),
+        source: application
+            .pointer("/spec/source")
+            .filter(|source| source.is_object())
+            .map(argocd_source),
+        synced_source,
+    })
+}
+
+fn health(application: &Value) -> Health {
+    match application.pointer("/status/health/status").and_then(Value::as_str) {
+        Some("Healthy") => Health::Healthy,
+        Some("Progressing") => Health::Progressing,
+        Some("Degraded") => Health::Degraded,
+        _ => Health::Unknown,
+    }
+}
+
+/// The running revision, and the source the newest history entry synced
+/// when it names a single revision.
+fn running(application: &Value) -> (Running, Option<nyl_render::gitops::observation::Source>) {
     let history = application
         .pointer("/status/history")
         .and_then(Value::as_array)
@@ -96,23 +107,33 @@ fn running(application: &Value) -> Running {
         .unwrap_or_default();
     let Some(newest) = newest_entry(history) else {
         // Without an entry, a selective or unfinished operation changes nothing we can prove.
-        return Running::NeverSynced;
+        return (Running::None, None);
     };
     let revision = single_revision(newest);
     if let Some(why) = newer_operation(application, newest) {
-        return Running::Mixed { history: revision, why };
+        return (
+            Running::Mixed {
+                last: revision,
+                reason: why.reason(),
+            },
+            None,
+        );
     }
     match revision {
-        Some(revision) => Running::Revision {
-            revision,
-            source: newest
+        Some(revision) => (
+            Running::Exact(revision),
+            newest
                 .get("source")
                 .or_else(|| newest.pointer("/sources/0"))
-                .cloned(),
-        },
-        None => Running::Unreadable(
-            "the newest status.history entry names no single revision (a multi-source Application is not one Nyl generates)"
-                .to_owned(),
+                .filter(|source| source.is_object())
+                .map(argocd_source),
+        ),
+        None => (
+            Running::Unreadable(
+                "the newest status.history entry names no single revision (a multi-source Application is not one Nyl generates)"
+                    .to_owned(),
+            ),
+            None,
         ),
     }
 }
@@ -144,7 +165,7 @@ fn single_revision(entry: &Value) -> Option<String> {
 
 /// An operation newer than the history entry that leaves a mix, if any: any
 /// operation as new as the entry that is not a completed full sync.
-fn newer_operation(application: &Value, newest: &Value) -> Option<Mixed> {
+fn newer_operation(application: &Value, newest: &Value) -> Option<Why> {
     let operation = application.pointer("/status/operationState")?;
     let time = |value: &Value, field: &str| {
         value
@@ -170,33 +191,36 @@ fn newer_operation(application: &Value, newest: &Value) -> Option<Mixed> {
         return None;
     }
     let Some(sync) = operation.pointer("/operation/sync") else {
-        return Some(Mixed::UnfinishedSync("non-sync operation".to_owned()));
+        return Some(Why::UnfinishedSync("non-sync operation".to_owned()));
     };
     let selective = sync
         .get("resources")
         .and_then(Value::as_array)
         .is_some_and(|resources| !resources.is_empty());
     if selective {
-        return Some(Mixed::SelectiveSync);
+        return Some(Why::SelectiveSync);
     }
     if sync.get("dryRun").and_then(Value::as_bool) == Some(true) {
-        return Some(Mixed::DryRun);
+        return Some(Why::DryRun);
     }
     match operation.get("phase").and_then(Value::as_str) {
         Some("Succeeded") => None,
-        Some(phase) => Some(Mixed::UnfinishedSync(phase.to_owned())),
-        None => Some(Mixed::UnfinishedSync("unknown".to_owned())),
+        Some(phase) => Some(Why::UnfinishedSync(phase.to_owned())),
+        None => Some(Why::UnfinishedSync("unknown".to_owned())),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use nyl_render::gitops::observation::Source;
     use serde_json::json;
 
     use super::*;
 
     fn application(status: Value) -> Value {
-        let mut application = json!({"metadata": {"name": "web"}, "spec": {"source": {"path": "dev/web/web"}}});
+        let mut application = json!({"metadata": {"name": "web"}, "spec": {"source": {
+            "repoURL": "https://example.invalid/deploy.git", "path": "dev/web/web", "targetRevision": "deploy",
+            "directory": {"recurse": true}}}});
         application["status"] = status;
         application
     }
@@ -206,8 +230,15 @@ mod tests {
                "source": {"path": "dev/web/web", "repoURL": "https://example.invalid/deploy.git"}})
     }
 
-    fn parse(status: Value) -> LiveApplication {
-        LiveApplication::parse(&application(status)).unwrap()
+    fn parse_status(status: Value) -> Observed {
+        parse(&application(status)).unwrap()
+    }
+
+    fn mixed(observed: &Observed) -> (Option<&str>, &str) {
+        match &observed.running {
+            Running::Mixed { last, reason } => (last.as_deref(), reason),
+            other => panic!("expected a mix, got {other:?}"),
+        }
     }
 
     /// Catches the running revision coming from the sync status or the
@@ -215,7 +246,7 @@ mod tests {
     /// entry beating a newer one when Argo CD lists them out of order.
     #[test]
     fn test_running_revision_is_the_newest_history_entry() {
-        let live = parse(json!({
+        let live = parse_status(json!({
             "sync": {"status": "OutOfSync", "revision": "branch-head"},
             "health": {"status": "Healthy"},
             "history": [entry(3, "c3", "2026-01-03T00:00:00Z"), entry(1, "c1", "2026-01-01T00:00:00Z"),
@@ -223,49 +254,77 @@ mod tests {
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-03T00:00:00Z",
                                "operation": {"sync": {"revision": "c3"}}, "syncResult": {"revision": "c3"}},
         }));
+        assert_eq!(live.running, Running::Exact("c3".to_owned()));
         assert_eq!(
-            live.running,
-            Running::Revision {
-                revision: "c3".to_owned(),
-                source: Some(json!({"path": "dev/web/web", "repoURL": "https://example.invalid/deploy.git"}))
-            }
+            live.synced_source,
+            Some(Source {
+                repository: "https://example.invalid/deploy.git".to_owned(),
+                path: "dev/web/web".to_owned(),
+                options: Value::Null,
+            })
         );
-        assert_eq!(live.health.as_deref(), Some("Healthy"));
-        assert_eq!(live.source.as_ref().unwrap()["path"], "dev/web/web");
+        assert_eq!(live.health, Health::Healthy);
+        // The configured source, without the revision it tracks.
+        let source = live.source.unwrap();
+        assert_eq!(source.path, "dev/web/web");
+        assert_eq!(source.options, json!({"directory": {"recurse": true}}));
         assert!(!live.deleting);
     }
 
-    /// Catches an Application that never synced reporting a revision, and a
-    /// status-less (just created) one failing to parse.
+    /// Catches an Application that never synced reporting a revision, a
+    /// status-less (just created) one failing to parse, and a health Argo CD
+    /// does not report reading as a pass.
     #[test]
     fn test_an_application_without_history_never_synced() {
-        assert_eq!(
-            parse(json!({"health": {"status": "Missing"}})).running,
-            Running::NeverSynced
-        );
-        let bare = LiveApplication::parse(&json!({"metadata": {"name": "web"}})).unwrap();
-        assert_eq!(bare.running, Running::NeverSynced);
-        assert_eq!(bare.health, None);
-        assert!(LiveApplication::parse(&json!("not an application")).is_err());
+        let never = parse_status(json!({"health": {"status": "Missing"}}));
+        assert_eq!(never.running, Running::None);
+        assert_eq!(never.health, Health::Unknown);
+        let bare = parse(&json!({"metadata": {"name": "web"}})).unwrap();
+        assert_eq!(bare.running, Running::None);
+        assert_eq!(bare.health, Health::Unknown);
+        assert_eq!(bare.source, None);
+        assert!(parse(&json!("not an application")).is_err());
+    }
+
+    /// Catches Argo CD's health vocabulary leaking past the mapping: the
+    /// three it shares with the neutral reading pass through, and `Suspended`,
+    /// `Missing`, `Unknown`, and anything new are Unknown, never Healthy.
+    #[test]
+    fn test_health_maps_to_the_neutral_vocabulary() {
+        for (reported, expected) in [
+            ("Healthy", Health::Healthy),
+            ("Progressing", Health::Progressing),
+            ("Degraded", Health::Degraded),
+            ("Suspended", Health::Unknown),
+            ("Missing", Health::Unknown),
+            ("Unknown", Health::Unknown),
+            ("Whatever", Health::Unknown),
+        ] {
+            assert_eq!(
+                parse_status(json!({"health": {"status": reported}})).health,
+                expected,
+                "{reported}"
+            );
+        }
     }
 
     /// Catches a selective sync newer than the history vouching for the
     /// history's revision, although it applied some resources of another.
     #[test]
     fn test_a_newer_selective_sync_leaves_a_mix() {
-        let live = parse(json!({
+        let live = parse_status(json!({
             "history": [entry(1, "c1", "2026-01-01T00:00:00Z")],
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-02T00:00:00Z",
                                "operation": {"sync": {"revision": "c2", "resources": [{"kind": "Deployment", "name": "web"}]}},
                                "syncResult": {"revision": "c2"}},
         }));
-        assert_eq!(
-            live.running,
-            Running::Mixed {
-                history: Some("c1".to_owned()),
-                why: Mixed::SelectiveSync
-            }
+        let (last, reason) = mixed(&live);
+        assert_eq!(last, Some("c1"));
+        assert!(
+            reason.contains("selective sync") && reason.contains("sync the whole Application"),
+            "{reason}"
         );
+        assert_eq!(live.synced_source, None);
     }
 
     /// Catches a failed or running full sync after the newest entry counted
@@ -273,19 +332,14 @@ mod tests {
     #[test]
     fn test_a_newer_unfinished_full_sync_leaves_a_mix() {
         for phase in ["Failed", "Error", "Running", "Terminating"] {
-            let live = parse(json!({
+            let live = parse_status(json!({
                 "history": [entry(1, "c1", "2026-01-01T00:00:00Z")],
                 "operationState": {"phase": phase, "startedAt": "2026-01-02T00:00:00Z",
                                    "operation": {"sync": {"revision": "c2"}}},
             }));
-            assert_eq!(
-                live.running,
-                Running::Mixed {
-                    history: Some("c1".to_owned()),
-                    why: Mixed::UnfinishedSync(phase.to_owned())
-                },
-                "{phase}"
-            );
+            let (last, reason) = mixed(&live);
+            assert_eq!(last, Some("c1"), "{phase}");
+            assert!(reason.contains(&format!("is {phase}")), "{reason}");
         }
     }
 
@@ -311,7 +365,7 @@ mod tests {
         });
         for status in [selective_before, full_succeeded, producer] {
             assert!(
-                matches!(parse(status.clone()).running, Running::Revision { .. }),
+                matches!(parse_status(status.clone()).running, Running::Exact(_)),
                 "{status}"
             );
         }
@@ -330,65 +384,60 @@ mod tests {
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-03T00:00:00Z",
                                "operation": {"sync": {"dryRun": true, "revision": "d"}}},
         });
-        assert_eq!(
-            parse(dry_run).running,
-            Running::Mixed {
-                history: Some("c".to_owned()),
-                why: Mixed::DryRun
-            }
-        );
+        let observed = parse_status(dry_run);
+        let (last, reason) = mixed(&observed);
+        assert_eq!(last, Some("c"));
+        assert!(reason.contains("dry run"), "{reason}");
         let same_second = json!({
             "history": [entry(5, "c", "2026-01-01T00:00:00Z")],
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-01T00:00:00Z",
                                "operation": {"sync": {"resources": [{"kind": "Deployment", "name": "web"}]}}},
         });
-        assert!(matches!(
-            parse(same_second).running,
-            Running::Mixed {
-                why: Mixed::SelectiveSync,
-                ..
-            }
-        ));
+        assert!(mixed(&parse_status(same_second)).1.contains("selective sync"));
         let other = json!({
             "history": [entry(5, "c", "2026-01-01T00:00:00Z")],
             "operationState": {"phase": "Succeeded", "startedAt": "2026-01-03T00:00:00Z", "operation": {}},
         });
-        assert!(matches!(
-            parse(other).running,
-            Running::Mixed {
-                why: Mixed::UnfinishedSync(_),
-                ..
-            }
-        ));
+        assert!(mixed(&parse_status(other)).1.contains("non-sync operation"));
     }
 
     /// Catches an operation whose time cannot be compared with the entry's
     /// vouching for a revision.
     #[test]
     fn test_an_incomparable_selective_operation_is_assumed_newer() {
-        let live = parse(json!({
+        let live = parse_status(json!({
             "history": [entry(1, "c1", "2026-01-01T00:00:00Z")],
             "operationState": {"phase": "Succeeded", "operation": {"sync": {"resources": [{"kind": "Deployment"}]}}},
         }));
-        assert!(matches!(
-            live.running,
-            Running::Mixed {
-                why: Mixed::SelectiveSync,
-                ..
-            }
-        ));
+        assert!(mixed(&live).1.contains("selective sync"));
     }
 
     #[test]
     fn test_multi_revision_entries_and_deletion() {
-        let single = LiveApplication::parse(&json!({
+        let single = parse(&json!({
             "metadata": {"deletionTimestamp": "2026-01-01T00:00:00Z"},
             "status": {"history": [{"id": 1, "revisions": ["c1"]}]},
         }))
         .unwrap();
         assert!(single.deleting);
-        assert!(matches!(single.running, Running::Revision { ref revision, .. } if revision == "c1"));
-        let multi = parse(json!({"history": [{"id": 1, "revisions": ["c1", "c2"]}]}));
+        assert_eq!(single.running, Running::Exact("c1".to_owned()));
+        let multi = parse_status(json!({"history": [{"id": 1, "revisions": ["c1", "c2"]}]}));
         assert!(matches!(multi.running, Running::Unreadable(_)));
+    }
+
+    /// Catches the source an edit left in the cluster hiding behind what
+    /// Argo CD defaults: the configured source and the one the last sync took
+    /// are both kept, without `targetRevision`, nulls, and empty containers.
+    #[test]
+    fn test_sources_drop_what_argocd_defaults() {
+        let mut document = application(json!({"history": [entry(1, "c1", "2026-01-01T00:00:00Z")]}));
+        document["spec"]["source"]["targetRevision"] = json!("another");
+        document["spec"]["source"]["helm"] = json!({});
+        document["spec"]["source"]["plugin"] = Value::Null;
+        let observed = parse(&document).unwrap();
+        assert_eq!(
+            observed.source.unwrap().options,
+            json!({"directory": {"recurse": true}})
+        );
     }
 }
