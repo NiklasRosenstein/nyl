@@ -191,9 +191,11 @@ before rendering. A document that is valid YAML before rendering may write them
 in any YAML form, with string values and no template syntax. One that is not,
 such as a spec wrapped in `{% if %}`, must write them directly under `metadata`
 as a block mapping of plain `key: value` lines or a one-line `{key: value}`
-mapping, with no template syntax among them or on an unindented line right after
-a block, and no anchors, aliases, or merge keys. Nyl rejects any other form instead of reading it as fewer labels, and
-rejects a group whose rendered labels differ from the literal ones. Remote
+mapping, with no template syntax among them, no label after a template line, and
+no anchors, aliases, or merge keys. A statement right after the labels, such as
+the `{% if %}` that wraps the spec, is fine. Nyl rejects any other form instead
+of reading it as fewer labels, and rejects a group whose rendered labels differ
+from the literal ones. Remote
 source coordinates and commit locks must remain statically parseable for
 `nyl update source-locks`.
 

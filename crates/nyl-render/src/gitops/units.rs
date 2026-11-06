@@ -199,7 +199,8 @@ fn scan_unit_envelope(document: &str, location: &str) -> Result<UnitEnvelope> {
             })?
         } else {
             let (api_version, kind, name) = scan_static_envelope_fields(document);
-            let labels = scan_static_metadata_labels(document).map_err(|_| unit_invalid(location, LITERAL_LABELS))?;
+            let labels = scan_static_metadata_labels(document)
+                .map_err(|error| unit_invalid(location, &format!("{LITERAL_LABELS}: {error}")))?;
             match (api_version, kind, name) {
                 (Some(api_version), Some(kind), Some(name)) => UnitEnvelope {
                     api_version,
@@ -963,7 +964,21 @@ spec:
         let worktree = project(&[("platform.yaml", PLATFORM), ("seed.yaml", conditional)]);
         let error = render(&worktree, "dev").unwrap_err().0;
         assert!(error.contains("metadata.labels must be literal"), "{error}");
+        // The scanner's own reason is kept.
+        assert!(error.contains("must be static"), "{error}");
         assert!(error.contains("seed.yaml document 1"), "{error}");
+    }
+
+    /// A unit whose spec alone is conditional keeps its literal labels: the
+    /// statement after the block does not make them conditional.
+    #[test]
+    fn test_render_unit_with_a_conditional_spec_keeps_its_labels() {
+        let conditional = "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: seed\n  labels:\n    dev: 'true'\n{% if values.region == 'eu' %}\nspec:\n  command: [./run.sh]\n{% endif %}\n";
+        let worktree = project(&[("platform.yaml", PLATFORM), ("seed.yaml", conditional)]);
+        let source = render(&worktree, "dev").unwrap();
+        let seed = unit(&source, "seed");
+        assert!(seed.selected);
+        assert_eq!(seed.spec, Some(json!({"command": ["./run.sh"]})));
     }
 
     #[test]

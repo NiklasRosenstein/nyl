@@ -604,32 +604,48 @@ fn reject_templated_labels(labels: &BTreeMap<String, String>) -> Result<()> {
 /// then: a document that parses is read by [`declared_metadata_labels`].
 ///
 /// Labels are a block mapping or a one-line flow mapping directly under
-/// `metadata`. A template line inside them, or any other form, is an error:
-/// reading it as fewer labels would let selection disagree with the render.
+/// `metadata`. A template line inside them, a label after a template line at
+/// or above their indent, or any other form, is an error: reading it as fewer
+/// labels would let selection disagree with the render. A template line right
+/// after the block, such as the statement wrapping the spec, is fine.
 pub(super) fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<String, String>> {
     let mut labels = BTreeMap::new();
     let mut metadata_indent = None;
     let mut metadata_child_indent = None;
     let mut labels_indent = None;
+    let mut interrupted = false;
     for line in document.lines() {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let indent = line.len() - trimmed.len();
-        if labels_indent.is_some_and(|parent| {
-            indent > parent || (indent == 0 && nyl_core::template_syntax::has_template_syntax(trimmed))
-        }) {
-            // A statement or expression among the labels makes some of them conditional.
-            if nyl_core::template_syntax::has_template_syntax(trimmed) {
-                return Err(NylError::config(LABELS_NOT_STATIC));
+        if let Some(parent) = labels_indent {
+            let templated = nyl_core::template_syntax::has_template_syntax(trimmed);
+            if indent > parent {
+                // A statement or expression among the labels, or a label after
+                // one that closed them off, is conditional or generated.
+                if templated || interrupted {
+                    return Err(NylError::config(LABELS_NOT_STATIC));
+                }
+                if let Some((key, value)) = split_label_pair(strip_yaml_comment(trimmed))? {
+                    insert_static_label(&mut labels, key, value)?;
+                }
+                continue;
             }
-            if let Some((key, value)) = split_label_pair(strip_yaml_comment(trimmed))? {
-                insert_static_label(&mut labels, key, value)?;
+            if templated {
+                // A template line at or above the labels' own indent, such as the
+                // `{% if %}` wrapping the spec, is fine unless labels follow it,
+                // on its own line or after the tag on this one.
+                if text_outside_tags(trimmed) {
+                    return Err(NylError::config(LABELS_NOT_STATIC));
+                }
+                interrupted = true;
+                continue;
             }
-            continue;
         }
         labels_indent = None;
+        interrupted = false;
         if indent == 0 {
             if is_template_statement(trimmed) {
                 continue;
@@ -663,6 +679,27 @@ pub(super) fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<Str
         }
     }
     Ok(labels)
+}
+
+/// Whether `line` has text beside its `{% %}`, `{{ }}`, and `{# #}` tags.
+fn text_outside_tags(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(start) = rest.find('{') {
+        let closing = match rest[start..].chars().nth(1) {
+            Some('%') => "%}",
+            Some('{') => "}}",
+            Some('#') => "#}",
+            _ => return true,
+        };
+        if !rest[..start].trim().is_empty() {
+            return true;
+        }
+        let Some(end) = rest[start + 2..].find(closing) else {
+            return true;
+        };
+        rest = &rest[start + 2 + end + 2..];
+    }
+    !rest.trim().is_empty()
 }
 
 /// A line that is a template statement or comment, which no YAML structure contains.
@@ -1131,13 +1168,12 @@ spec:
         let spec =
             "spec:\n  applicationNamespace: argocd\n  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n"
                 .to_owned();
-        let document =
-            format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: web\n{labels}{spec}");
-        if wrapped {
-            format!("{{% if values.enabled %}}\n{document}{{% endif %}}\n")
+        let spec = if wrapped {
+            format!("{{% if values.enabled %}}\n{spec}{{% endif %}}\n")
         } else {
-            document
-        }
+            spec
+        };
+        format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: web\n{labels}{spec}")
     }
 
     /// Templating that the typed parse rejects must not change which labels
@@ -1236,6 +1272,9 @@ spec:
             "  labels:\n    a: b\n{% if values.extra %}\n    c: d\n{% endif %}\n",
             "  labels:\n    a: b\n    {% if values.extra %}\n    c: d\n    {% endif %}\n",
             "  labels:\n    a: b\n    {{ values.extra | indent(4) }}\n",
+            "  labels:\n    a: b\n  {% if values.extra %}\n    c: d\n  {% endif %}\n",
+            "  labels:\n    a: b\n{{ values.extra | indent(4) }}\n    c: d\n",
+            "  labels:\n    a: b\n{% if values.extra %}    c: d\n{% endif %}\n",
             "  labels:\n    <<: *base\n    a: b\n",
             "  labels:\n    a: *tier\n",
             "  labels: {a: b,\n    c: d}\n",
@@ -1250,6 +1289,34 @@ spec:
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("metadata.labels"), "{labels:?}: {error}");
+        }
+    }
+
+    /// The usual layout of a conditional spec: block labels, then a template
+    /// line at the left margin that wraps the spec.
+    #[test]
+    fn test_scanned_labels_allow_a_template_line_after_the_block() {
+        let (temporary, _repository) = project();
+        for (after, wrap) in [
+            ("{% if values.enabled %}\n", "{% endif %}\n"),
+            ("{# a note #}\n", ""),
+            ("{{ values.spec }}\n", ""),
+            ("  {% if values.enabled %}\n", "  {% endif %}\n"),
+        ] {
+            fs::write(
+                temporary.path().join("group.yaml"),
+                format!(
+                    "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: web\n  labels:\n    environment: production\n{after}spec:\n  applicationNamespace: argocd\n{wrap}"
+                ),
+            )
+            .unwrap();
+            let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();
+            let group = inventory.get(GitOpsResourceKind::ApplicationGroup, "web").unwrap();
+            assert_eq!(
+                group.static_labels,
+                BTreeMap::from([("environment".to_owned(), "production".to_owned())]),
+                "{after:?}"
+            );
         }
     }
 
