@@ -7,20 +7,9 @@
 //! resolution; neither is authored.
 
 use nyl_core::orchestration::time::Duration;
+use nyl_core::resources::units::COMMON_UNIT_FIELDS;
 use nyl_render::resources::release_inputs::ReleaseKey;
 use serde_json::Value;
-
-/// Fields every unit kind shares, which the common validation checks.
-const COMMON_FIELDS: [&str; 8] = [
-    "enabled",
-    "outputs",
-    "dependsOn",
-    "approval",
-    "deletionPolicy",
-    "timeout",
-    "env",
-    "attestations",
-];
 
 /// The fields only this kind has.
 const KIND_FIELDS: [&str; 4] = ["target", "mode", "teardownWait", "releases"];
@@ -44,7 +33,7 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
     }
     if let Some(field) = spec
         .keys()
-        .find(|field| !KIND_FIELDS.contains(&field.as_str()) && !COMMON_FIELDS.contains(&field.as_str()))
+        .find(|field| !KIND_FIELDS.contains(&field.as_str()) && !COMMON_UNIT_FIELDS.contains(&field.as_str()))
     {
         return Err(format!(
             "spec has unknown field {field:?}; a KubernetesPublication has target, mode, and teardownWait besides the fields every unit shares"

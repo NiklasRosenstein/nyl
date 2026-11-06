@@ -315,6 +315,8 @@ pub fn prepare(
         })
         .map_err(config)?,
     );
+    // The unit's document carries what its key covers, as a run's does.
+    prepared.unit.resolved_spec = Some(keyed_spec);
     Ok(prepared)
 }
 

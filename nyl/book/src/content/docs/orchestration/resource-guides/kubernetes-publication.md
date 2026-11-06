@@ -79,12 +79,17 @@ unchanged tree creates no commit.
 The unit records a `PublishedTree` artifact named `tree` with `repository`,
 `branch`, `pathPrefix`, `commit`, and `indexDigest`. The push is a
 compare-and-swap on the branch head. When another publication moved the head
-first, nothing was published and the unit builds its commit again on the new
-head, up to three times.
+first, nothing was published, and the unit builds its commit again on the new
+head, up to three times and within its `timeout`. A target with
+`fromPublication` bindings is rendered again on the new head: when the state
+files it read are unchanged, it publishes there. When one changed, the unit
+ends without publishing as a retryable failure, `NYL-KUBERNETES-STATE-CHANGED`,
+and the next run resolves it again with the new state.
 
 `detect-drift` publishes nothing: it compares the branch with the tree the unit
-renders, and reports `drifted` when they differ and `unknown`, with the reason,
-when it cannot compare, for example after an owned file was edited outside Nyl.
+renders. It reports `drifted` when they differ, or when an owned file was
+edited outside Nyl, and `unknown`, with the reason, when it cannot compare,
+for example when the remote is unreachable.
 
 ## Teardown
 

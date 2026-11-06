@@ -81,6 +81,11 @@ pub enum NylError {
     #[error("Git error: {0}")]
     Git(#[from] crate::git::GitError),
 
+    /// An owned rendered file differs from its recorded digest: someone
+    /// changed it outside Nyl. See [`NylError::is_owned_file_modified`].
+    #[error("{0}")]
+    OwnedFileModified(String),
+
     /// A publication branch advanced between checking it out and pushing to
     /// it, so nothing was pushed. Building the tree again on the new head
     /// may succeed; see [`NylError::is_stale_publication`].
@@ -167,6 +172,12 @@ impl NylError {
     /// Returns true if this error is related to Git operations
     pub fn is_git_error(&self) -> bool {
         matches!(self, NylError::Git(_) | NylError::PublicationMoved(_))
+    }
+
+    /// Whether a rendered tree cannot be reconciled because an owned file was
+    /// modified outside Nyl.
+    pub fn is_owned_file_modified(&self) -> bool {
+        matches!(self, NylError::OwnedFileModified(_))
     }
 
     /// Whether a publication lost its race for the branch head, before the

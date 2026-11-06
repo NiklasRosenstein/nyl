@@ -15,7 +15,7 @@ for orchestration.
 | Repository | Holds | Written by |
 | --- | --- | --- |
 | Source repository | `nyl.toml` and every resource Nyl renders: releases, targets, environments, and units | People, through commits and pull requests. Nyl reads it, and orchestration renders units from a fresh checkout of the run's source commit. |
-| Publication destinations | Rendered Kubernetes trees for Argo CD | [`nyl publish-tree`](/nyl/reference/cli/publish-tree/); from M5 (planned), KubernetesPublication units |
+| Publication destinations | Rendered Kubernetes trees for Argo CD | [`nyl publish-tree`](/nyl/reference/cli/publish-tree/), and [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/) units |
 | State repositories | Each environment's desired and observed state and its coordination refs | Orchestration commands such as `reconcile`, `recover`, `detect-drift`, and `nyl state` |
 
 All three can be one repository.

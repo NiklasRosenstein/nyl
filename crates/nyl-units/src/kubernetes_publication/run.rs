@@ -19,10 +19,15 @@
 //! (`rules::teardown_wait`), read from `teardownWait`.
 //!
 //! A publication that loses the race for the branch head, before or at its
-//! push, built on a head that moved, so nothing was published; it is built
-//! again on the new head, a bounded number of times. Any other failure ends
-//! the call: one before the push is a failure before effects, and a failed
-//! push may have published.
+//! push, built on a head that moved, so nothing was published. A tree that
+//! read no state is built again as it is. A tree that read `fromPublication`
+//! state is rendered again on the new head: when the state it read is
+//! unchanged, it publishes there; when the state changed, the call ends
+//! without publishing as a retryable failure (`NYL-KUBERNETES-STATE-CHANGED`),
+//! and the next run resolves the unit again with the new state. Each retry is
+//! bounded in number and by the unit's timeout. Any other failure ends the
+//! call: one before the push is a failure before effects, and a failed push
+//! may have published.
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
@@ -30,7 +35,7 @@ use nyl_core::orchestration::driver::{
 };
 use nyl_core::orchestration::ids::CommitId;
 use nyl_core::orchestration::ports::CommitIdentity;
-use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit};
+use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, FailureCategory};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
@@ -129,39 +134,134 @@ fn author(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Public
     })
 }
 
-/// Build with `prepare` and push with `push`, building again when the
-/// branch head moved. `prepared` and `pushed` complete "cannot prepare ..."
-/// and "cannot ..." in the failure messages.
-fn with_retries<P, R>(
-    prepared: &str,
-    pushed: &str,
-    prepare: impl Fn() -> nyl_render::Result<P>,
+/// What rebuilding a tree on a branch head that moved found.
+enum Rebuilt {
+    /// The tree is ready to be prepared again.
+    Ready,
+    /// The state the tree was rendered from changed; nothing may be published from it.
+    StateChanged(String),
+}
+
+/// How a call that builds again ended.
+enum Attempted<R> {
+    Done(R),
+    StateChanged(String),
+}
+
+/// The time a call may spend, from the context's timeout, measured from its start.
+struct Budget {
+    started: std::time::Instant,
+    allowed: std::time::Duration,
+}
+
+impl Budget {
+    fn new(ctx: &ExecutionContext<'_>) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            allowed: (ctx.deadline - ctx.now).to_std().unwrap_or_default(),
+        }
+    }
+
+    fn spent(&self) -> bool {
+        self.started.elapsed() >= self.allowed
+    }
+}
+
+/// Prepare `tree` and push it, building again when the branch head moved:
+/// `rebuild` brings `tree` up to date with the new head, or reports that the
+/// state it was rendered from changed. `prepared` and `pushed` complete
+/// "cannot prepare ..." and "cannot ..." in the failure messages.
+fn with_retries<T, P, R>(
+    budget: &Budget,
+    tree: &mut T,
+    (prepared, pushed): (&str, &str),
+    prepare: impl Fn(&T) -> nyl_render::Result<P>,
     push: impl Fn(P) -> nyl_render::Result<R>,
-) -> DriverResult<R> {
+    rebuild: impl Fn(&mut T) -> DriverResult<Rebuilt>,
+) -> DriverResult<Attempted<R>> {
     let mut attempts = 0;
     loop {
         attempts += 1;
         let more = attempts < PUBLISH_ATTEMPTS;
-        let ready = match prepare() {
-            Ok(ready) => ready,
-            Err(error) if error.is_stale_publication() && more => continue,
+        let lost = match prepare(tree) {
+            Ok(ready) => match push(ready) {
+                Ok(result) => return Ok(Attempted::Done(result)),
+                Err(error) if error.is_stale_publication() => error,
+                Err(error) => return Err(DriverError::after_effects(format!("cannot {pushed}: {error}"))),
+            },
+            Err(error) if error.is_stale_publication() => error,
             Err(error) => {
                 return Err(DriverError::before_effects(format!(
                     "cannot prepare {prepared}: {error}"
                 )))
             }
         };
-        match push(ready) {
-            Ok(result) => return Ok(result),
-            Err(error) if error.is_stale_publication() && more => {}
-            // The compare-and-swap refused it, so nothing was published.
-            Err(error) if error.is_stale_publication() => {
-                return Err(DriverError::before_effects(format!(
-                    "cannot {pushed}: the publication branch moved {PUBLISH_ATTEMPTS} times while publishing: {error}"
-                )))
-            }
-            Err(error) => return Err(DriverError::after_effects(format!("cannot {pushed}: {error}"))),
+        // The branch head moved, so nothing was published.
+        if !more {
+            return Err(DriverError::before_effects(format!(
+                "cannot {pushed}: the publication branch moved {PUBLISH_ATTEMPTS} times while publishing: {lost}"
+            )));
         }
+        if budget.spent() {
+            return Err(DriverError::before_effects(format!(
+                "cannot {pushed}: the unit's timeout passed while the publication branch kept moving: {lost}"
+            )));
+        }
+        match rebuild(tree)? {
+            Rebuilt::Ready => {}
+            Rebuilt::StateChanged(message) => return Ok(Attempted::StateChanged(message)),
+        }
+    }
+}
+
+/// Render the target again on the branch head that moved and compare the
+/// state it reads with `before`; `derive` makes the tree that is published
+/// from the new render.
+fn rebuild_from_state<'a>(
+    render: &'a dyn Fn() -> DriverResult<RenderedTarget>,
+    before: &'a std::collections::BTreeMap<String, String>,
+    stateful: bool,
+    derive: impl Fn(RenderedTarget) -> DriverResult<RenderedTarget> + 'a,
+) -> impl Fn(&mut RenderedTarget) -> DriverResult<Rebuilt> + 'a {
+    move |tree| {
+        if !stateful {
+            // Nothing the tree read lives on the branch: the same tree is built on the new head.
+            return Ok(Rebuilt::Ready);
+        }
+        let fresh = render()?;
+        let after = state_inputs(&fresh)?;
+        if &after != before {
+            let changed = before
+                .keys()
+                .chain(after.keys())
+                .filter(|key| before.get(*key) != after.get(*key))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            return Ok(Rebuilt::StateChanged(format!(
+                "the state the tree was rendered from changed on the publication branch ({})",
+                changed.into_iter().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        *tree = derive(fresh)?;
+        Ok(Rebuilt::Ready)
+    }
+}
+
+fn state_inputs(rendered: &RenderedTarget) -> DriverResult<std::collections::BTreeMap<String, String>> {
+    rendered
+        .state_inputs()
+        .map_err(|error| DriverError::before_effects(format!("cannot read the inputs of the render: {error}")))
+}
+
+/// The outcome of a call that ended without publishing because the state its
+/// render read changed.
+fn state_changed(message: &str) -> Outcome {
+    Outcome::Failed {
+        category: FailureCategory::ToolError,
+        retryable: true,
+        message: format!(
+            "NYL-KUBERNETES-STATE-CHANGED: {message}; nothing was published, and the next run resolves the unit again with the new state"
+        ),
     }
 }
 
@@ -206,6 +306,22 @@ pub(crate) fn publish(
     unit: &DesiredUnit,
     outputs: Value,
 ) -> DriverResult<Outcome> {
+    let spec = resolved_spec(unit)?;
+    publish_with(
+        &|| render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec),
+        ctx,
+        unit,
+        outputs,
+    )
+}
+
+/// [`publish`] rendering with `render`, which a retry calls again.
+fn publish_with(
+    render: &dyn Fn() -> DriverResult<RenderedTarget>,
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    outputs: Value,
+) -> DriverResult<Outcome> {
     let author = author(ctx, unit)?;
     let key = unit
         .execution_key
@@ -216,24 +332,26 @@ pub(crate) fn publish(
         .uid
         .clone()
         .ok_or_else(|| DriverError::before_effects("an executing unit has a uid"))?;
-    let rendered = render(
-        catalogue,
-        &ctx.worktree,
-        &ctx.project_dir,
-        &ctx.cache_dir,
-        resolved_spec(unit)?,
-    )?;
+    let mut rendered = render()?;
+    let before = state_inputs(&rendered)?;
+    let stateful = rendered.publication_base.is_some();
     let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
     // Credential variables come from the execution's admitted environment
     // (PATH and the unit's declared passthrough), never from the process
     // environment.
     let variable = |name: &str| ctx.env.get(name).cloned();
     let published = with_retries(
-        "the publication",
-        "publish the tree",
-        || prepare_target_publication(&rendered, &ctx.project_dir, &message, &author, &variable),
+        &Budget::new(ctx),
+        &mut rendered,
+        ("the publication", "publish the tree"),
+        |tree| prepare_target_publication(tree, &ctx.project_dir, &message, &author, &variable),
         nyl_render::gitops::publication::PreparedTarget::push,
+        rebuild_from_state(render, &before, stateful, Ok),
     )?;
+    let published = match published {
+        Attempted::Done(published) => published,
+        Attempted::StateChanged(message) => return Ok(state_changed(&message)),
+    };
     Ok(Outcome::Succeeded {
         versions: std::collections::BTreeMap::new(),
         outputs,
@@ -270,19 +388,24 @@ pub(crate) fn teardown(
 ) -> DriverResult<Outcome> {
     let author = author(ctx, unit)?;
     let spec = resolved_spec(unit)?;
+    let render = || render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec);
     let variable = |name: &str| ctx.env.get(name).cloned();
     if ctx.teardown_wait.is_some() {
-        // Phase 2: the wait ended; remove exactly what the index owns.
-        let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
+        // Phase 2: the wait ended; remove exactly what the index owns. The
+        // render only identifies the owner and the destination, so a moved
+        // head needs nothing rebuilt.
+        let mut rendered = render()?;
         let message = format!(
             "nyl: teardown {}/{}: remove the owned files",
             unit.unit.environment, unit.unit.name
         );
         with_retries(
-            "the removal",
-            "remove the tree",
-            || prepare_target_removal(&rendered, &ctx.project_dir, &message, &author, &variable),
+            &Budget::new(ctx),
+            &mut rendered,
+            ("the removal", "remove the tree"),
+            |tree| prepare_target_removal(tree, &ctx.project_dir, &message, &author, &variable),
             nyl_render::gitops::publication::PreparedRemoval::push,
+            |_| Ok(Rebuilt::Ready),
         )?;
         return Ok(Outcome::Succeeded {
             versions: std::collections::BTreeMap::new(),
@@ -300,19 +423,30 @@ pub(crate) fn teardown(
             published: waiting.phase1_commit.clone(),
         });
     }
-    let rendered = render(catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
-    let phase1 = without_workload_applications(&rendered)
-        .map_err(|error| DriverError::before_effects(format!("cannot prepare phase 1 of the teardown: {error}")))?;
+    let rendered = render()?;
+    let before = state_inputs(&rendered)?;
+    let stateful = rendered.publication_base.is_some();
+    let phase1_of = |rendered: RenderedTarget| {
+        without_workload_applications(&rendered)
+            .map_err(|error| DriverError::before_effects(format!("cannot prepare phase 1 of the teardown: {error}")))
+    };
+    let mut phase1 = phase1_of(rendered)?;
     let message = format!(
         "nyl: teardown {}/{}: remove the workload Applications",
         unit.unit.environment, unit.unit.name
     );
     let published = with_retries(
-        "phase 1 of the teardown",
-        "publish phase 1 of the teardown",
-        || prepare_target_publication(&phase1, &ctx.project_dir, &message, &author, &variable),
+        &Budget::new(ctx),
+        &mut phase1,
+        ("phase 1 of the teardown", "publish phase 1 of the teardown"),
+        |tree| prepare_target_publication(tree, &ctx.project_dir, &message, &author, &variable),
         nyl_render::gitops::publication::PreparedTarget::push,
+        rebuild_from_state(&render, &before, stateful, phase1_of),
     )?;
+    let published = match published {
+        Attempted::Done(published) => published,
+        Attempted::StateChanged(message) => return Ok(state_changed(&message)),
+    };
     let commit = CommitId::new(published.commit)
         .map_err(|error| DriverError::after_effects(format!("phase 1 commit: {error}")))?;
     Ok(Outcome::Waiting {
@@ -327,11 +461,16 @@ pub(crate) fn teardown(
 }
 
 #[cfg(test)]
+#[path = "../../tests/publication_world/mod.rs"]
+mod world;
+
+#[cfg(test)]
 mod tests {
     use chrono::TimeZone;
     use serde_json::json;
 
     use super::*;
+    use crate::kubernetes_publication::run::world;
 
     /// Catches an uncacheable render keeping one key across resolutions,
     /// which would skip a publication whose inputs it cannot see.
@@ -351,6 +490,18 @@ mod tests {
         nyl_render::NylError::PublicationMoved("the branch advanced".to_owned())
     }
 
+    fn plenty() -> Budget {
+        Budget {
+            started: std::time::Instant::now(),
+            allowed: std::time::Duration::from_secs(3600),
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)] // The signature of a rebuild.
+    fn unchanged(_: &mut ()) -> DriverResult<Rebuilt> {
+        Ok(Rebuilt::Ready)
+    }
+
     /// Catches a publication that lost the race for a shared branch being
     /// reported as failed (or worse, uncertain): the loser builds again on
     /// the new head and publishes.
@@ -358,10 +509,11 @@ mod tests {
     fn test_a_publication_that_lost_the_branch_head_is_built_again() {
         let prepares = std::cell::Cell::new(0);
         let pushes = std::cell::Cell::new(0);
-        let published = with_retries(
-            "the publication",
-            "publish the tree",
-            || {
+        let Attempted::Done(published) = with_retries(
+            &plenty(),
+            &mut (),
+            ("the publication", "publish the tree"),
+            |()| {
                 prepares.set(prepares.get() + 1);
                 if prepares.get() == 1 {
                     Err(moved())
@@ -377,8 +529,11 @@ mod tests {
                     Ok(prepared)
                 }
             },
+            unchanged,
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("the publication is built again");
+        };
         // The first build lost at its check, the second at its push, and the third published.
         assert_eq!((published, prepares.get(), pushes.get()), (3, 3, 2));
     }
@@ -389,18 +544,48 @@ mod tests {
     fn test_a_publication_that_keeps_losing_the_branch_head_fails_before_effects() {
         let attempts = std::cell::Cell::new(0);
         let error = with_retries(
-            "the publication",
-            "publish the tree",
-            || Ok(()),
+            &plenty(),
+            &mut (),
+            ("the publication", "publish the tree"),
+            |()| Ok(()),
             |()| -> nyl_render::Result<()> {
                 attempts.set(attempts.get() + 1);
                 Err(moved())
             },
+            unchanged,
         )
-        .unwrap_err();
+        .err()
+        .expect("the publication fails");
         assert_eq!(attempts.get(), PUBLISH_ATTEMPTS);
         assert!(!error.effects_possible(), "{error}");
         assert!(error.to_string().contains("cannot publish the tree"), "{error}");
+    }
+
+    /// Catches retries outliving the unit's timeout: once it passed, a
+    /// moved branch ends the call instead of building again.
+    #[test]
+    fn test_a_spent_timeout_stops_building_again() {
+        let attempts = std::cell::Cell::new(0);
+        let spent = Budget {
+            started: std::time::Instant::now(),
+            allowed: std::time::Duration::ZERO,
+        };
+        let error = with_retries(
+            &spent,
+            &mut (),
+            ("the publication", "publish the tree"),
+            |()| Ok(()),
+            |()| -> nyl_render::Result<()> {
+                attempts.set(attempts.get() + 1);
+                Err(moved())
+            },
+            unchanged,
+        )
+        .err()
+        .expect("the timeout passed");
+        assert_eq!(attempts.get(), 1);
+        assert!(!error.effects_possible());
+        assert!(error.to_string().contains("timeout"), "{error}");
     }
 
     /// Catches an ordinary failure being retried or classified wrongly: a
@@ -409,32 +594,161 @@ mod tests {
     fn test_other_failures_end_the_call_with_their_effects() {
         let attempts = std::cell::Cell::new(0);
         let prepare_error = with_retries(
-            "the publication",
-            "publish the tree",
-            || -> nyl_render::Result<()> {
+            &plenty(),
+            &mut (),
+            ("the publication", "publish the tree"),
+            |()| -> nyl_render::Result<()> {
                 attempts.set(attempts.get() + 1);
-                Err(nyl_render::NylError::config("an owned file was modified outside Nyl"))
+                Err(nyl_render::NylError::config("the remote refused the clone"))
             },
             Ok,
+            unchanged,
         )
-        .unwrap_err();
+        .err()
+        .expect("preparing fails");
         assert_eq!(attempts.get(), 1);
         assert!(!prepare_error.effects_possible());
         assert!(prepare_error.to_string().contains("cannot prepare the publication"));
 
         let attempts = std::cell::Cell::new(0);
         let push_error = with_retries(
-            "the publication",
-            "publish the tree",
-            || Ok(()),
+            &plenty(),
+            &mut (),
+            ("the publication", "publish the tree"),
+            |()| Ok(()),
             |()| -> nyl_render::Result<()> {
                 attempts.set(attempts.get() + 1);
                 Err(nyl_render::NylError::config("the remote hung up"))
             },
+            unchanged,
         )
-        .unwrap_err();
+        .err()
+        .expect("pushing fails");
         assert_eq!(attempts.get(), 1);
         assert!(push_error.effects_possible());
+    }
+
+    /// A project whose `databaseHost` input reads `state/db.json` from the
+    /// publication branch, which holds that file.
+    fn stateful_world() -> world::World {
+        let world = world::World::new();
+        let platform = world.work().join("nyl/platform.yaml");
+        let text = std::fs::read_to_string(&platform).unwrap();
+        let bound = text.replace(
+            "databaseHost: {fromUnit: {unit: database, output: host}}",
+            "databaseHost: {fromPublication: {path: state/db.json, pointer: /host}}",
+        );
+        assert_ne!(text, bound);
+        std::fs::write(&platform, bound).unwrap();
+        world::git(&world.work(), &["add", "--all"]);
+        world::git(
+            &world.work(),
+            &["commit", "--quiet", "--message", "Read the database host from state"],
+        );
+        push_to_deploy(&world, &[("dev/state/db.json", "{\"host\": \"db.state.internal\"}\n")]);
+        world
+    }
+
+    /// Commit `files` to the `deploy` branch as another tool would.
+    fn push_to_deploy(world: &world::World, files: &[(&str, &str)]) {
+        let directory = tempfile::TempDir::new().unwrap();
+        let clone = directory.path().join("other");
+        let url = world.project_url();
+        let exists = !world::git(world.root.path(), &["ls-remote", "--heads", &url, "deploy"]).is_empty();
+        if exists {
+            world::git(
+                directory.path(),
+                &["clone", "--quiet", "--branch", "deploy", &url, "other"],
+            );
+        } else {
+            world::git(directory.path(), &["clone", "--quiet", &url, "other"]);
+            world::git(&clone, &["checkout", "--quiet", "--orphan", "deploy"]);
+            world::git(&clone, &["rm", "-rf", "--quiet", "."]);
+        }
+        for (path, content) in files {
+            let file = clone.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, content).unwrap();
+        }
+        world::git(&clone, &["add", "--all"]);
+        world::git(&clone, &["commit", "--quiet", "--message", "Another tool"]);
+        world::git(&clone, &["push", "--quiet", "origin", "HEAD:refs/heads/deploy"]);
+    }
+
+    /// Publish the stateful world's unit while `concurrent` runs once, after
+    /// its first render read the state. Returns the outcome and how often it rendered.
+    fn publish_while(world: &world::World, concurrent: impl Fn()) -> (Outcome, usize) {
+        let catalogue = crate::fake::test_catalogue();
+        let spec = json!({
+            "target": "dev",
+            "mode": "publish",
+            "releases": {"web/web": {"image": "registry.invalid:5000/web@sha256:0123"}}
+        });
+        let unit = world::desired(
+            spec.clone(),
+            nyl_core::orchestration::ids::ExecutionKey::from_digest_of(b"key"),
+        );
+        let identity: CommitIdentity = "Nyl Orchestration <nyl@example.invalid>".parse().unwrap();
+        let mut ctx = world::context(
+            world,
+            nyl_core::orchestration::driver::DriverOperation::Reconcile,
+            Some(&identity),
+        );
+        ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+        let renders = std::cell::Cell::new(0);
+        let render = || {
+            let rendered = super::render(&catalogue, &ctx.worktree, &ctx.project_dir, &ctx.cache_dir, &spec);
+            renders.set(renders.get() + 1);
+            if renders.get() == 1 {
+                concurrent();
+            }
+            rendered
+        };
+        let outcome = publish_with(&render, &ctx, &unit, json!({})).unwrap();
+        (outcome, renders.get())
+    }
+
+    /// Catches a `fromPublication` target failing, as the contract forbids,
+    /// because an unrelated target published to the shared branch first: it
+    /// renders again on the new head, reads the same state, and publishes.
+    #[test]
+    fn test_an_unrelated_push_to_the_shared_branch_rebuilds_a_stateful_publication() {
+        let world = stateful_world();
+        let (outcome, renders) = publish_while(&world, || {
+            push_to_deploy(&world, &[("other-target/state.json", "{}\n")]);
+        });
+        assert!(matches!(outcome, Outcome::Succeeded { .. }), "{outcome:?}");
+        assert_eq!(renders, 2);
+        let files = world.files("deploy");
+        assert!(files.iter().any(|path| path.starts_with("dev/web/")), "{files:?}");
+        assert!(files.contains(&"other-target/state.json".to_owned()), "{files:?}");
+        let deployment = files
+            .iter()
+            .filter(|path| path.starts_with("dev/web/"))
+            .map(|path| world::git(&world.bare(), &["show", &format!("deploy:{path}")]))
+            .find(|text| text.contains("kind: Deployment"))
+            .unwrap();
+        assert!(deployment.contains("db.state.internal"), "{deployment}");
+    }
+
+    /// Catches a publication built from state that no longer holds: when the
+    /// state file it read changed, it ends without publishing, retryably and
+    /// with its own code, so the next run resolves the unit again.
+    #[test]
+    fn test_a_changed_state_file_ends_a_stateful_publication_without_publishing() {
+        let world = stateful_world();
+        let (outcome, renders) = publish_while(&world, || {
+            push_to_deploy(&world, &[("dev/state/db.json", "{\"host\": \"db.moved.internal\"}\n")]);
+        });
+        let Outcome::Failed { retryable, message, .. } = outcome else {
+            panic!("the publication ends without publishing: {outcome:?}");
+        };
+        assert!(retryable);
+        assert!(message.starts_with("NYL-KUBERNETES-STATE-CHANGED:"), "{message}");
+        assert!(message.contains("@publication/state/db.json"), "{message}");
+        assert_eq!(renders, 2);
+        let files = world.files("deploy");
+        assert!(!files.iter().any(|path| path.starts_with("dev/web/")), "{files:?}");
     }
 
     /// Catches the render reading its pinned inputs from anywhere but the

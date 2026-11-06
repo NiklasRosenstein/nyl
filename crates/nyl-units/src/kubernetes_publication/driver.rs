@@ -17,7 +17,9 @@
 //!   and prefix) belongs to the target, and the ownership index refuses a
 //!   tree owned by another target at publication.
 //! - **Drift.** Drift is the destination branch no longer holding the tree
-//!   the unit renders: a dry publication that would commit something.
+//!   the unit renders: a dry publication that would commit something, or one
+//!   that finds an owned file modified outside Nyl. A comparison that cannot
+//!   be made, such as an unreachable remote, is `unknown`.
 //!
 //! `mode: observe` is rejected by validation until the driver can read
 //! Argo CD, so nothing promises health that is never checked.
@@ -201,6 +203,10 @@ impl Driver for KubernetesPublicationDriver {
                         "{}@{} no longer holds the tree the unit publishes",
                         rendered.destination.repository, rendered.destination.branch
                     ),
+                },
+                // An owned file edited outside Nyl is drift: reconciling it fails as a publication does.
+                Err(error) if error.is_owned_file_modified() => Drift::Drifted {
+                    summary: error.to_string(),
                 },
                 Err(error) => Drift::Unknown {
                     reason: format!("cannot compare the publication branch with the rendered tree: {error}"),

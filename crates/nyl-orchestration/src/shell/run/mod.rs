@@ -1103,7 +1103,7 @@ impl<'r, 'a> Session<'r, 'a> {
         };
         // What the driver learned from its inputs joins the resolved spec
         // before the key is computed, so the stored document carries it.
-        inputs.record_into(spec).map_err(invalid)?;
+        inputs.record_into(spec).map_err(|error| invalid(error.to_string()))?;
         let key = execution_key(&KeyMaterial {
             api_version: &unit.unit.api_version,
             kind: &unit.unit.kind,

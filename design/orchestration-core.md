@@ -694,8 +694,17 @@ the real publication path (the tree changes are in
 `phase1Commit`, and removes in phase 2 exactly the files of its own
 `_nyl/index.json`. A publication that loses the race for the branch head,
 before or at its compare-and-swap push, is built again on the new head, at
-most three times; any other failure of the push may have published and ends
-the call. The driver records the target's effective teardown settings at
+most three times and within the unit's `timeout`. A target with
+`fromPublication` bindings is rendered again on the new head: when the state
+it read (the `@input/`, `@publication/`, and `@carried/` digests of its
+index) is unchanged, it publishes there; when it changed, the execution ends
+without publishing as a retryable failure with `NYL-KUBERNETES-STATE-CHANGED`,
+and the next run resolves the unit again with the new state. A file the target
+owns that changed outside Nyl fails the execution, as reconciliation does.
+Any other failure of the push may have published and ends the call. Drift
+detection renders again and compares the branch with the tree: a difference
+or an owned file modified outside Nyl is `drifted`, and a comparison that
+cannot be made is `unknown`. The driver records the target's effective teardown settings at
 resolution (see Teardown readiness below). `mode: observe` is rejected with
 `NYL-KUBERNETES-MODE-UNSUPPORTED` until the driver can read Argo CD, and inline
 targets are not supported yet. Tier-1 tests keep the test kind

@@ -140,6 +140,36 @@ pub struct RenderedTarget {
     pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
 }
 
+impl RenderedTarget {
+    /// The values this render read from state, as its ownership index
+    /// records them: the digests of every resolved Release input
+    /// (`@input/…`), of `fromPublication` state files read from the base
+    /// commit (`@publication/…`), and of carried ones (`@carried/…`). Two
+    /// renders with equal state inputs read the same state.
+    pub fn state_inputs(&self) -> Result<BTreeMap<String, String>> {
+        let bytes = self.files.get(Path::new(DEFAULT_INDEX_PATH)).ok_or_else(|| {
+            NylError::config(format!(
+                "Rendered target tree for {} has no {DEFAULT_INDEX_PATH}",
+                self.destination.repository
+            ))
+        })?;
+        let index = parse_index(bytes, DEFAULT_INDEX_PATH)?;
+        Ok(index
+            .inputs
+            .into_iter()
+            .filter(|(key, _)| {
+                [
+                    super::inputs::INDEX_INPUT_PREFIX,
+                    super::inputs::INDEX_PUBLICATION_PREFIX,
+                    super::inputs::INDEX_CARRIED_PREFIX,
+                ]
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+            })
+            .collect())
+    }
+}
+
 /// Render `request.target` at `request.worktree` with `request.inputs` as
 /// [`super::inputs::OrchestratedInputs::Pinned`].
 ///
@@ -2118,8 +2148,5 @@ spec:
         commit_unowned(&url, "deploy", "elsewhere/state.json", "{}\n");
         let error = prepared.push().expect_err("the push loses the compare-and-swap");
         assert!(error.is_stale_publication(), "{error}");
-
-        let unrelated = NylError::config("cannot read the tree");
-        assert!(!unrelated.is_stale_publication());
     }
 }

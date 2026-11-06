@@ -306,7 +306,7 @@ fn test_drift_compares_the_branch_with_the_rendered_tree_without_publishing() {
         "nothing is published"
     );
 
-    // A file edited outside Nyl cannot be compared; the reason says why.
+    // A file edited outside Nyl is drift, and the summary says which.
     let owned = world
         .files("deploy")
         .into_iter()
@@ -327,10 +327,10 @@ fn test_drift_compares_the_branch_with_the_rendered_tree_without_publishing() {
     std::fs::write(other.join(&owned), "edited: true\n").unwrap();
     git(&other, &["commit", "--quiet", "--all", "--message", "Edit outside Nyl"]);
     git(&other, &["push", "--quiet", "origin", "HEAD:refs/heads/deploy"]);
-    let Drift::Unknown { reason } = drift_of(&world, &driver, &unit) else {
-        panic!("the comparison fails");
+    let Drift::Drifted { summary } = drift_of(&world, &driver, &unit) else {
+        panic!("an owned file was edited outside Nyl");
     };
-    assert!(reason.contains("modified outside Nyl"), "{reason}");
+    assert!(summary.contains("modified outside Nyl"), "{summary}");
 }
 
 /// Catches observe mode, inline targets, and a hand-written
