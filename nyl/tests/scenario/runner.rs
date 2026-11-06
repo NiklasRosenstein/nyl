@@ -1316,6 +1316,15 @@ fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<Comma
         .env("NO_COLOR", "1")
         .env("NYL_TEST_NOW", shared.clock.now().to_rfc3339())
         .args(args);
+    // Winsock needs SystemRoot to load its service providers, and the binary
+    // makes scratch directories in the temporary one; the rest of the
+    // environment stays cleared.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     let prints_json = orchestration && takes_json_output(args);
     if prints_json && !args.iter().any(|arg| arg == "-o" || arg == "--output") {
         command.args(["--output", "json"]);
