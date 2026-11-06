@@ -33,13 +33,12 @@ working-tree render explicitly; the ownership index records `dirty: true` and
 the commit message includes `Nyl-Source-Dirty: true`. The two options are
 mutually exclusive.
 
-A prefix that an orchestrated `KubernetesPublication` unit owns (its index is
-version 4 and names the unit) is refused with `NYL-TREE-OWNED-BY-UNIT`, as it
+A prefix that an orchestrated `KubernetesPublication` unit owns (its index names the unit
+in an `owner` member) is refused with `NYL-TREE-OWNED-BY-UNIT`, as it
 is by [`render-tree`](/nyl/reference/cli/render-tree/), because Nyl cannot tell
 here whether the unit still exists. Publish through the environment that owns
 it, or release the prefix after `nyl state forget` by removing the `owner`
-member from `<prefix>/_nyl/index.json` and setting its `version` to `3` in a
-commit to the publication branch; see
+member from `<prefix>/_nyl/index.json` in a commit to the publication branch; see
 [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership).
 
 Nyl clones the destination branch into a clean checkout, reconciles indexed
