@@ -489,6 +489,7 @@ mod tests {
             params: std::collections::BTreeMap::new(),
             expires_at,
             source_commit: None,
+            source_ref: None,
             keep_id: None,
             location: nyl_core::orchestration::state::StateLocation {
                 repository: "local".to_owned(),

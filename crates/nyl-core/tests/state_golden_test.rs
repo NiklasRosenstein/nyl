@@ -73,6 +73,7 @@ fn samples() -> Vec<(&'static str, Value)> {
                 "params": {"pr": 123, "size": "small"},
                 "expiresAt": "2026-10-01T09:00:00Z",
                 "sourceCommit": COMMIT,
+                "sourceRef": "refs/pull/123/head",
                 "keepId": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90",
                 "location": {
                     "repository": "https://example.invalid/platform.git",

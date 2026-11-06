@@ -44,6 +44,8 @@ pub struct ResolvedInstance {
     pub params: BTreeMap<String, Value>,
     /// The template's terms for the instance.
     pub terms: InstanceTerms,
+    /// The `--source-ref` this command was given, if any.
+    pub source_ref: Option<String>,
     /// The instance's `state.yaml`; `None` before `state init --template` created it.
     pub record: Option<StateRecord>,
 }
@@ -66,6 +68,10 @@ impl ResolvedInstance {
 pub struct InstanceRequest {
     pub template: Option<String>,
     pub params: BTreeMap<String, Value>,
+    /// `--source-ref`: a full ref name of `origin` that carries the commit the
+    /// run records, validated by [`parse_source_ref`] and recorded only by a
+    /// command that records the instance's commit.
+    pub source_ref: Option<String>,
     /// `--local`: read the record without network access.
     pub offline: bool,
 }
@@ -225,6 +231,7 @@ pub fn resolve_environment_with(
         template: template.metadata.name.clone(),
         params: terms.params.clone(),
         terms,
+        source_ref: request.source_ref.clone(),
         record,
     });
     Ok(located)
@@ -737,6 +744,25 @@ pub fn parse_params(params: &[String]) -> std::result::Result<BTreeMap<String, V
         }
     }
     Ok(parsed)
+}
+
+/// `--source-ref <ref>`: a full ref name under `refs/`, checked by its syntax
+/// alone (it is only a hint, so no remote is asked). Contract:
+/// [Instances](../../../design/orchestration-core.md#instances).
+pub fn parse_source_ref(reference: Option<&str>) -> std::result::Result<Option<String>, Finding> {
+    reference
+        .map(|reference| {
+            nyl_orchestration::rules::source_ref::validate(reference)
+                .map(|()| reference.to_owned())
+                .map_err(|why| {
+                    Finding::new(
+                        Code::InstanceOptionInvalid,
+                        format!("--source-ref {why}"),
+                        "pass the full name of a ref of the source repository's origin, such as refs/pull/123/head",
+                    )
+                })
+        })
+        .transpose()
 }
 
 /// An instance found by listing its template's state.

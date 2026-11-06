@@ -321,3 +321,9 @@ id = "8549e5cb-c8c8-41ac-bea9-5cf6765ab316"
 type = "fix"
 description = "`nyl state delete --teardown` prints the warnings of the teardown it ran when the deletion completes, and of its units, such as `NYL-SOURCE-OVERRIDE` for a `--source` substitution or `NYL-UNIT-RELEASED` for an image left in a registry; they were only in the JSON report's `details.teardown`"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
+type = "feature"
+description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
+author = "@NiklasRosenstein"

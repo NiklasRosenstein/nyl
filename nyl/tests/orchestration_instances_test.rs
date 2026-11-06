@@ -158,6 +158,141 @@ fn test_state_init_template_records_the_instance_in_the_shared_ref() {
     assert_eq!(record(&harness, "pr-1")["params"]["pr"], 1);
 }
 
+/// `--source-ref` is recorded in the instance's `state.yaml` next to
+/// `sourceCommit` by both commands that record the commit, overwritten by a run
+/// that passes it, and kept by a run that does not, so a local run never
+/// erases what CI recorded. Catches a hint lost by the next update, a record
+/// that never gets it, and a plain `reconcile -e <instance>` dropping it.
+#[test]
+fn test_source_ref_is_recorded_kept_when_omitted_and_overwritten_when_given() {
+    let (_directory, harness) = world(&[]);
+    let init = |args: &[&str]| {
+        let mut argv = vec![
+            "state",
+            "init",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+        ];
+        argv.extend_from_slice(args);
+        invoke(&harness, "main", &argv)
+    };
+    // Without it nothing is recorded.
+    assert_eq!(init(&[]).exit, 0);
+    assert!(record(&harness, "pr-1").get("sourceRef").is_none());
+
+    let created = init(&["--source-ref", "refs/pull/1/head"]);
+    assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
+    let recorded = record(&harness, "pr-1");
+    assert_eq!(recorded["sourceRef"], "refs/pull/1/head");
+    assert_eq!(
+        recorded["sourceCommit"].as_str().unwrap(),
+        harness.world.rev_parse("main")
+    );
+
+    // A run without it keeps the recorded value, and so does a plain reconcile of the instance.
+    assert_eq!(init(&[]).exit, 0);
+    assert_eq!(record(&harness, "pr-1")["sourceRef"], "refs/pull/1/head");
+    let plain = invoke(&harness, "main", &["reconcile", "-e", "pr-1"]);
+    assert_eq!(plain.exit, 0, "{}\n{}", plain.stderr, plain.stdout);
+    assert_eq!(record(&harness, "pr-1")["sourceRef"], "refs/pull/1/head");
+
+    // A run that passes it overwrites it, through `reconcile --template` as well.
+    let moved = invoke(
+        &harness,
+        "main",
+        &[
+            "reconcile",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+            "--source-ref",
+            "refs/merge-requests/1/head",
+        ],
+    );
+    assert_eq!(moved.exit, 0, "{}\n{}", moved.stderr, moved.stdout);
+    assert_eq!(record(&harness, "pr-1")["sourceRef"], "refs/merge-requests/1/head");
+}
+
+/// A `--source-ref` that is not a full ref name under `refs/` is refused by its
+/// syntax with `NYL-INSTANCE-OPTION-INVALID` before anything is written, by
+/// both commands, and needs `--template`; the scheduled fleet reconcile, which
+/// records no commit, rejects it too. Catches a hint recorded that no fetch
+/// could use, and one accepted where no instance is recorded.
+#[test]
+fn test_source_ref_must_be_a_ref_name_and_belongs_to_one_instance() {
+    let (_directory, harness) = world(&[]);
+    for bad in ["pull/1/head", "main", "refs/", "refs/pull/1 head", "refs/pull/../x"] {
+        let state = invoke(
+            &harness,
+            "main",
+            &[
+                "state",
+                "init",
+                "-e",
+                "pr-1",
+                "--template",
+                "preview",
+                "--param",
+                "pr=1",
+                "--source-ref",
+                bad,
+            ],
+        );
+        assert_eq!(state.exit, 1, "{bad}: {}\n{}", state.stderr, state.stdout);
+        assert!(
+            state.stderr.contains("NYL-INSTANCE-OPTION-INVALID"),
+            "{bad}: {}",
+            state.stderr
+        );
+        let reconcile = invoke(
+            &harness,
+            "main",
+            &[
+                "reconcile",
+                "-e",
+                "pr-1",
+                "--template",
+                "preview",
+                "--param",
+                "pr=1",
+                "--source-ref",
+                bad,
+            ],
+        );
+        assert_eq!(reconcile.exit, 1, "{bad}: {}\n{}", reconcile.stderr, reconcile.stdout);
+        assert!(
+            reconcile.stderr.contains("NYL-INSTANCE-OPTION-INVALID"),
+            "{bad}: {}",
+            reconcile.stderr
+        );
+    }
+    // Nothing was created by the refusals.
+    let listing = invoke(&harness, "main", &["get", "environments"]);
+    assert!(!listing.stdout.contains("pr-1"), "{}", listing.stdout);
+    // Without --template there is no instance to record it on (a usage error).
+    for argv in [
+        vec!["state", "init", "-e", "pr-1", "--source-ref", "refs/pull/1/head"],
+        vec!["reconcile", "-e", "pr-1", "--source-ref", "refs/pull/1/head"],
+    ] {
+        assert!(try_invoke(&harness, "main", &argv).is_err(), "{argv:?}");
+    }
+    // The fleet reconcile records no commit.
+    let fleet = invoke(
+        &harness,
+        "main",
+        &["reconcile", "--template", "preview", "--source-ref", "refs/pull/1/head"],
+    );
+    assert_eq!(fleet.exit, 1, "{}\n{}", fleet.stderr, fleet.stdout);
+    assert!(fleet.stderr.contains("NYL-INSTANCE-OPTION-INVALID"), "{}", fleet.stderr);
+}
+
 fn units_unit_result(outcome: &CommandOutcome, unit: &str) -> String {
     outcome.report["environments"][0]["units"][unit]["result"]
         .as_str()
