@@ -303,10 +303,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         publication_base: compiled.publication_base.clone(),
         cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
         argocd: super::tree::argocd_location(&inventory, &compiled.target)?,
-        workload: super::observation::WorkloadCluster {
-            cluster: compiled.cluster.metadata.name.clone(),
-            context: compiled.cluster.spec.live.as_ref().map(|live| live.context.clone()),
-        },
+        workload: super::tree::workload_cluster(&inventory, &compiled.target)?,
     })
 }
 

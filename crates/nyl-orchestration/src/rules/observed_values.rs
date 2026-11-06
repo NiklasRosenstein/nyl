@@ -17,7 +17,8 @@
 //!   failed read keeps what was recorded, so the last value for the current
 //!   receipt stays usable. A read that changes nothing keeps the stored entry,
 //!   and so the stored record, until the entry's last successful read is
-//!   older than the refresh interval, which keeps `maxAge` satisfiable
+//!   older than the refresh interval (or than half the observation's
+//!   `maxAge`, when that is shorter), which keeps `maxAge` satisfiable
 //!   without a commit per run.
 //! - **Lifetime.** A record names the receipt it was read for. [`changes`]
 //!   drops the record of a replaced or removed receipt in the commit that
@@ -152,8 +153,14 @@ pub fn settle(inputs: &SettleInputs<'_>) -> Settled {
         };
         let entry = match reading {
             ObservedValue::Value { value } => {
+                // A value read again is recorded again once its last read is
+                // older than the refresh interval, or than half its `maxAge`
+                // when that is shorter, so `maxAge` stays satisfiable.
+                let refresh = declaration
+                    .max_age
+                    .map_or(inputs.refresh, |age| inputs.refresh.min(Duration::from_secs(age.as_secs() / 2)));
                 let unchanged = matches!(before, Some(RecordedObservation::Value { value: old, observed_at })
-                    if *old == value && inputs.now < inputs.refresh.after(*observed_at));
+                    if *old == value && inputs.now < refresh.after(*observed_at));
                 if unchanged {
                     before.cloned()
                 } else {
@@ -539,13 +546,23 @@ mod tests {
     #[test]
     fn test_an_unchanged_read_keeps_the_record_until_the_refresh_interval() {
         let reading = readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]);
-        let record = settled(None, &reading, at(0)).record.unwrap();
+        let mut record = settled(None, &reading, at(0)).record.unwrap();
+        // `port` has a maxAge of 10m and is refreshed sooner (see below); keep it fresh here.
+        record.values.insert(
+            "port".to_owned(),
+            RecordedObservation::Value {
+                value: json!(443),
+                observed_at: at(29),
+            },
+        );
         let again = settled(Some(&record), &reading, at(30));
-        assert_eq!(again.record.as_ref(), Some(&record), "within the interval nothing is written");
+        assert_eq!(
+            again.record.as_ref().map(|record| record.values["ip"].clone()),
+            Some(record.values["ip"].clone()),
+            "within the interval the value keeps its time"
+        );
         assert!(again.changed.is_empty());
-        let refreshed = settled(Some(&record), &reading, at(61));
-        let refreshed = refreshed.record.unwrap();
-        assert_ne!(refreshed, record);
+        let refreshed = settled(Some(&record), &reading, at(61)).record.unwrap();
         assert_eq!(
             refreshed.values["ip"],
             RecordedObservation::Value {
@@ -557,6 +574,30 @@ mod tests {
             settled(Some(&record), &reading, at(61)).changed.is_empty(),
             "re-reading the same value is no change"
         );
+        // Nothing but time moved: the stored record is kept as it is.
+        let steady = readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]);
+        let stored = settled(None, &steady, at(0)).record.unwrap();
+        assert_eq!(settled(Some(&stored), &steady, at(4)).record.as_ref(), Some(&stored));
+    }
+
+    /// Catches a `maxAge` shorter than the refresh interval that no read can
+    /// satisfy, because an unchanged value kept its old time.
+    #[test]
+    fn test_a_short_max_age_is_refreshed_by_half_of_it() {
+        let reading = readings(&[("ip", value(json!("203.0.113.10"))), ("port", value(json!(443)))]);
+        let record = settled(None, &reading, at(0)).record.unwrap();
+        // `port` has a maxAge of 10m: a read 6 minutes later records it again,
+        // while `ip`, which never goes stale, keeps its time.
+        let later = settled(Some(&record), &reading, at(6)).record.unwrap();
+        assert_eq!(
+            later.values["port"],
+            RecordedObservation::Value {
+                value: json!(443),
+                observed_at: at(6)
+            }
+        );
+        assert_eq!(later.values["ip"], record.values["ip"]);
+        assert_eq!(settled(Some(&record), &reading, at(4)).record.as_ref(), Some(&record));
     }
 
     /// Catches a failed read erasing the last value, which would block

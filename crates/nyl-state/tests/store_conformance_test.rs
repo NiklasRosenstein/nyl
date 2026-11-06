@@ -10,7 +10,7 @@ use nyl_core::orchestration::ports::{
     Checkpoint, Committed, StateError, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservedUnit, Operation, Run, RunKind,
+    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservationRecord, ObservedUnit, Operation, Run, RunKind,
     Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
@@ -734,7 +734,7 @@ fn test_remote_state_fast_forwards_local_branches_and_refuses_rewrites() {
 }
 
 #[test]
-fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
+fn test_drift_records_observations_and_attestations_round_trip_on_the_observed_ref_only() {
     for subject in subjects() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
@@ -754,9 +754,17 @@ fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
             "at": "2026-09-24T10:00:00Z", "source": {"driver": "Command"}
         }))
         .unwrap();
+        let observations: ObservationRecord = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord", "unit": identity,
+            "executionKey": KEY, "at": "2026-09-24T10:00:00Z",
+            "values": {"ip": {"value": "203.0.113.10", "observedAt": "2026-09-24T10:00:00Z"},
+                       "port": {"pending": "no port yet"}}
+        }))
+        .unwrap();
         let before = store.snapshot(&location).unwrap().tips;
         let changes = TransitionChanges {
             drift: BTreeMap::from([(name.clone(), Some(drift.clone()))]),
+            observations: BTreeMap::from([(name.clone(), Some(observations.clone()))]),
             attestations: BTreeMap::from([(
                 name.clone(),
                 Some(BTreeMap::from([("smoke".to_owned(), attestation.clone())])),
@@ -771,10 +779,12 @@ fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
         let snapshot = store.snapshot(&location).unwrap();
         assert_eq!(snapshot.tips.desired, before.desired, "{}", subject.name);
         assert_eq!(snapshot.drift[&name], drift, "{}", subject.name);
+        assert_eq!(snapshot.observations[&name], observations, "{}", subject.name);
         assert_eq!(snapshot.attestations[&name]["smoke"], attestation, "{}", subject.name);
 
         let removal = TransitionChanges {
             drift: BTreeMap::from([(name.clone(), None)]),
+            observations: BTreeMap::from([(name.clone(), None)]),
             attestations: BTreeMap::from([(name.clone(), None)]),
             ..TransitionChanges::default()
         };
@@ -789,6 +799,7 @@ fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
             .unwrap();
         let snapshot = store.snapshot(&location).unwrap();
         assert!(snapshot.drift.is_empty(), "{}", subject.name);
+        assert!(snapshot.observations.is_empty(), "{}", subject.name);
         assert!(snapshot.attestations.is_empty(), "{}", subject.name);
     }
 }
