@@ -56,6 +56,11 @@ spec:
   idempotent: true
 ";
 
+/// The template with the opt-in to keep refs for the instances' source commits.
+fn keeping(template: &str) -> String {
+    format!("{template}  keepSource: true\n")
+}
+
 const DAY: u64 = 24 * 60;
 
 fn world(template: &str, units: &str) -> (tempfile::TempDir, harness::Harness) {
@@ -656,7 +661,7 @@ fn kept_only(harness: &harness::Harness, instance: &str, commit: &str) -> bool {
     refs.len() == 1 && refs[0].0.ends_with(&format!("/{commit}")) && refs[0].1 == commit
 }
 
-/// With `keepSource` (the default) an instance's recorded source commit stays
+/// With `keepSource: true` an instance's recorded source commit stays
 /// fetchable through a keep ref of its own, `refs/nyl-keep/<project>/<instance>/<commit>`
 /// in the source repository: a new commit is kept before the record names it
 /// and the previous one's ref goes after, a job in a fresh clone that lacks the
@@ -665,7 +670,7 @@ fn kept_only(harness: &harness::Harness, instance: &str, commit: &str) -> bool {
 /// keep refs that outlive their instances.
 #[test]
 fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
-    let (_directory, harness) = world(TEMPLATE, UNITS);
+    let (_directory, harness) = world(&keeping(TEMPLATE), UNITS);
     harness.world.branch(&scenario::format::BranchStep {
         name: "pr-9".to_owned(),
         from: "main".to_owned(),
@@ -737,7 +742,7 @@ fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
 /// a delete that removes another project's refs it happens to match by name.
 #[test]
 fn test_state_delete_leaves_a_keep_ref_that_is_not_the_instances() {
-    let (_directory, harness) = world(TEMPLATE, UNITS);
+    let (_directory, harness) = world(&keeping(TEMPLATE), UNITS);
     open(&harness, 9);
     let id = record(&harness, "pr-9")["keepId"].as_str().unwrap().to_owned();
     let prefix = nyl_orchestration::rules::keep::keep_prefix(&nyl_core::orchestration::ids::Uid::new(id).unwrap());
@@ -766,7 +771,7 @@ fn test_state_delete_leaves_a_keep_ref_that_is_not_the_instances() {
 #[test]
 fn test_a_refused_keep_ref_refuses_the_job_before_the_record_is_written() {
     use std::os::unix::fs::PermissionsExt as _;
-    let (_directory, harness) = world(TEMPLATE, UNITS);
+    let (_directory, harness) = world(&keeping(TEMPLATE), UNITS);
     let hook = harness.world.bare().join("hooks/pre-receive");
     std::fs::write(
         &hook,
@@ -786,7 +791,7 @@ fn test_a_refused_keep_ref_refuses_the_job_before_the_record_is_written() {
         refused.stderr
     );
     assert!(refused.stderr.contains("push access"), "{}", refused.stderr);
-    assert!(refused.stderr.contains("keepSource: false"), "{}", refused.stderr);
+    assert!(refused.stderr.contains("keepSource"), "{}", refused.stderr);
     assert_eq!(
         git_output(&harness.world.bare(), &["for-each-ref", "refs/heads/nyl/previews"]),
         "",
@@ -795,13 +800,12 @@ fn test_a_refused_keep_ref_refuses_the_job_before_the_record_is_written() {
     assert!(!exists(&harness, "pr-1"), "nothing ran");
 }
 
-/// `keepSource: false` keeps nothing: no ref is pushed, and an instance whose
+/// Keep refs are an opt-in: by default no ref is pushed, and an instance whose
 /// branch is gone cannot be run from its recorded commit, which the error
-/// says. Catches a switch that does not switch.
+/// says. Catches a default that pushes refs to repositories that never asked.
 #[test]
-fn test_keep_source_false_pushes_no_keep_ref() {
-    let template = format!("{TEMPLATE}  keepSource: false\n");
-    let (_directory, harness) = world(&template, UNITS);
+fn test_keep_refs_are_off_by_default() {
+    let (_directory, harness) = world(TEMPLATE, UNITS);
     harness.world.branch(&scenario::format::BranchStep {
         name: "pr-9".to_owned(),
         from: "main".to_owned(),
@@ -935,7 +939,7 @@ fn test_state_move_template_moves_every_instance_to_the_new_location() {
 /// orphans every open preview.
 #[test]
 fn test_state_move_template_renames_the_template_of_its_instances() {
-    let (_directory, harness) = world(TEMPLATE, UNITS);
+    let (_directory, harness) = world(&keeping(TEMPLATE), UNITS);
     open(&harness, 1);
     harness.world.commit_files(
         "main",
@@ -1007,8 +1011,7 @@ fn test_state_move_template_renames_the_template_of_its_instances() {
 /// stops at one preview whose pull request branch is gone.
 #[test]
 fn test_a_lost_source_commit_fails_only_that_instances_removal() {
-    let template = format!("{TEMPLATE}  keepSource: false\n");
-    let (_directory, harness) = world(&template, UNITS);
+    let (_directory, harness) = world(TEMPLATE, UNITS);
     harness.world.branch(&scenario::format::BranchStep {
         name: "pr-9".to_owned(),
         from: "main".to_owned(),
@@ -1103,7 +1106,7 @@ fn test_a_renewal_undoes_a_removal_that_waited_for_authorization() {
 /// that slips past the limit.
 #[test]
 fn test_the_pull_request_job_recreates_an_instance_the_fleet_removed() {
-    let (_directory, harness) = world(&limited(1), UNITS);
+    let (_directory, harness) = world(&keeping(&limited(1)), UNITS);
     open(&harness, 1);
     harness.advance(8 * DAY);
     let sweep = invoke(&harness, "main", &["reconcile", "--template", "preview", "-o", "json"]);
