@@ -5,7 +5,7 @@ mod scenario;
 
 use std::collections::BTreeMap;
 
-use scenario::format::StepKind;
+use scenario::format::{PublicationDrivers, StepKind};
 use scenario::world::World;
 use scenario::REACHED;
 
@@ -25,6 +25,7 @@ fn test_reached_scenarios_pass_in_tier_one() {
         .iter()
         .filter(|loaded| loaded.scenario.milestone <= REACHED)
         .filter(|loaded| loaded.scenario.tiers.contains(&1))
+        .filter(|loaded| loaded.scenario.publication == PublicationDrivers::Both)
         .filter(|loaded| !pending.contains_key(loaded.name.as_str()))
         .collect::<Vec<_>>();
     assert!(!runnable.is_empty(), "no scenario runs in tier 1");
@@ -757,4 +758,60 @@ fn test_reached_scenarios_pass_in_tier_one_with_the_real_publication_driver() {
             .collect::<Vec<_>>()
     });
     assert!(failures.is_empty(), "failed scenarios:\n{}", failures.join("\n\n"));
+}
+
+/// `deploy.mentions` reads the published files: a literal text and the value
+/// of a `nyl get` invocation must each appear in a matching file. Catches an
+/// exit-criterion check that passes without the manifests carrying the image
+/// digest and the infrastructure output.
+#[test]
+fn test_deploy_mentions_fail_when_no_published_file_carries_the_value() {
+    let run = |mention: &str| {
+        let text = format!(
+            "contract: design/reference-scenarios.md#scenario-1-platform-environment\nmilestone: M5\ntiers: [1]\nsteps:\n  - nyl: [state, init, -e, dev]\n    exit: 0\n  - nyl: [reconcile, -e, dev]\n    exit: 0\n    expect:\n      deploy:\n        branch: deploy\n        mentions:\n          'dev/web/**': [{mention}]\n"
+        );
+        run_inline("reference/platform", "inline/mentions", &text)
+    };
+    run("[get, output, database/connection, -e, dev, --pointer, /host]").unwrap();
+    run("[get, artifact, web-image/image, -e, dev, --pointer, /reference]").unwrap();
+    let missing = run("'a text no manifest has'").unwrap_err();
+    assert!(missing.contains("mentions"), "{missing}");
+    let other = run("[get, output, network/vpcId, -e, dev]").unwrap_err();
+    assert!(other.contains("mentions"), "{other}");
+}
+
+/// `keep-refs` counts the refs of `refs/nyl-keep/` and checks that the named
+/// revisions have one, and `source` compares the commit a run rendered. Catches
+/// a close-job scenario that passes with a keep ref missing or a stale source.
+#[test]
+fn test_keep_refs_and_source_expectations_compare_with_the_repository() {
+    let run = |expect: &str| {
+        let text = format!(
+            "contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request\nmilestone: M5\ntiers: [1]\nproject: ../preview/project\nsteps:\n  - nyl: [state, init, -e, dev]\n    exit: 0\n  - nyl: [reconcile, -e, dev]\n    exit: 0\n  - branch: {{name: pr-1, from: main}}\n  - commit: {{branch: pr-1, message: change, apply: ../preview/patches/web}}\n  - nyl: [reconcile, -e, pr-1, --template, preview, --param, pr=1]\n    at: pr-1\n    exit: 0\n    expect:\n{expect}"
+        );
+        run_inline("reference/preview-closed", "inline/keep-refs", &text)
+    };
+    run("      keep-refs: {count: 1, kept: [pr-1]}\n      source: pr-1\n").unwrap();
+    let count = run("      keep-refs: {count: 2}\n").unwrap_err();
+    assert!(count.contains("1 keep refs instead of 2"), "{count}");
+    let kept = run("      keep-refs: {count: 1, kept: [main]}\n").unwrap_err();
+    assert!(kept.contains("no keep ref for main"), "{kept}");
+    let source = run("      source: main\n").unwrap_err();
+    assert!(source.contains("the run's source is"), "{source}");
+}
+
+/// A scenario that depends on what the built-in publication driver derives
+/// from its render says so, and tier 1 then skips the test kind for it.
+#[test]
+fn test_publication_drivers_default_to_both_and_real_narrows_them() {
+    let (loaded, problems) = scenario::load_all();
+    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
+    let real_only = loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.publication == PublicationDrivers::Real)
+        .map(|loaded| loaded.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(real_only, ["reference/preview-not-ready"]);
+    let bad = "contract: design/reference-scenarios.md#tiers\nmilestone: M3\npublication: fake\nsteps: []\n";
+    assert!(serde_saphyr::from_str::<scenario::format::Scenario>(bad).is_err());
 }

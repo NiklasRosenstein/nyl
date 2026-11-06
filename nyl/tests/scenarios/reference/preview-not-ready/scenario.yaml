@@ -9,6 +9,7 @@
 contract: design/reference-scenarios.md#scenario-3-preview-expiry
 milestone: M5
 tiers: [1]
+publication: real
 project: ../preview/project
 steps:
   - nyl: [state, init, -e, dev]

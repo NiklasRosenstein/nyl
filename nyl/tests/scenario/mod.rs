@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use format::{Milestone, Scenario};
 
 /// The milestone this harness has reached.
-pub const REACHED: Milestone = Milestone(4);
+pub const REACHED: Milestone = Milestone(5);
 
 /// A scenario file and its parsed content.
 pub struct Loaded {
