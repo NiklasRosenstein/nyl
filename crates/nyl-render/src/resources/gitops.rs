@@ -2429,6 +2429,7 @@ mod tests {
                 "application-group.schema.json",
                 "environment.schema.json",
                 "environment-group.schema.json",
+                "environment-template.schema.json",
                 "release.schema.json"
             ]
         );
