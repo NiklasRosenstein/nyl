@@ -531,7 +531,10 @@ credential is never read from anywhere but the unit's admitted environment,
 and an observation that cannot establish a result records nothing rather than
 a failure. Attestations are recorded where the credentials exist, typically in
 CI, and decisions read the recorded evidence. Attestations are evidence for promotion
-and dependents; drift, which `nyl detect-drift` records, is separate: it is a
+and dependents: a `dependsOn` entry or `fromUnit` requires them with
+`evidence: attested` or named `attestations`, and its consumer stays blocked
+until the producer's current receipt has them passing, with no age limit
+(`maxAttestationAge` belongs to promotion paths); drift, which `nyl detect-drift` records, is separate: it is a
 reason for the next reconcile to act, not evidence. Argo CD health means Kubernetes considers the resources
 ready, not that the application works; application-level checks are further
 attestations. The [promotion contract](design/promotion.md#health-evidence)

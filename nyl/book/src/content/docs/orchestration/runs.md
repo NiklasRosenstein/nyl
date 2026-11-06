@@ -83,10 +83,49 @@ state, as `plan` and `reconcile` do before reading it: the producer must exist
 and declare the output as non-sensitive. An artifact reference is checked only
 for the producer's existence.
 
-References and `dependsOn` entries require a current receipt, evidence
-`published`. Requiring `evidence: attested` or naming `attestations` is
-rejected with `NYL-ATTESTATIONS-UNSUPPORTED` until units record attestations
-in a later milestone, rather than accepting a receipt without them.
+### Requiring attestations
+
+A receipt says a unit ran, not that what it did works. A `dependsOn` entry or a
+`fromUnit` reference can require more of its producer with `evidence` and
+`attestations`:
+
+```yaml
+dependsOn:
+  - {unit: kubernetes, attestations: [healthy]}   # smoke tests run against healthy workloads
+values:
+  endpoint: {fromUnit: {unit: service, output: endpoint, evidence: attested}}
+```
+
+- `evidence: published` (the default) requires a current receipt.
+  `evidence: attested` also requires every attestation the producer declares to
+  pass, and a producer that declares none is satisfied by its receipt.
+- `attestations: [a, b]` requires exactly those, whatever `evidence` says. Each
+  must be one the producer declares: the names its kind produces, such as
+  `accepted` and `healthy` for a [publication in observe
+  mode](/nyl/orchestration/resource-guides/kubernetes-publication/), and the
+  names in its `spec.attestations`. Naming another is an error
+  (`NYL-ATTESTATION-UNDECLARED`), which `nyl validate` reports too.
+- An attestation counts only for the receipt it names. A producer that
+  executes again starts with its attestations pending, and a pass recorded
+  for the earlier receipt no longer counts.
+- A consumer whose producer has a current receipt but lacks the evidence is
+  **blocked**, exit 2, and reports why: `attestation-pending` when nothing is
+  recorded for the receipt, `attestation-failing` when the recorded result is
+  `fail`, with the producer and the attestation, and a warning with the fix
+  (`NYL-ATTESTATION-PENDING` or `NYL-ATTESTATION-FAILING`). `plan` and `status`
+  show the same blocker.
+
+Attestations are recorded by [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest),
+typically in CI where the credentials exist, and by a unit that attests itself
+in its `reconcile`, such as a [Command](/nyl/orchestration/resource-guides/command/)
+whose `command` writes `NYL_ATTESTATIONS`. Every `reconcile` resolves again, so
+a blocked consumer runs in the first run after a pass is recorded, or in a later
+wave of the run in which its producer attested itself. Requiring an attestation
+adds no age limit: the recorded pass for the current receipt is enough, and a
+re-verified system simply keeps it fresh. A consumer that already ran stays
+`current` when the producer is attested again after executing, provided its own
+inputs did not change. The attestation `maxAttestationAge` limit belongs to
+promotion paths.
 
 ## Source commit
 

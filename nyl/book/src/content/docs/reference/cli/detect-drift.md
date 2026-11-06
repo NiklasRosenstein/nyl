@@ -13,7 +13,9 @@ when one is current.
 Drift and attestations answer different questions. Drift says whether a unit
 must execute again: a drifted unit is work for the next reconcile.
 Attestations are evidence that dependents and promotion require, such as a
-smoke test or a publication's Argo CD health.
+smoke test or a publication's Argo CD health; a `dependsOn` entry or
+`fromUnit` [requires them](/nyl/orchestration/runs/#requiring-attestations)
+with `evidence: attested` or `attestations`.
 
 :::note
 Orchestration is being built. `nyl attest` asks drivers to attest; recording
@@ -111,7 +113,12 @@ read, a rejected or expired credential, or an unreadable publication branch is
 
 An attestation belongs to the receipt it names: a new receipt starts with
 its attestations pending until `attest` runs again, or until its reconcile
-step attests it.
+step attests it, and the reconcile that records the new receipt drops the
+earlier receipt's attestations. A unit that depends on an attestation stays
+[blocked](/nyl/orchestration/runs/#requiring-attestations) until a pass is
+recorded for the current receipt, and `attest` is what records it: the next
+`reconcile` runs the blocked unit, and no `attest` is needed between the two
+for a unit that attested itself in its `command`.
 
 ## Cancellation and several environments
 

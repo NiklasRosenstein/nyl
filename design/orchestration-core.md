@@ -376,13 +376,27 @@ spec:
   `published`, which is a current receipt) and `attestations`, which names the
   producer's attestations to require instead of all it declares (see
   [Attestations](#attestations)). Naming an attestation the producer does not
-  declare is a resolution error. A consumer whose producer lacks the evidence
-  is `blocked` on it:
+  declare is a resolution error (`NYL-ATTESTATION-UNDECLARED`, also reported by
+  `nyl validate`). A consumer whose producer lacks the evidence is `blocked` on
+  it, exit 2, until the producer's current receipt has every required
+  attestation passing (owner: `rules::evidence`):
 
   ```yaml
   dependsOn:
     - {unit: kubernetes, attestations: [healthy]}   # smoke tests run against healthy workloads
   ```
+
+  A plan, status, or reconcile report shows the consumer `blocked` at the
+  entry or reference with `blockedBy` reason `attestation-pending` (none is
+  recorded for the producer's current receipt) or `attestation-failing` (the
+  recorded one is `fail`), naming the producer and the attestation, and the
+  warnings `NYL-ATTESTATION-PENDING` or `NYL-ATTESTATION-FAILING`. Each
+  warning carries its fix: `nyl attest -e <env>` and a new reconcile, or
+  fixing what failed. A producer without a current receipt is blocked first
+  (`no-current-receipt`). Every `reconcile` resolves again, so a consumer
+  runs in the first run after `nyl attest` records the pass, and a unit that
+  attests itself during `reconcile` unblocks its consumers in a later wave of
+  the same run.
 - Every kind that reads files names them in fields with the one Git source
   shape used everywhere, `source` for most kinds and `context`/`contexts` for
   `OciImage`: `path`, an optional `revision` and
@@ -1624,12 +1638,29 @@ attestations:
 - An attestation is valid only for the receipt or state it names. Declared
   attestations of a new receipt are pending until attested; the newest per
   name and receipt wins. Git history keeps earlier ones, so an older state
-  keeps the attestations it had.
+  keeps the attestations it had. A transition that records a new receipt drops
+  the attestations of the receipt it replaces in the same commit
+  (`rules::evidence::attestation_changes`), and a recorded attestation that
+  names another receipt or incarnation never counts.
 - `evidence: attested` requires every declared attestation of the producer to
-  pass; `attestations: [<name>, …]` requires the named ones instead. A failing
-  attestation fails that requirement until a newer one passes. Promotion
-  applies the same rules per unit and for the environment, as the
-  [promotion contract](promotion.md#promotion-paths) describes.
+  pass; `attestations: [<name>, …]` requires the named ones instead, whatever
+  `evidence` says, and `evidence: published` with no names requires only the
+  receipt. A producer that declares none satisfies `attested` with its current
+  receipt. A failing attestation fails that requirement until a newer one
+  passes. Dependents (`dependsOn` and `fromUnit`, in this environment or
+  another declared one) apply these rules to the producer's current receipt as
+  [Units](#units) describes; a dependent does not age attestations, since a
+  recorded pass for the current receipt satisfies it, and `maxAttestationAge`
+  belongs to promotion paths. Promotion applies the same rules per unit and
+  for the environment, as the [promotion contract](promotion.md#promotion-paths)
+  describes.
+- A driver's `reconcile` outcome attests as well: the names it reports that
+  the unit declares are recorded with `source: {driver: reconcile}` in the
+  run's transition commit, for the receipt the execution wrote, and are
+  visible to the consumers of a later wave of that run. A declared name it
+  leaves out stays pending. Run checkpoints do not carry them: a receipt that a
+  later run imports from a dead run, or that `nyl recover --accept` adopts, has
+  its attestations pending until `nyl attest` or a new execution records them.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -3662,6 +3693,22 @@ change with `observationWait: 10m`, a single run publishes, finds `ingressIp`
 `pending` for the new receipt, and polls until the address is observed
 again; it is unchanged, so `dns` stays `current`.
 ([`observed-value`](../nyl/tests/scenarios/walkthroughs/observed-value/scenario.yaml))
+
+**Attested evidence (M5).** `service` declares the attestation `healthy` and
+attests it when `nyl attest` runs its `attest` step; `smoke` has
+`dependsOn: [{unit: service, attestations: [healthy]}]`, and `dashboard` reads
+`service`'s `endpoint` with `evidence: attested`. The first reconcile executes
+`service`; a receipt is not an attestation, so `smoke` and `dashboard` are
+`blocked` on `service`'s `healthy` (`blockedBy` reason `attestation-pending`,
+`NYL-ATTESTATION-PENDING` with its fix), and plan and status show the same,
+exit 2. A failing `attest` (exit 3, `NYL-ATTESTATION-FAILED`) leaves them
+blocked with `attestation-failing` and `NYL-ATTESTATION-FAILING`. After a
+passing `attest`, the next reconcile executes both and not `service`. When
+`service` later executes with a new receipt, the attestation of the old one no
+longer counts: both are blocked again until `attest` records a pass for the new
+receipt, after which they are `current` without executing, because their own
+inputs did not change.
+([`attested-evidence`](../nyl/tests/scenarios/walkthroughs/attested-evidence/scenario.yaml))
 
 **Preview expiry.** Instance `pr-123` of template `preview` (`ttl: 7d`,
 `allowTeardown: true`) was last reconciled with `reconcile -e pr-123` eight days
