@@ -58,7 +58,7 @@ Use the actual rendered output path and configured namespace when they differ.
 ## Reading Argo CD
 
 Rendering and publishing never read Argo CD. A
-[`KubernetesPublication` unit in observe mode](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)
+[`KubernetesPublication` unit that declares `observe: {}`](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)
 does, to attest that Argo CD accepted a publication and that its Applications
 are healthy, and to wait for Applications to disappear when it tears a target
 down. `spec.access` says how, once, for every target on the instance. It never
