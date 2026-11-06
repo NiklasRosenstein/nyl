@@ -12,16 +12,26 @@
 //!   maintenance, or remove an expired instance. Only activity extends it.
 //! - [`guard_removal`] is the check a removal repeats under the lease, so an
 //!   instance renewed between the decision and the teardown is kept.
+//! - [`renew_units`] is what a renewal does to the units of an instance whose
+//!   removal was recorded but has not started: they are active again.
+//! - [`removal_action`] and [`eviction_result`] map what a removal did to what
+//!   its report says.
 //! - [`admit`] decides whether a template at `maxInstances` admits another
 //!   instance, and which expired instances `--make-room` removes first:
-//!   oldest expiry first, only as many as needed, never a live instance.
+//!   oldest expiry first, only as many as needed, never a live instance;
+//!   [`Eviction`] follows the removals to that end.
 //!
 //! A template without `ttl` never expires, whatever an older record says.
 
+use std::collections::BTreeMap;
+
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::ids::EnvironmentName;
-use nyl_core::orchestration::state::StateRecord;
+use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::state::{DesiredUnit, StateRecord};
 use nyl_core::orchestration::time::{Duration, Timestamp};
+
+use super::lifecycle::{transition, Event, Next};
+use crate::run_report::InstanceAction;
 
 /// What an invocation says about an instance's expiry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +100,86 @@ pub fn guard_removal(
     ))
 }
 
+/// The units a renewal writes: those whose `expired` deletion has not started
+/// are active again, in the same commit that moves the expiry, so a renewed
+/// preview is not left fenced behind a removal nobody authorized. A teardown
+/// that has started continues (the units are recreated after it completes).
+pub fn renew_units(desired: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitName, Option<DesiredUnit>> {
+    desired
+        .iter()
+        .filter_map(|(name, unit)| match transition(&unit.lifecycle, Event::Renewed) {
+            Ok(Next::Lifecycle(lifecycle)) => Some((
+                name.clone(),
+                Some(DesiredUnit {
+                    lifecycle,
+                    ..unit.clone()
+                }),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a removal's teardown is authorized: the template's `allowTeardown`
+/// (read at the entry checkout, which is the running job's) or `--allow-teardown`.
+pub fn removal_authorized(template_allows: bool, flag: bool) -> bool {
+    template_allows || flag
+}
+
+/// What a removal did, for its report: `removed` when state was deleted;
+/// `removal-pending` when nothing was authorized and units were recorded as
+/// pending teardown for that reason; otherwise `removal-incomplete`. A lease
+/// held by another run or an instance renewed meanwhile gated nothing, so
+/// they are incomplete, never pending.
+pub fn removal_action(removed: bool, authorized: bool, error_codes: &[Code], pending_units: usize) -> InstanceAction {
+    let interrupted = error_codes
+        .iter()
+        .any(|code| matches!(code, Code::LeaseHeld | Code::LeaseBroken | Code::InstanceRenewed));
+    if removed {
+        InstanceAction::Removed
+    } else if !authorized && pending_units > 0 && !interrupted {
+        InstanceAction::RemovalPending
+    } else {
+        InstanceAction::RemovalIncomplete
+    }
+}
+
+/// The finding of a removal that waits for authorization:
+/// `NYL-INSTANCE-REMOVAL-PENDING` (exit 2).
+pub fn removal_pending_finding(environment: &EnvironmentName, template: &str) -> Finding {
+    Finding::new(
+        Code::InstanceRemovalPending,
+        format!(
+            "{environment} is expired, and its teardown waits: the template does not set allowTeardown and --allow-teardown was not given"
+        ),
+        format!(
+            "set allowTeardown: true on EnvironmentTemplate {template}, or pass --allow-teardown to the run that removes expired instances"
+        ),
+    )
+}
+
+/// What a removal of an instance did, as eviction sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictionResult {
+    /// State was deleted: room was made.
+    Removed,
+    /// The instance was renewed meanwhile, so it is live and kept.
+    Renewed,
+    /// The removal did not finish.
+    Incomplete,
+}
+
+/// The eviction result of a removal reported as `action` with `error_codes`.
+pub fn eviction_result(action: InstanceAction, error_codes: &[Code]) -> EvictionResult {
+    if action == InstanceAction::Removed {
+        EvictionResult::Removed
+    } else if error_codes.contains(&Code::InstanceRenewed) {
+        EvictionResult::Renewed
+    } else {
+        EvictionResult::Incomplete
+    }
+}
+
 /// An instance of a template that counts against `maxInstances`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Existing {
@@ -102,9 +192,9 @@ pub struct Existing {
 pub enum Admission {
     /// Create it.
     Admit,
-    /// The template is at its limit and `--make-room` is given: remove these
-    /// expired instances, in this order, then create it.
-    Evict(Vec<EnvironmentName>),
+    /// The template is at its limit and `--make-room` is given: remove
+    /// expired instances as the eviction directs, then create it.
+    Evict(Eviction),
     /// The template is at its limit.
     Refuse(Refusal),
 }
@@ -119,6 +209,67 @@ pub struct Refusal {
     pub needed: usize,
     /// The expired instances that `--make-room` would remove, first removed first.
     pub evictable: Vec<EnvironmentName>,
+    /// Evictions that were started and did not finish.
+    pub incomplete: Vec<EnvironmentName>,
+    /// Evictions skipped because the instance was renewed meanwhile.
+    pub renewed: Vec<EnvironmentName>,
+}
+
+/// The removals `--make-room` performs: expired instances, oldest expiry
+/// first, until `needed` are removed. An instance renewed meanwhile is
+/// skipped, and one whose removal does not finish is left; either way the
+/// next candidate is tried, and if the candidates run out before enough are
+/// removed, nothing is created ([`Eviction::refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Eviction {
+    max: u32,
+    count: usize,
+    needed: usize,
+    candidates: Vec<EnvironmentName>,
+    removed: Vec<EnvironmentName>,
+    incomplete: Vec<EnvironmentName>,
+    renewed: Vec<EnvironmentName>,
+}
+
+impl Eviction {
+    /// The next instance to remove: the oldest expired one not tried yet, while room is still needed.
+    pub fn next(&self) -> Option<&EnvironmentName> {
+        if self.removed.len() >= self.needed {
+            return None;
+        }
+        self.candidates.iter().find(|candidate| {
+            ![&self.removed, &self.incomplete, &self.renewed]
+                .iter()
+                .any(|tried| tried.contains(candidate))
+        })
+    }
+
+    /// Record what the removal of `name` did.
+    pub fn record(&mut self, name: &EnvironmentName, result: EvictionResult) {
+        match result {
+            EvictionResult::Removed => self.removed.push(name.clone()),
+            EvictionResult::Renewed => self.renewed.push(name.clone()),
+            EvictionResult::Incomplete => self.incomplete.push(name.clone()),
+        }
+    }
+
+    /// The instances removed so far.
+    pub fn removed(&self) -> &[EnvironmentName] {
+        &self.removed
+    }
+
+    /// The refusal once no candidate is left and room was not made; `None`
+    /// while it was (or can still be).
+    pub fn refusal(&self) -> Option<Refusal> {
+        (self.removed.len() < self.needed && self.next().is_none()).then(|| Refusal {
+            max: self.max,
+            count: self.count,
+            needed: self.needed,
+            evictable: self.candidates.clone(),
+            incomplete: self.incomplete.clone(),
+            renewed: self.renewed.clone(),
+        })
+    }
 }
 
 /// Decide whether a template with `max` as `maxInstances` and `existing` as
@@ -151,37 +302,53 @@ pub fn admit(
         .filter(|instance| expired(instance.expires_at, ttl, now))
         .collect::<Vec<_>>();
     expired_instances.sort_by(|left, right| (left.expires_at, &left.name).cmp(&(right.expires_at, &right.name)));
-    let evictable = expired_instances
+    let candidates = expired_instances
         .into_iter()
         .map(|instance| instance.name.clone())
         .collect::<Vec<_>>();
-    if make_room && evictable.len() >= needed {
-        return Admission::Evict(evictable.into_iter().take(needed).collect());
+    if make_room && candidates.len() >= needed {
+        return Admission::Evict(Eviction {
+            max,
+            count,
+            needed,
+            candidates,
+            removed: Vec::new(),
+            incomplete: Vec::new(),
+            renewed: Vec::new(),
+        });
     }
     Admission::Refuse(Refusal {
         max,
         count,
         needed,
-        evictable,
+        evictable: candidates,
+        incomplete: Vec::new(),
+        renewed: Vec::new(),
     })
 }
 
 /// The finding of a template that refuses another instance: `NYL-INSTANCE-LIMIT`
-/// (exit 2). `incomplete` are the evictions `--make-room` started whose
-/// removal did not finish.
-pub fn limit_finding(template: &str, refusal: &Refusal, incomplete: &[EnvironmentName]) -> Finding {
+/// (exit 2).
+pub fn limit_finding(template: &str, refusal: &Refusal) -> Finding {
     let list = |names: &[EnvironmentName]| names.iter().map(EnvironmentName::as_str).collect::<Vec<_>>().join(", ");
     let at_limit = format!(
         "EnvironmentTemplate {template} is at maxInstances ({} of {})",
         refusal.count, refusal.max
     );
-    if !incomplete.is_empty() {
+    if !refusal.incomplete.is_empty() || !refusal.renewed.is_empty() {
+        let mut what = Vec::new();
+        if !refusal.incomplete.is_empty() {
+            what.push(format!(
+                "the removal of the expired instances {} has not finished",
+                list(&refusal.incomplete)
+            ));
+        }
+        if !refusal.renewed.is_empty() {
+            what.push(format!("{} was renewed meanwhile", list(&refusal.renewed)));
+        }
         return Finding::new(
             Code::InstanceLimit,
-            format!(
-                "{at_limit}, and the removal of the expired instances {} has not finished",
-                list(incomplete)
-            ),
+            format!("{at_limit}, and {}", what.join(" and ")),
             "finish their removal (see `nyl status` of each, for example with `--confirm-removed` or `--allow-teardown`), then create the instance again",
         );
     }
@@ -342,10 +509,17 @@ mod tests {
         };
         assert_eq!(refusal.evictable, vec![name("older"), name("newer")]);
         assert_eq!((refusal.count, refusal.max, refusal.needed), (3, 3, 1));
-        let finding = limit_finding("preview", &refusal, &[]);
+        let finding = limit_finding("preview", &refusal);
         assert_eq!(finding.code, Code::InstanceLimit);
         assert!(finding.message.contains("older, newer"));
         assert!(finding.fix.contains("--make-room"));
+    }
+
+    fn eviction(admission: Admission) -> Eviction {
+        let Admission::Evict(eviction) = admission else {
+            panic!("expected an eviction, got {admission:?}");
+        };
+        eviction
     }
 
     /// `--make-room` removes only as many expired instances as it needs,
@@ -358,14 +532,51 @@ mod tests {
             existing("newer", "2026-10-05T00:00:00Z"),
             existing("older", "2026-10-02T00:00:00Z"),
         ];
-        assert_eq!(
-            admit(Some(3), TTL, &instances, now, true),
-            Admission::Evict(vec![name("older")])
-        );
+        let mut one = eviction(admit(Some(3), TTL, &instances, now, true));
+        assert_eq!(one.next(), Some(&name("older")));
+        one.record(&name("older"), EvictionResult::Removed);
+        assert_eq!(one.next(), None, "one slot was needed");
+        assert!(one.refusal().is_none());
+        assert_eq!(one.removed(), [name("older")]);
         // Two slots over the limit need two removals.
-        assert_eq!(
-            admit(Some(2), TTL, &instances, now, true),
-            Admission::Evict(vec![name("older"), name("newer")])
+        let mut two = eviction(admit(Some(2), TTL, &instances, now, true));
+        two.record(&name("older"), EvictionResult::Removed);
+        assert_eq!(two.next(), Some(&name("newer")));
+        two.record(&name("newer"), EvictionResult::Removed);
+        assert_eq!(two.next(), None);
+    }
+
+    /// An instance renewed meanwhile is skipped, and one that does not finish
+    /// is left; the next expired instance is tried, and only when none is left
+    /// does the eviction refuse, saying what happened. Catches an eviction
+    /// that gives up at the first renewed preview, or removes a live one.
+    #[test]
+    fn test_eviction_continues_past_a_renewed_or_unfinished_instance() {
+        let now = at("2026-10-10T10:00:00Z");
+        let instances = [
+            existing("a", "2026-10-01T00:00:00Z"),
+            existing("b", "2026-10-02T00:00:00Z"),
+            existing("c", "2026-10-03T00:00:00Z"),
+        ];
+        let mut plan = eviction(admit(Some(3), TTL, &instances, now, true));
+        plan.record(&name("a"), EvictionResult::Renewed);
+        assert_eq!(plan.next(), Some(&name("b")));
+        plan.record(&name("b"), EvictionResult::Removed);
+        assert!(plan.refusal().is_none());
+
+        let mut stuck = eviction(admit(Some(3), TTL, &instances, now, true));
+        stuck.record(&name("a"), EvictionResult::Renewed);
+        stuck.record(&name("b"), EvictionResult::Incomplete);
+        stuck.record(&name("c"), EvictionResult::Incomplete);
+        assert_eq!(stuck.next(), None);
+        let refusal = stuck.refusal().expect("no room was made");
+        let finding = limit_finding("preview", &refusal);
+        assert_eq!(finding.code, Code::InstanceLimit);
+        assert!(finding.message.contains("b, c has not finished"), "{}", finding.message);
+        assert!(
+            finding.message.contains("a was renewed meanwhile"),
+            "{}",
+            finding.message
         );
     }
 
@@ -382,7 +593,7 @@ mod tests {
             panic!("no expired instance, nothing to evict");
         };
         assert!(refusal.evictable.is_empty());
-        assert!(limit_finding("preview", &refusal, &[])
+        assert!(limit_finding("preview", &refusal)
             .message
             .contains("no instance is expired"));
         let one_expired = [
@@ -393,9 +604,7 @@ mod tests {
             panic!("two removals are needed and one instance is expired");
         };
         assert_eq!((refusal.needed, refusal.evictable.len()), (2, 1));
-        assert!(limit_finding("preview", &refusal, &[]).message.contains("1 short"));
-        let unfinished = limit_finding("preview", &refusal, &[name("a")]);
-        assert!(unfinished.message.contains("has not finished"));
+        assert!(limit_finding("preview", &refusal).message.contains("1 short"));
     }
 
     /// A template without `ttl` has no expired instances, so a limit can only
@@ -408,5 +617,79 @@ mod tests {
             panic!("without a ttl nothing expires");
         };
         assert!(refusal.evictable.is_empty());
+    }
+
+    /// Which units a renewal writes, through the lifecycle table: a pending
+    /// expired removal is undone, and nothing else is touched.
+    #[test]
+    fn test_a_renewal_writes_only_the_units_whose_expired_removal_has_not_started() {
+        use nyl_core::orchestration::state::{Deletion, DeletionIntent, DeletionReason, Lifecycle, TeardownProgress};
+        let unit = |lifecycle: Lifecycle| DesiredUnit {
+            lifecycle,
+            ..crate::rules::fixtures::desired_numbered("site", 1, None)
+        };
+        let deleting = |reason, teardown| {
+            unit(Lifecycle::Deleting {
+                deletion: Deletion {
+                    hold: false,
+                    reason,
+                    intent: DeletionIntent::Teardown,
+                    teardown: Some(teardown),
+                    requested: None,
+                },
+            })
+        };
+        let desired = BTreeMap::from([
+            (UnitName::new("active").unwrap(), unit(Lifecycle::Active)),
+            (
+                UnitName::new("pending").unwrap(),
+                deleting(DeletionReason::Expired, TeardownProgress::Pending),
+            ),
+            (
+                UnitName::new("started").unwrap(),
+                deleting(DeletionReason::Expired, TeardownProgress::InProgress),
+            ),
+            (
+                UnitName::new("omitted").unwrap(),
+                deleting(DeletionReason::Omission, TeardownProgress::Pending),
+            ),
+        ]);
+        let written = renew_units(&desired);
+        assert_eq!(written.keys().map(UnitName::as_str).collect::<Vec<_>>(), ["pending"]);
+        assert_eq!(
+            written[&UnitName::new("pending").unwrap()].as_ref().unwrap().lifecycle,
+            Lifecycle::Active
+        );
+    }
+
+    /// The report of a removal: pending only when the missing authorization is
+    /// what held units back, never for a held lease or a renewed instance.
+    #[test]
+    fn test_a_removal_is_pending_only_when_units_were_gated_by_authorization() {
+        let action = |removed, authorized, codes: &[Code], pending| removal_action(removed, authorized, codes, pending);
+        assert_eq!(action(true, true, &[], 0), InstanceAction::Removed);
+        assert_eq!(action(false, false, &[], 2), InstanceAction::RemovalPending);
+        assert_eq!(action(false, true, &[], 2), InstanceAction::RemovalIncomplete);
+        assert_eq!(
+            action(false, false, &[Code::LeaseHeld], 0),
+            InstanceAction::RemovalIncomplete
+        );
+        assert_eq!(
+            action(false, false, &[Code::InstanceRenewed], 0),
+            InstanceAction::RemovalIncomplete
+        );
+        assert_eq!(action(false, false, &[], 0), InstanceAction::RemovalIncomplete);
+        assert!(
+            removal_authorized(true, false) && removal_authorized(false, true) && !removal_authorized(false, false)
+        );
+        assert_eq!(
+            eviction_result(InstanceAction::RemovalIncomplete, &[Code::InstanceRenewed]),
+            EvictionResult::Renewed
+        );
+        assert_eq!(
+            eviction_result(InstanceAction::RemovalPending, &[]),
+            EvictionResult::Incomplete
+        );
+        assert_eq!(eviction_result(InstanceAction::Removed, &[]), EvictionResult::Removed);
     }
 }

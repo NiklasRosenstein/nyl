@@ -427,8 +427,8 @@ pub fn readiness_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item
 }
 
 /// What the removal of an instance nobody attends would wait for: the
-/// `unattended` findings of each unit's driver
-/// ([`nyl_core::orchestration::driver::TeardownReadiness::unattended`]),
+/// findings of each unit's driver
+/// ([`nyl_core::orchestration::driver::Driver::unattended_teardown`]),
 /// shown by `nyl state init --template` because every instance is torn down
 /// some day, and by nothing that tears down with an operator present.
 pub fn unattended_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item = &'a DesiredUnit>) -> Vec<Finding> {
@@ -437,13 +437,13 @@ pub fn unattended_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Ite
         .filter(|unit| !unit.is_held_marker())
         .filter(|unit| super::desired::deletion_intent(drivers, unit) == DeletionIntent::Teardown)
         .filter_map(|unit| {
-            let driver = drivers.get(&unit.unit.api_version, &unit.unit.kind)?;
-            match driver.teardown_readiness(unit) {
-                Ok(nyl_core::orchestration::driver::Supported::Supported(readiness)) => Some(readiness),
-                _ => None,
-            }
+            Some(
+                drivers
+                    .get(&unit.unit.api_version, &unit.unit.kind)?
+                    .unattended_teardown(unit),
+            )
         })
-        .flat_map(|readiness| readiness.unattended)
+        .flatten()
         .collect()
 }
 

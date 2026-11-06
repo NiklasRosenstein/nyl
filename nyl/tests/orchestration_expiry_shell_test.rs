@@ -224,3 +224,27 @@ fn test_renewing_moves_the_expiry_once_and_refuses_a_declared_environment() {
     assert_eq!(renew(&harness, Some(14)).outcome, Outcome::Unchanged);
     assert_eq!(harness.tips(), tips, "an unchanged expiry writes no commit");
 }
+
+/// A renewal undoes the removal of units whose teardown has not started and
+/// leaves one that has: the publication waiting under its manual
+/// `teardownWait` keeps tearing down, because effects exist that only the
+/// teardown ends, and the units that waited behind it are active again. Catches
+/// a renewal that abandons a teardown halfway, or leaves a renewed instance
+/// fenced.
+#[test]
+fn test_a_renewal_leaves_a_teardown_that_started_and_undoes_the_rest() {
+    let harness = expiring("2026-10-01T10:00:00Z");
+    let started = remove(&harness, "2026-10-01T10:00:00Z", true);
+    assert_eq!(started.report.exit, 2, "{:?}", started.report);
+    let renewed = renew(&harness, Some(14));
+    assert_eq!(renewed.exit, 0, "{renewed:?}");
+    let desired = harness.snapshot().desired;
+    let state = |unit: &str| desired[&shell::unit(unit)].lifecycle.clone();
+    assert!(
+        matches!(state("kubernetes"), Lifecycle::Deleting { deletion } if deletion.reason == DeletionReason::Expired),
+        "the started teardown continues"
+    );
+    for unit in ["network", "database", "web-image"] {
+        assert_eq!(state(unit), Lifecycle::Active, "{unit} waited behind the teardown");
+    }
+}

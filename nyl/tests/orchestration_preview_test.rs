@@ -535,3 +535,30 @@ fn test_state_init_warns_what_an_unattended_removal_would_wait_for() {
     assert!(init.stderr.contains("NYL-TEARDOWN-WAIT-MANUAL"), "{}", init.stderr);
     assert!(init.stderr.contains("pr-1/kubernetes"), "{}", init.stderr);
 }
+
+/// A `manual` `teardownWait` is read from the declaration, so `state init
+/// --template` warns about it for the real publication before any producer
+/// ran and the unit could resolve; the unit's readiness requirements follow
+/// from the first `plan`. Catches the warning depending on resolution that
+/// a fresh preview cannot have.
+#[test]
+fn test_state_init_warns_a_manual_wait_before_the_publication_resolves() {
+    let project = preview_project();
+    let harness = real_publication_harness(project.path());
+    let init = invoke(
+        &harness,
+        &[
+            "state",
+            "init",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+        ],
+    );
+    assert_eq!(init.exit, 0, "{}\n{}", init.stderr, init.stdout);
+    assert!(init.stderr.contains("NYL-TEARDOWN-WAIT-MANUAL"), "{}", init.stderr);
+    assert!(init.stderr.contains("pr-1/kubernetes"), "{}", init.stderr);
+}

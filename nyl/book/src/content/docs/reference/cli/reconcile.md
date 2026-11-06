@@ -62,7 +62,7 @@ the options are:
 | `reconcile -e <instance>` | extends `expiresAt` to now plus `ttl`, then reconciles | removes it |
 | `reconcile -e <instance> --no-extend` | reconciles without extending | removes it |
 | `reconcile -e <instance> --renew` | extends, then reconciles | extends, then reconciles |
-| `reconcile -e <instance> --template <name> --param …` | creates or updates it, extends, then reconciles | the same: updating an active pull request never removes its preview |
+| `reconcile -e <instance> --template <name> --param …` | creates or updates it, extends, then reconciles | the same: updating an active pull request never removes its preview; an instance whose state was deleted is created again |
 | `reconcile --template <name>` | reconciles at its own recorded commit, without extending | removes it |
 
 - **Removal** runs `teardown --all` and then `state delete`, the way [`nyl state
@@ -80,11 +80,13 @@ the options are:
   teardown. A removal decided on one `expiresAt` repeats the check under the
   lease, so an instance another run renewed meanwhile is kept
   (`NYL-INSTANCE-RENEWED`, exit 2).
-- **`--renew`** keeps an expired instance. **`--no-extend`** reconciles an
+- **`--renew`** keeps an expired instance and undoes a removal that was
+  recorded as pending and has not started. **`--no-extend`** reconciles an
   instance as maintenance. They conflict, and `--no-extend` conflicts with
   `--template`. Both are rejected for a declared Environment, which has no
   expiry, and `--renew`, `--param`, `--make-room`, `--source`, and
-  `--worktree` for the fleet (`NYL-INSTANCE-OPTION-INVALID`).
+  `--worktree` for the fleet; every one of these is exit 1 with
+  `NYL-INSTANCE-OPTION-INVALID`.
 - **`--make-room`**, with `--template` and `-e`, removes expired instances of
   a template at `maxInstances` first, oldest expiry first and only as many as
   the new instance needs, then creates the instance; without it the run exits 2

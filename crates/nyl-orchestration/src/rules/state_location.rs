@@ -232,7 +232,6 @@ pub fn ref_conflicts(locations: &[(EnvironmentName, StateLocation)]) -> Vec<Find
             format!("{prefix}{environment}/lease"),
             format!("{prefix}{environment}/runs/*"),
             format!("{prefix}{environment}/signals/*"),
-            format!("{prefix}{environment}/keep"),
         ] {
             let owners = names.entry((location.repository.clone(), name)).or_default();
             if !owners.contains(&environment.to_string()) {
@@ -240,7 +239,10 @@ pub fn ref_conflicts(locations: &[(EnvironmentName, StateLocation)]) -> Vec<Find
             }
         }
     }
-    let mut findings = Vec::new();
+    let mut findings = locations
+        .iter()
+        .filter_map(|(environment, location)| super::keep::reserved_conflict(environment, location))
+        .collect::<Vec<_>>();
     for ((repository, name), owners) in &names {
         for ((other_repository, other), other_owners) in &names {
             if repository == other_repository && other.starts_with(&format!("{name}/")) {

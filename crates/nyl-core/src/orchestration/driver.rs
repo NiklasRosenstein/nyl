@@ -612,10 +612,6 @@ pub struct TeardownReadiness {
     pub remnants: Vec<Finding>,
     /// Requirements the driver cannot see, which never block.
     pub not_checked: Vec<String>,
-    /// What only an operator can answer, which a teardown nobody attends,
-    /// such as the removal of an expired template instance, would wait for.
-    /// They never block; `nyl state init --template` warns about them.
-    pub unattended: Vec<Finding>,
 }
 
 impl TeardownReadiness {
@@ -827,6 +823,15 @@ pub trait Driver: Send + Sync {
     fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let _ = unit;
         Ok(Supported::Unsupported)
+    }
+    /// What a teardown nobody attends, such as the removal of an expired
+    /// template instance, would wait for because only an operator can answer
+    /// it. Read from the unit's declaration alone, resolved or not, so
+    /// `nyl state init --template` can warn before any producer ran. Never
+    /// blocking; none by default.
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<Finding> {
+        let _ = unit;
+        Vec::new()
     }
     /// How a teardown of this spec waits after phase 1 (`teardownWait`), read
     /// from the stored document with the kind's defaults; the shell never

@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use clap::{Args, Subcommand, ValueEnum};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{SourceResolver as _, StateStore as _};
+use nyl_core::orchestration::ports::StateStore as _;
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
@@ -418,6 +418,17 @@ fn run_init(
                         ))
                     }
                 };
+                let sources = match ctx.session.sources() {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        return refused(Finding::new(
+                            Code::SourceUnavailable,
+                            error.to_string(),
+                            "check the project's Git configuration",
+                        ))
+                    }
+                };
+                let prefix = ctx.session.keep_prefix();
                 let mut report = state::init_instance(
                     ctx.context,
                     &ctx.environment,
@@ -427,6 +438,10 @@ fn run_init(
                         params: &instance.params,
                         source_commit: &source_commit,
                         ttl: instance.terms.ttl,
+                        keep: prefix.as_deref().map(|prefix| state::KeepSource {
+                            sources: &sources,
+                            prefix,
+                        }),
                     },
                     fresh,
                     &requested,
@@ -956,9 +971,9 @@ pub(crate) struct InstanceWrite<'a> {
 
 /// What precedes the write of a new or updated instance's record: its
 /// admission under `maxInstances` (a new instance only, with the removal of
-/// expired ones for `--make-room`), and its keep ref, so the commit the
-/// record names is fetchable before it is recorded. Returns the instances
-/// removed to make room.
+/// expired ones for `--make-room`). Returns the instances removed to make
+/// room. The keep ref of the source commit is moved by the write itself
+/// ([`state::InstanceInit::keep`]), past every refusal and before the commit.
 ///
 /// Contract: [Expiry](../../../../design/orchestration-core.md#expiry) and
 /// [Instances](../../../../design/orchestration-core.md#instances).
@@ -972,30 +987,17 @@ pub(crate) fn prepare_instance_write(
         .instance
         .as_ref()
         .expect("--template resolved an instance");
-    let record = instance.record.as_ref();
-    // A deleted instance starts over only with `--fresh`, and then is a new one.
-    let new = record.is_none_or(|record| write.fresh && record.deleted().is_some());
-    let evicted = if new {
-        crate::orchestration::instances::admit(session, wiring, write.make_room, write.removal)?
+    // A deleted instance starts over, with `--fresh` or as the pull request job
+    // does, and is then a new one.
+    let new = instance
+        .record
+        .as_ref()
+        .is_none_or(|record| write.fresh && record.deleted().is_some());
+    if new {
+        crate::orchestration::instances::admit(session, wiring, write.make_room, write.removal)
     } else {
-        Vec::new()
-    };
-    if instance.terms.keep_source && !write.local {
-        let commit = session.entry_commit()?;
-        if let Some(reference) = session.keep_ref() {
-            session.sources()?.keep(&reference, &commit).map_err(|error| {
-                Finding::new(
-                    Code::InstanceKeepFailed,
-                    format!("cannot keep the source commit {commit} of {} fetchable: {error}", session.resolved.name),
-                    format!(
-                        "grant push access to {reference} (the keep refs of every instance are refs/nyl/<instance>/keep under the state's coordinationRefPrefix), or set keepSource: false on EnvironmentTemplate {}",
-                        instance.template
-                    ),
-                )
-            })?;
-        }
+        Ok(Vec::new())
     }
-    Ok(evicted)
 }
 
 /// Create or update the instance a session resolved from `--template`, the
@@ -1030,6 +1032,8 @@ pub(crate) fn create_or_update_instance(
         wait: write.wait,
         cancellation: wiring.cancellation.clone(),
     };
+    let sources = session.sources()?;
+    let prefix = session.keep_prefix();
     let report = state::init_instance(
         &context,
         &session.resolved.name,
@@ -1039,6 +1043,10 @@ pub(crate) fn create_or_update_instance(
             params: &instance.params,
             source_commit: &source_commit,
             ttl: instance.terms.ttl,
+            keep: prefix.as_deref().map(|prefix| state::KeepSource {
+                sources: &sources,
+                prefix,
+            }),
         },
         write.fresh,
         &requested,

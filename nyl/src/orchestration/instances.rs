@@ -13,9 +13,8 @@ use std::path::Path;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::time::Duration;
-use nyl_orchestration::report::Outcome;
-use nyl_orchestration::rules::expiry::{self, Admission, Existing, Refusal};
-use nyl_orchestration::run_report::{EnvironmentRunReport, ExitCategory, InstanceAction, ReportKind};
+use nyl_orchestration::rules::expiry::{self, Admission, EvictionResult, Existing};
+use nyl_orchestration::run_report::{EnvironmentRunReport, InstanceAction};
 use nyl_orchestration::shell::run::{LifecycleOptions, RunMode, TeardownTarget};
 use nyl_state::git::CommitAuthor;
 
@@ -85,7 +84,7 @@ pub fn remove_expired(
             )
         })?;
     let identity = wiring.commit_identity(&session.resolved.git_dir, removal.author)?;
-    let authorized = removal.allow_teardown || instance.terms.allow_teardown;
+    let authorized = expiry::removal_authorized(instance.terms.allow_teardown, removal.allow_teardown);
     let mut request = session.request(&RunOptions {
         units: &[],
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
@@ -122,51 +121,13 @@ pub fn remove_expired(
     let deletion = session.run_with(wiring, &store, Some(&identity), &request, |context, request| {
         nyl_orchestration::shell::teardown::state_delete_detailed(context, request, true)
     })?;
-    let removed = deletion.report.outcome == Outcome::Done;
-    let mut report = deletion
-        .teardown
-        .and_then(|teardown| teardown.environments.into_iter().next())
-        .unwrap_or_else(|| EnvironmentRunReport::new(session.resolved.name.clone()));
-    // The units the teardown could not finish are the reason state stays; the
-    // deletion's own refusal repeats them, and its errors carry the rest.
-    for finding in deletion.report.errors {
-        if finding.code == Code::StateDeleteIncarnations {
-            report.warnings.push(finding);
-        } else if !report.errors.contains(&finding) {
-            report.errors.push(finding);
-        }
-    }
-    report.warnings.extend(deletion.report.warnings);
-    let action = if removed {
-        InstanceAction::Removed
-    } else if !authorized {
-        report.errors.push(Finding::new(
-            Code::InstanceRemovalPending,
-            format!(
-                "{} is expired, and its teardown waits: the template does not set allowTeardown and --allow-teardown was not given",
-                session.resolved.name
-            ),
-            format!(
-                "set allowTeardown: true on EnvironmentTemplate {}, or pass --allow-teardown to the run that removes expired instances",
-                instance.template
-            ),
-        ));
-        InstanceAction::RemovalPending
-    } else {
-        InstanceAction::RemovalIncomplete
-    };
-    report.finish(ReportKind::ReconcileReport);
-    if !removed && report.exit == ExitCategory::Ok {
-        // State and resources remain, so the removal is not complete, whatever the units say.
-        report.exit = ExitCategory::Incomplete;
-        report.complete = false;
-    }
-    report.instance = session.instance_report(wiring.clock.now()).map(|mut instance| {
-        instance.expired = true;
-        instance.action = Some(action);
-        instance
-    });
-    Ok(report)
+    Ok(nyl_orchestration::shell::removal::removal_report(
+        &session.resolved.name,
+        &instance.template,
+        deletion,
+        authorized,
+        session.instance_report(wiring.clock.now()),
+    ))
 }
 
 /// The live instances of `template` other than `creating`, which count
@@ -232,42 +193,53 @@ pub fn admit(
     let counted = existing;
     match expiry::admit(Some(max), instance.terms.ttl, &counted, now, make_room) {
         Admission::Admit => Ok(Vec::new()),
-        Admission::Refuse(refusal) => Err(expiry::limit_finding(template, &refusal, &[]).into()),
-        Admission::Evict(names) => {
-            let mut removed = Vec::new();
-            let mut incomplete = Vec::new();
-            for name in &names {
-                let evictee = Session::open_with(
-                    removal.path,
-                    name.as_str(),
-                    &InstanceRequest {
-                        offline: removal.offline,
-                        ..InstanceRequest::default()
-                    },
-                )?;
-                // Whatever the evictee's own session decides, it is expired: the
-                // rule chose it from its record, and the removal repeats the check under the lease.
-                let report = remove_expired(&evictee, wiring, removal)?;
-                if report
+        Admission::Refuse(refusal) => Err(expiry::limit_finding(template, &refusal).into()),
+        Admission::Evict(mut eviction) => {
+            // The evictees are other pull requests' previews: they inherit neither this
+            // job's `--source` nor its approvals, and the template's `allowTeardown`
+            // that authorizes their removal is the one this job's checkout declares.
+            let evicting = Removal {
+                source: None,
+                approval: None,
+                ..removal.clone()
+            };
+            while let Some(name) = eviction.next().cloned() {
+                let result = evict(&name, wiring, &evicting);
+                eviction.record(&name, result?);
+            }
+            match eviction.refusal() {
+                None => Ok(eviction.removed().to_vec()),
+                Some(refusal) => Err(expiry::limit_finding(template, &refusal).into()),
+            }
+        }
+    }
+}
+
+/// Remove the expired instance `name` to make room, and what came of it.
+fn evict(name: &EnvironmentName, wiring: &Wiring<'_>, removal: &Removal<'_>) -> Result<EvictionResult, Stop> {
+    let session = Session::open_with(
+        removal.path,
+        name.as_str(),
+        &InstanceRequest {
+            offline: removal.offline,
+            ..InstanceRequest::default()
+        },
+    )?;
+    // The rule chose it from a listing; the removal decides again on the record it reads, and under the lease.
+    match remove_expired(&session, wiring, removal) {
+        Ok(report) => {
+            let codes = report.errors.iter().map(|finding| finding.code).collect::<Vec<_>>();
+            Ok(expiry::eviction_result(
+                report
                     .instance
                     .as_ref()
-                    .is_some_and(|instance| instance.action == Some(InstanceAction::Removed))
-                {
-                    removed.push(name.clone());
-                } else {
-                    incomplete.push(name.clone());
-                }
-            }
-            if incomplete.is_empty() {
-                return Ok(removed);
-            }
-            let refusal = Refusal {
-                max,
-                count: counted.len(),
-                needed: names.len(),
-                evictable: names,
-            };
-            Err(expiry::limit_finding(template, &refusal, &incomplete).into())
+                    .and_then(|instance| instance.action)
+                    .unwrap_or(InstanceAction::RemovalIncomplete),
+                &codes,
+            ))
         }
+        Err(Stop::Finding(finding)) if finding.code == Code::InstanceRenewed => Ok(EvictionResult::Renewed),
+        Err(Stop::Finding(_)) => Ok(EvictionResult::Incomplete),
+        Err(error @ Stop::Error(_)) => Err(error),
     }
 }

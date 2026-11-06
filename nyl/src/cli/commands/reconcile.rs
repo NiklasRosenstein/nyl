@@ -58,12 +58,12 @@ pub struct ReconcileArgs {
 
     /// Keep an expired instance: extend its expiry and reconcile it instead
     /// of removing it.
-    #[arg(long, conflicts_with_all = ["no_extend", "labels", "group"])]
+    #[arg(long)]
     pub renew: bool,
 
     /// Reconcile an instance as maintenance, without extending its expiry; an
     /// expired instance is removed.
-    #[arg(long, conflicts_with_all = ["renew", "template", "labels", "group"])]
+    #[arg(long)]
     pub no_extend: bool,
 
     /// With --template and -e, when the template is at maxInstances, remove
@@ -71,9 +71,6 @@ pub struct ReconcileArgs {
     /// then create the instance.
     #[arg(long, requires = "template")]
     pub make_room: bool,
-
-    #[arg(skip)]
-    pub fleet: bool,
 
     /// Select environments whose literal labels match key=value pairs.
     #[arg(short = 'l', long, conflicts_with_all = ["environment", "group"])]
@@ -175,7 +172,6 @@ fn instance_request(args: &ReconcileArgs) -> std::result::Result<InstanceRequest
 /// without `-e` is the fleet reconcile; the options that need one instance
 /// are rejected for the fleet.
 fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
-    let template = args.template.as_ref()?;
     let refuse = |finding: Finding| {
         Some(stopped(
             ReportKind::ReconcileReport,
@@ -184,6 +180,27 @@ fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
             finding.into(),
         ))
     };
+    let option_invalid = |message: String, fix: &str| refuse(Finding::new(Code::InstanceOptionInvalid, message, fix));
+    // The expiry options say what a reconcile does with one named instance.
+    if args.renew && args.no_extend {
+        return option_invalid(
+            "--renew extends the expiry and --no-extend leaves it, so they cannot be given together".to_owned(),
+            "drop one of them",
+        );
+    }
+    if args.no_extend && args.template.is_some() {
+        return option_invalid(
+            "--no-extend and --template contradict: the pull request job's `reconcile --template` is activity, which extends the expiry".to_owned(),
+            "drop --no-extend, or drop --template to reconcile the instance as maintenance",
+        );
+    }
+    if (args.renew || args.no_extend) && (args.labels.is_some() || args.group.is_some()) {
+        return option_invalid(
+            "--renew and --no-extend apply to instances named with -e, and a label or group selects declared environments".to_owned(),
+            "name the instance with -e <name>",
+        );
+    }
+    let template = args.template.as_ref()?;
     if args.environment.len() > 1 {
         return refuse(Finding::new(
             Code::InstanceTemplateRequired,
@@ -287,13 +304,21 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
             wiring.drivers,
             &instance,
             Some(Expiry {
-                intent: intent(args),
+                intent: intent(args, false),
                 now: wiring.clock.now(),
             }),
         ),
         |environment, selected, _planned, unavailable| {
             (
-                reconcile_selected(args, environment, selected, unavailable, snapshot.as_ref(), wiring),
+                reconcile_selected(
+                    args,
+                    environment,
+                    selected,
+                    unavailable,
+                    snapshot.as_ref(),
+                    wiring,
+                    false,
+                ),
                 std::collections::BTreeSet::default(),
             )
         },
@@ -309,6 +334,7 @@ fn reconcile_selected(
     unavailable: &std::collections::BTreeSet<nyl_core::orchestration::ids::EnvironmentName>,
     snapshot: Option<&nyl_core::orchestration::ports::WorktreeSnapshot>,
     wiring: &Wiring<'_>,
+    fleet: bool,
 ) -> CommandOutcome {
     let mut args = args.clone();
     args.environment = vec![environment.to_owned()];
@@ -329,7 +355,7 @@ fn reconcile_selected(
             selected.len() > 1,
         )?;
         crate::orchestration::multi_environment::single_source(args.source.as_deref(), selected)?;
-        reconcile(&args, wiring, unavailable, snapshot)
+        reconcile(&args, wiring, unavailable, snapshot, fleet)
     };
     prepare().unwrap_or_else(|stop| stopped(ReportKind::ReconcileReport, environment, args.output, stop))
 }
@@ -347,7 +373,6 @@ fn fleet(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     use crate::orchestration::multi_environment::{dispatch, select, Expiry};
     let template = args.template.clone().expect("the fleet names a template");
     let mut args = args.clone();
-    args.fleet = true;
     let names = match fleet_instances(&args, &template) {
         Ok(names) => names,
         Err(stop) => return Ok(stopped(ReportKind::ReconcileReport, &template, args.output, stop)),
@@ -382,7 +407,7 @@ fn fleet(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         ),
         |environment, selected, _planned, unavailable| {
             (
-                reconcile_selected(&args, environment, selected, unavailable, None, wiring),
+                reconcile_selected(&args, environment, selected, unavailable, None, wiring, true),
                 std::collections::BTreeSet::default(),
             )
         },
@@ -434,10 +459,10 @@ fn fleet_instances(args: &ReconcileArgs, template: &str) -> std::result::Result<
 /// What the invocation says about an instance's expiry: activity extends it
 /// and removes an expired instance, maintenance (`--no-extend`, the fleet)
 /// only removes, and `--renew` or `--template` keep an expired instance.
-fn intent(args: &ReconcileArgs) -> Intent {
+fn intent(args: &ReconcileArgs, fleet: bool) -> Intent {
     if args.template.is_some() || args.renew {
         Intent::Renew
-    } else if args.no_extend || args.fleet {
+    } else if args.no_extend || fleet {
         Intent::Maintenance
     } else {
         Intent::Activity
@@ -480,6 +505,7 @@ fn reconcile(
     wiring: &Wiring<'_>,
     unavailable: &std::collections::BTreeSet<nyl_core::orchestration::ids::EnvironmentName>,
     snapshot: Option<&nyl_core::orchestration::ports::WorktreeSnapshot>,
+    fleet: bool,
 ) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open_with(&args.path, &args.environment[0], &instance_request(args)?)?;
     // Reconcile writes state, so it alone of the run commands needs an identity.
@@ -490,11 +516,12 @@ fn reconcile(
     let removal = removal(args);
     let now = wiring.clock.now();
     let mut evicted = Vec::new();
-    let mut extended = false;
+    // The expiry activity recorded, when it extended it: read from the write's report.
+    let mut extended: Option<Option<nyl_core::orchestration::time::Timestamp>> = None;
     if args.template.is_some() {
         // The pull request job creates or updates its instance, which is
         // activity: it extends the expiry and never removes the instance.
-        let (_, gone) = create_or_update_instance(
+        let (written, gone) = create_or_update_instance(
             &session,
             wiring,
             &identity,
@@ -502,20 +529,27 @@ fn reconcile(
                 reason: args.reason.as_deref(),
                 wait: args.wait_lease,
                 local: args.local,
-                fresh: false,
+                // An instance the fleet removed is gone, and its pull request's next
+                // job creates it again: a deleted record counts as missing here.
+                fresh: session
+                    .resolved
+                    .instance
+                    .as_ref()
+                    .and_then(|instance| instance.record.as_ref())
+                    .is_some_and(|record| record.deleted().is_some()),
                 make_room: args.make_room,
                 removal: &removal,
             },
         )?;
         evicted = gone;
-        extended = true;
+        extended = Some(recorded_expiry(&written));
     } else if let Some(instance) = &session.resolved.instance {
         let expires_at = instance.record.as_ref().and_then(|record| record.expires_at);
-        match expiry::decide(intent(args), expires_at, instance.terms.ttl, now) {
+        match expiry::decide(intent(args, fleet), expires_at, instance.terms.ttl, now) {
             Disposition::Remove => {
                 let mut report = RunReport::new(ReportKind::ReconcileReport);
                 let mut environment = remove_expired(&session, wiring, &removal)?;
-                if args.fleet && environment.errors.iter().any(|finding| finding.code == Code::LeaseHeld) {
+                if fleet && environment.errors.iter().any(|finding| finding.code == Code::LeaseHeld) {
                     environment.mark_busy();
                 }
                 report.environments.push(environment);
@@ -523,8 +557,7 @@ fn reconcile(
                 return Ok(outcome(&report, args.output, exit));
             }
             Disposition::Reconcile { extend: true } => {
-                extend_expiry(&session, wiring, &identity, args, instance.terms.ttl)?;
-                extended = true;
+                extended = Some(extend_expiry(&session, wiring, &identity, args, instance.terms.ttl)?);
             }
             Disposition::Reconcile { extend: false } => {}
         }
@@ -575,13 +608,9 @@ fn reconcile(
     )?;
     if let Some(environment) = report.environments.first_mut() {
         if let Some(instance) = &mut environment.instance {
-            if extended {
-                instance.expires_at = session
-                    .resolved
-                    .instance
-                    .as_ref()
-                    .and_then(|found| expiry::extended(found.terms.ttl, now));
-                instance.action = instance.expires_at.map(|_| InstanceAction::Extended);
+            if let Some(recorded) = extended {
+                instance.expires_at = recorded;
+                instance.action = recorded.map(|_| InstanceAction::Extended);
                 // Activity renewed it, even if it had expired.
                 instance.expired = false;
             }
@@ -597,7 +626,7 @@ fn reconcile(
             ));
         }
         // A fleet run skips an instance another run holds: busy, not failed.
-        if args.fleet && environment.errors.iter().any(|finding| finding.code == Code::LeaseHeld) {
+        if fleet && environment.errors.iter().any(|finding| finding.code == Code::LeaseHeld) {
             environment.mark_busy();
         }
     }
@@ -613,7 +642,7 @@ fn extend_expiry(
     identity: &nyl_core::orchestration::ports::CommitIdentity,
     args: &ReconcileArgs,
     ttl: Option<Duration>,
-) -> std::result::Result<(), Stop> {
+) -> std::result::Result<Option<nyl_core::orchestration::time::Timestamp>, Stop> {
     let author = Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
@@ -638,8 +667,18 @@ fn extend_expiry(
     );
     match report.errors.first() {
         Some(finding) => Err(Stop::Finding(finding.clone())),
-        None => Ok(()),
+        None => Ok(recorded_expiry(&report)),
     }
+}
+
+/// The `expiresAt` a state write recorded, as its report states it.
+fn recorded_expiry(
+    report: &nyl_orchestration::report::StateOperationReport,
+) -> Option<nyl_core::orchestration::time::Timestamp> {
+    report
+        .details
+        .get("expiresAt")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 #[cfg(test)]

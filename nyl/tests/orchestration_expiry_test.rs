@@ -271,6 +271,29 @@ fn test_renew_and_no_extend_are_rejected_where_they_do_not_apply() {
             declared.stderr
         );
     }
+    // Combinations that make no sense are coded findings, not usage errors.
+    for args in [
+        &["reconcile", "-e", "pr-1", "--renew", "--no-extend"][..],
+        &[
+            "reconcile",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+            "--no-extend",
+        ][..],
+        &["reconcile", "--template", "preview", "--no-extend"][..],
+    ] {
+        let rejected = invoke(&harness, "main", args);
+        assert_eq!(rejected.exit, 1, "{args:?}: {}", rejected.stderr);
+        assert!(
+            rejected.stderr.contains("NYL-INSTANCE-OPTION-INVALID"),
+            "{args:?}: {}",
+            rejected.stderr
+        );
+    }
     let fleet = invoke(&harness, "main", &["reconcile", "--template", "preview", "--renew"]);
     assert_eq!(fleet.exit, 1, "{}", fleet.stderr);
     assert!(fleet.stderr.contains("NYL-INSTANCE-OPTION-INVALID"), "{}", fleet.stderr);
@@ -606,17 +629,37 @@ fn test_max_instances_needs_a_listable_state_location() {
     );
 }
 
-fn show_ref(harness: &harness::Harness, reference: &str) -> String {
+/// The keep refs of `instance` in the source repository, by name and commit.
+fn keep_refs(harness: &harness::Harness, instance: &str) -> Vec<(String, String)> {
+    let prefix = nyl_orchestration::rules::keep::keep_prefix(
+        "/nyl",
+        &nyl_core::orchestration::ids::EnvironmentName::new(instance).unwrap(),
+    );
     git_output(
         &harness.world.bare(),
-        &["for-each-ref", "--format=%(objectname)", reference],
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            &format!("{prefix}/"),
+        ],
     )
+    .lines()
+    .filter_map(|line| line.split_once(' '))
+    .map(|(name, commit)| (name.to_owned(), commit.to_owned()))
+    .collect()
+}
+
+/// Whether the keep refs of `instance` are exactly the one for `commit`.
+fn kept_only(harness: &harness::Harness, instance: &str, commit: &str) -> bool {
+    let refs = keep_refs(harness, instance);
+    refs.len() == 1 && refs[0].0.ends_with(&format!("/{commit}")) && refs[0].1 == commit
 }
 
 /// With `keepSource` (the default) an instance's recorded source commit stays
-/// fetchable through `refs/nyl/<instance>/keep` in the source repository: the
-/// ref moves with the recorded commit, a job in a fresh clone that lacks the
-/// commit fetches it, and `state delete` removes the ref. Catches a teardown
+/// fetchable through a keep ref of its own, `refs/nyl-keep/<project>/<instance>/<commit>`
+/// in the source repository: a new commit is kept before the record names it
+/// and the previous one's ref goes after, a job in a fresh clone that lacks the
+/// commit fetches it, and `state delete` removes the refs. Catches a teardown
 /// that cannot find the source of a pull request whose branch is gone, and
 /// keep refs that outlive their instances.
 #[test]
@@ -649,7 +692,7 @@ fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
     };
     reconcile("pr-9");
     let first = harness.world.rev_parse("pr-9");
-    assert_eq!(show_ref(&harness, "refs/nyl/pr-9/keep"), first);
+    assert!(kept_only(&harness, "pr-9", &first), "{:?}", keep_refs(&harness, "pr-9"));
     assert_eq!(record(&harness, "pr-9")["sourceCommit"], first.as_str());
 
     harness
@@ -658,10 +701,10 @@ fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
     reconcile("pr-9");
     let second = harness.world.rev_parse("pr-9");
     assert_ne!(first, second);
-    assert_eq!(
-        show_ref(&harness, "refs/nyl/pr-9/keep"),
-        second,
-        "the ref moves with every update"
+    assert!(
+        kept_only(&harness, "pr-9", &second),
+        "the new commit is kept and the old one's ref pruned: {:?}",
+        keep_refs(&harness, "pr-9")
     );
 
     // The pull request is closed and its branch deleted: a job in a fresh
@@ -682,11 +725,75 @@ fn test_the_keep_ref_follows_the_recorded_source_until_the_state_is_deleted() {
     );
     assert_eq!(closed.exit, 0, "{}\n{}", closed.stderr, closed.stdout);
     assert!(!exists(&harness, "pr-9") && deleted(&harness, "pr-9"));
-    assert_eq!(
-        show_ref(&harness, "refs/nyl/pr-9/keep"),
-        "",
-        "state delete removes the keep ref"
+    assert!(
+        keep_refs(&harness, "pr-9").is_empty(),
+        "state delete removes the keep refs"
     );
+}
+
+/// A keep ref that does not name the commit its name says is not this
+/// instance's: `state delete` warns and leaves it, and removes the rest. Catches
+/// a delete that removes another project's refs it happens to match by name.
+#[test]
+fn test_state_delete_leaves_a_keep_ref_that_is_not_the_instances() {
+    let (_directory, harness) = world(TEMPLATE, UNITS);
+    open(&harness, 9);
+    let prefix = nyl_orchestration::rules::keep::keep_prefix(
+        "/nyl",
+        &nyl_core::orchestration::ids::EnvironmentName::new("pr-9").unwrap(),
+    );
+    let foreign = format!("{prefix}/{}", "f".repeat(40));
+    scenario::world::git(
+        &harness.world.bare(),
+        &["update-ref", &foreign, &harness.world.rev_parse("main")],
+    );
+    let closed = invoke(
+        &harness,
+        "main",
+        &["state", "delete", "-e", "pr-9", "--teardown", "-o", "json"],
+    );
+    assert_eq!(closed.exit, 0, "{}\n{}", closed.stderr, closed.stdout);
+    assert!(closed.stderr.contains("NYL-INSTANCE-KEEP-FAILED"), "{}", closed.stderr);
+    let left = keep_refs(&harness, "pr-9");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].0, foreign);
+}
+
+/// A source repository that refuses the keep ref refuses the job, with both
+/// ways out in the fix, and writes no record: the record never names a commit
+/// that is not kept. Catches a state that moves ahead of its keep ref, and a
+/// failure whose fix names one option.
+#[cfg(unix)]
+#[test]
+fn test_a_refused_keep_ref_refuses_the_job_before_the_record_is_written() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (_directory, harness) = world(TEMPLATE, UNITS);
+    let hook = harness.world.bare().join("hooks/pre-receive");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/nyl-keep/*) echo 'keep refs are not allowed' >&2; exit 1;; esac; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let refused = invoke(
+        &harness,
+        "main",
+        &["reconcile", "-e", "pr-1", "--template", "preview", "--param", "pr=1"],
+    );
+    assert_eq!(refused.exit, 1, "{}\n{}", refused.stderr, refused.stdout);
+    assert!(
+        refused.stderr.contains("NYL-INSTANCE-KEEP-FAILED"),
+        "{}",
+        refused.stderr
+    );
+    assert!(refused.stderr.contains("push access"), "{}", refused.stderr);
+    assert!(refused.stderr.contains("keepSource: false"), "{}", refused.stderr);
+    assert_eq!(
+        git_output(&harness.world.bare(), &["for-each-ref", "refs/heads/nyl/previews"]),
+        "",
+        "no state is written for a commit that is not kept"
+    );
+    assert!(!exists(&harness, "pr-1"), "nothing ran");
 }
 
 /// `keepSource: false` keeps nothing: no ref is pushed, and an instance whose
@@ -709,7 +816,7 @@ fn test_keep_source_false_pushes_no_keep_ref() {
         &["reconcile", "-e", "pr-9", "--template", "preview", "--param", "pr=9"],
     );
     assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
-    assert_eq!(show_ref(&harness, "refs/nyl/pr-9/keep"), "");
+    assert!(keep_refs(&harness, "pr-9").is_empty());
     harness.world.delete_branch("pr-9");
     let plain = invoke(&harness, "main", &["reconcile", "-e", "pr-9", "--no-extend"]);
     assert_ne!(plain.exit, 0, "{}\n{}", plain.stderr, plain.stdout);
@@ -932,4 +1039,101 @@ fn test_a_lost_source_commit_fails_only_that_instances_removal() {
     );
     assert_eq!(removed.exit, 0, "{}\n{}", removed.stderr, removed.stdout);
     assert!(!exists(&harness, "pr-9") && deleted(&harness, "pr-9"));
+}
+
+/// A removal that waits for authorization is undone by a renewal: the units
+/// are active again in the commit that renews, so the pull request job that
+/// keeps the preview updates it instead of exiting 2 behind a fenced removal,
+/// and a later fleet run with `--allow-teardown` has nothing to tear down.
+/// Catches a live preview destroyed by a removal decided before it was renewed.
+#[test]
+fn test_a_renewal_undoes_a_removal_that_waited_for_authorization() {
+    let template = TEMPLATE.replace("  allowTeardown: true\n", "");
+    let (_directory, harness) = world(&template, UNITS);
+    open(&harness, 1);
+    open(&harness, 2);
+    harness.advance(8 * DAY);
+    for instance in ["pr-1", "pr-2"] {
+        let pending = invoke(&harness, "main", &["reconcile", "-e", instance, "-o", "json"]);
+        assert_eq!(pending.exit, 2, "{}\n{}", pending.stderr, pending.stdout);
+    }
+    let state = |instance: &str| {
+        let status = invoke(&harness, "main", &["status", "-e", instance, "-o", "json"]);
+        status.report["environments"][0]["units"]["site"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(state("pr-1"), "pending-teardown");
+
+    // The pull request job renews pr-1 and updates it.
+    let job = open(&harness, 1);
+    assert_eq!(
+        job.report["environments"][0]["units"]["site"]["result"], "current",
+        "{}",
+        job.report
+    );
+    assert_eq!(state("pr-1"), "current");
+
+    // `--renew` renews pr-2, and the sweep that is allowed to tear down has nothing to remove.
+    let renewed = invoke(&harness, "main", &["reconcile", "-e", "pr-2", "--renew", "-o", "json"]);
+    assert_eq!(renewed.exit, 0, "{}\n{}", renewed.stderr, renewed.stdout);
+    let sweep = invoke(
+        &harness,
+        "main",
+        &["reconcile", "--template", "preview", "--allow-teardown", "-o", "json"],
+    );
+    assert_eq!(sweep.exit, 0, "{}\n{}", sweep.stderr, sweep.stdout);
+    for instance in ["pr-1", "pr-2"] {
+        assert!(exists(&harness, instance) && !deleted(&harness, instance), "{instance}");
+        assert_eq!(state(instance), "current");
+    }
+}
+
+/// The fleet removes an expired preview, and its pull request's next job
+/// creates it again as a new instance, under `maxInstances`; `state init
+/// --template` still needs `--fresh` for a deleted one. Catches a pull request
+/// that cannot be updated after the sweep removed its preview, and a recreation
+/// that slips past the limit.
+#[test]
+fn test_the_pull_request_job_recreates_an_instance_the_fleet_removed() {
+    let (_directory, harness) = world(&limited(1), UNITS);
+    open(&harness, 1);
+    harness.advance(8 * DAY);
+    let sweep = invoke(&harness, "main", &["reconcile", "--template", "preview", "-o", "json"]);
+    assert_eq!(sweep.exit, 0, "{}\n{}", sweep.stderr, sweep.stdout);
+    assert!(deleted(&harness, "pr-1") && !exists(&harness, "pr-1"));
+
+    let plain = init(&harness, 1, &[]);
+    assert_eq!(plain.exit, 1, "{}\n{}", plain.stderr, plain.stdout);
+    assert!(plain.stderr.contains("NYL-STATE-DELETED"), "{}", plain.stderr);
+    assert!(
+        keep_refs(&harness, "pr-1").is_empty(),
+        "a refused record leaves no keep ref behind"
+    );
+
+    // Another preview took the only slot: the recreation is a new instance and meets the limit.
+    open(&harness, 2);
+    let full = invoke(
+        &harness,
+        "main",
+        &["reconcile", "-e", "pr-1", "--template", "preview", "--param", "pr=1"],
+    );
+    assert_eq!(full.exit, 2, "{}\n{}", full.stderr, full.stdout);
+    assert!(full.stderr.contains("NYL-INSTANCE-LIMIT"), "{}", full.stderr);
+    assert!(deleted(&harness, "pr-1"));
+
+    harness.advance(8 * DAY);
+    assert_eq!(
+        invoke(&harness, "main", &["reconcile", "--template", "preview"]).exit,
+        0
+    );
+    assert!(deleted(&harness, "pr-2"));
+    let job = open(&harness, 1);
+    assert_eq!(
+        job.report["environments"][0]["units"]["site"]["result"], "executed",
+        "{}",
+        job.report
+    );
+    assert!(!deleted(&harness, "pr-1") && exists(&harness, "pr-1"));
 }

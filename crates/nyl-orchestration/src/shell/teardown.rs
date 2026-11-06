@@ -267,10 +267,7 @@ pub fn state_delete_detailed(context: &RunContext<'_>, request: &RunRequest, tea
                 location,
                 held,
                 &requested,
-                request
-                    .keep_ref
-                    .as_deref()
-                    .map(|reference| (context.sources, reference)),
+                request.keep_prefix.as_deref().map(|prefix| (context.sources, prefix)),
                 request.lifecycle.expired,
                 report,
             )
@@ -359,17 +356,6 @@ fn delete_holding(
             ),
         ));
     }
-    // The instance's source no longer matters once nothing of it remains.
-    // A keep ref that cannot be removed is no reason to keep the state.
-    if let Some((sources, reference)) = keep {
-        if let Err(error) = sources.release(reference) {
-            report.warnings.push(Finding::new(
-                Code::InstanceKeepFailed,
-                format!("cannot remove the keep ref {reference} of {environment}: {error}"),
-                format!("remove it by hand, for example with `git push origin :{reference}`"),
-            ));
-        }
-    }
     let mut record = snapshot.record.clone().expect("check_record found state.yaml");
     record.events.push(StateEvent::StateDeleted {
         at: held.lease.taken_at,
@@ -388,6 +374,20 @@ fn delete_holding(
     }
     commit(context, location, held, &snapshot, summary, changes, requested, report)?;
     report.details.insert("removed".to_owned(), json!(removed));
+    // The instance's source no longer matters once nothing of it remains, and
+    // a keep ref that cannot be removed is no reason to keep the state.
+    if let Some((sources, prefix)) = keep {
+        match sources.release(prefix, None) {
+            Ok(foreign) => report.warnings.extend(
+                foreign
+                    .iter()
+                    .map(|reference| super::state::foreign_keep_ref(reference)),
+            ),
+            Err(error) => report
+                .warnings
+                .push(super::state::keep_release_warning(prefix, &error.to_string())),
+        }
+    }
     // The leftover records: evidence refs and every signal ref; the state
     // refs and their history stay (Q14).
     for state in &coordination.evidence {
