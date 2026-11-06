@@ -371,6 +371,19 @@ fn read_environment(
     {
         sources = sources.with_kept_source(nyl_orchestration::rules::keep::keep_prefix(id));
     }
+    if let Some(reference) = resolved
+        .instance
+        .as_ref()
+        .and_then(|instance| {
+            instance
+                .source_ref
+                .clone()
+                .or_else(|| instance.record.as_ref()?.source_ref.clone())
+        })
+        .filter(|_| !request.offline)
+    {
+        sources = sources.with_source_ref(reference);
+    }
     // An instance not entered from its own checkout renders at its recorded commit.
     let recorded = resolved
         .instance

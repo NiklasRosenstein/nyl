@@ -133,6 +133,9 @@ impl Health {
 pub struct Observed {
     pub running: Running,
     pub health: Health,
+    /// The reconciler's own word for its health, such as `Suspended`. It is
+    /// shown in details and reasons and never affects a pass or a failure.
+    pub reported: Option<String>,
     /// The reconciler is removing it.
     pub deleting: bool,
     /// The source it is configured with now.

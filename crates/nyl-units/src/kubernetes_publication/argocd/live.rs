@@ -77,6 +77,11 @@ pub fn parse(application: &Value) -> Result<Observed, String> {
     Ok(Observed {
         running,
         health: health(application),
+        reported: application
+            .pointer("/status/health/status")
+            .and_then(Value::as_str)
+            .filter(|status| !status.is_empty())
+            .map(str::to_owned),
         deleting: application
             .pointer("/metadata/deletionTimestamp")
             .is_some_and(|value| !value.is_null()),

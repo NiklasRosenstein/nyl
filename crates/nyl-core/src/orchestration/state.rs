@@ -174,6 +174,13 @@ pub struct StateRecord {
     /// renders at this commit.
     #[serde(rename = "sourceCommit", default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
+    /// A hint for fetching `sourceCommit`, a full ref name of the source
+    /// repository's `origin` that carried it when the run that recorded it
+    /// passed `--source-ref` (GitHub's `refs/pull/<n>/head`, for a host that
+    /// refuses to serve a commit by its id). Only a place to look: it is never
+    /// resolved to a commit, and a run without the option keeps the value.
+    #[serde(rename = "sourceRef", default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
     /// The identity of an instance's keep refs in the source repository,
     /// `refs/nyl-keep/<keepId>/<commit>`: minted when the instance first
     /// keeps a commit, unique across projects, and surviving moves of the

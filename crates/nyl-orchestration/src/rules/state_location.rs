@@ -350,6 +350,7 @@ mod tests {
             params: BTreeMap::new(),
             expires_at: None,
             source_commit: None,
+            source_ref: None,
             keep_id: None,
             location: location.clone(),
             events: Vec::new(),
@@ -388,6 +389,7 @@ mod tests {
             params: BTreeMap::new(),
             expires_at: None,
             source_commit: None,
+            source_ref: None,
             keep_id: None,
             location: location.clone(),
             events: vec![StateEvent::StateDeleted {

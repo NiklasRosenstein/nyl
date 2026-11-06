@@ -20,7 +20,7 @@ use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
 use crate::orchestration::instances::Removal;
-use crate::orchestration::project::{parse_params, InstanceRequest};
+use crate::orchestration::project::{parse_params, parse_source_ref, InstanceRequest};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
 use nyl_render::gitops::discover_gitops_inventory;
@@ -135,6 +135,14 @@ pub enum StateCommand {
         /// YAML (repeatable); needs --template.
         #[arg(long = "param")]
         params: Vec<String>,
+        /// With --template, record this full ref name of `origin`
+        /// (`refs/pull/123/head`) next to the instance's source commit, for a
+        /// host that will not serve a commit by its id: a later run that lacks
+        /// the commit fetches the ref by name and looks for the recorded commit
+        /// in it. Only a hint, checked by syntax; a run without it keeps the
+        /// recorded one.
+        #[arg(long, requires = "template")]
+        source_ref: Option<String>,
         /// With --template, when the template is at maxInstances, remove
         /// expired instances first (oldest expiry first, only as many as
         /// needed), then create the instance.
@@ -259,6 +267,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             fresh,
             template,
             params,
+            source_ref,
             make_room,
             allow_teardown,
             allow_incomplete,
@@ -267,7 +276,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             wiring,
             *fresh,
             template.as_ref(),
-            params,
+            (params, source_ref.as_deref()),
             (*make_room, *allow_teardown, *allow_incomplete),
         ),
         StateCommand::Forget { common, unit } => {
@@ -352,7 +361,7 @@ fn run_init(
     wiring: &Wiring<'_>,
     fresh: bool,
     template: Option<&String>,
-    params: &[String],
+    (params, source_ref): (&[String], Option<&str>),
     (make_room, allow_teardown, allow_incomplete): (bool, bool, bool),
 ) -> Result<CommandOutcome> {
     let requested = requested(common, wiring);
@@ -360,6 +369,16 @@ fn run_init(
         template: template.cloned(),
         params: match parse_params(params) {
             Ok(params) => params,
+            Err(finding) => {
+                return Ok(render(
+                    &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
+                        .refused(finding),
+                    common.output,
+                ))
+            }
+        },
+        source_ref: match parse_source_ref(source_ref) {
+            Ok(source_ref) => source_ref,
             Err(finding) => {
                 return Ok(render(
                     &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
@@ -440,6 +459,7 @@ fn run_init(
                         template: &instance.template,
                         params: &instance.params,
                         source_commit: &source_commit,
+                        source_ref: instance.source_ref.as_deref(),
                         ttl: instance.terms.ttl,
                         keep: ctx.session.keeps_source().then_some(&sources as &dyn SourceResolver),
                     },
@@ -1046,6 +1066,7 @@ pub(crate) fn create_or_update_instance(
             template: &instance.template,
             params: &instance.params,
             source_commit: &source_commit,
+            source_ref: instance.source_ref.as_deref(),
             ttl: instance.terms.ttl,
             keep: session.keeps_source().then_some(&sources as &dyn SourceResolver),
         },

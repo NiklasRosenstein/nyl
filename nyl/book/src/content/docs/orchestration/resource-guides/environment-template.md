@@ -138,7 +138,8 @@ jobs:
       # …install Nyl and log in to the tools the units use
       - run: >
           nyl reconcile -e "pr-${{ github.event.number }}" --template preview
-          --param "pr=${{ github.event.number }}" --wait-lease 10m
+          --param "pr=${{ github.event.number }}"
+          --source-ref "refs/pull/${{ github.event.number }}/head" --wait-lease 10m
 ```
 
 ```yaml
@@ -188,6 +189,21 @@ authenticates as the project's `[[git.credentials]]` say (`token_env =
 `cancel-in-progress: false` and the shared group matter: a closed job that
 overlapped a preview job could remove an instance the other job is still
 creating.
+
+**`--source-ref` is for hosts that refuse to serve a commit by its id.** The
+preview job above passes `--source-ref refs/pull/<n>/head`, which records that
+ref in the instance's `state.yaml` next to the commit. The closed job's checkout
+of the default branch lacks the recorded commit, so it tries, in order, the
+retained worktree snapshots, the instance's keep ref, the commit by its id from
+`origin`, and last the recorded ref by name; it then looks for the **recorded
+commit** in what the fetch brought, never at the ref's tip, so a pull request
+head that moved on, or a ref the host has dropped, leaves the commit missing
+(`NYL-SOURCE-UNAVAILABLE`, as without the flag). It is a flag on the job, not a
+field of the template, so the template stays the same for a local `nyl reconcile
+--template` run, which just omits it; a run without the flag keeps the ref CI
+recorded. The ref is only checked for being a full name under `refs/` (see
+[`nyl state init`](/nyl/reference/cli/state/#nyl-state-init)), and GitLab's is
+`refs/merge-requests/<n>/head`.
 
 The closed job is the recommended teardown; it needs no keep refs and no
 extra permissions. The fleet job fetches the same way, so on GitHub and GitLab

@@ -266,6 +266,7 @@ fn test_api_server_reader_asks_argocd_whether_the_token_may_get_an_application()
 fn expected(role: DeploymentRole, namespace: &str, name: &str, path: &str) -> ExpectedDeployment {
     ExpectedDeployment {
         id: format!("{namespace}/{name}"),
+        display: String::new(),
         role,
         path: path.to_owned(),
         release: None,
@@ -362,6 +363,18 @@ fn test_kube_api_reader_reads_into_the_neutral_reading_and_anchors_itself() {
         expected(DeploymentRole::Workload, "argocd", "web", "dev/web/web"),
         expected(DeploymentRole::Workload, "argocd", "gone", "dev/gone"),
     ];
+    let anchored = reader
+        .read(&ReadRequest {
+            deployments: &deployments,
+            anchors: &[catalog_anchor()],
+            concluding_absence: false,
+        })
+        .unwrap();
+    assert_eq!(anchored.proof, Proof::Anchors);
+    assert_eq!(anchored.deployments["argocd/web"].health, Health::Degraded);
+    assert_eq!(anchored.absent["argocd/gone"], Visibility::Visible);
+    assert_eq!(anchored.anchors["argocd/dev-catalog"], Visibility::Visible);
+    // An anchor that is not visible comes first: nothing more is asked.
     let reading = reader
         .read(&ReadRequest {
             deployments: &deployments,
@@ -375,9 +388,11 @@ fn test_kube_api_reader_reads_into_the_neutral_reading_and_anchors_itself() {
             concluding_absence: false,
         })
         .unwrap();
-    assert_eq!(reading.proof, Proof::Anchors);
-    assert_eq!(reading.deployments["argocd/web"].health, Health::Degraded);
-    assert_eq!(reading.absent["argocd/gone"], Visibility::Visible);
+    assert!(
+        matches!(&reading.absent["argocd/gone"], Visibility::Hidden(reason) if reason.starts_with("not asked")),
+        "{:?}",
+        reading.absent
+    );
     assert_eq!(reading.anchors["argocd/dev-catalog"], Visibility::Visible);
     assert!(
         matches!(&reading.anchors["project/missing"], Visibility::Hidden(reason) if reason.contains("AppProject missing is not visible in namespace argocd")),

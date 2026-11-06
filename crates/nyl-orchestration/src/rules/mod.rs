@@ -20,6 +20,7 @@ pub mod observed_values;
 pub mod recovery;
 pub mod references;
 pub mod selection;
+pub mod source_ref;
 pub mod sources;
 pub mod state_location;
 pub mod takeover;

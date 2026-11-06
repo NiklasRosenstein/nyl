@@ -20,7 +20,7 @@ use nyl_state::git::CommitAuthor;
 
 use crate::cli::commands::state::{create_or_update_instance, InstanceWrite};
 use crate::orchestration::instances::{remove_expired, Removal};
-use crate::orchestration::project::{parse_params, InstanceRequest};
+use crate::orchestration::project::{parse_params, parse_source_ref, InstanceRequest};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
 use nyl_render::Result;
@@ -55,6 +55,14 @@ pub struct ReconcileArgs {
     /// (repeatable); needs --template and -e.
     #[arg(long = "param")]
     pub params: Vec<String>,
+
+    /// With --template and -e, record this full ref name of `origin`
+    /// (`refs/pull/123/head`) next to the instance's source commit, for a host
+    /// that will not serve a commit by its id: a later run that lacks the
+    /// commit fetches the ref by name and looks for the recorded commit in it.
+    /// Only a hint, checked by syntax; a run without it keeps the recorded one.
+    #[arg(long, requires = "template")]
+    pub source_ref: Option<String>,
 
     /// Keep an expired instance: extend its expiry and reconcile it instead
     /// of removing it.
@@ -164,6 +172,7 @@ fn instance_request(args: &ReconcileArgs) -> std::result::Result<InstanceRequest
     Ok(InstanceRequest {
         template: args.template.clone(),
         params: parse_params(&args.params)?,
+        source_ref: parse_source_ref(args.source_ref.as_deref())?,
         offline: args.local,
     })
 }
@@ -218,6 +227,9 @@ fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
         };
         if !args.params.is_empty() {
             return refuse(invalid("--param"));
+        }
+        if args.source_ref.is_some() {
+            return refuse(invalid("--source-ref"));
         }
         if args.make_room {
             return refuse(invalid("--make-room"));

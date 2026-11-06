@@ -265,7 +265,9 @@ The attestations' details name the reconciler that was read (`reconciler`)
 and list each Application (`deployments`) with its `id` (its name, qualified by
 its namespace outside the instance's), role (`catalog` or `workload`),
 directory, `state`, `health` (`Healthy`, `Progressing`, `Degraded`, or
-`Unknown`, which covers anything else Argo CD reports and is never healthy),
+`Unknown`, which covers anything else Argo CD reports and is never healthy;
+Argo CD's own word, such as `Suspended`, is kept in `reported` and shown in
+the reason, as in `web is Unknown (Suspended)`, and never affects a result),
 the revision it runs (`running`), and the publication commit that introduced
 what runs (`publication`), and, for one that fell short, why. The states are `accepted`,
 `other-publication`, `unmatched`, `not-on-branch`, `mixed`, `never-synced`,

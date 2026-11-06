@@ -99,6 +99,9 @@ pub struct Finding {
     pub state: State,
     /// The health reported, `None` for a deployment the reading lacks.
     pub health: Option<Health>,
+    /// The reconciler's own word for its health, when it is not the name of
+    /// `health` (such as `Suspended` for `Unknown`). Shown, never judged.
+    pub reported: Option<String>,
     /// The revision the reconciler reports, even when it matched no publication.
     pub revision: Option<String>,
     /// The matched publication, when there is one.
@@ -157,6 +160,10 @@ pub enum Conclusion {
 ///
 /// - the reader reports nothing it can prove about the target
 ///   ([`Reading::unprovable`]);
+///
+/// The first two apply only to a target with a workload deployment, which
+/// is the one that concludes anything from an absence.
+///
 /// - an anchor is not visible (or not reported), when the reader's proof is
 ///   [`Proof::Anchors`] or the caller [concludes from absence](Conclusion::Absence):
 ///   a credential or context for another reconciler, whose list is an empty
@@ -171,10 +178,16 @@ pub fn ensure_provable<'a>(
     reading: &Reading,
     conclusion: Conclusion,
 ) -> Result<(), ReadError> {
-    if let Some(reason) = &reading.unprovable {
-        return Err(ReadError::new(ReadErrorKind::Declaration, reason.clone()));
+    // A target with no workload deployment has nothing to conclude from an
+    // absence, so it needs no anchor and an unprovable reader is no obstacle:
+    // a reader never has to mirror this rule.
+    let anchored = expected.workload().next().is_some();
+    if anchored {
+        if let Some(reason) = &reading.unprovable {
+            return Err(ReadError::new(ReadErrorKind::Declaration, reason.clone()));
+        }
     }
-    if conclusion == Conclusion::Absence || reading.proof == Proof::Anchors {
+    if anchored && (conclusion == Conclusion::Absence || reading.proof == Proof::Anchors) {
         for anchor in &expected.anchors {
             match reading.anchors.get(&anchor.id) {
                 Some(Visibility::Visible) => {}
@@ -236,6 +249,7 @@ pub fn evaluate(
                 deployment: deployment.clone(),
                 state: State::NotOnBranch,
                 health: None,
+                reported: None,
                 revision: None,
                 publication: None,
                 truncated: false,
@@ -279,6 +293,7 @@ fn judge(
         deployment: deployment.clone(),
         state: State::Missing,
         health: None,
+        reported: None,
         revision: None,
         publication: None,
         truncated: false,
@@ -314,7 +329,7 @@ fn judge(
             } else {
                 finding.state = State::OtherPublication;
                 finding.reason = Some(format!(
-                    "it runs another publication ({}), not this receipt's {commit}: sync it",
+                    "it runs another publication ({}), not this receipt's {commit}: have the reconciler apply the current publication",
                     finding.publication.as_deref().unwrap_or_default()
                 ));
             }
@@ -364,6 +379,10 @@ fn running_revision(finding: &mut Finding, observed: Option<&Observed>) -> Optio
         );
     };
     finding.health = Some(observed.health);
+    finding.reported = observed
+        .reported
+        .clone()
+        .filter(|reported| reported != observed.health.name());
     if observed.deleting {
         return fall_short(finding, State::Deleting, "the reconciler is deleting it".to_owned());
     }
@@ -375,14 +394,14 @@ fn running_revision(finding: &mut Finding, observed: Option<&Observed>) -> Optio
         return fall_short(
             finding,
             State::OtherSource,
-            format!("its source differs from the one Nyl generated ({difference}): sync the catalog to restore it"),
+            format!("its source differs from the one Nyl generated ({difference}): restore the generated source by applying the catalog again"),
         );
     }
     match &observed.running {
         Running::None => fall_short(
             finding,
             State::NeverSynced,
-            "no full sync has completed, so it runs nothing yet: sync it".to_owned(),
+            "nothing has been fully applied yet, so it runs nothing: have the reconciler apply it".to_owned(),
         ),
         Running::Mixed { last, reason } => {
             finding.revision.clone_from(last);
@@ -399,8 +418,8 @@ fn running_revision(finding: &mut Finding, observed: Option<&Observed>) -> Optio
                     finding,
                     State::OtherSource,
                     format!(
-                        "its last sync took a source that differs from the one Nyl generated ({difference}): sync the \
-                         catalog and the deployment"
+                        "its last sync took a source that differs from the one Nyl generated ({difference}): restore the \
+                         generated source by applying the catalog, then have the reconciler apply the deployment again"
                     ),
                 ),
                 None => Some(revision.clone()),
@@ -436,9 +455,14 @@ impl Evaluation {
             .filter(|finding| finding.state == State::Accepted && !finding.is_healthy())
             .map(|finding| {
                 format!(
-                    "{} is {}",
+                    "{} is {}{}",
                     finding.deployment.id,
-                    finding.health.map_or("not reporting health", Health::name)
+                    finding.health.map_or("not reporting health", Health::name),
+                    finding
+                        .reported
+                        .as_ref()
+                        .map(|reported| format!(" ({reported})"))
+                        .unwrap_or_default()
                 )
             })
             .collect::<Vec<_>>();
@@ -495,6 +519,9 @@ impl Evaluation {
                     "health": finding.health.map(Health::name),
                 });
                 let object = entry.as_object_mut().expect("an object");
+                if let Some(reported) = &finding.reported {
+                    object.insert("reported".to_owned(), json!(reported));
+                }
                 if let Some(release) = &finding.deployment.release {
                     object.insert("release".to_owned(), json!(release));
                 }
@@ -624,6 +651,7 @@ mod tests {
     fn deployment(role: DeploymentRole, id: &str, path: &str) -> ExpectedDeployment {
         ExpectedDeployment {
             id: id.to_owned(),
+            display: String::new(),
             role,
             path: path.to_owned(),
             release: (role == DeploymentRole::Workload).then(|| format!("{id}/{id}")),
@@ -655,6 +683,7 @@ mod tests {
         Observed {
             running: Running::Exact(revision.to_owned()),
             health,
+            reported: None,
             deleting: false,
             source: Some(generated_source(path)),
             synced_source: Some(generated_source(path)),
@@ -1094,5 +1123,50 @@ mod tests {
         );
         let unanchored = workload(only_catalog, |reader| reader.anchors_visible = false).unwrap_err();
         assert_eq!(unanchored.message, "dev-catalog cannot be seen");
+    }
+
+    /// Catches the reconciler's own health word being lost or judged: a
+    /// health that is `Unknown` because the reconciler said `Suspended` shows
+    /// that word in the reason and the details, a word that only repeats the
+    /// health is not shown twice, and neither changes a pass or a failure.
+    #[test]
+    fn test_the_reported_health_word_is_shown_and_never_judged() {
+        let mut state = running("p2", "p1", "p2");
+        state.get_mut("web").unwrap().health = Health::Unknown;
+        state.get_mut("web").unwrap().reported = Some("Suspended".to_owned());
+        state.get_mut("api").unwrap().reported = Some("Healthy".to_owned());
+        let evaluation = judged("p2", &state);
+        let outcomes = evaluation.outcomes(&summary());
+        assert_eq!(
+            outcomes[1].reason.as_deref(),
+            Some("1 of 3 deployments are not Healthy: web is Unknown (Suspended)")
+        );
+        let details = &outcomes[0].details["deployments"];
+        assert_eq!(details[2]["reported"], "Suspended");
+        assert!(details[1].get("reported").is_none(), "{}", details[1]);
+        // A reconciler word that reads like health changes nothing.
+        let mut lying = running("p2", "p1", "p2");
+        lying.get_mut("web").unwrap().health = Health::Unknown;
+        lying.get_mut("web").unwrap().reported = Some("Healthy".to_owned());
+        assert!(!judged("p2", &lying).healthy());
+    }
+
+    /// Catches a target without a workload deployment needing anchors it
+    /// cannot have, or a reader having to mirror that rule: with only a
+    /// catalog, a hidden anchor and a reader that proves nothing are no
+    /// obstacle to an attestation or to a removal that finds nothing left.
+    #[test]
+    fn test_a_target_without_workload_needs_no_anchor() {
+        let mut expected = expected();
+        expected
+            .deployments
+            .retain(|deployment| deployment.role == DeploymentRole::Catalog);
+        let mut reader = TestReader::new(running("p2", "p1", "p2"));
+        reader.proof = Proof::Anchors;
+        reader.anchors_visible = false;
+        reader.unprovable = Some("nothing anchors this target".to_owned());
+        let reading = read(&reader, &expected, true);
+        assert!(evaluate(&expected, "p2", &reading, &branch()).unwrap().accepted());
+        assert!(removal(&expected, &reading).unwrap().is_empty());
     }
 }
