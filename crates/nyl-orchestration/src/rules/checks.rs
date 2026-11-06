@@ -388,7 +388,7 @@ pub fn warnings(
             Check::Observe => Finding::new(
                 codes.1,
                 format!("{unit} declares no observed values its kind can read"),
-                "declare `observations` on a unit whose kind reads observed values, such as a KubernetesPublication in `mode: observe`",
+                "declare `observations` on a unit whose kind reads observed values for its spec",
             ),
         }),
         CheckResult::Unknown { reason } => warnings.push(Finding::new(

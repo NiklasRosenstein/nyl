@@ -718,7 +718,7 @@ impl UnitError {
                 format!(
                     "unit {name} ({source_path}) declares observations, but kind {kind} reads no observed values for its spec"
                 ),
-                "remove `observations`, or use a kind that reads observed values, such as a KubernetesPublication in `mode: observe`",
+                "remove `observations`, or use a kind that reads observed values for its spec",
             ),
         }
     }
