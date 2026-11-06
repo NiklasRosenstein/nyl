@@ -2116,7 +2116,7 @@ spec:
         assert!(!prepared.is_unchanged());
         // Another writer moves the head before it pushes.
         commit_unowned(&url, "deploy", "elsewhere/state.json", "{}\n");
-        let error = prepared.push().err().expect("the push loses the compare-and-swap");
+        let error = prepared.push().expect_err("the push loses the compare-and-swap");
         assert!(error.is_stale_publication(), "{error}");
 
         let unrelated = NylError::config("cannot read the tree");

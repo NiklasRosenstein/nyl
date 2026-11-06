@@ -347,6 +347,96 @@ mod tests {
         assert_ne!(one, two);
     }
 
+    fn moved() -> nyl_render::NylError {
+        nyl_render::NylError::PublicationMoved("the branch advanced".to_owned())
+    }
+
+    /// Catches a publication that lost the race for a shared branch being
+    /// reported as failed (or worse, uncertain): the loser builds again on
+    /// the new head and publishes.
+    #[test]
+    fn test_a_publication_that_lost_the_branch_head_is_built_again() {
+        let prepares = std::cell::Cell::new(0);
+        let pushes = std::cell::Cell::new(0);
+        let published = with_retries(
+            "the publication",
+            "publish the tree",
+            || {
+                prepares.set(prepares.get() + 1);
+                if prepares.get() == 1 {
+                    Err(moved())
+                } else {
+                    Ok(prepares.get())
+                }
+            },
+            |prepared| {
+                pushes.set(pushes.get() + 1);
+                if pushes.get() == 1 {
+                    Err(moved())
+                } else {
+                    Ok(prepared)
+                }
+            },
+        )
+        .unwrap();
+        // The first build lost at its check, the second at its push, and the third published.
+        assert_eq!((published, prepares.get(), pushes.get()), (3, 3, 2));
+    }
+
+    /// Catches a branch that never stops moving ending as an uncertain
+    /// effect: nothing was pushed, so the failure is before effects.
+    #[test]
+    fn test_a_publication_that_keeps_losing_the_branch_head_fails_before_effects() {
+        let attempts = std::cell::Cell::new(0);
+        let error = with_retries(
+            "the publication",
+            "publish the tree",
+            || Ok(()),
+            |()| -> nyl_render::Result<()> {
+                attempts.set(attempts.get() + 1);
+                Err(moved())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts.get(), PUBLISH_ATTEMPTS);
+        assert!(!error.effects_possible(), "{error}");
+        assert!(error.to_string().contains("cannot publish the tree"), "{error}");
+    }
+
+    /// Catches an ordinary failure being retried or classified wrongly: a
+    /// failure to prepare changed nothing, and a failed push may have published.
+    #[test]
+    fn test_other_failures_end_the_call_with_their_effects() {
+        let attempts = std::cell::Cell::new(0);
+        let prepare_error = with_retries(
+            "the publication",
+            "publish the tree",
+            || -> nyl_render::Result<()> {
+                attempts.set(attempts.get() + 1);
+                Err(nyl_render::NylError::config("an owned file was modified outside Nyl"))
+            },
+            Ok,
+        )
+        .unwrap_err();
+        assert_eq!(attempts.get(), 1);
+        assert!(!prepare_error.effects_possible());
+        assert!(prepare_error.to_string().contains("cannot prepare the publication"));
+
+        let attempts = std::cell::Cell::new(0);
+        let push_error = with_retries(
+            "the publication",
+            "publish the tree",
+            || Ok(()),
+            |()| -> nyl_render::Result<()> {
+                attempts.set(attempts.get() + 1);
+                Err(nyl_render::NylError::config("the remote hung up"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts.get(), 1);
+        assert!(push_error.effects_possible());
+    }
+
     /// Catches the render reading its pinned inputs from anywhere but the
     /// resolved `releases`, the pointer `/releases/<group>~1<release>/<input>`
     /// that bindings resolve into.
