@@ -294,6 +294,27 @@ system writes nothing for 15 minutes; after that it rewrites the attestation wit
 its new time, so a system a CI job re-verifies stays within `maxAttestationAge`
 while one that cannot be reached goes stale.
 
+Other units can wait for the attestations. A smoke test that should run only
+against healthy workloads depends on `healthy`; it stays
+[blocked](/nyl/orchestration/runs/#requiring-attestations) on the publication
+until a `nyl attest` has recorded `healthy` for the publication's current
+receipt, and runs in the next `reconcile` without executing the publication
+again:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: smoke
+spec:
+  command: [./smoke.sh]
+  dependsOn: [{unit: kubernetes, attestations: [healthy]}]
+```
+
+`evidence: attested` instead of `attestations` requires both `accepted` and
+`healthy`. A unit in `mode: publish` declares no attestations, so requiring one
+of it is `NYL-ATTESTATION-UNDECLARED`.
+
 `nyl attest --target` for a target no environment owns arrives with promotion
 (M6), as does `nyl attest --name … --result …`.
 
