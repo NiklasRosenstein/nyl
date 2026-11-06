@@ -36,6 +36,7 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
 | `nyl-units` | The built-in unit kinds, one module each holding the kind's declaration, validation, schema descriptor, and `Driver` implementation; the driver registry and the process runner with masking; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown waits and warnings, expiry | Everything except `nyl-core` and `nyl-collections` |
+| `nyl-e2e` | The cluster end-to-end suite: kind, a registry, a Git server, and a reconciler, driving the real `nyl` binary as a subprocess ([reference scenarios](reference-scenarios.md#tiers)). Never a dependency of the product | Every other Nyl crate |
 | `nyl-cli` | Argument parsing, output formats, exit categories, the assembled resource catalogue, and wiring the concrete implementations into orchestration | Business rules |
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
