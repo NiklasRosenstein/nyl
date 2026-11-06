@@ -276,6 +276,7 @@ impl Harness {
                 environment_errors: BTreeMap::new(),
                 planned: BTreeMap::new(),
                 environments: BTreeMap::new(),
+                instances: BTreeSet::new(),
                 approvals: Default::default(),
                 environment: dev(),
                 entry,

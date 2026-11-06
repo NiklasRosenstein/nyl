@@ -76,10 +76,12 @@ impl Arguments {
                     shared_catalog = true;
                     continue;
                 }
-                _ => return Err(DriverError::before_effects(format!(
+                _ => {
+                    return Err(DriverError::before_effects(format!(
                     "{ARGUMENT}: the publication driver accepts --diff, --push, or --shared-catalog after `--`, not {}",
                     arg.to_string_lossy()
-                ))),
+                )))
+                }
             };
             if mode.is_some_and(|mode| mode != next) {
                 return Err(DriverError::before_effects(format!(

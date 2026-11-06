@@ -142,6 +142,8 @@ pub fn select(
                 .filter_map(|name| EnvironmentName::new(name).ok())
                 .chain(removing.iter().cloned())
                 .collect(),
+            &nyl_render::gitops::instances::instance_only_names(&inventory)
+                .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
         )?
     } else {
         order(&graph)?
