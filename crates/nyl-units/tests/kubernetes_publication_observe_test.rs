@@ -556,7 +556,11 @@ fn test_attest_that_cannot_read_argocd_is_unknown_with_the_fix() {
         drop(stub);
         let reason = unknown(observed.attest(&driver, &unit, &tree));
         match method {
-            Method::Kubernetes => assert!(reason.contains("cannot list Applications through context"), "{reason}"),
+            // A closed port is refused at once on Unix and times out on Windows.
+            Method::Kubernetes => assert!(
+                reason.contains("cannot list") && reason.contains("through context"),
+                "{reason}"
+            ),
             Method::Api => assert!(
                 reason.contains("cannot read Argo CD at") && reason.contains("spec.access.api.server"),
                 "{reason}"
