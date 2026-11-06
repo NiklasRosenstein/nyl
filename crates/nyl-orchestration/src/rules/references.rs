@@ -219,7 +219,7 @@ pub fn resolve_reference(
             .expect("the static declaration check found the observation");
         match observed_values::standing(
             desired,
-            &receipt.execution_key,
+            receipt,
             declaration,
             wanted,
             view.observations.get(name),
@@ -1415,7 +1415,7 @@ mod tests {
             "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord",
             "unit": {"environment": "dev", "name": "kubernetes", "uid": uid("kubernetes"),
                      "apiVersion": "units.gitops.nyl/v1", "kind": "Command"},
-            "executionKey": key("kubernetes"), "at": "2026-09-24T09:50:00Z",
+            "executionKey": key("kubernetes"), "run": RUN_1, "at": "2026-09-24T09:50:00Z",
             "values": values
         }))
         .unwrap();

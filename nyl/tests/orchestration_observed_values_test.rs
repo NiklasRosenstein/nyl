@@ -62,6 +62,9 @@ fn failed(name: &'static str, reason: &str) -> (&'static str, ObservedValue) {
 /// the time of each read and each execution.
 #[derive(Default)]
 struct Probe {
+    /// The clock a read advances by `read_takes`, when a test gives one.
+    clock: Option<Arc<nyl_orchestration::testing::FakeClock>>,
+    read_takes: Mutex<std::time::Duration>,
     reads: Mutex<BTreeMap<String, VecDeque<Read>>>,
     observed_at: Mutex<Vec<(String, Timestamp)>>,
     executed_at: Mutex<Vec<(String, Timestamp)>>,
@@ -173,6 +176,10 @@ impl Driver for Observing {
     ) -> DriverResult<Supported<ObservedValues>> {
         let name = unit.unit.name.to_string();
         self.probe.observed_at.lock().unwrap().push((name.clone(), ctx.now));
+        if let Some(clock) = &self.probe.clock {
+            let takes = *self.probe.read_takes.lock().unwrap();
+            clock.set(clock.now() + chrono::Duration::from_std(takes).unwrap());
+        }
         let read = self
             .probe
             .reads
@@ -274,7 +281,10 @@ spec:
             ("nyl/units.yaml", &units),
         ]);
         let mut shell = shell::Harness::new(project.path(), true);
-        let probe = Arc::new(Probe::default());
+        let probe = Arc::new(Probe {
+            clock: Some(shell.clock.clone()),
+            ..Probe::default()
+        });
         shell.drivers.register(Arc::new(Observing {
             inner: CommandDriver,
             probe: probe.clone(),
@@ -994,4 +1004,109 @@ fn test_a_new_receipt_starts_with_its_values_pending() {
         "{record}"
     );
     assert_eq!(harness.get().exit, 1);
+}
+
+/// A re-execution with the same key is a new receipt: the values read for the
+/// receipt it replaced are dropped, so a failed read cannot keep one alive.
+/// Catches a record matched by key alone surviving a forced re-execution.
+#[test]
+fn test_a_reexecution_with_the_same_key_starts_with_its_values_pending() {
+    let harness = Harness::new("", "");
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
+    );
+    assert_eq!(harness.reconcile().exit, 0);
+    assert_eq!(harness.get().stdout, "203.0.113.10\n");
+    let receipt_before = harness.shell.show(OBSERVED, "observed/units/lb.yaml");
+    harness.probe.script("lb", [Read::Error]);
+    let again = harness.shell.invoke(&[
+        "reconcile",
+        "-e",
+        "dev",
+        "--unit",
+        "lb",
+        "--reapply",
+        "--reason",
+        "again",
+        "--approve",
+        "lb",
+        "-o",
+        "json",
+    ]);
+    assert_eq!(unit(&again.report, "lb")["result"], "executed", "{}", again.stderr);
+    assert_ne!(
+        harness.shell.show(OBSERVED, "observed/units/lb.yaml"),
+        receipt_before,
+        "a new receipt"
+    );
+    assert_eq!(harness.get().exit, 1, "the old value belonged to the replaced receipt");
+}
+
+/// A value of the wrong type is reported as failed by `nyl observe`, as the
+/// record has it, not as a value with exit 0.
+#[test]
+fn test_observe_reports_a_wrong_type_as_failed() {
+    let harness = Harness::new("", "");
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
+    );
+    assert_eq!(harness.reconcile().exit, 0);
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![value("ip", json!(42)), value("port", json!(443))])],
+    );
+    let observed = observe_json(&harness.shell, &[]);
+    assert_eq!(observed.exit, 2, "{}", observed.stderr);
+    assert_eq!(
+        unit(&observed.report, "lb")["observations"]["ip"]["observation"],
+        "failed"
+    );
+    assert!(
+        observed.stderr.contains("NYL-OBSERVATION-FAILED"),
+        "{}",
+        observed.stderr
+    );
+    assert_eq!(harness.get().stdout, "203.0.113.10\n");
+}
+
+/// The last read of an `observationWait` is made when the wait is up, also
+/// when the clock does not land on it: with a clock that moves by a fraction
+/// of a second per wait, a value that arrives in the last window is read.
+#[test]
+fn test_the_last_read_of_the_wait_happens_with_a_sub_second_clock() {
+    let harness = Harness::new("  observationWait: 20s\n", "");
+    // Pending until the wait is nearly up: the last read finds the value.
+    harness.probe.script(
+        "lb",
+        (0..2).map(|_| Read::Values(vec![pending("ip", "no address"), pending("port", "no port")])),
+    );
+    harness.probe.script(
+        "lb",
+        [Read::Values(vec![
+            value("ip", json!("203.0.113.10")),
+            value("port", json!(443)),
+        ])],
+    );
+    // Every read takes 0.4 s, so the clock never lands on the wait's end:
+    // polls start at 0, 15.4, and 20.8 s, the last after the end at 20 s.
+    *harness.probe.read_takes.lock().unwrap() = std::time::Duration::from_millis(400);
+    let start = harness.shell.clock.now();
+    let run = harness.reconcile();
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert_eq!(unit(&run.report, "dns")["result"], "executed");
+    let polls = harness
+        .probe
+        .observations("lb")
+        .into_iter()
+        .map(|at| (at - start).num_milliseconds())
+        .collect::<Vec<_>>();
+    assert_eq!(polls, [0, 15_400, 20_800]);
 }

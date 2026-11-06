@@ -193,10 +193,15 @@ means belongs to the kind: its driver validates it and Nyl never reads it. A
 kind that reads no observed values rejects `observations`
 (`NYL-OBSERVATIONS-UNSUPPORTED`), and an observation is never sensitive.
 
+Observed values are committed in plain text to the state repository, where
+everyone who can read it can read them: observe only non-secret fields. A kind
+may reject some sources (a publication never reads Secrets or a whole
+resource), but cannot tell what a ConfigMap or a custom resource holds.
+
 An observed value is an observation of the producer's *current receipt*, never
 part of it. It is recorded in the observed state
 (`observed/units/<unit>/observations.yaml`), and the commit that records a new
-receipt removes the previous receipt's values, so a value read from what ran
+receipt, a re-execution with the same key included, removes the previous receipt's values, so a value read from what ran
 before never satisfies a reference.
 
 - **When Nyl reads.** `reconcile` reads every unit with a current receipt that
@@ -223,7 +228,10 @@ before never satisfies a reference.
   again like for any changed input, under its own
   [`approval`](#approvals), while the producer does not execute. `nyl status`
   and `nyl plan` show such a consumer as `ready`, and `nyl observe` names it
-  with `NYL-OBSERVATION-CHANGED`.
+  with `NYL-OBSERVATION-CHANGED`. They find consumers of the same environment
+  from its stored documents: a consumer in another environment (a reference with
+  `environment`) is not named, and stays `current` in its own `status` until its
+  next `reconcile` resolves the producer environment's recorded value and runs it.
 - **What is written.** The record changes only when a value arrives, changes,
   or becomes pending again, or when the last successful read is older than an
   hour (half the `maxAge` when that is shorter), so an unchanged read writes

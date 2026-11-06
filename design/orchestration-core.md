@@ -744,7 +744,9 @@ spec:
     it renders the target to resolve the unit, and rejects one outside the
     rendered tree with its own code, `NYL-KUBERNETES-OBSERVATION-UNOWNED`, so
     the cluster is the target's Cluster and nothing outside the declaration
-    is read. It rejects Secrets. A manifest without `metadata.namespace`
+    is read. It rejects Secrets and the whole-resource pointer (`pointer: ""`), but a
+    ConfigMap or a custom resource can still hold sensitive data, which the
+    declaration author must not observe. A manifest without `metadata.namespace`
     belongs to the namespace its Application deploys to. Resolution records,
     in the resolved spec, the Application that owns each observed resource
     (`observationSources`, part of the execution key) and the target's
@@ -1467,7 +1469,7 @@ files cover every version, and a reader rejects a version it does not know.
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
 | `DriftRecord` | `observed/units/<unit>/drift.yaml` | `unit`, `executionKey`, `at`, `result` (`clean`, `drifted` with a summary, or `unknown` with a reason), driver-specific `details` (see [Drift](#drift)) |
-| `ObservationRecord` | `observed/units/<unit>/observations.yaml` | `unit`, `executionKey`, `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
+| `ObservationRecord` | `observed/units/<unit>/observations.yaml` | `unit`, `executionKey`, `run` (that produced the receipt), `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
 | `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml` | The latest attestation per name of one scope; see [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
 | `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
@@ -1740,7 +1742,9 @@ spec:
   its schema and validates it, and Nyl never reads it. A name may not also be
   a declared output. Observed values are
   never sensitive: a declaration with `sensitive` is rejected, because a value
-  that cannot be recorded cannot be referenced. A kind whose driver lacks the
+  that cannot be recorded cannot be referenced. Observed values are committed in
+  plain text to the state repository, so a unit observes only non-secret
+  fields; a driver rejects the sources it can tell are sensitive. A kind whose driver lacks the
   `observed_values` capability rejects `observations` with
   `NYL-OBSERVATIONS-UNSUPPORTED`.
 - **Reading.** The driver's `observe` reads each declared observation for the
@@ -1749,8 +1753,9 @@ spec:
   `failed` with a reason (it could not read, such as missing credentials).
   The driver decides when a value belongs to the current receipt; the engine
   checks it against the declared type and never interprets the reason.
-- **Lifetime.** A recorded value belongs to the receipt whose execution key it
-  names. A new receipt starts with every observation `pending` and removes the
+- **Lifetime.** A recorded value belongs to the receipt whose execution key and
+  run it names. A new receipt, a re-execution with the same key included,
+  starts with every observation `pending` and removes the
   previous receipt's values in the same commit, as for a drift record, so
   a value read from what ran before can never satisfy a reference.
 - **When Nyl observes.** `reconcile` observes every selected unit with a
@@ -1781,12 +1786,16 @@ spec:
   names them with `NYL-OBSERVATION-CHANGED`, whose fix is the next
   `nyl reconcile`. A consumer that blocked on a `pending` value that now has
   one is `ready` the same way ("arrived"); both are found from the stored
-  desired documents, without rendering. That reconcile executes them, under
+  desired documents, without rendering. They name consumers of the
+  same environment only: a consumer that reads another environment's value
+  through `environment` is not named by `observe` or `status` of the producer
+  or of its own environment, and runs when its own next `reconcile` resolves
+  the producer environment's recorded value. That reconcile executes them, under
   their own `approval`, as for any changed input.
 - **Waiting.** After the run executes a unit, a `pending` observation is
   polled under the run's lease until it has a value or `observationWait` has
   passed since the execution finished, within the unit's `timeout`; the run
-  checks about every 15 seconds, with a last check when the wait is up, and
+  checks about every 15 seconds, with a last check that starts at or after the end of the wait, and
   computes the end from the injected clock. The run waits only when no
   other unit is ready, so units that do not depend on the observation are not
   held back. With the

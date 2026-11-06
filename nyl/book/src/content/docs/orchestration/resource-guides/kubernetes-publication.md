@@ -329,7 +329,10 @@ spec:
 
 `from.resource` names the resource as the Kubernetes API does (`namespace` only
 for a namespaced kind), and `pointer` is a [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901)
-into it. A unit in `mode: publish` that declares `observations` is rejected
+to one field of it; an empty pointer, which would select the whole resource, is
+rejected. Observed values are committed in plain text to the state repository,
+so observe only non-secret fields: Secrets are rejected, but a ConfigMap or a
+custom resource can hold sensitive data too. A unit in `mode: publish` that declares `observations` is rejected
 (`NYL-OBSERVATIONS-UNSUPPORTED`): reading is a use of Argo CD and cluster
 credentials that publishing alone does not need.
 

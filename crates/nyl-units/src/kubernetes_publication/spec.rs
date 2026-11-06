@@ -161,6 +161,11 @@ pub(super) fn observation_sources(
             _ => return Err(format!("{field}.pointer is required: a JSON Pointer into the resource, such as /status/loadBalancer/ingress/0/ip")),
         };
         nyl_core::json_pointer::validate(&format!("{field}.pointer"), &pointer).map_err(|error| error.to_string())?;
+        if pointer.is_empty() {
+            return Err(format!(
+                "{field}.pointer selects the whole resource, which an observation never reads: observed values are committed in plain text to the state repository, so select one non-secret field, such as /status/loadBalancer/ingress/0/ip"
+            ));
+        }
         sources.insert(name.clone(), ObservationSource { resource, pointer });
     }
     Ok(sources)
@@ -312,6 +317,10 @@ mod tests {
             (json!({"pointer": "/a"}), "resource is required"),
             (json!({"resource": service}), "pointer is required"),
             (json!({"resource": service, "pointer": "a"}), "JSON Pointer"),
+            (
+                json!({"resource": service, "pointer": ""}),
+                "selects the whole resource",
+            ),
             (
                 json!({"resource": service, "pointer": "/a", "other": 1}),
                 "unknown field \"other\"",
