@@ -657,6 +657,34 @@ fn test_local_reads_do_not_reach_the_remote_to_find_an_instance() {
     }
 }
 
+/// `nyl render` is a direct command: it renders what the working tree
+/// declares and reads no orchestration state, so a project that declares an
+/// EnvironmentTemplate whose state repository cannot be reached still renders,
+/// without a listing of the template's instances or a warning about one.
+/// (`status` over the same project warns and `--local` reads fail with
+/// NYL-STATE-UNAVAILABLE.) Catches a direct command that grew a dependency on
+/// instance state, which would make rendering depend on the network.
+#[test]
+fn test_render_offline_reads_no_state_of_the_templates_it_declares() {
+    const RELEASE: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web, namespace: web}\n";
+    let remote = TEMPLATE.replace(
+        "    repositoryRef: {name: platform}\n",
+        "    repository: {repoURL: 'https://example.invalid/nyl/state.git'}\n",
+    );
+    let (_directory, harness) = world(&[("nyl/preview.yaml", &remote), ("nyl/release.yaml", RELEASE)]);
+    let clone = harness.world.fresh_clone("main");
+    let home = clone.with_extension("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let output = scenario::nyl_binary(&clone, &home, &["render", "--offline", "nyl/release.yaml"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("kind: ConfigMap"));
+    assert!(!stderr.contains("EnvironmentTemplate"), "{stderr}");
+    assert!(!stderr.contains("NYL-STATE"), "{stderr}");
+}
+
 /// A template whose state cannot be listed leaves its instances unknown, so
 /// anything that needs every environment's state fails closed instead of
 /// checking without them: a teardown of dev refuses and names the template,
