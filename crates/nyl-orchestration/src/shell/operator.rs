@@ -187,12 +187,14 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                     .renderer
                     .render(&worktree, &request.environment, revision)
                     .map_err(|error| invalid(error.to_string()))?;
-                super::sources::validate_local_inputs(context.sources, driver, spec, revision).map_err(invalid)?;
+                super::sources::validate_local_inputs(context.sources, driver, spec, revision, None)
+                    .map_err(invalid)?;
                 let roots = super::sources::prepare_source_roots(
                     context.sources,
                     driver,
                     spec,
                     revision,
+                    None,
                     &rendered.project_dir,
                     &directory.join("contexts"),
                     Some((&worktree, revision)),

@@ -1140,7 +1140,7 @@ impl<'r, 'a> Session<'r, 'a> {
         )
         .map_err(invalid)?;
         let commit = effective_commit(spec, &fields, source_commit).map_err(invalid)?;
-        crate::shell::sources::validate_local_inputs(self.context.sources, driver, spec, source_commit)
+        crate::shell::sources::validate_local_inputs(self.context.sources, driver, spec, source_commit, None)
             .map_err(invalid)?;
 
         let cached = self
@@ -1158,6 +1158,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 driver,
                 spec,
                 source_commit,
+                None,
                 project_dir,
                 &self.directory.join(format!("key-sources-{name}")),
                 Some((&worktree, &commit)),
@@ -1925,17 +1926,21 @@ fn plan_unit(
     let temp_dir = directory.join("tmp");
     // Planning is sequential, so it always uses the first slot.
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-    let (worktree, source_roots) =
-        match session
-            .slots
-            .checkout_unit(context.sources, 0, commit, driver, spec, project_dir)
-        {
-            Ok(roots) => roots,
-            Err(message) => {
-                entry.plan_error = Some(message);
-                return;
-            }
-        };
+    let (worktree, source_roots) = match session.slots.checkout_unit(
+        context.sources,
+        0,
+        commit,
+        unit.source_revision.as_ref(),
+        driver,
+        spec,
+        project_dir,
+    ) {
+        Ok(roots) => roots,
+        Err(message) => {
+            entry.plan_error = Some(message);
+            return;
+        }
+    };
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;

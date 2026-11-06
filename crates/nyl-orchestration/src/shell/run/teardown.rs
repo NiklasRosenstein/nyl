@@ -1173,6 +1173,7 @@ fn run_jobs(
 }
 
 /// One driver teardown call.
+#[allow(clippy::too_many_lines)] // Checkout, credentials, the driver call, and its progress, in order.
 fn call(
     context: &RunContext<'_>,
     slots: &Slots,
@@ -1211,6 +1212,7 @@ fn call(
                 context.sources,
                 job.slot,
                 &job.commit,
+                job.unit.source_revision.as_ref(),
                 driver,
                 job.unit.resolved_spec.as_ref().unwrap_or(&job.unit.spec),
                 project_dir,
