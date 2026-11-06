@@ -1,0 +1,47 @@
+# Scenario 3's tier-1 variant "not teardown-ready": the Namespaces keep the
+# default deletePolicy Confirm, which holds a preview's Applications until
+# someone confirms in Argo CD, so an expired preview cannot be removed
+# unattended. The built-in driver records the target's teardown settings when
+# the unit resolves, which waits for the outputs it reads, so its warning
+# comes with the first reconcile or plan, not at `state init`. It runs with the
+# real KubernetesPublication driver only: the fake publication states its
+# settings in its declaration, which this shared project does not do.
+contract: design/reference-scenarios.md#scenario-3-preview-expiry
+milestone: M5
+tiers: [1]
+project: ../preview/project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+  - commit: {branch: main, message: "Keep the default Namespace deletePolicy", apply: patches/confirm}
+  - nyl: [state, init, -e, pr-1, --template, preview, --param, pr=1]
+    exit: 0
+
+  # The warning needs a resolved unit: an explicit reconcile, then a plan.
+  - nyl: [reconcile, -e, pr-1]
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+      codes: [NYL-TEARDOWN-NAMESPACE-CONFIRM]
+  - nyl: [plan, -e, pr-1]
+    exit: 0
+    expect:
+      codes: [NYL-TEARDOWN-NAMESPACE-CONFIRM]
+
+  # The scheduled job finds pr-1 expired: its teardown does not start.
+  - clock: {advance: 8d}
+  - nyl: [reconcile, --template, preview]
+    exit: 2
+    expect:
+      codes: [NYL-TEARDOWN-INCOMPLETE]
+      deploy: {branch: previews, contains: ['pr-1/web/**']}
+  - {nyl: [get, environments, pr-1], exit: 0}
+
+  # Until a run passes --allow-incomplete.
+  - nyl: [reconcile, --template, preview, --allow-incomplete]
+    exit: 0
+    expect:
+      deploy: {branch: previews, absent: ['pr-1/**']}
+  - {nyl: [get, environments, pr-1], exit: 1}
