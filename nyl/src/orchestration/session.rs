@@ -63,6 +63,8 @@ pub struct Session {
     /// Whether the command was entered from the instance's own source: it
     /// named `--template`, so the entry checkout is the instance's source.
     entered: bool,
+    /// `--local`: no network access, so no keep refs are fetched or moved.
+    offline: bool,
     /// Where every known instance keeps its state, the session's own included.
     instance_locations: BTreeMap<EnvironmentName, StateLocation>,
     /// Instances whose location cannot be computed, and templates whose
@@ -152,6 +154,7 @@ impl Session {
             inventory,
             resolved,
             entered: request.template.is_some(),
+            offline: request.offline,
             instance_locations,
             instance_errors,
         })
@@ -226,20 +229,23 @@ impl Session {
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
             .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root());
         // An instance's recorded source commit stays fetchable through its keep ref.
-        if let Some(keep_ref) = self.keep_ref() {
-            sources = sources.with_kept_source(keep_ref);
+        if let Some(prefix) = self.keep_prefix() {
+            sources = sources.with_kept_source(prefix);
         }
         Ok(sources)
     }
 
-    /// The keep ref of the instance this session works on: `None` for a
-    /// declared environment. Contract: [Instances](../../../design/orchestration-core.md#instances), `keepSource`.
-    pub fn keep_ref(&self) -> Option<String> {
-        self.resolved.instance.as_ref()?;
-        Some(nyl_orchestration::rules::keep::keep_ref(
-            &self.resolved.location.coordination_ref_prefix,
-            &self.resolved.name,
-        ))
+    /// The prefix of the keep refs of the instance this session works on:
+    /// `None` for a declared environment, a template with `keepSource: false`,
+    /// and a run without network access. Contract:
+    /// [Instances](../../../design/orchestration-core.md#instances), `keepSource`.
+    pub fn keep_prefix(&self) -> Option<String> {
+        self.resolved
+            .instance
+            .as_ref()
+            .filter(|instance| instance.terms.keep_source)?;
+        (!self.offline)
+            .then(|| nyl_orchestration::rules::keep::keep_prefix(&self.entry_project_dir(), &self.resolved.name))
     }
 
     /// Wire explicit working-file capture through the shared source shell.
@@ -448,7 +454,7 @@ impl Session {
             reapply: options.reapply,
             fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
-            keep_ref: self.keep_ref(),
+            keep_prefix: self.keep_prefix(),
         })
     }
 }

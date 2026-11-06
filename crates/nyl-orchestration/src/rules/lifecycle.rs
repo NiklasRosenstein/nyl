@@ -19,6 +19,10 @@ pub enum Event {
     },
     /// The unit is in the ownership set again, with the same name and kind.
     Returned,
+    /// The unit's instance was renewed: an `expired` deletion whose teardown
+    /// has not started is undone. One that has started continues, because
+    /// effects exist that only the teardown ends.
+    Renewed,
     /// `nyl teardown --unit` (`teardown` outside the ownership set, `replace`
     /// inside it) or `teardown --all` and `state delete --teardown`
     /// (`decommission`).
@@ -47,6 +51,7 @@ impl Event {
         match self {
             Self::Left { .. } => "left",
             Self::Returned => "returned",
+            Self::Renewed => "renewed",
             Self::TeardownRequested { .. } => "teardown-requested",
             Self::TeardownStarted => "teardown-started",
             Self::TornDown { .. } => "torn-down",
@@ -96,6 +101,12 @@ pub fn state_name(lifecycle: &Lifecycle) -> &'static str {
         Lifecycle::Held { .. } => "held",
         Lifecycle::Retained { .. } => "retained",
     }
+}
+
+/// Whether a renewal undoes `deletion`: the instance's expiry caused it and
+/// its teardown has not started.
+fn undone_by_renewal(deletion: &Deletion) -> bool {
+    deletion.reason == DeletionReason::Expired && deletion.teardown != Some(TeardownProgress::InProgress)
 }
 
 /// The end of a teardown or release: the files go, or, with a hold to apply
@@ -162,6 +173,25 @@ pub fn transition(current: &Lifecycle, event: Event) -> Result<Next, Refusal> {
         }
         (Lifecycle::Retained { .. }, Event::Returned) => Next::Lifecycle(Lifecycle::Active),
         (Lifecycle::Active | Lifecycle::Held { .. }, Event::Returned) => Next::Unchanged,
+
+        // Renewing an instance.
+        (Lifecycle::Deleting { deletion }, Event::Renewed) if undone_by_renewal(deletion) => {
+            Next::Lifecycle(Lifecycle::Active)
+        }
+        (
+            Lifecycle::Held {
+                hold,
+                deletion: Some(deletion),
+            },
+            Event::Renewed,
+        ) if undone_by_renewal(deletion) => Next::Lifecycle(Lifecycle::Held {
+            hold: hold.clone(),
+            deletion: None,
+        }),
+        (
+            Lifecycle::Active | Lifecycle::Deleting { .. } | Lifecycle::Held { .. } | Lifecycle::Retained { .. },
+            Event::Renewed,
+        ) => Next::Unchanged,
 
         // Retention and release.
         (Lifecycle::Active, Event::Retain { tombstone }) => Next::Lifecycle(Lifecycle::Retained { tombstone }),
@@ -445,6 +475,51 @@ mod tests {
         assert_eq!(deletion.teardown, Some(TeardownProgress::Pending));
     }
 
+    /// A renewed instance: an expired deletion that has not started is undone,
+    /// in a held unit too, and one that started, or any other reason, is not.
+    /// Catches a renewal that leaves a live preview's units fenced and
+    /// pending, or one that abandons a teardown halfway.
+    #[test]
+    fn test_renewal_undoes_only_an_expired_teardown_that_has_not_started() {
+        let pending = pending_teardown(DeletionReason::Expired);
+        assert_eq!(
+            transition(&pending, Event::Renewed),
+            Ok(Next::Lifecycle(Lifecycle::Active))
+        );
+        let started = deleting(
+            DeletionReason::Expired,
+            DeletionIntent::Teardown,
+            Some(TeardownProgress::InProgress),
+        );
+        assert_eq!(transition(&started, Event::Renewed), Ok(Next::Unchanged));
+        for reason in [
+            DeletionReason::Omission,
+            DeletionReason::Replace,
+            DeletionReason::Decommission,
+        ] {
+            assert_eq!(
+                transition(&pending_teardown(reason), Event::Renewed),
+                Ok(Next::Unchanged),
+                "{reason:?}"
+            );
+        }
+        let Lifecycle::Deleting { deletion } = pending else {
+            panic!("pending teardown is deleting");
+        };
+        let held = Lifecycle::Held {
+            hold: hold(),
+            deletion: Some(deletion),
+        };
+        assert_eq!(
+            transition(&held, Event::Renewed),
+            Ok(Next::Lifecycle(Lifecycle::Held {
+                hold: hold(),
+                deletion: None
+            }))
+        );
+        assert_eq!(transition(&Lifecycle::Active, Event::Renewed), Ok(Next::Unchanged));
+    }
+
     /// Omission: a unit restored before its teardown starts is active
     /// again; a started teardown or an explicit request is not undone by
     /// source.
@@ -525,6 +600,7 @@ mod tests {
             DeletionReason::Teardown,
             DeletionReason::Replace,
             DeletionReason::KindChange,
+            DeletionReason::Expired,
             DeletionReason::Decommission,
         ]);
         let intent = proptest::sample::select(vec![DeletionIntent::Retain, DeletionIntent::Teardown]);
@@ -532,6 +608,7 @@ mod tests {
         prop_oneof![
             (reason.clone(), intent).prop_map(|(reason, intent)| Event::Left { reason, intent }),
             Just(Event::Returned),
+            Just(Event::Renewed),
             reason.prop_map(requested),
             Just(Event::TeardownStarted),
             held.clone().prop_map(|hold| Event::TornDown { hold }),

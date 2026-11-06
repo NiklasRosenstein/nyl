@@ -371,8 +371,16 @@ impl Driver for KubernetesPublicationDriver {
         teardown_wait(spec)
     }
 
-    /// The workload deployments the reconciler still reports, for the
-    /// `observe` teardown wait.
+    /// A `manual` `teardownWait` stops an unattended removal after phase 1.
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<nyl_core::orchestration::codes::Finding> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        super::readiness::unattended_wait(&unit.unit.environment, &unit.unit.name, teardown_wait(spec))
+            .into_iter()
+            .collect()
+    }
+
+    /// The workload Applications Argo CD still reports, for the `observe`
+    /// teardown wait.
     fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
         Ok(Supported::Supported(observe::observe_removal(ctx, unit)))
     }
@@ -395,13 +403,11 @@ impl Driver for KubernetesPublicationDriver {
             Some(settings) => {
                 let settings: TeardownSettings = serde_json::from_value(settings.clone())
                     .map_err(|error| DriverError::before_effects(format!("spec.teardownSettings: {error}")))?;
-                let mut readiness = evaluate(&unit.unit.environment, &unit.unit.name, &settings);
-                readiness.unattended.extend(super::readiness::unattended_wait(
+                Ok(Supported::Supported(evaluate(
                     &unit.unit.environment,
                     &unit.unit.name,
-                    teardown_wait(spec),
-                ));
-                Ok(Supported::Supported(readiness))
+                    &settings,
+                )))
             }
         }
     }

@@ -296,9 +296,10 @@ pub struct RunRequest {
     /// `--reason` of an operator action (`--reapply`, `teardown`, `recover`),
     /// recorded as `Nyl-Reason` next to `Nyl-Requested-By`.
     pub reason: Option<String>,
-    /// The keep ref of an instance's source commit, which `state delete`
-    /// removes with the instance's state.
-    pub keep_ref: Option<String>,
+    /// The prefix of the keep refs of an instance's source commits, which
+    /// `state delete` removes with the instance's state; `None` for a
+    /// declared environment and when `keepSource` is off.
+    pub keep_prefix: Option<String>,
 }
 
 impl RunRequest {

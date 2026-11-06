@@ -341,10 +341,15 @@ fn read_environment(
     }
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
     let mut sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
-    // An instance's recorded commit stays fetchable through its keep ref.
-    if resolved.instance.is_some() {
-        sources = sources.with_kept_source(nyl_orchestration::rules::keep::keep_ref(
-            &resolved.location.coordination_ref_prefix,
+    // An instance's recorded commit stays fetchable through its keep refs.
+    if resolved
+        .instance
+        .as_ref()
+        .is_some_and(|instance| instance.terms.keep_source)
+        && !request.offline
+    {
+        sources = sources.with_kept_source(nyl_orchestration::rules::keep::keep_prefix(
+            &super::session::project_dir(inventory),
             &resolved.name,
         ));
     }

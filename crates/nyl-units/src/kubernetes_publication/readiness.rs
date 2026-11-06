@@ -21,10 +21,6 @@ use nyl_core::orchestration::driver::TeardownReadiness;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_render::gitops::publication::TeardownSettings;
 
-/// Evaluate a unit's teardown settings against the contract's readiness
-/// table. Each finding names the unit and the setting that fixes it; a
-/// setting Nyl cannot see (`None`) is listed in `not_checked` and never
-/// blocks.
 /// What a removal nobody attends would wait for: a `manual` `teardownWait`
 /// stops it after phase 1 until an operator confirms the removal, so a
 /// template whose instances expire unattended wants `observe` or `delay`.
@@ -44,6 +40,10 @@ pub fn unattended_wait(
     })
 }
 
+/// Evaluate a unit's teardown settings against the contract's readiness
+/// table. Each finding names the unit and the setting that fixes it; a
+/// setting Nyl cannot see (`None`) is listed in `not_checked` and never
+/// blocks.
 pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &TeardownSettings) -> TeardownReadiness {
     let mut readiness = TeardownReadiness::default();
     let subject = format!("{environment}/{unit}");

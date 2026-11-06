@@ -264,13 +264,11 @@ impl Driver for FakePublication {
             None => Ok(Supported::Unsupported),
             Some(settings) => Self::recorded_settings(settings)
                 .map(|settings| {
-                    let mut readiness = evaluate_teardown_readiness(&unit.unit.environment, &unit.unit.name, &settings);
-                    readiness.unattended.extend(unattended_wait(
+                    Supported::Supported(evaluate_teardown_readiness(
                         &unit.unit.environment,
                         &unit.unit.name,
-                        teardown_wait(spec),
-                    ));
-                    Supported::Supported(readiness)
+                        &settings,
+                    ))
                 })
                 .map_err(DriverError::before_effects),
         }
@@ -278,6 +276,13 @@ impl Driver for FakePublication {
 
     fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
         teardown_wait(spec)
+    }
+
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<nyl_core::orchestration::codes::Finding> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        unattended_wait(&unit.unit.environment, &unit.unit.name, teardown_wait(spec))
+            .into_iter()
+            .collect()
     }
 
     /// What the scenario scripted the fake Argo CD to report for the unit's
