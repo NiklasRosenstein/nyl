@@ -231,6 +231,15 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     };
     nyl_render::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
     print_partial_summary(&compiled.publication_report);
+    if let Some(shared) = &compiled.shared_catalog {
+        // The manifest is published by a KubernetesPublication unit, which has a build for it.
+        tracing::warn!(
+            target = target_name,
+            catalog = shared.name,
+            "The target shares catalog {}, whose manifest publish-tree does not publish; a KubernetesPublication unit of the target publishes it (nyl build <unit> -- --shared-catalog --push)",
+            shared.name
+        );
+    }
     publish_compiled(
         &args,
         publication_inventory,

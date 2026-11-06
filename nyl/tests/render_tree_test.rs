@@ -7307,8 +7307,10 @@ fn index_format_roundtrips_versioned_golden_and_reads_the_ownerless_and_legacy_e
     assert!(read(&legacy, "index-v2.json").is_err());
 
     // A shared catalog's tree names the string `catalog:<name>` as its owner.
-    let catalog: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/partial-publication/index-v3-shared-catalog.json")).unwrap();
+    let catalog: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/partial-publication/index-v3-shared-catalog.json"
+    ))
+    .unwrap();
     let index = read(&catalog, "index-v3-shared-catalog.json").unwrap();
     assert_eq!(
         index.owner,

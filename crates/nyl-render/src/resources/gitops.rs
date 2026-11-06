@@ -431,7 +431,7 @@ pub struct CatalogApplicationOverrides {
     pub enabled: bool,
     /// Sync this target's catalog directory through a catalog Application shared by many targets, such as every preview on a branch. Nyl renders that Application once, under `_nyl/shared/<name>/`, and the target generates no catalog Application of its own. The other `catalogApplication` fields then belong in this block, because they describe the shared Application.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shared: Option<SharedCatalogApplication>,
+    pub shared: Option<Box<SharedCatalogApplication>>,
     /// Catalog Application name. Defaults to the target name; names must be unique within the Argo CD instance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

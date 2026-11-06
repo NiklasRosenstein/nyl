@@ -2863,7 +2863,14 @@ spec:
         let worktree = inline_project(&url);
         let first = render_inline(worktree.path(), &shared_inline("pr-1", pruning_shared()), None).unwrap();
         let second = render_inline(worktree.path(), &shared_inline("pr-2", pruning_shared()), None).unwrap();
-        assert_eq!(first.shared_catalog, second.shared_catalog);
+        let tree = |rendered: &RenderedTarget| {
+            let shared = rendered
+                .shared_catalog
+                .as_deref()
+                .expect("the target names a shared catalog");
+            (shared.destination.clone(), shared.files.clone())
+        };
+        assert_eq!(tree(&first), tree(&second));
         assert_ne!(first.files, second.files);
     }
 

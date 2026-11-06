@@ -179,10 +179,24 @@ impl SharedCatalogManifest {
     }
 }
 
+/// A target that takes part in the checks across targets.
+struct Member<'a> {
+    target: &'a DeploymentTarget,
+    /// The publication repository and branch, as the checks compare them.
+    repository: (String, String),
+    shared: Option<&'a SharedCatalogApplication>,
+}
+
+fn conflict(message: String) -> NylError {
+    NylError::config(format!("{SHARED_CATALOG_CONFLICT_CODE}: {message}"))
+}
+
 /// The rules that span targets, checked wherever targets are validated
 /// together. Each failure carries [`SHARED_CATALOG_CONFLICT_CODE`] and names
 /// the targets and the fix.
 ///
+/// - No target's prefix is, contains, or lies beneath the reserved prefix
+///   `_nyl/shared`.
 /// - Targets that name one shared catalog publish to one repository and
 ///   revision, and describe it identically, because one manifest is rendered
 ///   for all of them.
@@ -190,14 +204,7 @@ impl SharedCatalogManifest {
 ///   than targets sharing it: its include pattern would sync the catalog
 ///   directory of a target that does not share it, or shares another one, and
 ///   give that target's Applications two owners.
-/// - No target's prefix is, contains, or lies beneath the reserved prefix
-///   `_nyl/shared`.
 pub fn validate_shared_catalogs(inventory: &GitOpsInventory) -> Result<()> {
-    struct Member<'a> {
-        target: &'a DeploymentTarget,
-        repository: (String, String),
-        shared: Option<&'a SharedCatalogApplication>,
-    }
     let mut members = Vec::new();
     for discovered in inventory.resources.values() {
         let Some(GitOpsResource::DeploymentTarget(target)) = discovered.resource.as_ref() else {
@@ -210,91 +217,87 @@ pub fn validate_shared_catalogs(inventory: &GitOpsInventory) -> Result<()> {
                 crate::git::normalize_git_url_for_equality(&repository.repo_url),
                 normalize_branch_revision(&target.spec.publication.revision).to_owned(),
             ),
-            shared: target.spec.catalog_application.shared.as_ref(),
+            shared: target.spec.catalog_application.shared.as_deref(),
         });
     }
-    let conflict =
-        |message: String| -> NylError { NylError::config(format!("{SHARED_CATALOG_CONFLICT_CODE}: {message}")) };
-    for member in &members {
+    check_reserved_prefix(&members)?;
+    check_catalog_descriptions(&members)?;
+    check_revisions(&members)
+}
+
+/// No target publishes into the reserved prefix of shared catalogs, and a
+/// target that shares one has a prefix beside the others.
+fn check_reserved_prefix(members: &[Member<'_>]) -> Result<()> {
+    let reserved = Path::new(SHARED_ROOT);
+    for member in members {
         let prefix = member.target.publication_path_prefix();
-        if let Some(shared) = member.shared {
-            if member.target.publication_path_prefix().is_empty() {
-                return Err(conflict(format!(
-                    "DeploymentTarget {:?} shares catalog {:?} and publishes to the repository root; give it a pathPrefix beside the other targets",
-                    member.target.metadata.name, shared.name
-                )));
-            }
+        if let Some(shared) = member.shared.filter(|_| prefix.is_empty()) {
+            return Err(conflict(format!(
+                "DeploymentTarget {:?} shares catalog {:?} and publishes to the repository root; give it a pathPrefix beside the other targets",
+                member.target.metadata.name, shared.name
+            )));
         }
-        let reserved = Path::new(SHARED_ROOT);
         let own = Path::new(prefix);
-        if own.starts_with(reserved) || reserved.starts_with(own) && !prefix.is_empty() {
+        if own.starts_with(reserved) || (!prefix.is_empty() && reserved.starts_with(own)) {
             return Err(conflict(format!(
                 "DeploymentTarget {:?} publishes to {prefix:?}, which overlaps the reserved prefix {SHARED_ROOT}/ of shared catalogs; choose another pathPrefix",
                 member.target.metadata.name
             )));
         }
     }
-    let mut catalogs: BTreeMap<(&(String, String), &str), &Member<'_>> = BTreeMap::new();
-    let mut carried: BTreeMap<&(String, String), Vec<&Member<'_>>> = BTreeMap::new();
-    for member in &members {
+    Ok(())
+}
+
+/// Targets that name one catalog describe it identically, on one revision.
+fn check_catalog_descriptions(members: &[Member<'_>]) -> Result<()> {
+    let mut first: BTreeMap<&str, &Member<'_>> = BTreeMap::new();
+    for member in members {
+        let Some(shared) = member.shared else { continue };
+        let Some(first) = first.get(shared.name.as_str()) else {
+            first.insert(shared.name.as_str(), member);
+            continue;
+        };
+        if first.repository != member.repository {
+            // Another branch is another catalog in Git but the same Application in Argo CD.
+            return Err(conflict(format!(
+                "DeploymentTargets {:?} and {:?} name the shared catalog {:?} on different repositories or revisions; targets sharing a catalog publish to one revision, and a catalog name is one Argo CD Application",
+                first.target.metadata.name, member.target.metadata.name, shared.name
+            )));
+        }
+        if first.shared != member.shared {
+            return Err(conflict(format!(
+                "DeploymentTargets {:?} and {:?} share catalog {:?} but describe it differently; one manifest is rendered for every target that shares it, so declare the same shared block, or give them different catalogs",
+                first.target.metadata.name, member.target.metadata.name, shared.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A revision that carries a shared catalog carries one, and only targets that share it.
+fn check_revisions(members: &[Member<'_>]) -> Result<()> {
+    let mut carried: BTreeMap<&(String, String), std::collections::BTreeSet<&str>> = BTreeMap::new();
+    for member in members {
         if let Some(shared) = member.shared {
-            carried.entry(&member.repository).or_default().push(member);
-            if let Some(first) = catalogs.get(&(&member.repository, shared.name.as_str())) {
-                if first.shared != member.shared {
-                    return Err(conflict(format!(
-                        "DeploymentTargets {:?} and {:?} share catalog {:?} but describe it differently; one manifest is rendered for every target that shares it, so declare the same shared block, or give them different catalogs",
-                        first.target.metadata.name, member.target.metadata.name, shared.name
-                    )));
-                }
-            } else {
-                catalogs.insert((&member.repository, shared.name.as_str()), member);
-            }
+            carried.entry(&member.repository).or_default().insert(&shared.name);
         }
     }
-    // The same catalog name on another repository revision is another catalog
-    // in Git but the same Application in Argo CD, so the name must be unique.
-    let mut by_name: BTreeMap<&str, &Member<'_>> = BTreeMap::new();
-    for ((repository, name), member) in &catalogs {
-        match by_name.get(name) {
-            Some(first) if &&first.repository != repository => {
-                return Err(conflict(format!(
-                    "DeploymentTargets {:?} and {:?} name the shared catalog {name:?} on different repositories or revisions; targets sharing a catalog publish to one revision, and a catalog name is one Argo CD Application",
-                    first.target.metadata.name, member.target.metadata.name
-                )));
-            }
-            Some(_) => {}
-            None => {
-                by_name.insert(name, member);
-            }
+    for member in members {
+        let Some(names) = carried.get(&member.repository) else {
+            continue;
+        };
+        let listed = names.iter().copied().collect::<Vec<_>>().join(", ");
+        if member.shared.is_none() {
+            return Err(conflict(format!(
+                "DeploymentTarget {:?} publishes to {}@{}, a revision that carries the shared catalog {listed}, but does not share it; the catalog's include pattern would sync its catalog directory too and give its Applications two owners. Share the catalog, or publish to another branch",
+                member.target.metadata.name, member.repository.0, member.target.spec.publication.revision
+            )));
         }
-    }
-    for (repository, carrying) in &carried {
-        let names = carrying
-            .iter()
-            .filter_map(|member| member.shared.map(|shared| shared.name.as_str()))
-            .collect::<std::collections::BTreeSet<_>>();
-        for member in members.iter().filter(|member| &&member.repository == repository) {
-            let own = member.shared.map(|shared| shared.name.as_str());
-            if names.len() > 1 || own.is_none() {
-                let (name, _) = carrying
-                    .first()
-                    .map(|first| (first.shared.expect("a carrier shares").name.as_str(), first))
-                    .expect("a revision carries a catalog");
-                let message = if own.is_none() {
-                    format!(
-                        "DeploymentTarget {:?} publishes to {}@{}, a revision that carries the shared catalog {name:?}, but does not share it; the catalog's include pattern would sync its catalog directory too and give its Applications two owners. Share the catalog, or publish to another branch",
-                        member.target.metadata.name, member.target.spec.publication.revision, repository.0
-                    )
-                } else {
-                    format!(
-                        "the revision {}@{} carries several shared catalogs ({}); each syncs every target's catalog directory, which would give the Applications two owners. Share one catalog per branch",
-                        repository.0,
-                        repository.1,
-                        names.iter().copied().collect::<Vec<_>>().join(", ")
-                    )
-                };
-                return Err(conflict(message));
-            }
+        if names.len() > 1 {
+            return Err(conflict(format!(
+                "the revision {}@{} carries several shared catalogs ({listed}); each syncs every target's catalog directory, which would give the Applications two owners. Share one catalog per branch",
+                member.repository.0, member.repository.1
+            )));
         }
     }
     Ok(())

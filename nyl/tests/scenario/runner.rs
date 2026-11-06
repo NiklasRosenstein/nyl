@@ -1082,9 +1082,13 @@ pub fn invoke_in(
     if !directory.is_empty() {
         path.push(directory);
     }
+    // The project path goes before `--`, so arguments a unit driver takes
+    // after it (`nyl build <unit> -- --diff`) stay the driver's own.
+    let split = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
     let argv = std::iter::once("nyl".to_owned())
-        .chain(args.iter().cloned())
-        .chain(std::iter::once(path.display().to_string()));
+        .chain(args[..split].iter().cloned())
+        .chain(std::iter::once(path.display().to_string()))
+        .chain(args[split..].iter().cloned());
     let cli = Cli::try_parse_from(argv).map_err(|error| format!("nyl {}: {error}", args.join(" ")))?;
     cli.execute_in_process(wiring)
         .map_err(|error| format!("nyl {}: {error}", args.join(" ")))

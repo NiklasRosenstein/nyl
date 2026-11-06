@@ -48,8 +48,8 @@ use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, Artifac
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
-    prepare_target_publication_fenced, prepare_target_removal_fenced, render_target, without_workload_applications,
-    PublicationAuthor, RenderedTarget, TargetRender,
+    prepare_target_publication_fenced, prepare_target_removal_fenced, render_target, shared_catalog_state,
+    without_workload_applications, PublicationAuthor, RenderedTarget, SharedCatalogState, TargetRender,
 };
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::gitops::units::PublicationTarget;
@@ -562,7 +562,7 @@ fn ensure_shared_catalog(
     shared: &RenderedTarget,
 ) -> DriverResult<std::result::Result<SharedCatalogResult, Outcome>> {
     let variable = |name: &str| ctx.env.get(name).cloned();
-    let state = match nyl_render::gitops::publication::shared_catalog_state(shared, &ctx.project_dir, &variable) {
+    let state = match shared_catalog_state(shared, &ctx.project_dir, &variable) {
         Ok(state) => state,
         Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
         Err(error) => {
@@ -572,7 +572,6 @@ fn ensure_shared_catalog(
             )))
         }
     };
-    use nyl_render::gitops::publication::SharedCatalogState;
     match state {
         SharedCatalogState::Current => return Ok(Ok(SharedCatalogResult::Current)),
         SharedCatalogState::Differs(_) => return Ok(Ok(SharedCatalogResult::Differs)),

@@ -319,7 +319,6 @@ fn test_an_instance_is_never_a_producer() {
             .replace("scope: preview", "scope: dev")
             .replace("'{{ values.peer }}'", "pr-1")
             .replace("unit: network", "unit: site")
-            .replace("output: id", "output: id")
     );
     let harness = Harness::new(&from_dev);
     harness.preview("1", &[]);

@@ -51,6 +51,16 @@ steps:
   - {nyl: [get, environments, pr-123], exit: 0}
   - {nyl: [get, environments, pr-124], exit: 0}
 
+  # The shared catalog's one writer, the build of an instance's unit: the
+  # manifest the instances created is the one it renders, so pushing it
+  # changes nothing.
+  - nyl: [build, kubernetes, -e, pr-124, --, --shared-catalog, --diff]
+    exit: 0
+  - nyl: [build, kubernetes, -e, pr-124, --, --shared-catalog, --push]
+    exit: 0
+    expect:
+      deploy: {branch: previews, unchanged: ['_nyl/shared/previews/**', 'pr-123/**', 'pr-124/**']}
+
   # Scenario 3, step 1: activity extends pr-123 to T+10d; pr-124 keeps T+7d.
   - clock: {advance: 3d}
   - commit: {branch: pr-123, message: "Change the page again", apply: patches/page}
