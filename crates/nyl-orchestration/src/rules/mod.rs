@@ -6,11 +6,13 @@ pub mod desired;
 pub mod drift;
 pub mod evidence;
 pub mod execution_key;
+pub mod expiry;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod freshness;
 pub mod graph;
 pub mod hold;
+pub mod keep;
 pub mod lease;
 pub mod lifecycle;
 pub mod local;

@@ -61,6 +61,9 @@ pub struct GitSourceResolver {
     /// The symbolic-link check of each tree this resolver checked out, so
     /// a slot reused for many units walks each tree once.
     symlinks: Mutex<BTreeMap<Oid, Result<(), String>>>,
+    /// The keep ref of the instance this resolver works for: a commit missing
+    /// from the clone is fetched from it.
+    kept: Option<String>,
 }
 
 fn error(message: impl Into<String>) -> SourceError {
@@ -131,7 +134,44 @@ impl GitSourceResolver {
             endpoints: BTreeMap::new(),
             fetched: Mutex::new(BTreeSet::new()),
             symlinks: Mutex::new(BTreeMap::new()),
+            kept: None,
         }
+    }
+
+    /// Fetch a commit of the entry repository that the clone lacks from the
+    /// keep ref `reference` of its origin, the ref that
+    /// [`SourceResolver::keep`] moves for an instance with `keepSource`.
+    #[must_use]
+    pub fn with_kept_source(mut self, reference: impl Into<String>) -> Self {
+        self.kept = Some(reference.into());
+        self
+    }
+
+    /// The URL the entry clone's `origin` remote reads and writes, if it has one.
+    fn origin_url(repository: &Repository) -> Option<String> {
+        let remote = repository.find_remote("origin").ok()?;
+        let url = remote.url().ok()?.to_owned();
+        Some(url)
+    }
+
+    /// Fetch the keep ref into a private ref of the entry clone, so a commit
+    /// no branch carries anymore is available again. Failures leave the
+    /// lookup to report the commit as missing.
+    fn fetch_kept(&self, repository: &Repository) {
+        let (Some(reference), Some(url)) = (&self.kept, Self::origin_url(repository)) else {
+            return;
+        };
+        let private = format!(
+            "refs/nyl-kept/{}",
+            &nyl_core::digest::sha256_hex(reference.as_bytes())[..16]
+        );
+        let _ = nyl_git::fetch(
+            repository.path(),
+            &url,
+            &[&format!("+{reference}:{private}")],
+            false,
+            &self.auth,
+        );
     }
 
     /// Exclude the configured Nyl cache from working-file snapshots.
@@ -275,6 +315,9 @@ impl GitSourceResolver {
         if !Self::commit_exists(&source, oid) {
             self.ensure_fetched(&source, repository)?;
             self.fetch_one(&source, repository, commit.as_str(), None);
+        }
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            self.fetch_kept(&source);
         }
         let checked = {
             let found = source.find_commit(oid).map_err(|_| {
@@ -891,6 +934,73 @@ impl SourceResolver for GitSourceResolver {
                 }
             }
         }
+    }
+
+    /// Contract: [Instances](../../../design/orchestration-core.md#instances),
+    /// `keepSource`. The ref moves to `commit` on the clone's `origin`, which
+    /// is where a later job of another clone fetches it from; a clone without
+    /// an origin holds the ref itself. Nothing is pushed when the ref is
+    /// already at the commit.
+    fn keep(&self, reference: &str, commit: &CommitId) -> SourceResult<()> {
+        let repository = self.open()?;
+        let oid = Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?;
+        if !Self::commit_exists(&repository, oid) {
+            return Err(error(format!(
+                "commit {commit} is not in this repository, so it cannot be kept"
+            )));
+        }
+        let Some(url) = Self::origin_url(&repository) else {
+            return repository
+                .reference(reference, oid, true, "nyl: keep instance source")
+                .map(drop)
+                .map_err(|cause| git_error(&format!("cannot move {reference}"), &cause));
+        };
+        let current = nyl_git::ls_remote(repository.path(), &url, &[reference], &self.auth)
+            .map_err(|cause| error(cause.to_string()))?
+            .remove(reference);
+        if current.as_deref() == Some(commit.as_str()) {
+            return Ok(());
+        }
+        nyl_git::push_atomic(
+            repository.path(),
+            &url,
+            &[nyl_git::RefUpdate {
+                remote: reference.to_owned(),
+                new: Some(commit.as_str().to_owned()),
+                expected: nyl_git::Expect::at(current.as_deref()),
+            }],
+            &self.auth,
+        )
+        .map_err(|cause| error(cause.to_string()))
+    }
+
+    fn release(&self, reference: &str) -> SourceResult<()> {
+        let repository = self.open()?;
+        let Some(url) = Self::origin_url(&repository) else {
+            return match repository.find_reference(reference) {
+                Ok(mut found) => found
+                    .delete()
+                    .map_err(|cause| git_error(&format!("cannot remove {reference}"), &cause)),
+                Err(_) => Ok(()),
+            };
+        };
+        let Some(current) = nyl_git::ls_remote(repository.path(), &url, &[reference], &self.auth)
+            .map_err(|cause| error(cause.to_string()))?
+            .remove(reference)
+        else {
+            return Ok(());
+        };
+        nyl_git::push_atomic(
+            repository.path(),
+            &url,
+            &[nyl_git::RefUpdate {
+                remote: reference.to_owned(),
+                new: None,
+                expected: nyl_git::Expect::At(current),
+            }],
+            &self.auth,
+        )
+        .map_err(|cause| error(cause.to_string()))
     }
 }
 

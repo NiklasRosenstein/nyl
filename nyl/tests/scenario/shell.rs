@@ -294,6 +294,7 @@ impl Harness {
                 reapply: false,
                 fail_fast: false,
                 reason: None,
+                keep_ref: None,
             },
             workspace: TempDir::new().unwrap(),
         }

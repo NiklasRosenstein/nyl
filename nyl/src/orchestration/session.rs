@@ -13,7 +13,8 @@ use nyl_core::orchestration::state::StateLocation;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
 use nyl_orchestration::run_report::{
-    EnvironmentRunReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport, UnitReport,
+    EnvironmentRunReport, InstanceAction, InstanceReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport,
+    UnitReport,
 };
 use nyl_orchestration::shell::run::{RunContext, RunRequest};
 use nyl_orchestration::shell::{Context, Settings};
@@ -221,9 +222,24 @@ impl Session {
     pub fn sources(&self) -> Result<GitSourceResolver, NylError> {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
         let state = self.store(None)?;
-        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
+        let mut sources = GitSourceResolver::new(&self.resolved.git_dir, auth)
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
-            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root()))
+            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root());
+        // An instance's recorded source commit stays fetchable through its keep ref.
+        if let Some(keep_ref) = self.keep_ref() {
+            sources = sources.with_kept_source(keep_ref);
+        }
+        Ok(sources)
+    }
+
+    /// The keep ref of the instance this session works on: `None` for a
+    /// declared environment. Contract: [Instances](../../../design/orchestration-core.md#instances), `keepSource`.
+    pub fn keep_ref(&self) -> Option<String> {
+        self.resolved.instance.as_ref()?;
+        Some(nyl_orchestration::rules::keep::keep_ref(
+            &self.resolved.location.coordination_ref_prefix,
+            &self.resolved.name,
+        ))
     }
 
     /// Wire explicit working-file capture through the shared source shell.
@@ -298,7 +314,7 @@ impl Session {
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
         let mut report = self.run_with(wiring, store, identity, request, operation)?;
-        self.annotate_report(&mut report);
+        self.annotate_report(&mut report, wiring.clock.now());
         Ok(report)
     }
 
@@ -336,9 +352,42 @@ impl Session {
         Ok(operation(&context, request))
     }
 
-    /// Add source repository context and environment-resolution warnings to the report.
-    pub fn annotate_report(&self, report: &mut RunReport) {
+    /// The instance's lifecycle as its record says at `now`, for a report.
+    pub fn instance_report(&self, now: nyl_core::orchestration::time::Timestamp) -> Option<InstanceReport> {
+        let instance = self.resolved.instance.as_ref()?;
+        let expires_at = instance.record.as_ref().and_then(|record| record.expires_at);
+        Some(InstanceReport {
+            template: instance.template.clone(),
+            expires_at,
+            expired: nyl_orchestration::rules::expiry::expired(expires_at, instance.terms.ttl, now),
+            action: None,
+        })
+    }
+
+    /// Add source repository context, environment-resolution warnings, and
+    /// an instance's lifecycle to the report; an expired instance warns that
+    /// its next reconcile removes it.
+    pub fn annotate_report(&self, report: &mut RunReport, now: nyl_core::orchestration::time::Timestamp) {
         for environment in &mut report.environments {
+            if environment.instance.is_none() {
+                environment.instance = self.instance_report(now);
+            }
+            if let Some(instance) = environment.instance.as_ref().filter(|instance| instance.expired) {
+                if instance.action.is_none() && report.kind != ReportKind::ReconcileReport {
+                    environment.warnings.push(Finding::new(
+                        Code::InstanceExpired,
+                        format!(
+                            "{} expired at {}; the next reconcile removes it",
+                            environment.name,
+                            instance.expires_at.map_or_else(String::new, |at| at.to_rfc3339())
+                        ),
+                        format!(
+                            "keep it with `nyl reconcile -e {} --renew`, or remove it now with `nyl state delete -e {0} --teardown`",
+                            environment.name
+                        ),
+                    ));
+                }
+            }
             if environment.source_commit.is_some() {
                 environment.source_repository = Some(self.resolved.source_repository.clone());
             }
@@ -399,6 +448,7 @@ impl Session {
             reapply: options.reapply,
             fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
+            keep_ref: self.keep_ref(),
         })
     }
 }
@@ -624,8 +674,41 @@ fn table(report: &RunReport) -> String {
                 styled(commit.as_ref(), Style::Dim)
             );
         }
+        if let Some(instance) = &environment.instance {
+            let _ = writeln!(
+                text,
+                "  {} {}",
+                styled("instance:", Style::Dim),
+                instance_line(instance)
+            );
+        }
     }
     text
+}
+
+/// The instance line of the table form: its template, expiry, and what the command did about it.
+fn instance_line(instance: &InstanceReport) -> String {
+    let mut line = format!("template {}", instance.template);
+    match instance.expires_at {
+        Some(at) if instance.expired => {
+            let _ = write!(line, ", expired at {}", at.to_rfc3339());
+        }
+        Some(at) => {
+            let _ = write!(line, ", expires at {}", at.to_rfc3339());
+        }
+        None => line.push_str(", never expires"),
+    }
+    if let Some(action) = instance.action {
+        let text = match action {
+            InstanceAction::Extended => "expiry extended",
+            InstanceAction::Removed => "removed",
+            InstanceAction::RemovalPending => "removal waits for --allow-teardown",
+            InstanceAction::RemovalIncomplete => "removal incomplete",
+            InstanceAction::Busy => "busy: another run holds its lease",
+        };
+        let _ = write!(line, "; {text}");
+    }
+    line
 }
 
 /// A table cell for a value that serializes as a string, such as a receipt

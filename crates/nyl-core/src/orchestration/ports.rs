@@ -663,6 +663,19 @@ pub trait SourceResolver: Send + Sync {
     }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
+    /// Move the keep ref `reference` of this repository to `commit`, so the
+    /// commit stays fetchable after every branch that carried it is gone.
+    /// Contract: [Instances](../../../../design/orchestration-core.md#instances),
+    /// `keepSource`. A resolver that keeps nothing succeeds without effect.
+    fn keep(&self, reference: &str, commit: &CommitId) -> SourceResult<()> {
+        let _ = (reference, commit);
+        Ok(())
+    }
+    /// Remove the keep ref `reference`; a ref that does not exist is not an error.
+    fn release(&self, reference: &str) -> SourceResult<()> {
+        let _ = reference;
+        Ok(())
+    }
 }
 
 /// Local source-cache refs for worktree snapshots, keyed by base commit and tree.
