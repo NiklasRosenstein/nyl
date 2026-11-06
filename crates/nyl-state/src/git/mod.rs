@@ -92,8 +92,8 @@ pub struct Endpoint {
 }
 
 impl GitStateStore {
-    /// Both state refs' trees, after the sync a read does, with the tips.
-    fn read_trees(&self, location: &StateLocation) -> StateResult<(StateTips, Files, Files)> {
+    /// The commits of both state refs, after the sync a read does, with the tips.
+    fn sync_commits(&self, location: &StateLocation) -> StateResult<(Repository, StateTips, Option<Oid>, Option<Oid>)> {
         let repository = self.open(location)?;
         let refs = self.refs(&repository, location);
         let desired_name = StateLocation::full_name(&location.desired_ref);
@@ -115,17 +115,22 @@ impl GitStateStore {
         } else {
             refs.sync_local(&names, &heads)?;
         }
-        let desired_tip = heads.get(&desired_name).copied();
-        let observed_tip = heads.get(&observed_name).copied();
-        let desired = tree::read(&repository, refs.fetched(&heads, &desired_name))?;
-        let observed = tree::read(&repository, refs.fetched(&heads, &observed_name))?;
+        let tips = StateTips {
+            desired: heads.get(&desired_name).copied().map(commit_id),
+            observed: heads.get(&observed_name).copied().map(commit_id),
+        };
+        let desired = refs.fetched(&heads, &desired_name);
+        let observed = refs.fetched(&heads, &observed_name);
+        Ok((repository, tips, desired, observed))
+    }
+
+    /// Both state refs' trees, after the sync a read does, with the tips.
+    fn read_trees(&self, location: &StateLocation) -> StateResult<(StateTips, Files, Files)> {
+        let (repository, tips, desired, observed) = self.sync_commits(location)?;
         Ok((
-            StateTips {
-                desired: desired_tip.map(commit_id),
-                observed: observed_tip.map(commit_id),
-            },
-            desired,
-            observed,
+            tips,
+            tree::read(&repository, desired)?,
+            tree::read(&repository, observed)?,
         ))
     }
 
@@ -679,19 +684,16 @@ impl StateStore for GitStateStore {
     /// The `state.yaml` of every directory directly beneath `location.path`
     /// that has one, such as the instances sharing one ref.
     fn list_records(&self, location: &StateLocation) -> StateResult<Vec<StateRecord>> {
-        let (_, desired, observed) = self.read_trees(location)?;
+        let (repository, _, desired, observed) = self.sync_commits(location)?;
         let prefix = tree::prefix(&location.path);
         let mut records = BTreeMap::new();
-        for files in [&observed, &desired] {
-            for (path, bytes) in files {
-                let Some(name) = path
+        for commit in [observed, desired] {
+            for (path, bytes) in tree::read_children(&repository, commit, &location.path, STATE_FILE)? {
+                let name = path
                     .strip_prefix(&prefix)
                     .and_then(|relative| relative.strip_suffix(&format!("/{STATE_FILE}")))
-                    .filter(|name| !name.is_empty() && !name.contains('/'))
-                else {
-                    continue;
-                };
-                records.insert(name.to_owned(), from_yaml::<StateRecord>(STATE_FILE, bytes)?);
+                    .unwrap_or_default();
+                records.insert(name.to_owned(), from_yaml::<StateRecord>(STATE_FILE, &bytes)?);
             }
         }
         Ok(records.into_values().collect())

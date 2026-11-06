@@ -277,7 +277,7 @@ fn state_form(
     options: &StateOptions,
     form: impl FnOnce(&EnvironmentSnapshot, &nyl_core::orchestration::ids::EnvironmentName) -> Result<CommandOutcome>,
 ) -> Result<CommandOutcome> {
-    let session = match Session::open(path, environment) {
+    let session = match Session::open_offline(path, environment, options.local) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(&finding)),
         Err(Stop::Error(error)) => return Err(error),
@@ -709,7 +709,8 @@ fn environments(selection: &GetResourceArgs) -> Result<CommandOutcome> {
         rows.push(vec![name.clone(), "-".to_owned(), units, state, "-".to_owned(), file]);
         names.push(name);
     }
-    let (listed, warnings) = crate::orchestration::project::list_instances(&inventory, false);
+    let listing = crate::orchestration::project::list_instances(&inventory, false);
+    let (listed, warnings) = (listing.instances, listing.warnings);
     let mut stderr = String::new();
     for warning in &warnings {
         write_finding(&mut stderr, "warning", None, warning);

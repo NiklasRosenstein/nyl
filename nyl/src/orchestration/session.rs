@@ -9,6 +9,7 @@ use std::path::Path;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
+use nyl_core::orchestration::state::StateLocation;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
 use nyl_orchestration::run_report::{
@@ -23,7 +24,7 @@ use crate::cli::commands::reconcile::RunOutput;
 use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
 use crate::orchestration::project::{
-    declared, list_instances, open_store, requested_by as requested_by_default, resolve_environment,
+    declared, instance_location, list_instances, open_store, requested_by as requested_by_default, resolve_environment,
     resolve_environment_with, InstanceRequest, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
@@ -61,12 +62,29 @@ pub struct Session {
     /// Whether the command was entered from the instance's own source: it
     /// named `--template`, so the entry checkout is the instance's source.
     entered: bool,
+    /// Where every known instance keeps its state, the session's own included.
+    instance_locations: BTreeMap<EnvironmentName, StateLocation>,
+    /// Instances whose location cannot be computed, and templates whose
+    /// instances could not be listed: checks across environments refuse.
+    instance_errors: BTreeMap<EnvironmentName, Finding>,
 }
 
 impl Session {
     /// Discover the project at `path` and resolve `environment` in it.
     pub fn open(path: &Path, environment: &str) -> Result<Self, Stop> {
         Self::open_with(path, environment, &InstanceRequest::default())
+    }
+
+    /// [`Self::open`] for a command with `--local`: instances are found without network access.
+    pub fn open_offline(path: &Path, environment: &str, offline: bool) -> Result<Self, Stop> {
+        Self::open_with(
+            path,
+            environment,
+            &InstanceRequest {
+                offline,
+                ..InstanceRequest::default()
+            },
+        )
     }
 
     /// [`Self::open`] for a command that may create or update an instance
@@ -77,10 +95,38 @@ impl Session {
         // Every environment-wide function sees every instance like a declared
         // environment: the ones state lists, and this one with the parameters
         // this command resolved for it.
-        let (listed, warnings) = list_instances(&inventory, request.offline);
-        resolved.warnings.extend(warnings);
+        let listing = list_instances(&inventory, request.offline);
+        resolved.warnings.extend(listing.warnings);
+        let mut instance_errors = BTreeMap::new();
+        for template in &listing.unavailable {
+            // A synthetic name stands for instances nobody could list.
+            if let Ok(name) = EnvironmentName::new(format!("{template}-instances")) {
+                instance_errors.insert(
+                    name,
+                    Finding::new(
+                        Code::StateUnavailable,
+                        format!("the instances of EnvironmentTemplate {template} could not be listed, so their state is unknown"),
+                        "check access to the template's state repository, or run without network access with --local",
+                    ),
+                );
+            }
+        }
+        let mut instance_locations = BTreeMap::new();
+        for gone in &listing.deleted {
+            if let Ok(location) = instance_location(&inventory, &gone.name, &gone.descriptor.template) {
+                instance_locations.insert(gone.name.clone(), location);
+            }
+        }
         let mut instances = BTreeMap::new();
-        for instance in listed {
+        for instance in listing.instances {
+            match instance_location(&inventory, &instance.name, &instance.descriptor.template) {
+                Ok(location) => {
+                    instance_locations.insert(instance.name.clone(), location);
+                }
+                Err(finding) => {
+                    instance_errors.insert(instance.name.clone(), finding);
+                }
+            }
             // An instance whose template no longer renders for its parameters
             // is reported, and left out of checks across environments, so one
             // stale preview never stops the other environments' runs.
@@ -98,12 +144,15 @@ impl Session {
         }
         if let Some(instance) = &resolved.instance {
             instances.insert(resolved.name.clone(), instance.descriptor());
+            instance_locations.insert(resolved.name.clone(), resolved.location.clone());
         }
         let inventory = inventory.with_instances(instances);
         Ok(Self {
             inventory,
             resolved,
             entered: request.template.is_some(),
+            instance_locations,
+            instance_errors,
         })
     }
 
@@ -320,6 +369,12 @@ impl Session {
                 }
             }
         }
+        // Instances are environments too: their stored claims fence resources
+        // by owner, protect producers they read, and are checked by `exec`.
+        for (name, location) in &self.instance_locations {
+            environments.entry(name.clone()).or_insert_with(|| location.clone());
+        }
+        environment_errors.extend(self.instance_errors.clone());
         Ok(RunRequest {
             planned: BTreeMap::new(),
             approvals: nyl_orchestration::rules::approval::Approvals::default(),

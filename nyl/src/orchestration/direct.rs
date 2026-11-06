@@ -1,6 +1,6 @@
 //! Read-only preparation of a unit from the current worktree or a source revision.
 //! Shared by direct artifact builds and operator tools using a worktree spec.
-use crate::orchestration::project::{open_store, resolve_environment};
+use crate::orchestration::project::{list_instances, open_store, resolve_environment};
 use crate::orchestration::run::Wiring;
 use nyl_core::orchestration::driver::{ResolutionContext, SourceRoot};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
@@ -90,12 +90,27 @@ pub fn prepare(
         .as_ref()
         .map(|name| resolve_environment(&entry, name.as_str()).map_err(config))
         .transpose()?;
-    let inventory = match selected_environment.as_ref().zip(selected.as_ref()) {
-        Some((resolved, name)) if resolved.instance.is_some() => inventory.with_instances(
-            std::iter::once((name.clone(), resolved.instance.as_ref().expect("checked").descriptor())).collect(),
-        ),
-        _ => inventory,
-    };
+    // Every listed instance joins the inventory, so a direct `--push` consults
+    // all the targets environments own; a listing that fails refuses the build.
+    let listing = list_instances(&entry, false);
+    if !listing.unavailable.is_empty() {
+        return Err(config(format!(
+            "cannot list the instances of EnvironmentTemplate {}, whose targets a direct build must check; \
+             check access to the template's state repository",
+            listing.unavailable.join(", ")
+        )));
+    }
+    let mut instances: nyl_core::orchestration::instance::Instances = listing
+        .instances
+        .into_iter()
+        .map(|instance| (instance.name, instance.descriptor))
+        .collect();
+    if let Some((resolved, name)) = selected_environment.as_ref().zip(selected.as_ref()) {
+        if let Some(instance) = &resolved.instance {
+            instances.insert(name.clone(), instance.descriptor());
+        }
+    }
+    let inventory = inventory.with_instances(instances);
     let effective = selected
         .as_ref()
         .map(|name| resolve_effective_environment(&inventory, name))

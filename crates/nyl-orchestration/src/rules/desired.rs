@@ -872,6 +872,45 @@ mod tests {
         drivers
     }
 
+    /// Catches an instance's template policy that does not reach the units
+    /// it must: `Teardown` overrides an explicit `Retain` for a kind that tears
+    /// down, leaves a kind that cannot (it would be rejected) and unselected
+    /// units alone, and an environment that is not an instance is untouched.
+    #[test]
+    fn test_instance_policy_overrides_only_units_whose_kind_tears_down() {
+        let spec = || Some(json!({"deletionPolicy": "Retain"}));
+        let mut instance = source(vec![
+            ("publication", rendered("Publication", true, spec())),
+            ("worker", rendered(TEST_KIND, true, spec())),
+            ("other", rendered("Publication", false, spec())),
+        ]);
+        let plain = instance.clone();
+        apply_instance_policy(&mut instance, &drivers());
+        assert_eq!(instance, plain, "an environment without a template keeps every policy");
+
+        instance.instance = Some(nyl_core::orchestration::instance::InstanceTerms {
+            template: "preview".to_owned(),
+            params: BTreeMap::new(),
+            deletion_policy: Some(DeletionPolicy::Teardown),
+            allow_teardown: true,
+            ttl: None,
+            max_instances: None,
+        });
+        apply_instance_policy(&mut instance, &drivers());
+        let policy = |unit: &str| instance.units[&name(unit)].spec.as_ref().unwrap()["deletionPolicy"].clone();
+        assert_eq!(policy("publication"), json!("Teardown"));
+        assert_eq!(
+            policy("worker"),
+            json!("Retain"),
+            "a kind that cannot tear down keeps its policy"
+        );
+        assert_eq!(
+            policy("other"),
+            json!("Retain"),
+            "an unselected unit is not the instance's"
+        );
+    }
+
     fn commit(digit: char) -> CommitId {
         CommitId::new(digit.to_string().repeat(40)).unwrap()
     }

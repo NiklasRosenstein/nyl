@@ -654,7 +654,7 @@ pub(crate) fn run_lifecycle(
             common.output,
         )
     };
-    let session = match Session::open(&common.path, &common.environment) {
+    let session = match Session::open_offline(&common.path, &common.environment, offline) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),

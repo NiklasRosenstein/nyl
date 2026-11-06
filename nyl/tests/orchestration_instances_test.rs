@@ -520,3 +520,219 @@ fn test_a_unit_left_by_the_template_is_torn_down_unattended() {
         .exists());
     assert!(tag(&harness, "pr-4").is_some());
 }
+
+/// Templates that share a state ref (what the contract recommends: one ref,
+/// a directory per instance) must not make each other's instances
+/// ambiguous: every command still finds `pr-1` as the instance of the template
+/// its record names, the other template cannot take the name, and each
+/// template's instances are listed with their own template. Catches every
+/// command for an instance failing with `NYL-INSTANCE-AMBIGUOUS` as soon as a
+/// second template exists.
+#[test]
+fn test_two_templates_sharing_a_state_ref_keep_their_instances_apart() {
+    let other = TEMPLATE.replace("name: preview", "name: e2e");
+    let (_directory, harness) = world(&[("nyl/e2e.yaml", &other)]);
+    let init = |name: &str, template: &str, pr: &str| {
+        invoke(
+            &harness,
+            "main",
+            &["state", "init", "-e", name, "--template", template, "--param", pr],
+        )
+    };
+    assert_eq!(init("pr-1", "preview", "pr=1").exit, 0);
+    assert_eq!(init("pr-2", "e2e", "pr=2").exit, 0);
+
+    for name in ["pr-1", "pr-2"] {
+        let status = invoke(&harness, "main", &["status", "-e", name, "-o", "json"]);
+        assert_eq!(status.exit, 0, "{name}: {}", status.stderr);
+        assert!(!status.stderr.contains("AMBIGUOUS"), "{}", status.stderr);
+    }
+    let taken = init("pr-1", "e2e", "pr=1");
+    assert_eq!(taken.exit, 1);
+    assert_eq!(first_error_code(&taken), "NYL-INSTANCE-NAME-TAKEN", "{}", taken.stderr);
+    for (name, template) in [("pr-1", "preview"), ("pr-2", "e2e")] {
+        let listed = invoke(&harness, "main", &["get", "environments", name]);
+        let row = listed
+            .stdout
+            .lines()
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(row, [name, template], "{}", listed.stdout);
+    }
+    let deleted = invoke(&harness, "main", &["state", "delete", "-e", "pr-1", "--teardown"]);
+    assert_eq!(deleted.exit, 0, "{}", deleted.stderr);
+}
+
+/// An instance is an environment of every check across environments: the run
+/// request lists the state location of every live instance, the session's own
+/// included, because owner fencing, `exec`'s ownership check, and the
+/// protection of producers other environments read are all answered from that
+/// list. Catches an instance whose claims, consumers, or own incarnations
+/// are invisible to them.
+#[test]
+fn test_every_live_instance_is_in_the_run_requests_environments() {
+    let (_directory, harness) = world(&[]);
+    for pr in ["1", "2"] {
+        let created = invoke(
+            &harness,
+            "main",
+            &[
+                "state",
+                "init",
+                "-e",
+                &format!("pr-{pr}"),
+                "--template",
+                "preview",
+                "--param",
+                &format!("pr={pr}"),
+            ],
+        );
+        assert_eq!(created.exit, 0, "{}", created.stderr);
+    }
+    let clone = harness.world.fresh_clone("main");
+    let session = nyl::orchestration::session::Session::open(&clone, "pr-1").unwrap_or_else(|_| panic!("opens"));
+    let request = session
+        .request(&nyl::orchestration::session::RunOptions {
+            units: &[],
+            concurrency: 1,
+            source: None,
+            wait: None,
+            local: None,
+            cancellation: Cancellation::default(),
+            mode: nyl_orchestration::shell::run::RunMode::Reconcile,
+            lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
+            reapply: false,
+            fail_fast: false,
+            reason: None,
+        })
+        .unwrap();
+    let names = request.environments.keys().map(ToString::to_string).collect::<Vec<_>>();
+    assert_eq!(names, ["pr-1", "pr-2"]);
+    assert_eq!(request.environments[&request.environment].path, "pr-1");
+    assert_eq!(
+        request
+            .environments
+            .values()
+            .map(|l| l.path.as_str())
+            .collect::<Vec<_>>(),
+        ["pr-1", "pr-2"]
+    );
+    assert!(
+        request.environment_errors.is_empty(),
+        "{:?}",
+        request.environment_errors
+    );
+}
+
+/// `--local` reads an instance's record without network access too. The
+/// template's state is in a remote nothing can reach here, so a read that
+/// went to the network fails as unavailable; offline, the instance is simply
+/// not in the clone's branches. Catches `--local` commands that still need the
+/// network to find an instance.
+#[test]
+fn test_local_reads_do_not_reach_the_remote_to_find_an_instance() {
+    let remote = TEMPLATE.replace(
+        "    repositoryRef: {name: platform}\n",
+        "    repository: {repoURL: 'https://example.invalid/nyl/state.git'}\n",
+    );
+    let (_directory, harness) = world(&[("nyl/preview.yaml", &remote)]);
+    // Online, finding the instance asks the remote; offline, it asks only the
+    // clone's cache, which has nothing yet.
+    let commands: [(&[&str], &str); 2] = [
+        (&["status", "-e", "pr-1"], "git ls-remote failed"),
+        (&["status", "-e", "pr-1", "--local"], "no local state repository"),
+    ];
+    for (args, reason) in commands {
+        let outcome = invoke(&harness, "main", args);
+        assert_eq!(outcome.exit, 1, "{args:?}: {}", outcome.stdout);
+        assert!(
+            outcome.stderr.contains("NYL-STATE-UNAVAILABLE"),
+            "{args:?}: {}",
+            outcome.stderr
+        );
+        assert!(outcome.stderr.contains(reason), "{args:?}: {}", outcome.stderr);
+    }
+}
+
+/// A template whose state cannot be listed leaves its instances unknown, so
+/// anything that needs every environment's state fails closed instead of
+/// checking without them: a teardown of dev refuses and names the template,
+/// and dev's own commands that do not need them still work. Catches a failed
+/// listing quietly shrinking the checks to the instances that could be read.
+#[test]
+fn test_a_template_that_cannot_be_listed_fails_checks_across_environments_closed() {
+    let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: dev\nspec:\n  unitSelector: {matchLabels: {dev: 'true'}}\n  allowUnprotectedSource: true\n  state: {repositoryRef: {name: platform}}\n";
+    let broken = TEMPLATE.replace(
+        "    repositoryRef: {name: platform}\n",
+        "    repository: {repoURL: 'file:///nonexistent/nyl/state.git'}\n",
+    );
+    let unit = UNITS.replace("preview: 'true'", "dev: 'true'");
+    let (_directory, harness) = world(&[
+        ("nyl/dev.yaml", environment),
+        ("nyl/preview.yaml", &broken),
+        ("nyl/units.yaml", &unit),
+    ]);
+    assert_eq!(invoke(&harness, "main", &["state", "init", "-e", "dev"]).exit, 0);
+    let status = invoke(&harness, "main", &["status", "-e", "dev"]);
+    assert_eq!(status.exit, 0, "{}", status.stderr);
+    assert!(
+        status
+            .stderr
+            .contains("cannot list the instances of EnvironmentTemplate preview"),
+        "{}",
+        status.stderr
+    );
+
+    assert_eq!(invoke(&harness, "main", &["reconcile", "-e", "dev"]).exit, 0);
+    let teardown = invoke(&harness, "main", &["teardown", "-e", "dev", "--all", "-o", "json"]);
+    // Nothing is torn down: the unit waits, with the reason.
+    assert_eq!(teardown.exit, 2, "{}\n{}", teardown.stderr, teardown.stdout);
+    assert!(
+        teardown
+            .stderr
+            .contains("the instances of EnvironmentTemplate preview could not be listed"),
+        "{}",
+        teardown.stderr
+    );
+    assert!(teardown.report["environments"][0]["units"]["site"]["result"] != "removed");
+}
+
+/// A declared Environment that takes the name of an existing instance wins:
+/// listings show the Environment once, and warn that the instance is ignored
+/// instead of shadowing it silently. Catches two environments of one name
+/// answering to every command.
+#[test]
+fn test_a_declared_environment_takes_precedence_over_an_instance_of_its_name() {
+    let (_directory, harness) = world(&[]);
+    let created = invoke(
+        &harness,
+        "main",
+        &[
+            "state",
+            "init",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+        ],
+    );
+    assert_eq!(created.exit, 0, "{}", created.stderr);
+    let environment = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: pr-1\nspec:\n  unitSelector: {matchLabels: {other: 'true'}}\n  allowUnprotectedSource: true\n";
+    harness
+        .world
+        .commit_files("main", "Declare pr-1", &[("nyl/pr-1.yaml", environment)]);
+    let listed = invoke(&harness, "main", &["get", "environments", "pr-1"]);
+    assert_eq!(listed.exit, 0, "{}", listed.stderr);
+    assert_eq!(
+        listed.stdout.lines().count(),
+        2,
+        "one row beside the header: {}",
+        listed.stdout
+    );
+    assert!(listed.stderr.contains("NYL-INSTANCE-NAME-TAKEN"), "{}", listed.stderr);
+}

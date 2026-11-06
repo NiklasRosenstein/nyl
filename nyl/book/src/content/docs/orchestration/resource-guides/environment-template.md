@@ -51,6 +51,10 @@ checkout's commit as the instance's source, and an `expiresAt` of now plus
 value as YAML and checks it against the declaration, so `--param pr=123` is an
 integer. A parameter without a `default` is required.
 
+Parameters are stored in plain text in the instance's `state.yaml`, which
+anyone who can read the state ref can read, so never pass a secret as a
+parameter; give units secrets through their `env`.
+
 The name must not belong to a declared Environment or to an instance of
 another template (`NYL-INSTANCE-NAME-TAKEN`), because leases, run refs, and
 state directories are named after it. A deleted instance refuses with
@@ -62,6 +66,11 @@ Every later command names the instance with `-e`:
 $ nyl reconcile -e pr-123
 $ nyl get environments
 ```
+
+An instance is found only while its template exists at the entry checkout: a
+checkout that no longer declares the template reports
+`NYL-INSTANCE-TEMPLATE-UNKNOWN`, and renaming or removing a template will need
+`nyl state move --template`, which is still to come.
 
 A plain `reconcile -e pr-123` from any checkout renders the instance at the
 source commit its record names, not at the checkout, and records which commit it
@@ -114,14 +123,19 @@ a collision with a real instance is found whichever command renders. Template
 the names with `environment.name` or `target.metadata.name`, for example
 `applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'`.
 
-A direct `nyl build --push` refuses to publish a target an instance owns.
+A direct `nyl build --push` refuses to publish a target an instance owns. If a
+template's state cannot be read, its instances are unknown, so a teardown, an `exec`,
+or a run of a unit that claims native resources refuses with `NYL-STATE-UNAVAILABLE`
+instead of checking without them. A deleted instance's name still answers the
+owner fence of the prefix it published, as an owner that no longer exists.
 
 ## Not yet implemented
 
 Part of the preview lifecycle is still in progress:
 
-- `ttl` records `expiresAt`, but nothing removes an expired instance yet, and
-  `reconcile` does not extend it.
+- `state init --template` and `reconcile --template` move `expiresAt` to now
+  plus `ttl`, and a plain `reconcile` does not, but nothing removes an expired
+  instance yet.
 - `maxInstances` is recorded and not enforced.
 - `keepSource` and the keep ref that lets teardown find a source commit after
   its branch is deleted: use `--source <revision>` meanwhile.
