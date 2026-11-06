@@ -133,10 +133,10 @@ separate generated Application. Nyl rejects overlapping resource ownership.</p>
 <p>The versioned <code dir="auto">_nyl/index.json</code> index records target identity, source provenance, owned files,
 and SHA-256 hashes. Nyl preserves unowned files and rejects changes to indexed
 files that were made outside Nyl.</p>
-<p>Version 2 is what <code dir="auto">render-tree</code> writes, version 3 adds the compilation
-metadata <code dir="auto">publish-tree</code> records, and version 4, written by orchestrated
-publications, adds the <code dir="auto">owner</code> that publishes the prefix: its environment,
-unit, and incarnation uid. Older versions stay readable, and the first
+<p>Version 2 is what <code dir="auto">render-tree</code> writes, and version 3 adds the compilation
+metadata <code dir="auto">publish-tree</code> records. A version 3 index written by an orchestrated
+publication also names the <code dir="auto">owner</code> that publishes the prefix: its environment,
+unit, and incarnation uid. Indexes without an owner stay readable, and the first
 orchestrated publication over one records its owner. A prefix that names an
 owner is not overwritten or removed by <code dir="auto">render-tree</code>, <code dir="auto">publish-tree</code>, or another
 unit incarnation that still exists (see
