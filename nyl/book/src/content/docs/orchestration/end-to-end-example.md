@@ -660,11 +660,23 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      # …the checkout (of ${{ github.event.pull_request.head.sha }}), tools, and login steps above
+      # The pull request's head, not the default `refs/pull/<n>/merge` that
+      # `pull_request` events check out: the instance records this commit, and the
+      # close job fetches it after the pull request is gone.
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.event.pull_request.head.sha }}', fetch-depth: 0, persist-credentials: false}
+      # …the tools and login steps above
       - run: >
           nyl reconcile -e "pr-${{ github.event.number }}" --template preview
           --param "pr=${{ github.event.number }}" --wait-lease 10m
 ```
+
+The checkout is of the pull request's head commit. The instance records the
+commit it ran from, and the close job below fetches that commit from the
+repository after the branch is gone; GitHub keeps the head under
+`refs/pull/<n>/head`, but not the synthetic merge commit that a plain checkout of
+a `pull_request` event takes, so a preview job that ran from the merge commit
+could not be removed later without `--source`.
 
 The first run creates the instance, `pr-1` here, in the shared `nyl/previews`
 ref: the template's name, its parameters, the pull request's commit as its
@@ -812,10 +824,15 @@ removed, and the other preview is untouched:
 ```console
 $ nyl state delete -e pr-1 --teardown
 state-delete pr-1: done
-  desired: a3c5be17fb7d7d0dbb664c0974f8f4bd95fe1c43
-  observed: a3c5be17fb7d7d0dbb664c0974f8f4bd95fe1c43
+  desired: 874ce61904dedf3de61e452504c5204a62e24f91
+  observed: 874ce61904dedf3de61e452504c5204a62e24f91
   removed: ["database","kubernetes","web-image"]
   teardown: exit 0
+warning  web-image: unit web-image of pr-1 left its resources in place: ContainerImage image (sha256:cbf068ebdd922a78a65ec0670ccfadb97149515048c46d7a230739ec1fdbfd39)
+
+  Action  remove the resources by hand when nothing needs them any more
+
+  NYL-UNIT-RELEASED
 $ git ls-tree -r --name-only origin/previews
 _nyl/shared/previews/_nyl/index.json
 _nyl/shared/previews/catalog.yaml
@@ -838,7 +855,7 @@ left out):
 $ nyl state delete -e pr-1 --teardown
 state-delete pr-1: refused
   teardown: exit 1
-error  cannot tear down unit kubernetes of pr-1: cannot check out commit a2d6fb749fe8601c374354698e56cb0a78908a34: commit a2d6fb749fe8601c374354698e56cb0a78908a34 does not exist in this repository
+error  cannot tear down unit kubernetes of pr-1: cannot check out commit 119926ca307a6b98f45688fc94fc334c9a5c27bd: commit 119926ca307a6b98f45688fc94fc334c9a5c27bd does not exist in this repository
 
   Action  fetch the commit, or tear it down with another revision's files: `nyl teardown -e pr-1 --unit kubernetes --source <revision>`
 
@@ -859,21 +876,27 @@ transition commit:
 ```console
 $ nyl state delete -e pr-1 --teardown --source main
 state-delete pr-1: done
-  desired: f17c524a3f898cc6be67b631da7b9c06a47a6bf7
-  observed: f17c524a3f898cc6be67b631da7b9c06a47a6bf7
+  desired: e3cfbe154c45cd83ce8d0b17fa7513ef9203a886
+  observed: e3cfbe154c45cd83ce8d0b17fa7513ef9203a886
   removed: ["database","kubernetes","web-image"]
   teardown: exit 0
-warning  unit kubernetes of pr-1 tears down with the files of 606d798d57ad621dc802aa201a7715f6fb4aaef3, not its recorded source commit a2d6fb749fe8601c374354698e56cb0a78908a34
+warning  unit kubernetes of pr-1 tears down with the files of 55b11c2ecc43346ccdfea06d96fab995d4714a13, not its recorded source commit 119926ca307a6b98f45688fc94fc334c9a5c27bd
 
   Action  check that the revision still holds what the unit needs to be destroyed; the substitution is recorded in the transition commit
 
   NYL-SOURCE-OVERRIDE
 
-warning  unit database of pr-1 tears down with the files of 606d798d57ad621dc802aa201a7715f6fb4aaef3, not its recorded source commit a2d6fb749fe8601c374354698e56cb0a78908a34
+warning  unit database of pr-1 tears down with the files of 55b11c2ecc43346ccdfea06d96fab995d4714a13, not its recorded source commit 119926ca307a6b98f45688fc94fc334c9a5c27bd
 
   Action  check that the revision still holds what the unit needs to be destroyed; the substitution is recorded in the transition commit
 
   NYL-SOURCE-OVERRIDE
+
+warning  web-image: unit web-image of pr-1 left its resources in place: ContainerImage image (sha256:cbf068ebdd922a78a65ec0670ccfadb97149515048c46d7a230739ec1fdbfd39)
+
+  Action  remove the resources by hand when nothing needs them any more
+
+  NYL-UNIT-RELEASED
 ```
 
 The override is safe when the default branch's configuration for those units can
@@ -986,10 +1009,12 @@ See [One catalog for every instance](/nyl/orchestration/resource-guides/environm
 ### Keep refs, for previews that outlive their branches
 
 The close job covers a preview that is removed when its pull request closes. A
-preview can also expire, through the scheduled job below, long after its branch
-is gone: an abandoned pull request, or a close job that failed. Where the host
-may no longer serve the recorded commit by then, set `keepSource: true` on the
-template. Every command that records an instance's source commit then first
+preview can also expire, through the scheduled job above, long after its branch
+is gone: an abandoned pull request, or a close job that failed. The scheduled
+job fetches the recorded commit by its id as well, so on GitHub and GitLab it
+needs no keep ref either. Set `keepSource: true` on the template for a host
+without pull request refs, or one that may prune that history before a preview
+expires. Every command that records an instance's source commit then first
 pushes a ref of its own, `refs/nyl-keep/<keepId>/<commit>`, to the source
 repository, so the commit stays fetchable until the instance's state is
 deleted.

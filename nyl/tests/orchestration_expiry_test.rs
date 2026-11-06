@@ -889,7 +889,7 @@ fn test_state_delete_with_source_warns_about_the_substitution() {
         &["reconcile", "-e", "pr-9", "--template", "preview", "--param", "pr=9"],
     );
     assert_eq!(created.exit, 0, "{}\n{}", created.stderr, created.stdout);
-    delete_pull_request_branch(&harness, "pr-9");
+    harness.world.delete_branch("pr-9");
 
     let refused = invoke(&harness, "main", &["state", "delete", "-e", "pr-9", "--teardown"]);
     assert_eq!(refused.exit, 1, "{}\n{}", refused.stderr, refused.stdout);

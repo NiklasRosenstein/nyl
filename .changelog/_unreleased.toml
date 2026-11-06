@@ -319,5 +319,5 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "8549e5cb-c8c8-41ac-bea9-5cf6765ab316"
 type = "fix"
-description = "`nyl state delete --teardown` prints the warnings of the teardown it ran when the deletion completes, such as `NYL-SOURCE-OVERRIDE` for a `--source` substitution; they were only in the JSON report's `details.teardown`"
+description = "`nyl state delete --teardown` prints the warnings of the teardown it ran when the deletion completes, and of its units, such as `NYL-SOURCE-OVERRIDE` for a `--source` substitution or `NYL-UNIT-RELEASED` for an image left in a registry; they were only in the JSON report's `details.teardown`"
 author = "@NiklasRosenstein"

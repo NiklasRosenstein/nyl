@@ -660,8 +660,8 @@ Tier 1 variants:
   branch gone and no ref of the host naming the commit, step 7 fails and
   suggests `--source`; `nyl state delete -e pr-123 --teardown --source main`
   takes the units' files, an OpenTofu unit's pinned `source` included, from
-  `main`, records the substitution, and succeeds. Scenario
-  `reference/preview-no-keep-ref` runs it.
+  `main`, warns (`NYL-SOURCE-OVERRIDE`), records the substitution, and
+  succeeds. Scenario `reference/preview-no-keep-ref` runs it.
 - **Pull request ref.** The same template, on a host that keeps the pull
   request's head under `refs/pull/123/head` after the branch is deleted, as
   GitHub does: step 7 succeeds with no keep ref and no `--source`, because the
