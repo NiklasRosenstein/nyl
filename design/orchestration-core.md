@@ -232,7 +232,7 @@ spec:
   retained worktree snapshots of the state repository, then fetched through
   the instance's keep ref (`keepSource`), and then by its exact id from the
   clone's `origin`, with the credentials of the other Git fetches. Only the
-  declared origin is contacted and only the recorded id is requested; a failed
+  clone's `origin` remote is contacted and only the recorded id is requested; a failed
   fetch leaves the commit missing, which the caller reports, and `--local`
   fetches nothing. A host that keeps a pull request's commits reachable after
   its branch is gone (GitHub's `refs/pull/<n>/head`, GitLab's
@@ -246,7 +246,9 @@ spec:
   changes the environment's `source`: the run records it as that run's S, as
   every run does, and the next run uses the environment's source again. It
   must satisfy the same reachability rules, the transition commit marks it as
-  an override, and a fleet reconcile rejects it.
+  an override, and a fleet reconcile rejects it. A full commit id that the
+  entry clone lacks is fetched from the clone's `origin` like a recorded
+  commit.
 - `reconcile -e <env> --worktree` snapshots Git-visible tracked and untracked
   working files once, with deletions and executable modes. It leaves HEAD and
   the user's index untouched, preserves internal symbolic links without following
@@ -1402,10 +1404,16 @@ nyl get environments                                         # declared environm
   default branch and runs `state delete -e <instance> --teardown`, with no
   `--source`. The recorded commit is the pull request's last head, which the
   host keeps reachable through its pull request ref after the branch is
-  deleted or squash-merged, and Nyl fetches it by id from `origin` (see
-  [Source](#source)); no keep ref is needed. A host without such a ref, a
-  closed job run with `--local`, and previews that expire through the fleet
-  long after their branches are gone need `keepSource: true` or `--source`.
+  deleted or squash-merged, and Nyl fetches it by id from the clone's `origin`
+  remote (see [Source](#source)); no keep ref is needed. The fleet job fetches
+  the same way, so an expired preview whose branch is gone is removed without
+  keep refs on such a host. The preview job must therefore record the pull
+  request's head: it checks out `${{ github.event.pull_request.head.sha }}`
+  on GitHub, because the default checkout of a `pull_request` event is the
+  synthetic merge commit `refs/pull/<n>/merge`, which the host does not keep
+  once the pull request closes. A host without pull request refs, history the
+  host may prune before an instance expires, and a job run with `--local` need
+  `keepSource: true` or `--source`.
 - When an instance's recorded source commit cannot be fetched, teardown fails
   with a message suggesting `--source <revision>`. `nyl teardown --all` and
   `nyl state delete --teardown` accept `--source` to take the units' source
