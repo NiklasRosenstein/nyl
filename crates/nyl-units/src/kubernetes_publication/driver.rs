@@ -177,6 +177,39 @@ impl Driver for KubernetesPublicationDriver {
                     },
                     "additionalProperties": false
                 },
+                "observations": {
+                    "type": "object",
+                    "description": "Observed values, in `mode: observe`: a field of a resource the target renders, read from the workload Cluster once the Application that owns the resource runs the current publication.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "required": ["type", "from"],
+                        "properties": {
+                            "type": {"type": "string", "enum": ["string", "integer", "number", "boolean", "object", "array"]},
+                            "maxAge": {"type": "string", "description": "How old the last successful read may get before the value stops resolving, such as 1h."},
+                            "from": {
+                                "type": "object",
+                                "description": "What to read.",
+                                "required": ["resource", "pointer"],
+                                "properties": {
+                                    "resource": {
+                                        "type": "object",
+                                        "description": "The resource as the Kubernetes API names it; a Secret is never read.",
+                                        "required": ["apiVersion", "kind", "name"],
+                                        "properties": {
+                                            "apiVersion": {"type": "string"},
+                                            "kind": {"type": "string"},
+                                            "namespace": {"type": "string", "description": "For a namespaced kind."},
+                                            "name": {"type": "string"}
+                                        },
+                                        "additionalProperties": false
+                                    },
+                                    "pointer": {"type": "string", "description": "A JSON Pointer into the live resource, such as /status/loadBalancer/ingress/0/ip."}
+                                },
+                                "additionalProperties": false
+                            }
+                        }
+                    }
+                },
                 "releases": {
                     "type": "object",
                     "description": "Filled from the target's releaseInputs; not written by hand.",

@@ -455,6 +455,36 @@ mod tests {
         );
     }
 
+    /// Catches a reference to an observed value adding no edge, or one the
+    /// producer never declares passing validation and waiting forever.
+    #[test]
+    fn test_extract_adds_an_edge_for_an_observation_and_checks_its_declaration() {
+        let producer = json!({"observations": {"ip": {"type": "string", "from": {}}}});
+        let consumer = |observation: &str| json!({"values": {"address": {"fromUnit": {"unit": "lb", "observation": observation}}}});
+        let graph = graph(&[("lb", "Command", producer.clone()), ("dns", "Command", consumer("ip"))]).unwrap();
+        assert_eq!(
+            graph.edges.iter().map(|edge| edge.source.clone()).collect::<Vec<_>>(),
+            [EdgeSource::Reference {
+                pointer: JsonPointer::new("/values/address").unwrap(),
+                output: None,
+                artifact: None,
+                observation: Some("ip".to_owned()),
+            }]
+        );
+        let findings = graph_errors(&[("lb", "Command", producer), ("dns", "Command", consumer("host"))]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].code, Code::ReferenceInvalid);
+        assert!(
+            findings[0].message.contains("declared observations: ip"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    fn graph_errors(specs: &[(&str, &str, Value)]) -> Vec<Finding> {
+        graph(specs).expect_err("the references are invalid")
+    }
+
     #[test]
     fn test_extract_sorts_and_deduplicates_edges() {
         let graph = graph(&[

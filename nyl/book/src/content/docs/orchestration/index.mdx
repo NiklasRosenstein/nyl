@@ -9,16 +9,18 @@ Orchestration is in development. Environments, their state in Git, the [`nyl sta
 [Command](/nyl/orchestration/resource-guides/command/),
 [OciImage](/nyl/orchestration/resource-guides/oci-image/), and
 [Terraform and OpenTofu](/nyl/orchestration/resource-guides/terraform/) units,
-[KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/) units in `publish` mode, one
+[KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/) units, one
 environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
 [`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs,
 drift repair, and lifecycle work), and [`nyl status`](/nyl/reference/cli/status/),
-recovery with [`nyl recover`](/nyl/reference/cli/recover/) and
-[`nyl detect-drift`](/nyl/reference/cli/detect-drift/), and deletion with
+recovery with [`nyl recover`](/nyl/reference/cli/recover/),
+[`nyl detect-drift`, `nyl attest`](/nyl/reference/cli/detect-drift/), and
+[`nyl observe`](/nyl/reference/cli/observe/), and deletion with
 [`nyl teardown`](/nyl/reference/cli/teardown/),
 [`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), `nyl state
 delete`, runs over several environments, and approvals are available.
-Publication units may declare their target inline. Observing Argo CD, attestations, and preview environments follow in M5. The [roadmap](/nyl/orchestration/roadmap/)
+Publication units may declare their target inline, observe Argo CD, and read observed values of the cluster; units can require attestations and
+observed values of other units. Preview environments follow in M5. The [roadmap](/nyl/orchestration/roadmap/)
 tracks the milestones.
 :::
 

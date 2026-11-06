@@ -1623,4 +1623,49 @@ mod tests {
         let waiting = observed_values::parse_reason(&reason).unwrap();
         assert_eq!(waiting.producer, "infra/kubernetes");
     }
+
+    /// Catches a value read for a consumer that requires attestations the
+    /// producer's current receipt does not have yet: the new value is read
+    /// only once the new receipt's attestations pass, so a consumer never acts
+    /// on an address that nothing has vouched for.
+    #[test]
+    fn test_an_observation_reference_with_attestations_waits_for_them_first() {
+        let mut world = World::new();
+        observing(&mut world, &recorded_values());
+        world
+            .desired
+            .get_mut(&name("kubernetes"))
+            .unwrap()
+            .attestations
+            .push("healthy".to_owned());
+        let reference = json!({"unit": "kubernetes", "observation": "ip", "attestations": ["healthy"]});
+        let ReferenceValue::Blocked { reason, .. } = world.resolve(reference.clone()).unwrap() else {
+            panic!("the attestation is not recorded")
+        };
+        assert_eq!(reason, "attestation healthy of kubernetes is pending");
+        let mut attested = world.attestations.clone();
+        attested.insert(
+            name("kubernetes"),
+            BTreeMap::from([(
+                "healthy".to_owned(),
+                serde_json::from_value(json!({
+                    "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "healthy",
+                    "unit": {"environment": "dev", "name": "kubernetes", "uid": uid("kubernetes")},
+                    "executionKey": key("kubernetes"), "result": "pass", "at": "2026-09-24T09:55:00Z",
+                    "source": {"driver": "attest"}
+                }))
+                .unwrap(),
+            )]),
+        );
+        world.attestations = attested;
+        let ReferenceValue::Value { value, .. } = world.resolve(reference).unwrap() else {
+            panic!("the attestation passes")
+        };
+        assert_eq!(value, json!("203.0.113.10"));
+        // An undeclared attestation is an error with its own code, as for outputs.
+        let error = world
+            .resolve(json!({"unit": "kubernetes", "observation": "ip", "attestations": ["nope"]}))
+            .unwrap_err();
+        assert_eq!(error.code, Code::AttestationUndeclared);
+    }
 }
