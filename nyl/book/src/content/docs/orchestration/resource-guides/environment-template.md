@@ -447,9 +447,18 @@ is `catalog:<name>`, so no instance writes outside its prefix.
   one sync for every preview: a manifest Argo CD rejects blocks all of them,
   and the `observe` teardown wait fails closed for all of them.
 - Teardown readiness reads the shared Application the branch holds (at
-  resolution, not the instance's own declaration) for its `syncPolicy` and
+  resolution and again when a teardown starts, never the instance's own
+  declaration; the reading is recorded but not part of the unit's key, so a
+  writer's push does not re-execute any preview) for its `syncPolicy` and
   deletion policy: it must prune for an instance's Applications to disappear.
-  Until the manifest exists, the rows are not checked. An instance
+  Until the manifest exists, the rows are not checked; a branch that cannot be
+  read (including offline: resolution has no cached fallback) or a manifest that
+  is no Application is a blocking row. A teardown whose catalog no longer prunes
+  is held by the driver even when the instance's stored settings said it did, so
+  run the writer before instances expire. The
+  `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` warning is what the unit's last
+  execution found and stays until it executes again; `nyl build <unit> -e <env> --
+  --shared-catalog --diff` shows the branch's state now. An instance
   leaves nothing of its catalog behind, because the shared catalog prunes its
   objects; the catalog itself stays until it is decommissioned.
 - The targets that name one catalog publish to one repository and revision,

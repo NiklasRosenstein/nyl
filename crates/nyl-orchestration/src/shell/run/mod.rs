@@ -1407,9 +1407,8 @@ fn declared_outputs(spec: &Value) -> BTreeMap<String, OutputDeclaration> {
         .unwrap_or_default()
 }
 
-/// A unit's stored blocked reasons in the report's form, and the warnings
-/// of those that wait for attestations or observed values.
-/// The coded warnings the unit's driver reported with its current receipt.
+/// The coded warnings the unit's driver reported with its current receipt:
+/// what its last execution found, which stays until it executes again.
 fn receipt_warnings(observed: Option<&ObservedUnit>) -> Vec<Finding> {
     observed
         .and_then(|observed| observed.receipt.as_ref())
@@ -1417,6 +1416,8 @@ fn receipt_warnings(observed: Option<&ObservedUnit>) -> Vec<Finding> {
         .unwrap_or_default()
 }
 
+/// A unit's stored blocked reasons in the report's form, and the warnings
+/// of those that wait for attestations or observed values.
 fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<BlockedBy>, Vec<Finding>) {
     let Readiness::Blocked { reasons } = &unit.readiness else {
         return (Vec::new(), Vec::new());

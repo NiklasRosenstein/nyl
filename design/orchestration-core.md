@@ -1198,7 +1198,9 @@ previews branch
   `PublishedTree` artifact it records, and for `differs` returns the warning
   `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` (fix: the writer below) through the
   driver's `warnings`, which the shell records with the receipt and shows in the
-  run report, `plan`, and `status` until the unit executes again. The writer
+  run report, `plan`, and `status` until the unit executes again. That is what
+  the unit's last execution found, not the branch's state now: `nyl build <unit>
+  -e <env> -- --shared-catalog --diff` reads the branch. The writer
   that replaces it is the build of any unit
   that names the catalog, at the revision whose Nyl version and declaration
   should win, usually the default branch's from a scheduled job:
@@ -1214,13 +1216,20 @@ previews branch
 - Nothing is reconciled from state: Git holds the other targets' files, and
   a publish removes only files in the publishing target's index.
 - Nyl renders the shared catalog, so the readiness table checks its settings,
-  read from the shared Application the branch holds, at resolution, not from
-  the manifest the instance renders: Argo CD runs what is published, so a pull
+  read from the shared Application the branch holds, at resolution and again
+  when a teardown starts, not from the manifest the instance renders. The
+  reading is recorded in the unit's document as a member that is never keyed
+  (the key follows what the target renders, so creating the manifest or a
+  writer's push never re-executes a preview), and a teardown over a catalog
+  that no longer prunes, or whose Application cannot be read, is held by the
+  driver with the readiness code even for an instance that expired and is
+  removed from its stored document: Argo CD runs what is published, so a pull
   request that declares a pruning catalog over one that does not prune reports
   the published settings, and its teardown is held. A branch without the
   manifest yet has nothing that prunes, so the catalog rows are not checked
-  until it exists, and a branch that cannot be read fails the resolution,
-  closed. Whether it prunes, and its deletion policy, are the rows. The shared catalog prunes each target's objects as phase 1 and
+  until it exists, and a branch that cannot be read, or a manifest that is no
+  Application, is recorded as a blocking row (an offline run of `plan` shows it
+  too, because resolution reads the branch and has no cached fallback). Whether it prunes, and its deletion policy, are the rows. The shared catalog prunes each target's objects as phase 1 and
   phase 2 remove them, so the target leaves no catalog remnant
   (`NYL-TEARDOWN-CATALOG-REMAINS` does not apply).
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:

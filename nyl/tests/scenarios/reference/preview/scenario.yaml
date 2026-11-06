@@ -55,6 +55,12 @@ steps:
     exit: 0
     expect: {messages: ['2026-10-01T10:00:00Z']}
 
+  # Creating the shared catalog did not re-key anything: a repeated run executes nothing.
+  - nyl: [reconcile, -e, pr-123]
+    exit: 0
+    expect:
+      executed: []
+
   # The shared catalog's one writer, the build of an instance's unit: the
   # manifest the instances created is the one it renders, so pushing it
   # changes nothing.
@@ -175,6 +181,11 @@ steps:
   - nyl: [build, kubernetes, -e, pr-126, --, --shared-catalog, --push]
     at: shared-labels
     exit: 0
+  # The writer's push re-keyed nothing: the instance has nothing to execute.
+  - nyl: [reconcile, -e, pr-126, --no-extend]
+    exit: 0
+    expect:
+      executed: []
   - commit: {branch: shared-labels, message: "Change pr-126's page", apply: patches/touch}
   - nyl: [reconcile, -e, pr-126, --template, preview, --param, pr=126]
     at: shared-labels

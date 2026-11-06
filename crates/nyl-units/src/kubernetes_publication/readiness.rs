@@ -108,6 +108,32 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
     readiness
 }
 
+/// The readiness of a target whose catalog is shared: the rows of the
+/// settings read from the Application the branch holds (`reading`, see
+/// [`super::run::read_shared_catalog`]), plus a blocking row when that
+/// manifest could not be read or understood, because a catalog that cannot be
+/// shown to prune must not be trusted to.
+pub fn evaluate_reading(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    reading: &serde_json::Value,
+) -> Result<TeardownReadiness, String> {
+    let settings = reading
+        .get("settings")
+        .ok_or("the shared catalog reading records no settings")?;
+    let settings: TeardownSettings =
+        serde_json::from_value(settings.clone()).map_err(|error| format!("shared catalog settings: {error}"))?;
+    let mut readiness = evaluate(environment, unit, &settings);
+    if let Some(problem) = reading.get("problem").and_then(serde_json::Value::as_str) {
+        readiness.blocking.push(Finding::new(
+            Code::TeardownCatalogManualSync,
+            format!("{environment}/{unit}: the shared catalog cannot be shown to prune removed workload Applications: {problem}"),
+            "restore access to the publication branch, or publish a readable shared catalog with `nyl build <unit> -e <environment> -- --shared-catalog --push`, or pass --allow-incomplete",
+        ));
+    }
+    Ok(readiness)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
