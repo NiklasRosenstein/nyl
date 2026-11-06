@@ -304,7 +304,7 @@ pub struct RunRequest {
     pub reason: Option<String>,
     /// The prefix of the keep refs of an instance's source commits, which
     /// `state delete` removes with the instance's state; `None` for a
-    /// declared environment and when `keepSource` is off.
+    /// declared environment and unless the template sets `keepSource: true`.
     pub keep_prefix: Option<String>,
 }
 

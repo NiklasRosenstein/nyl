@@ -73,14 +73,14 @@ nothing, and names the expired instances that could be removed;
 `--make-room` removes them first, oldest expiry first and only as many as the
 new instance needs, then creates it, and `--allow-teardown` and
 `--allow-incomplete` authorize those removals like the options of
-[`nyl reconcile`](/nyl/reference/cli/reconcile/#preview-lifecycle) do. Unless
-the template sets `keepSource: false`, it creates a keep ref of the recorded
+[`nyl reconcile`](/nyl/reference/cli/reconcile/#preview-lifecycle) do. If the
+template sets `keepSource: true`, it creates a keep ref of the recorded
 commit, `refs/nyl-keep/<keepId>/<commit>`, in the source repository
 before recording it, and removes the instance's older ones afterwards; a
 repository that refuses the push refuses the command
 (`NYL-INSTANCE-KEEP-FAILED`, exit 1) before anything is written, which a
-read-only token does, so grant push access to `refs/nyl-keep/*` or set
-`keepSource: false`. It warns about what the instance's teardown would meet: each unmet
+read-only token does, so grant push access to `refs/nyl-keep/*` or leave
+`keepSource` off. It warns about what the instance's teardown would meet: each unmet
 requirement of the publications that can resolve before their producers ran,
 and a `manual` `teardownWait`, which stops a removal nobody attends
 (`NYL-TEARDOWN-WAIT-MANUAL`, read from the declaration). See
