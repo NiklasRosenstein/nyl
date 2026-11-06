@@ -616,7 +616,7 @@ spec:
   instance of an EnvironmentTemplate, whose inline targets must therefore
   template their names, for example from `environment.name`. M2 extended the
   check from targets sharing an explicit ArgoCDInstance to this rule; inline
-  targets and template instances join it with M5. Implementation status (M5):
+  targets and template instances join it with M5. As implemented:
   the inline targets of every environment's enabled publication units join
   the inventory of every compile that checks across targets, in `nyl validate`
   and in every publication render (`gitops::units::with_inline_targets`,
@@ -706,7 +706,7 @@ spec:
   `releases`, keyed by `<group>/<release>` and then by input, so the pointer to
   an input is `/releases/<group>~1<release>/<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
-  - Implementation status (M5): `releases` holds the bindings only
+  - As implemented: `releases` holds the bindings only
     orchestration can resolve: `fromUnit`, resolved through the shared
     reference resolver in both its `output` and `artifact` forms, and
     `fromPromotion` once PromotionPath selectors exist (M6). The driver passes
@@ -902,7 +902,7 @@ in two phases, both through Git:
    Unowned files in the prefix, such as state files committed by other tools,
    are preserved, as in every reconciliation.
 
-Implementation status (M5): the `KubernetesPublication` driver
+As implemented: the `KubernetesPublication` driver
 (`nyl_units::kubernetes_publication`) carries out both phases through Git on
 the real publication path (the tree changes are in
 `nyl_render::gitops::publication`), records the phase 1 commit as the wait's
@@ -1475,7 +1475,7 @@ nyl get environments                                         # declared environm
 - Instances cannot be a PromotionPath source; previews build and test, and
   promotion starts from declared environments.
 
-Implementation status (M5): a template's `values`, `source`, and
+As implemented: a template's `values`, `source`, and
 `protectedRefs` strings render with `params` and `environment.name` when an
 instance is loaded, so a `values.target` object carries concrete prefixes and
 names into a unit's `target: {{ values.target | tojson }}`. `deletionPolicy`,
@@ -1485,8 +1485,8 @@ sliding expiry and the removal of expired instances, `--renew`, `--no-extend`,
 move --template` are implemented, and so are `catalogApplication.shared`
 (its manifest, its `catalog:<name>` owner, and `nyl build -- --shared-catalog`)
 and cross-environment references from instances to declared environments, with
-the protection of their producers; the preview reference scenario
-(`reference/preview`) runs them.
+the protection of their producers; the preview reference scenarios
+(`reference/preview-closed` and `reference/preview`) run them in both tiers.
 
 ### Template changes
 
