@@ -187,6 +187,17 @@ mod filters {
 mod tests {
     use super::*;
 
+    /// Catches a template that cannot embed a structured value: unit
+    /// documents write `target: {{ values.target | tojson }}` so an object
+    /// from `values` becomes the YAML flow mapping the unit declares.
+    #[test]
+    fn test_tojson_filter_writes_structured_values_as_yaml_flow() {
+        let engine = TemplateEngine::new();
+        let context = serde_json::json!({"values": {"target": {"inline": {"prefix": "pr-1", "ports": [80, 443]}}}});
+        let rendered = engine.render("target: {{ values.target | tojson }}", &context).unwrap();
+        assert_eq!(rendered, r#"target: {"inline": {"ports": [80, 443], "prefix": "pr-1"}}"#);
+    }
+
     #[test]
     fn test_b64encode_filter() {
         let engine = TemplateEngine::new();

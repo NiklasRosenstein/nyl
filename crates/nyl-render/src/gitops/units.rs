@@ -1697,6 +1697,39 @@ spec:
         );
     }
 
+    /// Catches a template whose `values.target` object, written as the
+    /// reference scenario writes it, reaches the unit unrendered: strings in
+    /// the object read `params` and the instance's name once, when the
+    /// instance is created, so the unit's `tojson` carries concrete values.
+    #[test]
+    fn test_templated_values_inside_a_target_object_render_for_the_instance() {
+        let template = PREVIEW_TEMPLATE.replace(
+            "    prefix: '{{ environment.name }}'\n",
+            "    target:\n      inline:\n        clusterRef: {name: dev}\n        publication:\n          repository: {repoURL: 'https://example.invalid/deploy.git'}\n          revision: previews\n          pathPrefix: '{{ environment.name }}'\n        values: {hostname: 'pr-{{ params.pr }}.example.com'}\n",
+        );
+        let unit = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels:\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}\n";
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        let worktree = project(&[
+            ("platform.yaml", &platform),
+            ("preview.yaml", &template),
+            ("kubernetes.yaml", unit),
+        ]);
+        let renderer =
+            UnitSourceRenderer::new("/nyl", crate::config::test_catalogue()).with_instances(instances(&[("pr-5", 5)]));
+        let source = render_with(&worktree, &renderer, "pr-5");
+        let spec = self::unit(&source, "kubernetes")
+            .spec
+            .clone()
+            .expect("the unit renders");
+        assert_eq!(spec["target"]["name"], json!("pr-5-kubernetes"));
+        assert_eq!(spec["target"]["inline"]["publication"]["pathPrefix"], json!("pr-5"));
+        assert_eq!(
+            spec["target"]["inline"]["values"]["hostname"],
+            json!("pr-5.example.com")
+        );
+    }
+
     /// Catches an inline target that is not a valid DeploymentTarget being
     /// accepted by the renderer and failing only at publication.
     #[test]

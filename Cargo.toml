@@ -31,7 +31,7 @@ nyl-orchestration = { path = "crates/nyl-orchestration" }
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 
 # Templates
-minijinja = { version = "3.0", features = ["builtins", "serde"] }
+minijinja = { version = "3.0", features = ["builtins", "serde", "json"] }
 
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }

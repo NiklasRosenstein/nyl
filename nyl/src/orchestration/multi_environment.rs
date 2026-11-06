@@ -135,7 +135,7 @@ pub fn select(
         }
     }
     if source_graph {
-        ownership_preflight(&inventory, &rendered_sources, &mut errors, offline, drivers)?;
+        ownership_preflight(&inventory, &rendered_sources, &mut errors, drivers, &hint)?;
     }
     let ordered = if source_graph {
         nyl_orchestration::rules::multi_environment::validate_available_sources(
@@ -164,22 +164,15 @@ fn ownership_preflight(
     inventory: &GitOpsInventory,
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     errors: &mut BTreeMap<String, Finding>,
-    offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
+    hint: &dyn Fn(&str) -> InstanceRequest,
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
     let mut unknown = Vec::new();
     for name in nyl_render::gitops::instances::environment_names(inventory)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?
     {
-        match snapshot(
-            inventory,
-            &name,
-            &InstanceRequest {
-                offline,
-                ..InstanceRequest::default()
-            },
-        ) {
+        match snapshot(inventory, &name, &hint(name.as_str())) {
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
             }
