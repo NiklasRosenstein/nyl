@@ -223,7 +223,7 @@ impl KubeApiReader {
                 Err(ReadError::new(
                     ReadErrorKind::Unreachable,
                     format!(
-                        "reading {plural} of namespace {namespace} through context {:?} took longer than {}s",
+                        "cannot list {plural} of namespace {namespace} through context {:?}: no answer within {}s",
                         self.connection.context(),
                         budget.as_secs()
                     ),
