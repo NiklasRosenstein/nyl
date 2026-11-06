@@ -216,6 +216,13 @@ fn run_tier(loaded: &Loaded, tier: u8, publication: Publication) -> Result<(), S
     // the files `file` steps change outside Nyl.
     let mut process_env = super::shell::process_env();
     process_env.insert("SCENARIO_TMP".to_owned(), world.scenario_tmp_for_scripts());
+    // A unit in observe mode admits `KUBECONFIG` for `nyl attest`, and an
+    // admitted variable must exist wherever the unit runs. No scenario reads
+    // Argo CD, so the file it names does not.
+    process_env.insert(
+        "KUBECONFIG".to_owned(),
+        format!("{}/no-kubeconfig", world.scenario_tmp_for_scripts()),
+    );
     let shared = Shared {
         world,
         clock: Arc::new(FakeClock::new(start)),

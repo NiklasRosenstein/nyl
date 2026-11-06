@@ -1,0 +1,106 @@
+# The end-to-end example of the Orchestration guide: dev runs an OpenTofu
+# configuration, an image build, and a publication of the web Release that reads
+# both; every pull request gets a preview of the `preview` template, which
+# publishes its own tree behind one shared catalog. The scenario beside this
+# project (scenario.yaml) runs it in both tiers.
+apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: shop
+spec:
+  repoURL: '%PROJECT_URL%'
+  publishURL: '%PROJECT_URL%'
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: dev
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  # The kubeconfig context that reaches this cluster, for `nyl attest` and
+  # `nyl observe` (access method `kubernetes`, the default).
+  live: {context: dev-admin}
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
+---
+# One Argo CD instance for the cluster. Its catalog prunes removed Applications,
+# so tearing a target down can complete.
+apiVersion: k8s.gitops.nyl/v1
+kind: ArgoCDInstance
+metadata:
+  name: dev
+spec:
+  clusterRef: {name: dev}
+  namespace: argocd
+  catalogApplicationDefaults:
+    syncPolicy: {automated: {prune: true}}
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: dev
+spec:
+  clusterRef: {name: dev}
+  argocdRef: {name: dev}
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  publication:
+    repositoryRef: {name: shop}
+    revision: deploy
+    pathPrefix: dev
+  releaseInputs:
+    web/web:
+      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      namespace: {value: web}
+---
+# The same web Release with static inputs, in a target that no environment
+# uses: `nyl publish-tree --target static` renders it without orchestration.
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: static
+spec:
+  destination:
+    server: https://static.example.invalid
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: static
+spec:
+  clusterRef: {name: static}
+  argocdRef: {name: dev}
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  publication:
+    repositoryRef: {name: shop}
+    revision: static
+    pathPrefix: static
+  releaseInputs:
+    web/web:
+      image: {value: 'registry.example.com/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'}
+      databaseHost: {value: shop.db.internal}
+      namespace: {value: web}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {stage: dev}
+  values:
+    target: dev
+    teardownWait: {strategy: manual}
+    stateDir: '%SCENARIO_TMP%/tofu'
+  state:
+    repositoryRef: {name: shop}
+  allowUnprotectedSource: true
