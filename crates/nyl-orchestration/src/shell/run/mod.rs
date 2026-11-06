@@ -1101,6 +1101,9 @@ impl<'r, 'a> Session<'r, 'a> {
                 .insert(name.clone(), (spec.clone(), commit.clone(), inputs.clone()));
             inputs
         };
+        // What the driver learned from its inputs joins the resolved spec
+        // before the key is computed, so the stored document carries it.
+        inputs.record_into(spec).map_err(invalid)?;
         let key = execution_key(&KeyMaterial {
             api_version: &unit.unit.api_version,
             kind: &unit.unit.kind,

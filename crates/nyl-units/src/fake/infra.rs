@@ -218,8 +218,7 @@ impl Driver for FakeInfra {
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
         Ok(KeyInputs {
             files: source_files(ctx, spec, "/source/path", "spec.source.path")?,
-            excluded_fields: Vec::new(),
-            fingerprint: None,
+            ..KeyInputs::default()
         })
     }
 

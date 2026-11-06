@@ -81,6 +81,12 @@ pub enum NylError {
     #[error("Git error: {0}")]
     Git(#[from] crate::git::GitError),
 
+    /// A publication branch advanced between checking it out and pushing to
+    /// it, so nothing was pushed. Building the tree again on the new head
+    /// may succeed; see [`NylError::is_stale_publication`].
+    #[error("{0}")]
+    PublicationMoved(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -160,7 +166,13 @@ impl NylError {
 
     /// Returns true if this error is related to Git operations
     pub fn is_git_error(&self) -> bool {
-        matches!(self, NylError::Git(_))
+        matches!(self, NylError::Git(_) | NylError::PublicationMoved(_))
+    }
+
+    /// Whether a publication lost its race for the branch head, before the
+    /// push or at its compare-and-swap, so that nothing was published.
+    pub fn is_stale_publication(&self) -> bool {
+        matches!(self, NylError::PublicationMoved(_))
     }
 
     /// Returns true if this is an API discovery miss for a specific GVK.

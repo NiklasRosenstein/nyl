@@ -570,8 +570,8 @@ impl Driver for CommandDriver {
         };
         Ok(KeyInputs {
             files,
-            excluded_fields: Vec::new(),
             fingerprint,
+            ..KeyInputs::default()
         })
     }
 

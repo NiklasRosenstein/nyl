@@ -3,7 +3,9 @@
 //! The command line wires [`builtin`] in production. Tier-1 scenarios and a
 //! binary built with the `test-kinds` feature use [`with_test_kinds`], which
 //! registers each fake kind under the built-in kind it stands in for, so
-//! state documents keep the real `apiVersion` and `kind`.
+//! state documents keep the real `apiVersion` and `kind`. Tier-1 keeps
+//! `FakePublication` because scenarios script a publication's outcome and
+//! answer `observe` with the fake Argo CD observer.
 
 use std::sync::Arc;
 
@@ -11,10 +13,15 @@ use nyl_core::orchestration::driver::DriverSet;
 
 use crate::command::CommandDriver;
 
-/// Native command, image, and infrastructure drivers.
-pub fn builtin() -> DriverSet {
+/// Every built-in driver: commands, images, infrastructure, and Kubernetes
+/// publications, which render against `catalogue`, the resource catalogue
+/// the command line passes to every other workflow.
+pub fn builtin(catalogue: nyl_render::config::ResourceCatalogue) -> DriverSet {
     let mut drivers = DriverSet::new();
     drivers.register(Arc::new(CommandDriver));
+    drivers.register(Arc::new(
+        crate::kubernetes_publication::KubernetesPublicationDriver::new(catalogue),
+    ));
     drivers.register(Arc::new(crate::oci_image::OciImageDriver));
     drivers.register(Arc::new(crate::terraform::TerraformDriver::terraform()));
     drivers.register(Arc::new(crate::terraform::TerraformDriver::opentofu()));
@@ -27,7 +34,7 @@ pub fn with_fake_publication(
     script: &crate::fake::Script,
     catalogue: nyl_render::config::ResourceCatalogue,
 ) -> DriverSet {
-    let mut drivers = builtin();
+    let mut drivers = builtin(catalogue.clone());
     drivers.register_as(
         nyl_core::constants::API_VERSION_UNITS,
         "KubernetesPublication",
@@ -46,7 +53,7 @@ pub fn with_test_kinds(script: &crate::fake::Script, catalogue: nyl_render::conf
     use nyl_core::constants::API_VERSION_UNITS;
     use nyl_core::orchestration::driver::Driver;
 
-    let mut drivers = builtin();
+    let mut drivers = builtin(catalogue.clone());
     let image: Arc<dyn Driver> = Arc::new(FakeImage::new(script.clone()));
     let infra: Arc<dyn Driver> = Arc::new(FakeInfra::new(script.clone()));
     let publication: Arc<dyn Driver> = Arc::new(FakePublication::new(script.clone(), catalogue));
@@ -80,6 +87,8 @@ mod tests {
         assert_eq!(kind("OciImage"), Some("FakeImage"));
         assert_eq!(kind("OpenTofu"), Some("FakeInfra"));
         assert_eq!(kind("KubernetesPublication"), Some("FakePublication"));
-        assert!(builtin().get("units.gitops.nyl/v1", "OciImage").is_some());
+        assert!(builtin(crate::fake::test_catalogue())
+            .get("units.gitops.nyl/v1", "OciImage")
+            .is_some());
     }
 }

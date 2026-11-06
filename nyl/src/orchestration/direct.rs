@@ -301,12 +301,15 @@ pub fn prepare(
         cache_dir: prepared.workspace.path().join("cache"),
     };
     let inputs = driver.execution_key_inputs(&context, &spec).map_err(config)?;
+    // The key covers what the driver records into the resolved spec, as in a run.
+    let mut keyed_spec = spec.clone();
+    inputs.record_into(&mut keyed_spec).map_err(config)?;
     prepared.unit.execution_key = Some(
         execution_key(&KeyMaterial {
             api_version: &prepared.unit.unit.api_version,
             kind: &prepared.unit.unit.kind,
             behavior_version: driver.behavior_version(),
-            resolved_spec: &spec,
+            resolved_spec: &keyed_spec,
             source_fields: &fields,
             inputs: &inputs,
         })

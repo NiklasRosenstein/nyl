@@ -101,7 +101,7 @@ impl ProcessWiring {
             drivers
         };
         #[cfg(not(feature = "test-kinds"))]
-        let drivers = nyl_units::registry::builtin();
+        let drivers = nyl_units::registry::builtin(crate::resource_catalogue());
         Self {
             ids: crate::orchestration::ids::UuidV7,
             drivers,

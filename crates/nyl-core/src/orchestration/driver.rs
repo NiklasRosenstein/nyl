@@ -153,6 +153,35 @@ pub struct KeyInputs {
     /// Output of a fingerprint step, digested into the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Facts the driver learned while reading its inputs that the resolved
+    /// spec records, by JSON Pointer to the member that receives each value,
+    /// such as a publication's effective teardown settings. Resolution writes
+    /// them into the resolved spec before it computes the key, so the stored
+    /// desired document carries them and commands that never render source
+    /// can read them back. The engine stores each value without
+    /// interpreting it; see [`KeyInputs::record_into`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recorded: BTreeMap<String, Value>,
+}
+
+impl KeyInputs {
+    /// Write each [`recorded`](Self::recorded) value into the resolved `spec`.
+    /// A pointer names a member of an existing object, so its parent must
+    /// exist; a pointer that cannot be written is an error, never skipped.
+    pub fn record_into(&self, spec: &mut Value) -> std::result::Result<(), String> {
+        for (pointer, value) in &self.recorded {
+            let (parent, last) = pointer
+                .rsplit_once('/')
+                .filter(|(_, last)| !last.is_empty())
+                .ok_or_else(|| format!("recorded field {pointer:?} is not a JSON Pointer to an object member"))?;
+            let key = last.replace("~1", "/").replace("~0", "~");
+            let Some(Value::Object(members)) = spec.pointer_mut(parent) else {
+                return Err(format!("recorded field {pointer:?} has no object to hold it"));
+            };
+            members.insert(key, value.clone());
+        }
+        Ok(())
+    }
 }
 
 /// The planned change kind.
@@ -702,5 +731,50 @@ mod ownership_tests {
         child.namespace = parent.namespace.clone();
         child.path.clear();
         assert!(parent.overlaps(&child));
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn recording(pointer: &str, value: Value) -> KeyInputs {
+        KeyInputs {
+            recorded: BTreeMap::from([(pointer.to_owned(), value)]),
+            ..KeyInputs::default()
+        }
+    }
+
+    /// Catches a driver's recorded fact missing from the stored resolved
+    /// document, where commands that never render source read it.
+    #[test]
+    fn test_recorded_fields_join_the_resolved_spec_and_replace_what_is_there() {
+        let mut spec = json!({"target": "dev", "nested": {"keep": 1}});
+        recording("/teardownSettings", json!({"catalogPrunes": true}))
+            .record_into(&mut spec)
+            .unwrap();
+        recording("/nested/added~1slash", json!(2))
+            .record_into(&mut spec)
+            .unwrap();
+        recording("/target", json!("other")).record_into(&mut spec).unwrap();
+        assert_eq!(
+            spec,
+            json!({"target": "other", "teardownSettings": {"catalogPrunes": true}, "nested": {"keep": 1, "added/slash": 2}})
+        );
+    }
+
+    /// Catches a recorded field silently dropped because its parent is
+    /// missing or its pointer names no member.
+    #[test]
+    fn test_recorded_field_without_a_place_to_go_is_an_error() {
+        let mut spec = json!({"target": "dev"});
+        for pointer in ["/missing/field", "", "/"] {
+            assert!(
+                recording(pointer, json!(1)).record_into(&mut spec).is_err(),
+                "{pointer:?}"
+            );
+        }
+        assert_eq!(spec, json!({"target": "dev"}));
     }
 }
