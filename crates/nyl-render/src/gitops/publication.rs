@@ -157,7 +157,7 @@ pub struct RenderedTarget {
     pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
     /// The target's Argo CD instance and how Nyl reads it. Declaration only:
     /// it enters no rendered byte, and a driver that observes records it at
-    /// resolution ([`super::observation::ArgoCdObservation`]).
+    /// resolution ([`super::observation::ReconcilerFacts`]).
     pub argocd: super::observation::ArgoCdLocation,
     /// The target's workload Cluster, where its rendered resources live, and
     /// that Cluster's local context. Declaration only, like `argocd`: it

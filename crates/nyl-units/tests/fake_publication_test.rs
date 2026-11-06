@@ -1,7 +1,7 @@
 //! `FakePublication`, the test stand-in for `KubernetesPublication`, against
 //! the shared publication world: the behaviors every publication kind has
 //! (`conformance`) and what only the fake adds, `teardownSettings` that a
-//! scenario declares and `mode: observe`.
+//! scenario declares and `observe: {}`.
 //!
 //! Contract: [Fake kinds](../../../design/reference-scenarios.md#fake-kinds)
 //! and the [Kubernetes publication unit](../../../design/orchestration-core.md#kubernetes-publication-unit).
@@ -95,8 +95,15 @@ fn test_fake_publication_validates_teardown_wait_and_settings() {
         spec[field] = value;
         driver.validate_spec(&spec)
     };
+    // The strategy that reads the reconciler needs the unit to opt into observing it.
+    assert!(with("teardownWait", json!({"strategy": "observe"})).is_err());
+    assert!(with("observe", json!({})).is_ok());
+    assert!(with("observe", json!({"interval": "1m"})).is_err());
+    let mut observing = spec();
+    observing["observe"] = json!({});
+    observing["teardownWait"] = json!({"strategy": "observe"});
+    assert!(driver.validate_spec(&observing).is_ok());
     for valid in [
-        json!({"strategy": "observe"}),
         json!({"strategy": "manual"}),
         json!({"strategy": "delay", "duration": "10m"}),
     ] {

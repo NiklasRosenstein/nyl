@@ -17,7 +17,8 @@ use kube::Api;
 use nyl_render::gitops::observation::ResourceRef;
 use serde_json::Value;
 
-use super::argocd::{block_on, Connection, ReadError, ReadErrorKind};
+use super::argocd::Connection;
+use super::reconciler::{block_on, ReadError, ReadErrorKind};
 
 /// Reads resources of one Cluster.
 pub trait ResourceReader {

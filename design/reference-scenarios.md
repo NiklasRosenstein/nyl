@@ -39,7 +39,7 @@ Everything lives in one per-test temporary directory, as the existing
 | Container registry | Tier 1: fake. Tier 2: a `registry:2` container on an ephemeral port |
 | Terraform backend | OpenTofu's `local` backend with a path inside the temporary directory |
 | Cloud resources | Only the built-in `terraform_data` resource and outputs, so no provider is downloaded |
-| Argo CD and the workload Cluster | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait, and scripted observed values for it; the real driver reads its observed values through the same script in tier 1 (its readings of Argo CD and of the workload Cluster are tested against local fakes of the Kubernetes API and the Argo CD API server). Publish mode needs none |
+| Argo CD and the workload Cluster | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait, and scripted observed values for it; the real driver reads its observed values through the same script in tier 1 (its readings of Argo CD and of the workload Cluster are tested against local fakes of the Kubernetes API and the Argo CD API server). A publication that does not declare `observe` needs none |
 | Time | An injected clock (see [Clock](#clock)) |
 
 ### Tiers
@@ -100,7 +100,7 @@ in for:
 | --- | --- | --- |
 | `FakeImage` | `OciImage` | Returns a digest derived from the execution key; publishes a `ContainerImage` artifact; declares `build` |
 | `FakeInfra` | `OpenTofu` | Keeps resources and outputs in a JSON file per backend key; reports plan and destroy digests for `bind: plan`; tears down |
-| `FakePublication` | `KubernetesPublication` | Publishes through the same code as the real driver, and adds scripted outcomes, `mode: observe`, and scenario-declared teardown settings; runs both teardown phases against the fake observer; its `nyl build` is the real driver's |
+| `FakePublication` | `KubernetesPublication` | Publishes through the same code as the real driver, and adds scripted outcomes, `observe: {}`, and scenario-declared teardown settings; runs both teardown phases against the fake observer; its `nyl build` is the real driver's |
 
 The scenario files name the real kinds; the harness maps them to fakes where a
 scenario scripts them. Tier 1 keeps the fakes for images and OpenTofu even
@@ -116,7 +116,7 @@ teardown-ready (its catalog prunes and its Namespaces are deleted with their
 Application), because the real driver reads readiness from the rendered
 target.
 
-Observe mode against a real Argo CD needs a cluster and stays a manual check.
+Observing a real Argo CD (`observe: {}`) needs a cluster and stays a manual check.
 The real driver's two ways of reading it (the Kubernetes API and the Argo CD
 API server) run against local HTTP fakes on an ephemeral port in the driver's
 and the command's tests; tier 1's fake observer covers the wait's decisions.
@@ -426,7 +426,7 @@ metadata:
     preview: 'true'
 spec:
   target: {{ values.target | tojson }}    # dev, prod, or the preview template's inline target
-  mode: publish                           # teardownWait defaults to manual
+  # no `observe`, so teardownWait defaults to manual
   {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% endif %}
 ---
 # dev.yaml: DeploymentTarget dev (excerpt)
@@ -564,7 +564,7 @@ through the fenced push.
 
 Tier 1 variants:
 
-- **Observe mode.** With `mode: observe`, step 16 waits on the fake observer.
+- **Observing the reconciler.** With `observe: {}`, step 16 waits on the fake observer.
   The observer first reports `observation-failed`: the teardown is uncertain
   with that reason, and `status` suggests fixing the observer or confirming.
   `--confirm-removed` then completes it as in step 18.
