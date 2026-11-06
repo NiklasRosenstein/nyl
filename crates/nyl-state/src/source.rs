@@ -10,6 +10,10 @@
 //! - [`SourceRepository::This`] is the entry clone at `git_dir`: a branch is
 //!   a local branch or its `origin/<branch>` remote-tracking ref, and
 //!   reachability checks both.
+//! - A commit the entry clone lacks is looked up in the retained snapshot
+//!   repository, then fetched from the instance's keep ref and, with
+//!   [`GitSourceResolver::with_origin_fetch`] (set for runs with network
+//!   access), by its exact id from the clone's `origin`.
 //! - A repository named by URL is fetched through `nyl-git` (the user's own
 //!   `git`, as for state repositories) into a private namespace of the entry
 //!   clone, `refs/nyl-sources/<url digest>/{heads,tags}/…`, once per
@@ -64,6 +68,9 @@ pub struct GitSourceResolver {
     /// The prefix of the keep refs of the instance this resolver works for: a
     /// commit missing from the clone is fetched from its ref.
     kept: Option<String>,
+    /// Whether a commit missing from the entry clone is fetched by its id
+    /// from the clone's `origin`.
+    origin_fetch: bool,
 }
 
 fn error(message: impl Into<String>) -> SourceError {
@@ -135,7 +142,21 @@ impl GitSourceResolver {
             fetched: Mutex::new(BTreeSet::new()),
             symlinks: Mutex::new(BTreeMap::new()),
             kept: None,
+            origin_fetch: false,
         }
+    }
+
+    /// Fetch a commit of the entry repository that the clone lacks by its
+    /// exact id from the clone's `origin`, with the credentials the resolver
+    /// uses for keep refs. A commit that only a pull request or merge request
+    /// ref carries (GitHub's `refs/pull/<n>/head`, GitLab's
+    /// `refs/merge-requests/<n>/head`) is available this way after its
+    /// branch is deleted. The caller sets it for runs with network access;
+    /// a failed fetch leaves the lookup to report the commit missing.
+    #[must_use]
+    pub fn with_origin_fetch(mut self) -> Self {
+        self.origin_fetch = true;
+        self
     }
 
     /// Fetch a commit of the entry repository that the clone lacks from its
@@ -152,6 +173,19 @@ impl GitSourceResolver {
         let remote = repository.find_remote("origin").ok()?;
         let url = remote.url().ok()?.to_owned();
         Some(url)
+    }
+
+    /// Fetch `commit` by its id from the entry clone's `origin`. Only the
+    /// declared origin and only the recorded id are asked for. Failures leave
+    /// the lookup to report the commit as missing.
+    fn fetch_from_origin(&self, repository: &Repository, commit: &CommitId) {
+        if !self.origin_fetch {
+            return;
+        }
+        let Some(url) = Self::origin_url(repository) else {
+            return;
+        };
+        let _ = nyl_git::fetch(repository.path(), &url, &[commit.as_str()], false, &self.auth);
     }
 
     /// Fetch the keep ref into a private ref of the entry clone, so a commit
@@ -316,6 +350,9 @@ impl GitSourceResolver {
         }
         if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
             self.fetch_kept(&source, commit);
+        }
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            self.fetch_from_origin(&source, commit);
         }
         let checked = {
             let found = source.find_commit(oid).map_err(|_| {

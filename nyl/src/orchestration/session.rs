@@ -63,7 +63,8 @@ pub struct Session {
     /// Whether the command was entered from the instance's own source: it
     /// named `--template`, so the entry checkout is the instance's source.
     entered: bool,
-    /// `--local`: no network access, so no keep refs are fetched or moved.
+    /// `--local`: no network access, so no keep refs are fetched or moved and no
+    /// recorded commit is fetched from the origin.
     offline: bool,
     /// Where every known instance keeps its state, the session's own included.
     instance_locations: BTreeMap<EnvironmentName, StateLocation>,
@@ -228,7 +229,11 @@ impl Session {
         let mut sources = GitSourceResolver::new(&self.resolved.git_dir, auth)
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
             .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root());
-        // An instance's recorded source commit stays fetchable through its keep ref.
+        // A recorded commit the clone lacks is fetched by its id from the project's origin,
+        // and an instance's keep ref is the fallback.
+        if !self.offline {
+            sources = sources.with_origin_fetch();
+        }
         if let Some(prefix) = self.keep_prefix() {
             sources = sources.with_kept_source(prefix);
         }

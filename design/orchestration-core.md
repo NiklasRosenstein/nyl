@@ -228,6 +228,16 @@ spec:
   `reconcile -e <instance> --template <name> --param …` moves an instance's
   recorded commit to its entry worktree, so a job run from another checkout
   never moves an instance.
+- A recorded source commit that the entry clone lacks is looked up in the
+  retained worktree snapshots of the state repository, then fetched through
+  the instance's keep ref (`keepSource`), and then by its exact id from the
+  clone's `origin`, with the credentials of the other Git fetches. Only the
+  declared origin is contacted and only the recorded id is requested; a failed
+  fetch leaves the commit missing, which the caller reports, and `--local`
+  fetches nothing. A host that keeps a pull request's commits reachable after
+  its branch is gone (GitHub's `refs/pull/<n>/head`, GitLab's
+  `refs/merge-requests/<n>/head`) therefore serves a closed job running on a
+  checkout of the default branch.
 - An EnvironmentTemplate takes the same field and may template it from
   `params`, for example `revision: 'refs/pull/{{ params.pr }}/merge'`.
 - `--source <rev>` overrides S for one single-environment `plan`,
@@ -1388,6 +1398,14 @@ nyl get environments                                         # declared environm
     marker is committed, and leaves a ref that does not name the commit its
     name says (not this instance's) with a warning; a ref that cannot be
     removed is a warning too, because it is no reason to keep the state.
+- The recommended teardown is the pull request closed job: it checks out the
+  default branch and runs `state delete -e <instance> --teardown`, with no
+  `--source`. The recorded commit is the pull request's last head, which the
+  host keeps reachable through its pull request ref after the branch is
+  deleted or squash-merged, and Nyl fetches it by id from `origin` (see
+  [Source](#source)); no keep ref is needed. A host without such a ref, a
+  closed job run with `--local`, and previews that expire through the fleet
+  long after their branches are gone need `keepSource: true` or `--source`.
 - When an instance's recorded source commit cannot be fetched, teardown fails
   with a message suggesting `--source <revision>`. `nyl teardown --all` and
   `nyl state delete --teardown` accept `--source` to take the units' source
