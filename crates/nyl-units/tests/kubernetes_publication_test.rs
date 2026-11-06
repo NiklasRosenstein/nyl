@@ -893,8 +893,7 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
             &plain,
             &[std::ffi::OsString::from("--shared-catalog")],
         )
-        .err()
-        .expect("a target without a shared catalog has none to build");
+        .expect_err("a target without a shared catalog has none to build");
     assert!(
         error.to_string().contains("NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG"),
         "{error}"

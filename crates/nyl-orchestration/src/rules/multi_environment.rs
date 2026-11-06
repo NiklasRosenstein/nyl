@@ -173,13 +173,11 @@ pub fn validate_sources(
     validate_available_sources(sources, &BTreeSet::new(), instances)
 }
 
-/// Validate all available declarations, retaining failed environments as graph
-/// nodes that cannot execute; one unavailable source does not stop independent runs.
-pub fn validate_available_sources(
+/// The first reference or `dependsOn` entry of a selected unit that names an instance as its producer.
+fn reject_instance_producers(
     sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
-    unavailable: &BTreeSet<EnvironmentName>,
     instances: &BTreeSet<EnvironmentName>,
-) -> Result<Vec<EnvironmentName>, Finding> {
+) -> Result<(), Finding> {
     for (consumer_environment, source) in sources {
         for (consumer, unit) in source.units.iter().filter(|(_, unit)| unit.selected) {
             let Some(spec) = unit.spec.as_ref() else {
@@ -193,6 +191,17 @@ pub fn validate_available_sources(
             }
         }
     }
+    Ok(())
+}
+
+/// Validate all available declarations, retaining failed environments as graph
+/// nodes that cannot execute; one unavailable source does not stop independent runs.
+pub fn validate_available_sources(
+    sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
+    unavailable: &BTreeSet<EnvironmentName>,
+    instances: &BTreeSet<EnvironmentName>,
+) -> Result<Vec<EnvironmentName>, Finding> {
+    reject_instance_producers(sources, instances)?;
     let mut graph: BTreeMap<EnvironmentName, BTreeSet<EnvironmentName>> = sources
         .iter()
         .map(|(environment, source)| {
