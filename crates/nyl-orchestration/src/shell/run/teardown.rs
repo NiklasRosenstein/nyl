@@ -539,6 +539,19 @@ impl Reconcile<'_, '_, '_> {
                 self.source_missing(life, name, &unit, "it records no sourceRevision");
                 continue;
             };
+            if let (Some(source), Some(recorded)) = (inputs.source, &unit.source_revision) {
+                if source != recorded {
+                    self.report.warnings.push(Finding::new(
+                        Code::SourceOverride,
+                        format!(
+                            "unit {name} of {environment} tears down with the files of {source}, not its recorded \
+                             source commit {recorded}"
+                        ),
+                        "check that the revision still holds what the unit needs to be destroyed; the substitution \
+                         is recorded in the transition commit",
+                    ));
+                }
+            }
             runnable.push((name.clone(), unit, commit));
         }
         if runnable.is_empty() {

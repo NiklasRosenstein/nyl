@@ -669,6 +669,13 @@ fn test_teardown_of_an_unfetchable_revision_needs_source() {
     let failed = teardown(&harness, target(), |_| {});
     assert_eq!(failed.exit.code(), 1, "{failed:#?}");
     assert!(
+        failed
+            .warnings
+            .iter()
+            .all(|warning| warning.code != nyl_core::orchestration::codes::Code::SourceOverride),
+        "no substitution was made: {failed:#?}"
+    );
+    assert!(
         failed.errors.iter().any(|error| error.fix.contains("--source")),
         "{failed:#?}"
     );
@@ -679,6 +686,17 @@ fn test_teardown_of_an_unfetchable_revision_needs_source() {
     });
     assert_eq!(outcome(&removed, "removed"), set(&["svc"]), "{removed:#?}");
     assert!(!harness.world.scenario_tmp().join("svc").exists());
+    // The substitution is a warning that names the unit and both commits.
+    let main = harness.world.rev_parse("main");
+    let warning = removed
+        .warnings
+        .iter()
+        .find(|warning| warning.code == nyl_core::orchestration::codes::Code::SourceOverride)
+        .unwrap_or_else(|| panic!("no NYL-SOURCE-OVERRIDE warning: {removed:#?}"));
+    for part in ["svc", &"1".repeat(40), &main] {
+        assert!(warning.message.contains(part), "{}: {part}", warning.message);
+    }
+    assert!(!warning.fix.is_empty());
 }
 
 /// Runs and leases, item 4, for a fenced name: a run killed during the
