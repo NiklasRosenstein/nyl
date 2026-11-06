@@ -120,6 +120,18 @@ a name a declared Environment or an instance of another template uses
 declarations (<code dir="auto">NYL-INSTANCE-PARAMETER-INVALID</code>), and <code dir="auto">--param</code> without
 <code dir="auto">--template</code> (<code dir="auto">NYL-INSTANCE-TEMPLATE-REQUIRED</code>), all with exit 1 before anything
 is written. <code dir="auto">--fresh</code> with <code dir="auto">--template</code> starts a deleted instance over.</p>
+<p><code dir="auto">--source-ref &#x3C;ref></code>, with <code dir="auto">--template</code>, records a full ref name of the source
+repository’s <code dir="auto">origin</code> (such as <code dir="auto">refs/pull/123/head</code>) in <code dir="auto">state.yaml</code> next to the
+source commit. It is a hint for hosts that will not serve a commit by its id: a
+later command that lacks the recorded commit and cannot get it by its id or
+through a keep ref fetches that ref by name and looks for the recorded commit in
+it. The commit is always the recorded one, never the ref’s tip, so a ref that has
+moved on delivers nothing and the commit is reported missing
+(<code dir="auto">NYL-SOURCE-UNAVAILABLE</code>). The ref is checked by its syntax only, with no
+network access: anything that is not a full name under <code dir="auto">refs/</code> is exit 1 with
+<code dir="auto">NYL-INSTANCE-OPTION-INVALID</code> before anything is written. A run that passes it
+overwrites the recorded ref; a run without it keeps the recorded one, so a local
+run never erases what CI recorded. <code dir="auto">--local</code> fetches nothing.</p>
 <p>Creating an instance also checks the template’s <code dir="auto">maxInstances</code> and keeps its
 source: at the limit it refuses with exit 2 (<code dir="auto">NYL-INSTANCE-LIMIT</code>), writes
 nothing, and names the expired instances that could be removed;
