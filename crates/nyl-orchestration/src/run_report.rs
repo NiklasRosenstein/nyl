@@ -695,8 +695,13 @@ pub struct BlockedBy {
     /// The producer, when a reference waits for one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<UnitName>,
-    /// A stable reason, such as `no-current-receipt`.
+    /// A stable reason: `no-current-receipt`, `attestation-pending`, or
+    /// `attestation-failing`.
     pub reason: String,
+    /// The attestation of `unit` the consumer waits for, for the two
+    /// attestation reasons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<String>,
 }
 
 #[cfg(test)]
@@ -781,6 +786,7 @@ mod tests {
             pointer: "/values/vpc".to_owned(),
             unit: Some(unit_name("network")),
             reason: "no-current-receipt".to_owned(),
+            attestation: None,
         });
         let mut plan = report(vec![("database", waiting)]);
         plan.finish(ReportKind::PlanReport);

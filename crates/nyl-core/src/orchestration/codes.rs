@@ -107,9 +107,12 @@ codes! {
     /// A unit declares `env.secrets`, but no secrets provider is wired into
     /// orchestration yet (M3).
     UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
-    /// A reference or `dependsOn` entry requires `evidence: attested` or
-    /// names attestations, which no kind records yet (M3).
-    AttestationsUnsupported => "NYL-ATTESTATIONS-UNSUPPORTED",
+    /// A reference or `dependsOn` entry requires an attestation its producer does not declare.
+    AttestationUndeclared => "NYL-ATTESTATION-UNDECLARED",
+    /// A consumer waits for an attestation of its producer's current receipt that is not recorded yet.
+    AttestationPending => "NYL-ATTESTATION-PENDING",
+    /// A consumer waits for an attestation of its producer's current receipt that is recorded as failing.
+    AttestationFailing => "NYL-ATTESTATION-FAILING",
     /// A unit has an uncertain condition: its effects may or may not have happened.
     UnitUncertain => "NYL-UNIT-UNCERTAIN",
     /// A leftover run's checkpoint no longer matches the unit's desired document; it was reported as superseded.

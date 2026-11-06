@@ -218,8 +218,18 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
 }
 
 /// A stored blocked reason in the report's form: `no-current-receipt` with
-/// the producer when the reason says the producer has no current receipt.
-fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
+/// the producer when the reason says the producer has no current receipt,
+/// and `attestation-pending` or `attestation-failing` with the producer and
+/// the attestation when it waits for one (see [`super::evidence`]).
+pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
+    if let Some(waiting) = super::evidence::parse_reason(reason) {
+        return BlockedBy {
+            pointer: pointer.to_owned(),
+            unit: UnitName::new(&waiting.producer).ok(),
+            reason: waiting.waiting.stable().to_owned(),
+            attestation: Some(waiting.name),
+        };
+    }
     let producer = reason
         .strip_suffix(" has no current receipt")
         .and_then(|unit| UnitName::new(unit).ok());
@@ -228,11 +238,13 @@ fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
             pointer: pointer.to_owned(),
             unit: Some(unit),
             reason: NO_CURRENT_RECEIPT.to_owned(),
+            attestation: None,
         },
         None => BlockedBy {
             pointer: pointer.to_owned(),
             unit: None,
             reason: reason.to_owned(),
+            attestation: None,
         },
     }
 }
@@ -486,6 +498,8 @@ pub fn status_with_readiness(
                 .iter()
                 .map(|reason| blocked_by(&reason.pointer, &reason.reason))
                 .collect();
+            unit.warnings
+                .extend(super::evidence::warnings(name, environment.as_str(), reasons));
         }
         if let Some(condition) = condition {
             unit.message = Some(condition.message().to_owned());
@@ -719,6 +733,7 @@ mod tests {
                 pointer: "/values/vpc".to_owned(),
                 unit: Some(name("network")),
                 reason: NO_CURRENT_RECEIPT.to_owned(),
+                attestation: None,
             }]
         );
         let web = unit("web");

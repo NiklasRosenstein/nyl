@@ -636,9 +636,15 @@ pub fn detail(unit: &UnitReport) -> String {
         Some(
             unit.blocked_by
                 .iter()
-                .map(|blocked| match &blocked.unit {
-                    Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
-                    None => format!("{}: {}", blocked.pointer, blocked.reason),
+                .map(|blocked| match (&blocked.unit, &blocked.attestation) {
+                    (Some(producer), Some(attestation)) => format!(
+                        "{} waits for attestation {attestation} of {producer} ({})",
+                        blocked.pointer, blocked.reason
+                    ),
+                    (Some(producer), None) => {
+                        format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason)
+                    }
+                    (None, _) => format!("{}: {}", blocked.pointer, blocked.reason),
                 })
                 .collect::<Vec<_>>()
                 .join("; "),

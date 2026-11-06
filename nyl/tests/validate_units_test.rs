@@ -95,8 +95,8 @@ fn test_validate_runs_the_unit_checks_plan_runs() {
             "NYL-REFERENCE-INVALID",
         ),
         (
-            "kind: Command\nmetadata:\n  name: waiter\n  labels: {dev: 'true'}\nspec:\n  command: [./wait.sh]\n  dependsOn: [{unit: network, evidence: attested}]\n",
-            "NYL-ATTESTATIONS-UNSUPPORTED",
+            "kind: Command\nmetadata:\n  name: waiter\n  labels: {dev: 'true'}\nspec:\n  command: [./wait.sh]\n  dependsOn: [{unit: network, attestations: [healthy]}]\n",
+            "NYL-ATTESTATION-UNDECLARED",
         ),
     ];
     for (unit, code) in cases {

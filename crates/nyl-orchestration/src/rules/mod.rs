@@ -4,6 +4,7 @@
 pub mod checks;
 pub mod desired;
 pub mod drift;
+pub mod evidence;
 pub mod execution_key;
 #[cfg(test)]
 pub(crate) mod fixtures;

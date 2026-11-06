@@ -24,7 +24,7 @@
 use super::*;
 use crate::rules::transitions::{self, Applied, Event};
 use nyl_core::orchestration::driver::{IncarnationDirectory, Inspection, RecoveryPolicy};
-use nyl_core::orchestration::state::{ApprovalRecord, FailureCategory};
+use nyl_core::orchestration::state::{ApprovalRecord, Attestation, FailureCategory};
 
 /// One finished execution.
 pub(super) struct Execution {
@@ -41,6 +41,10 @@ pub(super) struct Execution {
     pub(super) checkpoint: Option<Checkpoint>,
     /// The new artifact set of a success.
     pub(super) artifacts: Option<BTreeMap<String, ArtifactDocument>>,
+    /// The attestations the driver reported with a success, for the new
+    /// receipt (`source: {driver: reconcile}`); the receipt's earlier
+    /// attestations are replaced by them.
+    pub(super) attestations: Option<BTreeMap<String, Attestation>>,
     /// A fault killed the run after the effect.
     pub(super) killed: bool,
 }
@@ -176,6 +180,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         errors: Vec::new(),
         checkpoint: None,
         artifacts: None,
+        attestations: None,
         killed: false,
     };
     let before_effects = |execution: &mut Execution, message: String| {
@@ -362,7 +367,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             outputs,
             artifacts,
             mut versions,
-            ..
+            attestations,
         } => {
             let key = unit
                 .execution_key
@@ -381,24 +386,38 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 }
             };
             execution.artifacts = Some(set);
-            Event::Succeeded {
-                receipt: Receipt {
-                    execution_key: key,
-                    behavior_version: driver.behavior_version(),
-                    run: shared.run.clone(),
-                    read_desired: shared.read_desired.cloned(),
-                    started_at: started,
-                    finished_at: finished,
-                    versions: {
-                        versions.insert("nyl".to_owned(), context.base.version.clone());
-                        versions
-                    },
-                    approval: job.approval.clone(),
-                    provenance: unit.provenance.clone(),
-                    outputs,
-                    artifacts: digests,
+            let receipt = Receipt {
+                execution_key: key,
+                behavior_version: driver.behavior_version(),
+                run: shared.run.clone(),
+                read_desired: shared.read_desired.cloned(),
+                started_at: started,
+                finished_at: finished,
+                versions: {
+                    versions.insert("nyl".to_owned(), context.base.version.clone());
+                    versions
                 },
-            }
+                approval: job.approval.clone(),
+                provenance: unit.provenance.clone(),
+                outputs,
+                artifacts: digests,
+            };
+            // Only names the unit declares are recorded; a declared name the
+            // driver left out stays pending for `nyl attest` or a later run.
+            let declared = crate::rules::evidence::declared(unit);
+            let outcomes: Vec<_> = attestations
+                .into_iter()
+                .filter(|outcome| declared.contains(&outcome.name))
+                .collect();
+            execution.attestations = Some(crate::rules::checks::attestations(
+                shared.environment,
+                unit,
+                &receipt,
+                &outcomes,
+                "reconcile",
+                finished,
+            ));
+            Event::Succeeded { receipt }
         }
         Outcome::AwaitingApproval { digest } => {
             execution.change_digest = Some(digest);
