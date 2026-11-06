@@ -85,6 +85,8 @@ steps:
     exit: 0
     expect:
       outcome: done
+      # The image stays in the registry, and the removal says so.
+      messages: ['web-image: unit web-image of pr-1 left its resources in place']
       deploy: {branch: previews, absent: ['pr-1/**'], contains: ['pr-2/web/**']}
       keep-refs: {count: 0}
 

@@ -655,11 +655,18 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 
 Tier 1 variants:
 
-- **No keep ref.** With `keepSource: false`, step 7 fails and suggests
-  `--source`; `nyl state delete -e pr-123 --teardown --source main` takes the
-  units' files, an OpenTofu unit's pinned `source` included, from `main`,
-  records the substitution, and succeeds. Scenario
-  `reference/preview-no-keep-ref` runs it.
+- **No keep ref.** The template omits `keepSource`, as is the default, so
+  nothing keeps the commit but its branch: step 3 pushes no keep ref. With the
+  branch gone and no ref of the host naming the commit, step 7 fails and
+  suggests `--source`; `nyl state delete -e pr-123 --teardown --source main`
+  takes the units' files, an OpenTofu unit's pinned `source` included, from
+  `main`, warns (`NYL-SOURCE-OVERRIDE`), records the substitution, and
+  succeeds. Scenario `reference/preview-no-keep-ref` runs it.
+- **Pull request ref.** The same template, on a host that keeps the pull
+  request's head under `refs/pull/123/head` after the branch is deleted, as
+  GitHub does: step 7 succeeds with no keep ref and no `--source`, because the
+  close job at `main` fetches the recorded commit by its id from the origin.
+  Scenario `reference/preview-pull-request-ref` runs it.
 - **Name collision.** With an `applicationNameTemplate` that ignores the
   target's name, `nyl validate` rejects the template because two instances
   would generate the same Argo CD names. Scenario
