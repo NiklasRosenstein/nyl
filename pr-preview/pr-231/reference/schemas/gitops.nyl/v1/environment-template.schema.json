@@ -217,7 +217,7 @@
           "description": "Whether `reconcile` repairs drift by itself. Omitted, `converge`."
         },
         "keepSource": {
-          "description": "Keep each instance's recorded source commit fetchable with a keep ref of its own, `refs/nyl-keep/<keepId>/<commit>`, in the source repository, so teardown still finds its source after the pull request branch is gone. `nyl state delete` removes the refs. Needs push access to `refs/nyl-keep/*` in the source repository, which a read-only token (GitHub's default `contents: read`, a fork pull request) lacks: without it `state init --template` and `reconcile --template` refuse (`NYL-INSTANCE-KEEP-FAILED`), so grant the access or set `false`, and then remove instances before their branches disappear. Default `true`.",
+          "description": "Opt in to keeping each instance's recorded source commit fetchable with a keep ref of its own, `refs/nyl-keep/<keepId>/<commit>`, in the source repository, for instances that may expire (`ttl`) long after their pull request branches are gone. `nyl state delete` removes the refs. Needs push access to `refs/nyl-keep/*` in the source repository, which a read-only token (GitHub's default `contents: read`, a fork pull request) lacks: without it `state init --template` and `reconcile --template` refuse (`NYL-INSTANCE-KEEP-FAILED`), so grant the access or leave `false`. Omitted, `false`: tear an instance down in the pull request closed job, which fetches the recorded commit by its id from the project's origin; GitHub keeps `refs/pull/<n>/head` and GitLab `refs/merge-requests/<n>/head` after the branch is deleted.",
           "type": "boolean"
         },
         "maxInstances": {

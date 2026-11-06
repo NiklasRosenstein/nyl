@@ -126,14 +126,14 @@ nothing, and names the expired instances that could be removed;
 <code dir="auto">--make-room</code> removes them first, oldest expiry first and only as many as the
 new instance needs, then creates it, and <code dir="auto">--allow-teardown</code> and
 <code dir="auto">--allow-incomplete</code> authorize those removals like the options of
-<a href="/nyl/pr-preview/pr-231/reference/cli/reconcile/#preview-lifecycle"><code dir="auto">nyl reconcile</code></a> do. Unless
-the template sets <code dir="auto">keepSource: false</code>, it creates a keep ref of the recorded
+<a href="/nyl/pr-preview/pr-231/reference/cli/reconcile/#preview-lifecycle"><code dir="auto">nyl reconcile</code></a> do. If the
+template sets <code dir="auto">keepSource: true</code>, it creates a keep ref of the recorded
 commit, <code dir="auto">refs/nyl-keep/&#x3C;keepId>/&#x3C;commit></code>, in the source repository
 before recording it, and removes the instance’s older ones afterwards; a
 repository that refuses the push refuses the command
 (<code dir="auto">NYL-INSTANCE-KEEP-FAILED</code>, exit 1) before anything is written, which a
-read-only token does, so grant push access to <code dir="auto">refs/nyl-keep/*</code> or set
-<code dir="auto">keepSource: false</code>. It warns about what the instance’s teardown would meet: each unmet
+read-only token does, so grant push access to <code dir="auto">refs/nyl-keep/*</code> or leave
+<code dir="auto">keepSource</code> off. It warns about what the instance’s teardown would meet: each unmet
 requirement of the publications that can resolve before their producers ran,
 and a <code dir="auto">manual</code> <code dir="auto">teardownWait</code>, which stops a removal nobody attends
 (<code dir="auto">NYL-TEARDOWN-WAIT-MANUAL</code>, read from the declaration). See
