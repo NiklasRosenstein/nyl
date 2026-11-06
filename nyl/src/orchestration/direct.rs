@@ -161,7 +161,14 @@ pub fn prepare(
         &unit,
     );
     if !resolved.errors.is_empty() {
-        return Err(config(resolved.errors.join("; ")));
+        return Err(config(
+            resolved
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
     }
     let mut spec = resolved
         .resolved_spec

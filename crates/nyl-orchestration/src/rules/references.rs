@@ -37,6 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::{resolve_document, Origin, Provided, Providers, Provision, Resolved, UnitInputSource};
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId, UnitName};
 use nyl_core::orchestration::state::{
     ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservedUnit, Provenance, Readiness, Receipt,
@@ -47,6 +48,50 @@ use serde_json::Value;
 
 use super::evidence;
 use super::freshness::receipt_is_current;
+
+/// A resolution error with the stable code it is reported with and its fix:
+/// [`Code::ReferenceInvalid`] unless it comes from an attestation
+/// requirement ([`evidence::RequirementError`]), which keeps its own code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionError {
+    pub code: Code,
+    pub message: String,
+    pub fix: String,
+}
+
+impl From<String> for ResolutionError {
+    fn from(message: String) -> Self {
+        Self {
+            code: Code::ReferenceInvalid,
+            message,
+            fix: "correct the reference so that it names a declared, non-sensitive output or a listed artifact of a unit in the ownership set".to_owned(),
+        }
+    }
+}
+
+impl From<evidence::RequirementError> for ResolutionError {
+    fn from(error: evidence::RequirementError) -> Self {
+        Self {
+            code: error.code(),
+            message: error.to_string(),
+            fix: error.fix().to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for ResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl ResolutionError {
+    /// The error located at `field`, which its message follows.
+    fn at(mut self, field: &str) -> Self {
+        self.message = format!("{field} {}", self.message);
+        self
+    }
+}
 
 /// What references resolve against.
 pub struct ReferenceView<'a> {
@@ -111,7 +156,10 @@ fn declared_outputs(name: &UnitName, spec: &Value) -> Result<BTreeMap<String, Ou
 
 /// Resolve one reference. `Err` is a resolution error, reported with
 /// [`Code::ReferenceInvalid`](nyl_core::orchestration::codes::Code::ReferenceInvalid).
-pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> Result<ReferenceValue, String> {
+pub fn resolve_reference(
+    view: &ReferenceView<'_>,
+    source: &UnitInputSource,
+) -> Result<ReferenceValue, ResolutionError> {
     if let Some(environment) = source
         .environment
         .as_deref()
@@ -123,8 +171,7 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
     // Static checks against the producer's declaration come first, so an
     // invalid reference fails even while its producer has no receipt.
     let declaration = check_declaration(name, desired, source)?;
-    let required = evidence::required(source.evidence.unwrap_or_default(), &source.attestations, desired)
-        .map_err(|error| error.to_string())?;
+    let required = evidence::required(source.evidence.unwrap_or_default(), &source.attestations, desired)?;
     let observed = view.observed.get(name);
     if !receipt_is_current(desired, observed) {
         return Ok(ReferenceValue::Blocked {
@@ -145,15 +192,15 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
     }
     let whole = if let (Some(output), Some(declaration)) = (&source.output, declaration) {
         let Some(value) = receipt.outputs.get(output) else {
-            return Err(format!(
+            return Err(ResolutionError::from(format!(
                 "reads output {output:?}, which the receipt of unit {name} does not record"
-            ));
+            )));
         };
         if !declaration.output_type.accepts(value) {
-            return Err(format!(
+            return Err(ResolutionError::from(format!(
                 "reads output {output:?} of unit {name}, whose recorded value is not of its declared type {:?}",
                 declaration.output_type
-            ));
+            )));
         }
         value.clone()
     } else {
@@ -161,9 +208,9 @@ pub fn resolve_reference(view: &ReferenceView<'_>, source: &UnitInputSource) -> 
     };
     let pointer = source.pointer.as_deref().unwrap_or("");
     let Some(value) = nyl_core::json_pointer::resolve(&whole, pointer) else {
-        return Err(format!(
+        return Err(ResolutionError::from(format!(
             "selects JSON Pointer {pointer:?}, which has no value in what unit {name} recorded"
-        ));
+        )));
     };
     let in_run = view.produced_in_run.contains(name).then_some(view.run).flatten();
     Ok(ReferenceValue::Value {
@@ -188,7 +235,7 @@ fn resolve_external(
     view: &ReferenceView<'_>,
     source: &UnitInputSource,
     environment: &str,
-) -> Result<ReferenceValue, String> {
+) -> Result<ReferenceValue, ResolutionError> {
     let name = EnvironmentName::new(environment).map_err(|error| error.to_string())?;
     let snapshot = view
         .environments
@@ -212,9 +259,9 @@ fn resolve_external(
                     | nyl_core::orchestration::state::Lifecycle::Retained { .. }
             )
         }) {
-            return Err(format!(
+            return Err(ResolutionError::from(format!(
                 "references unit {environment}/{unit}, which is outside the ownership set"
-            ));
+            )));
         }
     }
     let external = ReferenceView {
@@ -354,7 +401,7 @@ pub struct Resolution {
     /// `Blocked` lists each blocked pointer with its reason.
     pub readiness: Readiness,
     /// Resolution errors, each naming the pointer.
-    pub errors: Vec<String>,
+    pub errors: Vec<ResolutionError>,
 }
 
 /// Where a resolved value came from, for [`resolve_document`].
@@ -385,6 +432,10 @@ impl Origin for Cited {
 
 struct ViewProviders<'a, 'v> {
     view: &'a ReferenceView<'v>,
+    /// The typed errors of the references this provider rejected, so that
+    /// [`resolve_unit`] reports each with its own code: the core resolver
+    /// collects only their messages, in the document's order.
+    rejected: std::cell::RefCell<Vec<ResolutionError>>,
 }
 
 impl Providers for ViewProviders<'_, '_> {
@@ -397,7 +448,12 @@ impl Providers for ViewProviders<'_, '_> {
                 origin: Cited::Receipt(provenance),
             })),
             Ok(ReferenceValue::Blocked { reason, .. }) => Ok(Provision::Blocked(reason)),
-            Err(error) => Err(format!("{field} {error}")),
+            Err(error) => {
+                let error = error.at(field);
+                let message = error.message.clone();
+                self.rejected.borrow_mut().push(error);
+                Err(message)
+            }
         }
     }
 }
@@ -417,8 +473,20 @@ fn same_receipt(stored: &ReceiptProvenance, new: &ReceiptProvenance) -> bool {
 /// returned instead of a new one. An explicit `dependsOn` entry whose
 /// producer has no current receipt blocks at `/dependsOn/<index>`.
 pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution {
-    let mut errors = Vec::new();
-    let resolved = resolve_document("spec", "", &unit.spec, &ViewProviders { view }, &mut errors);
+    let providers = ViewProviders {
+        view,
+        rejected: std::cell::RefCell::default(),
+    };
+    let mut issues = Vec::new();
+    let resolved = resolve_document("spec", "", &unit.spec, &providers, &mut issues);
+    let mut rejected = providers.rejected.into_inner();
+    let mut errors: Vec<ResolutionError> = issues
+        .into_iter()
+        .map(|issue| match rejected.iter().position(|error| error.message == issue) {
+            Some(index) => rejected.remove(index),
+            None => ResolutionError::from(issue),
+        })
+        .collect();
     let stored = view.previous.get(&unit.unit.name).map(|previous| &previous.provenance);
 
     let mut provenance = BTreeMap::new();
@@ -427,7 +495,7 @@ pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution 
         let pointer = match JsonPointer::new(pointer.as_str()) {
             Ok(pointer) => pointer,
             Err(error) => {
-                errors.push(format!("spec reference at {pointer:?}: {error}"));
+                errors.push(format!("spec reference at {pointer:?}: {error}").into());
                 continue;
             }
         };
@@ -467,11 +535,15 @@ pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution 
 /// entry waiting for several attestations blocks once for each). Entries
 /// naming another environment or a unit outside the ownership set are
 /// errors, and so is an attestation the producer does not declare.
-fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut Vec<String>) -> Vec<BlockedReason> {
+fn depends_on_reasons(
+    view: &ReferenceView<'_>,
+    unit: &DesiredUnit,
+    errors: &mut Vec<ResolutionError>,
+) -> Vec<BlockedReason> {
     let entries = match depends_on(&unit.spec) {
         Ok(entries) => entries,
         Err(error) => {
-            errors.push(format!("spec.dependsOn is invalid: {error}"));
+            errors.push(format!("spec.dependsOn is invalid: {error}").into());
             return Vec::new();
         }
     };
@@ -505,16 +577,17 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
                                     | nyl_core::orchestration::state::Lifecycle::Retained { .. }
                             ) =>
                         {
-                            errors.push(format!(
-                                "{field} references unit {environment}/{name} outside the ownership set"
-                            ));
+                            errors.push(
+                                format!("{field} references unit {environment}/{name} outside the ownership set")
+                                    .into(),
+                            );
                         }
                         // An undeclared attestation is an error even before the producer has a receipt.
                         Some((_, desired))
                             if evidence::required(entry.evidence(), entry.attestations(), desired).is_err() =>
                         {
                             if let Err(error) = evidence::required(entry.evidence(), entry.attestations(), desired) {
-                                errors.push(format!("{field} {error}"));
+                                errors.push(ResolutionError::from(error).at(&field));
                             }
                         }
                         Some((name, desired)) if receipt_is_current(desired, snapshot.observed.get(name)) => {
@@ -533,7 +606,7 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
                         Some((name, _)) => block(format!("{environment}/{}", no_current_receipt(name))),
                         None => block(format!("{environment}/{} has no current receipt", entry.unit())),
                     },
-                    None => errors.push(format!("{field} references undeclared environment {environment:?}")),
+                    None => errors.push(format!("{field} references undeclared environment {environment:?}").into()),
                 }
                 continue;
             }
@@ -542,7 +615,7 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
             Ok((name, desired)) => {
                 // An undeclared attestation is an error even before the producer has a receipt.
                 if let Err(error) = evidence::required(entry.evidence(), entry.attestations(), desired) {
-                    errors.push(format!("{field} {error}"));
+                    errors.push(ResolutionError::from(error).at(&field));
                 } else if !receipt_is_current(desired, view.observed.get(name)) {
                     block(no_current_receipt(name));
                 } else {
@@ -559,7 +632,7 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
                     }
                 }
             }
-            Err(error) => errors.push(format!("{field} {error}")),
+            Err(error) => errors.push(format!("{field} {error}").into()),
         }
     }
     reasons
@@ -573,7 +646,7 @@ fn unmet_reasons(
     (desired, observed): (&DesiredUnit, &ObservedUnit),
     recorded: Option<&BTreeMap<String, Attestation>>,
     label: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<ResolutionError>,
 ) -> Vec<String> {
     match evidence::required(entry.evidence(), entry.attestations(), desired) {
         Ok(required) => evidence::unmet(&required, desired, observed, recorded)
@@ -581,7 +654,7 @@ fn unmet_reasons(
             .map(|(attestation, waiting)| evidence::reason(&attestation, label, waiting))
             .collect(),
         Err(error) => {
-            errors.push(format!("{field} {error}"));
+            errors.push(ResolutionError::from(error).at(field));
             Vec::new()
         }
     }
@@ -674,7 +747,7 @@ mod tests {
             }
         }
 
-        fn resolve(&self, reference: Value) -> Result<ReferenceValue, String> {
+        fn resolve(&self, reference: Value) -> Result<ReferenceValue, ResolutionError> {
             resolve_reference(&self.view(), &serde_json::from_value(reference).unwrap())
         }
     }
@@ -821,17 +894,17 @@ mod tests {
         let undeclared = world
             .resolve(json!({"unit": "network", "output": "vpcID"}))
             .unwrap_err();
-        assert!(undeclared.contains("does not declare"), "{undeclared}");
+        assert!(undeclared.message.contains("does not declare"), "{undeclared}");
         let sensitive = world
             .resolve(json!({"unit": "network", "output": "token"}))
             .unwrap_err();
-        assert!(sensitive.contains("sensitive"), "{sensitive}");
+        assert!(sensitive.message.contains("sensitive"), "{sensitive}");
         let outside = world.resolve(json!({"unit": "cache", "output": "host"})).unwrap_err();
-        assert!(outside.contains("outside the ownership set"), "{outside}");
+        assert!(outside.message.contains("outside the ownership set"), "{outside}");
         let cross = world
             .resolve(json!({"environment": "infra", "unit": "network", "output": "vpcId"}))
             .unwrap_err();
-        assert!(cross.contains("undeclared environment"), "{cross}");
+        assert!(cross.message.contains("undeclared environment"), "{cross}");
     }
 
     #[test]
@@ -841,7 +914,7 @@ mod tests {
         let error = world
             .resolve(json!({"unit": "network", "output": "vpcId"}))
             .unwrap_err();
-        assert!(error.contains("declared type"), "{error}");
+        assert!(error.message.contains("declared type"), "{error}");
     }
 
     #[test]
@@ -865,7 +938,7 @@ mod tests {
         let error = world
             .resolve(json!({"unit": "web-image", "artifact": "image"}))
             .unwrap_err();
-        assert!(error.contains("digest"), "{error}");
+        assert!(error.message.contains("digest"), "{error}");
     }
 
     #[test]
@@ -874,11 +947,11 @@ mod tests {
         let error = world
             .resolve(json!({"unit": "web-image", "artifact": "image", "kind": "HelmChart"}))
             .unwrap_err();
-        assert!(error.contains("kind HelmChart"), "{error}");
+        assert!(error.message.contains("kind HelmChart"), "{error}");
         let unlisted = world
             .resolve(json!({"unit": "web-image", "artifact": "chart"}))
             .unwrap_err();
-        assert!(unlisted.contains("does not list"), "{unlisted}");
+        assert!(unlisted.message.contains("does not list"), "{unlisted}");
     }
 
     #[test]
@@ -901,7 +974,7 @@ mod tests {
         let missing = world
             .resolve(json!({"unit": "network", "output": "subnets", "pointer": "/b"}))
             .unwrap_err();
-        assert!(missing.contains("\"/b\""), "{missing}");
+        assert!(missing.message.contains("\"/b\""), "{missing}");
     }
 
     #[test]
@@ -931,7 +1004,14 @@ mod tests {
             }
         );
         assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
-        assert!(resolution.errors[0].starts_with("spec.variables.bad reads output \"nope\""));
+        assert!(resolution.errors[0]
+            .message
+            .starts_with("spec.variables.bad reads output \"nope\""));
+        assert_eq!(
+            resolution.errors[0].code,
+            Code::ReferenceInvalid,
+            "other reference errors keep their code"
+        );
         assert_eq!(resolution.provenance.len(), 1);
         assert_eq!(resolution.resolved_spec, None);
     }
@@ -1012,7 +1092,7 @@ mod tests {
             .resolve(json!({"unit": "network", "output": "vpcId", "attestations": ["smoke"]}))
             .unwrap_err();
         assert!(
-            error.contains("\"smoke\"") && error.contains("accepted, healthy"),
+            error.message.contains("\"smoke\"") && error.message.contains("accepted, healthy"),
             "{error}"
         );
         world.observed.remove(&name("network"));
@@ -1077,7 +1157,9 @@ mod tests {
         );
         let resolution = resolve_unit(&world.view(), &typo);
         assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
-        assert!(resolution.errors[0].starts_with("spec.dependsOn[0] requires attestation \"helthy\""));
+        assert!(resolution.errors[0]
+            .message
+            .starts_with("spec.dependsOn[0] requires attestation \"helthy\""));
     }
 
     /// Catches a consumer of another environment reading a producer's
@@ -1182,11 +1264,12 @@ mod tests {
             let resolution = resolve_unit(&world.view(), &unit);
             assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
             assert!(
-                resolution.errors[0].starts_with("spec.dependsOn[0] ") && resolution.errors[0].contains(text),
+                resolution.errors[0].message.starts_with("spec.dependsOn[0] ")
+                    && resolution.errors[0].message.contains(text),
                 "{:?}",
                 resolution.errors
             );
-            assert_eq!(evidence::error_code(&resolution.errors[0]), Some(code));
+            assert_eq!(resolution.errors[0].code, code);
             assert_eq!(resolution.readiness, Readiness::Ready, "nothing waits on an error");
         }
         // A name the driver observes still waits for the receipt, as before.
@@ -1220,11 +1303,8 @@ mod tests {
             json!({"environment": "infra", "unit": "network", "output": "vpcId", "evidence": "attested"}),
         ] {
             let error = world.resolve(reference).unwrap_err();
-            assert_eq!(
-                evidence::error_code(&error),
-                Some(Code::AttestationExternalUnsupported),
-                "{error}"
-            );
+            assert_eq!(error.code, Code::AttestationExternalUnsupported, "{error}");
+            assert!(error.fix.contains("cannot be recorded yet"), "{}", error.fix);
         }
     }
 }
