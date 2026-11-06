@@ -265,6 +265,58 @@ fn test_a_commit_only_a_pull_request_ref_carries_is_fetched_from_origin() {
     assert!(missing.to_string().contains(absent), "{missing}");
 }
 
+/// The keep ref of an instance alone serves a commit the clone lacks, without
+/// the origin fetch by id: the path of a run whose host keeps no pull request
+/// refs. Catches a keep ref that stops working once the id fetch exists.
+#[test]
+fn test_a_commit_only_a_keep_ref_carries_is_fetched_through_it() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let kept = commit(&origin, Some(world.c2), &[("app.txt", "kept")], "kept");
+    origin
+        .reference(&format!("refs/nyl-keep/instance/{kept}"), kept, true, "keep")
+        .unwrap();
+    let this = SourceRepository::This;
+    let without_prefix = world
+        .resolver()
+        .worktree(&this, &id(kept), &world.root.path().join("workspace/plain"))
+        .unwrap_err();
+    assert!(
+        without_prefix.to_string().contains("does not exist"),
+        "{without_prefix}"
+    );
+
+    let checkout = world.root.path().join("workspace/kept");
+    world
+        .resolver()
+        .with_kept_source("refs/nyl-keep/instance")
+        .worktree(&this, &id(kept), &checkout)
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(checkout.join("app.txt")).unwrap(), "kept");
+}
+
+/// An explicit full commit id the entry clone lacks, such as `--source <sha>`,
+/// is fetched from the clone's origin like a recorded commit, and only when the
+/// run has network access.
+#[test]
+fn test_resolve_revision_of_a_full_id_fetches_it_from_origin() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let c4 = commit(&origin, Some(world.c2), &[("app.txt", "pull request")], "c4");
+    origin.reference("refs/pull/1/head", c4, true, "pull request").unwrap();
+    let this = SourceRepository::This;
+    let missing = world.resolver().resolve_revision(&this, &c4.to_string()).unwrap_err();
+    assert!(missing.to_string().contains(&c4.to_string()), "{missing}");
+    assert_eq!(
+        world
+            .resolver()
+            .with_origin_fetch()
+            .resolve_revision(&this, &c4.to_string())
+            .unwrap(),
+        id(c4)
+    );
+}
+
 #[test]
 fn test_default_branch_follows_origin_head_then_local_head() {
     let world = World::new();

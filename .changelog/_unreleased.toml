@@ -289,7 +289,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "5af2a924-6a49-4274-abe0-be4c90afca35"
 type = "feature"
-description = "A recorded source commit that the entry clone lacks is fetched by its exact id from the clone's `origin`, after the retained snapshots and the instance's keep ref and with the same credentials, so a pull request closed job that checks out the default branch tears a preview down at its recorded commit without `keepSource` or `--source` wherever the host keeps `refs/pull/<n>/head` (GitHub) or `refs/merge-requests/<n>/head` (GitLab) after the branch is deleted. A failed fetch leaves the commit missing as before, and `--local` fetches nothing"
+description = "A recorded source commit that the entry clone lacks is fetched by its exact id from the clone's `origin`, after the retained snapshots and the instance's keep ref and with the same credentials, so a pull request closed job that checks out the default branch tears a preview down at its recorded commit without `keepSource` or `--source` wherever the host keeps `refs/pull/<n>/head` (GitHub) or `refs/merge-requests/<n>/head` (GitLab) after the branch is deleted. An explicit full commit id passed to `--source` that the clone lacks is fetched the same way. A failed fetch leaves the commit missing as before, and `--local` fetches nothing"
 author = "@NiklasRosenstein"
 
 [[entries]]
