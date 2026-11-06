@@ -269,6 +269,21 @@ fn test_validate_fault_unit_rules() {
     assert!(validation_error(&fault("{point: waiting-lease}")).contains("only pause"));
 }
 
+/// A `ref` step either deletes a ref or sets a pull request ref to a branch's
+/// tip, never both and never half of the second. Catches a scenario whose
+/// host ref silently does nothing.
+#[test]
+fn test_validate_ref_steps() {
+    let step = |reference: &str| format!("  - ref: {reference}\n");
+    assert!(
+        validation_error(&step("{delete: refs/nyl/dev/lease, set: refs/pull/1/head, to: pr-1}"))
+            .contains("exactly one of delete and set with to")
+    );
+    assert!(validation_error(&step("{set: refs/pull/1/head}")).contains("set and to together"));
+    assert!(validation_error(&step("{to: pr-1}")).contains("set and to together"));
+    assert!(validation_error(&step("{}")).contains("exactly one of delete and set with to"));
+}
+
 /// Observe steps script observed values: they run from M5, are succeeded,
 /// pending, or failed, and a failed read names no failure category because
 /// it does not fail the unit.

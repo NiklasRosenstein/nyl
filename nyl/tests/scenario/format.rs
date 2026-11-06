@@ -283,7 +283,12 @@ pub struct PauseAt {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefStep {
-    pub delete: String,
+    /// Delete this ref in the state repository.
+    pub delete: Option<String>,
+    /// Point this ref of `project.git` at the tip of the branch `to`, as a host
+    /// that keeps a pull request's head under `refs/pull/<n>/head` does.
+    pub set: Option<String>,
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -767,6 +772,17 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
                     return Err("fault before-push concerns the whole run; it takes no unit".to_owned());
                 }
                 _ => {}
+            }
+        }
+        StepKind::Ref => {
+            let reference = step.reference.as_ref().expect("kind");
+            let set = match (&reference.set, &reference.to) {
+                (Some(_), Some(_)) => true,
+                (None, None) => false,
+                _ => return Err("ref takes set and to together".to_owned()),
+            };
+            if reference.delete.is_some() == set {
+                return Err("ref takes exactly one of delete and set with to".to_owned());
             }
         }
         StepKind::File => {

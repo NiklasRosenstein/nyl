@@ -422,7 +422,7 @@ annotates what it records), the kube context, or files outside the repository.
 
 | What | Where it comes from | Which jobs need it |
 | --- | --- | --- |
-| Push access to the repository | `[[git.credentials]]` in `nyl.toml` naming the variable that holds a token or key, or Git's own helpers. Reaches `git` only, never a unit | Every job that writes: state, the `deploy` and `previews` branches, keep refs |
+| Push access to the repository | `[[git.credentials]]` in `nyl.toml` naming the variable that holds a token or key, or Git's own helpers. Reaches `git` only, never a unit | Every job that writes: state, the `deploy` and `previews` branches, and keep refs when a template sets `keepSource: true` |
 | `DOCKER_CONFIG` | `web-image` admits it with `env.passthrough`. Docker's login writes it | Every job that plans or runs `web-image`: reconcile, preview, close, fleet |
 | `KUBECONFIG`, or `ARGOCD_AUTH_TOKEN` | `kubernetes` admits it, according to the ArgoCDInstance's `spec.access` (below). A read-only credential | Every job that plans or runs `kubernetes`, which includes the reconcile and preview jobs, and the attest and observe jobs |
 | Credentials of the OpenTofu backend | `database` admits them with `env.passthrough` or `env.secrets` | Every job that plans or runs `database` |
@@ -769,8 +769,12 @@ spec:
 
 Close the pull request, and its job removes the preview. The job runs at the
 default branch, because the pull request's own branch may be gone after the
-squash-merge. Nyl renders the units from the instance's recorded source commit,
-which it kept fetchable through a keep ref until now:
+squash-merge. It needs no keep ref and no override: Nyl renders the units from
+the instance's recorded source commit, the pull request's last head, which a
+checkout of the default branch does not have, so Nyl fetches it by its id from
+the repository's `origin`. GitHub keeps `refs/pull/<n>/head` after the branch is
+deleted, also after a squash merge, so the commit is still there (GitLab keeps
+`refs/merge-requests/<n>/head`):
 
 ```yaml
 # .github/workflows/preview-close.yaml
@@ -783,7 +787,8 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      # The default branch, not the pull request's merge commit.
+      # The default branch, not the pull request's merge commit. Nyl fetches the
+      # recorded commit from origin by its id, with the credentials of nyl.toml.
       - uses: actions/checkout@v4
         with: {ref: '${{ github.event.repository.default_branch }}', fetch-depth: 0, persist-credentials: false}
       # …the tools, login, and Nyl steps above
@@ -820,6 +825,65 @@ pr-2/_nyl/index.json
 pr-2/web/web/deployment.apps/pr-2-web/web.yaml
 pr-2/web/web/namespace/pr-2-web.yaml
 ```
+
+### If the recorded commit cannot be fetched
+
+The fetch needs a host that keeps the commit reachable and a job that may read
+it. Without that, the removal fails before it changes anything and names the way
+forward. This listing comes from a run in which nothing kept the commit after
+its branch was deleted (the lines about the units that wait for `kubernetes` are
+left out):
+
+```console
+$ nyl state delete -e pr-1 --teardown
+state-delete pr-1: refused
+  teardown: exit 1
+error  cannot tear down unit kubernetes of pr-1: cannot check out commit a2d6fb749fe8601c374354698e56cb0a78908a34: commit a2d6fb749fe8601c374354698e56cb0a78908a34 does not exist in this repository
+
+  Action  fetch the commit, or tear it down with another revision's files: `nyl teardown -e pr-1 --unit kubernetes --source <revision>`
+
+  NYL-SOURCE-UNAVAILABLE
+
+error  units of pr-1 still have an incarnation or a teardown in progress: database, kubernetes, web-image
+
+  Action  tear them down first with `nyl state delete -e pr-1 --teardown` or `nyl teardown -e pr-1 --unit <u>`, or drop a retained or pending-teardown unit without touching its resources with `nyl state forget -e pr-1 --unit <u>`
+
+  NYL-STATE-DELETE-INCARNATIONS
+```
+
+The fallback is `--source <default-branch>`, which takes the units' source files
+from that branch instead of the recorded commit. Nyl warns
+(`NYL-SOURCE-OVERRIDE`, once per unit) and records the substitution in the
+transition commit:
+
+```console
+$ nyl state delete -e pr-1 --teardown --source main
+state-delete pr-1: done
+  desired: f17c524a3f898cc6be67b631da7b9c06a47a6bf7
+  observed: f17c524a3f898cc6be67b631da7b9c06a47a6bf7
+  removed: ["database","kubernetes","web-image"]
+  teardown: exit 0
+warning  unit kubernetes of pr-1 tears down with the files of 606d798d57ad621dc802aa201a7715f6fb4aaef3, not its recorded source commit a2d6fb749fe8601c374354698e56cb0a78908a34
+
+  Action  check that the revision still holds what the unit needs to be destroyed; the substitution is recorded in the transition commit
+
+  NYL-SOURCE-OVERRIDE
+
+warning  unit database of pr-1 tears down with the files of 606d798d57ad621dc802aa201a7715f6fb4aaef3, not its recorded source commit a2d6fb749fe8601c374354698e56cb0a78908a34
+
+  Action  check that the revision still holds what the unit needs to be destroyed; the substitution is recorded in the transition commit
+
+  NYL-SOURCE-OVERRIDE
+```
+
+The override is safe when the default branch's configuration for those units can
+still destroy what the instance recorded: the same providers and backend, no unit
+configuration removed since, and every rename covered by a `moved` block. A squash
+merge of the pull request itself is the best case, because the default branch
+then holds exactly the configuration the preview ran. A pull request closed
+without merging, or one that changed the units long before it closed, is the
+worst: the teardown can fail at the unit or destroy something other than what
+the preview created, so read the warning before relying on it.
 
 ### Scheduled maintenance
 
@@ -919,23 +983,26 @@ another manifest warns with `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` and reports
 --pointer /sharedCatalog/result`, which prints `current` here).
 See [One catalog for every instance](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance).
 
-### Keep refs and the token that pushes them
+### Keep refs, for previews that outlive their branches
 
-Teardown needs the instance's source files, and a closed pull request's branch
-may be gone. With `keepSource`, the default, every command that records an
-instance's source commit first pushes a ref of its own,
-`refs/nyl-keep/<keepId>/<commit>`, to the source repository, so the commit
-stays fetchable until the instance's state is deleted.
+The close job covers a preview that is removed when its pull request closes. A
+preview can also expire, through the scheduled job below, long after its branch
+is gone: an abandoned pull request, or a close job that failed. Where the host
+may no longer serve the recorded commit by then, set `keepSource: true` on the
+template. Every command that records an instance's source commit then first
+pushes a ref of its own, `refs/nyl-keep/<keepId>/<commit>`, to the source
+repository, so the commit stays fetchable until the instance's state is
+deleted.
 
-:::caution[The preview job's token must be able to push `refs/nyl-keep/*`]
+:::caution[`keepSource: true` needs a token that can push `refs/nyl-keep/*`]
 `nyl reconcile --template` and `nyl state init --template` refuse
 (`NYL-INSTANCE-KEEP-FAILED`, exit 1, nothing written) when the source repository
 refuses the ref. GitHub's default read-only `GITHUB_TOKEN`, and the token of a
-pull request from a fork, cannot push it, which is why the workflows above ask
-for `contents: write` and skip fork pull requests. Either give such a job a
-token that may push the ref, or set `keepSource: false` on the template and
-remove instances before their branches disappear, or tear them down with
-`--source <revision>`. See
+pull request from a fork, cannot push it. The workflows above ask for
+`contents: write` because they push state and the deploy branch, and skip fork
+pull requests for the same reason. Either give such a job a token that may push
+the ref, or leave `keepSource` off and rely on the close job (or tear instances
+down with `--source <revision>`). See
 [Source keep refs](/nyl/orchestration/resource-guides/environment-template/#source-keep-refs).
 :::
 

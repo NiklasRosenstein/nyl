@@ -1,7 +1,8 @@
 # The end-to-end example of the Orchestration guide
 # (nyl/book/src/content/docs/orchestration/end-to-end-example.md): dev builds an
 # image, applies OpenTofu, and publishes manifests that consume both; pull
-# requests get previews that are closed with the pull request or expire; the
+# requests get previews that are closed with the pull request (the close job
+# fetches the recorded commit from the pull request ref) or expire; the
 # shared catalog's writer runs. The commands are the ones the guide's local and
 # CI workflows run, in both tiers.
 contract: nyl/book/src/content/docs/orchestration/end-to-end-example.md#the-project
@@ -55,7 +56,7 @@ steps:
       deploy:
         branch: previews
         contains: ['pr-1/web/**', '_nyl/shared/previews/catalog.yaml']
-      keep-refs: {count: 1, kept: [pr-1]}
+      keep-refs: {count: 0}                 # keepSource is off: nothing is pushed to the repository
   - branch: {name: pr-2, from: main}
   - commit: {branch: pr-2, message: "Change the banner, differently", apply: patches/another}
   - nyl: [reconcile, -e, pr-2, --template, preview, --param, pr=2]
@@ -74,7 +75,10 @@ steps:
     expect:
       deploy: {branch: previews, unchanged: ['_nyl/shared/previews/**', 'pr-1/**', 'pr-2/**']}
 
-  # pr-1 is squash-merged: its close job removes the preview through the keep ref.
+  # pr-1 is squash-merged and its branch deleted; GitHub keeps refs/pull/1/head.
+  # Its close job, a checkout of main, fetches the recorded commit by its id from
+  # the origin and removes the preview with no override and no keep ref.
+  - ref: {set: refs/pull/1/head, to: pr-1}
   - squash-merge: {branch: pr-1, into: main}
   - delete-branch: pr-1
   - nyl: [state, delete, -e, pr-1, --teardown]
@@ -82,7 +86,7 @@ steps:
     expect:
       outcome: done
       deploy: {branch: previews, absent: ['pr-1/**'], contains: ['pr-2/web/**']}
-      keep-refs: {count: 1, kept: [pr-2]}
+      keep-refs: {count: 0}
 
   # pr-2 is abandoned: the scheduled fleet job removes it once it expires.
   - clock: {advance: 6d}

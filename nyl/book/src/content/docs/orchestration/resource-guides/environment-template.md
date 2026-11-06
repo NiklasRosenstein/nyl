@@ -160,8 +160,8 @@ extra permissions. Two situations need more:
   job runs with `--local`. The teardown fails before any effect, names the unit
   and the commit, and suggests `--source`. `nyl state delete -e pr-123 --teardown
   --source main` takes the units' source files from the default branch
-  instead, warns about the substitution, and records it in the transition
-  commit. It is safe when the default branch's configuration for those units
+  instead, warns (`NYL-SOURCE-OVERRIDE`) about the substitution, and records it
+  in the transition commit. It is safe when the default branch's configuration for those units
   can still destroy what the instance recorded: the same providers and
   backend, no unit configuration removed since, and every rename covered by a
   `moved` block. A squash merge of the pull request itself is the best case,

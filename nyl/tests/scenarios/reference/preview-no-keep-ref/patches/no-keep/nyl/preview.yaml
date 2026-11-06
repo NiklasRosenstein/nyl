@@ -30,4 +30,4 @@ spec:
   allowTeardown: true
   ttl: 7d
   maxInstances: 2
-  keepSource: false
+  # keepSource is omitted: it defaults to false, so no keep ref is pushed.
