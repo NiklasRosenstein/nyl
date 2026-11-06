@@ -13,10 +13,9 @@
 //! error, and so is a cycle, which names its units in order. A reference
 //! must also pass the resolver's state-free checks
 //! ([`super::references::check_declaration`]): it reads an output its
-//! producer declares as non-sensitive. M3 restriction: a reference or
-//! `dependsOn` entry requiring `evidence: attested` or naming attestations is
-//! rejected with `NYL-ATTESTATIONS-UNSUPPORTED`, since no kind records
-//! attestation results yet.
+//! producer declares as non-sensitive, and an attestation a reference or
+//! `dependsOn` entry requires must be one its producer declares
+//! (`NYL-ATTESTATION-UNDECLARED`, see [`super::evidence`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,9 +24,9 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::graph::{EdgeSource, ExecutionGraph, GraphEdge, GraphNode, GRAPH_FORMAT_VERSION};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, UnitName};
 use nyl_core::orchestration::state::DesiredUnit;
-use nyl_core::resources::units::{DependsOn, Evidence};
 
-use super::references::{check_declaration, depends_on, unsupported_depends_on, unsupported_evidence};
+use super::evidence;
+use super::references::{check_declaration, depends_on};
 
 /// The graph of a run's desired units. Errors use
 /// [`Code::DependencyUnknown`](nyl_core::orchestration::codes::Code::DependencyUnknown),
@@ -105,13 +104,6 @@ fn depends_on_edges(
         }
     };
     for (index, entry) in entries.iter().enumerate() {
-        if let Some(error) = unsupported_depends_on(entry) {
-            findings.push(attestations_unsupported(
-                consumer,
-                &format!("spec.dependsOn[{index}] {error}"),
-            ));
-            continue;
-        }
         if entry.environment().is_some_and(|other| other != environment.as_str()) {
             // Cross-environment edges order environments, not this environment's units.
             continue;
@@ -130,14 +122,20 @@ fn depends_on_edges(
                 continue;
             }
         };
-        let evidence = match entry {
-            DependsOn::Name(_) => Evidence::default(),
-            DependsOn::Entry(entry) => entry.evidence.unwrap_or_default(),
-        };
+        if let Err(error) = evidence::required(entry.evidence(), entry.attestations(), &units[&producer]) {
+            findings.push(attestation_undeclared(
+                consumer,
+                &format!("spec.dependsOn[{index}] {error}"),
+                &units[&producer],
+            ));
+            continue;
+        }
         edges.push(GraphEdge {
             producer,
             consumer: consumer.clone(),
-            source: EdgeSource::DependsOn { evidence },
+            source: EdgeSource::DependsOn {
+                evidence: entry.evidence(),
+            },
         });
     }
 }
@@ -165,13 +163,6 @@ fn reference_edges(
     };
     for reference in references {
         let source = reference.source;
-        if let Some(error) = unsupported_evidence(&source) {
-            findings.push(attestations_unsupported(
-                consumer,
-                &format!("the reference at {:?} {error}", reference.pointer),
-            ));
-            continue;
-        }
         if source
             .environment
             .as_deref()
@@ -201,6 +192,18 @@ fn reference_edges(
             ));
             continue;
         }
+        if let Err(error) = evidence::required(
+            source.evidence.unwrap_or_default(),
+            &source.attestations,
+            &units[&producer],
+        ) {
+            findings.push(attestation_undeclared(
+                consumer,
+                &format!("the reference at {:?} {error}", reference.pointer),
+                &units[&producer],
+            ));
+            continue;
+        }
         let pointer = match JsonPointer::new(reference.pointer.as_str()) {
             Ok(pointer) => pointer,
             Err(error) => {
@@ -224,13 +227,22 @@ fn reference_edges(
     }
 }
 
-/// `NYL-ATTESTATIONS-UNSUPPORTED` for one reference or `dependsOn` entry.
-fn attestations_unsupported(consumer: &UnitName, message: &str) -> Finding {
-    Finding::new(
-        Code::AttestationsUnsupported,
-        format!("unit {consumer}: {message}"),
-        "remove evidence: attested and attestations; requiring attestations arrives in a later milestone",
-    )
+/// `NYL-ATTESTATION-UNDECLARED` for one reference or `dependsOn` entry.
+fn attestation_undeclared(consumer: &UnitName, message: &str, producer: &DesiredUnit) -> Finding {
+    let declared = evidence::declared(producer);
+    let fix = if declared.is_empty() {
+        format!(
+            "remove the attestation requirement, or declare the attestation on {}: its kind may produce some for another spec, and `spec.attestations: [{{name, from: external}}]` declares one only an external source supplies",
+            producer.unit.name
+        )
+    } else {
+        format!(
+            "require one of {}, or declare the attestation in {}'s `spec.attestations`",
+            declared.iter().cloned().collect::<Vec<_>>().join(", "),
+            producer.unit.name
+        )
+    };
+    Finding::new(Code::AttestationUndeclared, format!("unit {consumer}: {message}"), fix)
 }
 
 /// Direct producers of every node.
@@ -331,6 +343,8 @@ pub fn teardown_order(graph: &ExecutionGraph) -> Vec<UnitName> {
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
+
+    use nyl_core::resources::units::Evidence;
 
     use super::*;
     use crate::rules::fixtures::*;
@@ -501,18 +515,37 @@ mod tests {
         assert!(findings[1].message.contains("sensitive"), "{}", findings[1].message);
     }
 
-    /// Catches a consumer requiring attestations running on a bare receipt:
-    /// no kind records attestations yet, so the requirement is rejected.
+    /// Catches a requirement for an attestation no one can record (a typo
+    /// that would wait forever): the requirement must name what the
+    /// producer declares, in `dependsOn` and in references alike, while a
+    /// declared name and `evidence: attested` on a unit declaring none pass.
     #[test]
-    fn test_extract_rejects_evidence_requirements_until_attestations_exist() {
-        let findings = graph(&[
-            ("db", "Command", json!({"outputs": {"host": {"type": "string"}}})),
+    fn test_extract_requires_declared_attestations() {
+        let declaring =
+            json!({"outputs": {"host": {"type": "string"}}, "attestations": [{"name": "qa", "from": "external"}]});
+        let ok = graph(&[
+            ("db", "Command", declaring.clone()),
+            ("plain", "Command", json!({})),
             (
                 "app",
                 "Command",
                 json!({
-                    "dependsOn": [{"unit": "db", "attestations": ["healthy"]}, {"unit": "db", "evidence": "published"}],
+                    "dependsOn": [{"unit": "db", "attestations": ["qa"]}, {"unit": "plain", "evidence": "attested"}],
                     "x": {"fromUnit": {"unit": "db", "output": "host", "evidence": "attested"}},
+                }),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(ok.edges.len(), 3);
+
+        let findings = graph(&[
+            ("db", "Command", declaring),
+            (
+                "app",
+                "Command",
+                json!({
+                    "dependsOn": [{"unit": "db", "attestations": ["healthy"]}],
+                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["smoke"]}},
                 }),
             ),
         ])
@@ -520,10 +553,15 @@ mod tests {
         let codes = findings.iter().map(|finding| finding.code).collect::<Vec<_>>();
         assert_eq!(
             codes,
-            [Code::AttestationsUnsupported, Code::AttestationsUnsupported],
+            [Code::AttestationUndeclared, Code::AttestationUndeclared],
             "{findings:?}"
         );
-        assert!(findings[0].message.contains("healthy"), "{}", findings[0].message);
-        assert!(findings[1].message.contains("\"attested\""), "{}", findings[1].message);
+        assert!(findings[0].message.contains("\"healthy\""), "{}", findings[0].message);
+        assert!(findings[0].fix.contains("qa"), "{}", findings[0].fix);
+        assert!(
+            findings[1].message.contains("the reference at"),
+            "{}",
+            findings[1].message
+        );
     }
 }

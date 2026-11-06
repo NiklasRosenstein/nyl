@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::resources::units::Evidence;
 use crate::resources::{schema, validate_relative_path};
 use crate::resources::{DenyUnknownFields, GitSource};
 use crate::{CoreError, Result};
@@ -248,10 +249,10 @@ pub struct UnitInputSource {
     /// JSON Pointer inside the output or artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
-    /// Required evidence level: `published` or `attested`.
+    /// Required evidence level: `published` (a current receipt, the default) or `attested` (every attestation the producer declares passes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<String>,
-    /// Required attestations.
+    pub evidence: Option<Evidence>,
+    /// The producer's attestations to require, instead of all it declares; each must pass for the producer's current receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
 }

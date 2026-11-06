@@ -198,6 +198,7 @@ pub fn get_value(
                 desired,
                 observed: &snapshot.observed,
                 artifacts: &snapshot.artifacts,
+                attestations: &snapshot.attestations,
                 observed_commit: snapshot.tips.observed.as_ref(),
                 run: None,
                 produced_in_run: &produced,

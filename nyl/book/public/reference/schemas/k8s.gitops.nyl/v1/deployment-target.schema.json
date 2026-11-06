@@ -160,6 +160,21 @@
       ],
       "type": "object"
     },
+    "Evidence": {
+      "description": "Evidence a consumer requires from its producer.",
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "A current receipt.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "A current receipt whose required attestations pass.",
+          "type": "string"
+        }
+      ]
+    },
     "FileInputSource": {
       "additionalProperties": false,
       "description": "A value read from a YAML or JSON file of this repository.",
@@ -1135,7 +1150,7 @@
           ]
         },
         "attestations": {
-          "description": "Required attestations.",
+          "description": "The producer's attestations to require, instead of all it declares; each must pass for the producer's current receipt.",
           "items": {
             "type": "string"
           },
@@ -1149,11 +1164,15 @@
           ]
         },
         "evidence": {
-          "description": "Required evidence level: `published` or `attested`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required evidence level: `published` (a current receipt, the default) or `attested` (every attestation the producer declares passes)."
         },
         "kind": {
           "description": "Expected artifact kind.",

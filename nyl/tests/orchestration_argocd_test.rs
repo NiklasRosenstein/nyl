@@ -88,7 +88,17 @@ struct Observed {
 
 impl Observed {
     fn new(teardown_wait: &str) -> Self {
+        Self::with_units(teardown_wait, "", 0)
+    }
+
+    /// The observed publication project with `units` appended to its units,
+    /// whose first reconcile exits with `exit`.
+    fn with_units(teardown_wait: &str, units: &str, exit: u8) -> Self {
         let project = observing_project(teardown_wait);
+        let file = project.path().join("nyl/units.yaml");
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(units);
+        std::fs::write(&file, text).unwrap();
         let mut shell = harness::Harness::new(project.path(), true);
         shell.drivers = nyl_units::registry::with_real_publication(&shell.script, nyl::resource_catalogue());
         let served = applications(Vec::new());
@@ -108,7 +118,7 @@ impl Observed {
         };
         assert_eq!(observed.shell.invoke(&["state", "init", "-e", "dev"]).exit, 0);
         let reconcile = observed.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
-        assert_eq!(reconcile.exit, 0, "{}", reconcile.stderr);
+        assert_eq!(reconcile.exit, exit, "{}", reconcile.stderr);
         observed
     }
 
@@ -478,4 +488,66 @@ fn test_renaming_the_kube_context_neither_executes_the_unit_nor_resets_its_attes
         stored.contains("context: renamed"),
         "the stored document records the new context: {stored}"
     );
+}
+
+/// A smoke test that runs only against healthy workloads, end to end with the
+/// real publication driver in observe mode: `reconcile` publishes and leaves
+/// the smoke unit blocked on `kubernetes`'s `healthy` (a receipt is not
+/// health), `attest` against a degraded Argo CD fails it and keeps the
+/// smoke unit blocked as failing, and a later `attest` against a healthy one
+/// unblocks it in the next `reconcile`, which executes it without executing
+/// the publication again. Catches a dependent that runs on a bare receipt,
+/// one that ignores the Argo CD reading, and one that stays blocked after the
+/// attestation passes.
+#[test]
+fn test_a_dependent_waits_for_the_healthy_attestation_of_the_publication() {
+    let observed = Observed::with_units(
+        "{strategy: manual}",
+        "---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: smoke
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  dependsOn: [{unit: kubernetes, attestations: [healthy]}]
+",
+        2,
+    );
+    let published = observed.head();
+    let status = observed.shell.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(status.exit, 2, "{}", status.stderr);
+    let smoke = &status.report["environments"][0]["units"]["smoke"];
+    assert_eq!(smoke["state"], "blocked", "{}", status.report);
+    assert_eq!(smoke["blockedBy"][0]["reason"], "attestation-pending");
+    assert_eq!(smoke["blockedBy"][0]["unit"], "kubernetes");
+    assert_eq!(smoke["blockedBy"][0]["attestation"], "healthy");
+
+    // Argo CD reports a degraded workload: the attestation fails and so does the wait.
+    observed.serve_with(&published, |name| {
+        Some(if name == "dev-catalog" { "Healthy" } else { "Degraded" }.to_owned())
+    });
+    assert_eq!(observed.shell.invoke(&["attest", "-e", "dev"]).exit, 3);
+    let waiting = observed.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(waiting.exit, 2, "{}", waiting.stderr);
+    assert_eq!(unit(&waiting.report)["result"], "current");
+    assert_eq!(
+        waiting.report["environments"][0]["units"]["smoke"]["blockedBy"][0]["reason"],
+        "attestation-failing"
+    );
+    assert!(waiting.stderr.contains("NYL-ATTESTATION-FAILING"), "{}", waiting.stderr);
+
+    // It recovers; the next attest passes and the next reconcile runs the smoke test.
+    observed.serve(&published, "Healthy", &[]);
+    assert_eq!(observed.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    let ready = observed.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(ready.exit, 0, "{}", ready.stderr);
+    assert_eq!(ready.report["environments"][0]["units"]["smoke"]["result"], "executed");
+    assert_eq!(
+        unit(&ready.report)["result"],
+        "current",
+        "the publication did not execute again"
+    );
+    assert_eq!(observed.head(), published);
 }
