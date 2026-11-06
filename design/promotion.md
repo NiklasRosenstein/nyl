@@ -264,7 +264,7 @@ spec:
   - `--revision <source commit>` takes the newest qualifying state with that
     source commit, and `--state-revision <desired commit>` takes exactly one.
     An explicitly chosen state satisfies `attested` through attestations
-    recorded for that state, such as those the publication unit's observe mode
+    recorded for that state, such as those a publication unit that declares `observe`
     wrote while it ran; the record names them, with their times. Only a state
     without them needs `--evidence published`, recorded as an override.
   - Rolling back is promoting an older state:
@@ -292,7 +292,7 @@ spec:
   because one source commit must fit every value. A path's `coverage.excludeApplications` names
   Applications it knowingly accepts as unhealthy; they leave the aggregate for
   that path and are listed in the PromotionRecord. A publication unit without
-  observe mode declares no attestations and is satisfied by its receipt.
+  `observe` declares no attestations and is satisfied by its receipt.
 - `record` decides where the PromotionRecord lives. With `record: state`, the
   default, it is written into the target's desired state, as a pull request
   against the desired ref under `changeGate: pullRequest`. With
@@ -634,8 +634,8 @@ so every source writes the same record:
 | External, through `nyl attest --name … --result …` | Someone or something else knows | A monitoring hook, a manual QA pass, an end-to-end job |
 
 - **Declared names.** A driver reports, from a unit's spec, which attestations
-  it can produce: a KubernetesPublication in observe mode declares `accepted`
-  and `healthy`; an OpenTofu unit declares `healthy` once its spec configures
+  it can produce: a KubernetesPublication that declares `observe: {}` declares
+  `accepted` and `healthy`; an OpenTofu unit declares `healthy` once its spec configures
   apply-time checks or probes, and nothing otherwise. A unit's
   `spec.attestations` adds names only external sources supply, such as
   `[{name: healthy, from: external}]` for a service nothing in Nyl can
@@ -664,9 +664,13 @@ so every source writes the same record:
 
 ### Kubernetes publications
 
-A KubernetesPublication attests `accepted` and
-`healthy` by observing Argo CD. Nyl knows the Applications it generates for a
-target, their ArgoCDInstance, and its Cluster. A mode that applies manifests
+A KubernetesPublication that declares `observe: {}` attests `accepted` and
+`healthy` by observing the reconciler that runs its target, Argo CD today.
+Nyl knows the Applications it generates for a target, their ArgoCDInstance, and
+its Cluster. `observe` is an object so that options can be added later; only
+`{}` is accepted. It opts the unit into observing, and says nothing about which
+reconciler runs: that follows the target's reconciler, so the declaration does
+not change when the reconciler does. A mode that applies manifests
 directly and attests `healthy` from rollout status during `reconcile` fits the
 same model and is not in the initial scope.
 
@@ -737,8 +741,11 @@ same model and is not in the initial scope.
   the source of its last sync, differs from the generated one without
   `targetRevision`: another directory, or `directory.recurse`, `exclude`, or a
   tool block edited in the cluster), or `unreadable`. A target that generates
-  no Application attests both vacuously. The details record, per Application,
-  its name, namespace, role, directory, state, health, the revision it runs,
+  no Application attests both vacuously. The details record the
+  reconciler that was read (`reconciler`: its kind, instance, namespace, and
+  access) and, per Application (`deployments`), its id (its name, qualified by
+  its namespace outside the instance's), role, directory, state, health
+  (`Healthy`, `Progressing`, `Degraded`, or `Unknown`), the revision it runs,
   and the publication it matched (the recorded commit below), and carry no time
   of the reading, so an unchanged system attests the same document and writes
   no commit.
@@ -789,9 +796,15 @@ same model and is not in the initial scope.
 
 ### Reading Argo CD
 
-The observer is one seam with two implementations behind the publication
-driver; everything after the reading, the running revision, the match to a
-publication, health, and the attestations, is shared:
+The observer is one seam, a reconciler-neutral reader, with Argo CD's two
+implementations behind the publication driver. A reader returns a neutral
+reading of the deployments the target expects (for Argo CD, its generated
+Applications): per deployment its running revision (one commit, a mix, or
+nothing yet), health (`Healthy`, `Progressing`, `Degraded`, or `Unknown`), and
+live source; per anchor whether it is visible; and, for an expected deployment
+the reading lacks, whether the credential could have seen it. Everything after
+the reading, the match to a publication, health, the attestations, and the
+answer of a teardown wait, is shared and names no reconciler:
 
 | Method | Declared as | Reads | Credentials |
 | --- | --- | --- | --- |
@@ -821,15 +834,25 @@ publication, health, and the attestations, is shared:
   attestation (adding `access` to an instance, or removing it, changes that one
   digest once; the same holds for `live` on any other Cluster document, such as
   the control-plane Cluster's, which is hashed without it when it declares it).
-  Resolution records the instance, its access, the publication
-  destination, and the Applications the target generates (with their projects
-  and generated `spec.source`) in the unit's resolved spec (`argocd`), so
-  `attest` and the `observe` teardown wait read the stored document and render
-  nothing. Only the generated Applications, the instance and Cluster names, and
-  the destination's branch and prefix key the unit; the declared access, the
-  control-plane context, and the URL the branch is read from are stored
-  but excluded from the key, so renaming a kube context or moving the API
-  server never re-executes the unit.
+  Resolution records the reconciler facts in the unit's resolved spec
+  (`reconciler`): `kind: argocd`, the instance with its namespace and
+  control-plane Cluster, its `access` and local `context`, the publication
+  destination, the deployments the target expects (`expected`: per Application
+  its id, role, directory, Release, generated source, and, for Argo CD's
+  reader alone, a locator with its namespace, name, and project), and the
+  `anchors` described below. `attest` and the `observe` teardown wait read the
+  stored document and render nothing. Only what the render derives keys the
+  unit: the expected deployments, the anchors, the instance and Cluster names,
+  and the destination's branch and prefix; the declared access, the
+  control-plane context, and the URL the branch is read from are stored but
+  excluded from the key, so renaming a kube context or moving the API server
+  never re-executes the unit.
+- **Adding a reconciler.** The reading and everything after it are neutral on
+  purpose. A second reconciler kind (Flux, say) adds a renderer deriving its
+  expected deployments and anchors from what the target generates, a location
+  variant recorded under `reconciler.kind`, and a reader that maps its API into
+  the neutral reading; the matching, health, attestations, teardown wait, and
+  the orchestration engine do not change.
 - **Credentials only through the unit's admitted environment.** The
   declaration names the variable, never a value: `tokenEnv` for the token, and
   `KUBECONFIG` for the kubeconfig file or files. The unit admits it with
@@ -858,8 +881,8 @@ Failure modes, and what each does:
 | Token or kubeconfig credential rejected (HTTP 401), expired included | The same, with the reason naming the expiry and the secret or variable to refresh; a credential that cannot be told expired from invalid is reported as "invalid or has expired" |
 | Credential accepted but may not read (HTTP 403) | The same, naming the permission to grant |
 | A partial reading (one Application namespace of several fails, or the body is no complete Application list) | Unknown: a partial reading never stands for a complete one |
-| An Application the credential cannot see | Argo CD's list leaves out what a token may not `get` and still answers success, so absence from it proves nothing alone. For the API method, every generated Application missing from the reading is checked with `GET /api/v1/account/can-i/applications/get/<project>/<name>` (`<project>/<namespace>/<name>` outside the instance's namespace): a `no` or an error makes `attest` unknown and the teardown wait `observation-failed`, naming the permission to grant; only a `yes` lets the Application count as gone (`missing`, failing `accepted`) |
-| A token or context that sees none of the target's Applications | The teardown wait concludes removal only if the reading shows what phase 1 keeps and only the Argo CD running this target has (the anchor), else `observation-failed` (the credential or context does not see this target: another project's role, a token without policy, another Argo CD's control plane). The anchor is the catalog Application when the target generates one; for a target without one (`catalogApplication.shared` or `enabled: false`), the AppProjects its Applications belong to, which phase 1 keeps, must be visible (`appprojects.argoproj.io` through the Kubernetes API, `GET /api/v1/projects/<name>` through the API server, which needs `get` on those projects); `default`, which every Argo CD has, anchors nothing. A target with neither fails closed for the Kubernetes method (nothing shows its context reaches this target; declare method `api`), and relies on `can-i` alone for the API method; a target with no workload Application has nothing to conclude. The anchor comes before the per-Application `can-i` above. The same anchor makes `attest` with the Kubernetes method `unknown` instead of a recorded `missing` failure when its context points at another Argo CD (a target whose catalog was never applied is `unknown` until it is; the API method needs no anchor there, because `can-i` answers for each Application). A tampered `spec.project` on a live Application is not detected |
+| An Application the credential cannot see | The reader says, for each expected deployment the reading lacks, whether the credential could have seen it; an absence the reader cannot vouch for fails the whole evaluation (never one deployment's finding), so unknown is never a pass and removal is never concluded from what could not be seen. Argo CD's list leaves out what a token may not `get` and still answers success, so absence from it proves nothing alone. For the API method, every generated Application missing from the reading is checked with `GET /api/v1/account/can-i/applications/get/<project>/<name>` (`<project>/<namespace>/<name>` outside the instance's namespace): a `no` or an error makes `attest` unknown and the teardown wait `observation-failed`, naming the permission to grant; only a `yes` lets the Application count as gone (`missing`, failing `accepted`) |
+| A token or context that sees none of the target's Applications | The teardown wait concludes removal only if the reading shows what phase 1 keeps and only the Argo CD running this target has (the anchor), else `observation-failed` (the credential or context does not see this target: another project's role, a token without policy, another Argo CD's control plane). The reading's anchors are the things only the Argo CD running this target has: the catalog Application when the target generates one; for a target without one (`catalogApplication.shared` or `enabled: false`), the AppProjects its Applications belong to, which phase 1 keeps, must be visible (`appprojects.argoproj.io` through the Kubernetes API, `GET /api/v1/projects/<name>` through the API server, which needs `get` on those projects); `default`, which every Argo CD has, anchors nothing. A target with neither fails closed for the Kubernetes method (nothing shows its context reaches this target; declare method `api`), and relies on `can-i` alone for the API method; a target with no workload Application has nothing to conclude. The anchor comes before the per-Application `can-i` above. The same anchor makes `attest` with the Kubernetes method `unknown` instead of a recorded `missing` failure when its context points at another Argo CD (a target whose catalog was never applied is `unknown` until it is; the API method needs no anchor there, because `can-i` answers for each Application). A tampered `spec.project` on a live Application is not detected |
 | An Application that does not exist | `missing`, and `accepted` fails; a teardown wait counts it as removed (once visibility is established as above) |
 | The publication branch cannot be fetched, or the running revision cannot be compared | Unknown, like an unreachable Argo CD |
 | The receipt's publication commit is no longer on the branch (rewritten) | `accepted` and `healthy` fail for every Application: nothing can run it |
