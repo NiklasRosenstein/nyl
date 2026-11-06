@@ -651,7 +651,7 @@ so every source writes the same record:
   non-orchestrated target's `_nyl/attestations.yaml`. Without `--name`,
   `nyl attest` asks the drivers instead (see the orchestration core
   contract's [Attestations](orchestration-core.md#attestations)); that form
-  is implemented, the external form is not yet.
+  is implemented, the external form and `--target` (M6) are not yet.
 - **Lifetime.** An attestation belongs to the receipt or state it names; a new
   receipt starts with its declared attestations pending. The newest
   attestation per name and receipt wins, and history keeps earlier ones.
@@ -670,11 +670,12 @@ target, their ArgoCDInstance, and its Cluster. A mode that applies manifests
 directly and attests `healthy` from rollout status during `reconcile` fits the
 same model and is not in the initial scope.
 
-- **Observer.** Nyl reads the target's generated Applications from the Argo CD
-  control-plane Cluster through its local context. Health checks need
-  credentials for that Cluster, which publication does not, so attestations
-  are recorded where those credentials exist, typically in CI by
-  `nyl attest`, and decisions read the recorded evidence.
+- **Observer.** Nyl reads the target's generated Applications from Argo CD,
+  one of two ways that an `ArgoCDInstance` declares in `spec.access` (see
+  [Reading Argo CD](#reading-argo-cd)). Health checks need credentials for
+  Argo CD, which publication does not, so attestations are recorded where
+  those credentials exist, typically in CI by `nyl attest`, and decisions read
+  the recorded evidence.
 - **Where attestations are recorded.** An orchestrated environment's
   publication units record into its observed state. A target without an
   environment records into its own publication branch:
@@ -695,19 +696,45 @@ same model and is not in the initial scope.
 - **Running revision.** Argo CD's Synced/OutOfSync status compares against the
   branch head, so an Application still running an older commit reports
   OutOfSync as soon as a newer publication changes its files. Nyl ignores it.
-  The running revision is that of the newest `status.history` entry, which
-  Argo CD appends only for full, non-dry-run syncs. The sync result is not
-  used, because Argo CD also records selective and dry-run syncs there as
-  succeeded. A selective sync newer than that entry leaves the Application
-  running a mix of revisions, which proves no revision. Health is Argo CD's
-  live health.
+  The running revision is that of the newest `status.history` entry (the
+  highest `id`), which Argo CD appends only for full, non-dry-run syncs. The
+  sync result is not used, because Argo CD also records selective and dry-run
+  syncs there as succeeded. An operation newer than that entry that is not a
+  completed full sync leaves the Application running a mix of revisions, which
+  proves no revision: a selective sync (`operation.sync.resources`), a full
+  sync that failed, errored, or is still running (it may have applied part of
+  its revision), or one whose time cannot be compared with the entry's. A dry
+  run changes nothing and is ignored. Health is Argo CD's live health,
+  `status.health.status`; only `Healthy` is healthy.
 - **Matching a publication.** The running revision R may be another target's
   commit or a state write-back on a shared branch. For each covered
   Application, Nyl finds the source target's publication commits (commits that
-  change `<prefix>/_nyl/index.json`) that are R or an ancestor of it, and whose
-  Application directory tree and recorded inputs for that Release equal those
-  at R. Values are always recovered from a matching publication commit, never
-  from R.
+  change `<prefix>/_nyl/index.json`) that are R or an ancestor of R along first
+  parents, and whose Application directory tree and recorded inputs for that
+  Release equal those at R. The directory tree is Git's tree for the
+  Application's `source.path`, so it covers every file Argo CD reads there;
+  the recorded inputs are the ownership index's `compilation` record for the
+  Release. Values are always recovered from a matching publication commit,
+  never from R. A revision that no publication commit matches, such as one
+  that edited the Application's directory without publishing, or one not on
+  the publication branch, is `unmatched`, never credited to the publication
+  before it.
+- **Accepted and healthy for a receipt.** A unit's attestations name its
+  current receipt, whose `PublishedTree` records the publication commit C.
+  An Application is *accepted* when its running revision's directory tree and
+  recorded inputs equal those at C: it runs this receipt's publication,
+  whatever commit it reports. `accepted` passes when every Application the
+  target generates, the catalog Application included, is accepted, and
+  `healthy` when, besides, every one is Healthy. Any other state fails the
+  aggregate and is listed in the details with its reason: `other-publication`
+  (it runs another publication), `unmatched`, `not-on-branch`, `mixed`,
+  `never-synced`, `missing`, `deleting`, `other-source` (it syncs another
+  directory than the generated one), or `unreadable`. A target that generates
+  no Application attests both vacuously. The details record, per Application,
+  its name, namespace, role, directory, state, health, the revision it runs,
+  and the publication it matched (the recorded commit below), and carry no time
+  of the reading, so an unchanged system attests the same document and writes
+  no commit.
 - **Recorded commit.** The running publication is what gets promoted. Among the
   publication commits equivalent to it, the PromotionRecord (or the lock's
   `commit`) names the oldest in the unbroken run of matching commits ending at
@@ -724,7 +751,8 @@ same model and is not in the initial scope.
   the target's source, coverage is every Application of every publication unit
   the target also selects, aggregated per unit as described above.
 - **Where Application data lives.** Only a `KubernetesPublication` unit knows
-  Applications, because it generated them. Its `accepted` and `healthy`
+  Applications, because it generated them; it records them at resolution
+  (see [Reading Argo CD](#reading-argo-cd)). Its `accepted` and `healthy`
   attestations aggregate every Application's running revision and health for
   the matched publication and list them in their details; promotion
   decisions use the results, and the per-Application details explain why a
@@ -752,3 +780,67 @@ same model and is not in the initial scope.
   QA, are further attestations: from a command unit, a driver's probes, or
   `nyl attest`.
 
+### Reading Argo CD
+
+The observer is one seam with two implementations behind the publication
+driver; everything after the reading, the running revision, the match to a
+publication, health, and the attestations, is shared:
+
+| Method | Declared as | Reads | Credentials |
+| --- | --- | --- | --- |
+| `kubernetes` (default) | `ArgoCDInstance.spec.access: {method: kubernetes}`, or no `access`, and the control-plane Cluster's `spec.live.context` | `applications.argoproj.io` objects in the Application namespaces, through the Kubernetes API of the instance's control-plane Cluster | The kubeconfig the unit admits as `KUBECONFIG`, at that context |
+| `api` | `ArgoCDInstance.spec.access: {method: api, api: {server: https://argocd.example.com, tokenEnv: ARGOCD_AUTH_TOKEN}}` | `GET <server>/api/v1/applications?appNamespace=<ns>` | The token the unit admits under the name `tokenEnv` names (default `ARGOCD_AUTH_TOKEN`) |
+
+- **Why both.** The Kubernetes method needs nothing beyond the control-plane
+  Cluster's own access (the credentials a platform team already issues, and
+  the only route when Argo CD's API is not exposed), but a kubeconfig that can
+  list Applications is cluster access. The API method needs only a token
+  scoped to `get` on the instance's Applications (an Argo CD account or
+  project role), the least privilege a CI job needs, but needs the API server
+  reachable from the runner. Which fits is the platform team's decision about
+  one Argo CD installation, so it is declared once on the instance, not chosen
+  per command or per runner: a CI render, an orchestration run, and a local
+  `nyl attest` read the same way.
+- **Declared in Git, on the instance.** The Applications are the Argo CD
+  instance's, not the workload Cluster's, and one instance serves many targets,
+  so the choice and the API server's address belong to the ArgoCDInstance:
+  every target on it reads the same way. The Kubernetes method needs the
+  control-plane Cluster's local context, which the Cluster already declares as
+  `spec.live.context`; an instance without `access` and without explicit
+  instances (the implicit one in the workload Cluster) therefore reads through
+  that Cluster. `access` never affects rendered bytes: it is left out of every
+  render input and ownership hash, so changing it never republishes a tree.
+  Resolution records the instance, its access, and the Applications the
+  target generates in the unit's resolved spec (`argocd`), so `attest` and the
+  `observe` teardown wait read the stored document and render nothing.
+- **Credentials only through the unit's admitted environment.** The
+  declaration names the variable, never a value: `tokenEnv` for the token, and
+  `KUBECONFIG` for the kubeconfig file or files. The unit admits it with
+  `env.passthrough` (from the runner) or `env.secrets` (from the project's
+  secrets provider), as any driver credential, and a credential that is not
+  admitted is an error naming the variable and the `env` entry that admits it.
+  Nothing falls back to the process environment, the kubeconfig's current
+  context, `~/.kube/config`, in-cluster configuration, or a proxy from the
+  process's `HTTPS_PROXY` (a unit admits `HTTPS_PROXY` for the API method; a
+  kubeconfig's own `proxy-url` applies to the Kubernetes method). The API
+  server's URL must use `https`, except for a loopback address, and the token
+  is sent only to it and never followed through a redirect.
+- **Deadlines.** Each reading ends within the check's deadline, at most 30
+  seconds.
+
+Failure modes, and what each does:
+
+| Situation | Result |
+| --- | --- |
+| Argo CD unreachable, a server error, or a timeout | `nyl attest` reports the unit `unknown` (`NYL-ATTEST-UNKNOWN`, exit 2) and records nothing, so the evidence recorded earlier stands until `maxAttestationAge` retires it; the teardown wait is `observation-failed` |
+| Token or kubeconfig credential rejected (HTTP 401), expired included | The same, with the reason naming the expiry and the secret or variable to refresh; a credential that cannot be told expired from invalid is reported as "invalid or has expired" |
+| Credential accepted but may not read (HTTP 403) | The same, naming the permission to grant |
+| A partial reading (one Application namespace of several fails, or the body is no complete Application list) | Unknown: a partial reading never stands for a complete one |
+| An Application the credential cannot see, or that does not exist | Absent from the reading: the Application is `missing` and `accepted` fails (a listing cannot tell the two apart); a teardown wait counts it as removed |
+| The publication branch cannot be fetched, or the running revision cannot be compared | Unknown, like an unreachable Argo CD |
+| The receipt's publication commit is no longer on the branch (rewritten) | `accepted` and `healthy` fail for every Application: nothing can run it |
+| A stale `status.history` entry | History is read as Argo CD wrote it: the newest entry by `id` is the running revision, and an operation newer than it that is selective or unfinished makes the Application `mixed`; an entry's `source.path` that is not the generated directory makes it `other-source` |
+| Several targets sharing a branch | The running revision may be another target's commit or a write-back; matching is by the Application's directory tree and recorded inputs, never by commit identity, so those commits match the publication whose directory they leave alone |
+
+Only an observation that established a result is recorded: `fail` means Argo
+CD was read and an Application fell short, `unknown` means it could not be read.

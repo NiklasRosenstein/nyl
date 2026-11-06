@@ -52,3 +52,8 @@ nyl capture cluster primary --check
 ```
 
 See the [`get and update` command reference](/nyl/reference/cli/project-resources/) for details.
+
+An Argo CD control-plane Cluster's `spec.live.context` is also the context
+through which a [`KubernetesPublication` in observe mode](/nyl/kubernetes-gitops/resource-guides/argocd-instance/#reading-argo-cd)
+reads Argo CD's Applications, when the ArgoCDInstance declares no other access.
+That reading never uses `--context` or the current context.

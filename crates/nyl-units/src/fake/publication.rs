@@ -30,8 +30,8 @@ use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, TeardownReadiness,
+    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, RemovalContext,
+    RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
@@ -42,7 +42,8 @@ use nyl_render::gitops::publication::TeardownSettings;
 use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
-    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, unit_target, validate_teardown_wait,
+    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unit_target,
+    validate_teardown_wait,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -259,6 +260,24 @@ impl Driver for FakePublication {
                 })
                 .map_err(DriverError::before_effects),
         }
+    }
+
+    fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
+        teardown_wait(spec)
+    }
+
+    /// What the scenario scripted the fake Argo CD to report for the unit's
+    /// target ([`super::FakeObserver`]); nothing remains by default.
+    fn observe_removal(
+        &self,
+        _ctx: &RemovalContext,
+        unit: &DesiredUnit,
+    ) -> DriverResult<Supported<RemovalObservation>> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        let target = unit_target(spec)?;
+        Ok(Supported::Supported(
+            self.script.observer().workload_applications(&target),
+        ))
     }
 
     /// A direct build is not scripted: it is the real driver's, so a scenario

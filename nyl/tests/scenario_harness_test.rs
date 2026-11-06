@@ -723,7 +723,8 @@ fn test_summary_lists_and_lease_break_are_read_from_the_summary() {
 }
 
 /// Scenarios that need `FakePublication` in tier 1, with why: the real
-/// driver cannot be scripted, and cannot observe Argo CD yet.
+/// driver cannot be scripted, and does not read observed values yet (it
+/// attests `accepted` and `healthy` from Argo CD, which no scenario scripts).
 const FAKE_PUBLICATION: [(&str, &str); 1] = [(
     "walkthroughs/observed-value",
     "scripts the observer of a publication in mode observe",

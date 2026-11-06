@@ -114,7 +114,6 @@ fn run(harness: &Harness, observer: &Events, mode: RunMode) -> EnvironmentRunRep
         process_env: &harness.process_env,
         secrets: None,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress: Some(observer),
         prompt: None,
     };

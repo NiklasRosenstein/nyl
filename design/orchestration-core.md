@@ -693,12 +693,17 @@ spec:
   does today.
 - It publishes a `PublishedTree` artifact named `tree` with the published
   commit and ownership-index digest (`published`). `mode: observe` additionally
-  lets `nyl attest` read Argo CD and attest `accepted` and `healthy` (M5), per
-  the promotion contract's [health evidence](promotion.md#health-evidence). Direct application through Nyl, which
+  lets `nyl attest` read Argo CD and attest `accepted` and `healthy`, per
+  the promotion contract's [health evidence](promotion.md#health-evidence) and
+  its [Reading Argo CD](promotion.md#reading-argo-cd) (owner:
+  `nyl_units::kubernetes_publication::argocd`). The publication still
+  happens first: observe mode adds a reading, and makes `observe` the default
+  `teardownWait`. Direct application through Nyl, which
   would attest `healthy` from rollout status during `reconcile`, is not a mode
   in the initial scope.
 - It supports [observed values](#observed-values) in `mode: observe`, whose
-  credentials it needs (M5). Its `from` names a `resource` (`apiVersion`,
+  credentials it needs (a later M5 slice; a unit that declares `observations`
+  is rejected until then). Its `from` names a `resource` (`apiVersion`,
   `kind`, `namespace` for namespaced kinds, `name`) and a JSON `pointer` into
   it:
 
@@ -837,15 +842,17 @@ Any other failure of the push may have published and ends the call. Drift
 detection renders again and compares the branch with the tree: a difference
 or an owned file modified outside Nyl is `drifted`, and a comparison that
 cannot be made is `unknown`. The driver records the target's effective teardown settings at
-resolution (see Teardown readiness below). `mode: observe` and the `observe`
-`teardownWait` strategy are rejected with `NYL-KUBERNETES-MODE-UNSUPPORTED` and
-`NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` until the driver can read Argo CD,
-so no wait or health claim depends on an observer that does not exist; the
-strategies `delay` and `manual` work as the table below says. Inline targets,
-the owner in the ownership index, and owner fencing work as described above, in
+resolution (see Teardown readiness below). A unit that observes Argo CD
+(`mode: observe`, or the `observe` `teardownWait` strategy) also records, at
+resolution, the Argo CD facts its readings need (`argocd`: the instance, how
+it is read, the publication destination, and the Applications the target
+generates; an authored `argocd` is rejected), so `attest` and the teardown wait
+read the stored document. The strategies `delay`, `manual`, and `observe` work
+as the table below says. Inline targets,
+the version 4 ownership index, and owner fencing work as described above, in
 both phases of the teardown. Tier-1 tests keep the test kind
 `FakePublication` (scripted outcomes, the fake Argo CD observer
-`FakeObserver` for `observe`, accepting inline targets and evaluating
+`FakeObserver` for the `observe` wait, accepting inline targets and evaluating
 scenario-declared teardown settings with the real driver's readiness rules).
 
 `teardownWait` decides when phase 1 counts as complete. The same point gates
@@ -857,11 +864,16 @@ path to the publication are not held back by its wait (see
 
 | Strategy | Phase 1 completes when | Default for |
 | --- | --- | --- |
-| `observe` | Argo CD no longer reports any of the target's workload Applications, within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `applications-remain` (listing them) or `observation-failed` (with the error, such as missing credentials for the Argo CD cluster) | `mode: observe` |
+| `observe` | The driver reports that Argo CD no longer has any of the target's workload Applications (every Application except the catalog's), within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `applications-remain` (listing them) or `observation-failed` (with the driver's error, such as a missing credential or an unreachable Argo CD) | `mode: observe` |
 | `delay` | `duration` has passed since the phase 1 commit, such as `{strategy: delay, duration: 10m}`; the teardown is recorded as not observed | |
 | `manual` | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and its dependencies wait, exit 2 | `mode: publish` |
 
-`observe` needs read access to the Argo CD cluster, as `mode: observe` does.
+`observe` reads Argo CD as `mode: observe` does (see [Reading Argo CD](promotion.md#reading-argo-cd)):
+each poll the shell asks the unit's driver, `Driver::observe_removal`, which
+reads the Applications its stored document records, with the credentials the
+unit admits; the shell interprets no Argo CD answer. An Application the
+credential cannot see counts as removed, so the token or role needs `get`
+on the target's Applications.
 Two escape hatches end any wait, whatever the strategy, once phase 1 is
 published and the wait is pending or uncertain. Both are needed because a
 `deleting` unit is torn down from its stored desired document, so changing
@@ -1603,8 +1615,9 @@ attestations:
   attestation (see the [promotion contract](promotion.md#health-evidence)).
   Both forms run under the lease, like every state-writing operation, and
   `--wait-lease` lets a CI job wait for a running reconcile; a refused name
-  exits 1. Implementation status: the driver form is implemented; the
-  external form is not yet.
+  exits 1. Implementation status: the driver form is implemented, including
+  the publication unit's `accepted` and `healthy`; the external form is not
+  yet.
 - An attestation is valid only for the receipt or state it names. Declared
   attestations of a new receipt are pending until attested; the newest per
   name and receipt wins. Git history keeps earlier ones, so an older state
@@ -2938,6 +2951,8 @@ trait Driver {
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
     fn teardown_readiness(&self, unit: &DesiredUnit) -> Result<Supported<TeardownReadiness>>; // readiness from the stored document; default Unsupported
+    fn teardown_wait(&self, spec: &ResolvedSpec) -> WaitStrategy; // `observe`, `delay`, or `manual` from the stored spec, with the kind's defaults; default manual
+    fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> Result<Supported<RemovalObservation>>; // the `observe` teardown wait: what of phase 1's removals remains; default Unsupported
     fn build(&self, ctx: &ExecutionContext, unit: &DesiredUnit, push: bool) -> Result<Supported<Vec<Artifact>>>; // outside orchestration
     fn exec(&self, ctx: &ExecutionContext, unit: &DesiredUnit, args: &[OsString]) -> Result<Supported<ExecStatus>>; // operator repair, see Operator exec
 }
@@ -2978,6 +2993,8 @@ enum Outcome {
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
 | `KeyInputs` | What resolution needs to compute an execution key: the selected `files` with their digests, the `excludedFields` of the resolved spec, an optional `fingerprint`, and `recorded` facts. Each recorded fact is a JSON Pointer to a member of the resolved spec and the value resolution writes there before it computes the key, so the stored desired document carries what the driver learned from its inputs. The engine stores a recorded value without interpreting it |
 | `TeardownReadiness` | What the driver found about whether the unit's teardown can complete: `blocking` requirements and `remnants` a teardown leaves, each a finding with a stable code and the setting that fixes it, and `not_checked` requirements the driver cannot see. The driver evaluates its own requirements (the publication driver from the settings it recorded at resolution: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog); the shell only displays the findings, keeps a unit with a blocking one pending teardown, and warns in `plan` and `reconcile` |
+| `WaitStrategy` | How a teardown waits after phase 1: `Observe`, `Delay { duration }`, or `Manual`. The driver reads it from the stored spec with its defaults (the publication driver: `teardownWait`, else `observe` for `mode: observe` and `manual` for `mode: publish`); `rules::teardown_wait` decides what each strategy does, and the shell reads no spec field itself |
+| `RemovalObservation` | What `observe_removal` found: `Remaining(names)` of what phase 1 removes that still exists (empty when all is gone), or `Failed(reason)` when the driver could not read it, shown unchanged as `observation-failed`; its `RemovalContext` carries the unit's admitted credentials and the wait's deadline, and no checkout, because a unit is torn down from its stored document |
 | `IncarnationDirectory` | `ExecutionContext.incarnations`: whether a named unit incarnation (environment, unit, uid) still exists in its environment's state, as `exists`, `gone`, or `unknown` with a reason. A driver that fences a native resource by owner asks it about the owner it finds recorded; the shell answers from the declared environments' state without knowing what is fenced |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |

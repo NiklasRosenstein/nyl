@@ -211,7 +211,6 @@ impl Harness {
             process_env: self.process_env.clone(),
             cancellation,
             prompt: None,
-            observer: None,
             progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -321,7 +320,6 @@ impl Harness {
             process_env: &self.process_env,
             secrets: None,
             commit_identity: identity.then_some(&self.identity),
-            observer: None,
             progress: None,
             prompt: None,
         };

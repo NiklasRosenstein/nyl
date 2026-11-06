@@ -29,16 +29,18 @@
 //!   that finds an owned file modified outside Nyl. A comparison that cannot
 //!   be made, such as an unreachable remote, is `unknown`.
 //!
-//! `mode: observe` and the `observe` teardown wait are rejected by validation
-//! until the driver can read Argo CD, so nothing promises health that is
-//! never checked.
+//! - **Observation.** A unit that observes Argo CD (`mode: observe`, or the
+//!   `observe` teardown wait) records the instance, its declared access, and
+//!   the target's Applications at resolution (`argocd`), declares the
+//!   attestations `accepted` and `healthy` in observe mode, and reads Argo
+//!   CD for `nyl attest` and the teardown wait ([`super::observe`]).
 
 use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
-    Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext, Inspection,
-    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
-    TeardownReadiness,
+    AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext,
+    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, RemovalContext,
+    RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::ports::CommitIdentity;
@@ -46,9 +48,17 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Recei
 use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor, TeardownSettings};
 use serde_json::{json, Value};
 
+use super::observe::{self, ARGOCD};
 use super::readiness::evaluate;
-use super::{build, plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target, KIND};
+use super::{build, plan, publish, render, resolution_inputs, teardown, teardown_wait, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
+
+use super::argocd::evaluate::{ACCEPTED, HEALTHY};
+
+/// Whether the spec's `mode` is `observe`.
+fn is_observe_mode(spec: &Value) -> bool {
+    spec.get("mode").and_then(Value::as_str) == Some("observe")
+}
 
 /// The pointer, in the resolved spec, of the recorded teardown settings.
 const TEARDOWN_SETTINGS: &str = "/teardownSettings";
@@ -83,7 +93,7 @@ impl Driver for KubernetesPublicationDriver {
         nyl_core::orchestration::time::Duration::from_mins(10)
     }
 
-    fn capabilities(&self, _spec: &Value) -> Capabilities {
+    fn capabilities(&self, spec: &Value) -> Capabilities {
         Capabilities {
             requires_committed_source: true,
             plan: true,
@@ -91,6 +101,7 @@ impl Driver for KubernetesPublicationDriver {
             detect_drift: true,
             teardown: true,
             build: true,
+            attest: is_observe_mode(spec),
             ..Capabilities::default()
         }
     }
@@ -132,16 +143,16 @@ impl Driver for KubernetesPublicationDriver {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["publish"],
+                    "enum": ["publish", "observe"],
                     "default": "publish",
-                    "description": "How the unit relates to the published tree. Only publish is available; observe needs Argo CD access."
+                    "description": "How the unit relates to the published tree. Both publish it; observe also lets `nyl attest` read Argo CD and attest `accepted` and `healthy`, and makes `observe` the default teardownWait."
                 },
                 "teardownWait": {
                     "type": "object",
                     "description": "When phase 1 of a teardown counts as complete.",
                     "required": ["strategy"],
                     "properties": {
-                        "strategy": {"type": "string", "enum": ["delay", "manual"]},
+                        "strategy": {"type": "string", "enum": ["observe", "delay", "manual"]},
                         "duration": {"type": "string", "description": "How long after phase 1, for strategy delay, such as 10m."}
                     },
                     "additionalProperties": false
@@ -159,8 +170,14 @@ impl Driver for KubernetesPublicationDriver {
         super::spec::validate(spec)
     }
 
-    fn attestations(&self, _spec: &Value) -> Vec<String> {
-        Vec::new()
+    /// `accepted` and `healthy` in observe mode; a unit in publish mode is
+    /// satisfied by its receipt and declares none.
+    fn attestations(&self, spec: &Value) -> Vec<String> {
+        if is_observe_mode(spec) {
+            vec![ACCEPTED.to_owned(), HEALTHY.to_owned()]
+        } else {
+            Vec::new()
+        }
     }
 
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
@@ -187,6 +204,9 @@ impl Driver for KubernetesPublicationDriver {
         let settings = serde_json::to_value(settings)
             .map_err(|error| DriverError::before_effects(format!("cannot record the teardown settings: {error}")))?;
         inputs.recorded.insert(TEARDOWN_SETTINGS.to_owned(), settings);
+        if observe::observes(spec) {
+            inputs.recorded.insert(ARGOCD.to_owned(), observe::recorded(&rendered)?);
+        }
         Ok(inputs)
     }
 
@@ -246,6 +266,26 @@ impl Driver for KubernetesPublicationDriver {
                 },
             };
         Ok(Supported::Supported(drift.into()))
+    }
+
+    /// `accepted` and `healthy` of the receipt's publication, read from Argo CD.
+    fn attest(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        _receipt: &Receipt,
+    ) -> DriverResult<Supported<AttestationCheck>> {
+        observe::attest(ctx, unit).map(Supported::Supported)
+    }
+
+    fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
+        teardown_wait(spec)
+    }
+
+    /// The workload Applications Argo CD still reports, for the `observe`
+    /// teardown wait.
+    fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
+        Ok(Supported::Supported(observe::observe_removal(ctx, unit)))
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {

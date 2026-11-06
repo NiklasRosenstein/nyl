@@ -12,14 +12,20 @@
 //!   `FakePublication` shares them, so both kinds publish the same bytes.
 //! - [`build`] implements `nyl build`: render, `--diff` against the published
 //!   tree, and `--push` for a target no environment owns.
+//! - [`argocd`] reads Argo CD (the Kubernetes API of the control-plane
+//!   Cluster, or the Argo CD API server) and judges what it reports;
+//!   [`observe`] is the driver's use of it, for `nyl attest` and the
+//!   `observe` teardown wait.
 //! - [`readiness`] evaluates the recorded teardown settings against the
 //!   contract's readiness table.
 //! - [`driver`] implements the [`Driver`](nyl_core::orchestration::driver::Driver)
 //!   contract: the execution key from the render's portable input record,
 //!   the teardown settings recorded at resolution, and drift detection.
 
+pub mod argocd;
 mod build;
 mod driver;
+mod observe;
 mod readiness;
 mod run;
 mod spec;
@@ -30,6 +36,7 @@ pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
 pub(crate) use run::{plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target};
+pub(crate) use spec::teardown_wait;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use spec::validate_teardown_wait;
 

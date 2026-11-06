@@ -34,7 +34,6 @@ fn test_direct_build_uses_dirty_snapshot_and_source_override_without_state() {
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let before = git_output(
@@ -130,7 +129,6 @@ fn test_direct_build_refuses_a_locked_commit_outside_protected_and_source_refs()
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let error = direct::prepare(&clone, "image", None, None, &wiring)
@@ -198,7 +196,6 @@ fn test_a_driver_that_refuses_the_build_exits_3_and_preparation_errors_exit_1() 
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let run = |unit: &str, driver: &[&str]| {

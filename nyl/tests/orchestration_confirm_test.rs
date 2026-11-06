@@ -495,7 +495,6 @@ fn invoke(harness: &harness::Harness, args: &[&str]) -> CommandOutcome {
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -702,7 +701,6 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
                 process_env: harness.process_env.clone(),
                 cancellation: Cancellation::default(),
                 prompt: None,
-                observer: None,
                 progress: None,
             };
             let args = ["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]
