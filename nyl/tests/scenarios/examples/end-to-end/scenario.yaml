@@ -48,7 +48,7 @@ steps:
   # A pull request job creates its preview, and a second one gets its own.
   - branch: {name: pr-1, from: main}
   - commit: {branch: pr-1, message: "Change the banner", apply: patches/page}
-  - nyl: [reconcile, -e, pr-1, --template, preview, --param, pr=1]
+  - nyl: [reconcile, -e, pr-1, --template, preview, --param, pr=1, --source-ref, refs/pull/1/head]
     at: pr-1
     exit: 0
     expect:
@@ -59,7 +59,7 @@ steps:
       keep-refs: {count: 0}                 # keepSource is off: nothing is pushed to the repository
   - branch: {name: pr-2, from: main}
   - commit: {branch: pr-2, message: "Change the banner, differently", apply: patches/another}
-  - nyl: [reconcile, -e, pr-2, --template, preview, --param, pr=2]
+  - nyl: [reconcile, -e, pr-2, --template, preview, --param, pr=2, --source-ref, refs/pull/2/head]
     at: pr-2
     exit: 0
     expect:
@@ -77,7 +77,8 @@ steps:
 
   # pr-1 is squash-merged and its branch deleted; GitHub keeps refs/pull/1/head.
   # Its close job, a checkout of main, fetches the recorded commit by its id from
-  # the origin and removes the preview with no override and no keep ref.
+  # the origin and removes the preview with no override and no keep ref; the
+  # recorded `refs/pull/1/head` is the fallback for a host that refuses a fetch by id.
   - ref: {set: refs/pull/1/head, to: pr-1}
   - squash-merge: {branch: pr-1, into: main}
   - delete-branch: pr-1
