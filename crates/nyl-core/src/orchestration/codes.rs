@@ -100,6 +100,8 @@ codes! {
     SourceUnavailable => "NYL-SOURCE-UNAVAILABLE",
     /// A source commit is not reachable from the refs it must be reachable from.
     SourceUnreachable => "NYL-SOURCE-UNREACHABLE",
+    /// A teardown with `--source` took a unit's files from another revision than its recorded source commit. A warning.
+    SourceOverride => "NYL-SOURCE-OVERRIDE",
     /// A driver call failed on Nyl's side before any effect started.
     DriverError => "NYL-DRIVER-ERROR",
     /// A unit reported outputs it does not declare; they were ignored.

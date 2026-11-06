@@ -38,6 +38,7 @@ steps:
     exit: 0
     expect:
       outcome: done
+      codes: [NYL-SOURCE-OVERRIDE]
       removed: [kubernetes, database]
       released: [web-image]
       deploy: {branch: previews, absent: ['pr-123/**']}
