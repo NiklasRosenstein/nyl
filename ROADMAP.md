@@ -682,14 +682,16 @@ path:
 - Credentials come only from the unit's admitted `KUBECONFIG` and the Cluster's
   declared `live.context`; the context's server must match the declared
   destination.
-- The release state in the cluster records the owning unit incarnation, and a
-  Release is fenced like a published prefix: another existing owner, or a
-  manual `nyl apply`, is refused. A target's reconciler is part of the
-  publication's identity, so switching one is a teardown, never an edit.
+- The release state in the cluster records the owning unit incarnation and the
+  publication it was applied for, and a Release is fenced like a published
+  prefix: another existing owner, or a manual `nyl apply`, is refused. A
+  target's reconciler is part of the publication's identity, so switching one
+  is refused, never an edit.
 - `observe: {}` reads Nyl's own release state and the rollout status of the
   workloads through a second `ReconcilerReader`; the shared evaluation, the
   attestations, and the teardown wait do not change, and teardown deletes in
-  the cluster in two phases behind `teardownWait`.
+  the cluster in two phases behind `teardownWait`, keeping the Namespaces that
+  hold the release state until the wait ends.
 
 Nothing in the engine, the state formats, or the CLI workflows knows the
 direct reconciler: it belongs to the target's declaration, to `nyl-render`, and

@@ -929,15 +929,18 @@ are the shared rules, unchanged. The deployments are the target's Releases.
 | Source of truth | The release state of each Release, and `get` on the workload objects its latest `Deployed` revision tracks, through the kubeconfig the unit admits as `KUBECONFIG` and the Cluster's declared `spec.live.context`, never the current context |
 | Running revision | The publication commit the latest revision recorded when the driver applied it (`Exact`). The shared matching then treats it exactly as an Argo CD revision: by the deployment directory's tree and recorded inputs, never by commit identity |
 | `mixed` | The latest revision is `Failed` or still `Rendered`: an apply that failed or was interrupted after applying some resources. The last `Deployed` commit is reported beside it |
-| `unmatched`, `unreadable` | A revision applied outside orchestration (`nyl apply`, `release rollback`) records no publication and is `unreadable`, with the fix to reconcile; one that cites another repository or branch is `unreadable` too |
+| `unmatched`, `unreadable` | A latest revision applied outside orchestration (`nyl apply`, `release rollback`) records no publication commit and is `unreadable`, with the fix to reconcile; revisions that cite another repository, branch, or prefix, or none, do not count at all |
 | Health | Rollout status of Deployments, StatefulSets, DaemonSets, Jobs, and controller-less ReplicaSets, folded `Degraded`, `Progressing`, `Unknown`, `Healthy`, with the worst object in `reported`; a missing tracked workload is `Degraded` |
 | `other-source`, `deleting`, `never-synced` | Do not arise: there is no configured source, and a revision exists only once recorded |
-| Proof of absence | `Proof::Anchors`: a release list the credential may not make fails instead of filtering, and the anchor `release-state` (at least one of the target's Releases has state, which exists only on a cluster Nyl applied to, and which phase 1 of a teardown keeps) shows the context reaches this target's cluster. A reading with no release state at all is not a `missing` finding but unknown, and a teardown wait fails closed. The connection also refuses a context whose server differs from the Cluster's declared destination |
+| Proof of absence | `Proof::Anchors`: a release list the credential may not make fails instead of filtering, and the anchor `release-state` shows the context reaches this target's cluster: a connection whose server was verified against the Cluster's declared destination server, or else at least one of the target's Releases having a revision of this publication (state exists only on a cluster Nyl applied to, and phase 1 of a teardown keeps it). A reading with no anchor is not a `missing` finding but unknown, and a teardown wait fails closed. The connection also refuses a context whose server differs from the declared destination |
 
-A deployment is *present* while it has release state not marked as torn
-down, or tracked objects that its `Delete` option deletes still exist, so the
-teardown wait ends when the Releases' workloads are gone, exactly as for an
-Application that disappears once its finalizer has deleted them. Failure modes
+In a reading that concludes absence, a deployment is *present* while a tracked
+object that its `Delete` option deletes still exists, other than the
+Namespaces holding the target's release state, which phase 1 defers to phase 2:
+the teardown wait ends when the Releases' workloads are gone, exactly as for an
+Application that disappears once its finalizer has deleted them.  Only
+revisions whose recorded publication destination equals the target's count, in
+either reading. Failure modes
 are those of the Argo CD table: an unreachable API, a rejected or expired
 credential, or a forbidden read leaves `nyl attest` `unknown` and the wait
 `observation-failed`, naming the permission to grant; nothing falls back to the
