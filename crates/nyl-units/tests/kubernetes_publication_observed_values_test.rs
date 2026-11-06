@@ -381,7 +381,7 @@ fn test_observe_reads_the_field_only_once_its_application_runs_the_publication()
         live.serve(&unit, |name| (name == "dev-catalog").then(|| "0".repeat(40)));
         let reason = pending_reason(&ready(&live)).to_owned();
         assert!(
-            reason.starts_with("application-not-running-publication:") && reason.contains("Application web"),
+            reason.starts_with("application-not-running-publication:") && reason.contains("Application argocd/web"),
             "{method:?}: {reason}"
         );
         // It runs an older publication.

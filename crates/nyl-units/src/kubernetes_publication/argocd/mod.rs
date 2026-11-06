@@ -382,6 +382,7 @@ mod tests {
             } else {
                 format!("{namespace}/{name}")
             },
+            display: format!("{namespace}/{name}"),
             role,
             path: format!("dev/{name}"),
             release: None,

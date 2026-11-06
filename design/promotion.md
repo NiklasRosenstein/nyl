@@ -839,7 +839,7 @@ answer of a teardown wait, is shared and names no reconciler:
   (`reconciler`): `kind: argocd`, the instance with its namespace and
   control-plane Cluster, its `access` and local `context`, the publication
   destination, the deployments the target expects (`expected`: per Application
-  its id, role, directory, Release, generated source, and, for Argo CD's
+  its id and display name, role, directory, Release, generated source, and, for Argo CD's
   reader alone, a locator with its namespace, name, and project), and the
   `anchors` described below. `attest` and the `observe` teardown wait read the
   stored document and render nothing. Only what the render derives keys the
