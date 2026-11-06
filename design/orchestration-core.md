@@ -522,7 +522,16 @@ services in one environment consume the cluster facts that an infrastructure
 environment on the same cluster produces, or when previews use dev's network.
 
 - The producer must be a declared environment; template instances are
-  consumers only, because they are too short-lived to depend on.
+  consumers only, because they are too short-lived to depend on. A reference
+  or `dependsOn` entry whose `environment` names an instance, from a declared
+  environment or from another instance, is refused with
+  `NYL-REFERENCE-INSTANCE-PRODUCER`, naming the consumer and the instance,
+  in source validation and in every run, before anything executes
+  (`nyl_orchestration::rules::multi_environment::instance_producers`, and the
+  run shell's producer snapshots). A declared environment and an instance of
+  the same name are the declared environment. An instance reads a declared
+  environment exactly as a declared environment does, including the wait, the
+  single snapshot per run, and the provenance.
 - The graph of environments that reference each other must be acyclic;
   validation rejects a cycle and names it.
 - A reference is read-only and blocks like any reference, exit 2, while the
@@ -540,7 +549,15 @@ environment on the same cluster produces, or when previews use dev's network.
   `state delete --teardown` of its environment, refuses while they reference
   it unless the invocation passes `--allow-dependents`, which the transition
   commit records. Nyl finds dependents by reading the declared environments'
-  desired state and listing the templates' state locations.
+  desired state and listing the templates' state locations, so a live
+  instance's unit protects its producer like a declared consumer.
+- Omitting a producer from its environment is caught earlier: the sources of
+  every environment, instances at their recorded commits, are validated
+  together, so a consumer that still references a unit its producer no longer
+  selects is `NYL-REFERENCE-INVALID` (the reference is "outside its ownership
+  set"), and `--allow-dependents` does not override it. The consumer drops the
+  reference first, or the instance is removed; an expired instance being
+  removed is not rendered, so it never holds a producer back.
 
 - References are structured objects, never template lookups, so every
   dependency edge is visible in the rendered spec. Templating may compute a
@@ -655,8 +672,10 @@ spec:
   gone: torn down, or released with `nyl state forget` (see
   [Deletion](#deletion)). The first publish of the new owner then records
   itself in the index.
-  - The index's `owner` is `{environment, unit, uid}`; only version 3 can
-    name one (owner: `nyl_render::gitops::reconcile`, with a golden file).
+  - The index's `owner` is `{environment, unit, uid}`, or the string
+    `catalog:<name>` for a shared catalog's tree (see Catalog ownership); only
+    version 3 can name one (owner: `nyl_render::gitops::reconcile`, with a
+    golden file).
     Version 2, which is released, and a version 3 index without an `owner`,
     as `publish-tree` writes it, name no owner and stay readable. The
     first orchestrated publication over one adopts it, if the target's
@@ -884,6 +903,17 @@ orchestration:
   The index of a direct publication has version 3 and no `owner`, as
   `publish-tree` writes it, so an environment that later selects the unit
   adopts the prefix.
+- `--shared-catalog` selects the shared catalog Application of a target with
+  `catalogApplication.shared` instead of the target's own tree, and composes
+  with `--diff` and `--push`: the plain form prints a `RenderedTree` of the
+  catalog (its prefix `_nyl/shared/<name>`, and `target` `catalog:<name>`),
+  `--diff` a `TreeDiff` whose `owner` is the string `catalog:<name>` when the
+  branch holds the tree, and `--push` publishes it, creating or replacing the
+  manifest as the one writer of it. No environment owns a shared catalog, so
+  `--push` is not refused as `NYL-KUBERNETES-BUILD-TARGET-OWNED`; the dirty
+  source and identity refusals apply, and a prefix owned by anything but
+  `catalog:<name>` is fenced. A target that shares no catalog is refused with
+  `NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`.
 - Any other argument, or `--diff` with `--push`, is refused with
   `NYL-KUBERNETES-BUILD-ARGUMENT`. The documents are local build information:
   nothing records them, and no reference reads them.
@@ -1127,24 +1157,64 @@ previews branch
   else. Argo CD matches `include` against each file's path relative to the
   source path with gobwas globs compiled without separators, so `*` also
   matches across `/`; this holds for Argo CD 2.8 through current releases.
+- The `shared` block takes the name and the settings of the catalog
+  Application (`project`, `syncPolicy`, `applicationDeletionPolicy`,
+  `selfPrunePolicy`, `labels`, `annotations`), which the target's own
+  `catalogApplication` fields would otherwise carry; a target that declares
+  both is invalid, and so is a shared catalog without a `pathPrefix`. Targets
+  that name one catalog describe it identically, because one manifest is
+  rendered for all of them. The checks that span targets fail with
+  `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`, naming the targets: another
+  description of the catalog, another repository or revision for it, another
+  or no catalog on a revision that carries one, a catalog name that is also
+  a target's own catalog Application, and a target prefix that is, contains,
+  or lies beneath the reserved prefix `_nyl/shared`.
 - The shared manifest lives under the reserved prefix `_nyl/shared/<name>/`
-  with its own ownership index, owner `catalog:<name>`, so no target ever
-  writes outside its own prefix. Nyl renders it from the `shared` block and
-  the ArgoCDInstance's catalog defaults.
-- The manifest has one writer in normal operation: the scheduled fleet
-  reconcile of the template, which runs at the default branch's commit and
-  Nyl version, republishes it when it differs. A target's publish creates it
-  only when it does not exist yet, and otherwise warns when its own rendering
-  would differ, so pull requests running different Nyl versions never
-  overwrite each other. `nyl build` on the template renders it on demand, and
-  a driver argument such as `-- --push` publishes it.
+  with its own ownership index, a version 3 index whose `owner` is the string
+  `catalog:<name>` (a unit incarnation is an object, see the Kubernetes
+  publication unit), so no target ever writes outside its own prefix. Nyl
+  renders it from the `shared` block and the ArgoCDInstance's catalog
+  defaults; the index records no source commit, so two targets that share the
+  catalog render byte-identical trees. `catalog:<name>` is no unit
+  incarnation that a teardown could remove, so no unit takes the prefix over
+  (`NYL-KUBERNETES-OWNER-FENCED`), and the catalog's publication refuses a
+  prefix whose index names another owner.
+- The manifest has one writer, and a target's publication only creates it:
+  when the publication branch holds no tree at the catalog's prefix, the
+  publication of a target that names it publishes the tree first, as its own
+  commit; when the branch holds the same manifest, nothing happens; when it
+  holds another, a publication leaves it alone, so pull requests running
+  different Nyl versions never overwrite each other, and records the result
+  (`created`, `current`, or `differs`) as `sharedCatalog` in the `PublishedTree`
+  artifact it records. The writer that replaces it is the build of any unit
+  that names the catalog, at the revision whose Nyl version and declaration
+  should win, usually the default branch's from a scheduled job:
+  `nyl build <unit> -e <instance> -- --shared-catalog --push` (see
+  [Direct builds](#direct-builds)). The same arguments without `--push` print
+  the rendered tree, and with `--diff` compare it with the branch. No
+  environment owns the shared catalog, so that push is never refused as
+  `NYL-KUBERNETES-BUILD-TARGET-OWNED`.
 - Nothing is reconciled from state: Git holds the other targets' files, and
   a publish removes only files in the publishing target's index.
-- Nyl renders the shared catalog, so the readiness table checks its settings.
+- Nyl renders the shared catalog, so the readiness table checks its settings,
+  read from the shared Application: whether it prunes, and its deletion
+  policy. The shared catalog prunes each target's objects as phase 1 and
+  phase 2 remove them, so the target leaves no catalog remnant
+  (`NYL-TEARDOWN-CATALOG-REMAINS` does not apply).
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
   the catalog rows become `external: not checked`, which the preflight reports
   without blocking, and `observe: {}` still checks that the Applications
   actually disappear.
+- Phase 1 keeps the target's AppProjects and publishes the target's catalog
+  directory without the workload Applications, and touches nothing outside the
+  target's prefix. A target with a shared catalog generates no catalog
+  Application, so the teardown wait's anchor is the same as for
+  `enabled: false`: the AppProjects its Applications belong to. The shared
+  catalog Application is no anchor of the target's, because it sources the
+  whole branch and matches no part of the target's publication; a target whose
+  only project is `default`, or whose projects are not visible, fails closed as
+  it does without a shared catalog (see
+  [Reading Argo CD](promotion.md#reading-argo-cd)).
 
 Nyl reports unmet requirements where they matter:
 
@@ -1458,9 +1528,11 @@ names into a unit's `target: {{ values.target | tojson }}`. `deletionPolicy`,
 `allowTeardown`, `ttl`, `maxInstances`, `keepSource` with its keep refs,
 sliding expiry and the removal of expired instances, `--renew`, `--no-extend`,
 `--make-room`, the fleet `reconcile --template` without `-e`, and `nyl state
-move --template` are implemented. Not yet implemented:
-`catalogApplication.shared`, and cross-environment references to declared
-environments.
+move --template` are implemented, and so are `catalogApplication.shared`
+(its manifest, its `catalog:<name>` owner, and `nyl build -- --shared-catalog`)
+and cross-environment references from instances to declared environments, with
+the protection of their producers; the preview reference scenario
+(`reference/preview`) runs them.
 
 ### Template changes
 
@@ -1617,7 +1689,7 @@ their own kinds in `artifacts.gitops.nyl/v1`:
 | Kind | Published by, as | `spec` |
 | --- | --- | --- |
 | `ContainerImage` | `OciImage`, named `image` | `repository` (string), `digest` (`sha256:<hex>`), `reference` (`<repository>@<digest>`), `platforms` (list of strings), `tags` (list of strings) |
-| `PublishedTree` | `KubernetesPublication`, named `tree` | `repository` (publication URL), `branch` (string), `pathPrefix` (string), `target` (the DeploymentTarget's name), `commit` (commit ID), `indexDigest` (`sha256:<hex>` over the canonical JSON of `<prefix>/_nyl/index.json`) |
+| `PublishedTree` | `KubernetesPublication`, named `tree` | `repository` (publication URL), `branch` (string), `pathPrefix` (string), `target` (the DeploymentTarget's name), `commit` (commit ID), `indexDigest` (`sha256:<hex>` over the canonical JSON of `<prefix>/_nyl/index.json`), and, for a target with `catalogApplication.shared`, `sharedCatalog` (`pathPrefix` of the catalog's tree and `result`: `created`, `current`, or `differs`) |
 
 Each kind publishes its artifacts under fixed names, so references name them
 without configuration. An artifact document has `apiVersion`, `kind`,

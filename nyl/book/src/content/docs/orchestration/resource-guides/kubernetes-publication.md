@@ -160,7 +160,10 @@ for example when the remote is unreachable.
 The published `_nyl/index.json` records the unit that owns the prefix: the
 environment, the unit, and the incarnation's uid (the `owner` member of the
 version 3 index; indexes without one, as `publish-tree` writes them, stay
-readable). A publication or teardown refuses a prefix that names another
+readable). The tree of a [shared catalog](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance)
+records the string `catalog:<name>` instead. No unit incarnation owns it, so no
+unit takes its prefix over (`NYL-KUBERNETES-OWNER-FENCED`) and a target's
+`pathPrefix` may not lie in the reserved `_nyl/shared` directory. A publication or teardown refuses a prefix that names another
 incarnation while that incarnation still exists in its environment's state,
 active, held, deleting, or retained. It fails with
 `NYL-KUBERNETES-OWNER-FENCED`, naming the owner, and publishes and removes
@@ -412,6 +415,18 @@ A build prints one JSON document and exits 0:
 | `--diff` | A `TreeDiff` comparing the render with the tree published at the destination: `changes` (`none`, `create` before anything is published at the prefix, or `update`), the `base` commit, the `owner` the published index names, and the `files` that differ, each `added`, `modified`, or `removed`. Only files are compared, not `_nyl/index.json`: `changes: none` can still be followed by a `--push` commit that only updates the index, for example with a new `sourceCommit`. |
 | `--push` | The `PublishedTree` a run records: the commit, branch, and `indexDigest`. |
 
+A target with `catalogApplication.shared` also accepts `--shared-catalog`, which
+builds the shared catalog Application instead of the target's tree and composes
+with `--diff` and `--push`. The documents then describe the catalog's tree
+(`pathPrefix` `_nyl/shared/<name>`, `target` `catalog:<name>`, and in a `TreeDiff`
+the `owner` `catalog:<name>`). `--push` is the one writer that replaces the
+manifest, and no environment owns the catalog, so it is not refused as
+`NYL-KUBERNETES-BUILD-TARGET-OWNED`; the dirty-source and identity refusals
+apply. A target that shares no catalog fails with
+`NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`. A run's publication only creates the
+manifest, and records `sharedCatalog.result` (`created`, `current`, or
+`differs`) in its `PublishedTree`.
+
 `--diff` reads the destination and writes nothing, so it also compares a tree
 that an environment owns. Differences do not change the exit status, as in
 [`diff-tree`](/nyl/reference/cli/diff-tree/); read `changes`. Files in the
@@ -431,8 +446,8 @@ refuses, before anything is published, with the codes below. The first, `NYL-KUB
 
 The index of a direct publication has version 3 and no owner, as `publish-tree`
 writes it, so an environment that later selects the unit adopts the prefix.
-`--diff` and `--push` are alternatives; any other argument fails with
-`NYL-KUBERNETES-BUILD-ARGUMENT`.
+`--diff` and `--push` are alternatives; any other argument than those and
+`--shared-catalog` fails with `NYL-KUBERNETES-BUILD-ARGUMENT`.
 
 A unit that declares its target [inline](#inline-targets) builds only with
 `-e`: the target is named `<environment>-<unit>` and rendered with the
@@ -481,7 +496,7 @@ agree:
 | Deleting an Application deletes its workloads | Blocking, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`: set `applicationDeletionPolicy` to `Foreground` or `Background`. |
 | Owned Namespaces do not hold deletion | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: set the Namespaces' `deletePolicy` to `Automatic` or `Retain`. |
 | Owned Namespaces are removed | Remnant, `NYL-TEARDOWN-NAMESPACES-REMAIN`: set `deletePolicy: Automatic`. |
-| The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-CATALOG-REMAINS`: let a parent own the catalog (`catalogApplication.enabled: false`). |
+| The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-CATALOG-REMAINS`: let a parent own the catalog (`catalogApplication.enabled: false`), or share one (`catalogApplication.shared`), whose Application is read for the rows above and prunes the target's objects. |
 
 A tree without a catalog Application leaves the catalog to a parent whose
 settings Nyl cannot see; those rows read `external: not checked` and never
