@@ -279,7 +279,7 @@ pub struct InstanceInit<'a> {
     /// The template's `ttl`: activity moves `expiresAt` to now plus this.
     pub ttl: Option<nyl_core::orchestration::time::Duration>,
     /// Keep `source_commit` fetchable before it is recorded, through this
-    /// source repository's keep refs; `None` for `keepSource: false` and for
+    /// source repository's keep refs; `None` unless the template sets `keepSource: true`, and for
     /// a run without network access.
     pub keep: Option<&'a dyn nyl_core::orchestration::ports::SourceResolver>,
 }
@@ -466,7 +466,7 @@ fn keep_source(
                 instance.source_commit
             ),
             format!(
-                "either grant this job push access to refs/nyl-keep/* in the source repository (a read-only token, such as GitHub's default `contents: read` or a fork pull request's, cannot), or set keepSource: false on EnvironmentTemplate {} and remove instances before their branches disappear",
+                "either grant this job push access to refs/nyl-keep/* in the source repository (a read-only token, such as GitHub's default `contents: read` or a fork pull request's, cannot), or remove keepSource: true from EnvironmentTemplate {} and tear instances down in the pull request closed job, before their commits become unreachable",
                 instance.template
             ),
         )

@@ -1,7 +1,7 @@
 //! The keep refs of an instance's source commit.
 //!
 //! Contract: [Instances](../../../../design/orchestration-core.md#instances),
-//! `keepSource`: with `keepSource` (the default) Nyl keeps each instance's
+//! `keepSource`: with `keepSource: true` (an opt-in) Nyl keeps each instance's
 //! recorded source commit fetchable with a keep ref in the source repository,
 //! so teardown after the pull request branch is deleted or squash-merged
 //! still finds its source.
