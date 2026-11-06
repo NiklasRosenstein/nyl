@@ -206,6 +206,12 @@ impl Driver for KubernetesPublicationDriver {
         inputs.recorded.insert(TEARDOWN_SETTINGS.to_owned(), settings);
         if observe::observes(spec) {
             inputs.recorded.insert(ARGOCD.to_owned(), observe::recorded(&rendered)?);
+            // How Argo CD is read (the declared access, the control-plane
+            // context, the URL the branch is read from) changes no result:
+            // only the generated Applications key the unit.
+            inputs
+                .excluded_fields
+                .extend(observe::UNKEYED.iter().map(|field| (*field).to_owned()));
         }
         Ok(inputs)
     }

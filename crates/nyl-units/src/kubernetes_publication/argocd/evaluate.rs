@@ -212,6 +212,62 @@ fn judge(
     Ok(finding)
 }
 
+/// How `actual`, an Application's source (as it is now, or as its last sync
+/// took it), differs from the source Nyl generated, `None` when they agree.
+/// Both are compared without `targetRevision` and without empty values, so
+/// what Argo CD defaults or omits is no difference; a source recorded before
+/// the generated one was is compared by its directory only.
+fn source_difference(application: &GeneratedApplication, actual: &Value) -> Option<String> {
+    if application.source.is_null() {
+        let path = actual.get("path").and_then(Value::as_str);
+        return path
+            .filter(|path| *path != application.path)
+            .map(|path| format!("path {path:?}, not {:?}", application.path));
+    }
+    let (generated, actual) = (normalized(&application.source), normalized(actual));
+    if generated == actual {
+        return None;
+    }
+    let (Value::Object(generated), Value::Object(actual)) = (&generated, &actual) else {
+        return Some("not a mapping".to_owned());
+    };
+    let differing = generated
+        .keys()
+        .chain(actual.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| generated.get(*key) != actual.get(*key))
+        .map(|key| format!("`{key}`"))
+        .collect::<Vec<_>>();
+    Some(format!("{} differ", differing.join(", ")))
+}
+
+/// A source without `targetRevision`, nulls, and empty containers.
+fn normalized(source: &Value) -> Value {
+    fn prune(value: &Value) -> Option<Value> {
+        match value {
+            Value::Null => None,
+            Value::Object(map) => {
+                let map = map
+                    .iter()
+                    .filter_map(|(key, value)| prune(value).map(|value| (key.clone(), value)))
+                    .collect::<serde_json::Map<_, _>>();
+                (!map.is_empty()).then_some(Value::Object(map))
+            }
+            Value::Array(items) => {
+                let items = items.iter().filter_map(prune).collect::<Vec<_>>();
+                (!items.is_empty()).then_some(Value::Array(items))
+            }
+            other => Some(other.clone()),
+        }
+    }
+    let mut source = source.clone();
+    if let Some(object) = source.as_object_mut() {
+        object.remove("targetRevision");
+    }
+    prune(&source).unwrap_or(Value::Null)
+}
+
 /// The single revision the live Application runs, when it runs one. When it
 /// does not, `finding` takes the state and reason that say why: missing,
 /// unreadable, deleting, another source directory, never synced, or a mix.
@@ -245,12 +301,15 @@ fn running_revision(finding: &mut Finding, live: Option<&Value>) -> Option<Strin
     if parsed.deleting {
         return fall_short(State::Deleting, "Argo CD is deleting it".to_owned());
     }
-    if let Some(path) = parsed.source_path.as_deref().filter(|path| *path != application.path) {
+    if let Some(difference) = parsed
+        .source
+        .as_ref()
+        .and_then(|source| source_difference(&application, source))
+    {
         return fall_short(
             State::OtherSource,
             format!(
-                "it sources directory {path:?}, not {:?}, which Nyl generated: sync the catalog to restore it",
-                application.path
+                "its spec.source differs from the one Nyl generated ({difference}): sync the catalog to restore it"
             ),
         );
     }
@@ -265,6 +324,9 @@ fn running_revision(finding: &mut Finding, live: Option<&Value>) -> Option<Strin
                 Mixed::SelectiveSync => {
                     "a selective sync newer than its last full sync leaves it running a mix of revisions: sync the whole Application".to_owned()
                 }
+                Mixed::DryRun => {
+                    "a dry run is its latest operation, so an earlier selective sync may be hidden behind it: sync the whole Application".to_owned()
+                }
                 Mixed::UnfinishedSync(phase) => format!(
                     "a full sync newer than its last completed one is {phase}, so it may run part of another revision: \
                      wait for it, or sync again"
@@ -275,16 +337,18 @@ fn running_revision(finding: &mut Finding, live: Option<&Value>) -> Option<Strin
             None
         }
         Running::Unreadable(reason) => fall_short(State::Unreadable, reason),
-        Running::Revision { revision, source_path } => match source_path.filter(|path| *path != application.path) {
-            Some(path) => fall_short(
-                State::OtherSource,
-                format!(
-                    "its last sync took directory {path:?}, not {:?}, which Nyl generated: sync the catalog and the Application",
-                    application.path
+        Running::Revision { revision, source } => {
+            match source.and_then(|source| source_difference(&application, &source)) {
+                Some(difference) => fall_short(
+                    State::OtherSource,
+                    format!(
+                        "its last sync took a source that differs from the one Nyl generated ({difference}): sync the \
+                     catalog and the Application"
+                    ),
                 ),
-            ),
-            None => Some(revision),
-        },
+                None => Some(revision),
+            }
+        }
     }
 }
 
@@ -502,8 +566,15 @@ mod tests {
             name: name.to_owned(),
             namespace: "argocd".to_owned(),
             path: path.to_owned(),
+            project: "default".to_owned(),
             release: (role == ApplicationRole::Workload).then(|| format!("{name}/{name}")),
+            source: generated_source(path),
         }
+    }
+
+    /// What Nyl generates as `spec.source`, without `targetRevision`.
+    fn generated_source(path: &str) -> Value {
+        json!({"repoURL": "https://example.invalid/deploy.git", "path": path, "directory": {"recurse": true}})
     }
 
     fn observation() -> ArgoCdObservation {
@@ -528,17 +599,26 @@ mod tests {
         }
     }
 
+    /// The source as Argo CD serves it: Nyl's, with the target revision.
+    type Edit = (&'static str, fn(&mut Value));
+
+    fn live_source(path: &str) -> Value {
+        let mut source = generated_source(path);
+        source["targetRevision"] = json!("deploy");
+        source
+    }
+
     fn live(name: &str, revision: &str, health: &str, path: &str) -> ((String, String), Value) {
         (
             ("argocd".to_owned(), name.to_owned()),
             json!({
                 "metadata": {"name": name},
-                "spec": {"source": {"path": path}},
+                "spec": {"source": live_source(path)},
                 "status": {
                     "sync": {"status": "OutOfSync"},
                     "health": {"status": health},
                     "history": [{"id": 1, "revision": revision, "deployedAt": "2026-01-01T00:00:00Z",
-                                 "source": {"path": path}}],
+                                 "source": live_source(path)}],
                 },
             }),
         )
@@ -668,7 +748,7 @@ mod tests {
         assert!(!evaluation.accepted());
         state.insert(
             ("argocd".to_owned(), "api".to_owned()),
-            json!({"metadata": {"name": "api"}, "spec": {"source": {"path": "dev/api/api"}}}),
+            json!({"metadata": {"name": "api"}, "spec": {"source": live_source("dev/api/api")}}),
         );
         assert_eq!(states(&judged("p2", &state))[1], ("api", "never-synced"));
     }
@@ -697,6 +777,61 @@ mod tests {
         synced["status"]["history"][0]["source"]["path"] = json!("dev/other");
         state.insert(web, synced);
         assert_eq!(states(&judged("p2", &state))[2], ("web", "other-source"));
+    }
+
+    /// Catches an Application edited in the cluster to render its directory
+    /// differently (`directory.recurse: false`, an `exclude`, a tool block)
+    /// passing because it still sources the same path, and an Argo CD
+    /// default or an omitted empty value being taken for such an edit.
+    #[test]
+    fn test_an_application_whose_source_was_edited_is_not_accepted() {
+        let web = ("argocd".to_owned(), "web".to_owned());
+        let edits: [Edit; 3] = [
+            ("recurse", |source| source["directory"]["recurse"] = json!(false)),
+            ("exclude", |source| source["directory"]["exclude"] = json!("*.yaml")),
+            ("tool", |source| source["kustomize"] = json!({"namePrefix": "x-"})),
+        ];
+        for (edit, apply) in edits {
+            let mut state = running("p2", "p1", "p2");
+            let mut edited = live("web", "p2", "Healthy", "dev/web/web").1;
+            apply(&mut edited["spec"]["source"]);
+            state.insert(web.clone(), edited.clone());
+            let evaluation = judged("p2", &state);
+            assert_eq!(states(&evaluation)[2], ("web", "other-source"), "{edit}");
+            assert!(evaluation.findings[2]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("differs from the one Nyl generated"));
+            // The last sync took the edited source too.
+            let mut synced = live("web", "p2", "Healthy", "dev/web/web").1;
+            apply(&mut synced["status"]["history"][0]["source"]);
+            state.insert(web.clone(), synced);
+            assert_eq!(states(&judged("p2", &state))[2], ("web", "other-source"), "{edit}");
+        }
+        let mut state = running("p2", "p1", "p2");
+        let mut defaulted = live("web", "p2", "Healthy", "dev/web/web").1;
+        defaulted["spec"]["source"]["targetRevision"] = json!("another");
+        defaulted["spec"]["source"]["helm"] = json!({});
+        defaulted["spec"]["source"]["plugin"] = Value::Null;
+        state.insert(web, defaulted);
+        assert_eq!(states(&judged("p2", &state))[2], ("web", "accepted"));
+    }
+
+    /// Catches a dry run after the last full sync letting an Application
+    /// attest: it may hide a selective sync.
+    #[test]
+    fn test_a_dry_run_after_the_last_full_sync_leaves_the_application_mixed() {
+        let mut state = running("p2", "p1", "p2");
+        let mut web = live("web", "p2", "Healthy", "dev/web/web").1;
+        web["status"]["operationState"] = json!({
+            "phase": "Succeeded", "startedAt": "2026-01-03T00:00:00Z",
+            "operation": {"sync": {"dryRun": true}}
+        });
+        state.insert(("argocd".to_owned(), "web".to_owned()), web);
+        let evaluation = judged("p2", &state);
+        assert_eq!(states(&evaluation)[2], ("web", "mixed"));
+        assert!(evaluation.findings[2].reason.as_deref().unwrap().contains("dry run"));
     }
 
     /// Catches a receipt whose publication is no longer on the branch

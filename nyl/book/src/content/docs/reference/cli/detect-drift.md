@@ -107,7 +107,7 @@ ArgoCDInstance declares and the credential the unit admits, and lists each
 Application's running publication and health in the details. A failing
 attestation exits 3 (`NYL-ATTESTATION-FAILED`); an Argo CD that cannot be
 read, a rejected or expired credential, or an unreadable publication branch is
-`unknown`: exit 2 and nothing recorded.
+`unknown`: exit 2 and nothing recorded. A stored attestation whose result is unchanged is rewritten with its new time once it is older than 15 minutes, so a repeated `attest` within that interval still writes nothing.
 
 An attestation belongs to the receipt it names: a new receipt starts with
 its attestations pending until `attest` runs again, or until its reconcile

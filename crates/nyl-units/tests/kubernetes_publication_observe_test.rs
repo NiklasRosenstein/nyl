@@ -13,7 +13,10 @@ mod publication_world;
 
 use std::collections::BTreeMap;
 
-use argocd_stub::{application, applications, argocd_api, kube_api, kubeconfig, Applications, Response, Stub};
+use argocd_stub::{
+    application_with_source, applications, applications_none, argocd_api_with_policy, kube_api, kubeconfig,
+    Applications, Denied, Response, Stub,
+};
 use nyl_core::orchestration::driver::{
     AttestationCheck, Driver, DriverOperation, KeyInputs, Outcome, RemovalContext, RemovalObservation,
     ResolutionContext, Supported,
@@ -53,6 +56,8 @@ struct Observed {
     world: World,
     stub: Stub,
     served: Applications,
+    /// What the API server's `can-i` denies the token.
+    denied: Denied,
     env: BTreeMap<String, String>,
     _directory: tempfile::TempDir,
 }
@@ -62,6 +67,7 @@ impl Observed {
         let world = World::new();
         let served = applications(Vec::new());
         let directory = tempfile::TempDir::new().unwrap();
+        let denied = applications_none();
         let (stub, env) = match method {
             Method::Kubernetes => {
                 let stub = kube_api(served.clone());
@@ -73,7 +79,7 @@ impl Observed {
                 )
             }
             Method::Api => (
-                argocd_api(TOKEN, served.clone()),
+                argocd_api_with_policy(TOKEN, served.clone(), denied.clone()),
                 BTreeMap::from([("ARGOCD_AUTH_TOKEN".to_owned(), TOKEN.to_owned())]),
             ),
         };
@@ -104,6 +110,7 @@ impl Observed {
             world,
             stub,
             served,
+            denied,
             env,
             _directory: directory,
         }
@@ -196,10 +203,13 @@ impl Observed {
             .iter()
             .filter_map(|app| {
                 let revision = running(&app.name)?;
-                Some(application(
+                // As Argo CD serves it: the generated source, with its target revision.
+                let mut source = app.source.clone();
+                source["targetRevision"] = json!("deploy");
+                Some(application_with_source(
                     &app.name,
                     &app.namespace,
-                    &app.path,
+                    &source,
                     &[&revision],
                     health(&app.name),
                 ))
@@ -615,4 +625,201 @@ fn test_a_unit_without_recorded_facts_cannot_attest_or_observe() {
         panic!("no facts, no observation");
     };
     assert!(reason.contains("records no Argo CD facts"), "{reason}");
+}
+
+/// The unit's key as a run computes it: the resolved spec without the fields
+/// the driver excludes, and the files.
+fn key_of(inputs: &KeyInputs, resolved: &Value) -> String {
+    let mut spec = resolved.clone();
+    for pointer in &inputs.excluded_fields {
+        if let Some((parent, last)) = pointer.rsplit_once('/') {
+            if let Some(Value::Object(map)) = spec.pointer_mut(parent) {
+                map.remove(last);
+            }
+        }
+    }
+    serde_json::to_string(&json!({"spec": spec, "files": inputs.files})).unwrap()
+}
+
+impl Observed {
+    fn inputs(&self, driver: &dyn Driver) -> (KeyInputs, Value) {
+        let authored = Self::driver_spec(json!({}));
+        let inputs = driver
+            .execution_key_inputs(
+                &ResolutionContext {
+                    source_roots: BTreeMap::default(),
+                    environment: EnvironmentName::new("dev").unwrap(),
+                    worktree: self.world.work(),
+                    project_dir: self.world.work().join("nyl"),
+                    env: BTreeMap::new(),
+                    deadline: chrono::Utc::now(),
+                    now: chrono::Utc::now(),
+                    tools: &NoTools,
+                    cache_dir: self.world.root.path().join("cache"),
+                },
+                &authored,
+            )
+            .unwrap();
+        let mut resolved = authored;
+        inputs.record_into(&mut resolved).unwrap();
+        (inputs, resolved)
+    }
+
+    fn edit_platform(&self, edit: impl Fn(&str) -> String) {
+        let platform = self.world.work().join("nyl/platform.yaml");
+        let text = std::fs::read_to_string(&platform).unwrap();
+        std::fs::write(&platform, edit(&text)).unwrap();
+        git(&self.world.work(), &["add", "--all"]);
+        git(&self.world.work(), &["commit", "--quiet", "--message", "Edit"]);
+    }
+
+    fn index_bytes(&self) -> String {
+        git(&self.world.bare(), &["show", "deploy:dev/_nyl/index.json"])
+    }
+}
+
+/// How Argo CD is read changes no result, so it must change no key and no
+/// published byte: editing the instance's `access` (the server), moving the
+/// Cluster's kube context, or naming another token variable leaves the unit's
+/// key and the published ownership index as they were, while the Applications
+/// the target generates stay part of the key. Catches credential plumbing
+/// re-executing units, resetting their attestations, and republishing.
+#[test]
+fn test_how_argocd_is_read_keys_nothing_and_publishes_nothing() {
+    let driver = real();
+    let observed = Observed::new(Method::Api);
+    let unit = observed.resolve(&driver, Observed::driver_spec(json!({})));
+    observed.publish(&driver, &unit);
+    let (inputs, resolved) = observed.inputs(&driver);
+    let key = key_of(&inputs, &resolved);
+    let index = observed.index_bytes();
+    let head = git(&observed.world.bare(), &["rev-parse", "refs/heads/deploy"]);
+
+    // Edit access (another token variable and server) and the Cluster's context.
+    observed.edit_platform(|text| {
+        text.replace(
+            "access: {method: api, api: {server: '",
+            "access: {method: api, api: {tokenEnv: OTHER_TOKEN, server: 'http://127.0.0.1:9/#",
+        )
+        .replace("http://127.0.0.1:9/#http://", "http://")
+        .replace("live: {context: argocd-admin}", "live: {context: renamed-context}")
+    });
+    let (after_inputs, after_resolved) = observed.inputs(&driver);
+    assert_ne!(
+        after_resolved["argocd"]["access"], resolved["argocd"]["access"],
+        "the edit reached the facts"
+    );
+    assert_ne!(after_resolved["argocd"]["context"], resolved["argocd"]["context"]);
+    assert_eq!(
+        key_of(&after_inputs, &after_resolved),
+        key,
+        "the key moved with credential plumbing"
+    );
+    observed.publish(&driver, &observed.resolve(&driver, Observed::driver_spec(json!({}))));
+    assert_eq!(
+        observed.index_bytes(),
+        index,
+        "the index moved with credential plumbing"
+    );
+    assert_eq!(
+        git(&observed.world.bare(), &["rev-parse", "refs/heads/deploy"]),
+        head,
+        "a commit was published"
+    );
+
+    // The generated Applications are keyed: a group that outputs elsewhere
+    // generates another directory.
+    let group = observed.world.work().join("nyl/web.yaml");
+    let text = std::fs::read_to_string(&group).unwrap();
+    std::fs::write(
+        &group,
+        text.replace(
+            "  applicationNamespace: argocd\n",
+            "  applicationNamespace: argocd\n  outputPath: elsewhere\n",
+        ),
+    )
+    .unwrap();
+    git(&observed.world.work(), &["add", "--all"]);
+    git(
+        &observed.world.work(),
+        &["commit", "--quiet", "--message", "Output elsewhere"],
+    );
+    let (moved_inputs, moved_resolved) = observed.inputs(&driver);
+    assert_ne!(
+        moved_resolved["argocd"]["applications"],
+        after_resolved["argocd"]["applications"]
+    );
+    assert_ne!(key_of(&moved_inputs, &moved_resolved), key);
+}
+
+/// Catches an Argo CD that lists nothing for a token that cannot see the
+/// target's Applications ending a teardown wait while workloads still run:
+/// removal is concluded only from Applications the reading could see. The
+/// catalog Application stays through phase 1, so a reading without it proves
+/// nothing, and (API server) an Application missing from the list needs
+/// Argo CD's own `can-i` to say the token may get it.
+#[test]
+fn test_observe_removal_is_never_concluded_from_what_the_credential_cannot_see() {
+    let driver = real();
+    for method in [Method::Kubernetes, Method::Api] {
+        let observed = Observed::new(method);
+        let unit = observed.resolve(&driver, {
+            let mut spec = spec();
+            spec["teardownWait"] = json!({"strategy": "observe"});
+            spec
+        });
+        let failed = |observation: RemovalObservation| match observation {
+            RemovalObservation::Failed(reason) => reason,
+            other => panic!("{method:?}: {other:?}"),
+        };
+
+        // A token (or context) that sees none of the target's Applications.
+        *observed.denied.lock().unwrap() = vec!["*".to_owned()];
+        let reason = failed(observed.removal(&driver, &unit));
+        assert!(
+            reason.contains("catalog Application argocd/dev-catalog is not in the reading"),
+            "{method:?}: {reason}"
+        );
+
+        // It sees the catalog but not the workload that is gone from its list.
+        observed.serve(
+            &unit,
+            |name| (name == "dev-catalog").then(|| "c".repeat(40)),
+            |_| "Healthy",
+        );
+        if method == Method::Api {
+            let reason = failed(observed.removal(&driver, &unit));
+            assert!(reason.contains("may not get Application web/web"), "{reason}");
+            assert!(
+                reason.contains("grant its account or project role `get` on web/web"),
+                "{reason}"
+            );
+            // Argo CD says it may: the workload really is gone.
+            observed.denied.lock().unwrap().clear();
+        }
+        assert_eq!(
+            observed.removal(&driver, &unit),
+            RemovalObservation::Remaining(Vec::new()),
+            "{method:?}"
+        );
+    }
+}
+
+/// The same rule for `accepted`: for the API server an Application the token
+/// could not see is unknown, not a recorded failure, while one it could see
+/// and that is gone fails as missing.
+#[test]
+fn test_attest_does_not_record_a_failure_for_applications_the_token_cannot_see() {
+    let driver = real();
+    let observed = Observed::new(Method::Api);
+    let unit = observed.resolve(&driver, Observed::driver_spec(json!({})));
+    let (tree, published) = observed.publish(&driver, &unit);
+    observed.serve(&unit, |name| (name != "web").then(|| published.clone()), |_| "Healthy");
+    *observed.denied.lock().unwrap() = vec!["web/web".to_owned()];
+    let reason = unknown(observed.attest(&driver, &unit, &tree));
+    assert!(reason.contains("may not get Application web/web"), "{reason}");
+    observed.denied.lock().unwrap().clear();
+    let result = outcomes(observed.attest(&driver, &unit, &tree));
+    assert_eq!(result[0].1, AttestationResult::Fail);
+    assert_eq!(result[0].3["applications"][1]["state"], "missing");
 }

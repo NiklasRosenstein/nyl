@@ -91,6 +91,30 @@ pub trait ArgoReader {
     /// An Application the credential may not read is absent, as Argo CD's own
     /// API answers; a namespace without any is an empty map.
     fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError>;
+
+    /// Whether the credential may `get` the Application Argo CD's policy
+    /// names `rbac_name` (`<project>/<name>`, or `<project>/<namespace>/<name>`
+    /// outside the instance's own namespace). A listing silently leaves out
+    /// what the credential may not get and still answers success, so an
+    /// Application's absence from it proves nothing until this says the
+    /// credential could have seen it. A reader whose listing fails instead of
+    /// filtering (the Kubernetes API, whose RBAC denies the whole list) has
+    /// nothing to add.
+    fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
+        let _ = rbac_name;
+        Ok(true)
+    }
+}
+
+/// The name Argo CD's policy and its `can-i` endpoint know an Application by:
+/// `<project>/<name>` in the instance's own namespace, else
+/// `<project>/<namespace>/<name>`.
+pub fn rbac_name(project: &str, namespace: &str, name: &str, default_namespace: &str) -> String {
+    if namespace.is_empty() || namespace == default_namespace {
+        format!("{project}/{name}")
+    } else {
+        format!("{project}/{namespace}/{name}")
+    }
 }
 
 /// The reader the declaration asks for, built from the unit's admitted

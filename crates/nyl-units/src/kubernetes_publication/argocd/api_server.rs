@@ -87,6 +87,47 @@ impl ApiServerReader {
 }
 
 impl ArgoReader for ApiServerReader {
+    fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
+        let url = self.can_i_url(rbac_name);
+        let server = self.server.as_str().to_owned();
+        let (token, budget, proxy) = (self.token.clone(), self.budget, self.proxy.clone());
+        block_on(async move {
+            let client = client(budget, proxy.as_deref())?;
+            let unreachable = |error: reqwest::Error| {
+                ReadError::new(
+                    ReadErrorKind::Unreachable,
+                    format!(
+                        "cannot ask Argo CD at {server} whether the token may get {rbac_name}: {}",
+                        error.without_url()
+                    ),
+                )
+            };
+            let response = client
+                .get(url)
+                .bearer_auth(&token)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(unreachable)?;
+            let status = response.status();
+            let body = response.text().await.map_err(unreachable)?;
+            if !status.is_success() {
+                return Err(failure(status, &body, &server));
+            }
+            match serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|body| body.get("value").and_then(Value::as_str).map(str::to_owned))
+            {
+                Some(value) if value == "yes" => Ok(true),
+                Some(value) if value == "no" => Ok(false),
+                _ => Err(ReadError::new(
+                    ReadErrorKind::Malformed,
+                    format!("Argo CD at {server} answered the can-i question for {rbac_name} with neither yes nor no"),
+                )),
+            }
+        })?
+    }
+
     fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
         let url = self.list_url(namespace);
         let server = self.server.as_str().to_owned();
@@ -94,30 +135,7 @@ impl ArgoReader for ApiServerReader {
         let budget = self.budget;
         let proxy = self.proxy.clone();
         block_on(async move {
-            let mut builder = reqwest::Client::builder()
-                // Ambient proxy settings are not read: only an admitted HTTPS_PROXY applies.
-                .no_proxy();
-            if let Some(proxy) = &proxy {
-                builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| {
-                    ReadError::new(
-                        ReadErrorKind::Declaration,
-                        format!("the admitted HTTPS_PROXY is not a proxy URL: {}", error.without_url()),
-                    )
-                })?);
-            }
-            let client = builder
-                .timeout(budget)
-                .connect_timeout(budget.min(Duration::from_secs(10)))
-                .user_agent("nyl")
-                // Never follow a redirect with the token: the declared server answers or nothing does.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|error| {
-                    ReadError::new(
-                        ReadErrorKind::Unreachable,
-                        format!("cannot build an HTTP client: {error}"),
-                    )
-                })?;
+            let client = client(budget, proxy.as_deref())?;
             let unreachable = |error: reqwest::Error| {
                 // `without_url` keeps the message free of anything but the cause.
                 let error = error.without_url();
@@ -138,30 +156,81 @@ impl ArgoReader for ApiServerReader {
                 .map_err(unreachable)?;
             let status = response.status();
             let body = response.text().await.map_err(unreachable)?;
-            match status {
-                status if status.is_success() => applications(&body, &server),
-                StatusCode::UNAUTHORIZED => Err(ReadError::new(
-                    ReadErrorKind::Rejected,
-                    format!(
-                        "Argo CD at {server} rejected the API token (HTTP 401{}): it is invalid or has expired; \
-                         issue a new one and update the secret or variable the unit admits",
-                        server_message(&body)
-                    ),
-                )),
-                StatusCode::FORBIDDEN => Err(ReadError::new(
-                    ReadErrorKind::Forbidden,
-                    format!(
-                        "Argo CD at {server} denied the API token read access to Applications (HTTP 403{}): \
-                         grant its account or project role `get` on applications",
-                        server_message(&body)
-                    ),
-                )),
-                status => Err(ReadError::new(
-                    ReadErrorKind::Unreachable,
-                    format!("Argo CD at {server} answered HTTP {status}{}", server_message(&body)),
-                )),
+            if status.is_success() {
+                applications(&body, &server)
+            } else {
+                Err(failure(status, &body, &server))
             }
         })?
+    }
+}
+
+impl ApiServerReader {
+    /// `GET <server>/api/v1/account/can-i/applications/get/<rbac name>`: Argo
+    /// CD's own answer, `yes` or `no`, about the token.
+    fn can_i_url(&self, rbac_name: &str) -> Url {
+        let mut url = self.server.clone();
+        let path = format!(
+            "{}/api/v1/account/can-i/applications/get/{rbac_name}",
+            url.path().trim_end_matches('/')
+        );
+        url.set_path(&path);
+        url
+    }
+}
+
+/// The HTTP client of one reading: no ambient proxy, an admitted
+/// `HTTPS_PROXY` only, no redirects (the token goes to the declared server or
+/// nowhere), and the reading's budget.
+fn client(budget: Duration, proxy: Option<&str>) -> Result<reqwest::Client, ReadError> {
+    let mut builder = reqwest::Client::builder()
+        // Ambient proxy settings are not read: only an admitted HTTPS_PROXY applies.
+        .no_proxy();
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| {
+            ReadError::new(
+                ReadErrorKind::Declaration,
+                format!("the admitted HTTPS_PROXY is not a proxy URL: {}", error.without_url()),
+            )
+        })?);
+    }
+    builder
+        .timeout(budget)
+        .connect_timeout(budget.min(Duration::from_secs(10)))
+        .user_agent("nyl")
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            ReadError::new(
+                ReadErrorKind::Unreachable,
+                format!("cannot build an HTTP client: {error}"),
+            )
+        })
+}
+
+/// The error of an unsuccessful answer: 401 (invalid or expired), 403, or any other status.
+fn failure(status: StatusCode, body: &str, server: &str) -> ReadError {
+    match status {
+        StatusCode::UNAUTHORIZED => ReadError::new(
+            ReadErrorKind::Rejected,
+            format!(
+                "Argo CD at {server} rejected the API token (HTTP 401{}): it is invalid or has expired; \
+                 issue a new one and update the secret or variable the unit admits",
+                server_message(body)
+            ),
+        ),
+        StatusCode::FORBIDDEN => ReadError::new(
+            ReadErrorKind::Forbidden,
+            format!(
+                "Argo CD at {server} denied the API token read access to Applications (HTTP 403{}): \
+                 grant its account or project role `get` on applications",
+                server_message(body)
+            ),
+        ),
+        status => ReadError::new(
+            ReadErrorKind::Unreachable,
+            format!("Argo CD at {server} answered HTTP {status}{}", server_message(body)),
+        ),
     }
 }
 

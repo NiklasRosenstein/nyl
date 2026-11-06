@@ -28,15 +28,23 @@ use nyl_core::orchestration::driver::{
     AttestationCheck, DriverError, DriverResult, ExecutionContext, RemovalContext, RemovalObservation,
 };
 use nyl_core::orchestration::state::DesiredUnit;
-use nyl_render::gitops::observation::{ArgoCdObservation, GitPublicationHistory};
+use nyl_render::gitops::observation::{
+    ApplicationRole, ArgoCdObservation, GeneratedApplication, GitPublicationHistory,
+};
 use nyl_render::gitops::publication::RenderedTarget;
 use serde_json::Value;
 
 use super::argocd::evaluate::evaluate;
-use super::argocd::{reader, ArgoReader, ReadError};
+use super::argocd::{rbac_name, reader, ArgoReader, ReadError, ReadErrorKind};
 
 /// The pointer, in the resolved spec, of the recorded observation facts.
 pub(super) const ARGOCD: &str = "/argocd";
+
+/// The recorded facts that do not key the unit: they say how Argo CD and the
+/// publication branch are read, never what the unit produces, so renaming a
+/// kube context, moving the API server, or changing the Cluster's access never
+/// re-executes the unit. The stored document still carries them.
+pub(super) const UNKEYED: [&str; 3] = ["/argocd/access", "/argocd/context", "/argocd/publication/url"];
 
 /// The longest one reading of Argo CD takes.
 const READING: Duration = Duration::from_secs(30);
@@ -83,13 +91,10 @@ fn budget(
 fn read_all(
     reader: &dyn ArgoReader,
     observation: &ArgoCdObservation,
-    only_workload: bool,
 ) -> Result<std::collections::BTreeMap<(String, String), Value>, ReadError> {
-    let applications = observation.applications.iter().filter(|application| {
-        !only_workload || application.role == nyl_render::gitops::observation::ApplicationRole::Workload
-    });
-    let namespaces = applications
-        .clone()
+    let namespaces = observation
+        .applications
+        .iter()
         .map(|application| application.namespace.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut live = std::collections::BTreeMap::new();
@@ -99,6 +104,46 @@ fn read_all(
         }
     }
     Ok(live)
+}
+
+/// Fail unless every one of `applications` that the reading lacks is one the
+/// credential could have seen. A listing leaves out what the credential may
+/// not get and still succeeds, so an absence proves nothing until the reader
+/// says the credential may get the Application (`can-i` for the API server).
+fn ensure_gone_is_visible<'a>(
+    reader: &dyn ArgoReader,
+    observation: &ArgoCdObservation,
+    live: &std::collections::BTreeMap<(String, String), Value>,
+    applications: impl Iterator<Item = &'a GeneratedApplication>,
+) -> Result<(), ReadError> {
+    for application in applications {
+        if live.contains_key(&(application.namespace.clone(), application.name.clone())) {
+            continue;
+        }
+        if application.project.is_empty() {
+            return Err(ReadError::new(
+                ReadErrorKind::Declaration,
+                "the unit records no Argo CD project for its Applications: it was resolved before it did; reconcile it so it records them".to_owned(),
+            ));
+        }
+        let rbac = rbac_name(
+            &application.project,
+            &application.namespace,
+            &application.name,
+            &observation.location.namespace,
+        );
+        if !reader.can_get(&rbac)? {
+            return Err(ReadError::new(
+                ReadErrorKind::Forbidden,
+                format!(
+                    "the credential may not get Application {rbac}, so its absence from the reading proves nothing \
+                     (Argo CD leaves out what a token may not get and still answers success): grant its account or \
+                     project role `get` on {rbac}"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `nyl attest`: `accepted` and `healthy` of the receipt's publication.
@@ -122,7 +167,10 @@ pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverRe
         Ok(reader) => reader,
         Err(error) => return unknown(error.message),
     };
-    let live = match read_all(reader.as_ref(), &observation, false) {
+    let live = match read_all(reader.as_ref(), &observation).and_then(|live| {
+        ensure_gone_is_visible(reader.as_ref(), &observation, &live, observation.applications.iter())?;
+        Ok(live)
+    }) {
         Ok(live) => live,
         Err(error) => return unknown(error.message),
     };
@@ -155,7 +203,33 @@ pub(super) fn observe_removal(ctx: &RemovalContext, unit: &DesiredUnit) -> Remov
         Ok(reader) => reader,
         Err(error) => return RemovalObservation::Failed(error.message),
     };
-    let live = match read_all(reader.as_ref(), &observation, true) {
+    let live = match read_all(reader.as_ref(), &observation).and_then(|live| {
+        // Removal is concluded only from what the credential showed it could
+        // see: the catalog Application stays through phase 1, so a reading
+        // that lacks it came from a credential or context that sees none of
+        // this target (another project's role, a token without policy, another
+        // Argo CD), and every workload would read as gone.
+        if let Some(catalog) = observation
+            .applications
+            .iter()
+            .find(|application| application.role == ApplicationRole::Catalog)
+        {
+            if !live.contains_key(&(catalog.namespace.clone(), catalog.name.clone())) {
+                return Err(ReadError::new(
+                    ReadErrorKind::Forbidden,
+                    format!(
+                        "the catalog Application {}/{} is not in the reading, which phase 1 keeps, so the credential or \
+                         context does not see this target's Applications and their absence would prove nothing: check \
+                         that the ArgoCDInstance's access reaches the Argo CD that runs this target and may read its \
+                         Applications",
+                        catalog.namespace, catalog.name
+                    ),
+                ));
+            }
+        }
+        ensure_gone_is_visible(reader.as_ref(), &observation, &live, observation.workload_applications())?;
+        Ok(live)
+    }) {
         Ok(live) => live,
         Err(error) => return RemovalObservation::Failed(error.message),
     };

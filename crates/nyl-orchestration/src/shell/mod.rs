@@ -42,6 +42,11 @@ pub struct Settings {
     pub lease_grace: Duration,
     /// How often a run waiting for a lease reads it again.
     pub lease_poll: Duration,
+    /// How old a recorded attestation of an unchanged result gets before
+    /// `nyl attest` writes it again with a new time. Within it, a repeated
+    /// attest writes nothing; beyond it, a system that is re-verified keeps
+    /// a fresh attestation, so a `maxAttestationAge` above this is satisfiable.
+    pub attestation_refresh: Duration,
 }
 
 impl Default for Settings {
@@ -50,6 +55,7 @@ impl Default for Settings {
             resolution_timeout: Duration::from_mins(30),
             lease_grace: Duration::from_mins(10),
             lease_poll: Duration::from_secs(15),
+            attestation_refresh: Duration::from_mins(15),
         }
     }
 }

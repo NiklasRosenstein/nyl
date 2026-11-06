@@ -231,9 +231,10 @@ Application included, against the publication of the unit's current receipt:
   `status.history` entry, which Argo CD appends for full syncs only. Whether
   it is Synced or OutOfSync is ignored, because an Application that runs an
   older publication reports OutOfSync once a newer one is published. A selective
-  sync, or a full sync that failed or is still running, after that entry leaves
-  the Application running a mix of revisions (`mixed`), which proves no
-  revision.
+  sync, a full sync that failed or is still running, or a dry run, as new as
+  that entry leaves the Application running a mix of revisions (`mixed`),
+  which proves no revision (the Application keeps only its latest operation, so
+  a dry run may hide a selective sync before it).
 - **Matching.** An Application *runs the publication* when the directory it
   sources, and the recorded inputs of its Release, are the same at its running
   revision as at the receipt's publication commit. The commit Argo CD reports
@@ -250,9 +251,15 @@ The attestations' details list each Application with its name, namespace, role
 runs (`running`), and the publication commit that introduced what runs
 (`publication`), and, for one that fell short, why. The states are `accepted`,
 `other-publication`, `unmatched`, `not-on-branch`, `mixed`, `never-synced`,
-`missing`, `deleting`, `other-source`, and `unreadable`. An Application the
-credential cannot see looks like one that does not exist, so give the token or
-context read access to every Application. A target that generates no
+`missing`, `deleting`, `other-source` (its source, or the source of its last
+sync, differs from the generated one, such as an edited `directory.recurse`,
+`exclude`, or tool block), and `unreadable`. Argo CD's list leaves out
+Applications the token may not read and still answers success, so with the API
+server Nyl asks Argo CD (`can-i`) about every Application the list lacks: a token that may not
+get it makes the unit `unknown`, and only an Application the token could see
+counts as `missing`. The Kubernetes method cannot tell a missing Application
+from a context for another Argo CD, so point `spec.live.context` at the control
+plane that runs the target. A target that generates no
 Application attests both vacuously.
 
 An attestation that could not establish its result is never recorded as a
@@ -264,7 +271,10 @@ the fix, and the attestations recorded earlier stay. A recorded `fail` always
 means Argo CD was read and an Application fell short; a failing attestation
 exits 3 (`NYL-ATTESTATION-FAILED`). A new receipt starts with both attestations
 pending until `nyl attest` runs again. Attest from where the credentials are,
-typically a CI job after Argo CD synced.
+typically a CI job after Argo CD synced. A repeated attest of an unchanged
+system writes nothing for 15 minutes; after that it rewrites the attestation with
+its new time, so a system a CI job re-verifies stays within `maxAttestationAge`
+while one that cannot be reached goes stale.
 
 `nyl attest --target` for a target no environment owns arrives with promotion
 (M6), as does `nyl attest --name … --result …`.
@@ -337,7 +347,10 @@ operator confirms with `nyl teardown --confirm-removed`), `{strategy: delay,
 duration: 10m}` (phase 1 completes after `duration`, recorded as not observed),
 or `{strategy: observe}` (the default for `mode: observe`: phase 1 completes
 once Argo CD no longer has any of the target's workload Applications, read as
-[Observing Argo CD](#observing-argo-cd) describes, within the unit's `timeout`).
+[Observing Argo CD](#observing-argo-cd) describes, within the unit's `timeout`;
+the wait concludes removal only from what the credential could see: the catalog
+Application must be in the same reading, and with the API server each missing
+Application needs Argo CD's `can-i` to say the token may get it).
 A unit that waits by observing records the same Argo CD facts at resolution and
 needs the same credential admitted; without one, or when Argo CD cannot be
 read, the teardown is uncertain with `observation-failed` and the reason.

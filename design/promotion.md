@@ -699,19 +699,24 @@ same model and is not in the initial scope.
   The running revision is that of the newest `status.history` entry (the
   highest `id`), which Argo CD appends only for full, non-dry-run syncs. The
   sync result is not used, because Argo CD also records selective and dry-run
-  syncs there as succeeded. An operation newer than that entry that is not a
-  completed full sync leaves the Application running a mix of revisions, which
-  proves no revision: a selective sync (`operation.sync.resources`), a full
-  sync that failed, errored, or is still running (it may have applied part of
-  its revision), or one whose time cannot be compared with the entry's. A dry
-  run changes nothing and is ignored. Health is Argo CD's live health,
-  `status.health.status`; only `Healthy` is healthy.
+  syncs there as succeeded. An operation as new as that entry (times have
+  second resolution) that is not a completed full sync leaves the Application
+  running a mix of revisions, which proves no revision: a selective sync
+  (`operation.sync.resources`), a full sync that failed, errored, or is still
+  running (it may have applied part of its revision), an operation that is no
+  sync, one whose time cannot be compared with the entry's, and a dry run.
+  A dry run changes nothing itself, but `status.operationState` holds only the
+  latest operation, so a dry run after the entry may hide a selective sync
+  before it. Health is Argo CD's live health, `status.health.status`; only
+  `Healthy` is healthy.
 - **Matching a publication.** The running revision R may be another target's
   commit or a state write-back on a shared branch. For each covered
   Application, Nyl finds the source target's publication commits (commits that
   change `<prefix>/_nyl/index.json`) that are R or an ancestor of R along first
-  parents, and whose Application directory tree and recorded inputs for that
-  Release equal those at R. The directory tree is Git's tree for the
+  parents. The newest of them must have the Application directory tree and
+  recorded inputs for that Release that R has (so a commit that restores an
+  older publication's tree by hand is `unmatched`, not credited to that
+  publication); the commits equivalent to it form the run below. The directory tree is Git's tree for the
   Application's `source.path`, so it covers every file Argo CD reads there;
   the recorded inputs are the ownership index's `compilation` record for the
   Release. Values are always recovered from a matching publication commit,
@@ -728,8 +733,10 @@ same model and is not in the initial scope.
   `healthy` when, besides, every one is Healthy. Any other state fails the
   aggregate and is listed in the details with its reason: `other-publication`
   (it runs another publication), `unmatched`, `not-on-branch`, `mixed`,
-  `never-synced`, `missing`, `deleting`, `other-source` (it syncs another
-  directory than the generated one), or `unreadable`. A target that generates
+  `never-synced`, `missing`, `deleting`, `other-source` (its `spec.source`, or
+  the source of its last sync, differs from the generated one without
+  `targetRevision`: another directory, or `directory.recurse`, `exclude`, or a
+  tool block edited in the cluster), or `unreadable`. A target that generates
   no Application attests both vacuously. The details record, per Application,
   its name, namespace, role, directory, state, health, the revision it runs,
   and the publication it matched (the recorded commit below), and carry no time
@@ -809,10 +816,18 @@ publication, health, and the attestations, is shared:
   `spec.live.context`; an instance without `access` and without explicit
   instances (the implicit one in the workload Cluster) therefore reads through
   that Cluster. `access` never affects rendered bytes: it is left out of every
-  render input and ownership hash, so changing it never republishes a tree.
-  Resolution records the instance, its access, and the Applications the
-  target generates in the unit's resolved spec (`argocd`), so `attest` and the
-  `observe` teardown wait read the stored document and render nothing.
+  render input, and the ownership index hashes an instance that declares it
+  without it, so editing `access` republishes nothing and resets no
+  attestation (adding `access` to an instance, or removing it, changes that one
+  digest once). Resolution records the instance, its access, the publication
+  destination, and the Applications the target generates (with their projects
+  and generated `spec.source`) in the unit's resolved spec (`argocd`), so
+  `attest` and the `observe` teardown wait read the stored document and render
+  nothing. Only the generated Applications, the instance and Cluster names, and
+  the destination's branch and prefix key the unit; the declared access, the
+  control-plane context, and the URL the branch is read from are stored
+  but excluded from the key, so renaming a kube context or moving the API
+  server never re-executes the unit.
 - **Credentials only through the unit's admitted environment.** The
   declaration names the variable, never a value: `tokenEnv` for the token, and
   `KUBECONFIG` for the kubeconfig file or files. The unit admits it with
@@ -824,7 +839,12 @@ publication, health, and the attestations, is shared:
   process's `HTTPS_PROXY` (a unit admits `HTTPS_PROXY` for the API method; a
   kubeconfig's own `proxy-url` applies to the Kubernetes method). The API
   server's URL must use `https`, except for a loopback address, and the token
-  is sent only to it and never followed through a redirect.
+  is sent only to it and never followed through a redirect. One exception is
+  stated rather than hidden: a kubeconfig's `exec` plugin or auth provider is
+  started by the Kubernetes client with the whole process environment, as
+  `kubectl` does, and the client offers no way to restrict it; what it reads
+  is the kubeconfig's declaration, not Nyl's. Use the API method where
+  that matters.
 - **Deadlines.** Each reading ends within the check's deadline, at most 30
   seconds.
 
@@ -836,11 +856,19 @@ Failure modes, and what each does:
 | Token or kubeconfig credential rejected (HTTP 401), expired included | The same, with the reason naming the expiry and the secret or variable to refresh; a credential that cannot be told expired from invalid is reported as "invalid or has expired" |
 | Credential accepted but may not read (HTTP 403) | The same, naming the permission to grant |
 | A partial reading (one Application namespace of several fails, or the body is no complete Application list) | Unknown: a partial reading never stands for a complete one |
-| An Application the credential cannot see, or that does not exist | Absent from the reading: the Application is `missing` and `accepted` fails (a listing cannot tell the two apart); a teardown wait counts it as removed |
+| An Application the credential cannot see | Argo CD's list leaves out what a token may not `get` and still answers success, so absence from it proves nothing alone. For the API method, every generated Application missing from the reading is checked with `GET /api/v1/account/can-i/applications/get/<project>/<name>` (`<project>/<namespace>/<name>` outside the instance's namespace): a `no` or an error makes `attest` unknown and the teardown wait `observation-failed`, naming the permission to grant; only a `yes` lets the Application count as gone (`missing`, failing `accepted`) |
+| A token or context that sees none of the target's Applications | The teardown wait concludes removal only if the catalog Application, which phase 1 keeps, is in the same reading (otherwise `observation-failed`: the credential or context does not see this target, such as another project's role, a token without policy, or another Argo CD), and then as above for each workload. The Kubernetes method has no per-Application filtering, and its RBAC fails the whole list instead, so the catalog anchor is its guard. For `accepted`, the Kubernetes method cannot tell an Application that does not exist from a context for another Argo CD: all read `missing` and fail |
+| An Application that does not exist | `missing`, and `accepted` fails; a teardown wait counts it as removed (once visibility is established as above) |
 | The publication branch cannot be fetched, or the running revision cannot be compared | Unknown, like an unreachable Argo CD |
 | The receipt's publication commit is no longer on the branch (rewritten) | `accepted` and `healthy` fail for every Application: nothing can run it |
-| A stale `status.history` entry | History is read as Argo CD wrote it: the newest entry by `id` is the running revision, and an operation newer than it that is selective or unfinished makes the Application `mixed`; an entry's `source.path` that is not the generated directory makes it `other-source` |
+| A stale `status.history` entry | History is read as Argo CD wrote it: the newest entry by `id` is the running revision, and any operation as new as it that is not a completed full sync (a selective sync, an unfinished or failed one, a dry run that may hide an earlier selective sync) makes the Application `mixed`; a `spec.source`, or an entry's `source`, that differs from the generated one makes it `other-source` |
 | Several targets sharing a branch | The running revision may be another target's commit or a write-back; matching is by the Application's directory tree and recorded inputs, never by commit identity, so those commits match the publication whose directory they leave alone |
 
 Only an observation that established a result is recorded: `fail` means Argo
 CD was read and an Application fell short, `unknown` means it could not be read.
+An unchanged result is rewritten with its new time once the stored attestation
+is older than the refresh interval (15 minutes; see the orchestration core
+contract's [Attestations](orchestration-core.md#attestations)), so a system
+that is re-verified keeps a fresh attestation, which `maxAttestationAge` needs,
+while one that cannot be reached grows stale; within the interval a repeated
+`nyl attest` writes nothing.

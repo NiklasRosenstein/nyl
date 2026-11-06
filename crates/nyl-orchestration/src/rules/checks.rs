@@ -31,7 +31,7 @@ use nyl_core::orchestration::state::{
     ArtifactUnit, Attestation, AttestationKind, AttestationResult, DesiredUnit, Drift, DriftRecord, DriftRecordKind,
     Operation, Receipt, StateV1,
 };
-use nyl_core::orchestration::time::Timestamp;
+use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::DriftRepair;
 use serde_json::json;
 
@@ -203,8 +203,12 @@ pub fn attestations(
 }
 
 /// The complete attestation set to store, given the stored one: a new
-/// document equal to the stored one but for `at` keeps the stored one;
-/// stored documents of the same receipt that this check did not report stay
+/// document equal to the stored one but for `at` keeps the stored one while
+/// the stored one is younger than `refresh`, so a repeated `attest` writes
+/// nothing within the interval; once it is older, the new `at` replaces it,
+/// so a system that is re-verified keeps a fresh attestation (and satisfies a
+/// `maxAttestationAge` longer than `refresh`) while one that cannot be
+/// reached grows stale; stored documents of the same receipt that this check did not report stay
 /// (the newest per name and receipt wins); stored documents of an earlier
 /// receipt are dropped, since they no longer describe it.
 #[must_use]
@@ -212,6 +216,8 @@ pub fn settle_attestations(
     mut new: BTreeMap<String, Attestation>,
     stored: Option<&BTreeMap<String, Attestation>>,
     receipt: &Receipt,
+    now: Timestamp,
+    refresh: Duration,
 ) -> BTreeMap<String, Attestation> {
     for (name, stored) in stored.into_iter().flatten() {
         let keep = match new.get(name) {
@@ -220,6 +226,7 @@ pub fn settle_attestations(
                     at: stored.at,
                     ..new.clone()
                 } == *stored
+                    && now < refresh.after(stored.at)
             }
             None => stored.execution_key == receipt.execution_key.as_str(),
         };
@@ -469,8 +476,23 @@ mod tests {
             attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], at(2)),
             Some(&attested),
             receipt,
+            at(2),
+            Duration::from_mins(15),
         );
         assert_eq!(again, attested);
+
+        // Once the stored attestation is older than the refresh interval, an
+        // unchanged result is written again with its new time.
+        let later = at(1) + chrono::Duration::minutes(16);
+        let refreshed = settle_attestations(
+            attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], later),
+            Some(&attested),
+            receipt,
+            later,
+            Duration::from_mins(15),
+        );
+        assert_eq!(refreshed["healthy"].at, later);
+        assert_eq!(refreshed["healthy"].details, attested["healthy"].details);
     }
 
     /// Catches an attestation of an earlier receipt surviving into the new
@@ -487,7 +509,13 @@ mod tests {
         };
         let earlier = attestations(&env(), &unit, old.receipt.as_ref().unwrap(), &[outcome], at(1));
         let current = observed_numbered("network", 1, Some(hex_key('a')));
-        let settled = settle_attestations(BTreeMap::new(), Some(&earlier), current.receipt.as_ref().unwrap());
+        let settled = settle_attestations(
+            BTreeMap::new(),
+            Some(&earlier),
+            current.receipt.as_ref().unwrap(),
+            at(1),
+            Duration::from_mins(15),
+        );
         assert!(settled.is_empty());
     }
 
