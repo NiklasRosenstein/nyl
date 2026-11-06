@@ -7305,6 +7305,26 @@ fn index_format_roundtrips_versioned_golden_and_reads_the_ownerless_and_legacy_e
     assert_eq!(serde_json::to_value(index).unwrap(), legacy);
     legacy["owner"] = golden["owner"].clone();
     assert!(read(&legacy, "index-v2.json").is_err());
+
+    // A shared catalog's tree names the string `catalog:<name>` as its owner.
+    let catalog: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/partial-publication/index-v3-shared-catalog.json")).unwrap();
+    let index = read(&catalog, "index-v3-shared-catalog.json").unwrap();
+    assert_eq!(
+        index.owner,
+        Some(nyl_render::gitops::reconcile::RenderIndexOwner::catalog("previews"))
+    );
+    assert_eq!(serde_json::to_value(&index).unwrap(), catalog);
+    // Only the `catalog:<name>` string form is an owner besides an object.
+    for text in ["previews", "catalog:", "unit:previews"] {
+        let mut other = catalog.clone();
+        other["owner"] = text.into();
+        assert!(read(&other, "bad-owner.json").is_err(), "{text}");
+    }
+    let mut v2 = catalog;
+    v2["version"] = 2.into();
+    v2.as_object_mut().unwrap().remove("compilation");
+    assert!(read(&v2, "index-v2.json").is_err());
 }
 
 #[test]

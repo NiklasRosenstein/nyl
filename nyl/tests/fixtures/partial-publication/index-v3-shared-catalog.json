@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "target": "catalog:previews",
+  "cluster": "dev",
+  "publication": {
+    "repository": "https://example.invalid/platform.git",
+    "revision": "previews",
+    "pathPrefix": "_nyl/shared/previews"
+  },
+  "dirty": false,
+  "inputs": {},
+  "files": {
+    "catalog.yaml": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+  },
+  "compilation": {
+    "version": 1,
+    "controlDigest": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+    "groups": {},
+    "releases": {},
+    "bindings": {}
+  },
+  "owner": "catalog:previews"
+}

@@ -604,7 +604,11 @@ producer plan changes a referenced unit, the consumer plan waits and names
 that producer's planned change, even when `--unit` hides it from the producer's
 report. A producer cannot be torn down while other
 environments' stored desired units reference it unless `--allow-dependents`
-permits that action.
+permits that action. Instances of an
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/#reading-declared-environments)
+read declared environments the same way and protect their producers the same
+way; they are consumers only, and a reference that names an instance as its
+producer fails with `NYL-REFERENCE-INSTANCE-PRODUCER`.
 
 In a selection containing several environments, unit options must name their
 environment: `--unit services/api` and `--approve services/api=<digest>`.

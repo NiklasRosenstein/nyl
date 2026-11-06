@@ -25,6 +25,13 @@ By default, Nyl emits `<target>-catalog` beneath
 target's `_nyl/catalog` directory. Set `catalogApplication.enabled: false` only
 when another trusted mechanism applies generated catalog resources.
 
+`catalogApplication.shared: {name: previews}` replaces the target's catalog
+Application with one Application that many targets share, such as every preview
+on a branch: it sources the branch root with an include pattern for its own
+manifest and every target's catalog directory, and Nyl publishes its manifest
+under `_nyl/shared/previews/`. Every target on the revision must share it. See
+[One catalog for every instance](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance).
+
 ## Release inputs
 
 `spec.releaseInputs` binds the typed inputs of the Releases the target renders,
