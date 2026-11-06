@@ -1,23 +1,32 @@
-//! What an observer of a published target needs: where its Argo CD instance
-//! is and which Applications the target generates (the declaration), and the
-//! publication history that matches a running revision to a publication
-//! (the Git side).
+//! What an observer of a published target needs: where its reconciler is,
+//! which deployments the target expects it to run, and the publication
+//! history that matches a running revision to a publication (the Git side).
 //!
 //! Contract: [Kubernetes publications](../../../../design/promotion.md#kubernetes-publications)
 //! (observer, running revision, matching a publication, recorded commit).
-//! Nothing here reads Argo CD: reading the Applications and judging health
-//! belongs to the publication driver, which asks this module only for
-//! declared facts ([`ArgoCdObservation`]) and Git answers
-//! ([`PublicationHistory`]).
+//! Nothing here reads a reconciler: reading it and judging health belong to
+//! the publication driver, which asks this module only for declared facts
+//! ([`ReconcilerFacts`]) and Git answers ([`PublicationHistory`]).
 //!
-//! - [`ArgoCdObservation`] is what a driver records at resolution: the
-//!   instance (its namespace, control-plane Cluster, local context, and
-//!   declared access) and the Applications the target generates, so that
-//!   `attest` and an `observe` teardown wait need no render.
+//! - [`ReconcilerFacts`] is what a driver records at resolution under
+//!   `/reconciler`: which reconciler runs the target and where
+//!   ([`ReconcilerLocation`], tagged by `kind`), the publication it reads,
+//!   and what the target expects of it ([`Expected`]): the deployments it
+//!   should run ([`ExpectedDeployment`]) and the anchors that show a reading
+//!   comes from the reconciler that runs this target ([`Anchor`]). So that
+//!   `attest` and an `observe` teardown wait need no render, they read the
+//!   stored document. Only the location is specific to a reconciler kind,
+//!   and each deployment and anchor carries an opaque `locator` that only
+//!   that kind's reader interprets.
+//! - [`ArgoCdLocation`], [`GeneratedApplication`], and
+//!   [`generated_applications`] are the Argo CD renderer: they derive the
+//!   expected deployments from the Applications the target generates. A
+//!   second reconciler kind adds its own location variant and renderer here,
+//!   and a reader in the publication driver.
 //! - [`PublicationHistory`] answers the matching questions over the
 //!   publication branch. [`running_publication`] applies the rule: the
 //!   publication commits that are the running revision or its ancestors and
-//!   whose Application directory tree and recorded inputs equal those at the
+//!   whose deployment directory tree and recorded inputs equal those at the
 //!   running revision form a run, and the recorded commit is the oldest of
 //!   the unbroken run ending at it. [`GitPublicationHistory`] implements the
 //!   trait over a fetched copy of the branch.
@@ -31,7 +40,7 @@ use serde_json::Value;
 
 use super::publication::{PublicationDestination, RenderedTarget};
 use super::reconcile::{parse_index, DEFAULT_INDEX_PATH};
-use crate::resources::ArgoCDAccess;
+use crate::resources::{ArgoCDAccess, ArgoCDAccessMethod};
 use crate::{NylError, Result};
 
 /// Where a target's Argo CD instance is and how Nyl reads it, from the
@@ -51,9 +60,36 @@ pub struct ArgoCdLocation {
     pub access: ArgoCDAccess,
 }
 
+/// The reconciler that runs a target and where Nyl reads it. The tag is the
+/// recorded `kind`; a new reconciler kind is a new variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ReconcilerLocation {
+    #[serde(rename = "argocd")]
+    ArgoCd(ArgoCdLocation),
+}
+
+impl ReconcilerLocation {
+    /// The reconciler's kind and name, as an attestation's details name them:
+    /// `{kind, instance, ...}` with whatever identifies how it is read.
+    pub fn summary(&self) -> Value {
+        match self {
+            Self::ArgoCd(location) => serde_json::json!({
+                "kind": "argocd",
+                "instance": location.instance,
+                "namespace": location.namespace,
+                "access": match location.access.method {
+                    ArgoCDAccessMethod::Kubernetes => "kubernetes",
+                    ArgoCDAccessMethod::Api => "api",
+                },
+            }),
+        }
+    }
+}
+
 /// Where a target's rendered resources live: its workload Cluster, with that
 /// Cluster's declared local context (`spec.live.context`). It may differ from
-/// the Argo CD control-plane Cluster.
+/// the control-plane Cluster of the reconciler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadCluster {
@@ -63,41 +99,90 @@ pub struct WorkloadCluster {
     pub context: Option<String>,
 }
 
-/// The part an Application plays in a target.
+/// The part a deployment plays in a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ApplicationRole {
-    /// The Application sourcing `_nyl/catalog`, which creates the others.
+pub enum DeploymentRole {
+    /// The deployment sourcing `_nyl/catalog`, which creates the others.
     Catalog,
-    /// Any other generated Application: a Release's or a dedicated Namespace Application.
+    /// Any other deployment: a Release's or a dedicated Namespace deployment.
     Workload,
 }
 
-/// An Argo CD Application the target generates.
+/// Where a deployment takes its manifests from: the repository, the
+/// directory, and whatever else changes how the reconciler renders the
+/// directory. The revision is left out: it is what an observer reads, not a
+/// setting to compare.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GeneratedApplication {
-    pub role: ApplicationRole,
-    pub name: String,
-    /// The namespace the Application object lives in.
-    pub namespace: String,
-    /// The directory it sources, from the publication repository's root.
+pub struct Source {
+    pub repository: String,
+    /// The directory, from the publication repository's root.
     pub path: String,
-    /// The Argo CD project it belongs to (`spec.project`), which Argo CD's
-    /// policy names it by. Empty in a document recorded before it was.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub project: String,
-    /// `<applicationGroup>/<release>` for a Release's Application.
+    /// The remaining settings, without nulls and empty containers, so that
+    /// what a reconciler defaults or omits is no difference; null when none.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub options: Value,
+}
+
+impl Source {
+    /// The names of what differs between two sources, empty when they agree:
+    /// `repository`, `path`, and each option that differs.
+    pub fn differences(&self, other: &Self) -> Vec<String> {
+        let mut differing = Vec::new();
+        if self.repository != other.repository {
+            differing.push("repository".to_owned());
+        }
+        if self.path != other.path {
+            differing.push("path".to_owned());
+        }
+        if self.options != other.options {
+            match (&self.options, &other.options) {
+                (Value::Object(a), Value::Object(b)) => differing.extend(
+                    a.keys()
+                        .chain(b.keys())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .filter(|key| a.get(*key) != b.get(*key))
+                        .cloned(),
+                ),
+                _ => differing.push("options".to_owned()),
+            }
+        }
+        differing
+    }
+}
+
+/// A deployment the target expects its reconciler to run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpectedDeployment {
+    /// What readings and findings call it, unique within the target.
+    pub id: String,
+    pub role: DeploymentRole,
+    /// The directory it deploys, from the publication repository's root.
+    pub path: String,
+    /// `<applicationGroup>/<release>` for a Release's deployment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
-    /// The generated `spec.source` without `targetRevision` (the revision is
-    /// what an observer reads, not a setting to compare): the repository, the
-    /// directory, and how Argo CD renders it (`directory.recurse`, and any
-    /// `exclude`, `include`, or tool block). An Application edited in the
-    /// cluster to render the directory differently no longer matches it.
-    /// Null in a document recorded before it was.
+    /// The source the target generated for it.
+    pub source: Source,
+    /// How the reconciler names it, opaque to everything but that kind's reader.
     #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub source: Value,
+    pub locator: Value,
+}
+
+/// A thing only the reconciler that runs this target has, such as a catalog
+/// deployment or a project the target depends on: seeing it shows a reading
+/// comes from that reconciler, so that a deployment's absence from it means
+/// something.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Anchor {
+    pub id: String,
+    /// How the reconciler names it, opaque to everything but that kind's reader.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub locator: Value,
 }
 
 /// Where the target publishes, as a reader of the branch needs it.
@@ -110,21 +195,60 @@ pub struct ObservedPublication {
     pub path_prefix: String,
 }
 
-/// Everything an observer needs from the declaration, recorded by the
-/// publication driver at resolution (a persisted format whose camelCase keys
-/// a test pins).
+/// What a target expects of its reconciler: the publication it reads, the
+/// deployments it should run, and the anchors of a trustworthy reading.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ArgoCdObservation {
-    #[serde(flatten)]
-    pub location: ArgoCdLocation,
+pub struct Expected {
     pub publication: ObservedPublication,
-    /// Every Application of the target, the catalog first.
-    pub applications: Vec<GeneratedApplication>,
+    /// Every deployment of the target, the catalog first.
+    #[serde(rename = "expected")]
+    pub deployments: Vec<ExpectedDeployment>,
+    /// Empty when the target has no workload deployment.
+    #[serde(default)]
+    pub anchors: Vec<Anchor>,
 }
 
-impl ArgoCdObservation {
-    /// The observation facts of a rendered target.
+impl Expected {
+    /// The deployments that are not the catalog: what a teardown's first
+    /// phase removes.
+    pub fn workload(&self) -> impl Iterator<Item = &ExpectedDeployment> {
+        self.deployments
+            .iter()
+            .filter(|deployment| deployment.role == DeploymentRole::Workload)
+    }
+
+    /// The same expectation limited to the deployments `keep` accepts, with
+    /// every anchor.
+    #[must_use]
+    pub fn restricted_to(&self, keep: impl Fn(&ExpectedDeployment) -> bool) -> Self {
+        Self {
+            publication: self.publication.clone(),
+            deployments: self
+                .deployments
+                .iter()
+                .filter(|deployment| keep(deployment))
+                .cloned()
+                .collect(),
+            anchors: self.anchors.clone(),
+        }
+    }
+}
+
+/// Everything an observer needs from the declaration, recorded by the
+/// publication driver at resolution under `/reconciler` (a persisted format
+/// whose camelCase keys a test pins).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcilerFacts {
+    #[serde(flatten)]
+    pub location: ReconcilerLocation,
+    #[serde(flatten)]
+    pub expected: Expected,
+}
+
+impl ReconcilerFacts {
+    /// The reconciler facts of a rendered target: the reconciler of its
+    /// target decides the kind.
     pub fn of(rendered: &RenderedTarget) -> Result<Self> {
         let PublicationDestination {
             push_url,
@@ -132,24 +256,177 @@ impl ArgoCdObservation {
             path_prefix,
             ..
         } = &rendered.destination;
+        let applications = generated_applications(rendered)?;
+        let location = &rendered.argocd;
         Ok(Self {
-            location: rendered.argocd.clone(),
-            publication: ObservedPublication {
-                url: push_url.clone(),
-                branch: branch.clone(),
-                path_prefix: path_prefix.clone(),
+            location: ReconcilerLocation::ArgoCd(location.clone()),
+            expected: Expected {
+                publication: ObservedPublication {
+                    url: push_url.clone(),
+                    branch: branch.clone(),
+                    path_prefix: path_prefix.clone(),
+                },
+                deployments: applications
+                    .iter()
+                    .map(|application| application.expected(&location.namespace))
+                    .collect(),
+                anchors: argocd_anchors(&applications, &location.namespace),
             },
-            applications: generated_applications(rendered)?,
         })
     }
+}
 
-    /// The Applications that are not the catalog: what a teardown's first
-    /// phase removes.
-    pub fn workload_applications(&self) -> impl Iterator<Item = &GeneratedApplication> {
-        self.applications
-            .iter()
-            .filter(|application| application.role == ApplicationRole::Workload)
+/// How Argo CD names an expected deployment: the Application's namespace,
+/// name, and project (which its policy names it by; empty in a document
+/// recorded before it was).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoCdApplication {
+    pub namespace: String,
+    pub name: String,
+    #[serde(default)]
+    pub project: String,
+}
+
+/// How Argo CD names an anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArgoCdAnchor {
+    /// The catalog Application, in the reading.
+    Application { namespace: String, name: String },
+    /// An AppProject of the instance's namespace, visible.
+    Project { name: String },
+}
+
+/// The Argo CD part of what a target generates, as an Application: the
+/// expected deployment in the form Argo CD names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedApplication {
+    pub role: DeploymentRole,
+    pub name: String,
+    /// The namespace the Application object lives in.
+    pub namespace: String,
+    /// The directory it sources, from the publication repository's root.
+    pub path: String,
+    /// The Argo CD project it belongs to (`spec.project`), which Argo CD's
+    /// policy names it by.
+    pub project: String,
+    /// `<applicationGroup>/<release>` for a Release's Application.
+    pub release: Option<String>,
+    /// The generated `spec.source`.
+    pub source: Value,
+}
+
+impl GeneratedApplication {
+    /// The id a deployment of an instance with `instance_namespace` has: the
+    /// Application's name, qualified by its namespace outside the instance's.
+    pub fn id(&self, instance_namespace: &str) -> String {
+        if self.namespace == instance_namespace {
+            self.name.clone()
+        } else {
+            format!("{}/{}", self.namespace, self.name)
+        }
     }
+
+    /// This Application as an expected deployment.
+    pub fn expected(&self, instance_namespace: &str) -> ExpectedDeployment {
+        ExpectedDeployment {
+            id: self.id(instance_namespace),
+            role: self.role,
+            path: self.path.clone(),
+            release: self.release.clone(),
+            source: argocd_source(&self.source),
+            locator: serde_json::to_value(ArgoCdApplication {
+                namespace: self.namespace.clone(),
+                name: self.name.clone(),
+                project: self.project.clone(),
+            })
+            .expect("a locator serializes"),
+        }
+    }
+}
+
+/// An Argo CD `spec.source` as a [`Source`]: `repoURL` and `path`, and the
+/// rest (how Argo CD renders the directory: `directory.recurse`, `exclude`,
+/// `include`, or a tool block) as options, without `targetRevision`, nulls,
+/// and empty containers.
+pub fn argocd_source(source: &Value) -> Source {
+    fn prune(value: &Value) -> Option<Value> {
+        match value {
+            Value::Null => None,
+            Value::Object(map) => {
+                let map = map
+                    .iter()
+                    .filter_map(|(key, value)| prune(value).map(|value| (key.clone(), value)))
+                    .collect::<serde_json::Map<_, _>>();
+                (!map.is_empty()).then_some(Value::Object(map))
+            }
+            Value::Array(items) => {
+                let items = items.iter().filter_map(prune).collect::<Vec<_>>();
+                (!items.is_empty()).then_some(Value::Array(items))
+            }
+            other => Some(other.clone()),
+        }
+    }
+    let text = |key: &str| source.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let mut options = source.clone();
+    if let Some(object) = options.as_object_mut() {
+        for key in ["targetRevision", "repoURL", "path"] {
+            object.remove(key);
+        }
+    }
+    Source {
+        repository: text("repoURL"),
+        path: text("path"),
+        options: prune(&options).unwrap_or(Value::Null),
+    }
+}
+
+/// The anchors of an Argo CD target, in the order they are checked:
+///
+/// - the catalog Application, when the target generates one: a reading that
+///   shows it comes from the Argo CD that runs this target;
+/// - without one (`catalogApplication.shared`, or `enabled: false`), the
+///   AppProjects the target's Applications belong to: phase 1 keeps the
+///   generated ones, and an externally owned one is a project the target
+///   depends on. The `default` project exists in every Argo CD and anchors
+///   nothing;
+/// - none for a target without a workload Application, which has nothing to
+///   conclude.
+fn argocd_anchors(applications: &[GeneratedApplication], instance_namespace: &str) -> Vec<Anchor> {
+    if !applications
+        .iter()
+        .any(|application| application.role == DeploymentRole::Workload)
+    {
+        return Vec::new();
+    }
+    if let Some(catalog) = applications
+        .iter()
+        .find(|application| application.role == DeploymentRole::Catalog)
+    {
+        return vec![Anchor {
+            id: catalog.id(instance_namespace),
+            locator: serde_json::to_value(ArgoCdAnchor::Application {
+                namespace: catalog.namespace.clone(),
+                name: catalog.name.clone(),
+            })
+            .expect("a locator serializes"),
+        }];
+    }
+    applications
+        .iter()
+        .map(|application| application.project.as_str())
+        .filter(|project| !project.is_empty() && *project != "default")
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|project| Anchor {
+            id: format!("project/{project}"),
+            locator: serde_json::to_value(ArgoCdAnchor::Project {
+                name: project.to_owned(),
+            })
+            .expect("a locator serializes"),
+        })
+        .collect()
 }
 
 /// The Applications a rendered target generates, read from its catalog
@@ -193,9 +470,9 @@ pub fn generated_applications(rendered: &RenderedTarget) -> Result<Vec<Generated
             let project = text("/spec/project").unwrap_or_default();
             applications.push(GeneratedApplication {
                 role: if source == catalog_source {
-                    ApplicationRole::Catalog
+                    DeploymentRole::Catalog
                 } else {
-                    ApplicationRole::Workload
+                    DeploymentRole::Workload
                 },
                 release: releases.get(&name).cloned(),
                 name,
@@ -291,7 +568,7 @@ fn owning_application_in(
     let prefix = prefix.trim_matches('/');
     for application in applications
         .iter()
-        .filter(|application| application.role == ApplicationRole::Workload)
+        .filter(|application| application.role == DeploymentRole::Workload)
     {
         let directory = application.path.trim_matches('/');
         let directory = if prefix.is_empty() {
@@ -391,19 +668,14 @@ pub const MATCH_WALK_LIMIT: usize = 1_000;
 /// An Application's directory and Release, the identity the matching rules
 /// compare.
 #[derive(Debug, Clone, Copy)]
-pub struct ApplicationTree<'a> {
+pub struct DeploymentTree<'a> {
     pub path: &'a str,
     pub release: Option<&'a str>,
 }
 
 /// Whether two revisions hold the same Application: the same directory tree
 /// and, for a Release's Application, the same recorded inputs.
-pub fn equivalent(
-    history: &dyn PublicationHistory,
-    application: ApplicationTree<'_>,
-    a: &str,
-    b: &str,
-) -> Result<bool> {
+pub fn equivalent(history: &dyn PublicationHistory, application: DeploymentTree<'_>, a: &str, b: &str) -> Result<bool> {
     if history.directory(a, application.path)? != history.directory(b, application.path)? {
         return Ok(false);
     }
@@ -446,7 +718,7 @@ pub enum RunningMatch {
 /// restored the tree of an older publication.
 pub fn running_publication(
     history: &dyn PublicationHistory,
-    application: ApplicationTree<'_>,
+    application: DeploymentTree<'_>,
     running: &str,
     limit: usize,
 ) -> Result<RunningMatch> {
@@ -682,7 +954,7 @@ mod tests {
         }
     }
 
-    const WEB: ApplicationTree<'static> = ApplicationTree {
+    const WEB: DeploymentTree<'static> = DeploymentTree {
         path: "dev/web/web",
         release: Some("web/web"),
     };
@@ -912,7 +1184,7 @@ mod tests {
         assert_eq!(
             running_publication(
                 &history,
-                ApplicationTree {
+                DeploymentTree {
                     path: "dev/web/web",
                     release: Some("web/web")
                 },
@@ -925,7 +1197,7 @@ mod tests {
         // Another target's commit leaves the first publication's directory as it was.
         let RunningMatch::Matched(matched) = running_publication(
             &history,
-            ApplicationTree {
+            DeploymentTree {
                 path: "dev/web/web",
                 release: Some("web/web"),
             },
@@ -938,7 +1210,7 @@ mod tests {
         assert_eq!(matched.recorded, p1);
     }
 
-    fn application(name: &str, path: &str, role: ApplicationRole) -> GeneratedApplication {
+    fn application(name: &str, path: &str, role: DeploymentRole) -> GeneratedApplication {
         GeneratedApplication {
             role,
             name: name.to_owned(),
@@ -982,9 +1254,9 @@ mod tests {
             ),
         ]);
         let applications = [
-            application("catalog", "dev/_nyl/catalog", ApplicationRole::Catalog),
-            application("web", "dev/web/web", ApplicationRole::Workload),
-            application("api", "dev/api/api", ApplicationRole::Workload),
+            application("catalog", "dev/_nyl/catalog", DeploymentRole::Catalog),
+            application("web", "dev/web/web", DeploymentRole::Workload),
+            application("api", "dev/api/api", DeploymentRole::Workload),
         ];
         let destinations = BTreeMap::from([
             (("argocd".to_owned(), "web".to_owned()), "web".to_owned()),
@@ -1025,43 +1297,124 @@ mod tests {
         assert!(release_applications_of(None).is_empty());
     }
 
-    /// Pins the recorded format: it is persisted in desired documents.
-    #[test]
-    fn test_observation_facts_serialize_with_camel_case_keys() {
-        let facts = ArgoCdObservation {
-            location: ArgoCdLocation {
+    fn argocd_facts() -> ReconcilerFacts {
+        ReconcilerFacts {
+            location: ReconcilerLocation::ArgoCd(ArgoCdLocation {
                 instance: "prod".to_owned(),
                 namespace: "argocd".to_owned(),
                 cluster: "control".to_owned(),
                 context: Some("control-admin".to_owned()),
                 access: ArgoCDAccess::kubernetes(),
+            }),
+            expected: Expected {
+                publication: ObservedPublication {
+                    url: "https://example.invalid/deploy.git".to_owned(),
+                    branch: "deploy".to_owned(),
+                    path_prefix: "dev".to_owned(),
+                },
+                deployments: vec![GeneratedApplication {
+                    role: DeploymentRole::Workload,
+                    name: "web".to_owned(),
+                    namespace: "argocd".to_owned(),
+                    path: "dev/web/web".to_owned(),
+                    project: "web".to_owned(),
+                    release: Some("web/web".to_owned()),
+                    source: serde_json::json!({
+                        "repoURL": "https://example.invalid/deploy.git", "path": "dev/web/web",
+                        "targetRevision": "deploy", "directory": {"recurse": true, "include": []}
+                    }),
+                }
+                .expected("argocd")],
+                anchors: vec![Anchor {
+                    id: "project/web".to_owned(),
+                    locator: serde_json::json!({"project": {"name": "web"}}),
+                }],
             },
-            publication: ObservedPublication {
-                url: "https://example.invalid/deploy.git".to_owned(),
-                branch: "deploy".to_owned(),
-                path_prefix: "dev".to_owned(),
-            },
-            applications: vec![GeneratedApplication {
-                role: ApplicationRole::Workload,
-                name: "web".to_owned(),
-                namespace: "argocd".to_owned(),
-                path: "dev/web/web".to_owned(),
-                project: "default".to_owned(),
-                release: Some("web/web".to_owned()),
-                source: serde_json::json!({"repoURL": "https://example.invalid/deploy.git", "path": "dev/web/web"}),
-            }],
-        };
+        }
+    }
+
+    /// Pins the recorded format: it is persisted in desired documents, and
+    /// only the location (the `kind` tag and what follows it) is specific to
+    /// a reconciler kind.
+    #[test]
+    fn test_reconciler_facts_serialize_with_camel_case_keys() {
+        let facts = argocd_facts();
         let value = serde_json::to_value(&facts).unwrap();
         assert_eq!(
             value,
             serde_json::json!({
+                "kind": "argocd",
                 "instance": "prod", "namespace": "argocd", "cluster": "control", "context": "control-admin",
                 "access": {"method": "kubernetes"},
                 "publication": {"url": "https://example.invalid/deploy.git", "branch": "deploy", "pathPrefix": "dev"},
-                "applications": [{"role": "workload", "name": "web", "namespace": "argocd", "path": "dev/web/web", "project": "default", "release": "web/web",
-                                  "source": {"repoURL": "https://example.invalid/deploy.git", "path": "dev/web/web"}}],
+                "expected": [{
+                    "id": "web", "role": "workload", "path": "dev/web/web", "release": "web/web",
+                    "source": {"repository": "https://example.invalid/deploy.git", "path": "dev/web/web",
+                               "options": {"directory": {"recurse": true}}},
+                    "locator": {"namespace": "argocd", "name": "web", "project": "web"}
+                }],
+                "anchors": [{"id": "project/web", "locator": {"project": {"name": "web"}}}],
             })
         );
-        assert_eq!(serde_json::from_value::<ArgoCdObservation>(value).unwrap(), facts);
+        assert_eq!(serde_json::from_value::<ReconcilerFacts>(value).unwrap(), facts);
+    }
+
+    fn generated(role: DeploymentRole, name: &str, namespace: &str, project: &str) -> GeneratedApplication {
+        GeneratedApplication {
+            role,
+            name: name.to_owned(),
+            namespace: namespace.to_owned(),
+            path: format!("dev/{name}"),
+            project: project.to_owned(),
+            release: None,
+            source: Value::Null,
+        }
+    }
+
+    /// Catches the wrong thing anchoring a reading: the catalog Application
+    /// alone when there is one, else the target's own projects but never
+    /// `default` (every Argo CD has it), and nothing for a target without a
+    /// workload deployment, which has nothing to conclude.
+    #[test]
+    fn test_anchors_are_the_catalog_else_the_projects_the_target_depends_on() {
+        let ids = |applications: &[GeneratedApplication]| {
+            argocd_anchors(applications, "argocd")
+                .into_iter()
+                .map(|anchor| anchor.id)
+                .collect::<Vec<_>>()
+        };
+        let catalog = generated(DeploymentRole::Catalog, "dev-catalog", "argocd", "web");
+        let web = generated(DeploymentRole::Workload, "web", "argocd", "web");
+        let api = generated(DeploymentRole::Workload, "api", "team-a", "api");
+        let plain = generated(DeploymentRole::Workload, "plain", "argocd", "default");
+        assert_eq!(ids(&[catalog.clone(), web.clone(), api.clone()]), ["dev-catalog"]);
+        assert_eq!(
+            ids(&[web.clone(), api.clone(), plain.clone()]),
+            ["project/api", "project/web"]
+        );
+        assert!(ids(&[plain]).is_empty());
+        assert!(ids(&[catalog]).is_empty());
+        // A deployment outside the instance's namespace is named with its own.
+        assert_eq!(api.expected("argocd").id, "team-a/api");
+        assert_eq!(web.expected("argocd").id, "web");
+    }
+
+    /// Catches what a reconciler defaults or omits counting as a difference
+    /// between the source Nyl generated and the one a deployment has, and a
+    /// real difference going unnamed.
+    #[test]
+    fn test_sources_differ_by_what_changes_how_the_directory_is_read() {
+        let generated = argocd_source(&serde_json::json!({
+            "repoURL": "r", "path": "p", "targetRevision": "deploy",
+            "directory": {"recurse": true, "include": []},
+        }));
+        let live = argocd_source(&serde_json::json!({
+            "repoURL": "r", "path": "p", "targetRevision": "other", "directory": {"recurse": true}, "plugin": null,
+        }));
+        assert!(generated.differences(&live).is_empty());
+        let edited = argocd_source(&serde_json::json!({
+            "repoURL": "r2", "path": "p", "directory": {"recurse": true, "exclude": "*.yaml"},
+        }));
+        assert_eq!(generated.differences(&edited), ["repository", "directory"]);
     }
 }

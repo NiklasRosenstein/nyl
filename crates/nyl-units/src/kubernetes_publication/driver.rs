@@ -3,7 +3,7 @@
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit).
 //!
 //! - **Execution key.** The render's portable input record, through
-//!   [`resolution_inputs`], plus the resolved spec (`mode`, the Release
+//!   [`resolution_inputs`], plus the resolved spec (`observe`, the Release
 //!   inputs under `releases`).
 //! - **Teardown settings.** Resolution renders the target anyway, so the
 //!   driver records the effective settings that decide whether a teardown
@@ -29,17 +29,19 @@
 //!   that finds an owned file modified outside Nyl. A comparison that cannot
 //!   be made, such as an unreachable remote, is `unknown`.
 //!
-//! - **Observed values.** In `mode: observe` the unit reads a field of a
+//! - **Observed values.** With `observe: {}` the unit reads a field of a
 //!   resource its target renders from the workload Cluster, once the
 //!   Application that owns it runs the receipt's publication
 //!   ([`super::observed_values`]). Resolution checks the resource is the
 //!   target's (`NYL-KUBERNETES-OBSERVATION-UNOWNED`) and records its owning
 //!   Application and the workload Cluster.
-//! - **Observation.** A unit that observes Argo CD (`mode: observe`, or the
-//!   `observe` teardown wait) records the instance, its declared access, and
-//!   the target's Applications at resolution (`argocd`), declares the
-//!   attestations `accepted` and `healthy` in observe mode, and reads Argo
-//!   CD for `nyl attest` and the teardown wait ([`super::observe`]).
+//! - **Observation.** A unit that declares `observe: {}` records the
+//!   reconciler of its target at resolution (`reconciler`: its kind and
+//!   instance, how it is read, and the deployments and anchors the target
+//!   expects of it), declares the attestations `accepted` and `healthy`, and
+//!   reads the reconciler for `nyl attest` and the `observe` teardown wait
+//!   ([`super::observe`]); which reconciler it reads follows the target, not
+//!   the flag.
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -55,19 +57,14 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Recei
 use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor, TeardownSettings};
 use serde_json::{json, Value};
 
-use super::observe::{self, ARGOCD};
+use super::observe::{self, RECONCILER};
 use super::observed_values::{self, ClusterReader, LiveReader};
 use super::readiness::evaluate;
 use super::spec::{OBSERVATION_SOURCES, WORKLOAD};
 use super::{build, plan, publish, render, resolution_inputs, teardown, teardown_wait, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
 
-use super::argocd::evaluate::{ACCEPTED, HEALTHY};
-
-/// Whether the spec's `mode` is `observe`.
-fn is_observe_mode(spec: &Value) -> bool {
-    spec.get("mode").and_then(Value::as_str) == Some("observe")
-}
+use super::reconciler::evaluate::{ACCEPTED, HEALTHY};
 
 /// The pointer, in the resolved spec, of the recorded teardown settings.
 const TEARDOWN_SETTINGS: &str = "/teardownSettings";
@@ -126,8 +123,8 @@ impl Driver for KubernetesPublicationDriver {
             detect_drift: true,
             teardown: true,
             build: true,
-            attest: is_observe_mode(spec),
-            observed_values: is_observe_mode(spec),
+            attest: observe::observes(spec),
+            observed_values: observe::observes(spec),
             ..Capabilities::default()
         }
     }
@@ -167,11 +164,10 @@ impl Driver for KubernetesPublicationDriver {
                         }
                     ]
                 },
-                "mode": {
-                    "type": "string",
-                    "enum": ["publish", "observe"],
-                    "default": "publish",
-                    "description": "How the unit relates to the published tree. Both publish it; observe also lets `nyl attest` read Argo CD and attest `accepted` and `healthy`, and makes `observe` the default teardownWait."
+                "observe": {
+                    "type": "object",
+                    "description": "Opts the unit into observing the reconciler of its target (Argo CD): `nyl attest` reads it and attests `accepted` and `healthy`, the `observe` teardownWait strategy becomes available and its default. Written `observe: {}`; it takes no options yet. Which reconciler it reads follows the target.",
+                    "additionalProperties": false
                 },
                 "teardownWait": {
                     "type": "object",
@@ -185,7 +181,7 @@ impl Driver for KubernetesPublicationDriver {
                 },
                 "observations": {
                     "type": "object",
-                    "description": "Observed values, in `mode: observe`: a field of a resource the target renders, read from the workload Cluster once the Application that owns the resource runs the current publication.",
+                    "description": "Observed values, which need `observe: {}`: a field of a resource the target renders, read from the workload Cluster once the Application that owns the resource runs the current publication.",
                     "additionalProperties": {
                         "type": "object",
                         "required": ["type", "from"],
@@ -229,10 +225,10 @@ impl Driver for KubernetesPublicationDriver {
         super::spec::validate(spec)
     }
 
-    /// `accepted` and `healthy` in observe mode; a unit in publish mode is
-    /// satisfied by its receipt and declares none.
+    /// `accepted` and `healthy` for a unit that observes; one that does not
+    /// is satisfied by its receipt and declares none.
     fn attestations(&self, spec: &Value) -> Vec<String> {
-        if is_observe_mode(spec) {
+        if observe::observes(spec) {
             vec![ACCEPTED.to_owned(), HEALTHY.to_owned()]
         } else {
             Vec::new()
@@ -264,10 +260,12 @@ impl Driver for KubernetesPublicationDriver {
             .map_err(|error| DriverError::before_effects(format!("cannot record the teardown settings: {error}")))?;
         inputs.recorded.insert(TEARDOWN_SETTINGS.to_owned(), settings);
         if observe::observes(spec) {
-            inputs.recorded.insert(ARGOCD.to_owned(), observe::recorded(&rendered)?);
-            // How Argo CD is read (the declared access, the control-plane
-            // context, the URL the branch is read from) changes no result:
-            // only the generated Applications key the unit.
+            inputs
+                .recorded
+                .insert(RECONCILER.to_owned(), observe::recorded(&rendered)?);
+            // How the reconciler is read (the declared access, the
+            // control-plane context, the URL the branch is read from) changes
+            // no result: only what the target expects of it keys the unit.
             inputs
                 .excluded_fields
                 .extend(observe::UNKEYED.iter().map(|field| (*field).to_owned()));
@@ -361,7 +359,7 @@ impl Driver for KubernetesPublicationDriver {
         )))
     }
 
-    /// `accepted` and `healthy` of the receipt's publication, read from Argo CD.
+    /// `accepted` and `healthy` of the receipt's publication, read from the reconciler.
     fn attest(
         &self,
         ctx: &ExecutionContext<'_>,
@@ -375,8 +373,8 @@ impl Driver for KubernetesPublicationDriver {
         teardown_wait(spec)
     }
 
-    /// The workload Applications Argo CD still reports, for the `observe`
-    /// teardown wait.
+    /// The workload deployments the reconciler still reports, for the
+    /// `observe` teardown wait.
     fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
         Ok(Supported::Supported(observe::observe_removal(ctx, unit)))
     }
