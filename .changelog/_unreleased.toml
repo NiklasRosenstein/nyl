@@ -69,3 +69,9 @@ id = "5af2a924-6a49-4274-abe0-be4c90afca35"
 type = "feature"
 description = "A recorded source commit that the entry clone lacks is fetched by its exact id from the clone's `origin`, after the retained snapshots and the instance's keep ref and with the same credentials, so a pull request closed job that checks out the default branch tears a preview down at its recorded commit without `keepSource` or `--source` wherever the host keeps `refs/pull/<n>/head` (GitHub) or `refs/merge-requests/<n>/head` (GitLab) after the branch is deleted. An explicit full commit id passed to `--source` that the clone lacks is fetched the same way. A failed fetch leaves the commit missing as before, and `--local` fetches nothing"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
+type = "feature"
+description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
+author = "@NiklasRosenstein"
