@@ -95,7 +95,7 @@ pub struct EnvironmentSpec {
 /// `nyl reconcile --template`), exist only in state, and behave like declared
 /// environments for every command. The template has the Environment's fields
 /// plus `parameters`, `deletionPolicy`, `allowTeardown`, `ttl`,
-/// `maxInstances`, and `keepSource`. Strings in `values`, `state`, and `source`
+/// and `maxInstances`. Strings in `values`, `state`, and `source`
 /// are templates: they read `params` and `environment.name` when an instance
 /// is created from the template, and `state` reads only `environment.name`,
 /// because it locates the state that holds the parameters.
@@ -163,24 +163,12 @@ pub struct EnvironmentTemplateSpec {
     /// Whether omission teardown needs no `--allow-teardown`: a unit removed from the template or its selection is torn down by the next reconcile. Default `false`.
     #[serde(rename = "allowTeardown", default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_teardown: bool,
-    /// How long an instance lives without activity, such as `7d`; activity on the instance moves its `expiresAt` to now plus `ttl`. Omitted, instances never expire.
+    /// How long an instance lives without activity, such as `7d`; `state init --template` moves the instance's `expiresAt` to now plus `ttl`. Omitted, instances never expire. Removing expired instances is in progress: today `expiresAt` is recorded and listed, and nothing removes the instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<Duration>,
-    /// The most instances of this template that may exist at once. Omitted, unlimited.
+    /// The most instances of this template that may exist at once. Omitted, unlimited. Enforcement is in progress: today the limit is recorded and not checked.
     #[serde(rename = "maxInstances", default, skip_serializing_if = "Option::is_none")]
     pub max_instances: Option<u32>,
-    /// Keep each instance's latest source commit fetchable with a keep ref in the source repository, so teardown still finds its source after the pull request branch is gone. Default `true`.
-    #[serde(rename = "keepSource", default = "default_true", skip_serializing_if = "is_true")]
-    pub keep_source: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if passes a reference.
-fn is_true(value: &bool) -> bool {
-    *value
 }
 
 /// Whether reconcile repairs drift on its own.

@@ -184,7 +184,6 @@ pub fn instantiate(
         params: bound,
         deletion_policy: template.spec.deletion_policy,
         allow_teardown: template.spec.allow_teardown,
-        keep_source: template.spec.keep_source,
         ttl: template.spec.ttl,
         max_instances: template.spec.max_instances,
     };

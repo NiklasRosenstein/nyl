@@ -37,8 +37,6 @@ pub struct InstanceTerms {
     pub deletion_policy: Option<DeletionPolicy>,
     /// Whether omission teardown needs no `--allow-teardown`.
     pub allow_teardown: bool,
-    /// Whether the instance's latest source commit is kept fetchable.
-    pub keep_source: bool,
     /// Time to live without activity.
     pub ttl: Option<Duration>,
     /// The most instances of the template that may exist at once.
