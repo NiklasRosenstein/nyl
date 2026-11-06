@@ -1,8 +1,9 @@
 //! The two ways of reading Argo CD, each against a local fake: the Argo CD
 //! API server (with a token) and the Kubernetes API of the control-plane
 //! Cluster (through an admitted kubeconfig and the Cluster's declared
-//! context). Both return Applications as Argo CD serves them, so everything
-//! after the reading is shared and tested once (`evaluate`, `live`).
+//! context). Both return Applications as Argo CD serves them and map them into
+//! the same neutral reading, so everything after the reading is shared and
+//! tested once (`evaluate`, `live`).
 //!
 //! Contract: [Kubernetes publications](../../../design/promotion.md#kubernetes-publications),
 //! access methods.
@@ -13,10 +14,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use argocd_stub::{
-    application, applications, applications_none, argocd_api, argocd_api_with_policy, kube_api, kubeconfig, Response,
-    Stub,
+    application, applications, applications_none, argocd_api, argocd_api_full, argocd_api_with_policy, kube_api,
+    kube_api_with_projects, kubeconfig, Response, Stub,
 };
-use nyl_units::kubernetes_publication::argocd::{ApiServerReader, ArgoReader, KubeApiReader, ReadErrorKind};
+use nyl_render::gitops::observation::{argocd_source, Anchor, DeploymentRole, ExpectedDeployment};
+use nyl_units::kubernetes_publication::argocd::{ApiServerReader, KubeApiReader};
+use nyl_units::kubernetes_publication::reconciler::{
+    Health, Proof, ReadErrorKind, ReadRequest, ReconcilerReader, Running, Visibility,
+};
 use serde_json::{json, Value};
 
 const BUDGET: Duration = Duration::from_secs(10);
@@ -254,4 +259,137 @@ fn test_api_server_reader_asks_argocd_whether_the_token_may_get_an_application()
         reader.can_get("default/web").unwrap_err().kind,
         ReadErrorKind::Malformed
     );
+}
+
+/// An expected deployment of an Application of namespace `namespace`, in
+/// project `default`, as the renderer records it.
+fn expected(role: DeploymentRole, namespace: &str, name: &str, path: &str) -> ExpectedDeployment {
+    ExpectedDeployment {
+        id: format!("{namespace}/{name}"),
+        role,
+        path: path.to_owned(),
+        release: None,
+        source: argocd_source(&json!({"repoURL": "https://example.invalid/deploy.git", "path": path})),
+        locator: json!({"namespace": namespace, "name": name, "project": "default"}),
+    }
+}
+
+fn catalog_anchor() -> Anchor {
+    Anchor {
+        id: "argocd/dev-catalog".to_owned(),
+        locator: json!({"application": {"namespace": "argocd", "name": "dev-catalog"}}),
+    }
+}
+
+/// Catches the API reader leaking Argo CD's shapes past the reading, and
+/// proving absence from anything but `can-i`: a listed Application becomes a
+/// neutral observation (revision, health, source), one the token cannot see
+/// is `Hidden` with the fix and one it can see is `Visible`, and the anchors
+/// are asked for only when the caller concludes from absence.
+#[test]
+fn test_api_server_reader_reads_into_the_neutral_reading() {
+    let denied = applications_none();
+    denied.lock().unwrap().push("default/team-a/hidden".to_owned());
+    let server = argocd_api_full(
+        "s3cret",
+        applications(apps()),
+        denied,
+        applications(vec![json!({"metadata": {"name": "web", "namespace": "argocd"}})]),
+    );
+    let reader = ApiServerReader::new(&server.url(), "ARGOCD_AUTH_TOKEN", Some("s3cret"), None, BUDGET)
+        .unwrap()
+        .in_namespace("argocd");
+    let deployments = [
+        expected(DeploymentRole::Workload, "argocd", "web", "dev/web/web"),
+        expected(DeploymentRole::Workload, "argocd", "gone", "dev/gone"),
+        expected(DeploymentRole::Workload, "team-a", "hidden", "dev/hidden"),
+        expected(DeploymentRole::Catalog, "argocd", "dev-catalog", "dev/_nyl/catalog"),
+    ];
+    let anchors = [catalog_anchor()];
+    let read = |concluding_absence| {
+        reader
+            .read(&ReadRequest {
+                deployments: &deployments,
+                anchors: &anchors,
+                concluding_absence,
+            })
+            .unwrap()
+    };
+    let reading = read(false);
+    assert_eq!(reading.proof, Proof::PerDeployment);
+    let web = &reading.deployments["argocd/web"];
+    assert_eq!(web.running, Running::Exact("c1".to_owned()));
+    assert_eq!(web.health, Health::Healthy);
+    assert_eq!(web.source.as_ref().unwrap().path, "dev/web/web");
+    assert_eq!(reading.absent["argocd/gone"], Visibility::Visible);
+    assert!(
+        matches!(&reading.absent["team-a/hidden"], Visibility::Hidden(reason) if reason.contains("grant its account or project role `get` on default/team-a/hidden")),
+        "{:?}",
+        reading.absent
+    );
+    assert!(reading.anchors.is_empty(), "{:?}", reading.anchors);
+    // The catalog is not served, so concluding from absence cannot trust the token.
+    let concluding = read(true);
+    assert!(
+        matches!(&concluding.anchors["argocd/dev-catalog"], Visibility::Hidden(reason) if reason.contains("catalog Application argocd/dev-catalog is not in the reading")),
+        "{:?}",
+        concluding.anchors
+    );
+}
+
+/// Catches the Kubernetes reader proving absence from anything but what
+/// only the Argo CD that runs the target has: it establishes the anchors on
+/// its own (the catalog Application in the list, an AppProject visible),
+/// reports an absent deployment as visible since a list it may not make
+/// fails instead of filtering, and with nothing to anchor says it can prove
+/// nothing.
+#[test]
+fn test_kube_api_reader_reads_into_the_neutral_reading_and_anchors_itself() {
+    let server = kube_api_with_projects(
+        applications(vec![
+            application("web", "argocd", "dev/web/web", &["c1"], "Degraded"),
+            application("dev-catalog", "argocd", "dev/_nyl/catalog", &["c1"], "Healthy"),
+        ]),
+        applications(vec![json!({"metadata": {"name": "web", "namespace": "argocd"}})]),
+    );
+    let directory = tempfile::TempDir::new().unwrap();
+    let file = directory.path().join("kubeconfig");
+    kubeconfig(&file, "argocd-admin", &server.url());
+    let reader = KubeApiReader::new("control", Some("argocd-admin"), Some(file.to_str().unwrap()), BUDGET)
+        .unwrap()
+        .in_namespace("argocd");
+    let deployments = [
+        expected(DeploymentRole::Workload, "argocd", "web", "dev/web/web"),
+        expected(DeploymentRole::Workload, "argocd", "gone", "dev/gone"),
+    ];
+    let reading = reader
+        .read(&ReadRequest {
+            deployments: &deployments,
+            anchors: &[
+                catalog_anchor(),
+                Anchor {
+                    id: "project/missing".to_owned(),
+                    locator: json!({"project": {"name": "missing"}}),
+                },
+            ],
+            concluding_absence: false,
+        })
+        .unwrap();
+    assert_eq!(reading.proof, Proof::Anchors);
+    assert_eq!(reading.deployments["argocd/web"].health, Health::Degraded);
+    assert_eq!(reading.absent["argocd/gone"], Visibility::Visible);
+    assert_eq!(reading.anchors["argocd/dev-catalog"], Visibility::Visible);
+    assert!(
+        matches!(&reading.anchors["project/missing"], Visibility::Hidden(reason) if reason.contains("AppProject missing is not visible in namespace argocd")),
+        "{:?}",
+        reading.anchors
+    );
+    let unanchored = reader
+        .read(&ReadRequest {
+            deployments: &deployments,
+            anchors: &[],
+            concluding_absence: false,
+        })
+        .unwrap();
+    assert!(unanchored.unprovable.as_deref().unwrap().contains("method api"));
 }

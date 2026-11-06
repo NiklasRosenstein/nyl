@@ -36,19 +36,19 @@ fn copy(from: &Path, to: &Path) {
     }
 }
 
-/// The walkthrough project with its publication in observe mode, admitting
+/// The walkthrough project with its publication observing the reconciler (`observe: {}`), admitting
 /// the kubeconfig, over a control-plane Cluster that declares its context.
 fn observing_project(teardown_wait: &str) -> TempDir {
     let project = TempDir::new().unwrap();
     copy(&shared_project(), project.path());
     let units = project.path().join("nyl/units.yaml");
     let text = std::fs::read_to_string(&units).unwrap();
-    assert!(text.contains("  mode: publish\n  timeout: 10m"));
+    assert!(text.contains("  target: '{{ values.target }}'\n  timeout: 10m"));
     std::fs::write(
         &units,
         text.replace(
-            "  mode: publish\n  timeout: 10m",
-            &format!("  mode: observe\n  teardownWait: {teardown_wait}\n  env: {{passthrough: [KUBECONFIG]}}\n  timeout: 10m"),
+            "  target: '{{ values.target }}'\n  timeout: 10m",
+            &format!("  target: '{{{{ values.target }}}}'\n  observe: {{}}\n  teardownWait: {teardown_wait}\n  env: {{passthrough: [KUBECONFIG]}}\n  timeout: 10m"),
         ),
     )
     .unwrap();
@@ -160,17 +160,20 @@ impl Observed {
 /// The `(name, namespace, source)` of each Application a stored unit records,
 /// the source as Argo CD serves it.
 fn served_sources(unit: &Value) -> Vec<(String, String, Value)> {
-    unit["resolvedSpec"]["argocd"]["applications"]
+    unit["resolvedSpec"]["reconciler"]["expected"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|app| {
-            let mut source = app["source"].clone();
-            source["targetRevision"] = Value::String("deploy".to_owned());
+        .map(|deployment| {
+            let source = &deployment["source"];
+            let mut served = source.get("options").cloned().unwrap_or_else(|| serde_json::json!({}));
+            served["repoURL"] = source["repository"].clone();
+            served["path"] = source["path"].clone();
+            served["targetRevision"] = Value::String("deploy".to_owned());
             (
-                app["name"].as_str().unwrap().to_owned(),
-                app["namespace"].as_str().unwrap().to_owned(),
-                source,
+                deployment["locator"]["name"].as_str().unwrap().to_owned(),
+                deployment["locator"]["namespace"].as_str().unwrap().to_owned(),
+                served,
             )
         })
         .collect()
@@ -213,12 +216,12 @@ fn test_attest_records_accepted_and_healthy_from_argocd() {
     let document: Value = serde_saphyr::from_str(&record).unwrap();
     let details = &document["attestations"]["healthy"]["details"];
     assert_eq!(details["publication"]["commit"], published.as_str());
-    let applications = details["applications"].as_array().unwrap();
-    assert_eq!(applications.len(), 2, "{details}");
-    for application in applications {
-        assert_eq!(application["running"], published.as_str());
-        assert_eq!(application["publication"], published.as_str());
-        assert_eq!(application["health"], "Healthy");
+    let deployments = details["deployments"].as_array().unwrap();
+    assert_eq!(deployments.len(), 2, "{details}");
+    for deployment in deployments {
+        assert_eq!(deployment["running"], published.as_str());
+        assert_eq!(deployment["publication"], published.as_str());
+        assert_eq!(deployment["health"], "Healthy");
     }
     let after = tip();
     assert_ne!(before, after);
@@ -403,7 +406,7 @@ fn test_attest_reads_the_argocd_api_server_with_the_admitted_token() {
         &["show", "refs/heads/nyl/dev/desired:desired/units/kubernetes.yaml"],
     );
     let unit_document: Value = serde_saphyr::from_str(&stored).unwrap();
-    assert_eq!(unit_document["resolvedSpec"]["argocd"]["access"]["method"], "api");
+    assert_eq!(unit_document["resolvedSpec"]["reconciler"]["access"]["method"], "api");
     *served.lock().unwrap() = served_sources(&unit_document)
         .iter()
         .map(|(name, namespace, source)| application_with_source(name, namespace, source, &[&published], "Healthy"))

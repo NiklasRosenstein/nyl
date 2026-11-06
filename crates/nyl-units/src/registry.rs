@@ -31,7 +31,7 @@ pub fn builtin(catalogue: nyl_render::config::ResourceCatalogue) -> DriverSet {
 /// [`with_test_kinds`] with the real `KubernetesPublication` driver instead of
 /// `FakePublication`: fake images and infrastructure around the driver that
 /// publishes to Git. Scenarios whose publication needs no script, and no
-/// `mode: observe`, run against it.
+/// `observe: {}`, run against it.
 #[cfg(any(test, feature = "test-kinds"))]
 pub fn with_real_publication(
     script: &crate::fake::Script,
