@@ -163,10 +163,10 @@ attest are left out of the report; one named with <code dir="auto">--unit</code>
 <code dir="auto">unsupported</code>. A driver that could not tell, such as an attest step that
 failed, reports the unit <code dir="auto">unknown</code> (<code dir="auto">NYL-ATTEST-UNKNOWN</code>, exit 2) and records
 nothing for it; the attestations recorded earlier stay.</p>
-<p>A <a href="/nyl/pr-preview/pr-225/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd"><code dir="auto">KubernetesPublication</code> in observe mode</a>
+<p>A <a href="/nyl/pr-preview/pr-225/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd"><code dir="auto">KubernetesPublication</code> that declares <code dir="auto">observe: {}</code></a>
 attests <code dir="auto">accepted</code> and <code dir="auto">healthy</code> by reading Argo CD, through the way its
 ArgoCDInstance declares and the credential the unit admits, and lists each
-Application’s running publication and health in the details. A failing
+Application’s running publication and health in the details (<code dir="auto">deployments</code>). A failing
 attestation exits 3 (<code dir="auto">NYL-ATTESTATION-FAILED</code>); an Argo CD that cannot be
 read, a rejected or expired credential, or an unreadable publication branch is
 <code dir="auto">unknown</code>: exit 2 and nothing recorded. A stored attestation whose result is unchanged is rewritten with its new time once it is older than 15 minutes, so a repeated <code dir="auto">attest</code> within that interval still writes nothing.</p>
