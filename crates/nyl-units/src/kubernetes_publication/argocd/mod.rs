@@ -1,114 +1,75 @@
-//! Reading Argo CD: the one driver-owned seam between the publication
-//! driver and the Applications it observes, with two implementations.
+//! Reading Argo CD: the Argo CD implementations of a
+//! [`ReconcilerReader`](super::reconciler::ReconcilerReader), which map what
+//! Argo CD serves into the neutral [`Reading`] the shared evaluation judges.
 //!
 //! Contract: [Kubernetes publications](../../../../../design/promotion.md#kubernetes-publications)
 //! (observer, access methods) and [Credentials](../../../../../design/orchestration-core.md#credentials).
 //!
-//! An [`ArgoReader`] answers one question: which Applications exist in a
-//! namespace, as Argo CD serves them. Everything after that, the running
-//! revision, the match to a publication, health, and the attestations, is
-//! shared and lives in [`live`] and [`evaluate`], so it is written and tested
-//! once whichever way Argo CD is read:
+//! Two readers ask Argo CD the same questions, which Applications exist in a
+//! namespace as Argo CD serves them, whether the credential may `get` one,
+//! and whether an AppProject is visible, and share everything that follows
+//! ([`read_argocd`], and [`live`] for one Application), so it is written and
+//! tested once whichever way Argo CD is read:
 //!
 //! - [`KubeApiReader`] lists `applications.argoproj.io` objects from the
 //!   Kubernetes API of the instance's control-plane Cluster, through the
 //!   kubeconfig the unit admits as `KUBECONFIG` and the Cluster's declared
-//!   `spec.live.context`.
+//!   `spec.live.context`. The API fails a list the context may not make
+//!   instead of filtering it, so its proof that a missing Application is
+//!   really missing is the anchors the target records
+//!   ([`Proof::Anchors`]).
 //! - [`ApiServerReader`] lists them from the Argo CD API server the
 //!   instance declares, with the token the unit admits (named by the
-//!   declaration's `tokenEnv`).
+//!   declaration's `tokenEnv`). Argo CD leaves out what a token may not
+//!   `get` and still answers success, so its proof is Argo CD's own `can-i`
+//!   answer per Application ([`Proof::PerDeployment`]); the anchors are
+//!   established as well when the caller concludes from absence.
 //!
 //! Which one, and the API server's address, come from the ArgoCDInstance in
-//! Git. Credentials come only from the unit's admitted environment: a
-//! missing one is a [`ReadErrorKind::Credentials`] error that names the
-//! variable and the `env` entry that admits it, never a fallback to the
-//! process environment, the current kube context, or `~/.kube/config`.
-//!
-//! Each reading runs on a thread with a runtime of its own, so a driver
-//! calls it from synchronous code and from inside an asynchronous runtime
-//! alike, and ends by its deadline.
+//! Git. Each reading runs on a thread with a runtime of its own and ends by
+//! its deadline.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use nyl_render::gitops::observation::ArgoCdObservation;
+use nyl_render::gitops::observation::{
+    Anchor, ArgoCdAnchor, ArgoCdApplication, ArgoCdLocation, DeploymentRole, ExpectedDeployment,
+};
 use nyl_render::resources::ArgoCDAccessMethod;
 use serde_json::Value;
 
+use super::reconciler::{
+    Health, Observed, Proof, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, Running, Visibility,
+    KUBECONFIG_ENV,
+};
+
 mod api_server;
-pub mod evaluate;
 mod kube_api;
 pub mod live;
 
 pub use api_server::ApiServerReader;
 pub use kube_api::KubeApiReader;
 
-/// Why Argo CD could not be read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadErrorKind {
-    /// A credential the declaration needs is not admitted to the unit.
-    Credentials,
-    /// The declaration cannot be read as it stands, such as a Cluster
-    /// without the local context the Kubernetes method needs.
-    Declaration,
-    /// Argo CD or its API did not answer: connection, timeout, server error.
-    Unreachable,
-    /// The credential was rejected (HTTP 401): invalid, or expired.
-    Rejected,
-    /// The credential is accepted but may not read Applications (HTTP 403).
-    Forbidden,
-    /// The answer is not the Application list it should be.
-    Malformed,
-}
+/// The namespace Argo CD runs in unless the instance says otherwise.
+const DEFAULT_NAMESPACE: &str = "argocd";
 
-/// A failed reading, with the fix attached to the message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadError {
-    pub kind: ReadErrorKind,
-    pub message: String,
-}
-
-impl ReadError {
-    pub fn new(kind: ReadErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for ReadError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ReadError {}
-
-/// Reads the Applications of one Argo CD instance.
-pub trait ArgoReader {
+/// What the two readers ask Argo CD, so that one mapping into a [`Reading`]
+/// serves both.
+trait ArgoQueries {
     /// The Applications in `namespace` by name, each as Argo CD serves it.
-    /// An Application the credential may not read is absent, as Argo CD's own
-    /// API answers; a namespace without any is an empty map.
+    /// An Application the credential may not read is absent, as Argo CD's
+    /// own API answers; a namespace without any is an empty map.
     fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError>;
 
     /// Whether the credential may `get` the Application Argo CD's policy
-    /// names `rbac_name` (`<project>/<name>`, or `<project>/<namespace>/<name>`
-    /// outside the instance's own namespace). A listing silently leaves out
-    /// what the credential may not get and still answers success, so an
-    /// Application's absence from it proves nothing until this says the
-    /// credential could have seen it. A reader whose listing fails instead of
-    /// filtering (the Kubernetes API, whose RBAC denies the whole list) has
-    /// nothing to add.
-    fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
-        let _ = rbac_name;
-        Ok(true)
-    }
+    /// names `rbac_name`. A listing silently leaves out what the credential
+    /// may not get and still answers success, so an Application's absence
+    /// from it proves nothing until this says the credential could have seen
+    /// it.
+    fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError>;
 
     /// Whether the AppProject `name` of `namespace` is visible to the
-    /// credential. Phase 1 of a teardown keeps a target's AppProjects, so one
-    /// the reading shows proves the credential reaches the Argo CD that runs
-    /// the target. Absence, or a credential that may not read it, is `false`.
+    /// credential. Absence, or a credential that may not read it, is `false`.
     fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError>;
 }
 
@@ -123,68 +84,387 @@ pub fn rbac_name(project: &str, namespace: &str, name: &str, default_namespace: 
     }
 }
 
-/// The reader the declaration asks for, built from the unit's admitted
+/// The reader the recorded location asks for, built from the unit's admitted
 /// environment, finishing each reading within `budget`.
 pub fn reader(
-    observation: &ArgoCdObservation,
+    location: &ArgoCdLocation,
     env: &BTreeMap<String, String>,
     budget: Duration,
-) -> Result<Box<dyn ArgoReader>, ReadError> {
-    let access = &observation.location.access;
+) -> Result<Box<dyn ReconcilerReader>, ReadError> {
+    let access = &location.access;
     match access.method {
-        ArgoCDAccessMethod::Kubernetes => Ok(Box::new(KubeApiReader::new(
-            &observation.location.cluster,
-            observation.location.context.as_deref(),
-            env.get(KUBECONFIG_ENV).map(String::as_str),
-            budget,
-        )?)),
+        ArgoCDAccessMethod::Kubernetes => Ok(Box::new(
+            KubeApiReader::new(
+                &location.cluster,
+                location.context.as_deref(),
+                env.get(KUBECONFIG_ENV).map(String::as_str),
+                budget,
+            )?
+            .in_namespace(&location.namespace),
+        )),
         ArgoCDAccessMethod::Api => {
             let api = access.api.as_ref().ok_or_else(|| {
                 ReadError::new(
                     ReadErrorKind::Declaration,
                     format!(
                         "ArgoCDInstance {} declares access method api without spec.access.api",
-                        observation.location.instance
+                        location.instance
                     ),
                 )
             })?;
-            Ok(Box::new(ApiServerReader::new(
-                &api.server,
-                &api.token_env,
-                env.get(&api.token_env).map(String::as_str),
-                env.get("HTTPS_PROXY")
-                    .or_else(|| env.get("https_proxy"))
-                    .map(String::as_str),
-                budget,
-            )?))
+            Ok(Box::new(
+                ApiServerReader::new(
+                    &api.server,
+                    &api.token_env,
+                    env.get(&api.token_env).map(String::as_str),
+                    env.get("HTTPS_PROXY")
+                        .or_else(|| env.get("https_proxy"))
+                        .map(String::as_str),
+                    budget,
+                )?
+                .in_namespace(&location.namespace),
+            ))
         }
     }
 }
 
-/// The admitted variable naming the kubeconfig file(s) the Kubernetes method reads.
-pub const KUBECONFIG_ENV: &str = "KUBECONFIG";
+fn locator_error(what: &str) -> ReadError {
+    ReadError::new(
+        ReadErrorKind::Declaration,
+        format!(
+            "the unit records no Argo CD locator for {what}: it was resolved before it did; reconcile it so it records it"
+        ),
+    )
+}
 
-/// Run `future` on a thread with a current-thread runtime of its own.
-fn block_on<T: Send>(future: impl std::future::Future<Output = T> + Send) -> Result<T, ReadError> {
-    // Both clients build a TLS configuration, which needs a process-level
-    // crypto provider; the binary installs one at start, and a library caller
-    // may not have. Installing is idempotent: it fails only when one exists.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map(|runtime| runtime.block_on(future))
-                    .map_err(|error| {
-                        ReadError::new(
-                            ReadErrorKind::Unreachable,
-                            format!("cannot start a runtime to read Argo CD: {error}"),
-                        )
-                    })
-            })
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+/// Map Argo CD into a [`Reading`] of what `request` names: every Application
+/// of the namespaces involved is listed once, each expected deployment is
+/// parsed from the Application it names, and absence is proven the way the
+/// reader's `proof` says.
+///
+/// - Each expected deployment the listing lacks gets the credential's
+///   answer, from `can-i` for the API method (`Visible` for the Kubernetes
+///   method, which has no such question). A deployment whose project the unit
+///   did not record is a [`ReadErrorKind::Declaration`] error, since Argo CD's
+///   policy names an Application by it.
+/// - The anchors are established when the reader's proof rests on them or
+///   the caller concludes from absence, and only for a target with a
+///   workload deployment (one without has nothing to conclude): the catalog
+///   Application must be in the listing, and each AppProject must be visible.
+///   The first one that is not ends the check.
+/// - With no anchor at all, the Kubernetes method can show nothing about
+///   which Argo CD its context reaches, so the reading is unprovable and says
+///   to declare the instance's access with method api.
+fn read_argocd(
+    queries: &dyn ArgoQueries,
+    namespace: &str,
+    proof: Proof,
+    request: &ReadRequest<'_>,
+) -> Result<Reading, ReadError> {
+    let applications = request
+        .deployments
+        .iter()
+        .map(|deployment| {
+            serde_json::from_value::<ArgoCdApplication>(deployment.locator.clone())
+                .map(|locator| (deployment, locator))
+                .map_err(|_| locator_error(&format!("deployment {}", deployment.id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let anchors = request
+        .anchors
+        .iter()
+        .map(|anchor| {
+            serde_json::from_value::<ArgoCdAnchor>(anchor.locator.clone())
+                .map(|locator| (anchor, locator))
+                .map_err(|_| locator_error(&format!("anchor {}", anchor.id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let workload = request
+        .deployments
+        .iter()
+        .any(|deployment| deployment.role == DeploymentRole::Workload);
+    let establish = workload && (request.concluding_absence || proof == Proof::Anchors);
+
+    let namespaces = applications
+        .iter()
+        .map(|(_, locator)| locator.namespace.as_str())
+        .chain(
+            anchors
+                .iter()
+                .filter(|_| establish)
+                .filter_map(|(_, locator)| match locator {
+                    ArgoCdAnchor::Application { namespace, .. } => Some(namespace.as_str()),
+                    ArgoCdAnchor::Project { .. } => None,
+                }),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut live = BTreeMap::new();
+    for listed in namespaces {
+        for (name, application) in queries.applications(listed)? {
+            live.insert((listed.to_owned(), name), application);
+        }
+    }
+
+    let (deployments, absent) = observe_each(queries, namespace, &applications, &live)?;
+    let mut established = BTreeMap::new();
+    let mut unprovable = None;
+    if establish {
+        established = establish_anchors(queries, namespace, &anchors, &live)?;
+        if proof == Proof::Anchors && anchors.is_empty() {
+            unprovable = Some(
+                "the target generates no catalog Application and no AppProject other than `default`, so nothing shows that \
+                 the Kubernetes context reaches the Argo CD that runs it; Nyl will not conclude anything from an empty list: \
+                 declare the ArgoCDInstance's access with method api, which asks Argo CD whether the token may get each \
+                 Application"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(Reading {
+        deployments,
+        anchors: established,
+        absent,
+        proof,
+        unprovable,
     })
+}
+
+type Live = BTreeMap<(String, String), Value>;
+
+/// The observed deployments by id, and the visibility of the absent ones.
+type Observations = (BTreeMap<String, Observed>, BTreeMap<String, Visibility>);
+
+/// Each expected deployment as an [`Observed`] one when `live` has its
+/// Application, else the credential's answer about it.
+fn observe_each(
+    queries: &dyn ArgoQueries,
+    namespace: &str,
+    applications: &[(&ExpectedDeployment, ArgoCdApplication)],
+    live: &Live,
+) -> Result<Observations, ReadError> {
+    let mut deployments = BTreeMap::new();
+    let mut absent = BTreeMap::new();
+    for (deployment, locator) in applications {
+        if let Some(application) = live.get(&(locator.namespace.clone(), locator.name.clone())) {
+            let observed = live::parse(application).unwrap_or_else(|error| Observed {
+                running: Running::Unreadable(error),
+                health: Health::Unknown,
+                deleting: false,
+                source: None,
+                synced_source: None,
+            });
+            deployments.insert(deployment.id.clone(), observed);
+            continue;
+        }
+        if locator.project.is_empty() {
+            return Err(ReadError::new(
+                ReadErrorKind::Declaration,
+                "the unit records no Argo CD project for its Applications: it was resolved before it did; reconcile it so it records them".to_owned(),
+            ));
+        }
+        let rbac = rbac_name(&locator.project, &locator.namespace, &locator.name, namespace);
+        let visibility = if queries.can_get(&rbac)? {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden(format!(
+                "the credential may not get Application {rbac}, so its absence from the reading proves nothing \
+                 (Argo CD leaves out what a token may not get and still answers success): grant its account or \
+                 project role `get` on {rbac}"
+            ))
+        };
+        absent.insert(deployment.id.clone(), visibility);
+    }
+    Ok((deployments, absent))
+}
+
+/// Whether each anchor is visible, in order, ending at the first that is not.
+fn establish_anchors(
+    queries: &dyn ArgoQueries,
+    namespace: &str,
+    anchors: &[(&Anchor, ArgoCdAnchor)],
+    live: &Live,
+) -> Result<BTreeMap<String, Visibility>, ReadError> {
+    let mut established = BTreeMap::new();
+    for (anchor, locator) in anchors {
+        let visibility = match locator {
+            ArgoCdAnchor::Application {
+                namespace: catalog_namespace,
+                name,
+            } => {
+                if live.contains_key(&(catalog_namespace.clone(), name.clone())) {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden(format!(
+                        "the catalog Application {catalog_namespace}/{name} is not in the reading, so the credential or context \
+                         does not see this target's Applications and their absence would prove nothing (if the catalog was \
+                         never applied, apply it first): check that the ArgoCDInstance's access reaches the Argo CD that runs \
+                         this target and may read its Applications"
+                    ))
+                }
+            }
+            ArgoCdAnchor::Project { name } => {
+                if queries.project_exists(namespace, name)? {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden(format!(
+                        "the target generates no catalog Application, and its AppProject {name} is not visible in \
+                         namespace {namespace}, so the credential or context does not see this target's Argo CD and the \
+                         absence of its Applications would prove nothing: check that the ArgoCDInstance's access reaches \
+                         the Argo CD that runs this target and may read its projects"
+                    ))
+                }
+            }
+        };
+        let hidden = matches!(visibility, Visibility::Hidden(_));
+        established.insert(anchor.id.clone(), visibility);
+        if hidden {
+            break;
+        }
+    }
+    Ok(established)
+}
+
+#[cfg(test)]
+mod tests {
+    use nyl_render::gitops::observation::Source;
+    use serde_json::json;
+
+    use super::*;
+
+    /// An Argo CD with a fixed set of Applications and projects, and a policy.
+    struct Fake {
+        applications: BTreeMap<String, Vec<(String, Value)>>,
+        projects: BTreeSet<String>,
+        denied: BTreeSet<String>,
+    }
+
+    impl ArgoQueries for Fake {
+        fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+            Ok(self
+                .applications
+                .get(namespace)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect())
+        }
+        fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
+            Ok(!self.denied.contains(rbac_name))
+        }
+        fn project_exists(&self, _: &str, name: &str) -> Result<bool, ReadError> {
+            Ok(self.projects.contains(name))
+        }
+    }
+
+    fn deployment(role: DeploymentRole, namespace: &str, name: &str, project: &str) -> ExpectedDeployment {
+        ExpectedDeployment {
+            id: if namespace == "argocd" {
+                name.to_owned()
+            } else {
+                format!("{namespace}/{name}")
+            },
+            role,
+            path: format!("dev/{name}"),
+            release: None,
+            source: Source {
+                repository: "r".to_owned(),
+                path: format!("dev/{name}"),
+                options: Value::Null,
+            },
+            locator: json!({"namespace": namespace, "name": name, "project": project}),
+        }
+    }
+
+    fn live_application(name: &str) -> (String, Value) {
+        (
+            name.to_owned(),
+            json!({"metadata": {"name": name}, "status": {"health": {"status": "Healthy"},
+                "history": [{"id": 1, "revision": "c1", "deployedAt": "2026-01-01T00:00:00Z"}]}}),
+        )
+    }
+
+    /// Catches Argo CD's own vocabulary leaking into the shared judgement and
+    /// the two proofs of absence being mixed up: a listed Application is
+    /// parsed, a missing one gets the credential's `can-i` answer with its
+    /// fix, the Kubernetes method establishes anchors itself while the API
+    /// method does so only for a caller that concludes from absence.
+    #[test]
+    fn test_argocd_is_mapped_into_the_neutral_reading() {
+        let web = deployment(DeploymentRole::Workload, "argocd", "web", "web");
+        let api = deployment(DeploymentRole::Workload, "team-a", "api", "api");
+        let fake = Fake {
+            applications: BTreeMap::from([("argocd".to_owned(), vec![live_application("web")])]),
+            projects: BTreeSet::new(),
+            denied: BTreeSet::from(["api/team-a/api".to_owned()]),
+        };
+        let anchors = [Anchor {
+            id: "project/web".to_owned(),
+            locator: json!({"project": {"name": "web"}}),
+        }];
+        let deployments = [web, api];
+        let request = |concluding_absence| ReadRequest {
+            deployments: &deployments,
+            anchors: &anchors,
+            concluding_absence,
+        };
+        let reading = read_argocd(&fake, "argocd", Proof::PerDeployment, &request(false)).unwrap();
+        assert_eq!(reading.deployments.keys().collect::<Vec<_>>(), ["web"]);
+        assert_eq!(
+            reading.absent["team-a/api"],
+            Visibility::Hidden(
+                "the credential may not get Application api/team-a/api, so its absence from the reading proves nothing \
+                 (Argo CD leaves out what a token may not get and still answers success): grant its account or \
+                 project role `get` on api/team-a/api"
+                    .to_owned()
+            )
+        );
+        assert!(reading.anchors.is_empty() && reading.unprovable.is_none());
+        let concluding = read_argocd(&fake, "argocd", Proof::PerDeployment, &request(true)).unwrap();
+        assert!(matches!(&concluding.anchors["project/web"], Visibility::Hidden(reason)
+            if reason.contains("AppProject web is not visible in namespace argocd")));
+        let kubernetes = read_argocd(&fake, "argocd", Proof::Anchors, &request(false)).unwrap();
+        assert!(kubernetes.anchors.contains_key("project/web"));
+    }
+
+    /// Catches a Kubernetes context that can show nothing about which Argo CD
+    /// it reaches being trusted with an empty list, and an Application whose
+    /// project was never recorded being asked about with a made-up name.
+    #[test]
+    fn test_nothing_to_anchor_and_no_recorded_project_are_declaration_errors() {
+        let fake = Fake {
+            applications: BTreeMap::new(),
+            projects: BTreeSet::new(),
+            denied: BTreeSet::new(),
+        };
+        let deployments = [deployment(DeploymentRole::Workload, "argocd", "web", "default")];
+        let request = ReadRequest {
+            deployments: &deployments,
+            anchors: &[],
+            concluding_absence: false,
+        };
+        let reading = read_argocd(&fake, "argocd", Proof::Anchors, &request).unwrap();
+        assert!(reading.unprovable.as_deref().unwrap().contains("method api"));
+        let reading = read_argocd(&fake, "argocd", Proof::PerDeployment, &request).unwrap();
+        assert!(reading.unprovable.is_none());
+        let deployments = [deployment(DeploymentRole::Workload, "argocd", "web", "")];
+        let error = read_argocd(
+            &fake,
+            "argocd",
+            Proof::PerDeployment,
+            &ReadRequest {
+                deployments: &deployments,
+                ..request
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ReadErrorKind::Declaration);
+        assert!(error.message.contains("no Argo CD project"), "{error}");
+    }
+
+    #[test]
+    fn test_rbac_names_qualify_applications_outside_the_instance_namespace() {
+        assert_eq!(rbac_name("web", "argocd", "web", "argocd"), "web/web");
+        assert_eq!(rbac_name("web", "", "web", "argocd"), "web/web");
+        assert_eq!(rbac_name("web", "team-a", "web", "argocd"), "web/team-a/web");
+    }
 }

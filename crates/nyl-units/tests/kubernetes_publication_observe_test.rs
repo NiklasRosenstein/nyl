@@ -24,7 +24,7 @@ use nyl_core::orchestration::driver::{
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId, UnitAddress};
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, AttestationResult, DesiredUnit, Receipt};
-use nyl_render::gitops::observation::{ApplicationRole, ArgoCdObservation};
+use nyl_render::gitops::observation::{ArgoCdLocation, DeploymentRole, ReconcilerFacts, ReconcilerLocation};
 use nyl_units::kubernetes_publication::KubernetesPublicationDriver;
 use publication_world::{context, desired, git, spec, NoTools, World};
 use serde_json::{json, Value};
@@ -134,7 +134,7 @@ impl Observed {
 
     fn driver_spec(extra: Value) -> Value {
         let mut spec = spec();
-        spec["mode"] = json!("observe");
+        spec["observe"] = json!({});
         spec.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         spec
     }
@@ -215,19 +215,29 @@ impl Observed {
     ) {
         let facts = facts(unit);
         *self.served.lock().unwrap() = facts
-            .applications
+            .expected
+            .deployments
             .iter()
-            .filter_map(|app| {
-                let revision = running(&app.name)?;
+            .filter_map(|deployment| {
+                let (namespace, name) = (
+                    deployment.locator["namespace"].as_str().unwrap(),
+                    deployment.locator["name"].as_str().unwrap(),
+                );
+                let revision = running(name)?;
                 // As Argo CD serves it: the generated source, with its target revision.
-                let mut source = app.source.clone();
+                let mut source = deployment.source.options.clone();
+                if source.is_null() {
+                    source = json!({});
+                }
+                source["repoURL"] = json!(deployment.source.repository);
+                source["path"] = json!(deployment.source.path);
                 source["targetRevision"] = json!("deploy");
                 Some(application_with_source(
-                    &app.name,
-                    &app.namespace,
+                    name,
+                    namespace,
                     &source,
                     &[&revision],
-                    health(&app.name),
+                    health(name),
                 ))
             })
             .collect();
@@ -257,8 +267,13 @@ fn commit_as_another_tool(world: &World, clone: &str, path: &str) {
     git(&directory, &["push", "--quiet", "origin", "HEAD:refs/heads/deploy"]);
 }
 
-fn facts(unit: &DesiredUnit) -> ArgoCdObservation {
-    serde_json::from_value(unit.resolved_spec.as_ref().unwrap()["argocd"].clone()).unwrap()
+fn facts(unit: &DesiredUnit) -> ReconcilerFacts {
+    serde_json::from_value(unit.resolved_spec.as_ref().unwrap()["reconciler"].clone()).unwrap()
+}
+
+fn location(facts: &ReconcilerFacts) -> &ArgoCdLocation {
+    let ReconcilerLocation::ArgoCd(location) = &facts.location;
+    location
 }
 
 fn receipt(unit: &DesiredUnit) -> Receipt {
@@ -298,7 +313,7 @@ fn unknown(check: AttestationCheck) -> String {
 /// observation: the instance, how it is read, the publication destination,
 /// and every Application the target generates (the catalog and each
 /// workload, with its release), which `attest` and the teardown wait read
-/// from the stored document. A publish-mode unit records none, so its key
+/// from the stored document. A unit without `observe` records none, so its key
 /// is unchanged.
 #[test]
 fn test_resolution_records_the_argocd_facts_of_an_observing_unit() {
@@ -307,54 +322,55 @@ fn test_resolution_records_the_argocd_facts_of_an_observing_unit() {
         let observed = Observed::new(method);
         let unit = observed.resolve(&driver, Observed::driver_spec(json!({})));
         let facts = facts(&unit);
-        assert_eq!(facts.location.namespace, "argocd");
-        assert_eq!(facts.location.cluster, "dev");
-        assert_eq!(facts.location.context.as_deref(), Some("argocd-admin"));
-        assert_eq!(facts.publication.branch, "deploy");
-        assert_eq!(facts.publication.path_prefix, "dev");
-        assert_eq!(facts.publication.url, observed.world.project_url());
+        assert_eq!(location(&facts).namespace, "argocd");
+        assert_eq!(location(&facts).cluster, "dev");
+        assert_eq!(location(&facts).context.as_deref(), Some("argocd-admin"));
+        assert_eq!(facts.expected.publication.branch, "deploy");
+        assert_eq!(facts.expected.publication.path_prefix, "dev");
+        assert_eq!(facts.expected.publication.url, observed.world.project_url());
         match method {
             Method::Kubernetes => {
-                assert_eq!(facts.location.instance, "implicit:dev");
+                assert_eq!(location(&facts).instance, "implicit:dev");
                 assert_eq!(
-                    facts.location.access.method,
+                    location(&facts).access.method,
                     nyl_render::resources::ArgoCDAccessMethod::Kubernetes
                 );
             }
             Method::Api => {
-                assert_eq!(facts.location.instance, "control");
-                let api = facts.location.access.api.as_ref().unwrap();
+                assert_eq!(location(&facts).instance, "control");
+                let api = location(&facts).access.api.as_ref().unwrap();
                 assert_eq!(api.server, observed.stub.url());
                 assert_eq!(api.token_env, "ARGOCD_AUTH_TOKEN");
             }
         }
         let catalog = facts
-            .applications
+            .expected
+            .deployments
             .iter()
-            .find(|app| app.role == ApplicationRole::Catalog)
+            .find(|deployment| deployment.role == DeploymentRole::Catalog)
             .unwrap();
         assert_eq!(catalog.path, "dev/_nyl/catalog");
-        let workloads = facts.workload_applications().collect::<Vec<_>>();
-        assert_eq!(workloads.len(), 1, "{:?}", facts.applications);
+        let workloads = facts.expected.workload().collect::<Vec<_>>();
+        assert_eq!(workloads.len(), 1, "{:?}", facts.expected.deployments);
         assert_eq!(workloads[0].path, "dev/web/web");
         assert_eq!(workloads[0].release.as_deref(), Some("web/web"));
-        // The declaration, not the process, decided it: a publish-mode unit records nothing.
+        // The declaration, not the process, decided it: a unit without `observe` records nothing.
         let publishing = observed.resolve(&driver, spec());
-        assert!(publishing.resolved_spec.as_ref().unwrap().get("argocd").is_none());
-        // A unit that only waits by observing records the facts too.
-        let waiting = observed.resolve(&driver, {
-            let mut spec = spec();
-            spec["teardownWait"] = json!({"strategy": "observe"});
+        assert!(publishing.resolved_spec.as_ref().unwrap().get("reconciler").is_none());
+        // The flag decides, not the strategy: an observing unit that waits by delay records the facts too.
+        let delaying = observed.resolve(&driver, {
+            let mut spec = Observed::driver_spec(json!({}));
+            spec["teardownWait"] = json!({"strategy": "delay", "duration": "10m"});
             spec
         });
-        assert!(waiting.resolved_spec.as_ref().unwrap().get("argocd").is_some());
+        assert!(delaying.resolved_spec.as_ref().unwrap().get("reconciler").is_some());
     }
 }
 
-/// Catches an observe-mode unit declaring no attestations, or a publish-mode
-/// one declaring (or being asked for) some it cannot produce.
+/// Catches a unit that declares `observe` declaring no attestations, or a unit
+/// that does not declaring (or being asked for) some it cannot produce.
 #[test]
-fn test_observe_mode_declares_accepted_and_healthy_and_attests() {
+fn test_observe_declares_accepted_and_healthy_and_attests() {
     let driver = real();
     let observing = Observed::driver_spec(json!({}));
     assert_eq!(driver.attestations(&observing), ["accepted", "healthy"]);
@@ -393,10 +409,10 @@ fn test_attest_judges_what_argocd_runs_against_the_pushed_publication() {
         let details = &result[0].3;
         assert_eq!(details["publication"]["commit"], json!(first));
         assert_eq!(
-            details["instance"]["access"],
+            details["reconciler"]["access"],
             json!(if method == Method::Api { "api" } else { "kubernetes" })
         );
-        let applications = details["applications"].as_array().unwrap();
+        let applications = details["deployments"].as_array().unwrap();
         assert_eq!(applications.len(), 2);
         for application in applications {
             assert_eq!(application["state"], "accepted", "{application}");
@@ -442,14 +458,14 @@ fn test_attest_judges_what_argocd_runs_against_the_pushed_publication() {
         assert!(reason.contains(&format!("do not run publication {second}")), "{reason}");
         assert!(reason.contains(&format!("another publication ({first})")), "{reason}");
         // The catalog and the other Application did not change, so they run the second publication too.
-        let states = behind[0].3["applications"]
+        let states = behind[0].3["deployments"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|application| {
+            .map(|deployment| {
                 (
-                    application["name"].as_str().unwrap().to_owned(),
-                    application["state"].as_str().unwrap().to_owned(),
+                    deployment["id"].as_str().unwrap().to_owned(),
+                    deployment["state"].as_str().unwrap().to_owned(),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -483,8 +499,8 @@ fn test_attest_matches_by_application_directory_on_a_shared_branch() {
         passing.iter().all(|(_, result, ..)| *result == AttestationResult::Pass),
         "{passing:?}"
     );
-    assert_eq!(passing[0].3["applications"][0]["running"], json!(foreign));
-    assert_eq!(passing[0].3["applications"][0]["publication"], json!(published));
+    assert_eq!(passing[0].3["deployments"][0]["running"], json!(foreign));
+    assert_eq!(passing[0].3["deployments"][0]["publication"], json!(published));
 
     // Another tool commits a file inside the workload's directory.
     commit_as_another_tool(&observed.world, "second", "dev/web/web/hotfix.yaml");
@@ -502,11 +518,11 @@ fn test_attest_matches_by_application_directory_on_a_shared_branch() {
     );
     let failing = outcomes(observed.attest(&driver, &unit, &tree));
     assert_eq!(failing[0].1, AttestationResult::Fail);
-    let web = failing[0].3["applications"]
+    let web = failing[0].3["deployments"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|application| application["name"] == "web")
+        .find(|deployment| deployment["id"] == "web")
         .unwrap();
     assert_eq!(web["state"], "unmatched");
     assert_eq!(web["running"], json!(edited));
@@ -579,7 +595,7 @@ fn test_observe_removal_reports_the_workload_applications_that_remain() {
     for method in [Method::Kubernetes, Method::Api] {
         let mut observed = Observed::new(method);
         let unit = observed.resolve(&driver, {
-            let mut spec = spec();
+            let mut spec = Observed::driver_spec(json!({}));
             spec["teardownWait"] = json!({"strategy": "observe"});
             spec
         });
@@ -644,7 +660,7 @@ fn test_a_unit_without_recorded_facts_cannot_attest_or_observe() {
     let RemovalObservation::Failed(reason) = observed.removal(&driver, &unit) else {
         panic!("no facts, no observation");
     };
-    assert!(reason.contains("records no Argo CD facts"), "{reason}");
+    assert!(reason.contains("records no reconciler facts"), "{reason}");
 }
 
 /// The unit's key as a run computes it: the resolved spec without the fields
@@ -726,10 +742,13 @@ fn test_how_argocd_is_read_keys_nothing_and_publishes_nothing() {
     });
     let (after_inputs, after_resolved) = observed.inputs(&driver);
     assert_ne!(
-        after_resolved["argocd"]["access"], resolved["argocd"]["access"],
+        after_resolved["reconciler"]["access"], resolved["reconciler"]["access"],
         "the edit reached the facts"
     );
-    assert_ne!(after_resolved["argocd"]["context"], resolved["argocd"]["context"]);
+    assert_ne!(
+        after_resolved["reconciler"]["context"],
+        resolved["reconciler"]["context"]
+    );
     assert_eq!(
         key_of(&after_inputs, &after_resolved),
         key,
@@ -766,8 +785,8 @@ fn test_how_argocd_is_read_keys_nothing_and_publishes_nothing() {
     );
     let (moved_inputs, moved_resolved) = observed.inputs(&driver);
     assert_ne!(
-        moved_resolved["argocd"]["applications"],
-        after_resolved["argocd"]["applications"]
+        moved_resolved["reconciler"]["expected"],
+        after_resolved["reconciler"]["expected"]
     );
     assert_ne!(key_of(&moved_inputs, &moved_resolved), key);
 }
@@ -784,7 +803,7 @@ fn test_observe_removal_is_never_concluded_from_what_the_credential_cannot_see()
     for method in [Method::Kubernetes, Method::Api] {
         let observed = Observed::new(method);
         let unit = observed.resolve(&driver, {
-            let mut spec = spec();
+            let mut spec = Observed::driver_spec(json!({}));
             spec["teardownWait"] = json!({"strategy": "observe"});
             spec
         });
@@ -841,7 +860,7 @@ fn test_attest_does_not_record_a_failure_for_applications_the_token_cannot_see()
     observed.denied.lock().unwrap().clear();
     let result = outcomes(observed.attest(&driver, &unit, &tree));
     assert_eq!(result[0].1, AttestationResult::Fail);
-    assert_eq!(result[0].3["applications"][1]["state"], "missing");
+    assert_eq!(result[0].3["deployments"][1]["state"], "missing");
 }
 
 impl Observed {
@@ -866,20 +885,21 @@ fn test_removal_without_a_catalog_application_is_anchored_by_the_projects() {
     for method in [Method::Kubernetes, Method::Api] {
         let observed = Observed::with_catalog(method, false);
         let unit = observed.resolve(&driver, {
-            let mut spec = spec();
+            let mut spec = Observed::driver_spec(json!({}));
             spec["teardownWait"] = json!({"strategy": "observe"});
             spec
         });
         let facts = facts(&unit);
         assert!(
             facts
-                .applications
+                .expected
+                .deployments
                 .iter()
-                .all(|app| app.role == ApplicationRole::Workload),
+                .all(|app| app.role == DeploymentRole::Workload),
             "{:?}",
-            facts.applications
+            facts.expected.deployments
         );
-        assert_eq!(facts.applications[0].project, "web");
+        assert_eq!(facts.expected.deployments[0].locator["project"], "web");
 
         // The credential reaches another Argo CD: no project of this target.
         let RemovalObservation::Failed(reason) = observed.removal(&driver, &unit) else {
@@ -926,11 +946,14 @@ fn test_removal_with_nothing_to_anchor_fails_closed_for_kubernetes_only() {
     for method in [Method::Kubernetes, Method::Api] {
         let observed = Observed::with_catalog(method, false);
         let mut unit = observed.resolve(&driver, {
-            let mut spec = spec();
+            let mut spec = Observed::driver_spec(json!({}));
             spec["teardownWait"] = json!({"strategy": "observe"});
             spec
         });
-        unit.resolved_spec.as_mut().unwrap()["argocd"]["applications"][0]["project"] = json!("default");
+        // Every project is `default`, so the target records no anchor.
+        let recorded = &mut unit.resolved_spec.as_mut().unwrap()["reconciler"];
+        recorded["expected"][0]["locator"]["project"] = json!("default");
+        recorded["anchors"] = json!([]);
         match method {
             Method::Kubernetes => {
                 let RemovalObservation::Failed(reason) = observed.removal(&driver, &unit) else {
@@ -994,8 +1017,11 @@ fn test_moving_the_control_plane_context_changes_no_published_byte() {
 
     observed.edit_platform(|text| text.replace("control-admin", "renamed-control-admin"));
     let moved = observed.resolve(&driver, Observed::driver_spec(json!({})));
-    assert_eq!(facts(&moved).location.cluster, "control");
-    assert_eq!(facts(&moved).location.context.as_deref(), Some("renamed-control-admin"));
+    assert_eq!(location(&facts(&moved)).cluster, "control");
+    assert_eq!(
+        location(&facts(&moved)).context.as_deref(),
+        Some("renamed-control-admin")
+    );
     observed.publish(&driver, &moved);
     assert_eq!(
         observed.index_bytes(),

@@ -101,8 +101,8 @@ values:
   pass, and a producer that declares none is satisfied by its receipt.
 - `attestations: [a, b]` requires exactly those, whatever `evidence` says. Each
   must be one the producer declares: the names its kind produces, such as
-  `accepted` and `healthy` for a [publication in observe
-  mode](/nyl/orchestration/resource-guides/kubernetes-publication/), and the
+  `accepted` and `healthy` for a [publication that declares
+  `observe: {}`](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd), and the
   names in its `spec.attestations`. Naming another is an error
   (`NYL-ATTESTATION-UNDECLARED`), which `nyl validate` reports too.
 - An attestation declared with `from: external` is supplied only by a person

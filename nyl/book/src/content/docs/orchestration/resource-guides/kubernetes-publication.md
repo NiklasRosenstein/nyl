@@ -17,16 +17,16 @@ metadata:
   labels: {stage: dev}
 spec:
   target: '{{ values.target }}'
-  mode: publish
   teardownWait: {strategy: manual}
 ```
 
 `target` names a static DeploymentTarget, or declares one inline (see
 [Inline targets](#inline-targets)). The unit places that target into its
 environment: a target belongs to at most one environment, and a target no
-publication unit names rejects `fromUnit` bindings. `mode` is `publish`, the
-default, or `observe`, which publishes the same way and lets the unit read Argo CD
-(see [Observing Argo CD](#observing-argo-cd)). The common unit fields
+publication unit names rejects `fromUnit` bindings. A unit publishes only,
+unless it declares `observe: {}`: it then publishes the same way and also
+reads the reconciler that runs its target, Argo CD (see
+[Observing Argo CD](#observing-argo-cd)). The common unit fields
 (`dependsOn`, `timeout`, `env`, and so on) apply; `timeout` defaults to `10m`.
 
 ## Inline targets
@@ -189,8 +189,8 @@ to `3`. The prefix is then unowned, and the next publication adopts it.
 
 Publishing is a receipt: the tree is on the branch. Whether Argo CD took it
 and the workloads are healthy is a separate fact that only Argo CD knows. A
-unit with `mode: observe` declares two attestations, `accepted` and `healthy`,
-and `nyl attest` reads Argo CD to record them:
+unit that declares `observe: {}` declares two attestations, `accepted` and
+`healthy`, and `nyl attest` reads Argo CD to record them:
 
 ```yaml
 apiVersion: units.gitops.nyl/v1
@@ -199,9 +199,17 @@ metadata:
   name: kubernetes
 spec:
   target: '{{ values.target }}'
-  mode: observe
+  observe: {}
   env: {passthrough: [KUBECONFIG]}      # the credential for the access the ArgoCDInstance declares
 ```
+
+`observe` is an object so that options can be added later; only `{}` is
+accepted, and a field inside it is a validation error. It opts the unit in and
+says nothing about which reconciler runs: that follows the reconciler of the
+unit's target, its ArgoCDInstance, so the declaration stays the same if the
+target's reconciler changes. There is no `mode` field; a unit without
+`observe` only publishes, declares no attestations, and waits for an operator
+when it is torn down.
 
 ```bash
 nyl attest -e dev
@@ -214,10 +222,13 @@ Argo CD API server, is declared once on the
 in Git, never chosen per command, and the credential comes only from the
 unit's admitted `env` (`KUBECONFIG` for the Kubernetes API; the declared token
 variable, `ARGOCD_AUTH_TOKEN` by default, for the API server). Resolution
-records what the readings need in the stored document (`argocd`: the
-instance, how it is read, the publication destination, and the Applications
-the target generates), so `nyl attest` renders nothing; an authored `argocd` is
-rejected.
+records what the readings need in the stored document (`reconciler`: its
+`kind` (`argocd`), the instance, how it is read, the publication destination,
+the Applications the target expects Argo CD to run, and the anchors that show
+a reading comes from the Argo CD that runs the target), so `nyl attest`
+renders nothing; an authored `reconciler` is rejected. Only what the render
+derives keys the unit: how Argo CD is read (`access`, `context`, and the
+publication URL) is recorded but never re-executes it.
 
 Matching reads the publication branch, from the destination the unit
 publishes to, with the project's `[[git.credentials]]` as a publication does,
@@ -246,10 +257,13 @@ Application included, against the publication of the unit's current receipt:
   publication, and `healthy` when, besides, every one reports `Healthy`.
   Otherwise the attestation fails with the Applications that fell short.
 
-The attestations' details list each Application with its name, namespace, role
-(`catalog` or `workload`), directory, `state`, `health`, the revision it
-runs (`running`), and the publication commit that introduced what runs
-(`publication`), and, for one that fell short, why. The states are `accepted`,
+The attestations' details name the reconciler that was read (`reconciler`)
+and list each Application (`deployments`) with its `id` (its name, qualified by
+its namespace outside the instance's), role (`catalog` or `workload`),
+directory, `state`, `health` (`Healthy`, `Progressing`, `Degraded`, or
+`Unknown`, which covers anything else Argo CD reports and is never healthy),
+the revision it runs (`running`), and the publication commit that introduced
+what runs (`publication`), and, for one that fell short, why. The states are `accepted`,
 `other-publication`, `unmatched`, `not-on-branch`, `mixed`, `never-synced`,
 `missing`, `deleting`, `other-source` (its source, or the source of its last
 sync, differs from the generated one, such as an edited `directory.recurse`,
@@ -298,7 +312,7 @@ spec:
 `evidence: attested` instead of `attestations` requires both `accepted` and
 `healthy`. A `dependsOn` consumer does not run again when only the publication's receipt changes;
 [`runs`](/nyl/orchestration/runs/#requiring-attestations) shows how to make a smoke test
-run against each new version. A unit in `mode: publish` declares no attestations, so requiring one
+run against each new version. A unit without `observe` declares no attestations, so requiring one
 of it is `NYL-ATTESTATION-UNDECLARED`.
 
 `nyl attest --target` for a target no environment owns arrives with promotion
@@ -367,10 +381,11 @@ files its `_nyl/index.json` records. Files other tools committed in the prefix
 stay. See [Publication teardown waits](/nyl/orchestration/deletion/#publication-teardown-waits)
 for the strategies and the confirmation commands.
 
-`teardownWait` is `{strategy: manual}` (the default for `mode: publish`: an
-operator confirms with `nyl teardown --confirm-removed`), `{strategy: delay,
-duration: 10m}` (phase 1 completes after `duration`, recorded as not observed),
-or `{strategy: observe}` (the default for `mode: observe`: phase 1 completes
+`teardownWait` is `{strategy: manual}` (the default for a unit without
+`observe`: an operator confirms with `nyl teardown --confirm-removed`),
+`{strategy: delay, duration: 10m}` (phase 1 completes after `duration`,
+recorded as not observed), or `{strategy: observe}` (the default for a unit
+that declares `observe: {}`, and an error for one that does not: phase 1 completes
 once Argo CD no longer has any of the target's workload Applications, read as
 [Observing Argo CD](#observing-argo-cd) describes, within the unit's `timeout`;
 the wait concludes removal only from what the credential could see: the catalog
@@ -378,8 +393,8 @@ Application must be in the same reading (for a target without one, its
 AppProjects must be visible; with the Kubernetes method and neither, the wait
 fails closed and the API method is the way out), and with the API server each
 missing Application needs Argo CD's `can-i` to say the token may get it).
-A unit that waits by observing records the same Argo CD facts at resolution and
-needs the same credential admitted; without one, or when Argo CD cannot be
+A unit that waits by observing records the same reconciler facts at resolution
+and needs the same credential admitted; without one, or when Argo CD cannot be
 read, the teardown is uncertain with `observation-failed` and the reason.
 
 ### Teardown readiness
