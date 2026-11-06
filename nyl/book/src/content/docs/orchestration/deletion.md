@@ -231,10 +231,27 @@ A `KubernetesPublication` unit tears down in two phases: it publishes the remova
 removes the rest. While it waits, the units it depends on wait with it,
 reported with `NYL-TEARDOWN-WAITING`, and units with no path to it proceed.
 Before a publication's teardown starts, Nyl checks that its target's settings
-let the teardown complete; an unmet requirement keeps the unit
-`pending-teardown` unless the invocation passes `--allow-incomplete`, and a
-teardown completed without a claim of removal is recorded under `incomplete`
-with `NYL-TEARDOWN-INCOMPLETE`.
+let the teardown complete, as the unit judges them
+([Teardown readiness](/nyl/orchestration/resource-guides/kubernetes-publication/#teardown-readiness));
+an unmet requirement keeps the unit `pending-teardown` unless the invocation
+passes `--allow-incomplete`, and a teardown completed without a claim of
+removal is recorded under `incomplete` with `NYL-TEARDOWN-INCOMPLETE`. `plan`
+and `reconcile` warn about the same requirements for every publication that
+would be torn down.
+
+| `teardownWait` | Phase 1 completes when |
+| --- | --- |
+| `manual` (the default) | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and the run exits 2. |
+| `delay` (`duration: 10m`) | The duration has passed since the phase 1 commit; the teardown is recorded as not observed. |
+
+The `observe` strategy, which waits until Argo CD reports no workload
+Application, needs to read Argo CD and is not available yet: the
+`KubernetesPublication` unit rejects it with
+`NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED`.
+
+A publication refuses to publish or remove a prefix that another existing unit
+incarnation owns, with `NYL-KUBERNETES-OWNER-FENCED`
+([Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership)).
 
 ## Codes
 
@@ -244,6 +261,10 @@ with `NYL-TEARDOWN-INCOMPLETE`.
 | `NYL-TEARDOWN-HAS-DEPENDENTS` | Retained tombstones cite the unit. Pass `--allow-dependents`, or forget the tombstones first. |
 | `NYL-TEARDOWN-WAITING` | A publication it depends on waits under its `teardownWait`. Run again once the wait is over, or confirm the removal with `nyl teardown --confirm-removed`. |
 | `NYL-TEARDOWN-INCOMPLETE` | The teardown cannot complete, or completed without a claim of removal. Meet the requirements, or pass `--allow-incomplete` and check what remains. |
+| `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM` | A publication's target does not let its teardown complete. Each names the setting that fixes it. |
+| `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS` | A publication's teardown leaves these objects behind. Each names the setting that removes them. |
+| `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
+| `NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` | The `observe` teardown wait is not available yet. Use `delay` or `manual`. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting. Pass `--allow-teardown`, restore the old kind, or forget the old incarnation. |
 | `NYL-UNIT-HELD` | A held unit keeps changes or a teardown from applying. Lift the hold with `nyl resume`. |

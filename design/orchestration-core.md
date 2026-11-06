@@ -533,9 +533,22 @@ spec:
 
   An inline target is named `<environment>-<unit>`, so adding or removing
   publication units never renames another unit's target. `target.name`
-  overrides the name; it must be unique like every target name. Changing the
-  name, like any change to the target's identity, replaces the unit through
-  teardown.
+  overrides the name; it must be unique like every target name, declared or
+  inline. Changing the name, like any change to the target's identity,
+  replaces the unit through teardown.
+
+  The unit renderer fills the target's `name` and `sourceFile`, the
+  project-relative file that declares the unit (the file `valuesFrom` paths
+  of the inline spec are relative to); both are renderer-owned, so an authored
+  `sourceFile` is an error. From there the inline target is an ordinary
+  target: it joins the project's inventory
+  (`GitOpsInventory::with_inline_target`), is parsed as strictly as a
+  discovered one, and renders, validates, and publishes through the same
+  compile and publish path. The `fromUnit` bindings of its `releaseInputs`
+  expand into `releases` as for any target. Reference resolution replaces each
+  such binding in the stored spec with the value it resolved, so the driver
+  renders the inline target without the bindings the pinned `releases`
+  supply, which the render takes from the snapshot.
 - **Why both exist.** A DeploymentTarget says what is rendered and where it is
   published; it is complete without orchestration and is what a project
   without environments writes. A KubernetesPublication is the
@@ -551,7 +564,12 @@ spec:
   instance of an EnvironmentTemplate, whose inline targets must therefore
   template their names, for example from `environment.name`. M2 extended the
   check from targets sharing an explicit ArgoCDInstance to this rule; inline
-  targets and template instances join it with M5.
+  targets and template instances join it with M5. Implementation status (M5):
+  `nyl validate` adds the inline targets of every environment's enabled
+  publication units to the inventory it compiles
+  (`gitops::units::with_inline_targets`); a disabled unit is torn down from
+  its stored document and contributes none. Template instances join with
+  EnvironmentTemplates.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
   referenced by none rejects `fromUnit` bindings and reads `fromPromotion`
@@ -567,11 +585,34 @@ spec:
   and 3; non-orchestrated publications use version 3 for per-Release ownership
   and mixed provenance (see [partial publication](partial-publication.md)). Publish and teardown refuse a prefix whose index names
   another environment's or another incarnation's unit while that incarnation
-  still exists in its environment's state, active, deleting, or retained. A
+  still exists in its environment's state, active, held, deleting, or
+  retained. A
   target moves between environments once the old environment's incarnation is
   gone: torn down, or released with `nyl state forget` (see
   [Deletion](#deletion)). The first publish of the new owner then records
   itself in the index.
+  - The index's `owner` is `{environment, unit, uid}`; version 4 is exactly
+    the version with an `owner` (owner: `nyl_render::gitops::reconcile`, with
+    a golden file). Versions 2 and 3 name no owner and stay readable. The
+    first orchestrated publication over one adopts it, if the target's
+    identity matches, and upgrades it to version 4 even when no manifest byte
+    changes. A publication that records no owner, such as `publish-tree` and
+    `render-tree`, refuses a prefix whose index names an owner, because it
+    cannot tell whether that unit still exists.
+  - Whether an incarnation still exists is the shell's fact, not the
+    driver's: `ExecutionContext::incarnations` answers it from each declared
+    environment's state (`IncarnationDirectory`, implemented in
+    `nyl_orchestration::shell::run::incarnations`). The incarnation exists
+    when that environment's desired documents hold the unit name with that
+    uid, in any lifecycle. The driver owns the rule: it takes a prefix over
+    only when the owner is `gone`, and fails closed when state cannot say
+    (`unknown`: the environment is not declared at the source commit, or its
+    state cannot be read). Calls that never publish, such as drift detection
+    and `nyl build`, pass a directory that answers `unknown` for everything.
+  - A refused publication or removal fails with
+    `NYL-KUBERNETES-OWNER-FENCED`, category `ownership`, retryable, because
+    the next run reads state again; nothing was written. Drift detection over
+    a fenced prefix is `unknown` with the same code.
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
 - Its execution key covers the target render's complete input record from
@@ -705,13 +746,16 @@ Any other failure of the push may have published and ends the call. Drift
 detection renders again and compares the branch with the tree: a difference
 or an owned file modified outside Nyl is `drifted`, and a comparison that
 cannot be made is `unknown`. The driver records the target's effective teardown settings at
-resolution (see Teardown readiness below). `mode: observe` is rejected with
-`NYL-KUBERNETES-MODE-UNSUPPORTED` until the driver can read Argo CD, and inline
-targets are not supported yet. Tier-1 tests keep the test kind
+resolution (see Teardown readiness below). `mode: observe` and the `observe`
+`teardownWait` strategy are rejected with `NYL-KUBERNETES-MODE-UNSUPPORTED` and
+`NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` until the driver can read Argo CD,
+so no wait or health claim depends on an observer that does not exist; the
+strategies `delay` and `manual` work as the table below says. Inline targets,
+the version 4 ownership index, and owner fencing work as described above, in
+both phases of the teardown. Tier-1 tests keep the test kind
 `FakePublication` (scripted outcomes, the fake Argo CD observer
-`FakeObserver` for `observe`). Publication target ownership (ownership index
-v4) is not written yet; until then a teardown removes only the files its own
-index records.
+`FakeObserver` for `observe`, accepting inline targets and evaluating
+scenario-declared teardown settings with the real driver's readiness rules).
 
 `teardownWait` decides when phase 1 counts as complete. The same point gates
 phase 2 and the teardown of the units the publication depends on, such as the
@@ -808,9 +852,12 @@ to compute the execution key; the driver reads the settings from that render
 and the Namespaces the tree owns) and records them in the resolved spec under
 `teardownSettings` through `KeyInputs.recorded`, so an authored
 `teardownSettings` is rejected. The driver reads them back through
-`Driver::teardown_settings`, and `rules::teardown_readiness` evaluates them.
-A document resolved before the settings were recorded has none and no
-requirements. A tree without a catalog Application leaves the catalog to a
+`Driver::teardown_readiness`, which evaluates them itself: the table below is
+the publication driver's (`nyl_units::kubernetes_publication::readiness`),
+and the shell only coordinates and displays the findings (their codes, the
+setting that fixes each, and the split into blocking requirements and
+remnants). A document resolved before the settings were recorded has none and
+no requirements. A tree without a catalog Application leaves the catalog to a
 parent Application, so its catalog rows are `external: not checked`:
 
 | Requirement | Setting | If unmet |
@@ -2792,7 +2839,7 @@ trait Driver {
     fn observe(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<ObservedValues>>; // `nyl observe` and `reconcile`; see Observed values
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
-    fn teardown_settings(&self, unit: &DesiredUnit) -> Result<Supported<TeardownSettings>>; // readiness from the stored document; default Unsupported
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> Result<Supported<TeardownReadiness>>; // readiness from the stored document; default Unsupported
     fn build(&self, ctx: &ExecutionContext, unit: &DesiredUnit, push: bool) -> Result<Supported<Vec<Artifact>>>; // outside orchestration
     fn exec(&self, ctx: &ExecutionContext, unit: &DesiredUnit, args: &[OsString]) -> Result<Supported<ExecStatus>>; // operator repair, see Operator exec
 }
@@ -2832,7 +2879,8 @@ enum Outcome {
 | `ObservedValues` | Per declared observation: `Value(value)`, `Pending { reason }`, or `Failed { reason }`; Nyl checks values against the declared types, records them, and shows reasons unchanged (see [Observed values](#observed-values)) |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
 | `KeyInputs` | What resolution needs to compute an execution key: the selected `files` with their digests, the `excludedFields` of the resolved spec, an optional `fingerprint`, and `recorded` facts. Each recorded fact is a JSON Pointer to a member of the resolved spec and the value resolution writes there before it computes the key, so the stored desired document carries what the driver learned from its inputs. The engine stores a recorded value without interpreting it |
-| `TeardownSettings` | The target settings teardown readiness checks: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog; a setting Nyl cannot see is `None` and reported as not checked |
+| `TeardownReadiness` | What the driver found about whether the unit's teardown can complete: `blocking` requirements and `remnants` a teardown leaves, each a finding with a stable code and the setting that fixes it, and `not_checked` requirements the driver cannot see. The driver evaluates its own requirements (the publication driver from the settings it recorded at resolution: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog); the shell only displays the findings, keeps a unit with a blocking one pending teardown, and warns in `plan` and `reconcile` |
+| `IncarnationDirectory` | `ExecutionContext.incarnations`: whether a named unit incarnation (environment, unit, uid) still exists in its environment's state, as `exists`, `gone`, or `unknown` with a reason. A driver that fences a native resource by owner asks it about the owner it finds recorded; the shell answers from the declared environments' state without knowing what is fenced |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
 | `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
 | `OwnershipScope` | A driver-defined namespace, canonical key components, normalized path segments, and display description. Equal namespace/key claims overlap when either path contains the other by segment. |
@@ -2846,7 +2894,7 @@ enum Outcome {
   `since` and the strategy. Once the wait ends, the run calls `teardown`
   again with `ExecutionContext.teardown_wait` set to the `WaitCompletion`,
   which tells the driver to run phase 2; every other call passes none.
-- `teardown_settings` reads the stored desired document only, so `status`,
+- `teardown_readiness` reads the stored desired document only, so `status`,
   `get units -o wide`, `plan`, and a teardown show the same readiness without
   rendering. A held marker has no kind and never reaches a driver.
 - `Result` errors are Nyl-side problems, such as an unreadable worktree; they
@@ -2857,7 +2905,8 @@ enum Outcome {
   [Operator exec](#operator-exec)),
   the resolved spec, admitted environment variables and secrets, the approved
   change digest for `bind: plan` units, the deadline, a cancellation signal,
-  the unit's observed file, and a transcript sink that masks secret values.
+  the unit's observed file, the incarnation directory, and a transcript sink
+  that masks secret values.
 - Every execution gets its own worktree and its own temporary directory for
   tool state, such as `TF_DATA_DIR`, so parallel units sharing a `source.path`
   never share a working directory.

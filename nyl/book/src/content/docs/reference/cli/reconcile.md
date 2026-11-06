@@ -36,6 +36,11 @@ that changes nothing writes no commit.
 
 ## Deletion
 
+`plan` and `reconcile` warn about each unmet teardown requirement, and each
+object a teardown would leave behind, of every publication that would be torn
+down (the `NYL-TEARDOWN-*` codes below), so a target that cannot tear down
+cleanly is known before a teardown runs.
+
 After the execution waves, a run carries out the lifecycle work of units
 that left the ownership set and of teardowns an operator requested with
 [`nyl teardown`](/nyl/reference/cli/teardown/), consumers first, as
@@ -205,6 +210,7 @@ Besides the codes above, a reconcile reports:
 | `NYL-TEARDOWN-INCOMPLETE` | A teardown cannot complete, or completed without a claim of removal. Meet the requirement or pass `--allow-incomplete`, and check what remains. |
 | `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM` | A publication's target does not let its teardown complete; each names the setting that fixes it. |
 | `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS` | A publication's teardown leaves these objects behind. |
+| `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix, so nothing was published (a retryable failure). Tear that unit down or release it with `nyl state forget`; see [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership). |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting first. |
 | `NYL-STATE-DELETED` | The environment's state was deleted with `nyl state delete`. Remove the Environment, or start over with `nyl state init --fresh`. |

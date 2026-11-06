@@ -48,6 +48,13 @@ input, Git, publication, and carried-state digests the index records for them. A
 has no target-wide `sourceCommit`; commit trailers identify the operation's
 source revision, baseline, and selection.
 
+Version 4 ownership indexes, written by orchestrated publications, add the
+owning unit incarnation (`owner`: environment, unit, uid) to version 3, as the
+[Kubernetes publication unit](orchestration-core.md#kubernetes-publication-unit)
+describes. Versions 2 and 3 remain readable; the first orchestrated publication
+over one records its owner and upgrades it. A publication that records no owner
+refuses a prefix whose index names one.
+
 Version 2 indexes remain readable and reconcilable. One full publication seeds
 the metadata before partial publication is possible. Missing files, hash
 mismatches, incompatible ownership, and unsupported metadata fail closed. A full

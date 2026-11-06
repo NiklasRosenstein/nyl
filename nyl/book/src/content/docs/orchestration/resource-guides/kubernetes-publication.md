@@ -21,13 +21,60 @@ spec:
   teardownWait: {strategy: manual}
 ```
 
-`target` names a static DeploymentTarget. The unit places that target into its
+`target` names a static DeploymentTarget, or declares one inline (see
+[Inline targets](#inline-targets)). The unit places that target into its
 environment: a target belongs to at most one environment, and a target no
 publication unit names rejects `fromUnit` bindings. `mode` is `publish`, the
-default. Inline targets and `mode: observe` are not available yet; the unit
-rejects `mode: observe` with `NYL-KUBERNETES-MODE-UNSUPPORTED`, because nothing
-would check what the publication promises. The common unit fields (`dependsOn`,
-`timeout`, `env`, and so on) apply; `timeout` defaults to `10m`.
+default. `mode: observe` is not available yet; the unit rejects it with
+`NYL-KUBERNETES-MODE-UNSUPPORTED`, because nothing would check what the
+publication promises. The common unit fields (`dependsOn`, `timeout`, `env`,
+and so on) apply; `timeout` defaults to `10m`.
+
+## Inline targets
+
+A unit can declare its DeploymentTarget in `spec.target.inline`, as a
+DeploymentTarget `spec` rendered with the unit for each environment, so one
+definition publishes a target of its own in every environment that selects it:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {stage: preview}
+spec:
+  target:
+    inline:
+      clusterRef: {name: preview-cluster}
+      applicationGroupSelector: {matchLabels: {app: web}}
+      publication:
+        repositoryRef: {name: deploy}
+        revision: previews
+        pathPrefix: '{{ environment.name }}'
+      values: {hostname: '{{ values.hostname }}'}
+      releaseInputs:
+        web/web:
+          image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+```
+
+The unit's templates see the environment's `values` and `environment`, as the
+other unit fields do. The inline target is named `<environment>-<unit>`, here
+`dev-kubernetes`, so adding or removing publication units never renames another
+unit's target; `target.name` overrides the name. Target names are unique across
+declared and inline targets, and changing the name replaces the unit through
+teardown. Relative paths in `valuesFrom` start at the file that declares the
+unit.
+
+From then on the target is an ordinary one. It is parsed as strictly as a
+declared target, rendered and published through the same compile and publish
+path, and checked with every other target by
+[`nyl validate`](/nyl/reference/cli/validate/), including that the Argo CD
+Application and AppProject names it generates differ from every other target's
+on the same cluster and Argo CD namespace. Use `applicationNameTemplate` and
+`projectTemplate` with `target.metadata.name` where several targets select one
+ApplicationGroup. Its `fromUnit` bindings work as in a declared target. The
+renderer fills `target.name` and `target.sourceFile` (the file that declares the
+unit); writing `sourceFile` by hand is an error.
 
 ## Release inputs from other units
 
@@ -91,6 +138,24 @@ renders. It reports `drifted` when they differ, or when an owned file was
 edited outside Nyl, and `unknown`, with the reason, when it cannot compare,
 for example when the remote is unreachable.
 
+## Ownership
+
+The published `_nyl/index.json` records the unit that owns the prefix: the
+environment, the unit, and the incarnation's uid (index version 4; indexes
+written before, as `publish-tree` writes them, name no owner and stay
+readable). A publication or teardown refuses a prefix that names another
+incarnation while that incarnation still exists in its environment's state,
+active, held, deleting, or retained. It fails with
+`NYL-KUBERNETES-OWNER-FENCED`, naming the owner, and publishes and removes
+nothing; the failure is retryable, because the next run reads state again. A
+target moves between environments once the old environment's incarnation is
+gone: its teardown completed, or `nyl state forget` released it. The first
+publication of the new owner records itself in the index. When the state of
+the owner's environment cannot be read, or the environment is no longer
+declared, the fence holds. The first orchestrated publication over a prefix
+without an owner adopts it and upgrades its index, and `publish-tree` refuses a
+prefix an orchestrated unit owns.
+
 ## Teardown
 
 When the unit leaves its environment's ownership set, it tears down in two
@@ -100,11 +165,34 @@ files its `_nyl/index.json` records. Files other tools committed in the prefix
 stay. See [Publication teardown waits](/nyl/orchestration/deletion/#publication-teardown-waits)
 for the strategies and the confirmation commands.
 
+`teardownWait` is `{strategy: manual}` (the default: an operator confirms with
+`nyl teardown --confirm-removed`) or `{strategy: delay, duration: 10m}` (phase 1
+completes after `duration`, recorded as not observed). The `observe` strategy
+needs to read Argo CD and is rejected with
+`NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` until the unit can.
+
+### Teardown readiness
+
 Resolution records the target's effective teardown settings in the stored
 document: whether the catalog prunes removed Applications, the Applications'
 `applicationDeletionPolicy`, each owned Namespace's `deletePolicy`, and whether a
-parent owns the catalog. `status`, `plan`, and every teardown check them
-without rendering, and an unmet blocking requirement holds the teardown until
-the target is fixed or the invocation passes `--allow-incomplete`.
-`teardownSettings` is derived from the rendered tree and is rejected when
-written by hand.
+parent owns the catalog. The unit itself judges them, from the stored document
+without rendering, so `status`, `plan`, `get units -o wide`, and every teardown
+agree:
+
+| Requirement | Unmet, and the fix |
+| --- | --- |
+| The catalog prunes removed workload Applications | Blocking, `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`: enable the catalog's `syncPolicy.automated` with `prune: true`. |
+| Deleting an Application deletes its workloads | Blocking, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`: set `applicationDeletionPolicy` to `Foreground` or `Background`. |
+| Owned Namespaces do not hold deletion | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: set the Namespaces' `deletePolicy` to `Automatic` or `Retain`. |
+| Owned Namespaces are removed | Remnant, `NYL-TEARDOWN-NAMESPACES-REMAIN`: set `deletePolicy: Automatic`. |
+| The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-CATALOG-REMAINS`: let a parent own the catalog (`catalogApplication.enabled: false`). |
+
+A tree without a catalog Application leaves the catalog to a parent whose
+settings Nyl cannot see; those rows read `external: not checked` and never
+block. `nyl plan` and `nyl reconcile` warn about every unmet requirement and
+remnant of each publication that would be torn down, so the problem is known
+long before a teardown runs. A blocking requirement holds a teardown
+(`NYL-TEARDOWN-INCOMPLETE`) until the target is fixed or the invocation passes
+`--allow-incomplete`. `teardownSettings` is derived from the rendered tree and
+is rejected when written by hand.

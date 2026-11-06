@@ -380,7 +380,14 @@ Cluster.
   keyed by `<applicationGroup>/<release>`, and the target's effective teardown
   settings, which the driver records when it resolves the unit; the other
   bindings resolve inside the render and enter its execution key. Its recorded
-  result is the published commit and index digest.
+  result is the published commit and index digest. The unit may declare its
+  target inline, which then compiles and publishes as any target does. The
+  published index records the owning unit incarnation, and a publication
+  refuses a prefix another existing incarnation owns; the shell answers
+  whether an incarnation still exists through a generic directory, so the
+  rule stays in the driver. The driver also judges its target's teardown
+  readiness from the recorded settings, and shared code only displays the
+  findings.
   Publication is a receipt; Argo CD acceptance and observed health are the
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
