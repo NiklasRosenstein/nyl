@@ -313,7 +313,7 @@ fn unknown(check: AttestationCheck) -> String {
 /// observation: the instance, how it is read, the publication destination,
 /// and every Application the target generates (the catalog and each
 /// workload, with its release), which `attest` and the teardown wait read
-/// from the stored document. A publish-mode unit records none, so its key
+/// from the stored document. A unit without `observe` records none, so its key
 /// is unchanged.
 #[test]
 fn test_resolution_records_the_argocd_facts_of_an_observing_unit() {
@@ -354,7 +354,7 @@ fn test_resolution_records_the_argocd_facts_of_an_observing_unit() {
         assert_eq!(workloads.len(), 1, "{:?}", facts.expected.deployments);
         assert_eq!(workloads[0].path, "dev/web/web");
         assert_eq!(workloads[0].release.as_deref(), Some("web/web"));
-        // The declaration, not the process, decided it: a publish-mode unit records nothing.
+        // The declaration, not the process, decided it: a unit without `observe` records nothing.
         let publishing = observed.resolve(&driver, spec());
         assert!(publishing.resolved_spec.as_ref().unwrap().get("reconciler").is_none());
         // The flag decides, not the strategy: an observing unit that waits by delay records the facts too.
@@ -367,10 +367,10 @@ fn test_resolution_records_the_argocd_facts_of_an_observing_unit() {
     }
 }
 
-/// Catches an observe-mode unit declaring no attestations, or a publish-mode
-/// one declaring (or being asked for) some it cannot produce.
+/// Catches a unit that declares `observe` declaring no attestations, or a unit
+/// that does not declaring (or being asked for) some it cannot produce.
 #[test]
-fn test_observe_mode_declares_accepted_and_healthy_and_attests() {
+fn test_observe_declares_accepted_and_healthy_and_attests() {
     let driver = real();
     let observing = Observed::driver_spec(json!({}));
     assert_eq!(driver.attestations(&observing), ["accepted", "healthy"]);
