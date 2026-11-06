@@ -153,6 +153,8 @@ pub fn prepare(
             observed: &snapshot.observed,
             artifacts: &snapshot.artifacts,
             attestations: &snapshot.attestations,
+            observations: &snapshot.observations,
+            now: wiring.clock.now(),
             observed_commit: snapshot.tips.observed.as_ref(),
             run: None,
             produced_in_run: &BTreeSet::new(),

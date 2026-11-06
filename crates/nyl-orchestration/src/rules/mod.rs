@@ -13,6 +13,7 @@ pub mod graph;
 pub mod hold;
 pub mod lease;
 pub mod lifecycle;
+pub mod observed_values;
 pub mod local;
 pub mod recovery;
 pub mod references;

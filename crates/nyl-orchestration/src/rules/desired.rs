@@ -701,6 +701,8 @@ fn leaving_units(inputs: &DesireInputs<'_>, set: &BTreeMap<&UnitName, &RenderedU
 /// Why a unit's spec is not accepted.
 enum UnitError {
     Invalid(String),
+    /// The unit declares `observations`, which its kind cannot read.
+    ObservationsUnsupported(String),
 }
 
 impl UnitError {
@@ -711,6 +713,13 @@ impl UnitError {
                 format!("unit {name} ({source_path}): {message}"),
                 "correct the unit's spec so that it matches its kind's schema",
             ),
+            Self::ObservationsUnsupported(kind) => Finding::new(
+                Code::ObservationsUnsupported,
+                format!(
+                    "unit {name} ({source_path}) declares observations, but kind {kind} reads no observed values for its spec"
+                ),
+                "remove `observations`, or use a kind that reads observed values, such as a KubernetesPublication in `mode: observe`",
+            ),
         }
     }
 }
@@ -718,6 +727,16 @@ impl UnitError {
 /// The driver's validation and the common fields' validation.
 fn validate_unit(driver: &dyn Driver, spec: &Value) -> Result<(), UnitError> {
     let invalid = |error: &dyn std::fmt::Display| UnitError::Invalid(error.to_string());
+    // A kind without the capability rejects `observations` before it
+    // validates anything of its own: its schema has no place for them.
+    if spec
+        .get("observations")
+        .and_then(Value::as_object)
+        .is_some_and(|observations| !observations.is_empty())
+        && !driver.capabilities(spec).observed_values
+    {
+        return Err(UnitError::ObservationsUnsupported(driver.kind().to_owned()));
+    }
     driver.validate_spec(spec).map_err(UnitError::Invalid)?;
     let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
     if common.approval.bind == nyl_core::resources::units::ApprovalBind::Plan

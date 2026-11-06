@@ -89,6 +89,7 @@ document_kind!(EnvironmentRecordKind, "EnvironmentRecord");
 document_kind!(DesiredUnitKind, "DesiredUnit");
 document_kind!(ObservedUnitKind, "ObservedUnit");
 document_kind!(DriftRecordKind, "DriftRecord");
+document_kind!(ObservationRecordKind, "ObservationRecord");
 document_kind!(AttestationKind, "Attestation");
 document_kind!(AttestationRecordKind, "AttestationRecord");
 document_kind!(LeaseKind, "Lease");
@@ -516,6 +517,14 @@ pub struct ReceiptProvenance {
     pub observed_commit: Option<CommitId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunId>,
+    /// The observed value of the producer's receipt the reference read, for
+    /// a `fromUnit: {unit, observation}` reference; absent for an output or
+    /// an artifact field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
+    /// When the observed value was last read successfully, with `observation`.
+    #[serde(rename = "observedAt", default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<Timestamp>,
 }
 
 /// A value read from a PromotionRecord.
@@ -852,6 +861,51 @@ pub enum Drift {
     Unknown { reason: String },
 }
 
+/// A unit's latest observed values, `observed/units/<unit>/observations.yaml`:
+/// what the driver read for the receipt whose execution key it names. A
+/// record belongs to that receipt alone and goes when a new receipt replaces
+/// it, so a value read from what ran before never satisfies a reference.
+/// Contract: [Observed values](../../../../design/orchestration-core.md#observed-values).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRecord {
+    #[serde(rename = "apiVersion")]
+    pub api_version: StateV1,
+    pub kind: ObservationRecordKind,
+    pub unit: UnitIdentity,
+    #[serde(rename = "executionKey")]
+    pub execution_key: ExecutionKey,
+    /// When the record was last written: a recorded read, never a read that
+    /// changed nothing.
+    pub at: Timestamp,
+    /// Each declared observation by name, as of its last recorded read.
+    pub values: BTreeMap<String, RecordedObservation>,
+}
+
+/// One observation in an [`ObservationRecord`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum RecordedObservation {
+    /// The value, and when it was last read successfully.
+    Value {
+        value: Value,
+        #[serde(rename = "observedAt")]
+        observed_at: Timestamp,
+    },
+    /// No value yet for this receipt, with the driver's reason.
+    Pending { pending: String },
+}
+
+impl RecordedObservation {
+    /// The value, when there is one.
+    pub fn value(&self) -> Option<&Value> {
+        match self {
+            Self::Value { value, .. } => Some(value),
+            Self::Pending { .. } => None,
+        }
+    }
+}
+
 /// An attestation of a receipt, or of an environment's state; stored as one
 /// entry of an [`AttestationRecord`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -979,6 +1033,7 @@ pub enum Operation {
     Recover,
     DetectDrift,
     Attest,
+    Observe,
     Exec,
     CiAdmit,
     StateInit,
@@ -999,6 +1054,7 @@ impl Operation {
             Self::Recover => "recover",
             Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
+            Self::Observe => "observe",
             Self::Exec => "exec",
             Self::CiAdmit => "ci-admit",
             Self::StateInit => "state-init",
@@ -1107,6 +1163,7 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
         ("artifact", schema::<ArtifactDocument>("Artifact")),
         ("drift-record", schema::<DriftRecord>("DriftRecord")),
+        ("observation-record", schema::<ObservationRecord>("ObservationRecord")),
         ("attestation-record", schema::<AttestationRecord>("AttestationRecord")),
         ("lease", schema::<Lease>("Lease")),
         ("run", schema::<Run>("Run")),

@@ -157,7 +157,7 @@ fn reference_edges(
                 findings.push(Finding::new(
                     Code::ReferenceInvalid,
                     format!("unit {consumer}: {issue}"),
-                    "write a reference as {fromUnit: {unit, output | artifact, kind?, pointer?}} alone in its object",
+                    "write a reference as {fromUnit: {unit, output | artifact | observation, kind?, pointer?}} alone in its object",
                 ));
             }
             return;
@@ -190,7 +190,7 @@ fn reference_edges(
             findings.push(Finding::new(
                 Code::ReferenceInvalid,
                 format!("unit {consumer}: the reference at {:?} {error}", reference.pointer),
-                "reference an output the producer declares and does not mark sensitive",
+                "reference an output or observation the producer declares (an output may not be sensitive)",
             ));
             continue;
         }
@@ -225,6 +225,7 @@ fn reference_edges(
                 pointer,
                 output: source.output,
                 artifact: source.artifact,
+                observation: source.observation,
             },
         });
     }
@@ -442,11 +443,13 @@ mod tests {
                     pointer: JsonPointer::new("/releases/platform~1web/dbHost").unwrap(),
                     output: Some("host".to_owned()),
                     artifact: None,
+                    observation: None,
                 },
                 EdgeSource::Reference {
                     pointer: JsonPointer::new("/releases/platform~1web/image").unwrap(),
                     output: None,
                     artifact: Some("image".to_owned()),
+                    observation: None,
                 },
             ]
         );

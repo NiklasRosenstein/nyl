@@ -59,7 +59,7 @@ use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
     SourceResolver, StateError, TransitionChanges,
 };
-use nyl_core::orchestration::state::Attestation;
+use nyl_core::orchestration::state::{Attestation, ObservationRecord};
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
     Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
@@ -79,6 +79,7 @@ use crate::rules::drift;
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
 use crate::rules::freshness::{receipt_is_current, same_incarnation};
 use crate::rules::graph::{extract, topological_order};
+use crate::rules::observed_values;
 use crate::rules::references::{resolve_unit, ReferenceView};
 use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
 use crate::rules::sources::{
@@ -98,6 +99,7 @@ use slots::Slots;
 mod cancel;
 mod execute;
 mod incarnations;
+mod observe;
 pub(crate) mod slots;
 mod teardown;
 pub(crate) mod wait;
@@ -424,6 +426,7 @@ struct Evidence<'e> {
     observed: &'e BTreeMap<UnitName, ObservedUnit>,
     artifacts: &'e BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
     attestations: &'e BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    observations: &'e BTreeMap<UnitName, ObservationRecord>,
     observed_commit: Option<&'e CommitId>,
     run: Option<&'e RunId>,
     produced_in_run: &'e BTreeSet<UnitName>,
@@ -921,6 +924,8 @@ impl<'r, 'a> Session<'r, 'a> {
                     observed: evidence.observed,
                     artifacts: evidence.artifacts,
                     attestations: evidence.attestations,
+                    observations: evidence.observations,
+                    now: self.base().clock.now(),
                     observed_commit: evidence.observed_commit,
                     run: evidence.run,
                     produced_in_run: evidence.produced_in_run,
@@ -1307,7 +1312,7 @@ fn declared_outputs(spec: &Value) -> BTreeMap<String, OutputDeclaration> {
 }
 
 /// A unit's stored blocked reasons in the report's form, and the warnings
-/// of those that wait for attestations.
+/// of those that wait for attestations or observed values.
 fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<BlockedBy>, Vec<Finding>) {
     let Readiness::Blocked { reasons } = &unit.readiness else {
         return (Vec::new(), Vec::new());
@@ -1317,7 +1322,14 @@ fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<Blo
             .iter()
             .map(|reason| crate::rules::unit_state::blocked_by(&reason.pointer, &reason.reason))
             .collect(),
-        crate::rules::evidence::warnings(&unit.unit.name, environment.as_str(), reasons),
+        crate::rules::evidence::warnings(&unit.unit.name, environment.as_str(), reasons)
+            .into_iter()
+            .chain(crate::rules::observed_values::warnings(
+                &unit.unit.name,
+                environment.as_str(),
+                reasons,
+            ))
+            .collect(),
     )
 }
 
@@ -1407,6 +1419,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
                 observed: &observed,
                 artifacts: &snapshot.artifacts,
                 attestations: &snapshot.attestations,
+                observations: &snapshot.observations,
                 observed_commit: snapshot.tips.observed.as_ref(),
                 run: None,
                 produced_in_run: &produced,
@@ -1869,6 +1882,7 @@ fn plan_unit(
                     unit: None,
                     reason: "needed-to-plan".to_owned(),
                     attestation: None,
+                    observation: None,
                 }));
         }
         Ok(Supported::Unsupported) => {
@@ -2306,6 +2320,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut artifacts = snapshot.artifacts.clone();
         // The attestations of the receipts as this run changes them.
         let mut attestations = snapshot.attestations.clone();
+        // The observed values of the receipts as this run reads them.
+        let mut observations = snapshot.observations.clone();
+        let mut observing = observe::Observing::default();
         let mut life = teardown::Life::new(&overlay.desired);
         if lifecycle_work {
             for (name, write) in &prepared.desired.lifecycle {
@@ -2377,6 +2394,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     observed: &observed,
                     artifacts: &artifacts,
                     attestations: &attestations,
+                    observations: &observations,
                     observed_commit: snapshot.tips.observed.as_ref(),
                     run: Some(&self.run),
                     produced_in_run: &produced,
@@ -2419,6 +2437,35 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 if taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
                     // Imported receipts may change downstream keys: resolve again.
                     continue;
+                }
+            }
+            if request.mode == RunMode::Reconcile && !request.lifecycle.leaving && life.stopped.is_none() {
+                // The observed values of a replaced receipt go, and every
+                // current unit that declares observations is read once per
+                // receipt before its consumers resolve: a value that changed
+                // by itself reaches them in this run.
+                for stale in observed_values::changes(&observations, &observed).into_keys() {
+                    observations.remove(&stale);
+                }
+                let now = context.base.clock.now();
+                let due = observing.due(session, &resolved.units, &observed, now);
+                if !due.is_empty() {
+                    let longest = longest_timeout(context.drivers, due.iter().map(|unit| &resolved.units[unit]));
+                    if let Err(ending) = self.phase(Vec::new(), lease::deadline(context.base, now, longest), &[]) {
+                        return ending;
+                    }
+                    if observing.read(
+                        session,
+                        &prepared,
+                        &resolved,
+                        &observed,
+                        &artifacts,
+                        &mut observations,
+                        &due,
+                    ) {
+                        // A recorded value changed: its consumers resolve again.
+                        continue;
+                    }
                 }
             }
             if !request.mode.executes() || request.lifecycle.leaving || life.stopped.is_some() {
@@ -2472,6 +2519,19 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
             }
             if ready.is_empty() {
+                // Nothing else to run: wait for the observed values this run
+                // owes a wait for (`observationWait`), then resolve again.
+                if request.mode == RunMode::Reconcile && life.stopped.is_none() {
+                    let now = context.base.clock.now();
+                    if let Some(until) = observing.next_poll(now) {
+                        let seconds = (until - now).num_seconds().max(1);
+                        context
+                            .base
+                            .clock
+                            .wait(Duration::from_secs(u64::try_from(seconds).unwrap_or(1)));
+                        continue;
+                    }
+                }
                 break (resolved, skipped);
             }
             for batch in batches(&ready, request.concurrency) {
@@ -2529,6 +2589,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                             produced.insert(name.clone());
                         }
                         observed.insert(name.clone(), checkpoint.observed.clone());
+                        // A run that executed a unit owes its `observationWait`.
+                        if let (UnitResult::Executed { .. } | UnitResult::Recovered { .. }, Some(receipt)) =
+                            (&execution.result, checkpoint.observed.receipt.as_ref())
+                        {
+                            let unit = &resolved.units[&name];
+                            observing.executed(
+                                unit,
+                                receipt,
+                                unit_timeout(context.drivers, unit),
+                                context.base.clock.now(),
+                            );
+                        }
                         // A new receipt starts with the attestations its own execution reported.
                         if let Some(set) = &execution.attestations {
                             if set.is_empty() {
@@ -2779,6 +2851,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
             }
             entry.warnings.extend(blocked_warnings);
+            entry
+                .warnings
+                .extend(observing.warnings.get(name).cloned().unwrap_or_default());
             self.report.units.insert(name.clone(), entry);
         }
         for (name, held) in &prepared.desired.held {
@@ -2846,7 +2921,20 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.desired.insert(name.clone(), write.clone());
             }
         }
-        Self::observed_changes(snapshot, &observed, &artifacts, &attestations, &life, &mut changes);
+        Self::observed_changes(
+            snapshot,
+            &observed,
+            &artifacts,
+            &attestations,
+            &observations,
+            &life,
+            &mut changes,
+        );
+        self.report.observations_changed = observing
+            .changed
+            .iter()
+            .map(|(unit, names)| (unit.clone(), names.iter().cloned().collect()))
+            .collect();
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
@@ -3027,6 +3115,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             &observed,
             &artifacts,
             &snapshot.attestations,
+            &snapshot.observations,
             &life,
             &mut changes,
         );
@@ -3126,6 +3215,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         observed: &BTreeMap<UnitName, ObservedUnit>,
         artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
         attestations: &BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+        observations: &BTreeMap<UnitName, ObservationRecord>,
         life: &teardown::Life,
         changes: &mut TransitionChanges,
     ) {
@@ -3162,7 +3252,24 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.attestations.insert(name.clone(), after.cloned());
             }
         }
+        // Observed values name the receipt they were read for: a replaced
+        // receipt's go in the same commit, and the new receipt's own are
+        // written with it.
+        let mut standing = observations.clone();
+        for stale in crate::rules::observed_values::changes(&standing, observed).into_keys() {
+            standing.remove(&stale);
+        }
+        let names: BTreeSet<&UnitName> = standing.keys().chain(snapshot.observations.keys()).collect();
+        for name in names {
+            let after = standing.get(name);
+            if snapshot.observations.get(name) != after {
+                changes.observations.insert(name.clone(), after.cloned());
+            }
+        }
         for name in &life.cleared {
+            if snapshot.observations.contains_key(name) {
+                changes.observations.insert(name.clone(), None);
+            }
             if snapshot.drift.contains_key(name) {
                 changes.drift.insert(name.clone(), None);
             }

@@ -23,8 +23,8 @@ use nyl_core::orchestration::ports::{
     RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
-    StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 
 /// The state of one environment directory on one ref.
@@ -36,6 +36,7 @@ struct Directory {
     observed: BTreeMap<UnitName, ObservedUnit>,
     artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
     drift: BTreeMap<UnitName, DriftRecord>,
+    observations: BTreeMap<UnitName, ObservationRecord>,
     attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
@@ -181,6 +182,7 @@ fn apply_side(
         apply_map(&mut directory.observed, &changes.observed);
         apply_map(&mut directory.artifacts, &changes.artifacts);
         apply_map(&mut directory.drift, &changes.drift);
+        apply_map(&mut directory.observations, &changes.observations);
         apply_map(&mut directory.attestations, &changes.attestations);
     }
     if directory == before && !(changes.commit_unchanged && observed_side) {
@@ -753,6 +755,9 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
             .map(|directory| directory.artifacts.clone())
             .unwrap_or_default(),
         drift: observed.map(|directory| directory.drift.clone()).unwrap_or_default(),
+        observations: observed
+            .map(|directory| directory.observations.clone())
+            .unwrap_or_default(),
         attestations: observed
             .map(|directory| directory.attestations.clone())
             .unwrap_or_default(),

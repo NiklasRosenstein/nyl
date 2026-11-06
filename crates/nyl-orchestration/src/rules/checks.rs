@@ -17,14 +17,22 @@
 //!   receipt (source `{driver: attest}`). A document equal to the stored one
 //!   but for `at` keeps the stored one, so a check that found nothing new
 //!   writes nothing.
-//! - Exit: 0 every checked unit clean, or its attestations pass; 2 a unit
-//!   could not be checked (no current receipt, unsupported, or unknown);
-//!   3 drift or a failing attestation; 1 an error. Most severe wins.
+//! - `nyl observe` is the third check, of observed values: it covers the
+//!   units whose kind reads observed values for their spec and that declare
+//!   observations (the decisions about the record are
+//!   [`super::observed_values`]'s); a unit named with `--unit` whose kind
+//!   cannot is `unsupported`.
+//! - Exit: 0 every checked unit clean, its attestations pass, or every
+//!   observation has a value; 2 a unit could not be checked (no current
+//!   receipt, unsupported, or unknown) or an observation is `pending` or
+//!   `failed`; 3 drift or a failing attestation; 1 an error. Most severe wins.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{AttestationOutcome, DriftDetection, DriverOperation, DriverSet, RecoveryPolicy};
+use nyl_core::orchestration::driver::{
+    AttestationOutcome, DriftDetection, DriverOperation, DriverSet, ObservedValue, ObservedValues, RecoveryPolicy,
+};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
@@ -33,10 +41,11 @@ use nyl_core::orchestration::state::{
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::DriftRepair;
+use nyl_core::resources::units::ObservationDeclaration;
 use serde_json::json;
 
 use crate::rules::freshness::receipt_is_current;
-use crate::run_report::{CheckResult, ExitCategory, ReportKind, UnitCheck, UnitReport};
+use crate::run_report::{CheckResult, ExitCategory, ObservationStatus, ReportKind, UnitCheck, UnitReport};
 
 /// The check an invocation runs against current receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +54,8 @@ pub enum Check {
     DetectDrift,
     /// `nyl attest`: the driver attestations of each receipt.
     Attest,
+    /// `nyl observe`: the observed values of each receipt.
+    Observe,
 }
 
 impl Check {
@@ -53,6 +64,7 @@ impl Check {
         match self {
             Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
+            Self::Observe => "observe",
         }
     }
 
@@ -61,6 +73,7 @@ impl Check {
         match self {
             Self::DetectDrift => Operation::DetectDrift,
             Self::Attest => Operation::Attest,
+            Self::Observe => Operation::Observe,
         }
     }
 
@@ -69,6 +82,7 @@ impl Check {
         match self {
             Self::DetectDrift => DriverOperation::DetectDrift,
             Self::Attest => DriverOperation::Attest,
+            Self::Observe => DriverOperation::Observe,
         }
     }
 
@@ -76,6 +90,7 @@ impl Check {
         match self {
             Self::DetectDrift => ReportKind::DetectDriftReport,
             Self::Attest => ReportKind::AttestReport,
+            Self::Observe => ReportKind::ObserveReport,
         }
     }
 
@@ -84,6 +99,7 @@ impl Check {
         match self {
             Self::DetectDrift => &["clean", "drifted", "unknown", "unsupported", "no-receipt"],
             Self::Attest => &["attested", "unknown", "unsupported", "no-receipt"],
+            Self::Observe => &["observed", "unknown", "unsupported", "no-receipt"],
         }
     }
 }
@@ -95,7 +111,7 @@ pub enum Target {
     Check,
     /// It has no current receipt: reported, exit 2.
     NoReceipt,
-    /// `attest --unit` named it, but its driver does not attest for its spec: reported, exit 2.
+    /// `attest` or `observe --unit` named it, but its driver does not attest or observe for its spec: reported, exit 2.
     Unsupported,
 }
 
@@ -115,7 +131,12 @@ pub fn targets(
         .iter()
         .filter(|(name, _)| named.is_none_or(|named| named.contains(*name)))
         .filter_map(|(name, desired)| {
-            if check == Check::Attest && !attests(drivers, desired) {
+            let covers = match check {
+                Check::DetectDrift => true,
+                Check::Attest => attests(drivers, desired),
+                Check::Observe => observes(drivers, desired),
+            };
+            if !covers {
                 return named.is_some().then(|| (name.clone(), Target::Unsupported));
             }
             let target = if receipt_is_current(desired, snapshot.observed.get(name)) {
@@ -134,6 +155,16 @@ fn attests(drivers: &DriverSet, desired: &DesiredUnit) -> bool {
     drivers
         .get(&desired.unit.api_version, &desired.unit.kind)
         .is_some_and(|driver| driver.capabilities(spec).attest)
+}
+
+/// Whether `desired`'s driver reads observed values for its spec, which
+/// declares some.
+fn observes(drivers: &DriverSet, desired: &DesiredUnit) -> bool {
+    let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
+    super::observed_values::declares(desired)
+        && drivers
+            .get(&desired.unit.api_version, &desired.unit.kind)
+            .is_some_and(|driver| driver.capabilities(spec).observed_values)
 }
 
 /// The drift record of `detection` of `unit`'s current `receipt` at `now`.
@@ -260,6 +291,34 @@ pub fn attest_check(attestations: &BTreeMap<String, Attestation>) -> UnitCheck {
             .iter()
             .map(|(name, attestation)| (name.clone(), attestation.result))
             .collect(),
+        observations: BTreeMap::new(),
+    }
+}
+
+/// What `nyl observe` reports for a unit: each declared observation as this
+/// read found it.
+pub fn observe_check(readings: &ObservedValues, declared: &BTreeMap<String, ObservationDeclaration>) -> UnitCheck {
+    UnitCheck {
+        result: CheckResult::Observed,
+        attestations: BTreeMap::new(),
+        observations: declared
+            .keys()
+            .map(|name| {
+                let status = match readings.values.get(name) {
+                    Some(ObservedValue::Value { value }) => ObservationStatus::Value { value: value.clone() },
+                    Some(ObservedValue::Pending { reason }) => ObservationStatus::Pending {
+                        reason: reason.clone(),
+                    },
+                    Some(ObservedValue::Failed { reason }) => ObservationStatus::Failed {
+                        reason: reason.clone(),
+                    },
+                    None => ObservationStatus::Failed {
+                        reason: format!("the driver reported nothing for observation {name}"),
+                    },
+                };
+                (name.clone(), status)
+            })
+            .collect(),
     }
 }
 
@@ -275,7 +334,15 @@ pub fn unit_exit(unit: &UnitReport) -> ExitCategory {
     match &check.result {
         CheckResult::Drifted { .. } => ExitCategory::Failed,
         _ if failing => ExitCategory::Failed,
-        CheckResult::Clean | CheckResult::Attested => ExitCategory::Ok,
+        CheckResult::Observed
+            if check
+                .observations
+                .values()
+                .any(|status| !matches!(status, ObservationStatus::Value { .. })) =>
+        {
+            ExitCategory::Incomplete
+        }
+        CheckResult::Clean | CheckResult::Attested | CheckResult::Observed => ExitCategory::Ok,
         CheckResult::NoReceipt | CheckResult::Unsupported | CheckResult::Unknown { .. } => ExitCategory::Incomplete,
     }
 }
@@ -302,9 +369,10 @@ pub fn warnings(
     let codes = match check {
         Check::DetectDrift => (Code::DriftNoReceipt, Code::DriftUnsupported, Code::DriftUnknown),
         Check::Attest => (Code::AttestNoReceipt, Code::AttestUnsupported, Code::AttestUnknown),
+        Check::Observe => (Code::ObserveNoReceipt, Code::ObserveUnsupported, Code::DriverError),
     };
     match &result.result {
-        CheckResult::Clean | CheckResult::Attested => {}
+        CheckResult::Clean | CheckResult::Attested | CheckResult::Observed => {}
         CheckResult::NoReceipt => warnings.push(Finding::new(
             codes.0,
             format!("{unit} in {environment} has no current receipt to check"),
@@ -321,12 +389,18 @@ pub fn warnings(
                 format!("the kind of {unit} produces no attestations for its spec"),
                 "attestations only someone else can produce are declared with `attestations: [{name, from: external}]`",
             ),
+            Check::Observe => Finding::new(
+                codes.1,
+                format!("{unit} declares no observed values its kind can read"),
+                "declare `observations` on a unit whose kind reads observed values, such as a KubernetesPublication in `mode: observe`",
+            ),
         }),
         CheckResult::Unknown { reason } => warnings.push(Finding::new(
             codes.2,
             match check {
                 Check::DetectDrift => format!("drift of {unit} in {environment} is unknown: {reason}"),
                 Check::Attest => format!("attestations of {unit} in {environment} are unknown: {reason}"),
+                Check::Observe => format!("observed values of {unit} in {environment} are unknown: {reason}"),
             },
             format!("fix the cause, such as a missing tool or credentials, and run `nyl {command}` again"),
         )),
@@ -335,6 +409,21 @@ pub fn warnings(
             format!("{unit} in {environment} drifted from its receipt: {summary}"),
             drift_fix(environment, unit, policy, drift_repair),
         )),
+    }
+    for (name, status) in &result.observations {
+        match status {
+            ObservationStatus::Value { .. } => {}
+            ObservationStatus::Pending { reason } => warnings.push(Finding::new(
+                Code::ObservationPending,
+                format!("observed value {name} of {unit} in {environment} has none yet: {reason}"),
+                format!("run `nyl observe -e {environment}` again once the system holds it; consumers of it stay blocked"),
+            )),
+            ObservationStatus::Failed { reason } => warnings.push(Finding::new(
+                Code::ObservationFailed,
+                format!("observed value {name} of {unit} in {environment} could not be read: {reason}; the last recorded value for its current receipt stays usable"),
+                "fix the cause, such as missing credentials, and run `nyl observe` again",
+            )),
+        }
     }
     for (name, result) in &result.attestations {
         if *result == AttestationResult::Fail {
@@ -558,6 +647,7 @@ mod tests {
                     .map(|result| ("healthy".to_owned(), result))
                     .into_iter()
                     .collect(),
+                observations: BTreeMap::new(),
             }),
             ..UnitReport::new("OpenTofu")
         }
@@ -618,13 +708,16 @@ mod tests {
             .map(|finding| finding.code)
             .collect();
             let expected_codes: Vec<Code> = match (check, &result) {
-                (_, CheckResult::Clean | CheckResult::Attested) => vec![],
+                (_, CheckResult::Clean | CheckResult::Attested | CheckResult::Observed) => vec![],
                 (Check::DetectDrift, CheckResult::NoReceipt) => vec![Code::DriftNoReceipt],
                 (Check::DetectDrift, CheckResult::Unsupported) => vec![Code::DriftUnsupported],
                 (Check::DetectDrift, CheckResult::Unknown { .. }) => vec![Code::DriftUnknown],
                 (Check::Attest, CheckResult::NoReceipt) => vec![Code::AttestNoReceipt],
                 (Check::Attest, CheckResult::Unsupported) => vec![Code::AttestUnsupported],
                 (Check::Attest, CheckResult::Unknown { .. }) => vec![Code::AttestUnknown],
+                (Check::Observe, CheckResult::NoReceipt) => vec![Code::ObserveNoReceipt],
+                (Check::Observe, CheckResult::Unsupported) => vec![Code::ObserveUnsupported],
+                (Check::Observe, CheckResult::Unknown { .. }) => vec![Code::DriverError],
                 (_, CheckResult::Drifted { .. }) => vec![Code::DriftDetected],
             }
             .into_iter()

@@ -85,6 +85,11 @@ pub struct Capabilities {
     pub attest: bool,
     /// Whether the kind supports `nyl build`.
     pub build: bool,
+    /// The kind reads observed values for a spec that declares
+    /// `observations`: `reconcile` and `nyl observe` ask the driver's
+    /// [`Driver::observe`]. A kind without it rejects `observations`.
+    #[serde(default, rename = "observedValues")]
+    pub observed_values: bool,
     /// `plan` reports a change digest, so `bind: plan` is allowed.
     #[serde(rename = "changeDigest")]
     pub change_digest: bool,
@@ -243,6 +248,27 @@ pub struct AttestationOutcome {
     pub details: Value,
 }
 
+/// One observed value as the driver read it. The engine checks a value
+/// against the declared type and records it; it never interprets a reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "observation", rename_all = "kebab-case")]
+pub enum ObservedValue {
+    /// The system holds the value for the current receipt.
+    Value { value: Value },
+    /// The system has not caught up with the receipt, or the field is not
+    /// set yet; a later read may find a value.
+    Pending { reason: String },
+    /// The driver could not read it, such as for missing credentials; the
+    /// last recorded value for the current receipt stays usable.
+    Failed { reason: String },
+}
+
+/// What [`Driver::observe`] read: each declared observation by name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ObservedValues {
+    pub values: BTreeMap<String, ObservedValue>,
+}
+
 /// How a reconcile or teardown call ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", rename_all = "kebab-case")]
@@ -346,6 +372,7 @@ pub enum DriverOperation {
     Reconcile,
     DetectDrift,
     Attest,
+    Observe,
     Inspect,
     Teardown,
     Fingerprint,
@@ -360,6 +387,7 @@ impl DriverOperation {
             Self::Reconcile => "reconcile",
             Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
+            Self::Observe => "observe",
             Self::Inspect => "inspect",
             Self::Teardown => "teardown",
             Self::Fingerprint => "fingerprint",
@@ -748,6 +776,23 @@ pub trait Driver: Send + Sync {
         unit: &DesiredUnit,
         receipt: &Receipt,
     ) -> DriverResult<Supported<AttestationCheck>> {
+        let _ = (ctx, unit, receipt);
+        Ok(Supported::Unsupported)
+    }
+    /// The observed values the spec declares, read for the current
+    /// `receipt`: `reconcile` (after an execution, and for units it did not
+    /// execute) and `nyl observe`. The driver reads each declared name from
+    /// its `from` source and decides when a value belongs to the current
+    /// receipt; Nyl checks it against the declared type. Unsupported by
+    /// default, which rejects `observations` for the kind.
+    ///
+    /// Contract: [Observed values](../../../../design/orchestration-core.md#observed-values).
+    fn observe(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        receipt: &Receipt,
+    ) -> DriverResult<Supported<ObservedValues>> {
         let _ = (ctx, unit, receipt);
         Ok(Supported::Unsupported)
     }

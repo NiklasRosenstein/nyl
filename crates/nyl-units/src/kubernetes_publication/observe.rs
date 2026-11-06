@@ -71,7 +71,7 @@ pub(super) fn recorded(rendered: &RenderedTarget) -> DriverResult<(Value, Vec<St
     Ok((facts, unkeyed))
 }
 
-pub(super) fn facts_of(unit: &DesiredUnit) -> Result<ReconcilerFacts, String> {
+pub(super) fn observation_of(unit: &DesiredUnit) -> Result<ArgoCdObservation, String> {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     let facts = spec.pointer(RECONCILER).ok_or_else(|| {
         "the unit records no reconciler facts: it was resolved before it observed the reconciler; reconcile it so it records them".to_owned()
@@ -89,6 +89,143 @@ pub(super) fn budget(
         .to_std()
         .unwrap_or_default()
         .clamp(Duration::from_secs(1), READING)
+}
+
+/// Every namespace the target's Applications live in, with the Applications
+/// each holds, as `reader` reports them.
+pub(super) fn read_all(
+    reader: &dyn ArgoReader,
+    observation: &ArgoCdObservation,
+) -> Result<std::collections::BTreeMap<(String, String), Value>, ReadError> {
+    let namespaces = observation
+        .applications
+        .iter()
+        .map(|application| application.namespace.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut live = std::collections::BTreeMap::new();
+    for namespace in namespaces {
+        for (name, application) in reader.applications(namespace)? {
+            live.insert((namespace.to_owned(), name), application);
+        }
+    }
+    Ok(live)
+}
+
+/// Fail unless every one of `applications` that the reading lacks is one the
+/// credential could have seen. A listing leaves out what the credential may
+/// not get and still succeeds, so an absence proves nothing until the reader
+/// says the credential may get the Application (`can-i` for the API server).
+pub(super) fn ensure_gone_is_visible<'a>(
+    reader: &dyn ArgoReader,
+    observation: &ArgoCdObservation,
+    live: &std::collections::BTreeMap<(String, String), Value>,
+    applications: impl Iterator<Item = &'a GeneratedApplication>,
+) -> Result<(), ReadError> {
+    for application in applications {
+        if live.contains_key(&(application.namespace.clone(), application.name.clone())) {
+            continue;
+        }
+        if application.project.is_empty() {
+            return Err(ReadError::new(
+                ReadErrorKind::Declaration,
+                "the unit records no Argo CD project for its Applications: it was resolved before it did; reconcile it so it records them".to_owned(),
+            ));
+        }
+        let rbac = rbac_name(
+            &application.project,
+            &application.namespace,
+            &application.name,
+            &observation.location.namespace,
+        );
+        if !reader.can_get(&rbac)? {
+            return Err(ReadError::new(
+                ReadErrorKind::Forbidden,
+                format!(
+                    "the credential may not get Application {rbac}, so its absence from the reading proves nothing \
+                     (Argo CD leaves out what a token may not get and still answers success): grant its account or \
+                     project role `get` on {rbac}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Fail unless the reading shows something phase 1 of a teardown keeps and
+/// that only the Argo CD running this target has, so that a credential or
+/// context for another Argo CD (an empty list that is a success) is never
+/// mistaken for a target whose Applications are gone:
+///
+/// - the catalog Application, when the target generates one, must be in the
+///   reading;
+/// - without one (`catalogApplication.shared`, or `enabled: false`), the
+///   AppProjects the target's Applications belong to must be visible: phase 1
+///   keeps the generated ones, and an externally owned one is a project the
+///   target depends on. The `default` project exists in every Argo CD and
+///   anchors nothing;
+/// - with neither, the Kubernetes method fails closed (a context cannot be
+///   shown to reach this target), and the API method relies on `can-i` alone.
+///
+/// A target with no workload Application has nothing to conclude and needs no
+/// anchor.
+pub(super) fn ensure_anchored(
+    reader: &dyn ArgoReader,
+    observation: &ArgoCdObservation,
+    live: &std::collections::BTreeMap<(String, String), Value>,
+) -> Result<(), ReadError> {
+    if observation.workload_applications().next().is_none() {
+        return Ok(());
+    }
+    if let Some(catalog) = observation
+        .applications
+        .iter()
+        .find(|application| application.role == ApplicationRole::Catalog)
+    {
+        if live.contains_key(&(catalog.namespace.clone(), catalog.name.clone())) {
+            return Ok(());
+        }
+        return Err(ReadError::new(
+            ReadErrorKind::Forbidden,
+            format!(
+                "the catalog Application {}/{} is not in the reading, so the credential or context does not see this \
+                 target's Applications and their absence would prove nothing (if the catalog was never applied, \
+                 apply it first): check that the ArgoCDInstance's access reaches the Argo CD that runs this target \
+                 and may read its Applications",
+                catalog.namespace, catalog.name
+            ),
+        ));
+    }
+    let projects = observation
+        .applications
+        .iter()
+        .map(|application| application.project.as_str())
+        .filter(|project| !project.is_empty() && *project != "default")
+        .collect::<std::collections::BTreeSet<_>>();
+    for project in &projects {
+        if !reader.project_exists(&observation.location.namespace, project)? {
+            return Err(ReadError::new(
+                ReadErrorKind::Forbidden,
+                format!(
+                    "the target generates no catalog Application, and its AppProject {project} is not visible in \
+                     namespace {}, so the credential or context does not see this target's Argo CD and the absence of \
+                     its Applications would prove nothing: check that the ArgoCDInstance's access reaches the Argo CD \
+                     that runs this target and may read its projects",
+                    observation.location.namespace
+                ),
+            ));
+        }
+    }
+    if projects.is_empty() && observation.location.access.method == ArgoCDAccessMethod::Kubernetes {
+        return Err(ReadError::new(
+            ReadErrorKind::Declaration,
+            "the target generates no catalog Application and no AppProject other than `default`, so nothing shows that \
+             the Kubernetes context reaches the Argo CD that runs it; Nyl will not conclude anything from an empty list: \
+             declare the ArgoCDInstance's access with method api, which asks Argo CD whether the token may get each \
+             Application"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// `nyl attest`: `accepted` and `healthy` of the receipt's publication.

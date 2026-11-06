@@ -60,46 +60,9 @@ pub struct ArgoCdLocation {
     pub access: ArgoCDAccess,
 }
 
-/// The reconciler that runs a target and where Nyl reads it. The tag is the
-/// recorded `kind`; a new reconciler kind is a new variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum ReconcilerLocation {
-    #[serde(rename = "argocd")]
-    ArgoCd(ArgoCdLocation),
-}
-
-impl ReconcilerLocation {
-    /// The recorded fields of this kind's location (JSON Pointers relative to
-    /// the facts) that say only how the reconciler is read, never what the
-    /// unit produces: renaming a kube context or moving an API server must
-    /// not re-execute the unit. A new kind names its own.
-    pub fn unkeyed(&self) -> &'static [&'static str] {
-        match self {
-            Self::ArgoCd(_) => &["/access", "/context"],
-        }
-    }
-
-    /// The reconciler's kind and name, as an attestation's details name them:
-    /// `{kind, instance, ...}` with whatever identifies how it is read.
-    pub fn summary(&self) -> Value {
-        match self {
-            Self::ArgoCd(location) => serde_json::json!({
-                "kind": "argocd",
-                "instance": location.instance,
-                "namespace": location.namespace,
-                "access": match location.access.method {
-                    ArgoCDAccessMethod::Kubernetes => "kubernetes",
-                    ArgoCDAccessMethod::Api => "api",
-                },
-            }),
-        }
-    }
-}
-
 /// Where a target's rendered resources live: its workload Cluster, with that
 /// Cluster's declared local context (`spec.live.context`). It may differ from
-/// the control-plane Cluster of the reconciler.
+/// the Argo CD control-plane Cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadCluster {
@@ -109,7 +72,7 @@ pub struct WorkloadCluster {
     pub context: Option<String>,
 }
 
-/// The part a deployment plays in a target.
+/// The part an Application plays in a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeploymentRole {
@@ -508,6 +471,126 @@ pub fn generated_applications(rendered: &RenderedTarget) -> Result<Vec<Generated
     }
     applications.sort_by(|a, b| (a.role, &a.name, &a.namespace).cmp(&(b.role, &b.name, &b.namespace)));
     Ok(applications)
+}
+
+/// A Kubernetes resource as the Kubernetes API names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRef {
+    pub api_version: String,
+    pub kind: String,
+    /// The namespace of a namespaced resource; absent for a cluster-scoped one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+impl std::fmt::Display for ResourceRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.namespace {
+            Some(namespace) => write!(formatter, "{} {namespace}/{} ({})", self.kind, self.name, self.api_version),
+            None => write!(formatter, "{} {} ({})", self.kind, self.name, self.api_version),
+        }
+    }
+}
+
+/// The workload Application of `rendered` whose directory renders `resource`,
+/// `None` when the target renders no such resource: the check that keeps a
+/// driver from reading anything the declaration does not own.
+///
+/// A manifest without `metadata.namespace` belongs to the namespace its
+/// Application deploys to (`spec.destination.namespace`), as Argo CD applies
+/// it. Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// observed values.
+pub fn owning_application(rendered: &RenderedTarget, resource: &ResourceRef) -> Result<Option<GeneratedApplication>> {
+    let applications = generated_applications(rendered)?;
+    let destinations = destination_namespaces(rendered)?;
+    owning_application_in(
+        &rendered.files,
+        &rendered.destination.path_prefix,
+        &applications,
+        &destinations,
+        resource,
+    )
+}
+
+/// The namespace each generated Application deploys to, by its namespace and name.
+fn destination_namespaces(rendered: &RenderedTarget) -> Result<BTreeMap<(String, String), String>> {
+    let mut destinations = BTreeMap::new();
+    for (path, bytes) in &rendered.files {
+        if !path.starts_with(super::CATALOG_DIRECTORY) {
+            continue;
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| NylError::config(format!("generated catalog file {} is not UTF-8", path.display())))?;
+        for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+            if manifest.get("kind").and_then(Value::as_str) != Some("Application") {
+                continue;
+            }
+            let text = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str).map(str::to_owned);
+            if let (Some(name), Some(namespace), Some(destination)) = (
+                text("/metadata/name"),
+                text("/metadata/namespace"),
+                text("/spec/destination/namespace"),
+            ) {
+                destinations.insert((namespace, name), destination);
+            }
+        }
+    }
+    Ok(destinations)
+}
+
+fn owning_application_in(
+    files: &BTreeMap<std::path::PathBuf, Vec<u8>>,
+    prefix: &str,
+    applications: &[GeneratedApplication],
+    destinations: &BTreeMap<(String, String), String>,
+    resource: &ResourceRef,
+) -> Result<Option<GeneratedApplication>> {
+    let prefix = prefix.trim_matches('/');
+    for application in applications
+        .iter()
+        .filter(|application| application.role == ApplicationRole::Workload)
+    {
+        let directory = application.path.trim_matches('/');
+        let directory = if prefix.is_empty() {
+            directory
+        } else {
+            directory.strip_prefix(prefix).unwrap_or(directory).trim_matches('/')
+        };
+        let destination = destinations.get(&(application.namespace.clone(), application.name.clone()));
+        for (path, bytes) in files {
+            let manifests = path.starts_with(directory)
+                && matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("yaml" | "yml" | "json")
+                );
+            if !manifests {
+                continue;
+            }
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| NylError::config(format!("rendered file {} is not UTF-8", path.display())))?;
+            for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+                let text = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str);
+                if text("/apiVersion") != Some(resource.api_version.as_str())
+                    || text("/kind") != Some(resource.kind.as_str())
+                    || text("/metadata/name") != Some(resource.name.as_str())
+                {
+                    continue;
+                }
+                let namespace = match (text("/metadata/namespace"), &resource.namespace) {
+                    (Some(namespace), _) => Some(namespace),
+                    // Applied into the namespace the Application deploys to.
+                    (None, Some(_)) => destination.map(String::as_str),
+                    (None, None) => None,
+                };
+                if namespace == resource.namespace.as_deref() {
+                    return Ok(Some(application.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// `<group>/<release>` by generated Application name, from the ownership
@@ -1107,6 +1190,81 @@ mod tests {
             panic!("matches");
         };
         assert_eq!(matched.recorded, p1);
+    }
+
+    fn application(name: &str, path: &str, role: ApplicationRole) -> GeneratedApplication {
+        GeneratedApplication {
+            role,
+            name: name.to_owned(),
+            namespace: "argocd".to_owned(),
+            path: path.to_owned(),
+            project: String::new(),
+            release: None,
+            source: Value::Null,
+        }
+    }
+
+    fn service(namespace: Option<&str>, name: &str) -> ResourceRef {
+        ResourceRef {
+            api_version: "v1".to_owned(),
+            kind: "Service".to_owned(),
+            namespace: namespace.map(str::to_owned),
+            name: name.to_owned(),
+        }
+    }
+
+    /// Catches a driver reading a resource the target does not render (the
+    /// cluster would be asked about anything), a resource attributed to the
+    /// Application of another directory (the wrong Application's revision
+    /// would gate the read), and a manifest without a namespace not
+    /// belonging to the namespace its Application deploys to.
+    #[test]
+    fn test_owning_application_names_the_directory_that_renders_the_resource() {
+        let files = BTreeMap::from([
+            (
+                std::path::PathBuf::from("web/web/service.yaml"),
+                b"apiVersion: v1\nkind: Service\nmetadata: {name: web, namespace: web}\n---\napiVersion: v1\nkind: Service\nmetadata: {name: bare}\n"
+                    .to_vec(),
+            ),
+            (
+                std::path::PathBuf::from("api/api/service.yaml"),
+                b"apiVersion: v1\nkind: Service\nmetadata: {name: web, namespace: api}\n".to_vec(),
+            ),
+            (
+                std::path::PathBuf::from("web/web/notes.txt"),
+                b"apiVersion: v1\nkind: Service\nmetadata: {name: ignored, namespace: web}\n".to_vec(),
+            ),
+        ]);
+        let applications = [
+            application("catalog", "dev/_nyl/catalog", ApplicationRole::Catalog),
+            application("web", "dev/web/web", ApplicationRole::Workload),
+            application("api", "dev/api/api", ApplicationRole::Workload),
+        ];
+        let destinations = BTreeMap::from([
+            (("argocd".to_owned(), "web".to_owned()), "web".to_owned()),
+            (("argocd".to_owned(), "api".to_owned()), "api".to_owned()),
+        ]);
+        let owner = |resource: &ResourceRef| {
+            owning_application_in(&files, "dev", &applications, &destinations, resource)
+                .unwrap()
+                .map(|application| application.name)
+        };
+        assert_eq!(owner(&service(Some("web"), "web")).as_deref(), Some("web"));
+        assert_eq!(owner(&service(Some("api"), "web")).as_deref(), Some("api"));
+        // No namespace in the manifest: the Application's destination namespace.
+        assert_eq!(owner(&service(Some("web"), "bare")).as_deref(), Some("web"));
+        assert_eq!(owner(&service(Some("api"), "bare")), None);
+        // Not rendered: another name, kind, namespace, or a file that is no manifest.
+        assert_eq!(owner(&service(Some("web"), "missing")), None);
+        assert_eq!(owner(&service(Some("other"), "web")), None);
+        assert_eq!(owner(&service(Some("web"), "ignored")), None);
+        let mut deployment = service(Some("web"), "web");
+        deployment.kind = "Deployment".to_owned();
+        assert_eq!(owner(&deployment), None);
+        // A resource declared without a namespace is one the manifest leaves
+        // without, such as a cluster-scoped kind; a namespaced one never matches it.
+        assert_eq!(owner(&service(None, "bare")).as_deref(), Some("web"));
+        assert_eq!(owner(&service(None, "web")), None);
     }
 
     #[test]
