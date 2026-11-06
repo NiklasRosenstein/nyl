@@ -506,8 +506,8 @@ fn test_state_init_warns_what_an_unattended_removal_would_wait_for() {
     let units = project.path().join("nyl/units.yaml");
     let text = std::fs::read_to_string(&units).unwrap().replace("\r\n", "\n");
     let declared = text.replace(
-        "  mode: publish\n",
-        "  mode: publish\n  teardownSettings: {catalogPrunes: false}\n",
+        "  target: {{ values.target | tojson }}\n",
+        "  target: {{ values.target | tojson }}\n  teardownSettings: {catalogPrunes: false}\n",
     );
     assert_ne!(text, declared);
     std::fs::write(&units, declared).unwrap();

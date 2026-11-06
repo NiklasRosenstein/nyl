@@ -391,11 +391,12 @@ Cluster.
   Publication is a receipt; Argo CD acceptance and observed health are the
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
-  that requires a healthy deployment. A unit in `observe` mode reads Argo CD
-  through one driver-owned reader, declared on the ArgoCDInstance (see
-  "Health evidence"), and the same reading serves the `observe`
-  `teardownWait`.
-- In observe mode, the publication unit's observed values read a field of a
+  that requires a healthy deployment. A unit that declares `observe: {}` reads the
+  reconciler of its target (Argo CD) through one driver-owned,
+  reconciler-neutral reader whose neutral reading one set of shared rules
+  judges, declared on the ArgoCDInstance (see "Health evidence"), and the
+  same reading serves the `observe` `teardownWait`.
+- With `observe: {}`, the publication unit's observed values read a field of a
   resource its target renders, from the target's Cluster, once the
   Application owning that resource runs the current publication. Reading
   needs workload-cluster credentials that publication alone does not: the
@@ -522,7 +523,7 @@ Evidence beyond a receipt is an **attestation**: a named pass or fail result
 about one unit's current receipt or an environment's recorded state, written by
 the unit's driver during `reconcile` or when `nyl attest` asks it, or by people
 and external systems through `nyl attest --name … --result …`. A
-KubernetesPublication in observe mode attests `accepted` and `healthy` from
+KubernetesPublication that declares `observe: {}` attests `accepted` and `healthy` from
 Argo CD, matching each Application's running revision to the publication
 commit that introduced it and listing them in the attestations' details.
 Argo CD is read one of two ways, declared once in Git on the ArgoCDInstance

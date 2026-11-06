@@ -19,7 +19,8 @@ use std::time::Duration;
 use reqwest::{StatusCode, Url};
 use serde_json::Value;
 
-use super::{block_on, ArgoReader, ReadError, ReadErrorKind};
+use super::{ArgoQueries, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader};
+use crate::kubernetes_publication::reconciler::{block_on, Proof};
 
 /// Reads Applications from the Argo CD API server.
 pub struct ApiServerReader {
@@ -28,6 +29,9 @@ pub struct ApiServerReader {
     /// The proxy the unit admits as `HTTPS_PROXY`, if any.
     proxy: Option<String>,
     budget: Duration,
+    /// The instance's namespace, where its AppProjects live and whose
+    /// Applications Argo CD's policy names without a namespace.
+    namespace: String,
 }
 
 impl ApiServerReader {
@@ -72,7 +76,15 @@ impl ApiServerReader {
                 .filter(|proxy| !proxy.is_empty())
                 .map(str::to_owned),
             budget,
+            namespace: super::DEFAULT_NAMESPACE.to_owned(),
         })
+    }
+
+    /// Read the instance that lives in `namespace`.
+    #[must_use]
+    pub fn in_namespace(mut self, namespace: &str) -> Self {
+        namespace.clone_into(&mut self.namespace);
+        self
     }
 
     /// The list endpoint for `namespace`: `<server>/api/v1/applications`
@@ -86,10 +98,10 @@ impl ApiServerReader {
     }
 }
 
-impl ArgoReader for ApiServerReader {
+impl ApiServerReader {
     /// `GET <server>/api/v1/projects/<name>`: visible on success; Argo CD
     /// answers 404, or 403 for a token that may not get it, otherwise.
-    fn project_exists(&self, _namespace: &str, name: &str) -> Result<bool, ReadError> {
+    pub fn project_exists(&self, _namespace: &str, name: &str) -> Result<bool, ReadError> {
         let mut url = self.server.clone();
         let path = format!("{}/api/v1/projects/{name}", url.path().trim_end_matches('/'));
         url.set_path(&path);
@@ -123,7 +135,8 @@ impl ArgoReader for ApiServerReader {
         })?
     }
 
-    fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
+    /// Whether the token may `get` the Application Argo CD names `rbac_name`.
+    pub fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
         let url = self.can_i_url(rbac_name);
         let server = self.server.as_str().to_owned();
         let (token, budget, proxy) = (self.token.clone(), self.budget, self.proxy.clone());
@@ -164,7 +177,9 @@ impl ArgoReader for ApiServerReader {
         })?
     }
 
-    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+    /// The Applications in `namespace` by name, as Argo CD serves them. One
+    /// the token may not read is absent, as Argo CD's own API answers.
+    pub fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
         let url = self.list_url(namespace);
         let server = self.server.as_str().to_owned();
         let token = self.token.clone();
@@ -198,6 +213,29 @@ impl ArgoReader for ApiServerReader {
                 Err(failure(status, &body, &server))
             }
         })?
+    }
+}
+
+impl ArgoQueries for ApiServerReader {
+    fn applications(&self, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
+        ApiServerReader::applications(self, namespace)
+    }
+
+    fn can_get(&self, rbac_name: &str) -> Result<bool, ReadError> {
+        ApiServerReader::can_get(self, rbac_name)
+    }
+
+    fn project_exists(&self, namespace: &str, name: &str) -> Result<bool, ReadError> {
+        ApiServerReader::project_exists(self, namespace, name)
+    }
+}
+
+impl ReconcilerReader for ApiServerReader {
+    /// Argo CD omits what a token may not `get` from a listing and still
+    /// answers success, so a missing Application means something only once
+    /// `can-i` says the token could have seen it.
+    fn read(&self, request: &ReadRequest<'_>) -> Result<Reading, ReadError> {
+        super::read_argocd(self, &self.namespace, Proof::PerDeployment, request)
     }
 }
 

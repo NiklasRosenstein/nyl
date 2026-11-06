@@ -564,7 +564,7 @@ metadata:
   labels: {tier: platform}
 spec:
   target: '{{ values.target }}'   # a static DeploymentTarget, or `inline:` (see below)
-  mode: publish        # publish | observe
+  observe: {}          # opt in to observing the target's reconciler; omit to publish only
   teardownWait: {strategy: manual}   # observe | delay | manual; see Teardown
 ```
 
@@ -750,24 +750,32 @@ spec:
   execution fails as a non-retryable ownership violation, as reconciliation
   does today.
 - It publishes a `PublishedTree` artifact named `tree` with the published
-  commit and ownership-index digest (`published`). `mode: observe` additionally
-  lets `nyl attest` read Argo CD and attest `accepted` and `healthy`, per
-  the promotion contract's [health evidence](promotion.md#health-evidence) and
-  its [Reading Argo CD](promotion.md#reading-argo-cd) (owner:
-  `nyl_units::kubernetes_publication::argocd`). The publication still
-  happens first: observe mode adds a reading, and makes `observe` the default
-  `teardownWait`. Direct application through Nyl, which
+  commit and ownership-index digest (`published`). A unit that declares
+  `observe: {}` additionally lets `nyl attest` read the reconciler that runs
+  its target (Argo CD) and attest `accepted` and `healthy`, per the promotion
+  contract's [health evidence](promotion.md#health-evidence) and its
+  [Reading Argo CD](promotion.md#reading-argo-cd) (owners:
+  `nyl_units::kubernetes_publication::reconciler` for the shared rules and
+  `nyl_units::kubernetes_publication::argocd` for the Argo CD readers). The
+  publication still happens first: `observe` adds a reading, makes the
+  `observe` strategy available for `teardownWait`, and makes it the default.
+  `observe` is an object so that options can be added later; only `{}` is
+  accepted. It does not say which reconciler is read: that follows the
+  reconciler of the unit's target (today the target's ArgoCDInstance), so
+  the same declaration observes whatever runs the target. Without `observe`
+  the unit only publishes, its default `teardownWait` is `manual`, and
+  `teardownWait: {strategy: observe}` is a validation error. Direct application through Nyl, which
   would attest `healthy` from rollout status during `reconcile`, is not a mode
   in the initial scope.
-- It supports [observed values](#observed-values) in `mode: observe`, whose
-  credentials it needs (a unit in `mode: publish` that declares
+- It supports [observed values](#observed-values) with `observe: {}`, whose
+  credentials it needs (a unit that does not declare `observe` and declares
   `observations` is rejected with `NYL-OBSERVATIONS-UNSUPPORTED`). Its `from`
   names a `resource` (`apiVersion`, `kind`, `namespace` for namespaced kinds,
   `name`) and a JSON `pointer` into it:
 
   ```yaml
   spec:
-    mode: observe
+    observe: {}
     observations:
       ingressIp:
         type: string
@@ -785,7 +793,8 @@ spec:
     ConfigMap or a custom resource can still hold sensitive data, which the
     declaration author must not observe. A manifest without `metadata.namespace`
     belongs to the namespace its Application deploys to. Resolution records,
-    in the resolved spec, the Application that owns each observed resource
+    in the resolved spec, the deployment (Application) that owns each observed
+    resource, by its id in the reconciler facts
     (`observationSources`, part of the execution key) and the target's
     workload Cluster with its local context (`workload`; the context, which
     only says how to read, is left out of the key), so `observe` renders
@@ -914,6 +923,31 @@ in two phases, both through Git:
    Unowned files in the prefix, such as state files committed by other tools,
    are preserved, as in every reconciliation.
 
+Implementation notes (reading a reconciler): the driver observes through one
+seam that no reconciler's types cross. A
+`nyl_units::kubernetes_publication::reconciler::ReconcilerReader` is given the
+deployments and anchors a target expects (`nyl_render::gitops::observation`:
+`ExpectedDeployment`, `Anchor`, recorded under `/reconciler`) and returns a
+neutral `Reading`: per deployment its running revision (`Exact(commit)`,
+`Mixed(reason)`, or none), health (`Healthy`, `Progressing`, `Degraded`, or
+`Unknown`), and live source; per anchor whether it is visible; and, for each
+expected deployment the reading lacks, whether the credential could have seen
+it. One `reconciler::evaluate` owns the rules over those types: `accepted`
+and `healthy` (`evaluate`), and the answer of a teardown wait (`removal`),
+both refusing to conclude from what is not provably visible. Argo CD's two
+readers (the Kubernetes API of the control-plane Cluster, with the anchors as
+its proof of absence, and the Argo CD API server, with `can-i` per
+Application) map into the reading in `kubernetes_publication::argocd`, and the
+Argo CD renderer in `nyl_render::gitops::observation` derives the expected
+deployments from the generated Applications. A second reconciler kind adds a
+variant of `ReconcilerLocation` with its renderer next to Argo CD's, and a
+reader implementing `ReconcilerReader` plus the one match arm of
+`reconciler::reader` that builds it; `evaluate`, the driver's observation, the
+orchestration engine, state, and the CLI do not change. The facts recorded at
+resolution follow the same split: the neutral part (`kind`, `publication`,
+`expected`, `anchors`) and the kind's location (for Argo CD `instance`,
+`namespace`, `cluster`, `context`, and `access`).
+
 As implemented: the `KubernetesPublication` driver
 (`nyl_units::kubernetes_publication`) carries out both phases through Git on
 the real publication path (the tree changes are in
@@ -932,12 +966,17 @@ Any other failure of the push may have published and ends the call. Drift
 detection renders again and compares the branch with the tree: a difference
 or an owned file modified outside Nyl is `drifted`, and a comparison that
 cannot be made is `unknown`. The driver records the target's effective teardown settings at
-resolution (see Teardown readiness below). A unit that observes Argo CD
-(`mode: observe`, or the `observe` `teardownWait` strategy) also records, at
-resolution, the Argo CD facts its readings need (`argocd`: the instance, how
-it is read, the publication destination, and the Applications the target
-generates; an authored `argocd` is rejected), so `attest` and the teardown wait
-read the stored document. The strategies `delay`, `manual`, and `observe` work
+resolution (see Teardown readiness below). A unit that declares `observe: {}`
+also records, at resolution, the reconciler facts its readings need
+(`reconciler`: the kind of reconciler that runs the target and its instance,
+how it is read, the publication destination, the deployments the target
+expects of it, and the anchors that show a reading comes from that
+reconciler; an authored `reconciler` is rejected), so `attest` and the
+teardown wait read the stored document. Only the render-derived part keys the
+unit (the reconciler's identity, the publication's branch and prefix, the
+expected deployments, and the anchors); how the reconciler is read, its
+`access`, local `context`, and the publication URL, is recorded but never
+keys it. The strategies `delay`, `manual`, and `observe` work
 as the table below says. Inline targets,
 the owner in the ownership index, and owner fencing work as described above, in
 both phases of the teardown. Tier-1 tests keep the test kind
@@ -954,16 +993,19 @@ path to the publication are not held back by its wait (see
 
 | Strategy | Phase 1 completes when | Default for |
 | --- | --- | --- |
-| `observe` | The driver reports that Argo CD no longer has any of the target's workload Applications (every Application except the catalog's), within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `applications-remain` (listing them) or `observation-failed` (with the driver's error, such as a missing credential or an unreachable Argo CD) | `mode: observe` |
+| `observe` | The driver reports that Argo CD no longer has any of the target's workload Applications (every Application except the catalog's), within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `applications-remain` (listing them) or `observation-failed` (with the driver's error, such as a missing credential or an unreachable Argo CD) | a unit that declares `observe` |
 | `delay` | `duration` has passed since the phase 1 commit, such as `{strategy: delay, duration: 10m}`; the teardown is recorded as not observed | |
-| `manual` | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and its dependencies wait, exit 2 | `mode: publish` |
+| `manual` | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and its dependencies wait, exit 2 | a unit without `observe` |
 
-`observe` reads Argo CD as `mode: observe` does (see [Reading Argo CD](promotion.md#reading-argo-cd)):
+`observe` reads the reconciler as a unit with `observe: {}` does (see [Reading Argo CD](promotion.md#reading-argo-cd)):
 each poll the shell asks the unit's driver, `Driver::observe_removal`, which
-reads the Applications its stored document records, with the credentials the
-unit admits; the shell interprets no Argo CD answer. An Application the
-credential cannot see counts as removed, so the token or role needs `get`
-on the target's Applications.
+reads the deployments its stored document records (for Argo CD, the target's
+Applications), with the credentials the unit admits; the shell interprets no
+reconciler answer. Removal is concluded only from what the reading proves
+visible: a deployment the credential may not see, or a reading that does not
+show what only the reconciler running this target has, ends the wait with
+`observation-failed` instead of counting the deployment as removed, so the
+token or role needs `get` on the target's Applications.
 Two escape hatches end any wait, whatever the strategy, once phase 1 is
 published and the wait is pending or uncertain. Both are needed because a
 `deleting` unit is torn down from its stored desired document, so changing
@@ -1172,7 +1214,7 @@ previews branch
   (`NYL-TEARDOWN-CATALOG-REMAINS` does not apply).
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
   the catalog rows become `external: not checked`, which the preflight reports
-  without blocking, and `mode: observe` still checks that the Applications
+  without blocking, and `observe: {}` still checks that the Applications
   actually disappear.
 - A branch carries one shared catalog, dedicated to it: every other
   `_nyl/shared/<other>/` tree on it refuses a publication or build with
@@ -1587,7 +1629,7 @@ expired from the moment `expiresAt` is reached.
   that gate a teardown (`--allow-dependents`, `--approve`, `--source`) apply to
   it, except that an eviction by `--make-room` inherits neither `--source` nor
   `--approve`, which name the new pull request's instance. Removal also waits for each publication's `teardownWait`: with the
-  `manual` default of `mode: publish`, it stops after phase 1 until
+  `manual` default of a unit without `observe`, it stops after phase 1 until
   `--confirm-removed`, so templates meant to expire unattended use `observe`
   or `delay`. A removal stuck in phase 1 needs `--confirm-removed` (or
   `teardown --all` run again once the wait is over); until then the preview
@@ -3413,7 +3455,7 @@ enum Outcome {
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
 | `KeyInputs` | What resolution needs to compute an execution key: the selected `files` with their digests, the `excludedFields` of the resolved spec, an optional `fingerprint`, and `recorded` facts. Each recorded fact is a JSON Pointer to a member of the resolved spec and the value resolution writes there before it computes the key, so the stored desired document carries what the driver learned from its inputs. The engine stores a recorded value without interpreting it |
 | `TeardownReadiness` | What the driver found about whether the unit's teardown can complete: `blocking` requirements and `remnants` a teardown leaves, each a finding with a stable code and the setting that fixes it, and `not_checked` requirements the driver cannot see. The driver evaluates its own requirements (the publication driver from the settings it recorded at resolution: whether the catalog prunes, the Application deletion policy, each owned Namespace's delete policy, and whether a parent owns the catalog); the shell only displays the findings, keeps a unit with a blocking one pending teardown, and warns in `plan` and `reconcile` |
-| `WaitStrategy` | How a teardown waits after phase 1: `Observe`, `Delay { duration }`, or `Manual`. The driver reads it from the stored spec with its defaults (the publication driver: `teardownWait`, else `observe` for `mode: observe` and `manual` for `mode: publish`); `rules::teardown_wait` decides what each strategy does, and the shell reads no spec field itself |
+| `WaitStrategy` | How a teardown waits after phase 1: `Observe`, `Delay { duration }`, or `Manual`. The driver reads it from the stored spec with its defaults (the publication driver: `teardownWait`, else `observe` for a unit that declares `observe` and `manual` for one that does not); `rules::teardown_wait` decides what each strategy does, and the shell reads no spec field itself |
 | `RemovalObservation` | What `observe_removal` found: `Remaining(names)` of what phase 1 removes that still exists (empty when all is gone), or `Failed(reason)` when the driver could not read it, shown unchanged as `observation-failed`; its `RemovalContext` carries the unit's admitted credentials (shown by name only in `Debug`) and the wait's deadline, and no checkout, because a unit is torn down from its stored document |
 | `IncarnationDirectory` | `ExecutionContext.incarnations`: whether a named unit incarnation (environment, unit, uid) still exists in its environment's state, as `exists`, `gone`, or `unknown` with a reason. A driver that fences a native resource by owner asks it about the owner it finds recorded; the shell answers from the declared environments' state without knowing what is fenced |
 | `WaitCompletion` | How a teardown wait ended: `observed`, `delayed`, `confirmed` (with `by`, `reason`, `from`), or `incomplete`; the run decides it and the transition commit records it |
@@ -4060,7 +4102,7 @@ Under `driftRepair: manual`, `reconcile` repairs nothing and the unit stays
 under `reapplied`.
 ([`drift`](../nyl/tests/scenarios/walkthroughs/drift/scenario.yaml))
 
-**Observed value (M5).** The `kubernetes` publication in `mode: observe`
+**Observed value (M5).** The `kubernetes` publication with `observe: {}`
 declares the observed value `ingressIp` from its ingress Service, and the
 Command unit `dns` consumes it. The first reconcile publishes; with the
 default `observationWait: 0s` the address is not assigned yet, so

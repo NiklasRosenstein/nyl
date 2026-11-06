@@ -37,7 +37,7 @@ metadata:
     preview: 'true'
 spec:
   target: {{ values.target | tojson }}      # dev, or the preview template's inline target
-  mode: observe
+  observe: {}
   teardownWait: {{ values.teardownWait | tojson }}
   env: {passthrough: [KUBECONFIG]}
   timeout: 10m
