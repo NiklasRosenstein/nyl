@@ -176,6 +176,7 @@ export const orchestrationRoadmap = {
       title: 'Direct reconciler for Kubernetes publications',
       summary: 'A DeploymentTarget that Nyl applies itself, with no Argo CD, through the same publication unit.',
       needs: ['M5'],
+      done: true,
       exitCriterion: 'The platform scenario\'s Kubernetes publication runs three ways against Kind with a local registry, changing only the target\'s reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server. Each publishes the same Release directories with equivalent receipts, attests `accepted` and `healthy`, reads the same observed value, and tears down to an empty cluster with `teardownWait: observe`; a second unit, environment, or manual `nyl apply` cannot take over a Release an environment owns.',
       items: [
         { text: 'Specify the direct reconciler in the design contracts: the target-level declaration, publication before apply, fencing in the cluster, the direct reader, and teardown ([contract](https://github.com/NiklasRosenstein/nyl/blob/develop/design/orchestration-core.md#direct-reconciler)).', done: true },
@@ -184,7 +185,7 @@ export const orchestrationRoadmap = {
         { text: 'Apply a direct target from `KubernetesPublication`: publish, then apply each Release in waves, fence Releases by owner, purge Releases that left the tree, and tear down in two phases behind `teardownWait` with the direct readiness rows.', done: true },
         { text: 'Read a direct target for `nyl attest`, the `observe` teardown wait, and observed values: a `DirectReader` over the release state and rollout status, with the release-state anchor, behind the unchanged shared evaluation.', done: true },
         { text: 'Add an opt-in health wait to `KubernetesPublication` (`observe: {waitHealthy: {timeout}}`): a reconcile polls the target\'s reader with backoff on the injected clock until `healthy` passes, records the attestations, and fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` on the timeout, for the direct reconciler and both Argo CD access methods.', done: true },
-        { text: 'Add the `nyl-e2e` crate: one scenario run direct, through Argo CD read by the Kubernetes API, and through Argo CD read by its API server, against Kind with a local registry and a local Argo CD install.', done: false },
+        { text: 'Add the `nyl-e2e` crate: one scenario run direct, through Argo CD read by the Kubernetes API, and through Argo CD read by its API server, against Kind with a local registry and a local Argo CD install.', done: true },
       ],
     },
   ],
