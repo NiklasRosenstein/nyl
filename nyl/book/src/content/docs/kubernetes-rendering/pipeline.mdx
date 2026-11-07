@@ -119,8 +119,7 @@ none.
 
 ## Namespaces in diff and apply
 
-`render` never connects to Kubernetes and leaves missing namespaces unset, as
-the published tree does. `diff` and `apply` fill them in for namespaced kinds,
+`render` leaves missing namespaces unset, as the published tree does. `diff` and `apply` fill them in for namespaced kinds,
 as Argo CD does when it syncs:
 
 1. the resource's own `metadata.namespace`;
@@ -130,6 +129,31 @@ as Argo CD does when it syncs:
 
 The kube context's default namespace is never used, so the result depends only
 on the declaration.
+
+## Without GitOps configuration
+
+`render`, `diff`, `apply`, `release`, and [`argocd`](/nyl/reference/cli/argocd/)
+also work in a project that declares no DeploymentTarget, or that has no
+`nyl.toml` or Git worktree, when `--context` names a kube context. That flag is
+the explicit opt-in to a cluster the declaration does not describe:
+
+- The Kubernetes version and API versions Helm renders with come from the live
+  cluster instead of a Cluster resource; `--kube-version` and
+  `--kube-api-versions` are rejected.
+- There are no target or Cluster values and no ApplicationGroup bindings, so a
+  Release is settled alone, as without a target.
+- Namespaces follow the same rules as above: the context's default namespace is
+  still never used.
+- Nothing checks the context against a declared server, because there is none.
+
+When the project declares DeploymentTargets, a target is always used, even with
+`--context`; the flag then only selects how to reach its Cluster, and Nyl checks
+that context against the Cluster's server. `render` with a target never
+connects. Without `--target` or `--context` and without targets, `diff`,
+`apply`, and `release` fail and name both flags.
+
+`render-tree`, `diff-tree`, and `publish-tree` have no such mode, so nothing
+read from a live cluster reaches a publication.
 
 ## Pruning and deletion
 

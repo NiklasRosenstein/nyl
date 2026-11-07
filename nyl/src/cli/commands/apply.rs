@@ -1,11 +1,11 @@
 use chrono::Utc;
 use clap::Args;
-use futures::stream::{self, StreamExt};
+
 use kube::api::DynamicObject;
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
+
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::cli::{
     apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, OwnershipReport, Phase, PhaseTiming},
@@ -39,7 +39,7 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub namespace: Option<String>,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 
@@ -170,7 +170,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .resolved_target
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
-        None,
+        preflight.live_kube_version.as_deref(),
         nyl_render::validation::ManifestValidationInput {
             manifests: &desired_manifests,
             source: &args.common.path,
@@ -446,144 +446,32 @@ async fn mark_superseded(storage: &dyn ReleaseStorage, previous: &ReleaseState) 
     }
 }
 
-/// Run `op` for every item, at most `concurrency` at a time, reporting each result
-/// to `on_done` as it completes. The one bounded executor behind apply and prune.
-async fn run_concurrently<T, R, Fut>(
-    items: impl IntoIterator<Item = T>,
-    concurrency: usize,
-    op: impl Fn(T) -> Fut,
-    mut on_done: impl FnMut(T, R),
-) where
-    T: Copy,
-    Fut: Future<Output = R>,
-{
-    let op = &op;
-    let mut running = stream::iter(items)
-        .map(|item| async move { (item, op(item).await) })
-        .buffer_unordered(concurrency);
-    while let Some((item, result)) = running.next().await {
-        on_done(item, result);
-    }
-}
-
-/// How long one prune waits in total for deleted resources to terminate before
-/// deleting the resources they may depend on.
-const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_mins(2);
-const PRUNE_TERMINATION_POLL: Duration = Duration::from_secs(1);
-
 /// Delete resources no longer desired, at most `concurrency` at a time, and return
-/// the keys that failed to delete.
-///
-/// Resources are deleted in reverse apply order ([`ResourceOrdering::prune_batches`]),
-/// dependents first; the resources of one kind are deleted concurrently. Before the
-/// next batch, pruning waits until the deleted resources are gone, so a resource
-/// whose finalizer needs its controller, CRD, or webhook is finalized before those
-/// are deleted. Once [`PRUNE_TERMINATION_TIMEOUT`] has passed, resources still
-/// terminating are reported and pruning continues without waiting. A resource whose
-/// version is no longer served is deleted through another served version; one whose
-/// whole kind is gone ([`KubeClient::is_kind_removed`]), such as a custom resource
-/// whose CRD was deleted, is already deleted.
+/// the keys that failed to delete, through the shared
+/// [`delete_in_prune_order`](nyl_render::kubernetes::delete_in_prune_order).
 async fn prune_resources<'k>(
     client: &dyn KubeClient,
-    mut keys: Vec<&'k ResourceKey>,
+    keys: Vec<&'k ResourceKey>,
     concurrency: usize,
     on_event: &mut ApplyEventSink<'_>,
 ) -> Vec<&'k ResourceKey> {
-    let mut failed = Vec::new();
-    if keys.is_empty() {
-        return failed;
-    }
-    on_event(ApplyEvent::PruneStarted { count: keys.len() });
-    // One deadline for the whole prune, however many kinds have slow finalizers.
-    let deadline = tokio::time::Instant::now() + PRUNE_TERMINATION_TIMEOUT;
-    let batches = ResourceOrdering::prune_batches(&mut keys);
-    let last = batches.len() - 1;
-    for (position, batch) in batches.into_iter().enumerate() {
-        let mut deleted = Vec::new();
-        run_concurrently(
-            keys[batch].iter().copied(),
-            concurrency,
-            |key: &ResourceKey| async move {
-                match client
-                    .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                    .await
-                {
-                    // Objects of a removed kind are gone with it; anything else, such
-                    // as an aggregated API that is down, stays recorded and is retried.
-                    Err(err) if err.is_api_resource_not_found_error() => match client.is_kind_removed(&key.gvk).await {
-                        Ok(true) => Ok(()),
-                        _ => Err(err),
-                    },
-                    result => result,
-                }
-            },
-            |key, result| {
-                on_event(ApplyEvent::Pruned { key, result: &result });
-                if result.is_ok() {
-                    deleted.push(key);
-                } else {
-                    failed.push(key);
-                }
-            },
-        )
-        .await;
-        if position < last {
-            wait_until_terminated(client, deleted, concurrency, deadline, on_event).await;
-        }
-    }
-    on_event(ApplyEvent::PruneFinished);
-    failed
-}
-
-/// Wait until every deleted resource is gone from the cluster, or the timeout passes.
-async fn wait_until_terminated(
-    client: &dyn KubeClient,
-    mut remaining: Vec<&ResourceKey>,
-    concurrency: usize,
-    deadline: tokio::time::Instant,
-    on_event: &mut ApplyEventSink<'_>,
-) {
-    let mut announced = false;
-    loop {
-        let mut terminating = Vec::new();
-        run_concurrently(
-            remaining.iter().copied(),
-            concurrency,
-            |key: &ResourceKey| async move {
-                match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
-                    Ok(found) => Ok(found.is_some()),
-                    // Gone with its kind, or unreachable while its aggregated API is down.
-                    Err(err) if err.is_api_resource_not_found_error() => {
-                        client.is_kind_removed(&key.gvk).await.map(|removed| !removed)
-                    }
-                    Err(err) => Err(err),
-                }
-            },
-            |key, result| match result {
-                Ok(true) => terminating.push(key),
-                Ok(false) => {}
-                // Keep waiting on transient errors; the deadline bounds the wait.
-                Err(err) => {
-                    tracing::debug!(resource = %key, error = %err, "Checking pruned resource failed");
-                    terminating.push(key);
-                }
-            },
-        )
-        .await;
-        remaining = terminating;
-        if remaining.is_empty() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            on_event(ApplyEvent::PruneWaitTimedOut { keys: &remaining });
-            return;
-        }
-        if !announced {
-            on_event(ApplyEvent::PruneWaiting { count: remaining.len() });
-            announced = true;
-        }
-        tokio::time::sleep(PRUNE_TERMINATION_POLL).await;
-    }
+    use nyl_render::kubernetes::PruneEvent;
+    nyl_render::kubernetes::delete_in_prune_order(
+        client,
+        keys,
+        &nyl_render::kubernetes::DeleteOptions::default(),
+        concurrency,
+        &mut |event| {
+            on_event(match event {
+                PruneEvent::Started { count } => ApplyEvent::PruneStarted { count },
+                PruneEvent::Deleted { key, result } => ApplyEvent::Pruned { key, result },
+                PruneEvent::Waiting { count } => ApplyEvent::PruneWaiting { count },
+                PruneEvent::WaitTimedOut { keys } => ApplyEvent::PruneWaitTimedOut { keys },
+                PruneEvent::Finished => ApplyEvent::PruneFinished,
+            });
+        },
+    )
+    .await
 }
 
 /// Resolve missing namespaces and collapse documents describing one object, the
@@ -1130,7 +1018,7 @@ pub(crate) async fn apply_sorted_manifests(
             registered_groups.clear();
         }
 
-        run_concurrently(
+        nyl_render::kubernetes::run_concurrently(
             batch,
             concurrency,
             |index| apply_manifest(client, &manifests[index], ownership),
@@ -1469,7 +1357,13 @@ mod tests {
             self.inner.default_namespace()
         }
 
-        async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+        async fn delete_resource_with(
+            &self,
+            gvk: &GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+            options: &nyl_render::kubernetes::DeleteOptions,
+        ) -> Result<()> {
             self.events.lock().unwrap().push(format!("delete-start {name}"));
             tokio::time::sleep(self.latency).await;
             self.events.lock().unwrap().push(format!("delete-end {name}"));
@@ -1479,7 +1373,7 @@ mod tests {
             if gvk.kind == self.removed_kind {
                 return Err(NylError::ApiResourceNotFound(gvk.kind.clone()));
             }
-            self.inner.delete_resource(gvk, namespace, name).await
+            self.inner.delete_resource_with(gvk, namespace, name, options).await
         }
 
         async fn get_normalized_resource(&self, resource: &DynamicObject, manager: &str) -> Result<DynamicObject> {

@@ -213,6 +213,7 @@ export default defineConfig({
                   "reference/cli/render-tree",
                   "reference/cli/diff-tree",
                   "reference/cli/publish-tree",
+                  "reference/cli/argocd",
                   "reference/cli/comment",
                   "reference/cli/plan",
                   "reference/cli/build",

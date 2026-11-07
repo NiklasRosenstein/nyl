@@ -468,9 +468,14 @@ src/
 - Direct commands (`render`, `diff`, `apply`) take a target's Release from the
   compiled target (`gitops::direct`), so they work on what its Application
   deploys; `--release-only` and standalone renders share the per-Release rules
-  of `settle_standalone_release`. `render` never connects to Kubernetes, and no
-  command takes a namespace from the kube context. Pruning and purging follow
-  each live resource's Argo CD `Prune`/`Delete` sync option.
+  of `settle_standalone_release`. A declared DeploymentTarget always supplies
+  the cluster, and `render` with a target never connects to Kubernetes.
+  Without GitOps configuration, `--context` is the explicit opt-in to a kube
+  context whose live capabilities replace the Cluster's; one decision,
+  `select_cluster_source`, chooses for every direct command, and tree and
+  publication commands accept no such mode. No command takes a namespace from
+  the kube context. Pruning and purging follow each live resource's Argo CD
+  `Prune`/`Delete` sync option.
 - Generated Argo CD Applications use ordinary recursive directory sources.
 
 ## Common Tasks

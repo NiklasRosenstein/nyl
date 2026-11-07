@@ -42,7 +42,7 @@ pub struct DiffArgs {
     #[arg(long)]
     pub namespace: Option<String>,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 
@@ -155,7 +155,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
             .resolved_target
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
-        None,
+        preflight.live_kube_version.as_deref(),
         nyl_render::validation::ManifestValidationInput {
             manifests: &desired_manifests,
             source: &args.common.path,
@@ -881,7 +881,13 @@ mod tests {
         fn default_namespace(&self) -> &'static str {
             "default"
         }
-        async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {
+        async fn delete_resource_with(
+            &self,
+            _gvk: &GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+            _options: &nyl_render::kubernetes::DeleteOptions,
+        ) -> Result<()> {
             Ok(())
         }
         async fn get_normalized_resource(

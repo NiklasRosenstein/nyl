@@ -7,7 +7,7 @@ Apply rendered manifests to the Kubernetes cluster with release tracking.
 ## Synopsis
 
 ```bash
-nyl apply [--target <TARGET>] [OPTIONS] <FILE>
+nyl apply [--target <TARGET> | --context <CONTEXT>] [OPTIONS] <FILE>
 ```
 
 ## Description
@@ -29,7 +29,7 @@ for the behavior `render`, `diff`, and `apply` share.
 - `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
+- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available. A project without DeploymentTargets uses `--context` instead.
 - `--release-only` - Settle the Release alone instead of taking it from the compiled target; see [`render`](/nyl/reference/cli/render/#common-options).
 - `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the applied manifests.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
@@ -58,7 +58,7 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
+- `--context <CONTEXT>` - Kubernetes context. With a DeploymentTarget it only replaces `Cluster.spec.live.context`, and Nyl still checks it against the Cluster's server. Without GitOps configuration it selects the cluster; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same time (default: 8; `1` applies serially)
 
 ## Apply order and progress
@@ -148,6 +148,9 @@ nyl apply --target production --name my-release --namespace default manifest.yam
 
 # Use different Kubernetes context
 nyl apply --target production --context admin@production manifest.yaml
+
+# Apply to a kube context in a project without GitOps configuration
+nyl apply --context kind-kind manifest.yaml
 
 # Keep only the ten most recent release revisions
 nyl apply --target production --history-limit 10 manifest.yaml

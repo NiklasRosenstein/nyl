@@ -2,7 +2,7 @@ use clap::Args;
 use colored::Colorize;
 use dialoguer::Confirm;
 
-use crate::cli::commands::cluster::load_target_kube_config;
+use crate::cli::commands::cluster::load_command_kube_config;
 use nyl_render::{
     kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     NylError, Result,
@@ -12,9 +12,9 @@ use nyl_render::{
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DeleteArgs {
-    /// deployment target whose cluster stores the release
+    /// Deployment target whose cluster stores the release. Optional when exactly one target is configured.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 
     /// Release name(s) to delete
     pub names: Vec<String>,
@@ -43,7 +43,7 @@ pub struct DeleteArgs {
     #[arg(long, conflicts_with = "no_purge")]
     pub confirm_delete: bool,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 }
@@ -54,7 +54,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
     }
 
     // Create Kubernetes client
-    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
+    let config = load_command_kube_config(args.target.as_deref(), args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client.clone());

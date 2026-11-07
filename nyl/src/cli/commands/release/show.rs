@@ -1,7 +1,7 @@
 use clap::Args;
 
 use crate::{
-    cli::commands::cluster::load_target_kube_config,
+    cli::commands::cluster::load_command_kube_config,
     cli::commands::release::{format, OutputFormat},
 };
 use nyl_render::{
@@ -12,9 +12,9 @@ use nyl_render::{
 /// Show details of a specific release
 #[derive(Args, Debug)]
 pub struct ShowArgs {
-    /// deployment target whose cluster stores the release
+    /// Deployment target whose cluster stores the release. Optional when exactly one target is configured.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 
     /// Release name
     pub name: String,
@@ -35,7 +35,7 @@ pub struct ShowArgs {
     #[arg(short, long, default_value = "table")]
     pub output: OutputFormat,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 }
@@ -43,7 +43,7 @@ pub struct ShowArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ShowArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
+    let config = load_command_kube_config(args.target.as_deref(), args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);

@@ -7,14 +7,16 @@
 mod client;
 mod diff;
 pub mod field_manager;
+mod ordered_delete;
 mod ordering;
 pub mod prune;
 mod resource;
 mod state;
 
 pub use client::{builtin_scope, is_known_cluster_scoped_gvk};
-pub use client::{DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
+pub use client::{DeleteOptions, DeletePropagation, DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
 pub use diff::DiffEngine;
+pub use ordered_delete::{delete_in_prune_order, run_concurrently, PruneEvent, PRUNE_TERMINATION_TIMEOUT};
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
 pub use resource::{ApplyOutcome, GroupVersionKind, ObjectIdentity, ResourceKey};

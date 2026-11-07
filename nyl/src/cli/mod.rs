@@ -104,6 +104,9 @@ enum Commands {
     /// Manage releases
     Release(commands::release::ReleaseArgs),
 
+    /// Inspect and purge Argo CD Applications' live resources
+    Argocd(commands::argocd::ArgocdArgs),
+
     /// Manage project-global vendored renderer inputs
     Vendor(commands::vendor::VendorArgs),
 
@@ -160,6 +163,7 @@ impl Cli {
             Commands::Init(args) => commands::init::execute(*args).await,
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
+            Commands::Argocd(args) => commands::argocd::execute(args).await,
             Commands::Vendor(args) => Box::pin(commands::vendor::execute(args)).await,
             Commands::Exec(_)
             | Commands::Build(_)

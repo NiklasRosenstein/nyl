@@ -83,6 +83,125 @@ pub fn resolved_cluster_context<'a>(cluster: &'a Cluster, override_context: Opti
     override_context.or_else(|| cluster.spec.live.as_ref().map(|live| live.context.as_str()))
 }
 
+/// Where a command that talks to Kubernetes takes its cluster from.
+///
+/// A declared DeploymentTarget always wins: `--context` then only selects how
+/// to reach its Cluster. Without GitOps configuration, `--context` is the
+/// explicit opt-in to a kube context, and what the declaration would supply
+/// (capabilities, the cluster identity) is read from the live cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClusterSource {
+    /// The named DeploymentTarget and its Cluster.
+    Target(String),
+    /// A kube context, with no GitOps configuration to describe it.
+    LiveContext(String),
+    /// Neither: only valid for commands that need no cluster.
+    None,
+}
+
+/// Choose a [`ClusterSource`] from the declared DeploymentTarget names (`None`
+/// when the project has no GitOps configuration at all) and the command line.
+///
+/// `needs_cluster` is true for commands that connect to Kubernetes.
+pub fn select_cluster_source(
+    declared_targets: Option<&[String]>,
+    target: Option<&str>,
+    context: Option<&str>,
+    needs_cluster: bool,
+) -> Result<ClusterSource> {
+    let declared = declared_targets.unwrap_or_default();
+    if let Some(target) = target {
+        if declared.iter().any(|name| name == target) {
+            return Ok(ClusterSource::Target(target.to_owned()));
+        }
+        return Err(NylError::config(format!("DeploymentTarget {target:?} was not found")));
+    }
+    let selects = needs_cluster || context.is_some();
+    match declared {
+        [name] if selects => Ok(ClusterSource::Target(name.clone())),
+        [] => match context {
+            Some(context) => Ok(ClusterSource::LiveContext(context.to_owned())),
+            None if needs_cluster => Err(NylError::config(
+                "This operation requires a DeploymentTarget, but none are configured; \
+                 pass --context to use a kube context without GitOps configuration",
+            )),
+            None => Ok(ClusterSource::None),
+        },
+        names if selects => Err(NylError::config(format!(
+            "--target is required because multiple DeploymentTargets are configured: {}",
+            names.join(", ")
+        ))),
+        _ => Ok(ClusterSource::None),
+    }
+}
+
+/// The names of the declared DeploymentTargets.
+pub fn declared_target_names(inventory: &GitOpsInventory) -> Vec<String> {
+    inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::DeploymentTarget)
+        .map(|resource| resource.identity.name.clone())
+        .collect()
+}
+
+/// Discover the project's GitOps inventory when it can have one: a project
+/// without `nyl.toml`, or outside a Git worktree, has no GitOps configuration.
+/// An explicit `--target` always requires discovery to succeed.
+pub fn discover_optional_inventory(start_dir: &Path, target: Option<&str>) -> Result<Option<GitOpsInventory>> {
+    if target.is_some() {
+        return inventory(start_dir).map(Some);
+    }
+    let Some(config_file) = nyl_render::config::ProjectConfig::find(Some(start_dir))? else {
+        return Ok(None);
+    };
+    let project_dir = config_file.parent().unwrap_or(start_dir);
+    if git2::Repository::discover(project_dir).is_err() {
+        return Ok(None);
+    }
+    inventory(start_dir).map(Some)
+}
+
+/// Resolve the cluster source for a command run from `start_dir`.
+pub fn resolve_cluster_source(
+    start_dir: &Path,
+    target: Option<&str>,
+    context: Option<&str>,
+    needs_cluster: bool,
+) -> Result<(ClusterSource, Option<GitOpsInventory>)> {
+    let inventory = discover_optional_inventory(start_dir, target)?;
+    let names = inventory.as_ref().map(declared_target_names);
+    let source = select_cluster_source(names.as_deref(), target, context, needs_cluster)?;
+    Ok((source, inventory))
+}
+
+/// Load the kube config for a resolved cluster source. A target's Cluster is
+/// verified against its declared server; a live context is used as named.
+pub async fn load_source_kube_config(
+    source: &ClusterSource,
+    inventory: Option<&GitOpsInventory>,
+    context: Option<&str>,
+) -> Result<kube::Config> {
+    match source {
+        ClusterSource::Target(name) => {
+            let inventory = inventory.ok_or_else(|| NylError::config("GitOps configuration was not discovered"))?;
+            let resolved = resolve_target_cluster_from_inventory(inventory, name)?;
+            load_cluster_kube_config(&resolved.cluster, context).await
+        }
+        ClusterSource::LiveContext(context) => KubeRsClient::load_kube_config(None, Some(context)).await,
+        ClusterSource::None => Err(NylError::config(
+            "This operation requires --target or --context to select a cluster",
+        )),
+    }
+}
+
+/// Load the kube config for a command that takes `--target` and `--context`.
+pub async fn load_command_kube_config(target: Option<&str>, context: Option<&str>) -> Result<kube::Config> {
+    let cwd = std::env::current_dir()?;
+    let (source, inventory) = resolve_cluster_source(&cwd, target, context, true)?;
+    load_source_kube_config(&source, inventory.as_ref(), context).await
+}
+
 pub async fn load_target_kube_config(target_name: &str, context_override: Option<&str>) -> Result<kube::Config> {
     let cwd = std::env::current_dir()?;
     let resolved = resolve_target_cluster(&cwd, target_name)?;
@@ -456,6 +575,75 @@ mod tests {
 
     use nyl_render::resources::GitOpsResourceIdentity;
     use nyl_render::validation::store;
+
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn test_select_cluster_source_uses_declared_target_whatever_the_context() {
+        let declared = names(&["prod"]);
+        for context in [None, Some("other")] {
+            assert_eq!(
+                select_cluster_source(Some(&declared), None, context, true).unwrap(),
+                ClusterSource::Target("prod".to_owned())
+            );
+            assert_eq!(
+                select_cluster_source(Some(&declared), Some("prod"), context, false).unwrap(),
+                ClusterSource::Target("prod".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn test_select_cluster_source_infers_sole_target_only_when_selecting_a_cluster() {
+        let declared = names(&["prod"]);
+        assert_eq!(
+            select_cluster_source(Some(&declared), None, None, false).unwrap(),
+            ClusterSource::None
+        );
+        assert_eq!(
+            select_cluster_source(Some(&declared), None, Some("ctx"), false).unwrap(),
+            ClusterSource::Target("prod".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_select_cluster_source_requires_target_among_several() {
+        let declared = names(&["dev", "prod"]);
+        let error = select_cluster_source(Some(&declared), None, Some("ctx"), true).unwrap_err();
+        assert!(error.to_string().contains("--target is required"), "{error}");
+        assert_eq!(
+            select_cluster_source(Some(&declared), None, None, false).unwrap(),
+            ClusterSource::None
+        );
+    }
+
+    #[test]
+    fn test_select_cluster_source_uses_live_context_without_gitops_configuration() {
+        for declared in [None, Some(Vec::new())] {
+            assert_eq!(
+                select_cluster_source(declared.as_deref(), None, Some("kind"), true).unwrap(),
+                ClusterSource::LiveContext("kind".to_owned())
+            );
+            assert_eq!(
+                select_cluster_source(declared.as_deref(), None, Some("kind"), false).unwrap(),
+                ClusterSource::LiveContext("kind".to_owned())
+            );
+            assert_eq!(
+                select_cluster_source(declared.as_deref(), None, None, false).unwrap(),
+                ClusterSource::None
+            );
+            let error = select_cluster_source(declared.as_deref(), None, None, true).unwrap_err();
+            assert!(error.to_string().contains("pass --context"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_select_cluster_source_rejects_unknown_target() {
+        let error = select_cluster_source(None, Some("prod"), Some("ctx"), true).unwrap_err();
+        assert!(error.to_string().contains("\"prod\" was not found"), "{error}");
+    }
 
     struct StubCapture {
         version: String,

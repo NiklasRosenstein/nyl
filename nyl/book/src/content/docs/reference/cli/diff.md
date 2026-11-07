@@ -7,7 +7,7 @@ Show the difference between rendered manifests and the current cluster state.
 ## Synopsis
 
 ```bash
-nyl diff [--target <TARGET>] [OPTIONS] <FILE>
+nyl diff [--target <TARGET> | --context <CONTEXT>] [OPTIONS] <FILE>
 ```
 
 ## Description
@@ -28,7 +28,7 @@ for the behavior `render`, `diff`, and `apply` share.
 - `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
+- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available. A project without DeploymentTargets uses `--context` instead.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--release-only` and `--allow-secret-inputs` - As for [`apply`](/nyl/reference/cli/apply/#common-options).
@@ -40,7 +40,7 @@ for the behavior `render`, `diff`, and `apply` share.
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
+- `--context <CONTEXT>` - Kubernetes context. With a DeploymentTarget it only replaces `Cluster.spec.live.context`, and Nyl still checks it against the Cluster's server. Without GitOps configuration it selects the cluster; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 
 ### Diff Options
 
@@ -67,6 +67,9 @@ nyl diff --target production --only-source-kind ConfigMap manifest.yaml
 
 # Diff only final rendered Deployments
 nyl diff --target production --only-kind Deployment manifest.yaml
+
+# Diff against a kube context in a project without GitOps configuration
+nyl diff --context kind-kind manifest.yaml
 ```
 
 ### Summary Mode

@@ -15,3 +15,15 @@ id = "d73eec00-08f7-4582-90d0-eab32d080800"
 type = "feature"
 description = "Orchestration can publish Kubernetes trees: the `KubernetesPublication` unit renders its DeploymentTarget with the `fromUnit` Release inputs (image digests, infrastructure outputs) its environment resolved, publishes the tree and its ownership index to the target's branch with a compare-and-swap push, and tears it down in two phases. Its effective teardown settings are recorded when the unit is resolved, so `status` and `plan` report teardown readiness without rendering. `mode: observe` and inline targets are not available yet"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "74debda0-d402-4763-9044-75c474a813da"
+type = "feature"
+description = "`nyl render`, `diff`, `apply`, and `release` work without GitOps configuration: in a project that declares no DeploymentTarget, `--context` selects the kube context, and the Kubernetes version and API versions come from the live cluster. With a declared target, `--context` still only selects how to reach its Cluster. `nyl render --context` is no longer deprecated, and `release` subcommands infer the sole target like `diff` and `apply`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "c232b073-6c41-4d76-a9f8-c5a3725d238b"
+type = "feature"
+description = "`nyl argocd resources` lists the resources an Argo CD Application records in `status.resources`, and `nyl argocd purge` deletes them on its destination cluster without generating manifests, for Applications whose source path was removed from Git. A purge deletes only objects carrying the Application's tracking, keeps `Delete=false` and (without `--confirm-delete`) `Delete=confirm` resources, deletes in reverse apply order with foreground propagation, supports `--dry-run` and JSON/YAML reports, and with `--delete-application` removes the Application's finalizers and deletes it after a clean purge"
+author = "@NiklasRosenstein"

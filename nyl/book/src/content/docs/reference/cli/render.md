@@ -13,7 +13,10 @@ nyl render [OPTIONS] <FILE>
 ## Description
 
 The `render` command generates Kubernetes manifests and writes final YAML to stdout.
-It never connects to Kubernetes. With `--target`, a Release renders as
+It connects to Kubernetes only with `--context` in a project without GitOps
+configuration, to read the cluster's version and APIs
+([Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration)).
+With `--target`, a Release renders as
 `render-tree` publishes it for its Argo CD Application, including managed
 Namespaces; resources without a namespace keep none. See
 [Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/#the-releases-application) for the
@@ -47,7 +50,7 @@ behavior `render`, `diff`, and `apply` share.
 - `--offline` - Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head, as with `render-tree --offline`.
 - `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless render of Helm charts. With `--target`, the Cluster's committed capabilities apply.
 - `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless render, comma-separated or repeated.
-- `--context` - Deprecated and ignored, since `render` never connects to Kubernetes; see [Deprecations](/nyl/reference/deprecations/).
+- `--context <CONTEXT>` - Without GitOps configuration, render with this kube context's live Kubernetes version and API versions, in place of `--kube-version` and `--kube-api-versions`. With a DeploymentTarget, `render` uses the Cluster's committed capabilities, never connects, and ignores the flag with a warning.
 
 ## Examples
 
@@ -117,6 +120,9 @@ nyl render --only-kind Deployment,Service manifest.yaml
 ```bash
 # Targetless render of Helm charts with explicit Kubernetes capabilities
 nyl render --kube-version 1.30 --kube-api-versions v1,apps/v1 manifest.yaml
+
+# Render with a live cluster's capabilities, without GitOps configuration
+nyl render --context kind-kind manifest.yaml
 
 # Use the Cluster's committed capabilities and only cached Git refs
 nyl render --target production --offline manifest.yaml

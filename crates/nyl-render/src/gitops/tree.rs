@@ -2225,6 +2225,19 @@ pub(super) fn target_selects_group(target: &DeploymentTarget, group_labels: &BTr
         .all(|(key, value)| group_labels.get(key) == Some(value))
 }
 
+/// The Cluster running a target's effective ArgoCDInstance and the namespace
+/// its Applications live in: the referenced instance, or the implicit one on
+/// the target's own Cluster in `argocd` when no instance is declared.
+pub fn target_argocd_location(inventory: &GitOpsInventory, target: &DeploymentTarget) -> Result<(Cluster, String)> {
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let instance = resolve_argocd_instance(inventory, target, instance_count)?;
+    Ok((instance.cluster, instance.resource.spec.namespace))
+}
+
 fn resolve_argocd_instance(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
