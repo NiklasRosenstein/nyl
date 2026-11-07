@@ -314,7 +314,7 @@ spec:
 `evidence: attested` instead of `attestations` requires both `accepted` and
 `healthy`. A `dependsOn` consumer does not run again when only the publication's receipt changes;
 [`runs`](/nyl/orchestration/runs/#requiring-attestations) shows how to make a smoke test
-run against each new version. A unit in `mode: publish` declares no attestations, so requiring one
+run against each new version. A unit without `observe` declares no attestations, so requiring one
 of it is `NYL-ATTESTATION-UNDECLARED`.
 
 `nyl attest --target` for a target no environment owns arrives with promotion

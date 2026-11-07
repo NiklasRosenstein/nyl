@@ -491,7 +491,7 @@ fn test_renaming_the_kube_context_neither_executes_the_unit_nor_resets_its_attes
 }
 
 /// A smoke test that runs only against healthy workloads, end to end with the
-/// real publication driver in observe mode: `reconcile` publishes and leaves
+/// real publication driver with `observe: {}`: `reconcile` publishes and leaves
 /// the smoke unit blocked on `kubernetes`'s `healthy` (a receipt is not
 /// health), `attest` against a degraded Argo CD fails it and keeps the
 /// smoke unit blocked as failing, and a later `attest` against a healthy one
