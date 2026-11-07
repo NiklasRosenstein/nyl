@@ -109,7 +109,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
 type = "fix"
-description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -146,4 +146,10 @@ author = "@NiklasRosenstein"
 id = "ef4cda57-f220-4b05-8902-7e16d46a3acd"
 type = "fix"
 description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `KubernetesPublication` published for, and the unit's published tree records its reconciler and Cluster"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "083f441d-6b33-4407-9c01-cb10fe49e34b"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) resolves `Delete` and `Prune` as Argo CD does: a resource without the option itself takes its Application's `spec.syncPolicy.syncOptions`, so a `Prune=confirm` or `Delete=confirm` that an ApplicationGroup's `syncPolicy.syncOptions` (or a Release's allowed `+syncOptions`) puts on its workload Applications is no longer reported ready while Argo CD holds the deletion, and a resource's own value still wins one option at a time. The finding now covers every rendered resource of a workload Application, not only Namespaces (a resource with `Delete=false`, a CustomResourceDefinition, or `helm.sh/resource-policy: keep` does not hold the deletion), and names the resource or the Application option. The recorded `teardownSettings` list them as `deletionConfirmations` instead of `namespacePrunePolicies`, and `namespaceDeletePolicies` holds each Namespace's effective `Delete`"
 author = "@NiklasRosenstein"

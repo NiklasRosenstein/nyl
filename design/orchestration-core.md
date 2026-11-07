@@ -1152,7 +1152,7 @@ settings, as recorded in the unit's stored desired document, so `status`,
 `plan`, and a teardown agree without rendering. Resolution renders the target
 to compute the execution key; the driver reads the settings from that render
 (the catalog Application and workload Applications as Argo CD will see them,
-and the Namespaces the tree owns, with their `Prune` and `Delete` sync options) and records them in the resolved spec under
+and the resources of each workload Application with their `Prune` and `Delete` sync options, resolved as Argo CD does) and records them in the resolved spec under
 `teardownSettings` through `KeyInputs.recorded`, so an authored
 `teardownSettings` is rejected. The driver reads them back through
 `Driver::teardown_readiness`, which evaluates them itself: the table below is
@@ -1167,7 +1167,7 @@ parent Application, so its catalog rows are `external: not checked`:
 | --- | --- | --- |
 | The catalog prunes removed workload Applications on its own | catalog `syncPolicy.automated` enabled with `prune: true` | Blocking: the Applications stay until someone syncs the catalog with pruning |
 | Deleting an Application deletes its workloads | `applicationDeletionPolicy` of the catalog Application and of every workload Application is `Foreground` or `Background`, not `Orphan` (a workload Application without a finalizer makes the recorded policy `Orphan`, because the catalog's own finalizer does not delete the workloads of an Application it prunes) | Blocking: workloads keep running without an Application |
-| Owned Namespaces do not stop deletion | namespace `prunePolicy` and `deletePolicy` are `Automatic`, or `deletePolicy` is `Retain`; either one left at the default `Confirm` renders `Prune=confirm` or `Delete=confirm`, and Argo CD holds the Application's finalizer while a resource it would delete carries either, until someone confirms. `Delete=false` keeps the Namespace, so nothing is confirmed; `Prune=false` only affects syncs. Read from the rendered sync-options annotation, so templates and overrides count | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
+| No resource requires confirmation to delete | no resource a workload Application would delete resolves `Delete` or `Prune` to `confirm`. Argo CD resolves each option per resource: the resource's own `argocd.argoproj.io/sync-options` annotation, else the Application's `spec.syncPolicy.syncOptions` (the first `key=value` entry of each), and holds the Application's finalizer while any such resource requires confirmation, until someone confirms. A resource it keeps is exempt: `Delete=false` at either level, a CustomResourceDefinition, `helm.sh/resource-policy: keep`; `Prune=false` only affects syncs. For owned Namespaces the default `prunePolicy` and `deletePolicy` of `Confirm` render `Prune=confirm` and `Delete=confirm`; `Automatic` for both, or `deletePolicy: Retain`, clears them. Read from the rendered annotations and Applications, never the policy defaults, so templates and overrides count, and the finding names the resource, or the Application option that covers all of its resources | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
 | Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain |
 | The catalog Application and AppProjects are removed | the target's catalog is owned by a parent (see Catalog ownership below) | Remnant: a self-managing catalog Application and its AppProjects remain after phase 2 |
 
@@ -1881,7 +1881,7 @@ shell displays the findings unchanged.
 | The credentials may delete | RBAC | Not checked |
 
 The Argo CD rows that stop a teardown (the catalog prunes, an Application
-deletion policy deletes workloads, a Namespace rendering `Prune=confirm` or
+deletion policy deletes workloads, a resource or Application requiring confirmation through `Prune=confirm` or
 `Delete=confirm` holds an Application's finalizer) have no counterpart, because nothing here holds a
 finalizer: a kept Namespace is a remnant, not a blocker, so a direct target
 has no blocking requirement and `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
@@ -1892,7 +1892,7 @@ apply (`Confirm`, the default, keeps it tracked with the warning above),
 and `deletePolicy` whether the teardown deletes it. Unlike Argo CD's readiness,
 which blocks on either `prunePolicy` or `deletePolicy` being `Confirm`, a direct
 target's teardown reads `deletePolicy` alone, because the purge consults only
-each object's `Delete` option and `namespacePrunePolicies` is recorded for
+each object's `Delete` option and `deletionConfirmations` is recorded for
 readiness evaluation by the recorded reconciler kind and ignored here; to remove
 Namespaces with a teardown, declare both `{prunePolicy: Automatic,
 deletePolicy: Automatic}`, which also keeps the same group valid for an Argo CD
