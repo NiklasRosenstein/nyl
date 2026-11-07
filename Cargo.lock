@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-e2e"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "clap",
  "serde",
