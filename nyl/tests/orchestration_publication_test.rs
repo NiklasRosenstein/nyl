@@ -107,6 +107,7 @@ fn test_reconcile_publishes_resolved_from_unit_values_and_records_teardown_setti
     assert_eq!(settings["catalogPrunes"], false, "{settings}");
     assert_eq!(settings["applicationDeletionPolicy"], "Foreground", "{settings}");
     assert_eq!(settings["namespaceDeletePolicies"]["web"], "Confirm", "{settings}");
+    assert_eq!(settings["namespacePrunePolicies"]["web"], "Confirm", "{settings}");
     let status = invoke(&harness, &["status", "-e", "dev", "-o", "json"]);
     let readiness = status.report["environments"][0]["units"]["kubernetes"]["teardownReadiness"].to_string();
     for code in ["NYL-TEARDOWN-CATALOG-MANUAL-SYNC", "NYL-TEARDOWN-NAMESPACE-CONFIRM"] {
@@ -165,7 +166,7 @@ fn test_ready_target_tears_down_in_two_phases() {
         "  publication:\n    repositoryRef: {name: platform}\n",
         "  catalogApplication:\n    syncPolicy: {automated: {prune: true}}\n  publication:\n    repositoryRef: {name: platform}\n",
     );
-    let web = read("nyl/web.yaml") + "  namespace: {deletePolicy: Automatic}\n";
+    let web = read("nyl/web.yaml") + "  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n";
     harness.world.commit_files(
         "main",
         "A target that tears down cleanly",
@@ -177,6 +178,7 @@ fn test_ready_target_tears_down_in_two_phases() {
     let settings = &desired(&harness, "kubernetes")["resolvedSpec"]["teardownSettings"];
     assert_eq!(settings["catalogPrunes"], true, "{settings}");
     assert_eq!(settings["namespaceDeletePolicies"]["web"], "Automatic", "{settings}");
+    assert_eq!(settings["namespacePrunePolicies"]["web"], "Automatic", "{settings}");
     // Only the self-managing catalog is left behind, which warns without blocking.
     let warnings = reconcile.report["environments"][0]["warnings"].to_string();
     assert!(warnings.contains("NYL-TEARDOWN-CATALOG-REMAINS"), "{warnings}");
@@ -346,7 +348,7 @@ fn declare_target_inline(harness: &harness::Harness, extra: &str) {
                 + "\n      catalogApplication:\n        syncPolicy: {automated: {prune: true}}"
         ),
     );
-    let web = read("nyl/web.yaml") + "  namespace: {deletePolicy: Automatic}\n";
+    let web = read("nyl/web.yaml") + "  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n";
     harness.world.commit_files(
         "main",
         "Declare the target inline",

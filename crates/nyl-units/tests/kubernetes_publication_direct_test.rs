@@ -332,7 +332,7 @@ async fn test_an_automatic_namespace_is_deleted_with_the_state_it_held() {
         &group,
         text.replace(
             "  applicationNamespace: argocd\n",
-            "  applicationNamespace: argocd\n  namespace: {deletePolicy: Automatic}\n",
+            "  applicationNamespace: argocd\n  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n",
         ),
     )
     .unwrap();

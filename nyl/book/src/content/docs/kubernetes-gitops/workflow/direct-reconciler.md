@@ -76,4 +76,9 @@ without its Releases and deletes their resources, honoring each object's `Delete
 sync option, but keeps the release state and the Namespaces that hold it. Phase 2,
 once the wait ends, deletes the state and then those Namespaces by their
 `deletePolicy`: `Automatic` removes them, `Confirm` and `Retain` leave them as a
-remnant that `nyl plan` warns about.
+remnant that `nyl plan` warns about. Only `deletePolicy` matters to a direct
+teardown; `prunePolicy` decides whether the next apply deletes a Namespace a
+Release stopped declaring (`Confirm`, the default, keeps it with a warning). A
+group shared with an Argo CD target declares both, as
+`namespace: {prunePolicy: Automatic, deletePolicy: Automatic}`, because Argo CD
+holds a teardown for either being `Confirm`.
