@@ -1,0 +1,79 @@
+# Attested evidence for dependents (design/orchestration-core.md, Units and
+# Attestations): a consumer that requires attestations waits for them to pass
+# for its producer's current receipt, and a new receipt starts pending again.
+contract: design/orchestration-core.md#attestations
+milestone: M5
+tiers: [1]                            # the local run uses tier 1's Git repository
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+
+  # A receipt is not an attestation: both consumers wait for `healthy`.
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: [service]
+      blocked: [smoke, dashboard]
+      codes: [NYL-ATTESTATION-PENDING]
+      commits: {desired: 1, observed: 1}
+
+  # A plan and a status show the same blockers.
+  - nyl: [plan, -e, dev]
+    exit: 2
+    expect:
+      current: [service]
+      blocked: [smoke, dashboard]
+      codes: [NYL-ATTESTATION-PENDING]
+  - nyl: [status, -e, dev]
+    exit: 2
+    expect:
+      current: [service]
+      blocked: [smoke, dashboard]
+      codes: [NYL-ATTESTATION-PENDING]
+
+  # A failing attestation blocks them too, with its own code.
+  - file: {path: health.json, content: '{"healthy": "fail"}'}
+  - nyl: [attest, -e, dev]
+    exit: 3
+    expect:
+      codes: [NYL-ATTESTATION-FAILED]
+      commits: {desired: 0, observed: 1}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      blocked: [smoke, dashboard]
+      codes: [NYL-ATTESTATION-FAILING]
+
+  # A newer passing attestation unblocks both in the next reconcile, which
+  # does not execute the producer again.
+  - file: {path: health.json, content: '{"healthy": "pass"}'}
+  - nyl: [attest, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [smoke, dashboard]
+      current: [service]
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+
+  # A new receipt of the producer starts pending: the old pass names the old
+  # receipt. Re-attested, the consumers are current without executing again,
+  # because their own inputs did not change.
+  - commit: {branch: main, message: "Release version 2", apply: patches/new-version}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      executed: [service]
+      blocked: [smoke, dashboard]
+      codes: [NYL-ATTESTATION-PENDING]
+  - nyl: [attest, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      current: [service, smoke, dashboard]

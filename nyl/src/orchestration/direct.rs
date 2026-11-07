@@ -152,6 +152,7 @@ pub fn prepare(
             desired: &snapshot.desired,
             observed: &snapshot.observed,
             artifacts: &snapshot.artifacts,
+            attestations: &snapshot.attestations,
             observed_commit: snapshot.tips.observed.as_ref(),
             run: None,
             produced_in_run: &BTreeSet::new(),
@@ -160,7 +161,14 @@ pub fn prepare(
         &unit,
     );
     if !resolved.errors.is_empty() {
-        return Err(config(resolved.errors.join("; ")));
+        return Err(config(
+            resolved
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
     }
     let mut spec = resolved
         .resolved_spec

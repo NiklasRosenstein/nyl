@@ -189,7 +189,12 @@ asks for the unit's attestations, such as a smoke test against what the
 command deployed. It writes one JSON object of `pass` or `fail` per declared
 name to `NYL_ATTESTATIONS`, such as `{"smoke": "pass"}`; a declared name it
 leaves out stays pending, and undeclared names are ignored. The `command`
-step can write the same file when the reconcile itself proves the result. An
+step can write the same file when the reconcile itself proves the result; the
+run records those results for the receipt it wrote, with
+`source: {driver: reconcile}`, so a unit that
+[requires them](/nyl/orchestration/runs/#requiring-attestations) runs in a later
+wave of the same run. A receipt a later run imports from a dead run has them
+pending until `nyl attest` records them. An
 `attest` step that does not exit 0 makes the unit `unknown` and records
 nothing.
 

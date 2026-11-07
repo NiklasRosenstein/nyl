@@ -223,10 +223,29 @@ impl DependsOn {
         }
     }
 
+    /// The evidence the entry requires of its producer.
+    pub fn evidence(&self) -> Evidence {
+        match self {
+            Self::Name(_) => Evidence::default(),
+            Self::Entry(entry) => entry.evidence.unwrap_or_default(),
+        }
+    }
+
+    /// The producer's attestations the entry names; empty for a name.
+    pub fn attestations(&self) -> &[String] {
+        match self {
+            Self::Name(_) => &[],
+            Self::Entry(entry) => &entry.attestations,
+        }
+    }
+
     fn validate(&self, field: &str) -> Result<()> {
         UnitName::new(self.unit()).map_err(|error| CoreError::config(format!("{field}: {error}")))?;
         if let Some(environment) = self.environment() {
             EnvironmentName::new(environment).map_err(|error| CoreError::config(format!("{field}: {error}")))?;
+        }
+        for (index, name) in self.attestations().iter().enumerate() {
+            validate_static_required(&format!("{field}.attestations[{index}]"), name)?;
         }
         Ok(())
     }
