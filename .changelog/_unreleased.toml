@@ -327,3 +327,9 @@ id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
 type = "feature"
 description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
+author = "@NiklasRosenstein"

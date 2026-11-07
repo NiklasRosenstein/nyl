@@ -1222,6 +1222,8 @@ pub struct TeardownSettings {
     pub application_deletion_policy: Option<String>,
     /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
     pub namespace_delete_policies: BTreeMap<String, String>,
+    /// Each owned Namespace's `prunePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
+    pub namespace_prune_policies: BTreeMap<String, String>,
     /// Whether a parent owns the target's catalog, so phase 2 removes the
     /// catalog Application and AppProjects too.
     pub catalog_owned_by_parent: bool,
@@ -1241,8 +1243,10 @@ pub struct TeardownSettings {
 ///   that Application then leaves its workloads running. A tree without a
 ///   catalog Application leaves a parent to sync it, which cannot be seen:
 ///   both settings are `None`, and `catalog_owned_by_parent` is true.
-/// - Each Namespace the tree renders reports its `Delete` sync option:
-///   `confirm` is `Confirm`, `false` is `Retain`, and none is `Automatic`.
+/// - Each Namespace the tree renders reports its `Delete` and `Prune` sync
+///   options: `confirm` is `Confirm`, `false` is `Retain`, and none is
+///   `Automatic`. The rendered annotation decides, not the policy defaults,
+///   so templates and overrides count.
 ///
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
@@ -1271,7 +1275,8 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
     let catalog_source = catalog_source(&rendered.destination.path_prefix);
     let mut catalog: Option<Value> = None;
     let mut workload_orphaned = false;
-    let mut namespaces = BTreeMap::new();
+    let mut delete_policies = BTreeMap::new();
+    let mut prune_policies = BTreeMap::new();
     for (path, bytes) in &rendered.files {
         let in_catalog = path.starts_with(super::CATALOG_DIRECTORY);
         if !matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("yaml" | "yml")) {
@@ -1298,7 +1303,8 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
                 && manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
             {
                 if let Some(name) = manifest.pointer("/metadata/name").and_then(Value::as_str) {
-                    namespaces.insert(name.to_owned(), namespace_delete_policy(&manifest).to_owned());
+                    delete_policies.insert(name.to_owned(), namespace_sync_policy(&manifest, "Delete").to_owned());
+                    prune_policies.insert(name.to_owned(), namespace_sync_policy(&manifest, "Prune").to_owned());
                 }
             }
         }
@@ -1331,7 +1337,8 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
         } else {
             catalog_policy.map(str::to_owned)
         },
-        namespace_delete_policies: namespaces,
+        namespace_delete_policies: delete_policies,
+        namespace_prune_policies: prune_policies,
         catalog_owned_by_parent: owned_by_parent,
     })
 }
@@ -1367,17 +1374,19 @@ fn application_deletion_policy(application: &serde_json::Value) -> &'static str 
     }
 }
 
-/// A Namespace's `deletePolicy` as its `Delete` Argo CD sync option renders.
-fn namespace_delete_policy(namespace: &serde_json::Value) -> &'static str {
+/// A Namespace's `deletePolicy` or `prunePolicy` as its `Delete` or `Prune`
+/// Argo CD sync option (`option`) renders.
+fn namespace_sync_policy(namespace: &serde_json::Value, option: &str) -> &'static str {
     let options = namespace
         .pointer("/metadata/annotations")
         .and_then(|annotations| annotations.get("argocd.argoproj.io/sync-options"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    let prefix = format!("{option}=");
     match options
         .split(',')
         .map(str::trim)
-        .find_map(|option| option.strip_prefix("Delete="))
+        .find_map(|candidate| candidate.strip_prefix(prefix.as_str()))
     {
         Some("confirm") => "Confirm",
         Some("false") => "Retain",
@@ -2719,12 +2728,14 @@ spec:
             catalog_prunes: Some(true),
             application_deletion_policy: Some("Foreground".to_owned()),
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
+            namespace_prune_policies: BTreeMap::from([("web".to_owned(), "Retain".to_owned())]),
             catalog_owned_by_parent: false,
         };
         let stored = serde_json::json!({
             "catalogPrunes": true,
             "applicationDeletionPolicy": "Foreground",
             "namespaceDeletePolicies": {"web": "Confirm"},
+            "namespacePrunePolicies": {"web": "Retain"},
             "catalogOwnedByParent": false,
         });
         assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
@@ -2734,6 +2745,7 @@ spec:
             "catalogPrunes": null,
             "applicationDeletionPolicy": null,
             "namespaceDeletePolicies": {},
+            "namespacePrunePolicies": {},
             "catalogOwnedByParent": true,
         });
         let parent_owned = TeardownSettings {
@@ -2763,14 +2775,69 @@ spec:
         assert_eq!(settings.catalog_prunes, Some(false));
         assert_eq!(settings.application_deletion_policy.as_deref(), Some("Foreground"));
         assert!(!settings.catalog_owned_by_parent);
-        assert!(
-            !settings.namespace_delete_policies.is_empty()
-                && settings
+        for policies in [&settings.namespace_delete_policies, &settings.namespace_prune_policies] {
+            assert!(
+                !policies.is_empty() && policies.values().all(|policy| policy == "Confirm"),
+                "{settings:?}"
+            );
+        }
+    }
+
+    /// Catches readiness judging a Namespace by the policy defaults instead of
+    /// the sync options the tree renders (templates and overrides land in the
+    /// annotation): `Delete` and `Prune` each read as Automatic, Retain, or
+    /// Confirm, independently of one another and of other options.
+    #[test]
+    fn test_teardown_settings_read_the_rendered_namespace_sync_options() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        let cases = [
+            ("ServerSideApply=true", "Automatic", "Automatic"),
+            ("Prune=confirm", "Automatic", "Confirm"),
+            ("Delete=confirm", "Confirm", "Automatic"),
+            ("Delete=false,Prune=confirm", "Retain", "Confirm"),
+            ("Prune=false, Delete=confirm", "Confirm", "Retain"),
+        ];
+        for (options, delete, prune) in cases {
+            let mut edited = rendered.clone();
+            let mut annotated = 0;
+            for (path, bytes) in &mut edited.files {
+                if path.starts_with(super::super::CATALOG_DIRECTORY)
+                    || path.extension().and_then(std::ffi::OsStr::to_str) != Some("yaml")
+                    || !String::from_utf8_lossy(bytes).contains("Namespace")
+                {
+                    continue;
+                }
+                let mut manifests =
+                    serde_saphyr::from_multiple::<serde_json::Value>(&String::from_utf8_lossy(bytes)).unwrap();
+                for manifest in &mut manifests {
+                    if manifest["kind"] == "Namespace" {
+                        manifest["metadata"]["annotations"] = json!({"argocd.argoproj.io/sync-options": options});
+                        annotated += 1;
+                    }
+                }
+                *bytes = manifests
+                    .iter()
+                    .map(|manifest| serde_saphyr::to_string(manifest).unwrap())
+                    .collect::<Vec<_>>()
+                    .join("---\n")
+                    .into_bytes();
+            }
+            assert!(annotated > 0, "the tree owns a Namespace");
+            let settings = settings_of(&edited);
+            assert!(
+                settings
                     .namespace_delete_policies
                     .values()
-                    .all(|policy| policy == "Confirm"),
-            "{settings:?}"
-        );
+                    .all(|policy| policy == delete),
+                "{options}: {settings:?}"
+            );
+            assert!(
+                settings.namespace_prune_policies.values().all(|policy| policy == prune),
+                "{options}: {settings:?}"
+            );
+        }
     }
 
     fn edit_catalog(rendered: &mut RenderedTarget, edit: impl Fn(&mut serde_json::Value) -> bool) {
