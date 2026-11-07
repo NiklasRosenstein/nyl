@@ -229,6 +229,11 @@ pub struct LifecycleOptions {
     pub leaving: bool,
     /// `teardown --confirm-removed`: the operator confirms a publication's removal.
     pub confirm_removed: bool,
+    /// The removal of an expired instance, decided on this `expiresAt`: its
+    /// teardowns are caused by expiry (`DeletionReason::Expired`), start only
+    /// with `allow_teardown`, and are refused when the record's expiry is no
+    /// longer this one ([`crate::rules::expiry::guard_removal`]).
+    pub expired: Option<nyl_core::orchestration::time::Timestamp>,
     /// `teardown --hold`: hold the units after their teardown, in the same
     /// operation ("tear down, then hold").
     pub hold: bool,
@@ -291,6 +296,10 @@ pub struct RunRequest {
     /// `--reason` of an operator action (`--reapply`, `teardown`, `recover`),
     /// recorded as `Nyl-Reason` next to `Nyl-Requested-By`.
     pub reason: Option<String>,
+    /// The prefix of the keep refs of an instance's source commits, which
+    /// `state delete` removes with the instance's state; `None` for a
+    /// declared environment and unless the template sets `keepSource: true`.
+    pub keep_prefix: Option<String>,
 }
 
 impl RunRequest {
@@ -322,6 +331,64 @@ pub fn plan(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
     let mut report = RunReport::new(ReportKind::PlanReport);
     report.environments.push(environment);
     report
+}
+
+/// The teardown requirements the environment's units do not meet, as
+/// `plan` would warn about them, and what an unattended removal would wait
+/// for, without a report of anything else: what
+/// `nyl state init --template` shows, because every instance is torn down
+/// some day. The units render at the request's source and resolve against
+/// the environment's state; nothing is written. The findings are the
+/// drivers' own, shown unchanged. `Err` holds why the units could not be
+/// resolved, so a caller can say the readiness is unchecked.
+///
+/// Contract: [Kubernetes publication unit](../../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+pub fn teardown_readiness_preview(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+) -> Result<Vec<Finding>, Vec<Finding>> {
+    off_runtime(|| {
+        let session = Session::new(context, request);
+        let preview = || -> Result<Vec<Finding>, Vec<Finding>> {
+            let snapshot = context
+                .base
+                .store
+                .snapshot(&request.location)
+                .map_err(|error| vec![store_error(&request.environment, &error)])?;
+            let prepared = session.prepare(&snapshot)?;
+            let held_view: BTreeMap<UnitName, DesiredUnit> = prepared
+                .desired
+                .held
+                .iter()
+                .map(|(name, held)| (name.clone(), held.stored.clone()))
+                .collect();
+            let produced = BTreeSet::new();
+            let resolved = session.resolve(
+                &prepared,
+                &Evidence {
+                    observed: &snapshot.observed,
+                    artifacts: &snapshot.artifacts,
+                    attestations: &snapshot.attestations,
+                    observations: &snapshot.observations,
+                    observed_commit: snapshot.tips.observed.as_ref(),
+                    run: None,
+                    produced_in_run: &produced,
+                    previous: &snapshot.desired,
+                },
+                &held_view,
+            );
+            let mut findings = crate::rules::teardown::readiness_warnings(context.drivers, resolved.units.values());
+            findings.extend(crate::rules::teardown::unattended_warnings(
+                context.drivers,
+                resolved.units.values(),
+            ));
+            Ok(findings)
+        };
+        let result = preview();
+        session.clean();
+        result
+    })
 }
 
 /// `nyl reconcile -e <env>`.
@@ -3019,6 +3086,16 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             overlay,
         } = begun;
         let run = self.run.clone();
+        // The removal of an expired instance repeats its decision under the
+        // lease: an instance renewed meanwhile is kept.
+        if let Some(decided_on) = request.lifecycle.expired {
+            if let Err(finding) =
+                crate::rules::expiry::guard_removal(&environment, decided_on, snapshot.record.as_ref())
+            {
+                self.report.errors.push(finding);
+                return Ending::Release;
+            }
+        }
         let leftovers = takeover::leftovers(&run, replaced.as_ref(), coordination);
         let mut observed = snapshot.observed.clone();
         let mut artifacts = snapshot.artifacts.clone();
@@ -3100,7 +3177,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             runs: &runs,
             options: TeardownOptions {
                 approvals: Some(&request.approvals),
-                allow_teardown: true,
+                // An explicit teardown needs no `--allow-teardown`; the removal
+                // of an expired instance does, like any teardown nobody asked
+                // for by name (`allowTeardown` of the template or the flag).
+                allow_teardown: request.lifecycle.expired.is_none() || request.lifecycle.allow_teardown,
                 allow_dependents: request.lifecycle.allow_dependents,
                 allow_incomplete: request.lifecycle.allow_incomplete,
                 named: named.as_ref(),

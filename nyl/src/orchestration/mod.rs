@@ -6,6 +6,7 @@
 
 pub mod clock;
 pub mod ids;
+pub mod instances;
 pub mod project;
 pub mod run;
 pub mod session;

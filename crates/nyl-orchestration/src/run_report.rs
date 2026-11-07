@@ -140,12 +140,16 @@ impl ExitCategory {
         }
     }
 
-    /// The category an error finding contributes: a held lease is
-    /// incomplete (2), a lost lease or a cancelled run uncertain (4),
+    /// The category an error finding contributes: a held lease, or an
+    /// instance limit, renewal, or removal that waits, is incomplete (2), a lost lease or a cancelled run uncertain (4),
     /// anything else an error (1).
     pub fn of_finding(finding: &Finding) -> Self {
         match finding.code {
-            Code::LeaseHeld | Code::LeaseBroken => Self::Incomplete,
+            Code::LeaseHeld
+            | Code::LeaseBroken
+            | Code::InstanceLimit
+            | Code::InstanceRenewed
+            | Code::InstanceRemovalPending => Self::Incomplete,
             Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,
         }
@@ -156,6 +160,41 @@ impl Serialize for ExitCategory {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u8(self.code())
     }
+}
+
+/// What a template instance's report says about its lifecycle.
+///
+/// Contract: [Expiry](../../../../design/orchestration-core.md#expiry).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceReport {
+    /// The EnvironmentTemplate.
+    pub template: String,
+    /// The recorded expiry, as the command saw it when it started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<nyl_core::orchestration::time::Timestamp>,
+    /// Whether the instance was expired when the command started.
+    pub expired: bool,
+    /// What the command did about expiry, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<InstanceAction>,
+}
+
+/// What a reconcile did about an instance's expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstanceAction {
+    /// Activity moved `expiresAt` to now plus `ttl`.
+    Extended,
+    /// The instance was expired: its teardown completed and its state was deleted.
+    Removed,
+    /// The instance was expired, and its teardown waits for `allowTeardown` or `--allow-teardown`.
+    RemovalPending,
+    /// The instance was expired, and its removal did not finish: a teardown
+    /// waits, failed, or is uncertain, so state and resources remain.
+    RemovalIncomplete,
+    /// The fleet reconcile skipped the instance because another run holds its lease.
+    Busy,
 }
 
 /// One environment of a report.
@@ -213,6 +252,9 @@ pub struct EnvironmentRunReport {
     /// The transition commits written, by state ref side (`desired`, `observed`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
+    /// The environment's lifecycle, for an instance of an EnvironmentTemplate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<InstanceReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<Finding>,
     pub warnings: Vec<Finding>,
@@ -239,9 +281,42 @@ impl EnvironmentRunReport {
             reapplied: Vec::new(),
             observations_changed: BTreeMap::new(),
             commits: BTreeMap::new(),
+            instance: None,
             errors: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    /// The fleet reconcile's rule for an instance another run holds: when the
+    /// report's errors say the lease is held, it is [`Self::mark_busy`]; a
+    /// held lease is not a failure of the run that skips it. Whether it did.
+    pub fn skip_when_busy(&mut self) -> bool {
+        let held = self.errors.iter().any(|finding| finding.code == Code::LeaseHeld);
+        if held {
+            self.mark_busy();
+        }
+        held
+    }
+
+    /// Report the instance as skipped because another run holds its lease:
+    /// the fleet reconcile's `busy`, which is not a failure. The lease
+    /// findings become warnings, and the exit category no longer counts the
+    /// instance, because only the instances a fleet run processed decide it.
+    pub fn mark_busy(&mut self) {
+        let (held, errors): (Vec<_>, Vec<_>) = std::mem::take(&mut self.errors)
+            .into_iter()
+            .partition(|finding| finding.code == Code::LeaseHeld);
+        self.errors = errors;
+        self.warnings.extend(held);
+        if let Some(instance) = &mut self.instance {
+            instance.action = Some(InstanceAction::Busy);
+        }
+        self.exit = self
+            .errors
+            .iter()
+            .map(ExitCategory::of_finding)
+            .fold(ExitCategory::Ok, ExitCategory::most_severe);
+        self.complete = false;
     }
 
     /// Units in the shell's dispatch/dependency order, with a stable fallback.

@@ -220,6 +220,171 @@ fn test_worktree_is_a_clean_detached_checkout_of_the_commit() {
     );
 }
 
+/// A commit that only a pull request ref of the origin carries (no branch
+/// does, as after a squash merge and a branch deletion) is fetched by its id
+/// from the entry clone's origin when the run has network access, and is
+/// missing without it. Catches a close job on a default-branch clone that
+/// cannot find the commit its instance recorded, and a `--local` run that
+/// reaches for the network.
+#[test]
+fn test_a_commit_only_a_pull_request_ref_carries_is_fetched_from_origin() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let c4 = commit(&origin, Some(world.c2), &[("app.txt", "pull request")], "c4");
+    origin.reference("refs/pull/1/head", c4, true, "pull request").unwrap();
+    let this = SourceRepository::This;
+    let clone = Repository::open(world.clone_dir()).unwrap();
+    assert!(clone.find_commit(c4).is_err(), "the clone starts without the commit");
+
+    let offline = world.resolver();
+    let refused = offline
+        .worktree(&this, &id(c4), &world.root.path().join("workspace/offline"))
+        .unwrap_err();
+    assert!(refused.to_string().contains("does not exist"), "{refused}");
+    assert!(clone.find_commit(c4).is_err(), "no network, so nothing was fetched");
+
+    let online = world.resolver().with_origin_fetch();
+    let checkout = world.root.path().join("workspace/online");
+    online.worktree(&this, &id(c4), &checkout).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("app.txt")).unwrap(),
+        "pull request"
+    );
+
+    // Only the recorded id is asked for: a commit the origin does not have stays missing.
+    let absent = "0123456789abcdef0123456789abcdef01234567";
+    let missing = world
+        .resolver()
+        .with_origin_fetch()
+        .worktree(
+            &this,
+            &CommitId::new(absent).unwrap(),
+            &world.root.path().join("workspace/absent"),
+        )
+        .unwrap_err();
+    assert!(missing.to_string().contains(absent), "{missing}");
+}
+
+/// The keep ref of an instance alone serves a commit the clone lacks, without
+/// the origin fetch by id: the path of a run whose host keeps no pull request
+/// refs. Catches a keep ref that stops working once the id fetch exists.
+#[test]
+fn test_a_commit_only_a_keep_ref_carries_is_fetched_through_it() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let kept = commit(&origin, Some(world.c2), &[("app.txt", "kept")], "kept");
+    origin
+        .reference(&format!("refs/nyl-keep/instance/{kept}"), kept, true, "keep")
+        .unwrap();
+    let this = SourceRepository::This;
+    let without_prefix = world
+        .resolver()
+        .worktree(&this, &id(kept), &world.root.path().join("workspace/plain"))
+        .unwrap_err();
+    assert!(
+        without_prefix.to_string().contains("does not exist"),
+        "{without_prefix}"
+    );
+
+    let checkout = world.root.path().join("workspace/kept");
+    world
+        .resolver()
+        .with_kept_source("refs/nyl-keep/instance")
+        .worktree(&this, &id(kept), &checkout)
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(checkout.join("app.txt")).unwrap(), "kept");
+}
+
+/// A host that will not serve a commit by its id but serves the ref that
+/// carried it: the resolver has no by-id fetch (`with_origin_fetch` is not set,
+/// as when the host refuses it) and the instance recorded `--source-ref`, so the
+/// ref is fetched by name and the recorded commit is found. Catches the
+/// fallback missing, a fetched ref being written into the clone, and a
+/// resolver without the ref finding the commit anyway.
+#[test]
+fn test_a_commit_is_fetched_through_the_recorded_source_ref_when_it_cannot_be_fetched_by_id() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let head = commit(&origin, Some(world.c2), &[("app.txt", "pull request")], "head");
+    origin
+        .reference("refs/pull/1/head", head, true, "pull request")
+        .unwrap();
+    let this = SourceRepository::This;
+    let clone = Repository::open(world.clone_dir()).unwrap();
+    let refs = |clone: &Repository| {
+        clone
+            .references()
+            .unwrap()
+            .map(|reference| reference.unwrap().name().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = refs(&clone);
+
+    let without = world
+        .resolver()
+        .worktree(&this, &id(head), &world.root.path().join("workspace/without"))
+        .unwrap_err();
+    assert!(without.to_string().contains("does not exist"), "{without}");
+
+    let checkout = world.root.path().join("workspace/by-ref");
+    world
+        .resolver()
+        .with_source_ref("refs/pull/1/head")
+        .worktree(&this, &id(head), &checkout)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("app.txt")).unwrap(),
+        "pull request"
+    );
+    assert_eq!(refs(&clone), before, "fetching the hint writes no ref");
+}
+
+/// The ref is a hint, never the commit: it moved on to an unrelated commit and
+/// the recorded one is gone from the origin, so the recorded commit stays
+/// missing (`does not exist`, which the caller reports as
+/// `NYL-SOURCE-UNAVAILABLE`) and nothing is checked out from the ref's tip.
+#[test]
+fn test_a_moved_source_ref_never_stands_in_for_the_recorded_commit() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let unrelated = commit(&origin, Some(world.c2), &[("app.txt", "someone else")], "unrelated");
+    origin.reference("refs/pull/1/head", unrelated, true, "moved").unwrap();
+    let recorded = "0123456789abcdef0123456789abcdef01234567";
+    let checkout = world.root.path().join("workspace/moved");
+    let error = world
+        .resolver()
+        .with_source_ref("refs/pull/1/head")
+        .worktree(&SourceRepository::This, &CommitId::new(recorded).unwrap(), &checkout)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("does not exist") && error.to_string().contains(recorded),
+        "{error}"
+    );
+    assert!(!checkout.join("app.txt").exists(), "the ref's tip was not used");
+}
+
+/// An explicit full commit id the entry clone lacks, such as `--source <sha>`,
+/// is fetched from the clone's origin like a recorded commit, and only when the
+/// run has network access.
+#[test]
+fn test_resolve_revision_of_a_full_id_fetches_it_from_origin() {
+    let world = World::new();
+    let origin = Repository::open(world.root.path().join("origin.git")).unwrap();
+    let c4 = commit(&origin, Some(world.c2), &[("app.txt", "pull request")], "c4");
+    origin.reference("refs/pull/1/head", c4, true, "pull request").unwrap();
+    let this = SourceRepository::This;
+    let missing = world.resolver().resolve_revision(&this, &c4.to_string()).unwrap_err();
+    assert!(missing.to_string().contains(&c4.to_string()), "{missing}");
+    assert_eq!(
+        world
+            .resolver()
+            .with_origin_fetch()
+            .resolve_revision(&this, &c4.to_string())
+            .unwrap(),
+        id(c4)
+    );
+}
+
 #[test]
 fn test_default_branch_follows_origin_head_then_local_head() {
     let world = World::new();

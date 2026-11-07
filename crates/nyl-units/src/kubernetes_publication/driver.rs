@@ -371,6 +371,11 @@ impl Driver for KubernetesPublicationDriver {
         teardown_wait(spec)
     }
 
+    /// A `manual` `teardownWait` stops an unattended removal after phase 1.
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<nyl_core::orchestration::codes::Finding> {
+        super::unattended_teardown(unit)
+    }
+
     /// The workload deployments the reconciler still reports, for the
     /// `observe` teardown wait.
     fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {

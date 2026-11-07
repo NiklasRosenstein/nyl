@@ -893,6 +893,7 @@ mod tests {
             params: BTreeMap::new(),
             deletion_policy: Some(DeletionPolicy::Teardown),
             allow_teardown: true,
+            keep_source: true,
             ttl: None,
             max_instances: None,
         });

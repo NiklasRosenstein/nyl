@@ -824,6 +824,15 @@ pub trait Driver: Send + Sync {
         let _ = unit;
         Ok(Supported::Unsupported)
     }
+    /// What a teardown nobody attends, such as the removal of an expired
+    /// template instance, would wait for because only an operator can answer
+    /// it. Read from the unit's declaration alone, resolved or not, so
+    /// `nyl state init --template` can warn before any producer ran. Never
+    /// blocking; none by default.
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<Finding> {
+        let _ = unit;
+        Vec::new()
+    }
     /// How a teardown of this spec waits after phase 1 (`teardownWait`), read
     /// from the stored document with the kind's defaults; the shell never
     /// reads the spec itself. `Manual` by default, the only strategy that

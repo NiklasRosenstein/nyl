@@ -12,6 +12,7 @@ pub mod local;
 pub mod operator;
 mod progress;
 pub mod recover;
+pub mod removal;
 pub mod run;
 pub mod signal;
 pub mod sources;

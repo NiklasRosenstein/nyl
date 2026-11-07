@@ -43,8 +43,8 @@ use nyl_render::gitops::publication::TeardownSettings;
 use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
-    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unit_target,
-    validate_observe,
+    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unattended_teardown,
+    unit_target, validate_observe,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -276,6 +276,10 @@ impl Driver for FakePublication {
 
     fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
         teardown_wait(spec)
+    }
+
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<nyl_core::orchestration::codes::Finding> {
+        unattended_teardown(unit)
     }
 
     /// What the scenario scripted the fake Argo CD to report for the unit's

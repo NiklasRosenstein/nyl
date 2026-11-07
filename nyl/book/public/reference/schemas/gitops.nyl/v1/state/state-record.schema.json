@@ -180,6 +180,10 @@
     },
     "StateV1": {
       "const": "gitops.nyl/v1"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -206,6 +210,17 @@
         "null"
       ]
     },
+    "keepId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Uid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The identity of an instance's keep refs in the source repository,\n`refs/nyl-keep/<keepId>/<commit>`: minted when the instance first\nkeeps a commit, unique across projects, and surviving moves of the\nstate, of the project, and renames of the template."
+    },
     "kind": {
       "$ref": "#/$defs/StateRecordKind"
     },
@@ -227,6 +242,13 @@
         }
       ],
       "description": "An instance's source commit: the entry worktree's commit when\n`state init --template` or `reconcile --template` last created or\nupdated it. A run that is not entered from the instance's own source\nrenders at this commit."
+    },
+    "sourceRef": {
+      "description": "A hint for fetching `sourceCommit`, a full ref name of the source\nrepository's `origin` that carried it when the run that recorded it\npassed `--source-ref` (GitHub's `refs/pull/<n>/head`, for a host that\nrefuses to serve a commit by its id). Only a place to look: it is never\nresolved to a commit, and a run without the option keeps the value.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "template": {
       "description": "The EnvironmentTemplate of an instance.",

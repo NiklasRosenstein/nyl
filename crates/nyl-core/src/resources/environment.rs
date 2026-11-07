@@ -95,7 +95,7 @@ pub struct EnvironmentSpec {
 /// `nyl reconcile --template`), exist only in state, and behave like declared
 /// environments for every command. The template has the Environment's fields
 /// plus `parameters`, `deletionPolicy`, `allowTeardown`, `ttl`,
-/// and `maxInstances`. Strings in `values`, `state`, and `source`
+/// `maxInstances`, and `keepSource`. Strings in `values`, `state`, and `source`
 /// are templates: they read `params` and `environment.name` when an instance
 /// is created from the template, and `state` reads only `environment.name`,
 /// because it locates the state that holds the parameters.
@@ -124,7 +124,7 @@ pub struct EnvironmentTemplate {
 }
 
 /// The Environment's fields, templated, plus what only instances have.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentTemplateSpec {
     /// Typed parameters of an instance, exposed to templates as `params`; `--param <name>=<value>` parses its value as YAML and checks it against the declaration. A parameter without a `default` is required.
@@ -163,12 +163,22 @@ pub struct EnvironmentTemplateSpec {
     /// Whether omission teardown needs no `--allow-teardown`: a unit removed from the template or its selection is torn down by the next reconcile. Default `false`.
     #[serde(rename = "allowTeardown", default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_teardown: bool,
-    /// How long an instance lives without activity, such as `7d`; `state init --template` moves the instance's `expiresAt` to now plus `ttl`. Omitted, instances never expire. Removing expired instances is in progress: today `expiresAt` is recorded and listed, and nothing removes the instance.
+    /// How long an instance lives without activity, such as `7d`: `state init --template`, `reconcile --template`, and every other `reconcile` of the instance (unless `--no-extend`) move its `expiresAt` to now plus `ttl`. A `reconcile` that finds the instance expired removes it, the way `nyl state delete --teardown` does, unless it is `--renew` or `reconcile --template`; `reconcile --template <name>` without an instance sweeps every instance of the template and never extends. Omitted, instances never expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<Duration>,
-    /// The most instances of this template that may exist at once. Omitted, unlimited. Enforcement is in progress: today the limit is recorded and not checked.
+    /// The most instances of this template that may exist at once, expired ones included until they are removed. At the limit, `state init --template` and `reconcile --template` refuse to create another instance (exit 2) and name the expired instances that could be removed; `--make-room` removes them first, oldest expiry first and only as many as needed. Needs `state.path` ending in `{{ environment.name }}` so Nyl can list the instances. Omitted, unlimited.
     #[serde(rename = "maxInstances", default, skip_serializing_if = "Option::is_none")]
     pub max_instances: Option<u32>,
+    /// Opt in to keeping each instance's recorded source commit fetchable with a keep ref of its own, `refs/nyl-keep/<keepId>/<commit>`, in the source repository, for instances that may expire (`ttl`) long after their pull request branches are gone. `nyl state delete` removes the refs. Needs push access to `refs/nyl-keep/*` in the source repository, which a read-only token (GitHub's default `contents: read`, a fork pull request) lacks: without it `state init --template` and `reconcile --template` refuse (`NYL-INSTANCE-KEEP-FAILED`), so grant the access or leave `false`. Omitted, `false`: tear an instance down in the pull request closed job, which fetches the recorded commit by its id from the project's origin; GitHub keeps `refs/pull/<n>/head` and GitLab `refs/merge-requests/<n>/head` after the branch is deleted.
+    #[serde(rename = "keepSource", default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_source: bool,
+}
+
+impl Default for EnvironmentTemplateSpec {
+    /// A template that declares nothing: `keepSource` is off, like an omitted field.
+    fn default() -> Self {
+        serde_json::from_value(serde_json::json!({})).expect("an empty spec deserializes")
+    }
 }
 
 /// Whether reconcile repairs drift on its own.
