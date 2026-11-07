@@ -74,7 +74,12 @@ spec:
 ```
 
 A target without `argocdRef` and without `reconciler` was an Argo CD target with the
-implicit instance; write `reconciler: {argocd: {}}`.
+implicit instance; write `reconciler: {argocd: {}}`. `argocdRef: null` is refused
+like any other use of the field.
+
+Units that declare their DeploymentTarget inline (`spec.target.inline`) take the same
+`reconciler` field. After migrating, reconcile such units before removing them, so the
+published trees and their ownership are checked against the new declaration first.
 
 ## Release inputs
 

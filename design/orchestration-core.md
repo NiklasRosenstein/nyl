@@ -595,6 +595,7 @@ spec:
   spec:
     target:
       inline:
+        reconciler: {argocd: {}}
         clusterRef: {name: preview-cluster}
         applicationGroupSelector: {matchLabels: {preview: 'true'}}
         publication:

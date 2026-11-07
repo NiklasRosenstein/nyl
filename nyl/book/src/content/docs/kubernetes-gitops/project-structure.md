@@ -86,8 +86,9 @@ nyl create app-project workloads
 nyl create application-group workloads
 ```
 
-The generated target declares `reconciler: {argocd: {}}`. When the project declares an
-ArgoCDInstance, edit the target to name it: `reconciler: {argocd: {instanceRef: {name: central}}}`.
+The generated target names the project's ArgoCDInstance when it declares one
+(`--argocd-instance <name>` chooses among several) and otherwise declares
+`reconciler: {argocd: {}}`; `--reconciler direct` declares `reconciler: {direct: {}}`.
 
 ## Application source paths
 

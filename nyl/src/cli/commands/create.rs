@@ -16,7 +16,7 @@ use nyl_render::gitops::{
 };
 use nyl_render::resources::{
     ApplicationGroup, ApplicationGroupSource, GitOpsResource, GitOpsResourceKind, Release, KIND_RELEASE,
-    RELEASE_SCHEMA_FILENAME,
+    RELEASE_SCHEMA_FILENAME, TARGET_ARGOCD_INSTANCE_REF_REQUIRED, TARGET_ARGOCD_INSTANCE_UNDECLARED,
 };
 use nyl_render::util::path_for_display;
 use nyl_render::{NylError, Result};
@@ -53,7 +53,7 @@ enum CreateCommand {
     #[command(name = "argocd-instance", alias = "argocd")]
     ArgoCDInstance(AliasScaffoldArgs),
     /// Create a deployment target declaration.
-    Target(AliasScaffoldArgs),
+    Target(TargetScaffoldArgs),
     /// Create an AppProject definition.
     #[command(name = "app-project")]
     AppProject(AliasScaffoldArgs),
@@ -79,6 +79,16 @@ struct ResourceScaffoldArgs {
     /// Place an ApplicationGroup in SOURCE/_application-group.yaml.
     #[arg(long, requires = "source", conflicts_with = "output")]
     colocate: bool,
+    /// The reconciler of a DeploymentTarget; `None` means the default, Argo CD.
+    #[arg(skip)]
+    reconciler: Option<TargetReconcilerChoice>,
+}
+
+/// A DeploymentTarget's reconciler as the command line asked for it.
+#[derive(Debug, Clone, Default)]
+struct TargetReconcilerChoice {
+    direct: bool,
+    argocd_instance: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -90,6 +100,29 @@ struct AliasScaffoldArgs {
     source: Option<PathBuf>,
     #[arg(long, requires = "source", conflicts_with = "output")]
     colocate: bool,
+}
+
+/// Which reconciler a scaffolded DeploymentTarget declares.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ReconcilerChoice {
+    /// Argo CD syncs the published tree.
+    #[default]
+    Argocd,
+    /// Nyl applies the Releases itself.
+    Direct,
+}
+
+#[derive(Args, Debug)]
+struct TargetScaffoldArgs {
+    name: String,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Who applies the target's Releases.
+    #[arg(long, value_enum, default_value_t = ReconcilerChoice::Argocd)]
+    reconciler: ReconcilerChoice,
+    /// ArgoCDInstance an Argo CD target uses. Defaults to the only declared instance; required when several are declared.
+    #[arg(long, value_name = "NAME")]
+    argocd_instance: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -142,7 +175,7 @@ pub fn execute(args: CreateArgs) -> Result<()> {
         CreateCommand::Cluster(args) => scaffold_cluster(args),
         CreateCommand::Repository(args) => scaffold_repository(args),
         CreateCommand::ArgoCDInstance(args) => scaffold_alias_resource(GitOpsResourceKind::ArgoCDInstance, args),
-        CreateCommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::DeploymentTarget, args),
+        CreateCommand::Target(args) => scaffold_target(args),
         CreateCommand::AppProject(args) => scaffold_alias_resource(GitOpsResourceKind::AppProjectDefinition, args),
         CreateCommand::ApplicationGroup(args) => scaffold_alias_resource(GitOpsResourceKind::ApplicationGroup, args),
         CreateCommand::Release(args) => scaffold_release(args),
@@ -157,6 +190,32 @@ fn scaffold_alias_resource(kind: GitOpsResourceKind, args: AliasScaffoldArgs) ->
             output: args.output,
             source: args.source,
             colocate: args.colocate,
+            reconciler: None,
+        },
+        None,
+        None,
+        None,
+    )
+    .map(|_| ())
+}
+
+fn scaffold_target(args: TargetScaffoldArgs) -> Result<()> {
+    if args.reconciler == ReconcilerChoice::Direct && args.argocd_instance.is_some() {
+        return Err(NylError::config(
+            "--argocd-instance applies to an Argo CD target; drop it, or use `--reconciler argocd`",
+        ));
+    }
+    scaffold_resource(
+        ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::DeploymentTarget,
+            name: args.name,
+            output: args.output,
+            source: None,
+            colocate: false,
+            reconciler: Some(TargetReconcilerChoice {
+                direct: args.reconciler == ReconcilerChoice::Direct,
+                argocd_instance: args.argocd_instance,
+            }),
         },
         None,
         None,
@@ -175,6 +234,7 @@ fn scaffold_repository(args: RepositoryScaffoldArgs) -> Result<()> {
             output: args.output,
             source: None,
             colocate: false,
+            reconciler: None,
         },
         None,
         None,
@@ -196,6 +256,7 @@ fn scaffold_cluster(args: ClusterScaffoldArgs) -> Result<()> {
             output: args.output,
             source: None,
             colocate: false,
+            reconciler: None,
         },
         None,
         Some(&context),
@@ -426,6 +487,7 @@ fn declare_application_group(name: &str, project_dir: Option<&Path>) -> Result<(
             output: None,
             source: None,
             colocate: false,
+            reconciler: None,
         },
         project_dir,
         None,
@@ -604,12 +666,21 @@ fn scaffold_resource(
     } else {
         args.source.as_deref().map(|path| path.to_string_lossy())
     };
+    let reconciler = if args.kind == GitOpsResourceKind::DeploymentTarget {
+        Some(target_reconciler_yaml(
+            &inventory,
+            &args.reconciler.unwrap_or_default(),
+        )?)
+    } else {
+        None
+    };
     let yaml = render_resource_scaffold(
         args.kind,
         &args.name,
         source.as_deref(),
         cluster_context,
         repository_urls,
+        reconciler.as_deref(),
     );
     if use_primary {
         let relative = output.strip_prefix(&inventory.project_root).map_err(|_| {
@@ -635,12 +706,58 @@ fn scaffold_resource(
     Ok(output)
 }
 
+/// The `reconciler` block a scaffolded DeploymentTarget declares. An Argo CD
+/// target names the project's ArgoCDInstance when one is declared, because a
+/// target without it would be invalid; with several instances the choice is the
+/// user's.
+fn target_reconciler_yaml(inventory: &GitOpsInventory, choice: &TargetReconcilerChoice) -> Result<String> {
+    if choice.direct {
+        return Ok("  reconciler:\n    direct: {}\n".to_owned());
+    }
+    let mut instances = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .map(|resource| resource.identity.name.clone())
+        .collect::<Vec<_>>();
+    instances.sort();
+    let chosen = match (&choice.argocd_instance, instances.as_slice()) {
+        (Some(name), []) => {
+            return Err(NylError::config(format!(
+                "{TARGET_ARGOCD_INSTANCE_UNDECLARED}: --argocd-instance {name:?} names no ArgoCDInstance, because none is declared; \
+                 create it with `nyl create argocd-instance {name}`, or drop the flag to use the implicit target-local instance"
+            )));
+        }
+        (Some(name), declared) if !declared.contains(name) => {
+            return Err(NylError::config(format!(
+                "{TARGET_ARGOCD_INSTANCE_UNDECLARED}: --argocd-instance {name:?} is not a declared ArgoCDInstance; declared: {}",
+                declared.join(", ")
+            )));
+        }
+        (Some(name), _) => Some(name.clone()),
+        (None, []) => None,
+        (None, [only]) => Some(only.clone()),
+        (None, several) => {
+            return Err(NylError::config(format!(
+                "{TARGET_ARGOCD_INSTANCE_REF_REQUIRED}: the project declares several ArgoCDInstances ({}), so an Argo CD target must name one; \
+                 pass `--argocd-instance <name>`",
+                several.join(", ")
+            )));
+        }
+    };
+    Ok(match chosen {
+        Some(name) => format!("  reconciler:\n    argocd:\n      instanceRef:\n        name: {name}\n"),
+        None => "  reconciler:\n    argocd: {}\n".to_owned(),
+    })
+}
+
 fn render_resource_scaffold(
     kind: GitOpsResourceKind,
     name: &str,
     source: Option<&str>,
     cluster_context: Option<&str>,
     repository_urls: Option<(&str, Option<&str>)>,
+    reconciler: Option<&str>,
 ) -> String {
     let schema = format!(
         "https://niklasrosenstein.github.io/nyl/reference/schemas/{}/{}",
@@ -674,7 +791,8 @@ fn render_resource_scaffold(
             "apiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  namespace: argocd\n"
         ),
         GitOpsResourceKind::DeploymentTarget => format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  # Argo CD with the implicit target-local instance. With an ArgoCDInstance declared,\n  # write `argocd: {{instanceRef: {{name: <instance>}}}}`; for Nyl to apply the Releases, write `direct: {{}}`.\n  reconciler:\n    argocd: {{}}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n{}  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n",
+            reconciler.unwrap_or("  reconciler:\n    argocd: {}\n")
         ),
         GitOpsResourceKind::AppProjectDefinition => format!(
             "apiVersion: k8s.gitops.nyl/v1\nkind: AppProjectDefinition\nmetadata:\n  name: {name}\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: {name}\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n"
@@ -984,6 +1102,7 @@ mod tests {
             output: None,
             source: None,
             colocate: false,
+            reconciler: None,
         };
         scaffold_resource(args.clone(), Some(temp.path()), None, None).unwrap();
         let path = temp.path().join("config/repositories/deploy.yaml");
@@ -1005,6 +1124,7 @@ mod tests {
                 output: None,
                 source: None,
                 colocate: false,
+                reconciler: None,
             },
             Some(temp.path()),
             Some("admin@production"),
@@ -1018,6 +1138,7 @@ mod tests {
                 output: None,
                 source: None,
                 colocate: false,
+                reconciler: None,
             },
             Some(temp.path()),
             None,
@@ -1031,6 +1152,7 @@ mod tests {
                 output: None,
                 source: None,
                 colocate: false,
+                reconciler: None,
             },
             Some(temp.path()),
             None,
@@ -1052,6 +1174,115 @@ mod tests {
         assert!(instance.contains("namespace: argocd"));
     }
 
+    fn scaffold_named(
+        temp: &TempDir,
+        kind: GitOpsResourceKind,
+        name: &str,
+        choice: Option<TargetReconcilerChoice>,
+    ) -> Result<PathBuf> {
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind,
+                name: name.to_owned(),
+                output: None,
+                source: None,
+                colocate: false,
+                reconciler: choice,
+            },
+            Some(temp.path()),
+            None,
+            None,
+        )
+    }
+
+    fn project_with_instances(names: &[&str]) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        git2::Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        for name in names {
+            scaffold_named(&temp, GitOpsResourceKind::ArgoCDInstance, name, None).unwrap();
+        }
+        temp
+    }
+
+    fn argocd(instance: Option<&str>) -> Option<TargetReconcilerChoice> {
+        Some(TargetReconcilerChoice {
+            direct: false,
+            argocd_instance: instance.map(ToOwned::to_owned),
+        })
+    }
+
+    /// Catches a scaffolded Argo CD target that the project rejects at once:
+    /// with one declared ArgoCDInstance the target names it, with several the
+    /// user must choose (`NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED`) and a
+    /// chosen instance must exist, and a direct target needs no instance.
+    #[test]
+    fn test_scaffold_target_names_the_argocd_instance_the_project_requires() {
+        let target_file = |temp: &TempDir, name: &str| {
+            fs::read_to_string(temp.path().join(format!("config/targets/{name}.yaml"))).unwrap()
+        };
+
+        let one = project_with_instances(&["central"]);
+        scaffold_named(&one, GitOpsResourceKind::DeploymentTarget, "prod", argocd(None)).unwrap();
+        assert!(
+            target_file(&one, "prod").contains("reconciler:\n    argocd:\n      instanceRef:\n        name: central\n")
+        );
+        // The scaffold validates as the project declares it.
+        discover_gitops_inventory(one.path(), None, crate::resource_catalogue()).unwrap();
+
+        let several = project_with_instances(&["central", "edge"]);
+        let error = scaffold_named(&several, GitOpsResourceKind::DeploymentTarget, "prod", argocd(None))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED"), "{error}");
+        assert!(
+            error.contains("--argocd-instance <name>") && error.contains("central, edge"),
+            "{error}"
+        );
+        assert!(!several.path().join("config/targets/prod.yaml").exists());
+        scaffold_named(
+            &several,
+            GitOpsResourceKind::DeploymentTarget,
+            "prod",
+            argocd(Some("edge")),
+        )
+        .unwrap();
+        assert!(target_file(&several, "prod").contains("        name: edge\n"));
+        discover_gitops_inventory(several.path(), None, crate::resource_catalogue()).unwrap();
+        // One instance can be chosen by name too, and an unknown one is refused.
+        let error = scaffold_named(
+            &one,
+            GitOpsResourceKind::DeploymentTarget,
+            "stage",
+            argocd(Some("nope")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED") && error.contains("central"),
+            "{error}"
+        );
+
+        let none = project_with_instances(&[]);
+        let error = scaffold_named(
+            &none,
+            GitOpsResourceKind::DeploymentTarget,
+            "prod",
+            argocd(Some("central")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED"), "{error}");
+
+        let direct = TargetReconcilerChoice {
+            direct: true,
+            argocd_instance: None,
+        };
+        scaffold_named(&several, GitOpsResourceKind::DeploymentTarget, "kind", Some(direct)).unwrap();
+        assert!(target_file(&several, "kind").contains("reconciler:\n    direct: {}\n"));
+        discover_gitops_inventory(several.path(), None, crate::resource_catalogue()).unwrap();
+    }
+
     #[test]
     fn test_scaffold_colocated_application_group() {
         let temp = TempDir::new().unwrap();
@@ -1065,6 +1296,7 @@ mod tests {
                 output: None,
                 source: Some(source.clone()),
                 colocate: true,
+                reconciler: None,
             },
             Some(temp.path()),
             None,
@@ -1261,6 +1493,7 @@ mod tests {
                 output: None,
                 source: None,
                 colocate: false,
+                reconciler: None,
             },
             Some(temp.path()),
             None,

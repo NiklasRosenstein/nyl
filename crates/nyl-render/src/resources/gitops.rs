@@ -386,9 +386,16 @@ pub struct DeploymentTargetSpec {
     #[schemars(with = "TargetReconciler")]
     pub reconciler: Option<TargetReconciler>,
     /// Removed in favor of `reconciler.argocd.instanceRef`. Parsed only so that using it fails with `NYL-TARGET-ARGOCD-REF-REMOVED` and the fix.
-    #[serde(rename = "argocdRef", default, skip_serializing)]
+    #[serde(
+        rename = "argocdRef",
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_present"
+    )]
     #[schemars(skip)]
-    pub legacy_argocd_ref: Option<serde::de::IgnoredAny>,
+    // The outer option records that the field was written, the inner one its value, so `argocdRef: null` counts as used.
+    #[allow(clippy::option_option)]
+    pub legacy_argocd_ref: Option<Option<serde::de::IgnoredAny>>,
     /// Matches literal ApplicationGroup metadata labels before rendering their specs. An empty selector matches all groups.
     #[serde(rename = "applicationGroupSelector", default)]
     pub application_group_selector: LabelSelector,
@@ -406,6 +413,15 @@ pub struct DeploymentTargetSpec {
     /// Release input bindings, keyed by `<applicationGroup>/<release>` and then input name. Each binding sets exactly one source and replaces the Release default whole. Keys of selected but disabled groups are ignored; other keys must name a rendered Release and inputs it declares. Not visible to templates as `target.spec.releaseInputs`.
     #[serde(rename = "releaseInputs", default, skip_serializing_if = "BTreeMap::is_empty")]
     pub release_inputs: super::release_inputs::ReleaseInputBindings,
+}
+
+/// Records that a field is present, even when it is `null`.
+#[allow(clippy::option_option)] // see `DeploymentTargetSpec::legacy_argocd_ref`
+fn deserialize_present<'de, D>(deserializer: D) -> std::result::Result<Option<Option<serde::de::IgnoredAny>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<serde::de::IgnoredAny> as Deserialize>::deserialize(deserializer).map(Some)
 }
 
 /// The reconciler that applies a target's Releases: exactly one member.
@@ -2486,6 +2502,7 @@ mod tests {
         assert!(both.contains(TARGET_RECONCILER_AMBIGUOUS), "{both}");
         for legacy in [
             json!({"argocdRef": {"name": "central"}}),
+            json!({"argocdRef": null}),
             json!({"argocdRef": {"name": "central"}, "reconciler": {"direct": {}}}),
         ] {
             let error = refused(legacy);
