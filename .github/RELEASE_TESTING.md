@@ -114,6 +114,10 @@ treats as "do not distribute" unless the package opts in.
 
 ## Recommended Release Process
 
+The release script allows Cargo to access the registry when refreshing the
+workspace versions in `Cargo.lock`. The local registry cache does not need to
+contain every locked dependency before starting a release.
+
 1. **Prepare release**:
    ```bash
    # Complete the entries in .changelog/_unreleased.toml
