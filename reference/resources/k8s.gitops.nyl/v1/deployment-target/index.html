@@ -85,15 +85,17 @@
 <span class="line"><span style="color:#85E89D">metadata</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">  name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">production</span></span>
 <span class="line"><span style="color:#85E89D">spec</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#85E89D">  argocdRef</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#85E89D">    name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">primary</span></span>
 <span class="line"><span style="color:#85E89D">  clusterRef</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">    name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">primary</span></span>
 <span class="line"><span style="color:#85E89D">  publication</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">    pathPrefix</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">targets/production</span></span>
 <span class="line"><span style="color:#85E89D">    repositoryRef</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">      name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">deploy</span></span>
-<span class="line"><span style="color:#85E89D">    revision</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">deploy</span></span></code></pre>
+<span class="line"><span style="color:#85E89D">    revision</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">deploy</span></span>
+<span class="line"><span style="color:#85E89D">  reconciler</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">    argocd</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">      instanceRef</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">        name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">primary</span></span></code></pre>
 <h2 id="fields">Fields</h2>
 <p>Required means required within the containing object. Optional and nullable are distinct; contextual defaults and requirements are explained with each field.</p>
 <p>Unknown fields are rejected.</p>
@@ -141,15 +143,6 @@
 <p><a id="field-spec.applicationGroupSelector.matchLabels%5Bkey%5D"></a></p>
 <h3 id="specapplicationgroupselectormatchlabelskey">spec.applicationGroupSelector.matchLabels[key]</h3>
 <p><strong>Optional</strong> · string</p>
-<p><a id="field-spec.argocdRef"></a></p>
-<h3 id="specargocdref">spec.argocdRef</h3>
-<p><strong>Optional</strong> · object or null</p>
-<p>Project-local <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a>. Required for an Argo CD target when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a> and <code>argocd</code> namespace. Not allowed with <code>reconciler.direct</code>.</p>
-<p>Unknown fields are rejected.</p>
-<p><a id="field-spec.argocdRef.name"></a></p>
-<h3 id="specargocdrefname">spec.argocdRef.name</h3>
-<p><strong>Required</strong> · string</p>
-<p>Project-local name of the referenced resource; its kind and API group are determined by the containing field.</p>
 <p><a id="field-spec.catalogApplication"></a></p>
 <h3 id="speccatalogapplication">spec.catalogApplication</h3>
 <p><strong>Optional</strong> · object</p>
@@ -447,9 +440,28 @@
 <p>Publication branch or revision for this target.</p>
 <p><a id="field-spec.reconciler"></a></p>
 <h3 id="specreconciler">spec.reconciler</h3>
-<p><strong>Optional</strong> · object or null</p>
-<p>Who applies the rendered <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Releases</a>. Omitted: Argo CD, which syncs the published tree. <code>direct: {}</code>: Nyl applies the <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Releases</a> to the target’s <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a> itself with the mechanics of <code>nyl apply</code>, and still publishes the tree without Applications, AppProjects, or a catalog.</p>
+<p><strong>Required</strong> · object</p>
+<p>Who applies the rendered <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Releases</a>. Required, with exactly one member. <code>argocd</code>: Argo CD syncs the published tree; <code>argocd.instanceRef</code> names the project-local <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a>, which is required once any explicit instance exists, and <code>argocd: {}</code> uses the implicit target-local instance in the workload <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a> and the <code>argocd</code> namespace otherwise. <code>direct: {}</code>: Nyl applies the <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Releases</a> to the target’s <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a> itself with the mechanics of <code>nyl apply</code>, and still publishes the tree without Applications, AppProjects, or a catalog.</p>
 <p>Unknown fields are rejected.</p>
+<p>Choose exactly one variant:</p>
+<ul>
+<li><a href="#field-spec.reconciler.argocd"><strong>argocd</strong></a> — Argo CD syncs the published tree; <code>instanceRef</code> names the <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a> when any is declared.</li>
+<li><a href="#field-spec.reconciler.direct"><strong>direct</strong></a> — Nyl applies the <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Releases</a> to the target’s <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a> itself.</li>
+</ul>
+<p><a id="field-spec.reconciler.argocd"></a></p>
+<h3 id="specreconcilerargocd">spec.reconciler.argocd</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>Argo CD syncs the published tree. Write <code>argocd: {instanceRef: {name: &#x3C;instance>}}</code> for an explicit <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a>, or <code>argocd: {}</code> for the implicit target-local instance, which is valid only while no <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a> is declared.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.reconciler.argocd.instanceRef"></a></p>
+<h3 id="specreconcilerargocdinstanceref">spec.reconciler.argocd.instanceRef</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>Project-local <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a>. Required when any explicit instance exists; not allowed when none is declared, where Nyl uses a target-local instance in the workload <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a> and <code>argocd</code> namespace.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.reconciler.argocd.instanceRef.name"></a></p>
+<h3 id="specreconcilerargocdinstancerefname">spec.reconciler.argocd.instanceRef.name</h3>
+<p><strong>Required</strong> · string</p>
+<p>Project-local name of the referenced resource; its kind and API group are determined by the containing field.</p>
 <p><a id="field-spec.reconciler.direct"></a></p>
 <h3 id="specreconcilerdirect">spec.reconciler.direct</h3>
 <p><strong>Optional</strong> · object or null</p>

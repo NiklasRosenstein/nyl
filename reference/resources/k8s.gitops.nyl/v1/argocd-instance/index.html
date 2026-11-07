@@ -77,7 +77,7 @@
 <p>Declare one to configure a shared or remote Argo CD control plane, a different namespace, or shared catalog defaults.</p>
 </details>
 <details id="if-omitted"><summary>If omitted</summary>
-<p>When no <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a> resources are declared, each target uses an implicit instance in its workload <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a>, in namespace <code>argocd</code>, with the catalog defaults. Leave <code>spec.argocdRef</code> unset in this case. Once any explicit instance exists, every <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/">DeploymentTarget</a> must set <code>spec.argocdRef.name</code> to a declared instance.</p>
+<p>When no <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/">ArgoCDInstance</a> resources are declared, each target uses an implicit instance in its workload <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a>, in namespace <code>argocd</code>, with the catalog defaults. Write <code>reconciler: {argocd: {}}</code> on a target in this case. Once any explicit instance exists, every Argo CD <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/">DeploymentTarget</a> must set <code>spec.reconciler.argocd.instanceRef.name</code> to a declared instance.</p>
 </details>
 <h2 id="example">Example</h2>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">apiVersion</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">k8s.gitops.nyl/v1</span></span>

@@ -82,6 +82,22 @@ under the configured <code dir="auto">project.gitops_scaffold_path</code>, which
 <p><code dir="auto">--output</code> selects an exact file. For an ApplicationGroup, the combination
 <code dir="auto">--source DIR --colocate</code> writes <code dir="auto">DIR/_application-group.yaml</code>. Existing files and duplicate
 resource identities are never overwritten.</p>
+<p><code dir="auto">nyl create target</code> declares who applies the target’s Releases, so the target it
+writes is valid for the project:</p>
+<ul>
+<li>Argo CD (the default, <code dir="auto">--reconciler argocd</code>) names the project’s ArgoCDInstance:
+<code dir="auto">reconciler: {argocd: {instanceRef: {name: &#x3C;instance>}}}</code> when exactly one is
+declared, and <code dir="auto">reconciler: {argocd: {}}</code>, the implicit target-local instance, when
+none is.</li>
+<li><code dir="auto">--argocd-instance &#x3C;name></code> picks the instance. It is required when several are
+declared; without it the command fails with
+<code dir="auto">NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED</code> and lists them. A name that no
+ArgoCDInstance declares fails with <code dir="auto">NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED</code>.</li>
+<li><code dir="auto">--reconciler direct</code> writes <code dir="auto">reconciler: {direct: {}}</code>, Nyl applying the Releases
+itself. It takes no <code dir="auto">--argocd-instance</code>.</li>
+</ul>
+<p>Create ArgoCDInstances before the targets that use them; a target scaffolded earlier
+needs its <code dir="auto">reconciler</code> edited once an instance exists.</p>
 <p><code dir="auto">nyl create cluster</code> records its local context but does not connect to it. Use
 <code dir="auto">nyl capture cluster NAME</code> to refresh stored Kubernetes capabilities.</p>
 <p>A generated ApplicationGroup declares no project and no <code dir="auto">destinationNamespace</code>,
