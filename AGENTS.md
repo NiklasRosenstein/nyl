@@ -142,7 +142,8 @@ Reviewers must check the boundary explicitly:
 │   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
-│   └── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
+│   ├── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
+│   └── nyl-e2e/       # Cluster E2E suite (`nyl-e2e` binary); drives the real `nyl`, depends on no Nyl crate
 ├── nyl/               # The `nyl` command line (plays the nyl-cli role)
 │   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests
@@ -188,6 +189,9 @@ mise run build            # or: cargo build --release -p nyl
 
 # Run benchmarks
 mise run bench            # or: cargo bench -p nyl
+
+# Cluster E2E suite (docker, kind, kubectl, OpenTofu); see crates/nyl-e2e/README.md
+mise run e2e              # or: cargo build -p nyl -p nyl-e2e && target/debug/nyl-e2e run --variant all
 
 # Documentation
 mise run docs-serve       # Serve the documentation site

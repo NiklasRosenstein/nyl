@@ -53,6 +53,13 @@ description = "Build Rust release binary"
 dir = "nyl"
 run = "cargo build --release"
 
+[tasks.e2e]
+description = "Run the cluster E2E suite (needs docker, kind, kubectl, and OpenTofu)"
+run = [
+  "cargo build -p nyl -p nyl-e2e",
+  "target/debug/nyl-e2e run --variant ${E2E_VARIANT:-all} --nyl target/debug/nyl",
+]
+
 [tasks.build-dist]
 description = "Build with dist profile"
 dir = "nyl"

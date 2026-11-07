@@ -1,0 +1,19 @@
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+# Block-style labels: a group whose spec uses template syntax is selected by
+# labels read before it renders.
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  applicationNamespace: argocd
+  source: {path: ../applications/web}   # beside nyl/
+  # Names per target, so no two targets generate the same Argo CD names.
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
+  projectTemplate:
+    name: '{{ target.metadata.name }}-web'
+  # Argo CD asks for confirmation before it deletes a resource that has either
+  # Prune=confirm or Delete=confirm when its Application is deleted, so both
+  # policies are Automatic: a teardown must complete without an operator.
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}
