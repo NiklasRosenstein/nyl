@@ -19,9 +19,79 @@
         }
       ]
     },
+    "ArgoCDAccess": {
+      "additionalProperties": false,
+      "description": "How Nyl reads the Applications of an Argo CD instance.\n\nThe declaration is Git-managed configuration: it names the access method\nand, for the API server, its address, never a credential. The credential\nreaches a unit only through its admitted `env`.",
+      "properties": {
+        "api": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArgoCDApiAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Argo CD API server. Required for, and only allowed with, method `api`."
+        },
+        "method": {
+          "$ref": "#/$defs/ArgoCDAccessMethod",
+          "description": "`kubernetes` reads Application objects from the Kubernetes API of the instance's control-plane Cluster, through the kubeconfig the unit admits as `KUBECONFIG` and the Cluster's `spec.live.context`. `api` reads them from the Argo CD API server with a token."
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "ArgoCDAccessMethod": {
+      "description": "Which interface of Argo CD Nyl reads Applications from.",
+      "oneOf": [
+        {
+          "const": "kubernetes",
+          "description": "The Kubernetes API of the control-plane Cluster.",
+          "type": "string"
+        },
+        {
+          "const": "api",
+          "description": "The Argo CD API server.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArgoCDApiAccess": {
+      "additionalProperties": false,
+      "description": "The Argo CD API server of an instance.",
+      "properties": {
+        "server": {
+          "description": "Base URL of the Argo CD API server, such as `https://argocd.example.com`. Must be `https`, except for a loopback address.",
+          "type": "string"
+        },
+        "tokenEnv": {
+          "default": "ARGOCD_AUTH_TOKEN",
+          "description": "Name of the admitted environment variable that holds the API token, which the unit admits through `env.passthrough` or `env.secrets`. Defaults to `ARGOCD_AUTH_TOKEN`, the name the Argo CD CLI uses. The token needs read access (`get`) to the instance's Applications.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
     "ArgoCDInstanceSpec": {
       "additionalProperties": false,
       "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArgoCDAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How Nyl reads this instance's Applications to attest their acceptance and health and to wait for their removal. Omitted: the Kubernetes API of the control-plane Cluster, through its `live.context`. Never affects rendered bytes."
+        },
         "catalogApplicationDefaults": {
           "$ref": "#/$defs/CatalogApplicationDefaults",
           "default": {

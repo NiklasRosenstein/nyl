@@ -187,6 +187,119 @@ pub struct ArgoCDInstanceSpec {
     /// Default policy for the catalog Applications of targets using this instance.
     #[serde(rename = "catalogApplicationDefaults", default)]
     pub catalog_application_defaults: CatalogApplicationDefaults,
+    /// How Nyl reads this instance's Applications to attest their acceptance and health and to wait for their removal. Omitted: the Kubernetes API of the control-plane Cluster, through its `live.context`. Never affects rendered bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ArgoCDAccess>,
+}
+
+/// The default name of the admitted variable that holds an Argo CD API token.
+pub const DEFAULT_ARGOCD_TOKEN_ENV: &str = "ARGOCD_AUTH_TOKEN";
+
+/// How Nyl reads the Applications of an Argo CD instance.
+///
+/// The declaration is Git-managed configuration: it names the access method
+/// and, for the API server, its address, never a credential. The credential
+/// reaches a unit only through its admitted `env`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgoCDAccess {
+    /// `kubernetes` reads Application objects from the Kubernetes API of the instance's control-plane Cluster, through the kubeconfig the unit admits as `KUBECONFIG` and the Cluster's `spec.live.context`. `api` reads them from the Argo CD API server with a token.
+    pub method: ArgoCDAccessMethod,
+    /// The Argo CD API server. Required for, and only allowed with, method `api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<ArgoCDApiAccess>,
+}
+
+/// Which interface of Argo CD Nyl reads Applications from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArgoCDAccessMethod {
+    /// The Kubernetes API of the control-plane Cluster.
+    Kubernetes,
+    /// The Argo CD API server.
+    Api,
+}
+
+/// The Argo CD API server of an instance.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgoCDApiAccess {
+    /// Base URL of the Argo CD API server, such as `https://argocd.example.com`. Must be `https`, except for a loopback address.
+    pub server: String,
+    /// Name of the admitted environment variable that holds the API token, which the unit admits through `env.passthrough` or `env.secrets`. Defaults to `ARGOCD_AUTH_TOKEN`, the name the Argo CD CLI uses. The token needs read access (`get`) to the instance's Applications.
+    #[serde(rename = "tokenEnv", default = "default_argocd_token_env")]
+    pub token_env: String,
+}
+
+impl ArgoCDAccess {
+    /// The access an instance without `access` has: the Kubernetes API.
+    pub fn kubernetes() -> Self {
+        Self {
+            method: ArgoCDAccessMethod::Kubernetes,
+            api: None,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match (self.method, &self.api) {
+            (ArgoCDAccessMethod::Api, None) => Err(CoreError::config(
+                "spec.access.api is required for method api: name the Argo CD API server in spec.access.api.server",
+            )),
+            (ArgoCDAccessMethod::Kubernetes, Some(_)) => Err(CoreError::config(
+                "spec.access.api applies only to method api; use method api to read the Argo CD API server",
+            )),
+            (ArgoCDAccessMethod::Api, Some(api)) => api.validate(),
+            (ArgoCDAccessMethod::Kubernetes, None) => Ok(()),
+        }
+    }
+}
+
+impl ArgoCDApiAccess {
+    fn validate(&self) -> Result<()> {
+        validate_static_required("spec.access.api.server", &self.server)?;
+        let url = reqwest::Url::parse(&self.server).map_err(|error| {
+            CoreError::config(format!(
+                "spec.access.api.server {:?} is not a URL: {error}",
+                self.server
+            ))
+        })?;
+        let loopback = match url.host_str() {
+            Some("localhost") => true,
+            Some(host) => host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback()),
+            None => false,
+        };
+        match url.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            scheme => {
+                return Err(CoreError::config(format!(
+                "spec.access.api.server must use https so the token is not sent in the clear (got scheme {scheme:?}); \
+                     http is accepted only for a loopback address"
+            )))
+            }
+        }
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+            return Err(CoreError::config(
+                "spec.access.api.server must not carry credentials, a query, or a fragment",
+            ));
+        }
+        validate_static_required("spec.access.api.tokenEnv", &self.token_env)?;
+        if !self
+            .token_env
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(CoreError::config(format!(
+                "spec.access.api.tokenEnv {:?} must be an environment variable name (letters, digits, and underscores)",
+                self.token_env
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1158,6 +1271,9 @@ impl ArgoCDInstance {
             "spec.catalogApplicationDefaults.project",
             &self.spec.catalog_application_defaults.project,
         )?;
+        if let Some(access) = &self.spec.access {
+            access.validate()?;
+        }
         Ok(())
     }
 }
@@ -1565,6 +1681,10 @@ fn default_true() -> bool {
 
 fn default_argocd_namespace() -> String {
     "argocd".to_owned()
+}
+
+fn default_argocd_token_env() -> String {
+    DEFAULT_ARGOCD_TOKEN_ENV.to_owned()
 }
 
 fn default_argocd_project() -> String {
@@ -2122,6 +2242,72 @@ mod tests {
         assert!(parse_gitops_resource(&value).is_err());
         value["spec"]["destination"].as_object_mut().unwrap().remove("server");
         assert!(parse_gitops_resource(&value).is_ok());
+    }
+
+    fn argocd_instance_with_access(access: serde_json::Value) -> serde_json::Value {
+        json!({
+            "apiVersion": "k8s.gitops.nyl/v1",
+            "kind": "ArgoCDInstance",
+            "metadata": {"name": "control"},
+            "spec": {"clusterRef": {"name": "primary"}, "access": access}
+        })
+    }
+
+    /// Catches an access declaration that would send a token over the wire
+    /// unprotected, name no server, or mix the two methods: the declaration
+    /// is the only place the address comes from, so it is validated where it
+    /// is read.
+    #[test]
+    fn validates_argocd_instance_access() {
+        for valid in [
+            json!({"method": "kubernetes"}),
+            json!({"method": "api", "api": {"server": "https://argocd.example.com"}}),
+            json!({"method": "api", "api": {"server": "http://127.0.0.1:8080", "tokenEnv": "MY_TOKEN"}}),
+            json!({"method": "api", "api": {"server": "http://localhost:8080"}}),
+            json!({"method": "api", "api": {"server": "http://[::1]:8080"}}),
+        ] {
+            assert!(
+                parse_gitops_resource(&argocd_instance_with_access(valid.clone())).is_ok(),
+                "{valid}"
+            );
+        }
+        for (invalid, message) in [
+            (json!({"method": "api"}), "spec.access.api is required"),
+            (
+                json!({"method": "kubernetes", "api": {"server": "https://argocd.example.com"}}),
+                "applies only to method api",
+            ),
+            (
+                json!({"method": "api", "api": {"server": "http://argocd.example.com"}}),
+                "must use https",
+            ),
+            (
+                json!({"method": "api", "api": {"server": "https://user:pw@argocd.example.com"}}),
+                "must not carry credentials",
+            ),
+            (json!({"method": "api", "api": {"server": "argocd"}}), "is not a URL"),
+            (
+                json!({"method": "api", "api": {"server": "https://argocd.example.com", "tokenEnv": "A-B"}}),
+                "environment variable name",
+            ),
+            (json!({"method": "grpc"}), "unknown variant"),
+        ] {
+            let error = parse_gitops_resource(&argocd_instance_with_access(invalid.clone()))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{invalid}: {error}");
+        }
+        let parsed = parse_gitops_resource(&argocd_instance_with_access(
+            json!({"method": "api", "api": {"server": "https://argocd.example.com"}}),
+        ))
+        .unwrap();
+        let Some(GitOpsResource::ArgoCDInstance(instance)) = parsed else {
+            panic!("an ArgoCDInstance");
+        };
+        assert_eq!(
+            instance.spec.access.unwrap().api.unwrap().token_env,
+            DEFAULT_ARGOCD_TOKEN_ENV
+        );
     }
 
     #[test]

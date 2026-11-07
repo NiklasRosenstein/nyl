@@ -495,7 +495,6 @@ fn invoke(harness: &harness::Harness, args: &[&str]) -> CommandOutcome {
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -670,8 +669,8 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
         // A Windows checkout has CRLF line endings; the edits below match LF.
         .replace("\r\n", "\n");
     let units = units.replace(
-        "  mode: publish\n",
-        "  mode: publish\n  teardownWait: {strategy: delay, duration: 10m}\n",
+        "  target: '{{ values.target }}'\n",
+        "  target: '{{ values.target }}'\n  teardownWait: {strategy: delay, duration: 10m}\n",
     );
     harness
         .world
@@ -702,7 +701,6 @@ fn test_a_delay_wait_ends_early_on_a_confirmation_from_a_second_invocation() {
                 process_env: harness.process_env.clone(),
                 cancellation: Cancellation::default(),
                 prompt: None,
-                observer: None,
                 progress: None,
             };
             let args = ["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]
@@ -782,8 +780,8 @@ fn test_unmet_readiness_keeps_a_teardown_pending_until_allow_incomplete() {
         // A Windows checkout has CRLF line endings; the edits below match LF.
         .replace("\r\n", "\n");
     let units = units.replace(
-        "  mode: publish\n",
-        "  mode: publish\n  teardownSettings: {catalogPrunes: false}\n",
+        "  target: '{{ values.target }}'\n",
+        "  target: '{{ values.target }}'\n  teardownSettings: {catalogPrunes: false}\n",
     );
     harness
         .world

@@ -334,7 +334,6 @@ fn recover(harness: &shell::Harness) -> StateOperationReport {
         process_env: &harness.process_env,
         secrets: None,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress: None,
         prompt: None,
     };

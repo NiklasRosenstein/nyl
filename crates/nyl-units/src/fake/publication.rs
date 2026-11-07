@@ -4,15 +4,15 @@
 //! The real driver ([`crate::kubernetes_publication`]) is the built-in kind.
 //! This fake delegates every publish and teardown to the same operations, so
 //! it publishes the same bytes, and adds what a scenario needs from a test
-//! kind: scripted outcomes ([`Script`]), `mode: observe` (answered by the
-//! fake Argo CD observer, [`super::FakeObserver`]), and `teardownSettings`
+//! kind: scripted outcomes ([`Script`]), `observe: {}` (answered by the
+//! fake reconciler observer, [`super::FakeObserver`]), and `teardownSettings`
 //! that a scenario declares.
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit)
 //! and [Artifacts](../../../../design/orchestration-core.md#artifacts);
 //! [Fake kinds](../../../../design/reference-scenarios.md#fake-kinds).
 //!
-//! After resolution the spec is `{target, mode: publish|observe,
+//! After resolution the spec is `{target, observe?: {},
 //! teardownWait?, teardownSettings?, releases: {"<group>/<release>":
 //! {<input>: <value>}}}`. The execution key's inputs are the render's
 //! portable input record, so a change to any file the target reads, or to a
@@ -30,8 +30,8 @@ use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, TeardownReadiness,
+    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, RemovalContext,
+    RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
@@ -42,7 +42,8 @@ use nyl_render::gitops::publication::TeardownSettings;
 use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
-    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, unit_target, validate_teardown_wait,
+    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unit_target,
+    validate_observe,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -122,7 +123,7 @@ impl Driver for FakePublication {
             "required": ["target"],
             "properties": {
                 "target": {"type": ["string", "object"]},
-                "mode": {"type": "string", "enum": ["publish", "observe"]},
+                "observe": {"type": "object", "additionalProperties": false},
                 "teardownWait": {
                     "type": "object",
                     "required": ["strategy"],
@@ -162,14 +163,7 @@ impl Driver for FakePublication {
             Ok(PublicationTarget::Inline(inline)) => inline.validate().map_err(|error| error.to_string())?,
             Err(message) => return Err(message),
         }
-        match spec.get("mode") {
-            None => {}
-            Some(Value::String(mode)) if mode == "publish" || mode == "observe" => {}
-            Some(other) => return Err(format!("spec.mode must be publish or observe, got {other}")),
-        }
-        if let Some(wait) = spec.get("teardownWait") {
-            validate_teardown_wait(wait)?;
-        }
+        validate_observe(spec.as_object().expect("a mapping"))?;
         if let Some(settings) = spec.get("teardownSettings") {
             Self::recorded_settings(settings)?;
         }
@@ -261,6 +255,24 @@ impl Driver for FakePublication {
         }
     }
 
+    fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
+        teardown_wait(spec)
+    }
+
+    /// What the scenario scripted the fake Argo CD to report for the unit's
+    /// target ([`super::FakeObserver`]); nothing remains by default.
+    fn observe_removal(
+        &self,
+        _ctx: &RemovalContext,
+        unit: &DesiredUnit,
+    ) -> DriverResult<Supported<RemovalObservation>> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        let target = unit_target(spec)?;
+        Ok(Supported::Supported(
+            self.script.observer().workload_applications(&target),
+        ))
+    }
+
     /// A direct build is not scripted: it is the real driver's, so a scenario
     /// that builds a publication sees what the built-in kind does.
     fn build(
@@ -291,12 +303,15 @@ mod tests {
     fn test_validate_spec_checks_field_types() {
         let driver = FakePublication::new(Script::new(), crate::fake::test_catalogue());
         assert!(driver
-            .validate_spec(&json!({"target": "dev", "mode": "publish", "releases": {"web/web": {"image": "x"}}}))
+            .validate_spec(&json!({"target": "dev", "observe": {}, "releases": {"web/web": {"image": "x"}}}))
             .is_ok());
-        assert!(driver.validate_spec(&json!({"mode": "publish"})).is_err());
+        assert!(driver.validate_spec(&json!({"observe": {}})).is_err());
         assert!(driver.validate_spec(&json!({"target": 1})).is_err());
         assert!(driver
-            .validate_spec(&json!({"target": "dev", "mode": "apply"}))
+            .validate_spec(&json!({"target": "dev", "observe": {"interval": "1m"}}))
+            .is_err());
+        assert!(driver
+            .validate_spec(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}}))
             .is_err());
         assert!(driver.validate_spec(&json!({"target": "dev", "releases": []})).is_err());
         assert!(driver

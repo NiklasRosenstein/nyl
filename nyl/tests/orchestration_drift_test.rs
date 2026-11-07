@@ -86,7 +86,6 @@ impl Harness {
             process_env: self.shell.process_env.clone(),
             cancellation: Cancellation::default(),
             prompt: None,
-            observer: None,
             progress: None,
         };
         let argv = std::iter::once("nyl".to_owned())

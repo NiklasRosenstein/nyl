@@ -191,7 +191,7 @@ fn test_state_delete_leaves_the_deleted_marker_and_refuses_later_commands() {
 }
 
 /// Instances: `state delete --teardown` stops with exit 2 while the
-/// publication's `manual` teardown wait (the default of `mode: publish`)
+/// publication's `manual` teardown wait (the default of a unit that does not observe)
 /// waits; once `--confirm-removed` ran phase 2, running it again resumes,
 /// tears the rest down, and continues to the deletion in the same command.
 /// Held files without an incarnation (the units `--all` holds) do not stop

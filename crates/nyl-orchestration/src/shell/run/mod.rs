@@ -56,8 +56,8 @@ use nyl_core::orchestration::driver::{
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
-    ArgoObserver, Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer,
-    SourceRepository, SourceResolver, StateError, TransitionChanges,
+    Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
+    SourceResolver, StateError, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
@@ -128,10 +128,6 @@ pub struct RunContext<'a> {
     /// clock's time: the identity the command line resolved for state
     /// commits. `None` for `plan`, which writes nothing.
     pub commit_identity: Option<&'a CommitIdentity>,
-    /// Reads Argo CD for a publication's `observe` teardown wait; `None`
-    /// when no observer is configured, which makes such a wait uncertain
-    /// with `observation-failed`.
-    pub observer: Option<&'a dyn ArgoObserver>,
     /// The terminal of a run waiting on a teardown, when stdin is one: Enter
     /// confirms the removal.
     pub prompt: Option<&'a dyn OperatorPrompt>,

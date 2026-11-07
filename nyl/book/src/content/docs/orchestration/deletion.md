@@ -243,11 +243,12 @@ would be torn down.
 | --- | --- |
 | `manual` (the default) | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and the run exits 2. |
 | `delay` (`duration: 10m`) | The duration has passed since the phase 1 commit; the teardown is recorded as not observed. |
+| `observe` (the default for a unit that declares `observe: {}`) | The unit reads Argo CD and no workload Application of the target remains (the catalog Application does not count), within the unit's `timeout`. Applications that remain make the teardown uncertain with `applications-remain` and their names; a reading that fails, such as for a credential the unit does not admit, an expired token, or an unreachable Argo CD, makes it uncertain with `observation-failed` and the reason. A credential that cannot see the target's Applications (the catalog Application, or for a target without one its AppProjects, is missing from the reading, or the token may not `get` an Application the list lacks) is `observation-failed` too: the wait never concludes removal from what it could not see. Fix the cause and run the teardown again, or confirm the removal by hand. |
 
-The `observe` strategy, which waits until Argo CD reports no workload
-Application, needs to read Argo CD and is not available yet: the
-`KubernetesPublication` unit rejects it with
-`NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED`.
+The `observe` strategy reads Argo CD the way `nyl attest` does, from the
+[ArgoCDInstance's declared access](/nyl/kubernetes-gitops/resource-guides/argocd-instance/#reading-argo-cd)
+with the credential the unit admits, from the stored document, so it works for a
+unit torn down after it left the source.
 
 A publication refuses to publish or remove a prefix that another existing unit
 incarnation owns, with `NYL-KUBERNETES-OWNER-FENCED`
@@ -267,7 +268,6 @@ incarnation owns, with `NYL-KUBERNETES-OWNER-FENCED`
 | `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read. Declare the environment again and tear its unit down, or release the prefix as [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership) describes. |
 | `NYL-TREE-OWNED-BY-UNIT` | `publish-tree` or `render-tree` met a prefix an orchestrated unit owns, such as after `nyl state forget`. Publish through the owning environment, or release the prefix as above. |
 | `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published; nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile to publish the new target. |
-| `NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` | The `observe` teardown wait is not available yet. Use `delay` or `manual`. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting. Pass `--allow-teardown`, restore the old kind, or forget the old incarnation. |
 | `NYL-UNIT-HELD` | A held unit keeps changes or a teardown from applying. Lift the hold with `nyl resume`. |

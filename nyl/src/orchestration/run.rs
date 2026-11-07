@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::driver::{DriverSet, ToolRunner};
-use nyl_core::orchestration::ports::{ArgoObserver, Clock, CommitIdentity, IdGenerator, OperatorPrompt};
+use nyl_core::orchestration::ports::{Clock, CommitIdentity, IdGenerator, OperatorPrompt};
 use nyl_orchestration::fault::FaultInjector;
 use nyl_orchestration::shell::run::Cancellation;
 
@@ -45,10 +45,6 @@ pub struct Wiring<'a> {
     /// only when stdin is a terminal (`from_process` detects it). Tests pass
     /// `None` or a scripted prompt.
     pub prompt: Option<&'a dyn OperatorPrompt>,
-    /// The Argo CD observer of `teardownWait: observe`; `None` until M5
-    /// brings a real one (an `observe` wait without one is uncertain).
-    /// Tests pass a `FakeObserver`.
-    pub observer: Option<&'a dyn ArgoObserver>,
     /// Live unit events, delivered on stderr by production wiring.
     pub progress: Option<&'a dyn nyl_core::orchestration::progress::ProgressObserver>,
 }
@@ -170,7 +166,6 @@ impl<'a> Wiring<'a> {
             process_env: unicode_env(std::env::vars_os()),
             cancellation: owned.cancellation.clone(),
             prompt: owned.prompt.as_ref().map(|prompt| prompt as &dyn OperatorPrompt),
-            observer: None,
             progress: Some(&TerminalProgress),
         })
     }
