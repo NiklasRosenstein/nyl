@@ -9,13 +9,14 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M4 is complete, and M5 has begun: the `KubernetesPublication` unit publishes trees with image digests and infrastructure outputs, declares its target inline, tears down in two phases behind an owner fence, and builds, diffs, and pushes from `nyl build`, and observes Argo CD (the Kubernetes API of its control-plane Cluster or its API server) to attest `accepted` and `healthy` and to wait for removal. Units can require those attestations of their producers with `evidence: attested` or `attestations` in `dependsOn` and `fromUnit`, and can declare observed values their driver reads (`fromUnit: {unit, observation}`, `observationWait`, `nyl observe`), such as the load balancer address of a published Service. Continue with M5: preview environments.',
+    intro: 'M4 is complete, and M5 has begun: the `KubernetesPublication` unit publishes trees with image digests and infrastructure outputs, declares its target inline, tears down in two phases behind an owner fence, and builds, diffs, and pushes from `nyl build`, and observes Argo CD (the Kubernetes API of its control-plane Cluster or its API server) to attest `accepted` and `healthy` and to wait for removal. Units can require those attestations of their producers with `evidence: attested` or `attestations` in `dependsOn` and `fromUnit`, and can declare observed values their driver reads (`fromUnit: {unit, observation}`, `observationWait`, `nyl observe`), such as the load balancer address of a published Service. EnvironmentTemplates create preview instances in state (`nyl state init --template`, `nyl reconcile --template`), which every command treats like a declared environment, and `nyl get environments` lists them. Continue with M5: the rest of the preview lifecycle.',
     steps: [
       { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: true },
       { text: 'Add publication observation (and the `observe` teardown wait) and its `accepted` and `healthy` attestations.', done: true },
       { text: 'Add attested evidence for dependents.', done: true },
       { text: 'Add observed values.', done: true },
-      { text: 'Add preview environment templates, expiry, limits, and end-to-end reference scenarios.', done: false },
+      { text: 'Add preview environment templates and their instances.', done: true },
+      { text: 'Add preview expiry, instance limits, the shared catalog and source keep refs, cross-environment references to declared environments, and end-to-end reference scenarios.', done: false },
     ],
     outro: 'Promotion paths follow in M6.',
   },

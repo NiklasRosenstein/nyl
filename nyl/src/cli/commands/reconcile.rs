@@ -15,6 +15,8 @@ use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
 use nyl_state::git::CommitAuthor;
 
+use crate::cli::commands::state::{create_or_update_instance, InstanceWrite};
+use crate::orchestration::project::{parse_params, InstanceRequest};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
 use nyl_render::Result;
@@ -36,6 +38,16 @@ pub struct ReconcileArgs {
     /// The environment to reconcile.
     #[arg(short = 'e', long = "environment", required_unless_present_any = ["labels", "group"], conflicts_with_all = ["labels", "group"])]
     pub environment: Vec<String>,
+
+    /// Create or update this environment as an instance of an EnvironmentTemplate
+    /// before reconciling it, from this checkout.
+    #[arg(long, conflicts_with_all = ["labels", "group"])]
+    pub template: Option<String>,
+
+    /// A parameter of the instance, `name=value` with the value parsed as YAML
+    /// (repeatable); needs --template.
+    #[arg(long = "param")]
+    pub params: Vec<String>,
 
     /// Select environments whose literal labels match key=value pairs.
     #[arg(short = 'l', long, conflicts_with_all = ["environment", "group"])]
@@ -123,9 +135,39 @@ pub struct ReconcileArgs {
     pub path: PathBuf,
 }
 
+/// What `--template` and `--param` say about the instance, or nothing.
+fn instance_request(args: &ReconcileArgs) -> std::result::Result<InstanceRequest, Stop> {
+    Ok(InstanceRequest {
+        template: args.template.clone(),
+        params: parse_params(&args.params)?,
+        offline: args.local,
+    })
+}
+
+/// `--template` creates or updates exactly one instance.
+fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
+    if args.template.is_none() || args.environment.len() == 1 {
+        return None;
+    }
+    Some(stopped(
+        ReportKind::ReconcileReport,
+        args.environment.first().map_or("local", String::as_str),
+        args.output,
+        nyl_core::orchestration::codes::Finding::new(
+            nyl_core::orchestration::codes::Code::InstanceTemplateRequired,
+            "--template creates or updates exactly one instance",
+            "name the instance with one -e <name>",
+        )
+        .into(),
+    ))
+}
+
 /// Run the command in-process with `wiring`.
 pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     use crate::orchestration::multi_environment::{dispatch, select};
+    if let Some(outcome) = template_selection_error(args) {
+        return Ok(outcome);
+    }
     let snapshot = if args.worktree {
         let capture = || -> std::result::Result<_, Stop> {
             if args.environment.len() != 1 {
@@ -136,7 +178,7 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
                 )
                 .into());
             }
-            Session::open(&args.path, &args.environment[0])?.snapshot_worktree(
+            Session::open_with(&args.path, &args.environment[0], &instance_request(args)?)?.snapshot_worktree(
                 wiring,
                 args.author.as_deref(),
                 args.local,
@@ -156,6 +198,17 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
     } else {
         None
     };
+    let instance = match instance_request(args) {
+        Ok(instance) => instance,
+        Err(stop) => {
+            return Ok(stopped(
+                ReportKind::ReconcileReport,
+                args.environment.first().map_or("local", String::as_str),
+                args.output,
+                stop,
+            ))
+        }
+    };
     let preflight_source = snapshot
         .as_ref()
         .map(|source| source.commit.as_str())
@@ -172,6 +225,7 @@ pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> 
             preflight_source,
             args.local,
             wiring.drivers,
+            &instance,
         ),
         |environment, selected, _planned, unavailable| {
             let mut args = args.clone();
@@ -209,9 +263,23 @@ fn reconcile(
     unavailable: &std::collections::BTreeSet<nyl_core::orchestration::ids::EnvironmentName>,
     snapshot: Option<&nyl_core::orchestration::ports::WorktreeSnapshot>,
 ) -> std::result::Result<CommandOutcome, Stop> {
-    let session = Session::open(&args.path, &args.environment[0])?;
+    let session = Session::open_with(&args.path, &args.environment[0], &instance_request(args)?)?;
     // Reconcile writes state, so it alone of the run commands needs an identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
+    if args.template.is_some() {
+        // The pull request job creates or updates its instance, then reconciles it.
+        create_or_update_instance(
+            &session,
+            wiring,
+            &identity,
+            &InstanceWrite {
+                reason: args.reason.as_deref(),
+                wait: args.wait_lease,
+                local: args.local,
+                fresh: false,
+            },
+        )?;
+    }
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: args.concurrency,

@@ -105,6 +105,7 @@ fn run(harness: &Harness, observer: &Events, mode: RunMode) -> EnvironmentRunRep
     let base = harness.context();
     let tools = ProcessRunner::new();
     let context = RunContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         base: &base,
         sources: &job.sources,
         renderer: &job.renderer,

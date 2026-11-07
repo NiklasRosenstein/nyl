@@ -872,6 +872,7 @@ mod tests {
     fn context<'a>(root: &Path, temp: &Path, tools: &'a dyn ToolRunner) -> ExecutionContext<'a> {
         let now = "2026-10-28T12:00:00Z".parse().unwrap();
         ExecutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             unit: UnitAddress::new(EnvironmentName::new("dev").unwrap(), UnitName::new("web").unwrap()),
             operation: DriverOperation::Reconcile,
             worktree: root.into(),
@@ -990,6 +991,7 @@ mod tests {
         let docker = Docker::default();
         let now = "2026-10-28T12:00:00Z".parse().unwrap();
         let ctx = ResolutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             environment: EnvironmentName::new("dev").unwrap(),
             worktree: root.path().into(),
             project_dir: root.path().into(),

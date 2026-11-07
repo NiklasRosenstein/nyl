@@ -15,6 +15,7 @@ nyl get targets
 nyl get app-projects
 nyl get application-groups
 nyl get environments
+nyl get environment-templates
 nyl get units
 nyl get cluster primary
 ```
@@ -40,6 +41,15 @@ NAME        PROJECT                 SOURCE                   FILE
 monitoring  monitoring (generated)  applications/monitoring  applications/monitoring/group.yaml#document-1
 web         web (generated)         applications/web         applications/web/group.yaml#document-1
 ```
+
+`nyl get environments` also lists the live instances of every
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/),
+found by listing the template's state location, and adds the `TEMPLATE` and
+`EXPIRES` columns (`-` for a declared Environment). An instance whose state was
+deleted is not listed. This is the one `get` form that reads state; it contacts
+the state repositories of declared templates only. A template whose refs depend
+on the environment name has no location to list, so its instances are not shown.
+
 
 `CONTEXT` is the Cluster's `spec.live.context`, `PUBLICATION` the target's
 repository and revision, and `PROJECT` the ApplicationGroup's AppProject, marked

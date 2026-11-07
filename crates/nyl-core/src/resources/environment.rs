@@ -12,16 +12,21 @@ use serde::{Deserialize, Serialize};
 
 use super::gitops::{validate_repository_choice, validate_static_required, GitOpsResourceMetadata};
 use super::strict::DenyUnknownFields;
+use super::units::DeletionPolicy;
 use super::{GitSource, InlineGitRepository, LabelSelector, LocalReference};
+use crate::bindings::{validate_declarations_at, InputDeclaration};
 use crate::constants::API_VERSION_GITOPS;
 use crate::orchestration::codes::{Code, Finding};
 use crate::orchestration::ids::EnvironmentName;
+use crate::orchestration::time::Duration;
 use crate::{CoreError, Result};
 
 /// Kind name of [`Environment`].
 pub const KIND_ENVIRONMENT: &str = "Environment";
 /// Kind name of [`EnvironmentGroup`].
 pub const KIND_ENVIRONMENT_GROUP: &str = "EnvironmentGroup";
+/// Kind name of [`EnvironmentTemplate`].
+pub const KIND_ENVIRONMENT_TEMPLATE: &str = "EnvironmentTemplate";
 
 /// A named place that units are reconciled into, with its own state.
 ///
@@ -82,6 +87,88 @@ pub struct EnvironmentSpec {
     /// Whether `reconcile` repairs drift by itself: `converge` executes units whose latest drift observation is `drifted` again (units not safe to re-run await approval); `manual` leaves them `drifted` until `--reapply`. Omitted, the group's, else `converge`.
     #[serde(rename = "driftRepair", default, skip_serializing_if = "Option::is_none")]
     pub drift_repair: Option<DriftRepair>,
+}
+
+/// What a preview environment looks like, instantiated with parameters.
+///
+/// Instances are created with `nyl state init --template` (or
+/// `nyl reconcile --template`), exist only in state, and behave like declared
+/// environments for every command. The template has the Environment's fields
+/// plus `parameters`, `deletionPolicy`, `allowTeardown`, `ttl`,
+/// and `maxInstances`. Strings in `values`, `state`, and `source`
+/// are templates: they read `params` and `environment.name` when an instance
+/// is created from the template, and `state` reads only `environment.name`,
+/// because it locates the state that holds the parameters.
+///
+/// ## When needed
+///
+/// To give every pull request its own environment, created and removed by CI.
+///
+/// ## If omitted
+///
+/// Every environment is declared with an `Environment` resource in source.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::environment_template_example())]
+pub struct EnvironmentTemplate {
+    /// API group and version defining this resource.
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    /// Resource kind within the API group.
+    pub kind: String,
+    /// Resource identity and metadata. Instances take its labels.
+    pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
+    #[serde(default)]
+    pub spec: EnvironmentTemplateSpec,
+}
+
+/// The Environment's fields, templated, plus what only instances have.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentTemplateSpec {
+    /// Typed parameters of an instance, exposed to templates as `params`; `--param <name>=<value>` parses its value as YAML and checks it against the declaration. A parameter without a `default` is required.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, InputDeclaration>,
+    /// Matches literal unit `metadata.labels` across all unit kinds. An empty selector selects every unit.
+    #[serde(rename = "unitSelector", default)]
+    pub unit_selector: LabelSelector,
+    /// Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// Where an instance's state lives. Strings may read `environment.name` only. With `path` such as `{{ environment.name }}`, every instance shares the refs, one directory each.
+    #[serde(default)]
+    pub state: EnvironmentState,
+    /// The source commit runs use, which may template `revision` from `params`. Omitted, an instance runs from the commit recorded when it was created or last reconciled from a checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EnvironmentSource>,
+    /// Refs that pinned commits and run source commits must be reachable from. Omitted, the group's, else each repository's default branch.
+    #[serde(rename = "protectedRefs", default, skip_serializing_if = "Option::is_none")]
+    pub protected_refs: Option<Vec<String>>,
+    /// Whether runs may use source commits outside `protectedRefs`; previews run from pull request branches and set `true`. Omitted, `false`.
+    #[serde(rename = "allowUnprotectedSource", default, skip_serializing_if = "Option::is_none")]
+    pub allow_unprotected_source: Option<bool>,
+    /// Environment-wide attestations, recorded with `nyl attest` for an instance's current state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attestations: Vec<String>,
+    /// CI deployment admission: `required` makes state-writing runs use the source of the current admission. Omitted, `off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<Admission>,
+    /// Whether `reconcile` repairs drift by itself. Omitted, `converge`.
+    #[serde(rename = "driftRepair", default, skip_serializing_if = "Option::is_none")]
+    pub drift_repair: Option<DriftRepair>,
+    /// `Teardown` overrides every unit's own policy, including an explicit `Retain`, for the kinds that support teardown; units of other kinds are left in place and dropped from state when the instance is removed. `Retain` or omitted leaves each unit's own policy.
+    #[serde(rename = "deletionPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub deletion_policy: Option<DeletionPolicy>,
+    /// Whether omission teardown needs no `--allow-teardown`: a unit removed from the template or its selection is torn down by the next reconcile. Default `false`.
+    #[serde(rename = "allowTeardown", default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_teardown: bool,
+    /// How long an instance lives without activity, such as `7d`; `state init --template` moves the instance's `expiresAt` to now plus `ttl`. Omitted, instances never expire. Removing expired instances is in progress: today `expiresAt` is recorded and listed, and nothing removes the instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<Duration>,
+    /// The most instances of this template that may exist at once. Omitted, unlimited. Enforcement is in progress: today the limit is recorded and not checked.
+    #[serde(rename = "maxInstances", default, skip_serializing_if = "Option::is_none")]
+    pub max_instances: Option<u32>,
 }
 
 /// Whether reconcile repairs drift on its own.
@@ -282,6 +369,113 @@ impl Environment {
             }
         }
         Ok(())
+    }
+}
+
+impl EnvironmentTemplate {
+    /// The validated name.
+    pub fn name(&self) -> Result<EnvironmentName> {
+        EnvironmentName::new(&self.metadata.name)
+            .map_err(|error| CoreError::config(format!("EnvironmentTemplate metadata.name: {error}")))
+    }
+
+    /// What is checked without parameters: the envelope, the parameter
+    /// declarations, and the limits. The templated fields are validated as
+    /// the Environment each instance renders to ([`Environment::validate`]).
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(&self.api_version, &self.kind, KIND_ENVIRONMENT_TEMPLATE)?;
+        validate_static_required("metadata.name", &self.metadata.name)?;
+        self.name()?;
+        validate_declarations_at("spec.parameters", &self.spec.parameters)?;
+        for (name, declaration) in &self.spec.parameters {
+            if declaration.default.is_none() && declaration.allowed.as_ref().is_some_and(Vec::is_empty) {
+                return Err(CoreError::config(format!(
+                    "spec.parameters.{name}.enum must not be empty"
+                )));
+            }
+        }
+        if self.spec.max_instances == Some(0) {
+            return Err(CoreError::config(
+                "spec.maxInstances must be at least 1; omit it for no limit",
+            ));
+        }
+        if self.spec.ttl.is_some_and(|ttl| ttl.as_secs() == 0) {
+            return Err(CoreError::config(
+                "spec.ttl must be longer than zero; omit it for no expiry",
+            ));
+        }
+        let state = &self.spec.state;
+        if state.repository_ref.is_some() || state.repository.is_some() {
+            validate_repository_choice(state.repository_ref.as_ref(), state.repository.as_ref(), "spec.state")?;
+        }
+        if let Some(prefix) = &state.coordination_ref_prefix {
+            if !prefix.starts_with("refs/") || !prefix.ends_with('/') {
+                return Err(CoreError::config(
+                    "spec.state.coordinationRefPrefix must start with refs/ and end with /",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The Environment an instance named `name` renders to, before its
+    /// strings are rendered: the fields the template shares with an
+    /// Environment, with the template's labels. Templated strings are still
+    /// templates.
+    pub fn environment_skeleton(&self, name: &str) -> Environment {
+        let spec = &self.spec;
+        Environment {
+            api_version: API_VERSION_GITOPS.to_owned(),
+            kind: KIND_ENVIRONMENT.to_owned(),
+            metadata: GitOpsResourceMetadata {
+                name: name.to_owned(),
+                labels: self.metadata.labels.clone(),
+            },
+            spec: EnvironmentSpec {
+                unit_selector: spec.unit_selector.clone(),
+                values: spec.values.clone(),
+                state: spec.state.clone(),
+                source: spec.source.clone(),
+                protected_refs: spec.protected_refs.clone(),
+                allow_unprotected_source: spec.allow_unprotected_source,
+                attestations: spec.attestations.clone(),
+                admission: spec.admission,
+                drift_repair: spec.drift_repair,
+            },
+        }
+    }
+
+    /// The parameters of an instance: `given` over each declared default,
+    /// every one checked against its declaration. A parameter that is
+    /// neither given nor defaulted, one that is not declared, and a value of
+    /// the wrong type or outside `enum` are errors naming the parameter.
+    pub fn bind_parameters(
+        &self,
+        given: &BTreeMap<String, serde_json::Value>,
+    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, String> {
+        let declared = &self.spec.parameters;
+        if let Some(unknown) = given.keys().find(|name| !declared.contains_key(*name)) {
+            let known = declared.keys().cloned().collect::<Vec<_>>().join(", ");
+            return Err(format!(
+                "parameter {unknown:?} is not declared by EnvironmentTemplate {} (declared: {})",
+                self.metadata.name,
+                if known.is_empty() { "none".to_owned() } else { known }
+            ));
+        }
+        let mut bound = BTreeMap::new();
+        for (name, declaration) in declared {
+            let Some(value) = given.get(name).or(declaration.default.as_ref()) else {
+                return Err(format!(
+                    "parameter {name:?} of EnvironmentTemplate {} has no default; pass --param {name}=<value>",
+                    self.metadata.name
+                ));
+            };
+            declaration
+                .check(value)
+                .map_err(|reason| format!("parameter {name:?}: {reason}"))?;
+            bound.insert(name.clone(), value.clone());
+        }
+        Ok(bound)
     }
 }
 

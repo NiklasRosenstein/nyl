@@ -18,6 +18,7 @@ use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
+use crate::orchestration::project::{parse_params, InstanceRequest};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
 use nyl_render::gitops::discover_gitops_inventory;
@@ -77,6 +78,13 @@ pub enum StateCommand {
         /// Start over deliberately: every unit becomes a new incarnation and executes again.
         #[arg(long)]
         fresh: bool,
+        /// Create or update the environment as an instance of this EnvironmentTemplate.
+        #[arg(long)]
+        template: Option<String>,
+        /// A parameter of the instance, `name=value` with the value parsed as
+        /// YAML (repeatable); needs --template.
+        #[arg(long = "param")]
+        params: Vec<String>,
     },
     /// Move state from its old location to the configured one. The options
     /// name the old location; each defaults to the configured value.
@@ -175,12 +183,12 @@ pub enum LeaseCommand {
 /// Run a `nyl state` command in-process with `wiring`.
 pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
-        StateCommand::Init { common, fresh } => {
-            let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateInit.as_str(), None, false, |ctx| {
-                state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested)
-            })
-        }
+        StateCommand::Init {
+            common,
+            fresh,
+            template,
+            params,
+        } => run_init(common, wiring, *fresh, template.as_ref(), params),
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
             let requested = requested(common, wiring);
@@ -244,6 +252,63 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             ],
         ),
     }
+}
+
+/// `nyl state init`, for a declared environment or, with `--template`, an instance.
+fn run_init(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    fresh: bool,
+    template: Option<&String>,
+    params: &[String],
+) -> Result<CommandOutcome> {
+    let requested = requested(common, wiring);
+    let request = InstanceRequest {
+        template: template.cloned(),
+        params: match parse_params(params) {
+            Ok(params) => params,
+            Err(finding) => {
+                return Ok(render(
+                    &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
+                        .refused(finding),
+                    common.output,
+                ))
+            }
+        },
+        offline: false,
+    };
+    run_with_instance(
+        common,
+        wiring,
+        Operation::StateInit.as_str(),
+        None,
+        false,
+        &request,
+        |ctx| match (&ctx.session.resolved.instance, template) {
+            (Some(instance), Some(_)) => {
+                let source_commit = match ctx.session.entry_commit() {
+                    Ok(commit) => commit,
+                    Err(finding) => {
+                        return StateOperationReport::new(ctx.environment.clone(), "state-init").refused(finding)
+                    }
+                };
+                state::init_instance(
+                    ctx.context,
+                    &ctx.environment,
+                    ctx.location,
+                    &state::InstanceInit {
+                        template: &instance.template,
+                        params: &instance.params,
+                        source_commit: &source_commit,
+                        ttl: instance.terms.ttl,
+                    },
+                    fresh,
+                    &requested,
+                )
+            }
+            _ => state::init(ctx.context, &ctx.environment, ctx.location, fresh, &requested),
+        },
+    )
 }
 
 /// `nyl state move`: `old` holds `--desired-ref`, `--observed-ref`,
@@ -346,6 +411,7 @@ pub(crate) fn requested(common: &Common, wiring: &Wiring<'_>) -> Requested {
 
 /// What one state operation runs against.
 pub(crate) struct OperationContext<'a> {
+    pub(crate) session: &'a Session,
     pub(crate) context: &'a Context<'a>,
     pub(crate) environment: EnvironmentName,
     pub(crate) location: &'a StateLocation,
@@ -363,6 +429,28 @@ pub(crate) fn run(
     offline: bool,
     operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
 ) -> Result<CommandOutcome> {
+    run_with_instance(
+        common,
+        wiring,
+        operation_name,
+        extra_endpoint,
+        offline,
+        &InstanceRequest::default(),
+        operation,
+    )
+}
+
+/// [`run`] for a command that may create or update an instance of an EnvironmentTemplate.
+#[allow(clippy::too_many_arguments)] // The shared state command wiring, with the instance request.
+pub(crate) fn run_with_instance(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    operation_name: &'static str,
+    extra_endpoint: Option<(String, Endpoint)>,
+    offline: bool,
+    instance: &InstanceRequest,
+    operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
+) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
         let environment = placeholder_environment(&common.environment);
         render(
@@ -370,7 +458,14 @@ pub(crate) fn run(
             common.output,
         )
     };
-    let session = match Session::open(&common.path, &common.environment) {
+    let session = match Session::open_with(
+        &common.path,
+        &common.environment,
+        &InstanceRequest {
+            offline,
+            ..instance.clone()
+        },
+    ) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),
@@ -417,7 +512,7 @@ pub(crate) fn run(
         if repository != resolved.location.repository {
             store = crate::orchestration::project::configure_repository(
                 &session.inventory,
-                resolved,
+                &resolved.git_dir,
                 store,
                 &repository,
                 endpoint,
@@ -426,6 +521,7 @@ pub(crate) fn run(
     }
     let context = session.context(&store, wiring, Some(identity.to_string()));
     let mut report = operation(&OperationContext {
+        session: &session,
         context: &context,
         environment: resolved.name.clone(),
         location: &resolved.location,
@@ -444,6 +540,64 @@ pub(crate) fn run(
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
     Ok(render(&report, common.output))
+}
+
+/// How a command that creates or updates an instance writes its record.
+pub(crate) struct InstanceWrite<'a> {
+    pub(crate) reason: Option<&'a str>,
+    pub(crate) wait: Option<Duration>,
+    /// `--local`: write to the clone's state branches without the remote.
+    pub(crate) local: bool,
+    pub(crate) fresh: bool,
+}
+
+/// Create or update the instance a session resolved from `--template`, the
+/// way `nyl state init --template` does: the first step of
+/// `nyl reconcile --template`. A refusal stops the command with its finding.
+pub(crate) fn create_or_update_instance(
+    session: &Session,
+    wiring: &Wiring<'_>,
+    identity: &nyl_core::orchestration::ports::CommitIdentity,
+    write: &InstanceWrite<'_>,
+) -> std::result::Result<StateOperationReport, Stop> {
+    let instance = session
+        .resolved
+        .instance
+        .as_ref()
+        .expect("--template resolved an instance");
+    let author = Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    });
+    let store = if write.local {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
+    let context = session.context(&store, wiring, Some(identity.to_string()));
+    let source_commit = session.entry_commit()?;
+    let requested = Requested {
+        reason: write.reason.map(str::to_owned),
+        wait: write.wait,
+        cancellation: wiring.cancellation.clone(),
+    };
+    let report = state::init_instance(
+        &context,
+        &session.resolved.name,
+        &session.resolved.location,
+        &state::InstanceInit {
+            template: &instance.template,
+            params: &instance.params,
+            source_commit: &source_commit,
+            ttl: instance.terms.ttl,
+        },
+        write.fresh,
+        &requested,
+    );
+    if let Some(finding) = report.errors.first() {
+        return Err(Stop::Finding(finding.clone()));
+    }
+    Ok(report)
 }
 
 /// `nyl state delete [--teardown]`: on the run path, through
@@ -500,7 +654,7 @@ pub(crate) fn run_lifecycle(
             common.output,
         )
     };
-    let session = match Session::open(&common.path, &common.environment) {
+    let session = match Session::open_offline(&common.path, &common.environment, offline) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),

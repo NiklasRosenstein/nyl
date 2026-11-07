@@ -63,6 +63,14 @@ enum GetCommand {
     /// Get Environment declarations.
     #[command(alias = "environment")]
     Environments(GetResourceArgs),
+    /// Get EnvironmentTemplate declarations.
+    #[command(
+        name = "environment-templates",
+        alias = "environment-template",
+        alias = "template",
+        alias = "templates"
+    )]
+    EnvironmentTemplates(GetResourceArgs),
     /// Get unit declarations, or with -e the units' state.
     Units(GetUnitsArgs),
     /// Get one unit's persisted desired and observed documents.
@@ -191,7 +199,8 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::Targets(selection) => declarations(GitOpsResourceKind::DeploymentTarget, selection),
         GetCommand::AppProjects(selection) => declarations(GitOpsResourceKind::AppProjectDefinition, selection),
         GetCommand::ApplicationGroups(selection) => declarations(GitOpsResourceKind::ApplicationGroup, selection),
-        GetCommand::Environments(selection) => declarations(GitOpsResourceKind::Environment, selection),
+        GetCommand::Environments(selection) => environments(selection),
+        GetCommand::EnvironmentTemplates(selection) => declarations(GitOpsResourceKind::EnvironmentTemplate, selection),
         GetCommand::Units(units) => match &units.state.environment {
             None => unit_declarations(&units.path, units.state.output),
             Some(environment) => state_form(&units.path, environment, &units.state, |snapshot, env| {
@@ -268,7 +277,7 @@ fn state_form(
     options: &StateOptions,
     form: impl FnOnce(&EnvironmentSnapshot, &nyl_core::orchestration::ids::EnvironmentName) -> Result<CommandOutcome>,
 ) -> Result<CommandOutcome> {
-    let session = match Session::open(path, environment) {
+    let session = match Session::open_offline(path, environment, options.local) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(&finding)),
         Err(Stop::Error(error)) => return Err(error),
@@ -679,6 +688,79 @@ fn declarations(kind: GitOpsResourceKind, selection: &GetResourceArgs) -> Result
     })
 }
 
+/// `nyl get environments`: the declared Environments, then the live
+/// instances of every EnvironmentTemplate, found by listing their state.
+/// Contract: [Instances](../../../../design/orchestration-core.md#instances).
+fn environments(selection: &GetResourceArgs) -> Result<CommandOutcome> {
+    let inventory = discover_gitops_inventory(&selection.path, None, crate::resource_catalogue())?;
+    let wanted = |name: &str| selection.name.as_deref().is_none_or(|selected| selected == name);
+    let mut rows = Vec::new();
+    let mut names = Vec::new();
+    for resource in inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::Environment && wanted(&resource.identity.name))
+    {
+        let mut row = resource_row(GitOpsResourceKind::Environment, resource);
+        let file = row.pop().unwrap_or_default();
+        let state = row.pop().unwrap_or_default();
+        let units = row.pop().unwrap_or_default();
+        let name = row.pop().unwrap_or_default();
+        rows.push(vec![name.clone(), "-".to_owned(), units, state, "-".to_owned(), file]);
+        names.push(name);
+    }
+    let listing = crate::orchestration::project::list_instances(&inventory, false);
+    let (listed, warnings) = (listing.instances, listing.warnings);
+    let mut stderr = String::new();
+    for warning in &warnings {
+        write_finding(&mut stderr, "warning", None, warning);
+    }
+    for instance in listed.iter().filter(|instance| wanted(instance.name.as_str())) {
+        let mut state = String::from("-");
+        let mut units = String::from("-");
+        if let Ok(resolved) = crate::orchestration::project::resolve_environment_with(
+            &inventory
+                .clone()
+                .with_instances(std::iter::once((instance.name.clone(), instance.descriptor.clone())).collect()),
+            instance.name.as_str(),
+            &crate::orchestration::project::InstanceRequest::default(),
+        ) {
+            units = selector(&resolved.environment.spec.unit_selector.match_labels);
+            state = format!("{}@{}", resolved.location.repository, resolved.location.desired_ref);
+        }
+        rows.push(vec![
+            instance.name.to_string(),
+            instance.descriptor.template.clone(),
+            units,
+            state,
+            instance.record.expires_at.map_or_else(
+                || "-".to_owned(),
+                |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            "-".to_owned(),
+        ]);
+        names.push(instance.name.to_string());
+    }
+    if let Some(name) = &selection.name {
+        if rows.is_empty() {
+            return Err(NylError::config(format!("Environment {name:?} was not found")));
+        }
+    }
+    let table = rows
+        .iter()
+        .map(|row| row.iter().cloned().map(Cell::plain).collect())
+        .collect::<Vec<_>>();
+    Ok(CommandOutcome {
+        exit: 0,
+        report: json!({ "kind": "Environment", "names": names }),
+        stdout: format!(
+            "{}\n",
+            render_table(&["NAME", "TEMPLATE", "UNITS", "STATE", "EXPIRES", "FILE"], &table)
+        ),
+        stderr,
+    })
+}
+
 fn effective_clusters(
     inventory: &GitOpsInventory,
     resources: &mut [DiscoveredGitOpsResource],
@@ -709,6 +791,7 @@ fn resources_table(kind: GitOpsResourceKind, resources: &[&DiscoveredGitOpsResou
         GitOpsResourceKind::ApplicationGroup => vec!["NAME", "PROJECT", "SOURCE", "FILE"],
         GitOpsResourceKind::Environment => vec!["NAME", "UNITS", "STATE", "FILE"],
         GitOpsResourceKind::EnvironmentGroup => vec!["NAME", "SELECTOR", "FILE"],
+        GitOpsResourceKind::EnvironmentTemplate => vec!["NAME", "PARAMETERS", "UNITS", "FILE"],
     };
     let rows = resources
         .iter()
@@ -808,6 +891,12 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
             selector(&group.spec.environment_selector.match_labels),
             file,
         ],
+        Some(GitOpsResource::EnvironmentTemplate(template)) => vec![
+            name.clone(),
+            template.spec.parameters.keys().cloned().collect::<Vec<_>>().join(","),
+            selector(&template.spec.unit_selector.match_labels),
+            file,
+        ],
         None => templated_resource_row(kind, name, file),
     }
 }
@@ -861,7 +950,8 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
         GitOpsResourceKind::GitRepository
         | GitOpsResourceKind::ArgoCDInstance
         | GitOpsResourceKind::ApplicationGroup
-        | GitOpsResourceKind::Environment => vec![
+        | GitOpsResourceKind::Environment
+        | GitOpsResourceKind::EnvironmentTemplate => vec![
             name.to_owned(),
             "<templated>".to_owned(),
             "<templated>".to_owned(),

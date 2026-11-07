@@ -281,6 +281,7 @@ impl Harness {
                 entry,
                 location: self.location.clone(),
                 entry_commit,
+                source_recorded: false,
                 entry_project_dir: "/nyl".to_owned(),
                 units: (!units.is_empty()).then(|| units.iter().map(|name| unit(name)).collect()),
                 concurrency: run::DEFAULT_CONCURRENCY,
@@ -311,6 +312,7 @@ impl Harness {
         // Running tools receive the run's cancelling signal.
         let tools = ProcessRunner::new().cancelled_by(job.request.cancellation.shared());
         let context = RunContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             base: &base,
             sources: &job.sources,
             renderer: &job.renderer,

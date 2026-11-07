@@ -324,6 +324,13 @@ pub trait StateStore: Send + Sync {
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 
+    /// The `state.yaml` of every directory directly beneath `location.path`
+    /// that has one: how instances of an EnvironmentTemplate that share a
+    /// ref are found. Stores that keep no shared refs list none.
+    fn list_records(&self, _location: &StateLocation) -> StateResult<Vec<StateRecord>> {
+        Ok(Vec::new())
+    }
+
     /// Read the state as of `tips` instead of the refs' current tips, for
     /// `nyl get --state-revision`. A tip of `None` reads that side as empty.
     fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
@@ -711,6 +718,8 @@ pub struct RenderedSource {
     pub project_dir: String,
     /// The Environment with group defaults applied.
     pub environment: Environment,
+    /// The template's terms when the environment is an instance, read at this commit.
+    pub instance: Option<super::instance::InstanceTerms>,
     pub units: BTreeMap<UnitName, RenderedUnit>,
 }
 

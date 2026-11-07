@@ -43,6 +43,8 @@ pub enum SourceRequest {
     Worktree(nyl_core::orchestration::ports::WorktreeSnapshot),
     /// The entry worktree's commit.
     Entry(CommitId),
+    /// An instance's recorded source commit.
+    Recorded(CommitId),
     /// The tip of a revision of this repository.
     Revision(String),
     /// A commit, with the revision it must be reachable from.
@@ -59,6 +61,7 @@ impl SourceRequest {
                 revision: snapshot.revision.clone(),
             },
             Self::Entry(_) => SourceChoice::Entry,
+            Self::Recorded(_) => SourceChoice::Recorded,
             Self::Revision(revision) => SourceChoice::Revision {
                 revision: revision.clone(),
             },
@@ -72,21 +75,36 @@ impl SourceRequest {
     }
 }
 
-/// The request for S from the entry worktree's Environment, its commit, and
-/// an optional `--source` override.
+/// The request for S from the entry worktree's Environment, its commit (an
+/// instance's recorded commit when `recorded`), and an optional `--source`
+/// override.
 ///
 /// `source.fromPromotion` is M6: it yields a revision only where one is set
 /// (validation excludes that), and otherwise the entry commit, so the shell
 /// must reject it beforehand with [`unsupported_source`].
-pub fn source_request(entry: &Environment, entry_commit: &CommitId, override_revision: Option<&str>) -> SourceRequest {
+pub fn source_request(
+    entry: &Environment,
+    entry_commit: &CommitId,
+    override_revision: Option<&str>,
+    recorded: bool,
+) -> SourceRequest {
     if let Some(revision) = override_revision {
         return SourceRequest::Override(revision.to_owned());
     }
+    // Without a source of its own, an instance not entered from its own
+    // checkout renders at the commit its record names.
+    let without_source = || {
+        if recorded {
+            SourceRequest::Recorded(entry_commit.clone())
+        } else {
+            SourceRequest::Entry(entry_commit.clone())
+        }
+    };
     let Some(source) = &entry.spec.source else {
-        return SourceRequest::Entry(entry_commit.clone());
+        return without_source();
     };
     let Some(revision) = &source.git.revision else {
-        return SourceRequest::Entry(entry_commit.clone());
+        return without_source();
     };
     match source.git.commit.as_deref().map(CommitId::new) {
         Some(Ok(commit)) => SourceRequest::Commit {
@@ -546,10 +564,32 @@ mod tests {
             ),
         ];
         for (spec, override_revision, request, choice) in cases {
-            let actual = source_request(&environment(&spec), &entry, override_revision);
+            let actual = source_request(&environment(&spec), &entry, override_revision, false);
             assert_eq!(actual, request, "{spec}");
             assert_eq!(actual.choice(), choice, "{spec}");
         }
+    }
+
+    /// Catches an instance not entered from its own checkout following the
+    /// checkout: it renders at its record's commit and records that choice,
+    /// unless its template names a revision or the run overrides the source.
+    #[test]
+    fn test_a_recorded_source_is_used_only_without_a_source_of_its_own() {
+        let recorded = commit('e');
+        let request = |spec: &Value, override_revision: Option<&str>| {
+            source_request(&environment(spec), &recorded, override_revision, true)
+        };
+        let plain = request(&json!({}), None);
+        assert_eq!(plain, SourceRequest::Recorded(recorded.clone()));
+        assert_eq!(plain.choice(), SourceChoice::Recorded);
+        assert_eq!(
+            request(&json!({"source": {"revision": "release/prod"}}), None),
+            SourceRequest::Revision("release/prod".to_owned())
+        );
+        assert_eq!(
+            request(&json!({}), Some("hotfix")),
+            SourceRequest::Override("hotfix".to_owned())
+        );
     }
 
     /// Catches a promoted source silently running from the entry commit.

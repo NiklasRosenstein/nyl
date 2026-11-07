@@ -520,6 +520,7 @@ fn check_unit(
         deadline,
     };
     let ctx = ExecutionContext {
+        instances: context.instances,
         secrets,
         interactive: false,
         artifacts: snapshot.artifacts.get(name).cloned().unwrap_or_default(),

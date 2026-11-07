@@ -319,6 +319,29 @@ fn fenced_readiness(name: &UnitName, stored: &DesiredUnit) -> Readiness {
     }
 }
 
+/// An instance's EnvironmentTemplate `deletionPolicy: Teardown` overrides the
+/// policy of every selected unit whose kind supports teardown, an explicit
+/// `Retain` included, by writing it into the rendered spec, so the stored
+/// document and every later decision (omission, `teardown --all`, expiry)
+/// read one policy. Units of other kinds keep their own, which for a kind
+/// without teardown means they are left in place and dropped from state.
+///
+/// Contract: [Environment templates and previews](../../../../design/orchestration-core.md#environment-templates-and-previews).
+pub fn apply_instance_policy(source: &mut RenderedSource, drivers: &DriverSet) {
+    let Some(DeletionPolicy::Teardown) = source.instance.as_ref().and_then(|instance| instance.deletion_policy) else {
+        return;
+    };
+    for unit in source.units.values_mut().filter(|unit| unit.selected) {
+        let Some(spec) = unit.spec.as_mut() else { continue };
+        let supports_teardown = drivers
+            .get(&unit.envelope.api_version, &unit.envelope.kind)
+            .is_some_and(|driver| driver.capabilities(spec).teardown);
+        if let (true, Some(spec)) = (supports_teardown, spec.as_object_mut()) {
+            spec.insert("deletionPolicy".to_owned(), Value::String("Teardown".to_owned()));
+        }
+    }
+}
+
 /// The selected, enabled units: those rendered to a spec whose `enabled`
 /// is not `false`.
 pub fn ownership_set(source: &RenderedSource) -> BTreeMap<&UnitName, &RenderedUnit> {
@@ -849,6 +872,45 @@ mod tests {
         drivers
     }
 
+    /// Catches an instance's template policy that does not reach the units
+    /// it must: `Teardown` overrides an explicit `Retain` for a kind that tears
+    /// down, leaves a kind that cannot (it would be rejected) and unselected
+    /// units alone, and an environment that is not an instance is untouched.
+    #[test]
+    fn test_instance_policy_overrides_only_units_whose_kind_tears_down() {
+        let spec = || Some(json!({"deletionPolicy": "Retain"}));
+        let mut instance = source(vec![
+            ("publication", rendered("Publication", true, spec())),
+            ("worker", rendered(TEST_KIND, true, spec())),
+            ("other", rendered("Publication", false, spec())),
+        ]);
+        let plain = instance.clone();
+        apply_instance_policy(&mut instance, &drivers());
+        assert_eq!(instance, plain, "an environment without a template keeps every policy");
+
+        instance.instance = Some(nyl_core::orchestration::instance::InstanceTerms {
+            template: "preview".to_owned(),
+            params: BTreeMap::new(),
+            deletion_policy: Some(DeletionPolicy::Teardown),
+            allow_teardown: true,
+            ttl: None,
+            max_instances: None,
+        });
+        apply_instance_policy(&mut instance, &drivers());
+        let policy = |unit: &str| instance.units[&name(unit)].spec.as_ref().unwrap()["deletionPolicy"].clone();
+        assert_eq!(policy("publication"), json!("Teardown"));
+        assert_eq!(
+            policy("worker"),
+            json!("Retain"),
+            "a kind that cannot tear down keeps its policy"
+        );
+        assert_eq!(
+            policy("other"),
+            json!("Retain"),
+            "an unselected unit is not the instance's"
+        );
+    }
+
     fn commit(digit: char) -> CommitId {
         CommitId::new(digit.to_string().repeat(40)).unwrap()
     }
@@ -880,6 +942,7 @@ mod tests {
                 "metadata": {"name": "dev"}
             }))
             .unwrap(),
+            instance: None,
             units: units
                 .into_iter()
                 .map(|(unit, rendered)| (name(unit), rendered))

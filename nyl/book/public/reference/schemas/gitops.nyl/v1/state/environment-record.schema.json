@@ -30,6 +30,20 @@
         },
         {
           "additionalProperties": false,
+          "description": "An instance's recorded source commit: a run that is not entered from the instance's own source.",
+          "properties": {
+            "by": {
+              "const": "recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "The tip of the Environment's `source.revision`.",
           "properties": {
             "by": {
