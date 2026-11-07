@@ -548,19 +548,27 @@ read, the teardown is uncertain with `observation-failed` and the reason.
 ### Teardown readiness
 
 Resolution records the target's effective teardown settings in the stored
-document: whether the catalog prunes removed Applications, the Applications'
-`applicationDeletionPolicy`, each owned Namespace's `prunePolicy` and `deletePolicy`, and whether a
+document: whether the catalog prunes removed Applications, and what keeps it from doing so (a `Prune=confirm` or `Prune=false` option), the Applications'
+`applicationDeletionPolicy`, each owned Namespace's effective `Delete` option, every resource or Application whose
+`Delete=confirm` or `Prune=confirm` holds an Application's deletion, and whether a
 parent owns the catalog. The unit itself judges them, from the stored document
 without rendering, so `status`, `plan`, `get units -o wide`, and every teardown
 agree:
 
 | Requirement | Unmet, and the fix |
 | --- | --- |
-| The catalog prunes removed workload Applications | Blocking, `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`: enable the catalog's `syncPolicy.automated` with `prune: true`. |
+| The catalog prunes removed workload Applications | Blocking, `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`: enable the catalog's `syncPolicy.automated` with `prune: true`, and remove `Prune=confirm` and `Prune=false`. Argo CD resolves `Prune` for each Application the catalog prunes: the Application's own `argocd.argoproj.io/sync-options` annotation (an ApplicationGroup's `annotations` set it on every workload Application), else the catalog's `syncPolicy.syncOptions` (`catalogApplication.syncPolicy` on the DeploymentTarget, `catalogApplicationDefaults.syncPolicy` on the ArgoCDInstance, or the shared catalog's own). `Prune=confirm` keeps the catalog's sync waiting for a confirmation in Argo CD, and `Prune=false` skips the Application; the finding names which. `Delete=confirm` on the catalog is not checked, because it only applies when the catalog Application itself is deleted. |
 | Deleting an Application deletes its workloads | Blocking, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`: set `applicationDeletionPolicy` to `Foreground` or `Background`. |
-| Owned Namespaces do not hold deletion | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: Argo CD holds an Application's deletion while a Namespace it would delete renders `Delete=confirm` or `Prune=confirm`, so set the Namespaces' `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`, which keeps the Namespace. The default of `Confirm` for either blocks. |
+| No resource requires confirmation to delete | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: Argo CD holds an Application's deletion while any resource it would delete requires confirmation, which a resource's own `argocd.argoproj.io/sync-options` annotation or its Application's `spec.syncPolicy.syncOptions` sets with `Delete=confirm` or `Prune=confirm`. The finding names each such resource, or the Application whose options do it for all of its resources. For a Namespace, set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`; the default of `Confirm` for either blocks. For an Application, remove the option from the ApplicationGroup's `syncPolicy.syncOptions` or from a Release's `+syncOptions` override. |
 | Owned Namespaces are removed | Remnant, `NYL-TEARDOWN-NAMESPACES-REMAIN`: set `deletePolicy: Automatic`. |
 | The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-CATALOG-REMAINS`: let a parent own the catalog (`catalogApplication.enabled: false`), or share one (`catalogApplication.shared`), whose Application is read for the rows above and prunes the target's objects. |
+
+A resource's own option wins over its Application's, one option at a time, as in
+Argo CD (`Prune=confirm` on the Application with `Prune=false` on a resource leaves
+the resource unconfirmed). Resources Argo CD does not delete with the Application
+never hold it: those with `Delete=false` (on the resource, or on the Application when
+the resource sets no `Delete`), CustomResourceDefinitions, and resources with
+`helm.sh/resource-policy: keep`.
 
 A tree without a catalog Application leaves the catalog to a parent whose
 settings Nyl cannot see; those rows read `external: not checked` and never

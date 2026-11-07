@@ -5,10 +5,11 @@
 //! teardown readiness and catalog ownership. The driver owns these
 //! semantics; the orchestration shell only coordinates and displays the
 //! findings. Three blocking requirements decide whether the teardown can
-//! succeed (the catalog prunes removed workload Applications on its own,
+//! succeed (the catalog prunes removed workload Applications on its own, with
+//! automated pruning and no `Prune=confirm` or `Prune=false` option,
 //! `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`; deleting an Application deletes its
-//! workloads, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`; owned Namespaces do not
-//! stop deletion, `NYL-TEARDOWN-NAMESPACE-CONFIRM`); two remnant rows leave
+//! workloads, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`; no resource requires
+//! confirmation to delete, `NYL-TEARDOWN-NAMESPACE-CONFIRM`); two remnant rows leave
 //! objects behind (`NYL-TEARDOWN-NAMESPACES-REMAIN`,
 //! `NYL-TEARDOWN-CATALOG-REMAINS`). Settings a parent Application owns are
 //! `external: not checked` and never block. An unmet blocking requirement
@@ -19,7 +20,7 @@
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::TeardownReadiness;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_render::gitops::publication::TeardownSettings;
+use nyl_render::gitops::publication::{PruneHold, TeardownSettings};
 
 /// What a removal nobody attends would wait for: a `manual` `teardownWait`
 /// stops it after phase 1 until an operator confirms the removal, so a
@@ -40,6 +41,61 @@ pub fn unattended_wait(
     })
 }
 
+/// How many resources a confirmation finding names before it counts the rest.
+const MAX_LISTED_CONFIRMATIONS: usize = 8;
+
+/// The catalog row: pruning on its own takes automated pruning, and no `Prune`
+/// sync option that waits for a confirmation or skips an Application.
+fn catalog_prune_finding(subject: &str, settings: &TeardownSettings) -> Option<Finding> {
+    let mut not_pruning = Vec::new();
+    if settings.catalog_prunes == Some(false) {
+        not_pruning.push("it has no syncPolicy.automated with prune: true".to_owned());
+    }
+    if !settings.catalog_prune_holds.is_empty() {
+        let holding = settings
+            .catalog_prune_holds
+            .iter()
+            .map(|hold| match (&hold.application, hold.prune) {
+                (Some(application), PruneHold::Confirm) => {
+                    format!("Application {application} requires confirmation to be pruned (Prune=confirm)")
+                }
+                (Some(application), PruneHold::False) => {
+                    format!("Application {application} is never pruned (Prune=false)")
+                }
+                (None, PruneHold::Confirm) => {
+                    "its spec.syncPolicy.syncOptions make pruning wait for confirmation (Prune=confirm)".to_owned()
+                }
+                (None, PruneHold::False) => "its spec.syncPolicy.syncOptions skip pruning (Prune=false)".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        not_pruning.extend(holding.into_iter().take(MAX_LISTED_CONFIRMATIONS));
+        let more = settings
+            .catalog_prune_holds
+            .len()
+            .saturating_sub(MAX_LISTED_CONFIRMATIONS);
+        if more > 0 {
+            not_pruning.push(format!("and {more} more Applications"));
+        }
+    }
+    (!not_pruning.is_empty()).then(|| {
+        let manual_sync = settings.catalog_prunes == Some(false);
+        Finding::new(
+            Code::TeardownCatalogManualSync,
+            if manual_sync && settings.catalog_prune_holds.is_empty() {
+                format!(
+                    "{subject}: the catalog does not prune removed workload Applications on its own, so they stay until someone syncs it with pruning"
+                )
+            } else {
+                format!(
+                    "{subject}: the catalog does not prune removed workload Applications on its own: {}",
+                    not_pruning.join("; ")
+                )
+            },
+            "enable the catalog Application's syncPolicy.automated with prune: true, and remove Prune=confirm and Prune=false from its syncOptions and from the generated Applications' argocd.argoproj.io/sync-options annotation (catalogApplication.syncPolicy on the DeploymentTarget, catalogApplicationDefaults.syncPolicy on its ArgoCDInstance, or the ApplicationGroup annotations), or pass --allow-incomplete",
+        )
+    })
+}
+
 /// Evaluate a unit's teardown settings against the contract's readiness
 /// table. Each finding names the unit and the setting that fixes it; a
 /// setting Nyl cannot see (`None`) is listed in `not_checked` and never
@@ -47,18 +103,11 @@ pub fn unattended_wait(
 pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &TeardownSettings) -> TeardownReadiness {
     let mut readiness = TeardownReadiness::default();
     let subject = format!("{environment}/{unit}");
-    match settings.catalog_prunes {
-        Some(false) => readiness.blocking.push(Finding::new(
-            Code::TeardownCatalogManualSync,
-            format!(
-                "{subject}: the catalog does not prune removed workload Applications on its own, so they stay until someone syncs it with pruning"
-            ),
-            "enable the catalog Application's syncPolicy.automated with prune: true (catalogApplication.syncPolicy on the DeploymentTarget, or catalogApplicationDefaults.syncPolicy on its ArgoCDInstance), or pass --allow-incomplete",
-        )),
-        Some(true) => {}
-        None => readiness
+    readiness.blocking.extend(catalog_prune_finding(&subject, settings));
+    if settings.catalog_prunes.is_none() {
+        readiness
             .not_checked
-            .push("catalog syncPolicy.automated.prune: external: not checked".to_owned()),
+            .push("catalog syncPolicy.automated.prune: external: not checked".to_owned());
     }
     match settings.application_deletion_policy.as_deref() {
         Some("Orphan") => readiness.blocking.push(Finding::new(
@@ -80,35 +129,44 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
             .collect::<Vec<_>>()
     };
     // Argo CD's cascade deletion holds an Application while a resource it
-    // would delete carries `Delete=confirm` or `Prune=confirm`. `Delete=false`
-    // keeps the resource, so neither confirmation is consulted for it, and
-    // `Prune=false` only affects syncs, so the Namespace is still deleted.
-    let holding = settings
-        .namespace_delete_policies
-        .iter()
-        .filter_map(|(namespace, delete)| {
-            let prune = settings
-                .namespace_prune_policies
-                .get(namespace)
-                .map_or("Automatic", String::as_str);
-            let setting = if delete == "Confirm" {
-                "deletePolicy"
-            } else if delete != "Retain" && prune == "Confirm" {
-                "prunePolicy"
-            } else {
-                return None;
-            };
-            Some(format!("{namespace} ({setting}: Confirm)"))
-        })
-        .collect::<Vec<_>>();
-    if !holding.is_empty() {
+    // would delete requires confirmation, whether the resource's own
+    // `Delete=confirm` or `Prune=confirm` annotation or its Application's
+    // `syncPolicy.syncOptions` says so. Settings already left out resources
+    // that keep their own, such as `Delete=false`.
+    if !settings.deletion_confirmations.is_empty() {
+        let holding = settings
+            .deletion_confirmations
+            .iter()
+            .map(|confirmation| {
+                let options = confirmation
+                    .options
+                    .iter()
+                    .map(|option| format!("{}=confirm", option.name()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match &confirmation.resource {
+                    Some(resource) => format!("{resource} of Application {} ({options})", confirmation.application),
+                    None => format!(
+                        "Application {} (spec.syncPolicy.syncOptions: {options})",
+                        confirmation.application
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let shown = holding
+            .iter()
+            .take(MAX_LISTED_CONFIRMATIONS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let more = holding.len() - shown.len();
         readiness.blocking.push(Finding::new(
             Code::TeardownNamespaceConfirm,
             format!(
-                "{subject}: Namespaces {} require confirmation to delete, which holds their Application and its workloads until the deletion is confirmed in Argo CD",
-                holding.join(", ")
+                "{subject}: {}{} require confirmation to delete, which holds their Application and its workloads until the deletion is confirmed in Argo CD",
+                shown.join(", "),
+                if more > 0 { format!(", and {more} more") } else { String::new() },
             ),
-            "set the Namespaces' prunePolicy and deletePolicy to Automatic (or deletePolicy to Retain, which keeps the Namespace), or pass --allow-incomplete",
+            "remove Delete=confirm and Prune=confirm from the named resources and Applications (a Namespace's prunePolicy and deletePolicy to Automatic, or deletePolicy to Retain; an Application's ApplicationGroup syncPolicy.syncOptions or Release +syncOptions override), or pass --allow-incomplete",
         ));
     }
     let remaining = with_policy(&|policy| policy != "Automatic");
@@ -132,9 +190,9 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
 /// The readiness of a direct target's teardown. Nothing here holds a
 /// finalizer, so nothing blocks: a Namespace whose `deletePolicy` is not
 /// `Automatic` is a remnant, and what a teardown's credentials may delete is
-/// not checked. `namespacePrunePolicies` do not matter, unlike for Argo CD,
-/// which holds an Application's cascade deletion for a `Prune=confirm`
-/// Namespace: a direct teardown purges by each object's `Delete` option alone,
+/// not checked. `deletionConfirmations` do not matter, unlike for Argo CD,
+/// which holds an Application's cascade deletion for a resource requiring
+/// confirmation: a direct teardown purges by each object's `Delete` option alone,
 /// and `Prune` only decides whether the next apply deletes a Namespace a
 /// Release stopped declaring.
 ///
@@ -198,6 +256,8 @@ pub fn evaluate_reading(
 mod tests {
     use std::collections::BTreeMap;
 
+    use nyl_render::gitops::publication::{CatalogPruneHold, ConfirmedOption, DeletionConfirmation};
+
     use super::*;
 
     fn env() -> EnvironmentName {
@@ -213,32 +273,47 @@ mod tests {
             catalog_prunes: Some(true),
             application_deletion_policy: Some("Foreground".to_owned()),
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Automatic".to_owned())]),
-            namespace_prune_policies: BTreeMap::from([("web".to_owned(), "Automatic".to_owned())]),
+            deletion_confirmations: Vec::new(),
+            catalog_prune_holds: Vec::new(),
             catalog_owned_by_parent: true,
         }
     }
 
-    fn namespace_policies(delete: &str, prune: &str) -> TeardownSettings {
+    fn confirmation(application: &str, resource: Option<&str>, options: &[&str]) -> DeletionConfirmation {
+        DeletionConfirmation {
+            application: application.to_owned(),
+            resource: resource.map(str::to_owned),
+            options: options
+                .iter()
+                .map(|option| match *option {
+                    "Delete" => ConfirmedOption::Delete,
+                    _ => ConfirmedOption::Prune,
+                })
+                .collect(),
+        }
+    }
+
+    fn confirming(confirmations: Vec<DeletionConfirmation>) -> TeardownSettings {
         TeardownSettings {
-            namespace_delete_policies: BTreeMap::from([("web".to_owned(), delete.to_owned())]),
-            namespace_prune_policies: BTreeMap::from([("web".to_owned(), prune.to_owned())]),
+            deletion_confirmations: confirmations,
             ..ready_settings()
         }
     }
 
-    /// Catches a direct target being held by a Namespace's `Prune=confirm`, which
-    /// Argo CD holds an Application's deletion for and a direct teardown never
-    /// consults: no policy blocks, `deletePolicy` alone decides the remnant.
+    /// Catches a direct target being held by a resource requiring confirmation,
+    /// which Argo CD holds an Application's deletion for and a direct teardown
+    /// never consults: nothing blocks, and `deletePolicy` alone decides the
+    /// Namespace remnant.
     #[test]
-    fn test_a_direct_teardown_ignores_the_prune_policy_and_never_blocks() {
-        for (delete, prune, remnant) in [
-            ("Automatic", "Automatic", false),
-            ("Automatic", "Confirm", false),
-            ("Confirm", "Automatic", true),
-            ("Retain", "Confirm", true),
-        ] {
-            let readiness = evaluate_direct(&env(), &name("kubernetes"), &namespace_policies(delete, prune));
-            assert!(readiness.ready(), "{delete}/{prune}");
+    fn test_a_direct_teardown_ignores_deletion_confirmations_and_never_blocks() {
+        for (delete, remnant) in [("Automatic", false), ("Confirm", true), ("Retain", true)] {
+            let settings = TeardownSettings {
+                namespace_delete_policies: BTreeMap::from([("web".to_owned(), delete.to_owned())]),
+                deletion_confirmations: vec![confirmation("web", Some("Namespace web"), &["Prune"])],
+                ..ready_settings()
+            };
+            let readiness = evaluate_direct(&env(), &name("kubernetes"), &settings);
+            assert!(readiness.ready(), "{delete}");
             assert_eq!(
                 codes(&readiness.remnants),
                 if remnant {
@@ -246,7 +321,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
-                "{delete}/{prune}"
+                "{delete}"
             );
         }
     }
@@ -301,14 +376,9 @@ mod tests {
                 "applicationDeletionPolicy",
             ),
             (
-                namespace_policies("Confirm", "Automatic"),
+                confirming(vec![confirmation("web", Some("Namespace web"), &["Delete", "Prune"])]),
                 Code::TeardownNamespaceConfirm,
-                "deletePolicy",
-            ),
-            (
-                namespace_policies("Automatic", "Confirm"),
-                Code::TeardownNamespaceConfirm,
-                "prunePolicy",
+                "prunePolicy and deletePolicy",
             ),
         ];
         for (settings, code, setting) in cases {
@@ -325,54 +395,148 @@ mod tests {
     }
 
     /// Catches the stall found against Argo CD v3.5.7: its cascade deletion
-    /// holds an Application while a Namespace it would delete carries
-    /// `Prune=confirm` or `Delete=confirm`, so readiness must name whichever
-    /// holds, treat both Automatic as ready, and let `Delete=false` (Retain)
-    /// keep the Namespace without any confirmation being consulted.
+    /// holds an Application while any resource it would delete requires
+    /// confirmation, whether that resource's own annotation or the
+    /// Application's `syncOptions` says so. The finding names each one with
+    /// the options that do, and says where to remove them; a target with no
+    /// such resource is ready.
     #[test]
-    fn test_namespace_confirmation_blocks_by_prune_or_delete_policy() {
-        let blocked = |delete: &str, prune: &str| {
-            let readiness = evaluate(&env(), &name("kubernetes"), &namespace_policies(delete, prune));
-            (codes(&readiness.blocking), readiness)
-        };
-        let (codes_, readiness) = blocked("Automatic", "Confirm");
-        assert_eq!(codes_, vec![Code::TeardownNamespaceConfirm]);
+    fn test_a_resource_or_application_option_requiring_confirmation_blocks_and_is_named() {
+        let readiness = evaluate(
+            &env(),
+            &name("kubernetes"),
+            &confirming(vec![
+                confirmation("api", None, &["Prune"]),
+                confirmation("web", Some("Deployment shop/web"), &["Delete"]),
+                confirmation("web", Some("Namespace shop"), &["Delete", "Prune"]),
+            ]),
+        );
+        assert_eq!(codes(&readiness.blocking), vec![Code::TeardownNamespaceConfirm]);
         let finding = &readiness.blocking[0];
         assert!(
-            finding.message.contains("web (prunePolicy: Confirm)"),
+            finding
+                .message
+                .contains("Application api (spec.syncPolicy.syncOptions: Prune=confirm)"),
             "{}",
             finding.message
         );
-        assert!(!finding.message.contains("deletePolicy"), "{}", finding.message);
         assert!(
-            finding.fix.contains("prunePolicy and deletePolicy to Automatic") && finding.fix.contains("Retain"),
+            finding
+                .message
+                .contains("Deployment shop/web of Application web (Delete=confirm)"),
             "{}",
-            finding.fix
+            finding.message
         );
-
-        let (codes_, readiness) = blocked("Confirm", "Automatic");
-        assert_eq!(codes_, vec![Code::TeardownNamespaceConfirm]);
-        assert!(readiness.blocking[0].message.contains("web (deletePolicy: Confirm)"));
-
-        let (codes_, readiness) = blocked("Confirm", "Confirm");
-        assert_eq!(codes_, vec![Code::TeardownNamespaceConfirm]);
-        assert!(readiness.blocking[0].message.contains("web (deletePolicy: Confirm)"));
-
-        // Both Automatic: nothing holds the Application and the Namespace goes.
-        let (codes_, readiness) = blocked("Automatic", "Automatic");
-        assert!(codes_.is_empty() && readiness.remnants.is_empty());
-
-        // Retain (`Delete=false`) keeps the Namespace without a confirmation,
-        // whatever the prune policy: a remnant, not a blocker.
-        for prune in ["Automatic", "Confirm", "Retain"] {
-            let (codes_, readiness) = blocked("Retain", prune);
-            assert!(codes_.is_empty(), "prune {prune}: {codes_:?}");
-            assert_eq!(codes(&readiness.remnants), vec![Code::TeardownNamespacesRemain]);
+        assert!(
+            finding
+                .message
+                .contains("Namespace shop of Application web (Delete=confirm, Prune=confirm)"),
+            "{}",
+            finding.message
+        );
+        for fix in [
+            "Release +syncOptions",
+            "ApplicationGroup syncPolicy.syncOptions",
+            "Retain",
+        ] {
+            assert!(finding.fix.contains(fix), "{}", finding.fix);
         }
 
-        // `Prune=false` only affects syncs: the Namespace is still deleted.
-        let (codes_, readiness) = blocked("Automatic", "Retain");
-        assert!(codes_.is_empty() && readiness.remnants.is_empty());
+        assert!(evaluate(&env(), &name("kubernetes"), &ready_settings()).ready());
+    }
+
+    /// Catches a catalog that syncs with pruning but cannot prune a removed
+    /// workload Application being ready: Argo CD's sync waits for confirmation
+    /// on `Prune=confirm` and skips a `Prune=false` Application. The finding
+    /// keeps the catalog row's code, so a shared catalog's pre-teardown check
+    /// holds on it too, names the option or Application, and says where to
+    /// remove it; a catalog that also does not sync automatically says so.
+    #[test]
+    fn test_a_prune_option_the_catalog_cannot_prune_through_blocks_and_is_named() {
+        let holding = |holds: Vec<CatalogPruneHold>| TeardownSettings {
+            catalog_prune_holds: holds,
+            ..ready_settings()
+        };
+        let hold = |application: Option<&str>, prune: PruneHold| CatalogPruneHold {
+            application: application.map(str::to_owned),
+            prune,
+        };
+        let readiness = evaluate(
+            &env(),
+            &name("kubernetes"),
+            &holding(vec![
+                hold(None, PruneHold::Confirm),
+                hold(Some("api"), PruneHold::False),
+            ]),
+        );
+        assert_eq!(codes(&readiness.blocking), vec![Code::TeardownCatalogManualSync]);
+        let finding = &readiness.blocking[0];
+        for part in [
+            "dev/kubernetes: ",
+            "its spec.syncPolicy.syncOptions make pruning wait for confirmation (Prune=confirm)",
+            "Application api is never pruned (Prune=false)",
+        ] {
+            assert!(finding.message.contains(part), "{}", finding.message);
+        }
+        for fix in [
+            "Prune=confirm and Prune=false",
+            "ApplicationGroup annotations",
+            "--allow-incomplete",
+        ] {
+            assert!(finding.fix.contains(fix), "{}", finding.fix);
+        }
+
+        let single = evaluate(
+            &env(),
+            &name("kubernetes"),
+            &holding(vec![hold(Some("web"), PruneHold::Confirm)]),
+        );
+        assert!(
+            single.blocking[0]
+                .message
+                .contains("Application web requires confirmation to be pruned (Prune=confirm)"),
+            "{}",
+            single.blocking[0].message
+        );
+
+        let both = TeardownSettings {
+            catalog_prunes: Some(false),
+            catalog_prune_holds: vec![hold(None, PruneHold::False)],
+            ..ready_settings()
+        };
+        let readiness = evaluate(&env(), &name("kubernetes"), &both);
+        assert_eq!(codes(&readiness.blocking), vec![Code::TeardownCatalogManualSync]);
+        let message = &readiness.blocking[0].message;
+        assert!(message.contains("it has no syncPolicy.automated with prune: true; its spec.syncPolicy.syncOptions skip pruning (Prune=false)"), "{message}");
+
+        let many = (0..MAX_LISTED_CONFIRMATIONS + 2)
+            .map(|index| hold(Some(&format!("app-{index:02}")), PruneHold::Confirm))
+            .collect();
+        let message = &evaluate(&env(), &name("kubernetes"), &holding(many)).blocking[0].message;
+        assert!(message.contains("app-07") && !message.contains("app-08"), "{message}");
+        assert!(message.contains("and 2 more Applications"), "{message}");
+
+        // A direct teardown has no catalog to prune through.
+        assert!(evaluate_direct(
+            &env(),
+            &name("kubernetes"),
+            &holding(vec![hold(None, PruneHold::Confirm)])
+        )
+        .ready());
+    }
+
+    /// Catches a long list of confirmations flooding the finding: it names a
+    /// few and counts the rest.
+    #[test]
+    fn test_many_confirmations_are_counted_after_the_first_few() {
+        let confirmations = (0..MAX_LISTED_CONFIRMATIONS + 3)
+            .map(|index| confirmation("web", Some(&format!("ConfigMap shop/cm-{index:02}")), &["Prune"]))
+            .collect();
+        let readiness = evaluate(&env(), &name("kubernetes"), &confirming(confirmations));
+        let message = &readiness.blocking[0].message;
+        assert!(message.contains("ConfigMap shop/cm-07"), "{message}");
+        assert!(!message.contains("ConfigMap shop/cm-08"), "{message}");
+        assert!(message.contains(", and 3 more require confirmation"), "{message}");
     }
 
     /// Catches remnants going unreported, or blocking a teardown that can complete.
@@ -394,7 +558,7 @@ mod tests {
         );
         assert!(readiness.remnants[0].message.contains("Namespaces web remain"));
 
-        // Confirm both blocks and remains.
+        // A Namespace that keeps its Confirm policy is a remnant; what holds the deletion is separate.
         let confirm = TeardownSettings {
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
             ..ready_settings()
@@ -411,7 +575,8 @@ mod tests {
             catalog_prunes: None,
             application_deletion_policy: None,
             namespace_delete_policies: BTreeMap::new(),
-            namespace_prune_policies: BTreeMap::new(),
+            deletion_confirmations: Vec::new(),
+            catalog_prune_holds: Vec::new(),
             catalog_owned_by_parent: true,
         };
         let readiness = evaluate(&env(), &name("kubernetes"), &settings);

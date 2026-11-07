@@ -206,13 +206,17 @@ codes! {
     /// an unmet readiness requirement or an unconfirmed removal.
     TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
     /// Teardown readiness: the catalog does not prune removed workload
-    /// Applications on its own (blocking).
+    /// Applications on its own, because it does not sync with pruning or its
+    /// `Prune` sync option waits for confirmation or skips them (blocking).
     TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
     /// Teardown readiness: deleting an Application orphans its workloads (blocking).
     TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
-    /// Teardown readiness: an owned Namespace with `prunePolicy: Confirm` or
-    /// `deletePolicy: Confirm` holds the Application's finalizer until someone
-    /// confirms (blocking).
+    /// Teardown readiness: a resource a workload Application would delete,
+    /// whose own sync options or the Application's `syncPolicy.syncOptions`
+    /// resolve `Delete` or `Prune` to `confirm`, holds the Application's
+    /// finalizer until someone confirms the deletion in Argo CD (blocking).
+    /// An owned Namespace with the default `prunePolicy` or `deletePolicy`
+    /// of `Confirm` is the usual case.
     TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
     /// Teardown readiness: owned Namespaces remain after teardown (remnant).
     TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",

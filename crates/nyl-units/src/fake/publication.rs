@@ -22,8 +22,8 @@
 //! Unlike the real driver, which records the target's effective teardown
 //! settings at resolution, the fake reads the same shape from a
 //! `teardownSettings` that a scenario declares (`catalogPrunes`,
-//! `applicationDeletionPolicy`, `namespaceDeletePolicies`, `namespacePrunePolicies`,
-//! `catalogOwnedByParent`) and evaluates it with the real driver's readiness
+//! `applicationDeletionPolicy`, `namespaceDeletePolicies`, `deletionConfirmations`,
+//! `catalogPruneHolds`, `catalogOwnedByParent`) and evaluates it with the real driver's readiness
 //! rules. A document without it records no settings, so the fake reports
 //! readiness as unsupported (no requirements).
 
@@ -68,14 +68,23 @@ impl FakePublication {
     /// The recorded `teardownSettings`, with absent fields at their
     /// defaults: an absent catalog setting is external (`None`).
     fn recorded_settings(value: &Value) -> Result<TeardownSettings, String> {
-        let mut settings = serde_json::to_value(TeardownSettings::default()).map_err(|error| error.to_string())?;
-        let (Value::Object(defaults), Value::Object(recorded)) = (&mut settings, value) else {
+        let Value::Object(recorded) = value else {
             return Err("spec.teardownSettings must be a mapping".to_owned());
         };
-        if let Some(key) = recorded.keys().find(|key| !defaults.contains_key(*key)) {
+        // The fields the settings have, whether or not their defaults serialize.
+        let schema =
+            serde_json::to_value(schemars::schema_for!(TeardownSettings)).map_err(|error| error.to_string())?;
+        let known = schema.get("properties").and_then(Value::as_object);
+        if let Some(key) = recorded
+            .keys()
+            .find(|key| !known.is_some_and(|known| known.contains_key(*key)))
+        {
             return Err(format!("spec.teardownSettings has unknown field {key:?}"));
         }
-        defaults.extend(recorded.clone());
+        let mut settings = serde_json::to_value(TeardownSettings::default()).map_err(|error| error.to_string())?;
+        if let Value::Object(defaults) = &mut settings {
+            defaults.extend(recorded.clone());
+        }
         serde_json::from_value(settings).map_err(|error| format!("spec.teardownSettings: {error}"))
     }
 }
@@ -144,9 +153,30 @@ impl Driver for FakePublication {
                             "type": "object",
                             "additionalProperties": {"type": "string", "enum": ["Automatic", "Retain", "Confirm"]}
                         },
-                        "namespacePrunePolicies": {
-                            "type": "object",
-                            "additionalProperties": {"type": "string", "enum": ["Automatic", "Retain", "Confirm"]}
+                        "deletionConfirmations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["application", "options"],
+                                "properties": {
+                                    "application": {"type": "string"},
+                                    "resource": {"type": "string"},
+                                    "options": {"type": "array", "items": {"type": "string", "enum": ["Delete", "Prune"]}}
+                                },
+                                "additionalProperties": false
+                            }
+                        },
+                        "catalogPruneHolds": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["prune"],
+                                "properties": {
+                                    "application": {"type": "string"},
+                                    "prune": {"type": "string", "enum": ["confirm", "false"]}
+                                },
+                                "additionalProperties": false
+                            }
                         },
                         "catalogOwnedByParent": {"type": "boolean"}
                     },
