@@ -25,6 +25,12 @@ under the configured `project.gitops_scaffold_path`, which defaults to
 `--source DIR --colocate` writes `DIR/_application-group.yaml`. Existing files and duplicate
 resource identities are never overwritten.
 
+`nyl create target` declares `reconciler: {argocd: {}}`, Argo CD with the implicit
+target-local instance, and comments the other forms. A project that declares an
+ArgoCDInstance, such as `central` above, must name it in the target's
+`reconciler: {argocd: {instanceRef: {name: central}}}`; a target Nyl applies itself
+declares `reconciler: {direct: {}}`.
+
 `nyl create cluster` records its local context but does not connect to it. Use
 `nyl capture cluster NAME` to refresh stored Kubernetes capabilities.
 

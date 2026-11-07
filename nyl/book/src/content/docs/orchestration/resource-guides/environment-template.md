@@ -389,7 +389,7 @@ values:
   target:
     inline:
       clusterRef: {name: dev}
-      argocdRef: {name: dev}
+      reconciler: {argocd: {instanceRef: {name: dev}}}
       catalogApplication:
         shared: {name: previews}
       publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
