@@ -482,7 +482,7 @@ fn verify_owned_files(
                 tracing::warn!("Replacing modified owned rendered file {}", path.display());
                 continue;
             }
-            return Err(NylError::config(format!(
+            return Err(NylError::OwnedFileModified(format!(
                 "Owned rendered file {} was modified outside Nyl",
                 path.display()
             )));

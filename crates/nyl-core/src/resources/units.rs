@@ -50,6 +50,19 @@ impl UnitEnvelope {
     }
 }
 
+/// The members of a unit's `spec` that [`CommonUnitFields`] defines, which
+/// the engine reads and no driver may overwrite.
+pub const COMMON_UNIT_FIELDS: [&str; 8] = [
+    "enabled",
+    "outputs",
+    "dependsOn",
+    "approval",
+    "deletionPolicy",
+    "timeout",
+    "env",
+    "attestations",
+];
+
 /// The longest `spec.timeout` a unit may declare.
 pub const MAX_UNIT_TIMEOUT: Duration = Duration::from_secs(7 * 86_400);
 

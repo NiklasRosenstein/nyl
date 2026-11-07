@@ -90,7 +90,7 @@ Each binding sets exactly one source:
 | `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/reference/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
 | `fromGit` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
 | `fromPublication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carryFileFromWorktree`, a working-tree file of this run is rendered from and written into the publication. |
-| `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. |
+| `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. An environment's [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/) resolves `fromUnit` and renders the target with the values pinned. |
 
 The effective value is the target binding if there is one, otherwise the
 Release default. A binding replaces the value whole; unlike `values`, inputs

@@ -153,6 +153,57 @@ pub struct KeyInputs {
     /// Output of a fingerprint step, digested into the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Facts the driver learned while reading its inputs that the resolved
+    /// spec records, by JSON Pointer to the member that receives each value,
+    /// such as a publication's effective teardown settings. Resolution writes
+    /// them into the resolved spec before it computes the key, so the stored
+    /// desired document carries them and commands that never render source
+    /// can read them back. The engine stores each value without
+    /// interpreting it; see [`KeyInputs::record_into`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recorded: BTreeMap<String, Value>,
+}
+
+/// Why a recorded field cannot join the resolved spec.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RecordError {
+    /// The pointer is not `/<member>`: recorded facts are new top-level members.
+    #[error("recorded field {pointer:?} is not a JSON Pointer to one top-level member of the spec")]
+    NotAMember { pointer: String },
+    /// The member is a common unit field, or is already in the spec the engine
+    /// resolved, and the engine has used it.
+    #[error("recorded field {pointer:?} would replace a member the unit declares or the engine reads; a driver records only new members")]
+    Occupied { pointer: String },
+}
+
+impl KeyInputs {
+    /// Write each [`recorded`](Self::recorded) value into the resolved `spec`
+    /// as a new top-level member. A recorded fact never replaces a member the
+    /// spec already has, nor a common unit field, because the engine reads
+    /// those; such a pointer is an error, never skipped.
+    pub fn record_into(&self, spec: &mut Value) -> std::result::Result<(), RecordError> {
+        for (pointer, value) in &self.recorded {
+            let member = pointer
+                .strip_prefix('/')
+                .filter(|member| !member.is_empty() && !member.contains('/'))
+                .ok_or_else(|| RecordError::NotAMember {
+                    pointer: pointer.clone(),
+                })?
+                .replace("~1", "/")
+                .replace("~0", "~");
+            let occupied = || RecordError::Occupied {
+                pointer: pointer.clone(),
+            };
+            let Value::Object(members) = spec else {
+                return Err(occupied());
+            };
+            if members.contains_key(&member) || crate::resources::units::COMMON_UNIT_FIELDS.contains(&member.as_str()) {
+                return Err(occupied());
+            }
+            members.insert(member, value.clone());
+        }
+        Ok(())
+    }
 }
 
 /// The planned change kind.
@@ -702,5 +753,102 @@ mod ownership_tests {
         child.namespace = parent.namespace.clone();
         child.path.clear();
         assert!(parent.overlaps(&child));
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn recording(pointer: &str, value: Value) -> KeyInputs {
+        KeyInputs {
+            recorded: BTreeMap::from([(pointer.to_owned(), value)]),
+            ..KeyInputs::default()
+        }
+    }
+
+    /// Catches a driver's recorded fact missing from the stored resolved
+    /// document, where commands that never render source read it.
+    #[test]
+    fn test_recorded_fields_join_the_resolved_spec_as_new_members() {
+        let mut spec = json!({"target": "dev"});
+        let mut inputs = recording("/teardownSettings", json!({"catalogPrunes": true}));
+        inputs.recorded.insert("/a~1b".to_owned(), json!(2));
+        inputs.record_into(&mut spec).unwrap();
+        assert_eq!(
+            spec,
+            json!({"target": "dev", "teardownSettings": {"catalogPrunes": true}, "a/b": 2})
+        );
+    }
+
+    /// Catches a driver overwriting what the engine already used (the
+    /// authored target, `dependsOn`, `approval`) after resolution, or a
+    /// recorded fact with no place to go being skipped.
+    #[test]
+    fn test_recorded_field_may_not_replace_or_miss() {
+        let mut spec = json!({"target": "dev", "nested": {"keep": 1}});
+        for pointer in ["/target", "/nested", "/dependsOn", "/approval", "/timeout"] {
+            assert_eq!(
+                recording(pointer, json!(1)).record_into(&mut spec),
+                Err(RecordError::Occupied {
+                    pointer: pointer.to_owned()
+                }),
+                "{pointer}"
+            );
+        }
+        for pointer in ["/nested/new", "", "/"] {
+            assert!(
+                matches!(
+                    recording(pointer, json!(1)).record_into(&mut spec),
+                    Err(RecordError::NotAMember { .. })
+                ),
+                "{pointer:?}"
+            );
+        }
+        assert_eq!(spec, json!({"target": "dev", "nested": {"keep": 1}}));
+    }
+
+    /// Catches a serde rename of `TeardownSettings` breaking every stored
+    /// publication: the recorded settings live in desired documents, which
+    /// are read back strictly, so their camelCase keys are a persisted format.
+    #[test]
+    fn test_recorded_teardown_settings_have_a_pinned_json_shape() {
+        let settings = TeardownSettings {
+            catalog_prunes: Some(true),
+            application_deletion_policy: Some("Foreground".to_owned()),
+            namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
+            catalog_owned_by_parent: false,
+        };
+        let stored = json!({
+            "catalogPrunes": true,
+            "applicationDeletionPolicy": "Foreground",
+            "namespaceDeletePolicies": {"web": "Confirm"},
+            "catalogOwnedByParent": false,
+        });
+        assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
+        assert_eq!(serde_json::from_value::<TeardownSettings>(stored).unwrap(), settings);
+        // A catalog a parent owns records the settings Nyl cannot see as null.
+        let external = json!({
+            "catalogPrunes": null,
+            "applicationDeletionPolicy": null,
+            "namespaceDeletePolicies": {},
+            "catalogOwnedByParent": true,
+        });
+        assert_eq!(
+            serde_json::from_value::<TeardownSettings>(external.clone()).unwrap(),
+            TeardownSettings {
+                catalog_owned_by_parent: true,
+                ..TeardownSettings::default()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(TeardownSettings {
+                catalog_owned_by_parent: true,
+                ..TeardownSettings::default()
+            })
+            .unwrap(),
+            external
+        );
     }
 }

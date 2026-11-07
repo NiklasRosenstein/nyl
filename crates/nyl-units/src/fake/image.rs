@@ -162,7 +162,7 @@ impl Driver for FakeImage {
         Ok(KeyInputs {
             files: source_files(ctx, spec, "/context/path", "spec.context.path")?,
             excluded_fields: vec!["/builder".to_owned(), "/cache".to_owned()],
-            fingerprint: None,
+            ..KeyInputs::default()
         })
     }
 

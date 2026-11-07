@@ -595,7 +595,7 @@ impl Driver for OciImageDriver {
         Ok(KeyInputs {
             files,
             excluded_fields: vec!["/builder".into(), "/cache".into()],
-            fingerprint: None,
+            ..KeyInputs::default()
         })
     }
     fn plan(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {

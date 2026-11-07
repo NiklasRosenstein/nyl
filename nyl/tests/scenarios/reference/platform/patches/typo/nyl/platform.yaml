@@ -1,5 +1,6 @@
 # M3 platform reference project: dev runs infrastructure, an image, a seed
-# command, and a publication. The harness maps future native kinds to fakes.
+# command, and a publication. Tier 1 maps native kinds to fakes where it scripts
+# them; the same project runs against the real KubernetesPublication driver.
 apiVersion: gitops.nyl/v1
 kind: GitRepository
 metadata:
@@ -28,6 +29,10 @@ spec:
   clusterRef: {name: dev}
   applicationGroupSelector:
     matchLabels: {app: web}
+  # A target whose teardown can complete: the catalog prunes the removed
+  # workload Applications, and its Namespaces are deleted with them.
+  catalogApplication:
+    syncPolicy: {automated: {prune: true}}
   publication:
     repositoryRef: {name: platform}
     revision: deploy

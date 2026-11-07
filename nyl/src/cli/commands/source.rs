@@ -20,7 +20,7 @@ pub(crate) fn update_locks(
     #[cfg(feature = "test-kinds")]
     let drivers = nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new(), crate::resource_catalogue());
     #[cfg(not(feature = "test-kinds"))]
-    let drivers = nyl_units::registry::builtin();
+    let drivers = nyl_units::registry::builtin(crate::resource_catalogue());
     let locks = collect_source_locks(
         &inventory,
         requested_group,
