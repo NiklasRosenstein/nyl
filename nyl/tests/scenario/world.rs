@@ -212,6 +212,10 @@ impl World {
         std::fs::create_dir_all(&jobs).unwrap();
         let count = self.clones.fetch_add(1, Ordering::Relaxed);
         let path = jobs.join(format!("job-{count}"));
+        // Cloning the path rather than the URL copies the objects without
+        // starting `git-upload-pack` and its helpers, which costs several
+        // processes per clone (each slow to start on Windows). The clone
+        // then names `project.git` by URL, exactly as a URL clone would.
         git(
             &jobs,
             &[
@@ -219,11 +223,17 @@ impl World {
                 "--quiet",
                 "--branch",
                 branch,
-                self.project_url().as_str(),
+                self.bare().to_str().unwrap(),
                 path.to_str().unwrap(),
             ],
         );
+        git(&path, &["remote", "set-url", "origin", self.project_url().as_str()]);
         path
+    }
+
+    /// `project.git`, for reads that need no `git` process.
+    pub fn repository(&self) -> git2::Repository {
+        git2::Repository::open_bare(self.bare()).expect("project.git opens")
     }
 
     /// The commit a revision of `project.git` names, such as `main~1`.
