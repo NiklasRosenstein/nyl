@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::{
-    resolve_document, BindingIssue, Origin, Provided, Providers, Provision, Resolved, UnitInputSource,
+    resolve_document, BindingIssue, Coded, Origin, Provided, Providers, Provision, Resolved, UnitInputSource,
 };
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId, UnitName};
@@ -78,11 +78,13 @@ impl From<String> for ResolutionError {
 /// [`Code::ReferenceInvalid`].
 impl From<BindingIssue> for ResolutionError {
     fn from(issue: BindingIssue) -> Self {
-        let default = Self::from(issue.message);
-        Self {
-            code: issue.code.unwrap_or(default.code),
-            fix: issue.fix.unwrap_or(default.fix),
-            message: default.message,
+        match issue.coded {
+            Some(Coded { code, fix }) => Self {
+                code,
+                message: issue.message,
+                fix,
+            },
+            None => Self::from(issue.message),
         }
     }
 }
@@ -167,7 +169,7 @@ fn no_current_receipt(producer: impl std::fmt::Display) -> String {
 
 /// How blocked reasons name a producer: the unit alone, or
 /// `<environment>/<unit>` for one in another environment.
-fn producer_label(environment: Option<&str>, unit: &UnitName) -> String {
+fn producer_label(environment: Option<&str>, unit: impl std::fmt::Display) -> String {
     match environment {
         Some(environment) => format!("{environment}/{unit}"),
         None => unit.to_string(),
@@ -194,8 +196,11 @@ fn declared_outputs(name: &UnitName, spec: &Value) -> Result<BTreeMap<String, Ou
     }
 }
 
-/// Resolve one reference. `Err` is a resolution error, reported with
-/// [`Code::ReferenceInvalid`](nyl_core::orchestration::codes::Code::ReferenceInvalid).
+/// Resolve one reference. `Err` is a resolution error with its own stable
+/// code and fix: a malformed or unresolvable reference is
+/// [`Code::ReferenceInvalid`](nyl_core::orchestration::codes::Code::ReferenceInvalid),
+/// and an attestation the producer does not offer keeps the attestation code
+/// that [`evidence::required`] reports.
 pub fn resolve_reference(
     view: &ReferenceView<'_>,
     source: &UnitInputSource,
@@ -333,7 +338,7 @@ fn resolve_external(
     {
         return Ok(ReferenceValue::Blocked {
             unit: UnitName::new(&source.unit).map_err(|error| error.to_string())?,
-            reason: format!("{environment}/{} has no current receipt", source.unit),
+            reason: no_current_receipt(producer_label(Some(environment), &source.unit)),
         });
     }
     if let Ok(unit) = UnitName::new(&source.unit) {
@@ -345,7 +350,8 @@ fn resolve_external(
             )
         }) {
             return Err(ResolutionError::from(format!(
-                "references unit {environment}/{unit}, which is outside the ownership set"
+                "references unit {}, which is outside the ownership set",
+                producer_label(Some(environment), unit)
             )));
         }
     }
@@ -654,7 +660,7 @@ fn depends_on_reasons(
                     .and_then(|name| view.environments.get(&name));
                 match snapshot {
                     Some(snapshot) if snapshot.desired.is_empty() => {
-                        block(format!("{environment}/{} has no current receipt", entry.unit()));
+                        block(no_current_receipt(producer_label(Some(environment), entry.unit())));
                     }
                     Some(snapshot) => match UnitName::new(entry.unit())
                         .ok()
@@ -668,8 +674,11 @@ fn depends_on_reasons(
                             ) =>
                         {
                             errors.push(
-                                format!("{field} references unit {environment}/{name} outside the ownership set")
-                                    .into(),
+                                format!(
+                                    "{field} references unit {} outside the ownership set",
+                                    producer_label(Some(environment), name)
+                                )
+                                .into(),
                             );
                         }
                         // An undeclared attestation is an error even before the producer has a receipt.
@@ -687,14 +696,14 @@ fn depends_on_reasons(
                                 &field,
                                 (desired, observed),
                                 snapshot.attestations.get(name),
-                                &format!("{environment}/{name}"),
+                                &producer_label(Some(environment), name),
                                 errors,
                             ) {
                                 block(reason);
                             }
                         }
-                        Some((name, _)) => block(format!("{environment}/{}", no_current_receipt(name))),
-                        None => block(format!("{environment}/{} has no current receipt", entry.unit())),
+                        Some((name, _)) => block(no_current_receipt(producer_label(Some(environment), name))),
+                        None => block(no_current_receipt(producer_label(Some(environment), entry.unit()))),
                     },
                     None => errors.push(format!("{field} references undeclared environment {environment:?}").into()),
                 }

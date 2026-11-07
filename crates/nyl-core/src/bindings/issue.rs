@@ -10,16 +10,22 @@ use crate::orchestration::codes::Code;
 
 /// One problem found while resolving bindings or references.
 ///
-/// `code` and `fix` are `None` when the reporter has no more specific
-/// diagnosis than the message; a caller that reports with stable codes then
-/// applies its own default. The resolver never reads them.
+/// `coded` is `None` when the reporter has no more specific diagnosis than the
+/// message; a caller that reports with stable codes then applies its own
+/// default. The resolver never reads it. A code and its fix travel together,
+/// so an issue with one and not the other cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingIssue {
     pub message: String,
-    /// The stable code the provider reports the problem with.
-    pub code: Option<Code>,
-    /// What to do about it.
-    pub fix: Option<String>,
+    /// The stable code and fix the provider reports the problem with.
+    pub coded: Option<Coded>,
+}
+
+/// The stable code a provider reports a problem with, and what to do about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coded {
+    pub code: Code,
+    pub fix: String,
 }
 
 impl BindingIssue {
@@ -27,8 +33,7 @@ impl BindingIssue {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            code: None,
-            fix: None,
+            coded: None,
         }
     }
 
@@ -36,8 +41,7 @@ impl BindingIssue {
     pub fn coded(code: Code, message: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            code: Some(code),
-            fix: Some(fix.into()),
+            coded: Some(Coded { code, fix: fix.into() }),
         }
     }
 }

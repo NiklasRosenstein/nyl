@@ -38,7 +38,7 @@ pub use binding::{
     UnitInputSource,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
-pub use issue::BindingIssue;
+pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
 
 /// An effective value and where it came from.
@@ -737,8 +737,14 @@ mod tests {
         });
         let mut issues = Vec::new();
         resolve_document("spec", "", &document, &providers, &mut issues);
-        assert_eq!(issues[0], rejected);
-        assert_eq!(issues[1].code, None);
-        assert_eq!(issues[1].fix, None);
+        assert_eq!(
+            issues,
+            [
+                rejected,
+                BindingIssue::new(
+                    "spec.b mixes fromUnit with other fields; a reference object holds only its reference, and replaces the whole value"
+                )
+            ]
+        );
     }
 }
