@@ -219,6 +219,7 @@ export default defineConfig({
                   "reference/cli/reconcile",
                   "reference/cli/status",
                   "reference/cli/detect-drift",
+                  "reference/cli/observe",
                   "reference/cli/teardown",
                   "reference/cli/hold",
                   "reference/cli/recover",

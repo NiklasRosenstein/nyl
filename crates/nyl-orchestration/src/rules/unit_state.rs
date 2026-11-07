@@ -219,8 +219,10 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
 
 /// A stored blocked reason in the report's form: `no-current-receipt` with
 /// the producer when the reason says the producer has no current receipt,
-/// and `attestation-pending` or `attestation-failing` with the producer and
-/// the attestation when it waits for one (see [`super::evidence`]).
+/// `attestation-pending` or `attestation-failing` with the producer and
+/// the attestation when it waits for one (see [`super::evidence`]), and
+/// `observation-pending` with the producer and the observation (see
+/// [`super::observed_values`]).
 pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
     if let Some(waiting) = super::evidence::parse_reason(reason) {
         let (environment, unit) = producer(&waiting.producer);
@@ -230,6 +232,18 @@ pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
             unit,
             reason: waiting.waiting.stable().to_owned(),
             attestation: Some(waiting.name),
+            observation: None,
+        };
+    }
+    if let Some(waiting) = super::observed_values::parse_reason(reason) {
+        let (environment, unit) = producer(&waiting.producer);
+        return BlockedBy {
+            pointer: pointer.to_owned(),
+            environment,
+            unit,
+            reason: super::observed_values::OBSERVATION_PENDING.to_owned(),
+            attestation: None,
+            observation: Some(waiting.observation),
         };
     }
     match reason.strip_suffix(" has no current receipt") {
@@ -241,6 +255,7 @@ pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
                 unit,
                 reason: NO_CURRENT_RECEIPT.to_owned(),
                 attestation: None,
+                observation: None,
             }
         }
         _ => BlockedBy {
@@ -249,6 +264,7 @@ pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
             unit: None,
             reason: reason.to_owned(),
             attestation: None,
+            observation: None,
         },
     }
 }
@@ -484,6 +500,11 @@ pub fn status_with_readiness(
             half_executed.extend(units);
         }
     }
+    // A current consumer whose observed value changed is work for the next
+    // reconcile: state `ready`, exit 2. Contract:
+    // [Observed values](../../../../design/orchestration-core.md#observed-values).
+    let changed =
+        super::observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &snapshot.observations, now);
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
@@ -494,6 +515,30 @@ pub fn status_with_readiness(
             unit_state(desired, observed, running.contains(name))
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
+        if matches!(unit.state, Some(UnitState::Current | UnitState::Blocked)) {
+            let reasons = changed
+                .iter()
+                .filter(|changed| &changed.consumer == name)
+                .collect::<Vec<_>>();
+            if !reasons.is_empty() {
+                unit.state = Some(UnitState::Ready);
+                unit.message = Some(format!(
+                    "ready: {}",
+                    reasons
+                        .iter()
+                        .map(|changed| format!(
+                            "observed value {} of {} {}",
+                            changed.observation,
+                            changed.producer,
+                            if changed.arrived { "arrived" } else { "changed" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                unit.warnings
+                    .extend(super::observed_values::changed_warnings(environment, name, &reasons));
+            }
+        }
         if drivers.is_some() {
             unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.drift.get(name));
             // A current unit whose latest drift record is `drifted` is
@@ -506,13 +551,17 @@ pub fn status_with_readiness(
         }
         let condition = observed.and_then(|observed| observed.condition.as_ref());
         unit.last_run = observed.and_then(ObservedUnit::last_run).cloned();
-        if let Readiness::Blocked { reasons } = &desired.readiness {
+        // A unit whose every blocker is an observed value that has arrived
+        // since is ready, and shows no blocker.
+        if let (Readiness::Blocked { reasons }, false) = (&desired.readiness, unit.state == Some(UnitState::Ready)) {
             unit.blocked_by = reasons
                 .iter()
                 .map(|reason| blocked_by(&reason.pointer, &reason.reason))
                 .collect();
             unit.warnings
                 .extend(super::evidence::warnings(name, environment.as_str(), reasons));
+            unit.warnings
+                .extend(super::observed_values::warnings(name, environment.as_str(), reasons));
         }
         if let Some(condition) = condition {
             unit.message = Some(condition.message().to_owned());
@@ -748,6 +797,7 @@ mod tests {
                 unit: Some(name("network")),
                 reason: NO_CURRENT_RECEIPT.to_owned(),
                 attestation: None,
+                observation: None,
             }]
         );
         let web = unit("web");
@@ -1099,6 +1149,7 @@ mod tests {
                 unit: Some(name("network")),
                 reason: "attestation-pending".to_owned(),
                 attestation: Some("healthy".to_owned()),
+                observation: None,
             }
         );
         let local = blocked_by("/dependsOn/0", "attestation healthy of network is failing");

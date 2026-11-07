@@ -5,7 +5,8 @@
 //! This fake delegates every publish and teardown to the same operations, so
 //! it publishes the same bytes, and adds what a scenario needs from a test
 //! kind: scripted outcomes ([`Script`]), `observe: {}` (answered by the
-//! fake reconciler observer, [`super::FakeObserver`]), and `teardownSettings`
+//! fake reconciler observer, [`super::FakeObserver`], and by scripted observed
+//! values), and `teardownSettings`
 //! that a scenario declares.
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit)
@@ -30,8 +31,8 @@ use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, RemovalContext,
-    RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
+    Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    RemovalContext, RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
@@ -96,7 +97,7 @@ impl Driver for FakePublication {
         nyl_core::orchestration::time::Duration::from_mins(10)
     }
 
-    fn capabilities(&self, _spec: &Value) -> Capabilities {
+    fn capabilities(&self, spec: &Value) -> Capabilities {
         Capabilities {
             requires_committed_source: true,
             plan: true,
@@ -104,6 +105,7 @@ impl Driver for FakePublication {
             detect_drift: true,
             teardown: true,
             build: true,
+            observed_values: spec.get("observe").is_some(),
             ..Capabilities::default()
         }
     }
@@ -228,6 +230,23 @@ impl Driver for FakePublication {
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
         Ok(Supported::Unsupported)
+    }
+
+    /// What the scenario scripted the fake's observed values to be
+    /// ([`Script::observed`]); pending when nothing is.
+    fn observe(
+        &self,
+        _ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        _receipt: &Receipt,
+    ) -> DriverResult<Supported<ObservedValues>> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        let names: Vec<String> = spec
+            .get("observations")
+            .and_then(Value::as_object)
+            .map(|observations| observations.keys().cloned().collect())
+            .unwrap_or_default();
+        self.script.observed(&unit.unit.name, &names).map(Supported::Supported)
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {

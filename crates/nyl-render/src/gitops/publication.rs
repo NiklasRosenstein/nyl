@@ -155,6 +155,11 @@ pub struct RenderedTarget {
     /// it enters no rendered byte, and a driver that observes records it at
     /// resolution ([`super::observation::ReconcilerFacts`]).
     pub argocd: super::observation::ArgoCdLocation,
+    /// The target's workload Cluster, where its rendered resources live, and
+    /// that Cluster's local context. Declaration only, like `argocd`: it
+    /// enters no rendered byte, and a driver that reads resources from the
+    /// cluster records it at resolution.
+    pub workload: super::observation::WorkloadCluster,
 }
 
 impl RenderedTarget {
@@ -298,6 +303,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         publication_base: compiled.publication_base.clone(),
         cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
         argocd: super::tree::argocd_location(&inventory, &compiled.target)?,
+        workload: super::tree::workload_cluster(&inventory, &compiled.target)?,
     })
 }
 

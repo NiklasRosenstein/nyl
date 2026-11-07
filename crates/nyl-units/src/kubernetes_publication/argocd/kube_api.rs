@@ -26,33 +26,35 @@ use serde_json::Value;
 use super::{ArgoQueries, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, KUBECONFIG_ENV};
 use crate::kubernetes_publication::reconciler::{block_on, Proof};
 
-/// Reads Applications through a kubeconfig context.
-pub struct KubeApiReader {
+/// An explicit connection to one Cluster: a kubeconfig context, read from the
+/// files the unit admits as `KUBECONFIG`. Nothing falls back to the current
+/// context, `~/.kube/config`, or in-cluster configuration. Shared by the
+/// Argo CD reader and the reader of a workload Cluster's resources.
+pub struct Connection {
     cluster: String,
     context: String,
     kubeconfig: Vec<PathBuf>,
-    budget: Duration,
-    /// The instance's namespace, where its AppProjects live.
-    namespace: String,
+    pub(crate) budget: Duration,
 }
 
-impl KubeApiReader {
-    /// A reader of the Cluster named `cluster` through `context` (its
+impl Connection {
+    /// A connection to the Cluster named `cluster` through `context` (its
     /// `spec.live.context`), reading the files of `kubeconfig` (the
-    /// admitted `KUBECONFIG`). Each reading ends within `budget`.
+    /// admitted `KUBECONFIG`). `without_context` is the advice a missing
+    /// context gets. Each reading ends within `budget`.
     pub fn new(
         cluster: &str,
         context: Option<&str>,
         kubeconfig: Option<&str>,
         budget: Duration,
+        without_context: &str,
     ) -> Result<Self, ReadError> {
         let context = context.filter(|context| !context.is_empty()).ok_or_else(|| {
             ReadError::new(
                 ReadErrorKind::Declaration,
                 format!(
-                    "the Kubernetes access method needs the local kubeconfig context of Cluster {cluster}: set its \
-                     spec.live.context (Nyl never uses the current context), or declare the ArgoCDInstance's \
-                     spec.access with method api"
+                    "no local kubeconfig context is declared for Cluster {cluster}: set its spec.live.context \
+                     (Nyl never uses the current context){without_context}"
                 ),
             )
         })?;
@@ -78,18 +80,20 @@ impl KubeApiReader {
             context: context.to_owned(),
             kubeconfig: files,
             budget,
-            namespace: super::DEFAULT_NAMESPACE.to_owned(),
         })
     }
 
-    /// Read the instance that lives in `namespace`.
-    #[must_use]
-    pub fn in_namespace(mut self, namespace: &str) -> Self {
-        namespace.clone_into(&mut self.namespace);
-        self
+    /// The context's name, for messages.
+    pub fn context(&self) -> &str {
+        &self.context
     }
 
-    async fn client(&self) -> Result<Client, ReadError> {
+    /// The Cluster's name, for messages.
+    pub fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    pub(crate) async fn client(&self) -> Result<Client, ReadError> {
         let declaration = |detail: String| ReadError::new(ReadErrorKind::Declaration, detail);
         let mut merged: Option<Kubeconfig> = None;
         for path in &self.kubeconfig {
@@ -157,13 +161,50 @@ impl KubeApiReader {
     }
 }
 
+/// Reads Applications through a kubeconfig context.
+pub struct KubeApiReader {
+    connection: Connection,
+    /// The instance's namespace, where its AppProjects live.
+    namespace: String,
+}
+
 impl KubeApiReader {
+    /// A reader of the Cluster named `cluster` through `context` (its
+    /// `spec.live.context`), reading the files of `kubeconfig` (the
+    /// admitted `KUBECONFIG`). Each reading ends within `budget`.
+    pub fn new(
+        cluster: &str,
+        context: Option<&str>,
+        kubeconfig: Option<&str>,
+        budget: Duration,
+    ) -> Result<Self, ReadError> {
+        Ok(Self {
+            connection: Connection::new(
+                cluster,
+                context,
+                kubeconfig,
+                budget,
+                ", or declare the ArgoCDInstance's spec.access with method api",
+            )?,
+            namespace: super::DEFAULT_NAMESPACE.to_owned(),
+        })
+    }
+}
+
+impl KubeApiReader {
+    /// Read the instance that lives in `namespace`.
+    #[must_use]
+    pub fn in_namespace(mut self, namespace: &str) -> Self {
+        namespace.clone_into(&mut self.namespace);
+        self
+    }
+
     /// The `plural` objects (of `kind`) of `namespace`, by name, each as served.
     fn list(&self, kind: &str, plural: &str, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
-        let budget = self.budget;
+        let budget = self.connection.budget;
         block_on(async {
             tokio::time::timeout(budget, async {
-                let client = self.client().await?;
+                let client = self.connection.client().await?;
                 let resource = ApiResource {
                     group: "argoproj.io".to_owned(),
                     version: "v1alpha1".to_owned(),
@@ -194,7 +235,7 @@ impl KubeApiReader {
                     ReadErrorKind::Unreachable,
                     format!(
                         "cannot list {plural} of namespace {namespace} through context {:?}: no answer within {}s",
-                        self.context,
+                        self.connection.context(),
                         budget.as_secs()
                     ),
                 ))
@@ -242,7 +283,8 @@ impl ReconcilerReader for KubeApiReader {
 
 impl KubeApiReader {
     fn list_error(&self, error: &kube::Error, plural: &str, namespace: &str) -> ReadError {
-        let context = &self.context;
+        let context = self.connection.context();
+        let cluster = self.connection.cluster();
         match error {
             kube::Error::Api(status) if status.code == 401 => ReadError::new(
                 ReadErrorKind::Rejected,
@@ -262,8 +304,7 @@ impl KubeApiReader {
                 ReadErrorKind::Declaration,
                 format!(
                     "context {context:?} serves no {plural}.argoproj.io: it is not the Argo CD control-plane Cluster \
-                     {}; fix Cluster {}'s spec.live.context",
-                    self.cluster, self.cluster
+                     {cluster}; fix Cluster {cluster}'s spec.live.context"
                 ),
             ),
             other => ReadError::new(

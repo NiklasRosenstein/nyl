@@ -328,17 +328,21 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     StepOperation::Reconcile => DriverOperation::Reconcile,
                     StepOperation::DetectDrift => DriverOperation::DetectDrift,
                     StepOperation::Teardown => DriverOperation::Teardown,
-                    StepOperation::Observe => {
-                        return Err("observe steps run from M5, when the fake kinds observe".to_owned());
-                    }
+                    StepOperation::Observe => DriverOperation::Observe,
                 };
+                let observe = step.operation == StepOperation::Observe;
                 let result = match step.outcome {
                     DriverOutcome::Succeeded => Scripted::Succeeded {
                         outputs: step.outputs.clone(),
                     },
                     DriverOutcome::Uncertain => Scripted::Uncertain,
                     DriverOutcome::Drifted => Scripted::Drifted,
-                    DriverOutcome::Pending => return Err("only observe steps are pending".to_owned()),
+                    DriverOutcome::Pending => Scripted::Pending,
+                    // An observation that could not be read has a reason, not a category.
+                    DriverOutcome::Failed if observe => Scripted::Failed {
+                        category: FailureCategory::ToolError,
+                        retryable: false,
+                    },
                     DriverOutcome::Failed => Scripted::Failed {
                         category: serde_json::from_value::<FailureCategory>(Value::String(
                             step.category.clone().unwrap_or_default(),

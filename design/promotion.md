@@ -839,7 +839,7 @@ answer of a teardown wait, is shared and names no reconciler:
   (`reconciler`): `kind: argocd`, the instance with its namespace and
   control-plane Cluster, its `access` and local `context`, the publication
   destination, the deployments the target expects (`expected`: per Application
-  its id, role, directory, Release, generated source, and, for Argo CD's
+  its id and display name, role, directory, Release, generated source, and, for Argo CD's
   reader alone, a locator with its namespace, name, and project), and the
   `anchors` described below. `attest` and the `observe` teardown wait read the
   stored document and render nothing. Only what the render derives keys the
@@ -871,6 +871,14 @@ answer of a teardown wait, is shared and names no reconciler:
   `kubectl` does, and the client offers no way to restrict it; what it reads
   is the kubeconfig's declaration, not Nyl's. Use the API method where
   that matters.
+- **Observed values read the workload Cluster the same way.** A
+  [`KubernetesPublication`'s observed values](orchestration-core.md#kubernetes-publication-unit)
+  read a rendered resource from the target's workload Cluster, which may be
+  another Cluster than the instance's control plane, through the workload
+  Cluster's own `spec.live.context` in the admitted `KUBECONFIG`, once the
+  Application that owns the resource runs the receipt's publication (matched
+  as above). The same rules apply: only admitted credentials, no ambient
+  kube configuration.
 - **Deadlines.** Each reading ends within the check's deadline, at most 30
   seconds.
 

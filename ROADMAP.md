@@ -399,7 +399,9 @@ Cluster.
 - With `observe: {}`, the publication unit's observed values read a field of a
   resource its target renders, from the target's Cluster, once the
   Application owning that resource runs the current publication. Reading
-  needs workload-cluster credentials that publication alone does not.
+  needs workload-cluster credentials that publication alone does not: the
+  workload Cluster's own declared context in the kubeconfig the unit admits,
+  never ambient kube configuration.
 
 **Command unit (M3).** A constrained escape hatch for tools without a driver:
 

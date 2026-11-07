@@ -15,7 +15,10 @@
 //! success reports the effects applied, a failure not applied, and an
 //! uncertain result unknown. A scripted `detect-drift` decides the fake's next
 //! drift result ([`Script::drift`]): `drifted`, `clean` for a
-//! success, and `unknown` for an uncertain result.
+//! success, and `unknown` for an uncertain result. A scripted `observe`
+//! decides what the publication's next read of its observed values finds
+//! ([`Script::observed`]): the values of a success, every observation pending
+//! or failed, and nothing scripted reads as pending.
 
 mod image;
 mod infra;
@@ -38,6 +41,44 @@ pub use infra::FakeInfra;
 pub use observer::FakeObserver;
 pub use publication::FakePublication;
 
+/// The real publication driver reading observed values through a [`Script`]
+/// instead of Argo CD and the workload Cluster, so tier-1 scenarios can
+/// script what the live system holds (`driver: {operation: observe}`) while
+/// the driver's own declaration, validation, and resolution run as built.
+#[derive(Debug, Clone)]
+pub struct ScriptedLive {
+    script: Script,
+}
+
+impl ScriptedLive {
+    pub fn new(script: Script) -> Self {
+        Self { script }
+    }
+}
+
+impl crate::kubernetes_publication::LiveReader for ScriptedLive {
+    fn read(
+        &self,
+        request: &crate::kubernetes_publication::LiveRequest<'_>,
+    ) -> BTreeMap<String, nyl_core::orchestration::driver::ObservedValue> {
+        let names: Vec<String> = request.sources.keys().cloned().collect();
+        match self.script.observed(&request.unit.unit.name, &names) {
+            Ok(values) => values.values,
+            Err(error) => names
+                .into_iter()
+                .map(|name| {
+                    (
+                        name,
+                        nyl_core::orchestration::driver::ObservedValue::Failed {
+                            reason: error.to_string(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 /// API version of the fake kinds.
 pub const API_VERSION_TEST_UNITS: &str = "units.test.nyl/v1";
 
@@ -58,6 +99,8 @@ pub enum Scripted {
     },
     /// `detect-drift` only: the resources no longer match the receipt.
     Drifted,
+    /// `observe` only: no declared observation has a value yet.
+    Pending,
 }
 
 /// Queued results by unit and operation name.
@@ -125,8 +168,47 @@ impl Script {
             Some(Scripted::Uncertain) => Some(Drift::Unknown {
                 reason: "scripted unknown drift".to_owned(),
             }),
-            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. }) => {
+            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Pending) => {
                 return Err(DriverError::before_effects("scripted drift detection failure"));
+            }
+        })
+    }
+
+    /// What the fake's next `observe` of `unit` finds for the declared
+    /// observations `names`: a scripted success holds each value under its
+    /// name (a declared name it leaves out is pending), a scripted failure
+    /// fails every one, and anything else, or nothing scripted, leaves every
+    /// one pending. A scripted driver error is a driver error.
+    fn observed(
+        &self,
+        unit: &UnitName,
+        names: &[String],
+    ) -> DriverResult<nyl_core::orchestration::driver::ObservedValues> {
+        use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
+        let each = |value: &dyn Fn(&str) -> ObservedValue| ObservedValues {
+            values: names.iter().map(|name| (name.clone(), value(name))).collect(),
+        };
+        let pending = |reason: &'static str| {
+            each(&|_| ObservedValue::Pending {
+                reason: reason.to_owned(),
+            })
+        };
+        Ok(match self.take(unit, DriverOperation::Observe) {
+            None => pending("nothing is scripted"),
+            Some(Scripted::Pending | Scripted::Drifted | Scripted::Uncertain) => pending("scripted pending"),
+            Some(Scripted::Succeeded { outputs }) => {
+                each(&|name| match outputs.as_ref().and_then(|outputs| outputs.get(name)) {
+                    Some(value) => ObservedValue::Value { value: value.clone() },
+                    None => ObservedValue::Pending {
+                        reason: format!("scripted: no value for {name}"),
+                    },
+                })
+            }
+            Some(Scripted::Failed { .. }) => each(&|_| ObservedValue::Failed {
+                reason: "scripted failure".to_owned(),
+            }),
+            Some(Scripted::RetryRequired { .. }) => {
+                return Err(DriverError::before_effects("scripted observation failure"));
             }
         })
     }
@@ -137,7 +219,7 @@ impl Script {
     /// only applies to `detect-drift`, so it falls through unchanged.
     fn outcome(&self, unit: &UnitName, operation: DriverOperation) -> ScriptedOutcome {
         match self.take(unit, operation) {
-            None | Some(Scripted::Drifted) => ScriptedOutcome::Run { outputs: None },
+            None | Some(Scripted::Drifted | Scripted::Pending) => ScriptedOutcome::Run { outputs: None },
             Some(Scripted::Succeeded { outputs }) => ScriptedOutcome::Run { outputs },
             Some(Scripted::Uncertain) => ScriptedOutcome::Return(Outcome::Uncertain {
                 reason: format!("scripted uncertain {}", operation.as_str()),

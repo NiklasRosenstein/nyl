@@ -266,6 +266,7 @@ fn test_api_server_reader_asks_argocd_whether_the_token_may_get_an_application()
 fn expected(role: DeploymentRole, namespace: &str, name: &str, path: &str) -> ExpectedDeployment {
     ExpectedDeployment {
         id: format!("{namespace}/{name}"),
+        display: String::new(),
         role,
         path: path.to_owned(),
         release: None,

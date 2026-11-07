@@ -128,6 +128,9 @@ enum Commands {
     /// Ask the drivers to attest an environment's current receipts
     Attest(commands::check::CheckArgs),
 
+    /// Read the observed values of an environment's current receipts and record them
+    Observe(commands::check::CheckArgs),
+
     /// Clear a unit's uncertain or failed condition, or accept a checkpointed result
     Recover(commands::recover::RecoverArgs),
 
@@ -171,6 +174,7 @@ impl Cli {
             | Commands::Status(_)
             | Commands::DetectDrift(_)
             | Commands::Attest(_)
+            | Commands::Observe(_)
             | Commands::Recover(_)
             | Commands::Teardown(_)
             | Commands::Hold(_)
@@ -178,7 +182,7 @@ impl Cli {
                 #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
                 eprintln!("Nyl test build: fake drivers enabled; use a production build for real orchestration");
                 let cancellation = nyl_orchestration::shell::run::Cancellation::new();
-                // reconcile, detect-drift, attest, and recover end cleanly on SIGINT or
+                // reconcile, detect-drift, attest, observe, and recover end cleanly on SIGINT or
                 // SIGTERM instead of dying with the lease held.
                 let handler = self
                     .cancels_on_signal()
@@ -232,6 +236,7 @@ impl Cli {
                 | Commands::Reconcile(_)
                 | Commands::DetectDrift(_)
                 | Commands::Attest(_)
+                | Commands::Observe(_)
                 | Commands::Recover(_)
                 | Commands::State(_)
                 | Commands::Teardown(_)
@@ -241,7 +246,7 @@ impl Cli {
     }
 
     /// Run an orchestration command (`plan`, `reconcile`, `status`,
-    /// `detect-drift`, `attest`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
+    /// `detect-drift`, `attest`, `observe`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
     /// instead of printing and exiting. The tier-1 scenario harness calls
     /// this. An orchestration command that fails before producing its report,
     /// such as on a project that cannot be discovered, is an outcome with
@@ -261,13 +266,14 @@ impl Cli {
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
             Commands::DetectDrift(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::DetectDrift, wiring),
             Commands::Attest(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Attest, wiring),
+            Commands::Observe(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Observe, wiring),
             Commands::Recover(args) => commands::recover::run(&args, wiring),
             Commands::Teardown(args) => commands::teardown::run(&args, wiring),
             Commands::Hold(args) => commands::hold::run_hold(&args, wiring),
             Commands::Resume(args) => commands::hold::run_resume(&args, wiring),
             _ => {
                 return Err(nyl_render::NylError::config(
-                    "only plan, reconcile, status, detect-drift, attest, recover, teardown, hold, resume, get, state, and lease run in-process",
+                    "only plan, reconcile, status, detect-drift, attest, observe, recover, teardown, hold, resume, get, state, and lease run in-process",
                 ))
             }
         };

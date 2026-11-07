@@ -15,6 +15,7 @@
         "recover",
         "detect-drift",
         "attest",
+        "observe",
         "exec",
         "ci-admit",
         "state-init",

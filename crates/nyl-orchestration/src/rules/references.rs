@@ -40,14 +40,16 @@ use nyl_core::bindings::{resolve_document, Origin, Provided, Providers, Provisio
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId, UnitName};
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservedUnit, Provenance, Readiness, Receipt,
-    ReceiptProvenance,
+    ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservationRecord, ObservedUnit, Provenance, Readiness,
+    Receipt, ReceiptProvenance,
 };
+use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::units::{DependsOn, OutputDeclaration};
 use serde_json::Value;
 
 use super::evidence;
 use super::freshness::receipt_is_current;
+use super::observed_values::{self, Standing};
 
 /// A resolution error with the stable code it is reported with and its fix:
 /// [`Code::ReferenceInvalid`] unless it comes from an attestation
@@ -108,6 +110,12 @@ pub struct ReferenceView<'a> {
     /// The attestations recorded for the latest receipts, overlaid likewise,
     /// which consumers requiring evidence read (see [`super::evidence`]).
     pub attestations: &'a BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    /// The observed values recorded for the latest receipts, overlaid
+    /// likewise, which `fromUnit: {unit, observation}` references read (see
+    /// [`super::observed_values`]).
+    pub observations: &'a BTreeMap<UnitName, ObservationRecord>,
+    /// The time observed values' `maxAge` is judged at.
+    pub now: Timestamp,
     /// The observed commit the snapshot was read at, cited by provenance.
     pub observed_commit: Option<&'a CommitId>,
     /// This run, when receipts of `produced_in_run` came from it.
@@ -190,6 +198,7 @@ pub fn resolve_reference(
             reason: evidence::reason(&attestation, name.as_str(), waiting),
         });
     }
+    let mut observation = None;
     let whole = if let (Some(output), Some(declaration)) = (&source.output, declaration) {
         let Some(value) = receipt.outputs.get(output) else {
             return Err(ResolutionError::from(format!(
@@ -203,6 +212,36 @@ pub fn resolve_reference(
             )));
         }
         value.clone()
+    } else if let Some(wanted) = &source.observation {
+        let declared = observed_values::declarations(observed_values::spec_of(desired))?;
+        let declaration = declared
+            .get(wanted)
+            .expect("the static declaration check found the observation");
+        match observed_values::standing(
+            desired,
+            receipt,
+            declaration,
+            wanted,
+            view.observations.get(name),
+            view.now,
+        ) {
+            Standing::Pending { reason } => {
+                return Ok(ReferenceValue::Blocked {
+                    unit: name.clone(),
+                    reason: observed_values::reason(wanted, name.as_str(), &reason),
+                });
+            }
+            Standing::Value { value, observed_at } => {
+                if !declaration.observation_type.accepts(&value) {
+                    return Err(ResolutionError::from(format!(
+                        "reads observation {wanted:?} of unit {name}, whose recorded value is not of its declared type {:?}",
+                        declaration.observation_type
+                    )));
+                }
+                observation = Some((wanted.clone(), observed_at));
+                value
+            }
+        }
     } else {
         read_artifact(view, name, source, receipt)?
     };
@@ -226,6 +265,8 @@ pub fn resolve_reference(
                 view.observed_commit.cloned()
             },
             run: in_run.cloned(),
+            observation: observation.as_ref().map(|(name, _)| name.clone()),
+            observed_at: observation.map(|(_, observed_at)| observed_at),
         },
     })
 }
@@ -271,6 +312,8 @@ fn resolve_external(
         observed: &snapshot.observed,
         artifacts: &snapshot.artifacts,
         attestations: &snapshot.attestations,
+        observations: &snapshot.observations,
+        now: view.now,
         observed_commit: snapshot.tips.observed.as_ref(),
         run: None,
         produced_in_run: &BTreeSet::new(),
@@ -289,14 +332,21 @@ fn resolve_external(
 /// A blocked reason of a producer in another environment, which names the
 /// environment with the producer.
 fn qualified(environment: &str, reason: &str) -> String {
-    match evidence::parse_reason(reason) {
-        Some(waiting) => evidence::reason(
+    if let Some(waiting) = evidence::parse_reason(reason) {
+        return evidence::reason(
             &waiting.name,
             &format!("{environment}/{}", waiting.producer),
             waiting.waiting,
-        ),
-        None => format!("{environment}/{reason}"),
+        );
     }
+    if let Some(waiting) = observed_values::parse_reason(reason) {
+        return observed_values::reason(
+            &waiting.observation,
+            &format!("{environment}/{}", waiting.producer),
+            &waiting.why,
+        );
+    }
+    format!("{environment}/{reason}")
 }
 
 /// The state-free checks of a reference against its producer's rendered
@@ -319,8 +369,8 @@ pub fn check_spec_declaration(
     spec: &Value,
     source: &UnitInputSource,
 ) -> Result<Option<OutputDeclaration>, String> {
-    match (&source.output, &source.artifact) {
-        (Some(output), None) => {
+    match (&source.output, &source.artifact, &source.observation) {
+        (Some(output), None, None) => {
             if let Some(kind) = &source.kind {
                 return Err(format!(
                     "asserts kind {kind:?} for output {output:?} of unit {name}; kind applies to artifact references only"
@@ -341,8 +391,28 @@ pub fn check_spec_declaration(
             Ok(Some(declaration.clone()))
         }
         // Artifact names are checked once kinds declare them (M5).
-        (None, Some(_)) => Ok(None),
-        _ => Err("must set exactly one of output and artifact".to_owned()),
+        (None, Some(_), None) => Ok(None),
+        (None, None, Some(observation)) => {
+            if let Some(kind) = &source.kind {
+                return Err(format!(
+                    "asserts kind {kind:?} for observation {observation:?} of unit {name}; kind applies to artifact references only"
+                ));
+            }
+            let declared = observed_values::declarations(spec).map_err(|error| format!("unit {name}: {error}"))?;
+            if declared.contains_key(observation) {
+                Ok(None)
+            } else if declared.is_empty() {
+                Err(format!(
+                    "reads observation {observation:?}, which unit {name} does not declare: it declares no observations"
+                ))
+            } else {
+                Err(format!(
+                    "reads observation {observation:?}, which unit {name} does not declare; declared observations: {}",
+                    declared.keys().cloned().collect::<Vec<_>>().join(", ")
+                ))
+            }
+        }
+        _ => Err("must set exactly one of output, artifact, and observation".to_owned()),
     }
 }
 
@@ -487,20 +557,36 @@ pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution 
             None => ResolutionError::from(issue),
         })
         .collect();
-    let stored = view.previous.get(&unit.unit.name).map(|previous| &previous.provenance);
+    let previous = view.previous.get(&unit.unit.name);
+    let stored = previous.map(|previous| &previous.provenance);
 
     let mut provenance = BTreeMap::new();
-    for (pointer, cited) in resolved.provenance {
+    for (raw, cited) in resolved.provenance {
         let Cited::Receipt(new) = cited else { continue };
-        let pointer = match JsonPointer::new(pointer.as_str()) {
+        let pointer = match JsonPointer::new(raw.as_str()) {
             Ok(pointer) => pointer,
             Err(error) => {
-                errors.push(format!("spec reference at {pointer:?}: {error}").into());
+                errors.push(format!("spec reference at {raw:?}: {error}").into());
                 continue;
             }
         };
+        // An observed value changes while the receipt stays: its citation is
+        // kept only while the consumer still resolves the same value, so a
+        // re-read of an unchanged value (a new `observedAt`) rewrites nothing.
+        let same_value = || {
+            previous
+                .and_then(|previous| previous.resolved_spec.as_ref())
+                .and_then(|spec| spec.pointer(&raw))
+                == resolved.value.pointer(&raw)
+        };
         let citation = match stored.and_then(|stored| stored.get(&pointer)) {
-            Some(Provenance::Receipt(stored)) if same_receipt(stored, &new) => stored.clone(),
+            Some(Provenance::Receipt(stored))
+                if same_receipt(stored, &new)
+                    && stored.observation == new.observation
+                    && (new.observation.is_none() || stored.observed_at == new.observed_at || same_value()) =>
+            {
+                stored.clone()
+            }
             _ => new,
         };
         provenance.insert(pointer, Provenance::Receipt(citation));
@@ -676,6 +762,8 @@ mod tests {
         observed: BTreeMap<UnitName, ObservedUnit>,
         artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
         attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+        observations: BTreeMap<UnitName, ObservationRecord>,
+        now: Timestamp,
         previous: BTreeMap<UnitName, DesiredUnit>,
         produced_in_run: BTreeSet<UnitName>,
         observed_commit: CommitId,
@@ -700,6 +788,8 @@ mod tests {
                 observed: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
                 attestations: BTreeMap::new(),
+                observations: BTreeMap::new(),
+                now: "2026-09-24T10:00:00Z".parse().unwrap(),
                 previous: BTreeMap::new(),
                 produced_in_run: BTreeSet::new(),
                 observed_commit: commit(COMMIT),
@@ -740,6 +830,8 @@ mod tests {
                 observed: &self.observed,
                 artifacts: &self.artifacts,
                 attestations: &self.attestations,
+                observations: &self.observations,
+                now: self.now,
                 observed_commit: Some(&self.observed_commit),
                 run: Some(&self.run),
                 produced_in_run: &self.produced_in_run,
@@ -1306,5 +1398,274 @@ mod tests {
             assert_eq!(error.code, Code::AttestationExternalUnsupported, "{error}");
             assert!(error.fix.contains("cannot be recorded yet"), "{}", error.fix);
         }
+    }
+
+    /// A unit `kubernetes` with a current receipt that declares `ip`
+    /// (string) and `port` (integer, `maxAge` 10m), whose record holds `values`.
+    fn observing(world: &mut World, values: &Value) {
+        world.add(
+            "kubernetes",
+            json!({"observations": {
+                "ip": {"type": "string", "from": {"any": "thing"}},
+                "port": {"type": "integer", "maxAge": "10m", "from": {}}
+            }}),
+        );
+        world.receipt("kubernetes", receipt("kubernetes", json!({}), Vec::new()));
+        let record: ObservationRecord = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord",
+            "unit": {"environment": "dev", "name": "kubernetes", "uid": uid("kubernetes"),
+                     "apiVersion": "units.gitops.nyl/v1", "kind": "Command"},
+            "executionKey": key("kubernetes"), "run": RUN_1, "at": "2026-09-24T09:50:00Z",
+            "values": values
+        }))
+        .unwrap();
+        world.observations.insert(name("kubernetes"), record);
+    }
+
+    fn recorded_values() -> Value {
+        json!({
+            "ip": {"value": "203.0.113.10", "observedAt": "2026-09-24T09:50:00Z"},
+            "port": {"value": 443, "observedAt": "2026-09-24T09:50:00Z"}
+        })
+    }
+
+    /// Catches an observed value read as anything but the value recorded for
+    /// the producer's current receipt, and its citation missing the
+    /// observation and the time of its read.
+    #[test]
+    fn test_resolve_reference_reads_the_recorded_observation_and_cites_it() {
+        let mut world = World::new();
+        observing(&mut world, &recorded_values());
+        let ReferenceValue::Value { value, provenance } = world
+            .resolve(json!({"unit": "kubernetes", "observation": "ip"}))
+            .unwrap()
+        else {
+            panic!("the observation has a value")
+        };
+        assert_eq!(value, json!("203.0.113.10"));
+        assert_eq!(provenance.observation.as_deref(), Some("ip"));
+        assert_eq!(provenance.observed_at, Some("2026-09-24T09:50:00Z".parse().unwrap()));
+        assert_eq!(provenance.observed_commit, Some(commit(COMMIT)));
+        assert_eq!(provenance.execution_key, key("kubernetes"));
+        // `pointer` selects inside an object value like inside an output.
+        let mut object = World::new();
+        observing(&mut object, &recorded_values());
+        object.desired.get_mut(&name("kubernetes")).unwrap().spec["observations"]["ip"]["type"] = json!("object");
+        object.observations.get_mut(&name("kubernetes")).unwrap().values.insert(
+            "ip".to_owned(),
+            serde_json::from_value(json!({"value": {"host": "a", "port": 1}, "observedAt": "2026-09-24T09:50:00Z"}))
+                .unwrap(),
+        );
+        let ReferenceValue::Value { value, .. } = object
+            .resolve(json!({"unit": "kubernetes", "observation": "ip", "pointer": "/host"}))
+            .unwrap()
+        else {
+            panic!("the pointer selects a field")
+        };
+        assert_eq!(value, json!("a"));
+    }
+
+    /// Catches a consumer running with a value the producer's system does not
+    /// hold (yet, any more, or for this receipt): each is a blocker that
+    /// names the driver's words, so the report says what to wait for.
+    #[test]
+    fn test_resolve_reference_blocks_on_a_pending_aged_or_foreign_observation() {
+        let reference = json!({"unit": "kubernetes", "observation": "ip"});
+        let blocked = |world: &World, reference: Value| match world.resolve(reference).unwrap() {
+            ReferenceValue::Blocked { reason, .. } => reason,
+            other @ ReferenceValue::Value { .. } => panic!("{other:?}"),
+        };
+        let mut world = World::new();
+        observing(
+            &mut world,
+            &json!({"ip": {"pending": "field-not-set: /status/loadBalancer"}, "port": {"value": 443, "observedAt": "2026-09-24T09:50:00Z"}}),
+        );
+        assert_eq!(
+            blocked(&world, reference.clone()),
+            "observation ip of kubernetes is pending: field-not-set: /status/loadBalancer"
+        );
+        // No record for the receipt.
+        world.observations.clear();
+        assert_eq!(
+            blocked(&world, reference.clone()),
+            "observation ip of kubernetes is pending: not observed yet"
+        );
+        // A record of an earlier receipt never satisfies a reference.
+        let mut stale = World::new();
+        observing(&mut stale, &recorded_values());
+        stale.observations.get_mut(&name("kubernetes")).unwrap().execution_key = key("kubernetes-old");
+        assert!(blocked(&stale, reference.clone()).contains("not observed yet"));
+        // `port` goes stale ten minutes after its last successful read; `ip` never does.
+        let mut aged = World::new();
+        observing(&mut aged, &recorded_values());
+        aged.now = "2026-09-24T10:01:00Z".parse().unwrap();
+        assert!(blocked(&aged, json!({"unit": "kubernetes", "observation": "port"})).contains("maxAge of 10m"));
+        assert!(matches!(aged.resolve(reference).unwrap(), ReferenceValue::Value { .. }));
+        // A producer without a current receipt blocks like for any reference.
+        aged.observed.remove(&name("kubernetes"));
+        assert_eq!(
+            blocked(&aged, json!({"unit": "kubernetes", "observation": "ip"})),
+            "kubernetes has no current receipt"
+        );
+    }
+
+    /// Catches a reference to a value the producer never declares waiting
+    /// forever instead of failing, and the three reference forms mixing.
+    #[test]
+    fn test_resolve_reference_rejects_undeclared_and_mixed_observation_references() {
+        let mut world = World::new();
+        observing(&mut world, &recorded_values());
+        let error = |reference: Value| world.resolve(reference).unwrap_err();
+        let undeclared = error(json!({"unit": "kubernetes", "observation": "host"}));
+        assert!(
+            undeclared.message.contains("does not declare")
+                && undeclared.message.contains("declared observations: ip, port"),
+            "{}",
+            undeclared.message
+        );
+        assert_eq!(undeclared.code, Code::ReferenceInvalid);
+        let none = error(json!({"unit": "network", "observation": "ip"}));
+        assert!(none.message.contains("declares no observations"), "{}", none.message);
+        assert!(error(json!({"unit": "kubernetes", "observation": "ip", "kind": "X"}))
+            .message
+            .contains("kind applies to artifact references only"));
+        assert!(
+            error(json!({"unit": "kubernetes", "observation": "ip", "output": "ip"}))
+                .message
+                .contains("exactly one of output, artifact, and observation")
+        );
+    }
+
+    /// Catches a re-read of an unchanged value rewriting its consumer's
+    /// desired document (the citation's time moved), while a changed value
+    /// must be cited anew.
+    #[test]
+    fn test_resolve_unit_keeps_the_citation_of_an_unchanged_observed_value() {
+        let mut world = World::new();
+        observing(&mut world, &recorded_values());
+        let reader = json!({"values": {"address": {"fromUnit": {"unit": "kubernetes", "observation": "ip"}}}});
+        let unit = desired("dns", "Command", reader, "dns");
+        let first = resolve_unit(&world.view(), &unit);
+        let pointer = nyl_core::orchestration::ids::JsonPointer::new("/values/address").unwrap();
+        assert_eq!(
+            first.resolved_spec.as_ref().unwrap()["values"]["address"],
+            json!("203.0.113.10")
+        );
+        // The consumer's stored document holds what the first resolution produced.
+        let mut stored = unit.clone();
+        stored.provenance = first.provenance.clone();
+        stored.resolved_spec = first.resolved_spec.clone();
+        world.previous.insert(name("dns"), stored);
+        // The value was read again, later: the same value keeps the stored citation.
+        world.observations.get_mut(&name("kubernetes")).unwrap().values.insert(
+            "ip".to_owned(),
+            serde_json::from_value(json!({"value": "203.0.113.10", "observedAt": "2026-09-24T09:59:00Z"})).unwrap(),
+        );
+        let again = resolve_unit(&world.view(), &unit);
+        assert_eq!(again.provenance[&pointer], first.provenance[&pointer]);
+        // Another value is cited with its own time.
+        world.observations.get_mut(&name("kubernetes")).unwrap().values.insert(
+            "ip".to_owned(),
+            serde_json::from_value(json!({"value": "203.0.113.20", "observedAt": "2026-09-24T09:59:30Z"})).unwrap(),
+        );
+        let changed = resolve_unit(&world.view(), &unit);
+        let Provenance::Receipt(cited) = &changed.provenance[&pointer] else {
+            panic!("a receipt citation")
+        };
+        assert_eq!(cited.observed_at, Some("2026-09-24T09:59:30Z".parse().unwrap()));
+        assert_eq!(
+            changed.resolved_spec.unwrap()["values"]["address"],
+            json!("203.0.113.20")
+        );
+    }
+
+    /// Catches cross-environment references reading the consumer's own
+    /// records instead of the producer environment's snapshot.
+    #[test]
+    fn test_cross_environment_references_read_the_producers_observed_values() {
+        let mut producer = World::new();
+        observing(&mut producer, &recorded_values());
+        let mut consumer = World::new();
+        let environment = EnvironmentName::new("infra").unwrap();
+        let mut snapshot = nyl_core::orchestration::ports::EnvironmentSnapshot {
+            desired: producer.desired.clone(),
+            observed: producer.observed.clone(),
+            observations: producer.observations.clone(),
+            ..nyl_core::orchestration::ports::EnvironmentSnapshot::default()
+        };
+        snapshot.tips.observed = Some(producer.observed_commit.clone());
+        consumer.environments.insert(environment.clone(), snapshot);
+        let ReferenceValue::Value { value, provenance } = consumer
+            .resolve(json!({"environment": "infra", "unit": "kubernetes", "observation": "ip"}))
+            .unwrap()
+        else {
+            panic!("the producer environment holds the value")
+        };
+        assert_eq!(value, json!("203.0.113.10"));
+        assert_eq!(provenance.environment, Some(environment.clone()));
+        consumer
+            .environments
+            .get_mut(&environment)
+            .unwrap()
+            .observations
+            .clear();
+        let ReferenceValue::Blocked { reason, .. } = consumer
+            .resolve(json!({"environment": "infra", "unit": "kubernetes", "observation": "ip"}))
+            .unwrap()
+        else {
+            panic!("no record in the producer environment")
+        };
+        assert_eq!(
+            reason,
+            "observation ip of infra/kubernetes is pending: not observed yet"
+        );
+        // The qualified reason reads back for reports, with the environment.
+        let waiting = observed_values::parse_reason(&reason).unwrap();
+        assert_eq!(waiting.producer, "infra/kubernetes");
+    }
+
+    /// Catches a value read for a consumer that requires attestations the
+    /// producer's current receipt does not have yet: the new value is read
+    /// only once the new receipt's attestations pass, so a consumer never acts
+    /// on an address that nothing has vouched for.
+    #[test]
+    fn test_an_observation_reference_with_attestations_waits_for_them_first() {
+        let mut world = World::new();
+        observing(&mut world, &recorded_values());
+        world
+            .desired
+            .get_mut(&name("kubernetes"))
+            .unwrap()
+            .attestations
+            .push("healthy".to_owned());
+        let reference = json!({"unit": "kubernetes", "observation": "ip", "attestations": ["healthy"]});
+        let ReferenceValue::Blocked { reason, .. } = world.resolve(reference.clone()).unwrap() else {
+            panic!("the attestation is not recorded")
+        };
+        assert_eq!(reason, "attestation healthy of kubernetes is pending");
+        let mut attested = world.attestations.clone();
+        attested.insert(
+            name("kubernetes"),
+            BTreeMap::from([(
+                "healthy".to_owned(),
+                serde_json::from_value(json!({
+                    "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "healthy",
+                    "unit": {"environment": "dev", "name": "kubernetes", "uid": uid("kubernetes")},
+                    "executionKey": key("kubernetes"), "result": "pass", "at": "2026-09-24T09:55:00Z",
+                    "source": {"driver": "attest"}
+                }))
+                .unwrap(),
+            )]),
+        );
+        world.attestations = attested;
+        let ReferenceValue::Value { value, .. } = world.resolve(reference).unwrap() else {
+            panic!("the attestation passes")
+        };
+        assert_eq!(value, json!("203.0.113.10"));
+        // An undeclared attestation is an error with its own code, as for outputs.
+        let error = world
+            .resolve(json!({"unit": "kubernetes", "observation": "ip", "attestations": ["nope"]}))
+            .unwrap_err();
+        assert_eq!(error.code, Code::AttestationUndeclared);
     }
 }

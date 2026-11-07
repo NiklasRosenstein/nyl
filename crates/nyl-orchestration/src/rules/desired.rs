@@ -701,6 +701,8 @@ fn leaving_units(inputs: &DesireInputs<'_>, set: &BTreeMap<&UnitName, &RenderedU
 /// Why a unit's spec is not accepted.
 enum UnitError {
     Invalid(String),
+    /// The unit declares `observations`, which its kind cannot read.
+    ObservationsUnsupported(String),
 }
 
 impl UnitError {
@@ -711,6 +713,13 @@ impl UnitError {
                 format!("unit {name} ({source_path}): {message}"),
                 "correct the unit's spec so that it matches its kind's schema",
             ),
+            Self::ObservationsUnsupported(kind) => Finding::new(
+                Code::ObservationsUnsupported,
+                format!(
+                    "unit {name} ({source_path}) declares observations, but kind {kind} reads no observed values for its spec"
+                ),
+                "remove `observations`, or use a kind that reads observed values for its spec",
+            ),
         }
     }
 }
@@ -718,6 +727,16 @@ impl UnitError {
 /// The driver's validation and the common fields' validation.
 fn validate_unit(driver: &dyn Driver, spec: &Value) -> Result<(), UnitError> {
     let invalid = |error: &dyn std::fmt::Display| UnitError::Invalid(error.to_string());
+    // A kind without the capability rejects `observations` before it
+    // validates anything of its own: its schema has no place for them.
+    if spec
+        .get("observations")
+        .and_then(Value::as_object)
+        .is_some_and(|observations| !observations.is_empty())
+        && !driver.capabilities(spec).observed_values
+    {
+        return Err(UnitError::ObservationsUnsupported(driver.kind().to_owned()));
+    }
     driver.validate_spec(spec).map_err(UnitError::Invalid)?;
     let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
     if common.approval.bind == nyl_core::resources::units::ApprovalBind::Plan
@@ -1475,5 +1494,52 @@ mod tests {
             .iter()
             .any(|error| error.message.contains("/nyl/units.yaml")));
         assert!(desired.units.is_empty());
+    }
+
+    /// Catches observations accepted for a kind that reads none (the
+    /// declaration would never be read, and a consumer would wait forever),
+    /// and rejected for one that does; the code names the kind.
+    #[test]
+    fn test_observations_need_a_kind_that_reads_observed_values() {
+        let observations = json!({"ip": {"type": "string", "from": {"any": "thing"}}});
+        let units = source(vec![
+            (
+                "plain",
+                rendered(TEST_KIND, true, Some(json!({"observations": observations}))),
+            ),
+            (
+                "reads",
+                rendered(
+                    TEST_KIND,
+                    true,
+                    Some(json!({"observes": true, "observations": observations})),
+                ),
+            ),
+            ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
+        ]);
+        let desired = run_desire(&units, &EnvironmentSnapshot::default());
+        assert_eq!(desired.errors.len(), 1, "{:?}", desired.errors);
+        assert_eq!(desired.errors[0].code, Code::ObservationsUnsupported);
+        assert!(
+            desired.errors[0].message.contains("unit plain") && desired.errors[0].message.contains("kind Test"),
+            "{}",
+            desired.errors[0].message
+        );
+        // An empty declaration declares nothing, so every kind accepts it.
+        let accepted = run_desire(
+            &source(vec![
+                (
+                    "reads",
+                    rendered(
+                        TEST_KIND,
+                        true,
+                        Some(json!({"observes": true, "observations": observations})),
+                    ),
+                ),
+                ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
+            ]),
+            &EnvironmentSnapshot::default(),
+        );
+        assert!(accepted.errors.is_empty(), "{:?}", accepted.errors);
     }
 }

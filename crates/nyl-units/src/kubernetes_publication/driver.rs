@@ -29,6 +29,12 @@
 //!   that finds an owned file modified outside Nyl. A comparison that cannot
 //!   be made, such as an unreachable remote, is `unknown`.
 //!
+//! - **Observed values.** With `observe: {}` the unit reads a field of a
+//!   resource its target renders from the workload Cluster, once the
+//!   Application that owns it runs the receipt's publication
+//!   ([`super::observed_values`]). Resolution checks the resource is the
+//!   target's (`NYL-KUBERNETES-OBSERVATION-UNOWNED`) and records its owning
+//!   Application and the workload Cluster.
 //! - **Observation.** A unit that declares `observe: {}` records the
 //!   reconciler of its target at resolution (`reconciler`: its kind and
 //!   instance, how it is read, and the deployments and anchors the target
@@ -38,11 +44,12 @@
 //!   the flag.
 
 use std::ffi::OsString;
+use std::sync::Arc;
 
 use nyl_core::orchestration::driver::{
     AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, RemovalContext,
-    RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
+    Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    RemovalContext, RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::ports::CommitIdentity;
@@ -51,7 +58,9 @@ use nyl_render::gitops::publication::{prepare_target_publication, PublicationAut
 use serde_json::{json, Value};
 
 use super::observe::{self, RECONCILER};
+use super::observed_values::{self, ClusterReader, LiveReader};
 use super::readiness::evaluate;
+use super::spec::{OBSERVATION_SOURCES, WORKLOAD};
 use super::{build, plan, publish, render, resolution_inputs, teardown, teardown_wait, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
 
@@ -64,12 +73,28 @@ const TEARDOWN_SETTINGS: &str = "/teardownSettings";
 #[derive(Debug, Clone)]
 pub struct KubernetesPublicationDriver {
     resource_catalogue: nyl_render::config::ResourceCatalogue,
+    /// How observed values are read from the live system.
+    live: Arc<dyn LiveReader>,
 }
 
 impl KubernetesPublicationDriver {
-    /// A publication driver that discovers and renders against `resource_catalogue`.
+    /// A publication driver that discovers and renders against
+    /// `resource_catalogue` and reads observed values from Argo CD and the
+    /// workload Cluster.
     pub fn new(resource_catalogue: nyl_render::config::ResourceCatalogue) -> Self {
-        Self { resource_catalogue }
+        Self {
+            resource_catalogue,
+            live: Arc::new(ClusterReader),
+        }
+    }
+
+    /// The same driver reading observed values through `live`, such as a
+    /// scripted reader for tier-1 scenarios; the declaration, its validation,
+    /// and what resolution records are the driver's own either way.
+    #[must_use]
+    pub fn with_live_reader(mut self, live: Arc<dyn LiveReader>) -> Self {
+        self.live = live;
+        self
     }
 }
 
@@ -99,6 +124,7 @@ impl Driver for KubernetesPublicationDriver {
             teardown: true,
             build: true,
             attest: observe::observes(spec),
+            observed_values: observe::observes(spec),
             ..Capabilities::default()
         }
     }
@@ -152,6 +178,39 @@ impl Driver for KubernetesPublicationDriver {
                         "duration": {"type": "string", "description": "How long after phase 1, for strategy delay, such as 10m."}
                     },
                     "additionalProperties": false
+                },
+                "observations": {
+                    "type": "object",
+                    "description": "Observed values, which need `observe: {}`: a field of a resource the target renders, read from the workload Cluster once the Application that owns the resource runs the current publication.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "required": ["type", "from"],
+                        "properties": {
+                            "type": {"type": "string", "enum": ["string", "integer", "number", "boolean", "object", "array"]},
+                            "maxAge": {"type": "string", "description": "How old the last successful read may get before the value stops resolving, such as 1h."},
+                            "from": {
+                                "type": "object",
+                                "description": "What to read.",
+                                "required": ["resource", "pointer"],
+                                "properties": {
+                                    "resource": {
+                                        "type": "object",
+                                        "description": "The resource as the Kubernetes API names it; a Secret is never read.",
+                                        "required": ["apiVersion", "kind", "name"],
+                                        "properties": {
+                                            "apiVersion": {"type": "string"},
+                                            "kind": {"type": "string"},
+                                            "namespace": {"type": "string", "description": "For a namespaced kind."},
+                                            "name": {"type": "string"}
+                                        },
+                                        "additionalProperties": false
+                                    },
+                                    "pointer": {"type": "string", "description": "A JSON Pointer into the live resource, such as /status/loadBalancer/ingress/0/ip."}
+                                },
+                                "additionalProperties": false
+                            }
+                        }
+                    }
                 },
                 "releases": {
                     "type": "object",
@@ -207,6 +266,18 @@ impl Driver for KubernetesPublicationDriver {
             // control-plane context, the URL the branch is read from) changes
             // no result: only what the target expects of it keys the unit.
             inputs.excluded_fields.extend(unkeyed);
+        }
+        // What an observation reads must be rendered by the target: the
+        // owning Application and the workload Cluster are recorded, and the
+        // Cluster's local context never keys the unit.
+        if let Some((sources, workload)) =
+            observed_values::recorded(spec, &rendered, &unit_target(spec).unwrap_or_default())?
+        {
+            inputs.recorded.insert(OBSERVATION_SOURCES.to_owned(), sources);
+            inputs.recorded.insert(WORKLOAD.to_owned(), workload);
+            inputs
+                .excluded_fields
+                .extend(observed_values::UNKEYED.iter().map(|field| (*field).to_owned()));
         }
         Ok(inputs)
     }
@@ -267,6 +338,22 @@ impl Driver for KubernetesPublicationDriver {
                 },
             };
         Ok(Supported::Supported(drift.into()))
+    }
+
+    /// The observed values the spec declares: a field of a rendered resource,
+    /// read from the workload Cluster once its Application runs the receipt's
+    /// publication.
+    fn observe(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        _receipt: &Receipt,
+    ) -> DriverResult<Supported<ObservedValues>> {
+        Ok(Supported::Supported(observed_values::observe(
+            self.live.as_ref(),
+            ctx,
+            unit,
+        )))
     }
 
     /// `accepted` and `healthy` of the receipt's publication, read from the reconciler.

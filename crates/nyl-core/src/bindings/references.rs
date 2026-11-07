@@ -97,6 +97,7 @@ mod tests {
             unit: unit.to_owned(),
             output: output.map(str::to_owned),
             artifact: artifact.map(str::to_owned),
+            observation: None,
             kind: None,
             pointer: None,
             evidence: None,
@@ -154,7 +155,7 @@ mod tests {
             assert!(issue.contains(&format!("{pointer:?}")), "{issue} names {pointer}");
         }
         assert!(
-            issues[0].ends_with("must set exactly one of output and artifact"),
+            issues[0].ends_with("must set exactly one of output, artifact, and observation"),
             "{issues:?}"
         );
     }

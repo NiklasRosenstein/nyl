@@ -651,6 +651,7 @@ mod tests {
     fn deployment(role: DeploymentRole, id: &str, path: &str) -> ExpectedDeployment {
         ExpectedDeployment {
             id: id.to_owned(),
+            display: String::new(),
             role,
             path: path.to_owned(),
             release: (role == DeploymentRole::Workload).then(|| format!("{id}/{id}")),

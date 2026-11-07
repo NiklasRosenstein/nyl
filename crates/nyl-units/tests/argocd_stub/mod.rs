@@ -335,3 +335,103 @@ pub fn kubeconfig(path: &Path, context: &str, server: &str) {
     )
     .unwrap();
 }
+
+/// The Kubernetes API of a workload Cluster: API discovery of the kinds in
+/// `KINDS`, and `GET` of one object of `objects` (matched by `apiVersion`,
+/// `kind`, `metadata.namespace`, and `metadata.name`), 404 for any other.
+pub fn kube_workload(objects: Applications) -> Stub {
+    /// apiVersion, kind, plural, namespaced.
+    const KINDS: [(&str, &str, &str, bool); 4] = [
+        ("v1", "Service", "services", true),
+        ("v1", "Namespace", "namespaces", false),
+        ("v1", "Secret", "secrets", true),
+        ("apps/v1", "Deployment", "deployments", true),
+    ];
+    let not_found = |path: &str| {
+        Response::json(
+            404,
+            &json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404,
+                    "message": format!("{path} not found")}),
+        )
+    };
+    Stub::start(move |request| {
+        let path = request.path();
+        let (version, rest) = if let Some(rest) = path.strip_prefix("/api/v1") {
+            ("v1".to_owned(), rest)
+        } else if let Some(rest) = path.strip_prefix("/apis/") {
+            let mut parts = rest.splitn(3, '/');
+            let group = parts.next().unwrap_or_default();
+            let version = parts.next().unwrap_or_default();
+            (format!("{group}/{version}"), parts.next().unwrap_or_default())
+        } else {
+            return not_found(path);
+        };
+        if rest.is_empty() {
+            let resources = KINDS
+                .iter()
+                .filter(|(api_version, ..)| *api_version == version)
+                .map(|(_, kind, plural, namespaced)| {
+                    json!({"name": plural, "singularName": "", "namespaced": namespaced, "kind": kind,
+                           "verbs": ["get", "list"]})
+                })
+                .collect::<Vec<_>>();
+            if resources.is_empty() {
+                return not_found(path);
+            }
+            return Response::json(
+                200,
+                &json!({"kind": "APIResourceList", "groupVersion": version, "resources": resources}),
+            );
+        }
+        let segments = rest.trim_start_matches('/').split('/').collect::<Vec<_>>();
+        let (namespace, plural, name) = match segments.as_slice() {
+            ["namespaces", namespace, plural, name] => (Some(*namespace), *plural, *name),
+            [plural, name] => (None, *plural, *name),
+            _ => return not_found(path),
+        };
+        let Some((_, kind, ..)) = KINDS
+            .iter()
+            .find(|(api_version, _, kind_plural, _)| *api_version == version && *kind_plural == plural)
+        else {
+            return not_found(path);
+        };
+        let found = objects
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|object| {
+                object.get("apiVersion").and_then(Value::as_str) == Some(version.as_str())
+                    && object.get("kind").and_then(Value::as_str) == Some(*kind)
+                    && object.pointer("/metadata/name").and_then(Value::as_str) == Some(name)
+                    && object.pointer("/metadata/namespace").and_then(Value::as_str) == namespace
+            })
+            .cloned();
+        found.map_or_else(|| not_found(path), |object| Response::json(200, &object))
+    })
+}
+
+/// A kubeconfig with one context per `(name, server)`, authenticating with
+/// a static token, written to `path`.
+pub fn kubeconfig_contexts(path: &Path, contexts: &[(&str, &str)]) {
+    let mut text = String::from("apiVersion: v1\nkind: Config\nclusters:\n");
+    for (name, server) in contexts {
+        text.push_str(&format!("- name: {name}\n  cluster: {{server: '{server}'}}\n"));
+    }
+    text.push_str("users:\n- name: stub\n  user: {token: stub-token}\ncontexts:\n");
+    for (name, _) in contexts {
+        text.push_str(&format!("- name: {name}\n  context: {{cluster: {name}, user: stub}}\n"));
+    }
+    text.push_str("current-context: other\n");
+    std::fs::write(path, text).unwrap();
+}
+
+/// A Deployment as the workload Cluster serves it.
+pub fn deployment(namespace: &str, name: &str, status: &Value) -> Value {
+    json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"replicas": 3},
+        "status": status,
+    })
+}
