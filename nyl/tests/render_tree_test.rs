@@ -1313,6 +1313,47 @@ fn project_templates_generate_constrained_projects() {
 }
 
 #[test]
+fn templated_project_template_name_keeps_the_group_rendered() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    // The target selects the group by its labels, which the typed parse of a
+    // templated `projectTemplate.name` cannot supply before rendering.
+    let group = fs::read_to_string(&group_path)
+        .unwrap()
+        .replace(
+            "  projectRef: workloads\n",
+            "  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n",
+        )
+        .replace(
+            "  labels:\n    environment: production\n",
+            "  labels: {environment: production}\n",
+        );
+    fs::write(group_path, group).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let tree = output.join("production");
+    let project =
+        fs::read_to_string(tree.join("_nyl/catalog/appproject.argoproj.io/argocd/production-web.yaml")).unwrap();
+    assert!(project.contains("name: production-web"), "{project}");
+    let application =
+        fs::read_to_string(tree.join("_nyl/catalog/application.argoproj.io/argocd-production/api.yaml")).unwrap();
+    assert!(application.contains("project: production-web"), "{application}");
+    let release = fs::read_to_string(tree.join("workloads/api/configmap/api/api.yaml")).unwrap();
+    assert!(release.contains("environment: production"), "{release}");
+}
+
+#[test]
 fn bare_project_template_derives_least_privilege_defaults() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
