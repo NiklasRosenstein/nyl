@@ -73,7 +73,8 @@ pub struct DiffArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: DiffArgs) -> Result<()> {
     args.common.validation.check_complete(args.append_release)?;
-    let preflight = run_render_preflight(RenderPreflightOptions {
+    // Boxed: the render future is large, and Windows debug builds run on a 1 MiB main stack.
+    let preflight = Box::pin(run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
         kube_version: None,
@@ -81,7 +82,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
         discovery_progress: crate::cli::commands::render::DiscoveryProgress::Quiet,
-    })
+    }))
     .await?;
 
     let desired_manifests = preflight.manifests;

@@ -219,7 +219,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                     "--kube-version and --kube-api-versions cannot be used with --context; the live cluster is authoritative",
                 ));
             }
-            Some(LiveCluster::connect(context, options.discovery_progress).await?)
+            Some(Box::pin(LiveCluster::connect(context, options.discovery_progress)).await?)
         }
         _ => None,
     };
@@ -302,7 +302,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.max_depth = options.common.max_depth;
     request.track_parent = options.common.track_parent;
     request.strip_empty_metadata_labels_default = false;
-    let rendered = session.render(request).await?;
+    let rendered = Box::pin(session.render(request)).await?;
     if let (Some(inputs), Some(release)) = (&direct_inputs, &rendered.release) {
         nyl_render::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
     }
@@ -326,7 +326,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
     let release = rendered.release.clone();
     let duplicates = rendered.duplicates;
-    let workload = nyl_render::gitops::direct::resolve_direct_workload(
+    let workload = Box::pin(nyl_render::gitops::direct::resolve_direct_workload(
         nyl_render::gitops::direct::DirectWorkloadRequest {
             target: inventory
                 .as_ref()
@@ -361,7 +361,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             release: rendered.release,
             release_provenance: rendered.release_provenance,
         },
-    )
+    ))
     .await?;
     let mut manifests = workload.manifests;
     let provenance = workload.manifest_provenance;
@@ -447,7 +447,8 @@ impl LiveCluster {
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    let preflight = run_render_preflight(RenderPreflightOptions {
+    // Boxed: the render future is large, and Windows debug builds run on a 1 MiB main stack.
+    let preflight = Box::pin(run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: args.offline,
         kube_version: args.kube_version.as_deref(),
@@ -455,7 +456,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Never,
         discovery_progress: DiscoveryProgress::Quiet,
-    })
+    }))
     .await?;
     if args.context.is_some() && preflight.resolved_target.is_some() {
         tracing::warn!("--context is ignored: rendering for a DeploymentTarget never connects to Kubernetes");

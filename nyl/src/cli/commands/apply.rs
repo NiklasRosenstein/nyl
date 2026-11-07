@@ -114,7 +114,8 @@ pub(crate) const DEFAULT_APPLY_CONCURRENCY: u16 = 8;
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     args.common.validation.check_complete(args.append_release)?;
     let ownership = args.handoff.ownership()?;
-    let preflight = run_render_preflight(RenderPreflightOptions {
+    // Boxed: the render future is large, and Windows debug builds run on a 1 MiB main stack.
+    let preflight = Box::pin(run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
         kube_version: None,
@@ -122,7 +123,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
         discovery_progress: DiscoveryProgress::Announce,
-    })
+    }))
     .await?;
 
     let mut desired_manifests = preflight.manifests;
