@@ -5,6 +5,12 @@ description = "ApplicationGroups with a templated spec that cannot be parsed bef
 author = "@NiklasRosenstein"
 
 [[entries]]
+id = "8cc38a84-10b3-45dd-8837-a3795fd5925f"
+type = "fix"
+description = "`OciImage` builds with `load` work with Docker Buildx 0.38, which no longer records the image's configuration digest: the platform is read from the loaded image by its digest"
+author = "@NiklasRosenstein"
+
+[[entries]]
 id = "d73eec00-08f7-4582-90d0-eab32d080800"
 type = "feature"
 description = "Orchestration can publish Kubernetes trees: the `KubernetesPublication` unit renders its DeploymentTarget with the `fromUnit` Release inputs (image digests, infrastructure outputs) its environment resolved, publishes the tree and its ownership index to the target's branch with a compare-and-swap push, and tears it down in two phases. Its effective teardown settings are recorded when the unit is resolved, so `status` and `plan` report teardown readiness without rendering. `mode: observe` and inline targets are not available yet"
