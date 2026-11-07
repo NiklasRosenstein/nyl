@@ -3,3 +3,9 @@ id = "630f9659-a268-4d91-9f19-383f1f55decf"
 type = "fix"
 description = "ApplicationGroups with a templated spec that cannot be parsed before rendering, such as `projectTemplate.name: '{{ target.metadata.name }}-web'`, are no longer silently left out of the targets that select them when they write `metadata.labels` in flow style or with a trailing comment (or `metadata: # ...`): targets now select them by the labels the document declares, so existing `render-tree` and `publish-tree` output may gain their Applications, Releases, and AppProject (selection only grows). A group that renders to no document now counts as disabled, so `--application-group` and ignored `releaseInputs` treat it like `enabled: false`. A document that is not valid YAML before rendering and writes labels in a form that cannot be read statically (template syntax among them, anchors, aliases, merge keys, multi-line flow) now fails with an error instead of being read as fewer labels, and a group whose rendered labels differ from its literal ones is rejected"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8cc38a84-10b3-45dd-8837-a3795fd5925f"
+type = "fix"
+description = "`OciImage` builds with `load` work with Docker Buildx 0.38, which no longer records the image's configuration digest: the platform is read from the loaded image by its digest"
+author = "@NiklasRosenstein"
