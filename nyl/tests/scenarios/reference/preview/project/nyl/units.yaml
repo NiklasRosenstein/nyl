@@ -49,7 +49,6 @@ metadata:
     preview: 'true'
 spec:
   target: {{ values.target | tojson }}    # dev, or the preview template's inline target
-  mode: publish
   {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% else %}teardownWait: {strategy: manual}{% endif %}
   timeout: 10m
 ---
