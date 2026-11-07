@@ -2470,7 +2470,7 @@ fn validate_argocd_name_collisions(
             if !target_selects_group(target, &discovered.static_labels) {
                 continue;
             }
-            let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, &session)? else {
+            let Some(group) = render_effective_group(discovered, &session)? else {
                 continue;
             };
             if !group.spec.enabled {
@@ -3181,6 +3181,49 @@ pub(super) fn render_effective_control(
     Ok(Some(effective))
 }
 
+/// The ApplicationGroup `discovered` is for the target `session` renders, or
+/// `None` when its document renders to no document, which omits the group for
+/// that target.
+///
+/// Contract: [Structural templating](../../../../nyl/book/src/content/docs/kubernetes-gitops/resource-guides/application-group.md#structural-templating)
+/// and [unit documents](../../../../design/orchestration-core.md), where an
+/// ApplicationGroup that renders to nothing counts as `enabled: false`. This is
+/// the only way a selected group leaves a target without an error: a template
+/// that fails to render, or renders anything but one ApplicationGroup with the
+/// static identity, is an error.
+///
+/// Targets selected the group by its literal labels before rendering, so the
+/// rendered `metadata.labels` must equal them; this is where that invariant is
+/// enforced for every reader of discovery's labels.
+pub(super) fn render_effective_group(
+    discovered: &super::DiscoveredGitOpsResource,
+    session: &RenderSession,
+) -> Result<Option<ApplicationGroup>> {
+    // `render_effective_control` already checks that the kind is unchanged, so
+    // the other variants are unreachable; the error keeps this total.
+    let group = match render_effective_control(discovered, session)? {
+        None => return Ok(None),
+        Some(GitOpsResource::ApplicationGroup(group)) => *group,
+        Some(_) => {
+            return Err(NylError::config(format!(
+                "GitOps resource {} document {} is not an ApplicationGroup after target rendering",
+                discovered.source_path.display(),
+                discovered.document_index
+            )))
+        }
+    };
+    if group.metadata.labels != discovered.static_labels {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {:?} renders metadata.labels {:?}, but targets selected it by the literal labels {:?} in {}; write metadata.labels literally, without templating, because targets select on them before rendering",
+            group.metadata.name,
+            group.metadata.labels,
+            discovered.static_labels,
+            discovered.source_path.display()
+        )));
+    }
+    Ok(Some(group))
+}
+
 struct ResolvedGroupSource {
     root: PathBuf,
     provenance_root: PathBuf,
@@ -3345,13 +3388,15 @@ pub(super) fn selected_groups(
         {
             continue;
         }
-        let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, session)? else {
-            continue;
-        };
-        if group.spec.enabled {
-            groups.push((discovered.source_path.clone(), *group));
-        } else {
-            disabled.insert(group.metadata.name.clone());
+        match render_effective_group(discovered, session)? {
+            Some(group) if group.spec.enabled => groups.push((discovered.source_path.clone(), group)),
+            Some(group) => {
+                disabled.insert(group.metadata.name.clone());
+            }
+            // Omitted for this target, which counts as `enabled: false`.
+            None => {
+                disabled.insert(discovered.identity.name.clone());
+            }
         }
     }
     groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
@@ -4123,6 +4168,220 @@ mod tests {
         let claimed = BTreeSet::from([manifest_path_identity(&entry), manifest_path_identity(&included)]);
 
         assert_eq!(unclaimed_group_manifests(&source, &claimed), vec![ignored.as_path()]);
+    }
+
+    const PLATFORM: &str = r"apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: deploy
+spec:
+  repoURL: https://example.invalid/deploy.git
+  publishURL: ssh://git@example.invalid/deploy.git
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: prod-eu-1
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, v1/ConfigMap, v1/Namespace]
+    clusterScopedKinds: [core/Namespace]
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: production
+  labels:
+    environment: production
+spec:
+  clusterRef:
+    name: prod-eu-1
+  applicationGroupSelector:
+    matchLabels:
+      environment: production
+  publication:
+    repositoryRef:
+      name: deploy
+    revision: deploy/production
+    pathPrefix: production
+";
+
+    /// A Git project with the platform above, `group` as the only ApplicationGroup,
+    /// and one Release in the group's derived source directory.
+    fn templated_group_project(group: &str) -> tempfile::TempDir {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        git2::Repository::init(root).unwrap();
+        for (path, contents) in [
+            ("nyl.toml", ""),
+            ("config/platform.yaml", PLATFORM),
+            ("config/group.yaml", group),
+            (
+                "applications/workloads/api.yaml",
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\n  namespace: api\ndata:\n  stage: '{{ target.metadata.labels.environment }}'\n",
+            ),
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        directory
+    }
+
+    fn group_document(labels: &str, spec: &str) -> String {
+        format!(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: workloads\n{labels}spec:\n  applicationNamespace: argocd\n{spec}"
+        )
+    }
+
+    const BLOCK_LABELS: &str = "  labels:\n    environment: production\n";
+
+    fn compile_production(directory: &tempfile::TempDir) -> Result<CompiledTargetTree> {
+        let inventory =
+            crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue())?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(compile_target_tree(&inventory, "production"))
+    }
+
+    fn file<'a>(tree: &'a CompiledTargetTree, path: &str) -> &'a str {
+        let bytes = tree.files.get(Path::new(path)).unwrap_or_else(|| {
+            panic!(
+                "{path} was not rendered; got {:?}",
+                tree.files.keys().collect::<Vec<_>>()
+            )
+        });
+        std::str::from_utf8(bytes).unwrap()
+    }
+
+    /// Structural templating in `projectTemplate` renders per target without
+    /// dropping the group, whichever YAML form its labels are written in.
+    #[test]
+    fn test_compile_renders_a_group_with_a_templated_project_template() {
+        let spec = "  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n    labels:\n      team: '{{ cluster.metadata.name }}'\n";
+        for (index, labels) in [
+            BLOCK_LABELS,
+            "  labels: {environment: production}\n",
+            "  labels: # targets select on these\n    environment: production\n",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = templated_group_project(&group_document(labels, spec));
+            let tree = compile_production(&directory).unwrap_or_else(|error| panic!("form {index}: {error}"));
+
+            let project = file(&tree, "_nyl/catalog/appproject.argoproj.io/argocd/production-web.yaml");
+            assert!(project.contains("name: production-web"), "form {index}: {project}");
+            assert!(project.contains("team: prod-eu-1"), "form {index}: {project}");
+            let application = file(&tree, "_nyl/catalog/application.argoproj.io/argocd/api.yaml");
+            assert!(
+                application.contains("project: production-web"),
+                "form {index}: {application}"
+            );
+            let release = file(&tree, "workloads/api/configmap/api/api.yaml");
+            assert!(release.contains("stage: production"), "form {index}: {release}");
+        }
+    }
+
+    /// An ApplicationGroup whose document renders to nothing is omitted for the
+    /// target and counts as disabled; every other selected group is kept.
+    #[test]
+    fn test_selected_groups_records_a_group_that_renders_to_nothing_as_omitted() {
+        let omitted = format!(
+            "{{% if target.metadata.name != 'production' %}}\n{}{{% endif %}}\n",
+            group_document(BLOCK_LABELS, "")
+        );
+        for (document, enabled) in [
+            (omitted, false),
+            (
+                group_document(
+                    BLOCK_LABELS,
+                    "  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n",
+                ),
+                true,
+            ),
+        ] {
+            let directory = templated_group_project(&document);
+            let inventory =
+                crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue())
+                    .unwrap();
+            let Some(GitOpsResource::DeploymentTarget(target)) = &inventory
+                .get(GitOpsResourceKind::DeploymentTarget, "production")
+                .unwrap()
+                .resource
+            else {
+                panic!("the target is static");
+            };
+            let (cluster, _) = resolve_cluster(&inventory, target.cluster_name()).unwrap();
+            let session =
+                RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)
+                    .unwrap();
+
+            let (groups, disabled) = selected_groups(&inventory, target, &session).unwrap();
+
+            let names = groups
+                .iter()
+                .map(|(_, group)| group.metadata.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, if enabled { vec!["workloads"] } else { vec![] });
+            assert_eq!(disabled.contains("workloads"), !enabled, "{disabled:?}");
+        }
+    }
+
+    /// A selected group whose effective spec cannot be rendered is an error that
+    /// names the field, never an omission.
+    #[test]
+    fn test_selected_group_with_an_unrenderable_spec_is_an_error() {
+        for (spec, fragment) in [
+            // Renders to '-web', which is not a DNS subdomain.
+            (
+                "  projectTemplate:\n    name: '{{ target.name }}-web'\n",
+                "spec.projectTemplate.name",
+            ),
+            (
+                "  projectTemplate:\n    name: '{{ target.metadata.name | nosuchfilter }}'\n",
+                "nosuchfilter",
+            ),
+        ] {
+            let directory = templated_group_project(&group_document(BLOCK_LABELS, spec));
+            let error = compile_production(&directory).unwrap_err().to_string();
+            assert!(error.contains(fragment), "{error}");
+        }
+    }
+
+    /// Targets select on the labels discovery read; a group whose rendered labels
+    /// differ from them is an error rather than a silently different selection.
+    #[test]
+    fn test_selected_group_whose_rendered_labels_differ_from_the_selected_ones_is_an_error() {
+        // The labels sit below a template expression, which discovery's scanner
+        // cannot see through: it reads none, the render has `environment`.
+        let document = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: workloads\n{{ \"  labels: {environment: production}\" }}\nspec:\n  applicationNamespace: argocd\n";
+        let directory = templated_group_project(document);
+        let inventory =
+            crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
+        let discovered = inventory
+            .get(GitOpsResourceKind::ApplicationGroup, "workloads")
+            .unwrap();
+        assert!(discovered.static_labels.is_empty());
+        let Some(GitOpsResource::DeploymentTarget(target)) = &inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .unwrap()
+            .resource
+        else {
+            panic!("the target is static");
+        };
+        let (cluster, _) = resolve_cluster(&inventory, target.cluster_name()).unwrap();
+        let session =
+            RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster).unwrap();
+
+        let error = render_effective_group(discovered, &session).unwrap_err().to_string();
+        assert!(error.contains("targets selected it by the literal labels"), "{error}");
+        assert!(error.contains("environment"), "{error}");
     }
 
     #[cfg(unix)]
