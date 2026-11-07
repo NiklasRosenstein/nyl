@@ -128,6 +128,10 @@ fn test_resolution_records_the_targets_effective_teardown_settings() {
         settings.namespace_delete_policies,
         BTreeMap::from([("web".to_owned(), "Confirm".to_owned())])
     );
+    assert_eq!(
+        settings.namespace_prune_policies,
+        BTreeMap::from([("web".to_owned(), "Confirm".to_owned())])
+    );
 
     // The stored document answers without rendering anything.
     let unit = resolved_unit(&driver, &world, spec());

@@ -81,3 +81,27 @@ id = "5b0f6c1e-2d94-4f0a-8a57-9c3e1b7a40d2"
 type = "feature"
 description = "Drivers can report coded warnings with a successful execution (`Outcome::Succeeded` `warnings`), which Nyl records with the receipt and shows in the run report, `plan`, and `status` until the unit executes again; a `KubernetesPublication` warns `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` when the shared catalog manifest on the branch differs from the one it renders. A shared catalog's teardown readiness follows the manifest on the branch, recorded without keying the unit and read again when a teardown starts. `render-tree`, `publish-tree`, and `diff-tree` now check the shared-catalog rules across targets like `nyl validate` when a project may declare one: a target shares a catalog, a target could not be parsed statically, the project has an EnvironmentTemplate, or a publication unit declares or may declare an inline target (a mapping, a templated name, or a document that is not YAML before rendering). They then render every environment's units, so an unrelated broken unit fails them; projects with only static targets and no templates or inline units are unaffected"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6efe7756-b86d-47a3-9bc4-258a8c9af4d2"
+type = "docs"
+description = "Add an end-to-end example to the Orchestration guide: one project with an OciImage, an OpenTofu configuration, a KubernetesPublication, and a preview template, reconciled locally and in GitHub Actions (reconcile on main, `nyl attest` and `nyl observe` with either Argo CD access method, a preview per pull request, its close job, and the scheduled fleet reconcile and shared-catalog writer), with the credentials the units admit and the token a preview job needs for keep refs. M5 is complete: its exit criterion is met by the reference scenarios, which now all run in both tiers with the built-in publication driver"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "1f9d2003-0882-458d-a02c-3d76a7717781"
+type = "fix"
+description = "`nyl teardown --all --source <revision>` and `nyl state delete --teardown --source <revision>` now take the files of a unit's Git source field from that revision when the stored spec pinned the field to the unit's recorded source commit (an OpenTofu or Terraform `source`, an image `context`), as they already did for the unit's own files, so a lost source commit no longer locks an instance out of removal. Explicit `revision` and `commit` locks and other repositories stay as declared, and the stored spec, its digests, and approvals are unchanged. A teardown that substitutes the recorded commit now warns with `NYL-SOURCE-OVERRIDE`, naming the unit, the recorded commit, and the commit used"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8549e5cb-c8c8-41ac-bea9-5cf6765ab316"
+type = "fix"
+description = "`nyl state delete --teardown` prints the warnings of the teardown it ran when the deletion completes, and of its units, such as `NYL-SOURCE-OVERRIDE` for a `--source` substitution or `NYL-UNIT-RELEASED` for an image left in a registry; they were only in the JSON report's `details.teardown`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
+author = "@NiklasRosenstein"

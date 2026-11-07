@@ -190,6 +190,14 @@ impl World {
         git(&self.bare(), &["gc", "--quiet", "--prune=now"]);
     }
 
+    /// A `ref: {set, to}` step: `reference` names the tip of `branch` in `project.git`.
+    pub fn set_ref(&self, reference: &str, branch: &str) {
+        git(
+            &self.bare(),
+            &["update-ref", reference, &format!("refs/heads/{branch}")],
+        );
+    }
+
     /// A `ref: {delete}` step: delete any ref in the state repository.
     /// A `file` step: a change made outside Nyl beneath `%SCENARIO_TMP%`,
     /// writing the file (and its parents) or removing it.

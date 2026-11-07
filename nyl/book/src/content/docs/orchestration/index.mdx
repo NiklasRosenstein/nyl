@@ -20,7 +20,8 @@ recovery with [`nyl recover`](/nyl/reference/cli/recover/),
 [`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), `nyl state
 delete`, runs over several environments, and approvals are available.
 Publication units may declare their target inline, observe Argo CD, and read observed values of the cluster; units can require attestations and
-observed values of other units. Preview environments follow in M5. The [roadmap](/nyl/orchestration/roadmap/)
+observed values of other units. Preview environments, with their expiry and shared catalog, and the
+[end-to-end example](/nyl/orchestration/end-to-end-example/) are available. Promotion paths follow in M6. The [roadmap](/nyl/orchestration/roadmap/)
 tracks the milestones.
 :::
 
@@ -54,6 +55,7 @@ whether it starts on a workstation or in CI.
     { title: 'Runs', text: 'How a run chooses its source commit, resolves references between units, decides what executes, and records the result.', href: '/orchestration/runs/' },
     { title: 'Recovery', text: 'How a run takes over from one that died, what an uncertain unit is, how to recover it, and how drift is repaired.', href: '/orchestration/recovery/' },
     { title: 'Deletion and holds', text: 'How units leave an environment, how they are torn down, and how a hold freezes one.', href: '/orchestration/deletion/' },
+    { title: 'End-to-end example', text: 'An image, an OpenTofu configuration, and a publication reconciled locally and in GitHub Actions, with a preview for every pull request.', href: '/orchestration/end-to-end-example/' },
     { title: 'Git storage', text: 'Every repository and ref orchestration reads and writes.', href: '/reference/git-storage/' },
   ]}
 />

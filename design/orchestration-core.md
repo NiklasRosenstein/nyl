@@ -648,7 +648,7 @@ spec:
   instance of an EnvironmentTemplate, whose inline targets must therefore
   template their names, for example from `environment.name`. M2 extended the
   check from targets sharing an explicit ArgoCDInstance to this rule; inline
-  targets and template instances join it with M5. Implementation status (M5):
+  targets and template instances join it with M5. As implemented:
   the inline targets of every environment's enabled publication units join
   the inventory of every compile that checks across targets, in `nyl validate`
   and in every publication render (`gitops::units::with_inline_targets`,
@@ -738,7 +738,7 @@ spec:
   `releases`, keyed by `<group>/<release>` and then by input, so the pointer to
   an input is `/releases/<group>~1<release>/<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
-  - Implementation status (M5): `releases` holds the bindings only
+  - As implemented: `releases` holds the bindings only
     orchestration can resolve: `fromUnit`, resolved through the shared
     reference resolver in both its `output` and `artifact` forms, and
     `fromPromotion` once PromotionPath selectors exist (M6). The driver passes
@@ -943,7 +943,7 @@ in two phases, both through Git:
    Unowned files in the prefix, such as state files committed by other tools,
    are preserved, as in every reconciliation.
 
-Implementation notes (M5, reading a reconciler): the driver observes through one
+Implementation notes (reading a reconciler): the driver observes through one
 seam that no reconciler's types cross. A
 `nyl_units::kubernetes_publication::reconciler::ReconcilerReader` is given the
 deployments and anchors a target expects (`nyl_render::gitops::observation`:
@@ -968,7 +968,7 @@ resolution follow the same split: the neutral part (`kind`, `publication`,
 `expected`, `anchors`) and the kind's location (for Argo CD `instance`,
 `namespace`, `cluster`, `context`, and `access`).
 
-Implementation status (M5): the `KubernetesPublication` driver
+As implemented: the `KubernetesPublication` driver
 (`nyl_units::kubernetes_publication`) carries out both phases through Git on
 the real publication path (the tree changes are in
 `nyl_render::gitops::publication`), records the phase 1 commit as the wait's
@@ -1104,7 +1104,7 @@ settings, as recorded in the unit's stored desired document, so `status`,
 `plan`, and a teardown agree without rendering. Resolution renders the target
 to compute the execution key; the driver reads the settings from that render
 (the catalog Application and workload Applications as Argo CD will see them,
-and the Namespaces the tree owns) and records them in the resolved spec under
+and the Namespaces the tree owns, with their `Prune` and `Delete` sync options) and records them in the resolved spec under
 `teardownSettings` through `KeyInputs.recorded`, so an authored
 `teardownSettings` is rejected. The driver reads them back through
 `Driver::teardown_readiness`, which evaluates them itself: the table below is
@@ -1119,7 +1119,7 @@ parent Application, so its catalog rows are `external: not checked`:
 | --- | --- | --- |
 | The catalog prunes removed workload Applications on its own | catalog `syncPolicy.automated` enabled with `prune: true` | Blocking: the Applications stay until someone syncs the catalog with pruning |
 | Deleting an Application deletes its workloads | `applicationDeletionPolicy` of the catalog Application and of every workload Application is `Foreground` or `Background`, not `Orphan` (a workload Application without a finalizer makes the recorded policy `Orphan`, because the catalog's own finalizer does not delete the workloads of an Application it prunes) | Blocking: workloads keep running without an Application |
-| Owned Namespaces do not stop deletion | namespace `deletePolicy` is `Automatic` or `Retain`; the default `Confirm` renders `Delete=confirm`, which holds the Application's finalizer until someone confirms | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
+| Owned Namespaces do not stop deletion | namespace `prunePolicy` and `deletePolicy` are `Automatic`, or `deletePolicy` is `Retain`; either one left at the default `Confirm` renders `Prune=confirm` or `Delete=confirm`, and Argo CD holds the Application's finalizer while a resource it would delete carries either, until someone confirms. `Delete=false` keeps the Namespace, so nothing is confirmed; `Prune=false` only affects syncs. Read from the rendered sync-options annotation, so templates and overrides count | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
 | Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain |
 | The catalog Application and AppProjects are removed | the target's catalog is owned by a parent (see Catalog ownership below) | Remnant: a self-managing catalog Application and its AppProjects remain after phase 2 |
 
@@ -1554,10 +1554,12 @@ nyl get environments                                         # declared environm
   `nyl state delete --teardown` accept `--source` to take the units' source
   files from another revision, typically the protected branch right after the
   pull request was squash-merged. Teardown uses the stored resolved specs, so
-  only the source files come from that revision. When they differ from the
-  recorded source, Nyl warns and records the substitution in the transition
-  commit; it never refuses, so a lost commit cannot lock anyone out of
-  removing an instance.
+  only the source files come from that revision, including those of a source
+  field the stored spec pinned to the recorded commit without an explicit
+  `revision` or `commit` lock; explicit locks and other repositories stay as
+  declared. When they differ from the recorded source, Nyl warns and records
+  the substitution in the transition commit; it never refuses, so a lost
+  commit cannot lock anyone out of removing an instance.
 - An instance's units read shared infrastructure from declared environments
   with a cross-environment reference, such as
   `fromUnit: {environment: dev, unit: network, output: vpcId}`, under the
@@ -1566,7 +1568,7 @@ nyl get environments                                         # declared environm
 - Instances cannot be a PromotionPath source; previews build and test, and
   promotion starts from declared environments.
 
-Implementation status (M5): a template's `values`, `source`, and
+As implemented: a template's `values`, `source`, and
 `protectedRefs` strings render with `params` and `environment.name` when an
 instance is loaded, so a `values.target` object carries concrete prefixes and
 names into a unit's `target: {{ values.target | tojson }}`. `deletionPolicy`,
@@ -1576,8 +1578,8 @@ sliding expiry and the removal of expired instances, `--renew`, `--no-extend`,
 move --template` are implemented, and so are `catalogApplication.shared`
 (its manifest, its `catalog:<name>` owner, and `nyl build -- --shared-catalog`)
 and cross-environment references from instances to declared environments, with
-the protection of their producers; the preview reference scenario
-(`reference/preview`) runs them.
+the protection of their producers; the preview reference scenarios
+(`reference/preview-closed` and `reference/preview`) run them in both tiers.
 
 ### Template changes
 

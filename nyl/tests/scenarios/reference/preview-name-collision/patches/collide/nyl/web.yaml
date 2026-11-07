@@ -1,0 +1,18 @@
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+# Block-style labels: a group whose spec is templated is selected by labels
+# read before it renders.
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  applicationNamespace: argocd
+  source: {path: ../applications/web}   # beside nyl/
+  # Names per target, so previews never collide with dev or each other.
+  applicationNameTemplate: '${ release.metadata.name }'
+  destinationNamespace: '{{ values.namespace | default("web") }}'
+  projectTemplate:
+    name: '{{ target.metadata.name }}-web'
+    destinations: [{server: '*', namespace: '{{ values.namespace | default("web") }}'}]
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}

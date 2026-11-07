@@ -499,8 +499,17 @@ fn check_unit(
     let temp_dir = directory.join(format!("tmp-{name}"));
     let (worktree, source_roots) = match std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", temp_dir.display()))
-        .and_then(|()| slots.checkout_unit(context.sources, job.slot, &commit, driver, spec, project_dir))
-    {
+        .and_then(|()| {
+            slots.checkout_unit(
+                context.sources,
+                job.slot,
+                &commit,
+                Some(revision),
+                driver,
+                spec,
+                project_dir,
+            )
+        }) {
         Ok(roots) => roots,
         Err(message) => return failed(message),
     };

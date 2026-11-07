@@ -206,6 +206,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 context.sources,
                 job.slot,
                 job.commit,
+                unit.source_revision.as_ref(),
                 driver,
                 unit.resolved_spec.as_ref().unwrap_or(&unit.spec),
                 shared.project_dir,

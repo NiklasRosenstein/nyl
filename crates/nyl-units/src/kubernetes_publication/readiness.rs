@@ -79,15 +79,36 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
             .map(|(namespace, _)| namespace.as_str())
             .collect::<Vec<_>>()
     };
-    let confirm = with_policy(&|policy| policy == "Confirm");
-    if !confirm.is_empty() {
+    // Argo CD's cascade deletion holds an Application while a resource it
+    // would delete carries `Delete=confirm` or `Prune=confirm`. `Delete=false`
+    // keeps the resource, so neither confirmation is consulted for it, and
+    // `Prune=false` only affects syncs, so the Namespace is still deleted.
+    let holding = settings
+        .namespace_delete_policies
+        .iter()
+        .filter_map(|(namespace, delete)| {
+            let prune = settings
+                .namespace_prune_policies
+                .get(namespace)
+                .map_or("Automatic", String::as_str);
+            let setting = if delete == "Confirm" {
+                "deletePolicy"
+            } else if delete != "Retain" && prune == "Confirm" {
+                "prunePolicy"
+            } else {
+                return None;
+            };
+            Some(format!("{namespace} ({setting}: Confirm)"))
+        })
+        .collect::<Vec<_>>();
+    if !holding.is_empty() {
         readiness.blocking.push(Finding::new(
             Code::TeardownNamespaceConfirm,
             format!(
-                "{subject}: Namespaces {} have deletePolicy: Confirm, which holds their Application and its workloads until the deletion is confirmed in Argo CD",
-                confirm.join(", ")
+                "{subject}: Namespaces {} require confirmation to delete, which holds their Application and its workloads until the deletion is confirmed in Argo CD",
+                holding.join(", ")
             ),
-            "set the Namespaces' deletePolicy to Automatic or Retain, or pass --allow-incomplete",
+            "set the Namespaces' prunePolicy and deletePolicy to Automatic (or deletePolicy to Retain, which keeps the Namespace), or pass --allow-incomplete",
         ));
     }
     let remaining = with_policy(&|policy| policy != "Automatic");
@@ -153,7 +174,16 @@ mod tests {
             catalog_prunes: Some(true),
             application_deletion_policy: Some("Foreground".to_owned()),
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Automatic".to_owned())]),
+            namespace_prune_policies: BTreeMap::from([("web".to_owned(), "Automatic".to_owned())]),
             catalog_owned_by_parent: true,
+        }
+    }
+
+    fn namespace_policies(delete: &str, prune: &str) -> TeardownSettings {
+        TeardownSettings {
+            namespace_delete_policies: BTreeMap::from([("web".to_owned(), delete.to_owned())]),
+            namespace_prune_policies: BTreeMap::from([("web".to_owned(), prune.to_owned())]),
+            ..ready_settings()
         }
     }
 
@@ -207,12 +237,14 @@ mod tests {
                 "applicationDeletionPolicy",
             ),
             (
-                TeardownSettings {
-                    namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
-                    ..ready_settings()
-                },
+                namespace_policies("Confirm", "Automatic"),
                 Code::TeardownNamespaceConfirm,
                 "deletePolicy",
+            ),
+            (
+                namespace_policies("Automatic", "Confirm"),
+                Code::TeardownNamespaceConfirm,
+                "prunePolicy",
             ),
         ];
         for (settings, code, setting) in cases {
@@ -226,6 +258,57 @@ mod tests {
             );
             assert!(readiness.blocking[0].message.starts_with("dev/kubernetes: "));
         }
+    }
+
+    /// Catches the stall found against Argo CD v3.5.7: its cascade deletion
+    /// holds an Application while a Namespace it would delete carries
+    /// `Prune=confirm` or `Delete=confirm`, so readiness must name whichever
+    /// holds, treat both Automatic as ready, and let `Delete=false` (Retain)
+    /// keep the Namespace without any confirmation being consulted.
+    #[test]
+    fn test_namespace_confirmation_blocks_by_prune_or_delete_policy() {
+        let blocked = |delete: &str, prune: &str| {
+            let readiness = evaluate(&env(), &name("kubernetes"), &namespace_policies(delete, prune));
+            (codes(&readiness.blocking), readiness)
+        };
+        let (codes_, readiness) = blocked("Automatic", "Confirm");
+        assert_eq!(codes_, vec![Code::TeardownNamespaceConfirm]);
+        let finding = &readiness.blocking[0];
+        assert!(
+            finding.message.contains("web (prunePolicy: Confirm)"),
+            "{}",
+            finding.message
+        );
+        assert!(!finding.message.contains("deletePolicy"), "{}", finding.message);
+        assert!(
+            finding.fix.contains("prunePolicy and deletePolicy to Automatic") && finding.fix.contains("Retain"),
+            "{}",
+            finding.fix
+        );
+
+        let (codes_, readiness) = blocked("Confirm", "Automatic");
+        assert_eq!(codes_, vec![Code::TeardownNamespaceConfirm]);
+        assert!(readiness.blocking[0].message.contains("web (deletePolicy: Confirm)"));
+
+        let (codes_, readiness) = blocked("Confirm", "Confirm");
+        assert_eq!(codes_, vec![Code::TeardownNamespaceConfirm]);
+        assert!(readiness.blocking[0].message.contains("web (deletePolicy: Confirm)"));
+
+        // Both Automatic: nothing holds the Application and the Namespace goes.
+        let (codes_, readiness) = blocked("Automatic", "Automatic");
+        assert!(codes_.is_empty() && readiness.remnants.is_empty());
+
+        // Retain (`Delete=false`) keeps the Namespace without a confirmation,
+        // whatever the prune policy: a remnant, not a blocker.
+        for prune in ["Automatic", "Confirm", "Retain"] {
+            let (codes_, readiness) = blocked("Retain", prune);
+            assert!(codes_.is_empty(), "prune {prune}: {codes_:?}");
+            assert_eq!(codes(&readiness.remnants), vec![Code::TeardownNamespacesRemain]);
+        }
+
+        // `Prune=false` only affects syncs: the Namespace is still deleted.
+        let (codes_, readiness) = blocked("Automatic", "Retain");
+        assert!(codes_.is_empty() && readiness.remnants.is_empty());
     }
 
     /// Catches remnants going unreported, or blocking a teardown that can complete.
@@ -264,6 +347,7 @@ mod tests {
             catalog_prunes: None,
             application_deletion_policy: None,
             namespace_delete_policies: BTreeMap::new(),
+            namespace_prune_policies: BTreeMap::new(),
             catalog_owned_by_parent: true,
         };
         let readiness = evaluate(&env(), &name("kubernetes"), &settings);

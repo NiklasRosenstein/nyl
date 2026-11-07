@@ -381,7 +381,15 @@ fn read(shared: &Shared<'_>, job: &Job<'_>) -> Result<ObservedValues, String> {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     let result = shared
         .slots
-        .checkout_unit(context.sources, job.slot, job.commit, driver, spec, shared.project_dir)
+        .checkout_unit(
+            context.sources,
+            job.slot,
+            job.commit,
+            unit.source_revision.as_ref(),
+            driver,
+            spec,
+            shared.project_dir,
+        )
         .and_then(|(worktree, source_roots)| {
             let (env, secrets) = execution_credentials(context, driver, &unit.spec)?;
             let now = context.base.clock.now();

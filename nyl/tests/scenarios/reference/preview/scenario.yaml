@@ -1,13 +1,13 @@
 # Reference scenario 3, preview expiry, with the YAML preview project: dev runs
 # first (scenario 1 up to step 6), two pull requests get instances (scenario 2
 # up to step 4), then time passes. Runs from M5 in tier 1, with the fake kinds
-# and with the real KubernetesPublication driver.
+# and with the real KubernetesPublication driver, and in tier 2 with every real
+# tool.
 #
 # `get environments <name>` exits 0 for an environment that exists and 1 for
 # one that does not, so it is how a step asks whether an instance is live.
 contract: design/reference-scenarios.md#scenario-3-preview-expiry
 milestone: M5
-tiers: [1]
 steps:
   # Scenario 1, steps 3 to 5: dev's network has a current receipt.
   - nyl: [state, init, -e, dev]
@@ -142,13 +142,15 @@ steps:
   - {nyl: [get, environments, pr-125], exit: 1}
 
   # Step 8: --renew keeps an expired instance, which runs at the commit
-  # `state init --template` recorded.
+  # `state init --template` recorded. Tier 1's clock moved with the removals'
+  # 2 minute waits; a tier 2 process keeps the time it was given, so both tiers
+  # are set to the same one.
+  - clock: {set: '2026-10-13T10:04:00Z'}
   - nyl: [reconcile, -e, pr-126, --renew]
     exit: 0
     expect:
       executed: [web-image, database, kubernetes]
-  # Renewed to T+26d from the clock, which the two removals' 2 minute waits
-  # (pr-123 and pr-125) moved 4 minutes past T+19d.
+  # Renewed to T+26d from the clock, 4 minutes past T+19d.
   - nyl: [get, environments, pr-126]
     exit: 0
     expect: {messages: ['2026-10-20T10:04:00Z']}

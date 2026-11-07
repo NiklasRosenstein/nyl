@@ -166,3 +166,4 @@ teardown request), `pending-teardown`, `tearing-down`, `failed`, or
 | `NYL-UNIT-HELD` | A held unit only recorded the teardown request. Lift the hold with `nyl resume`. |
 | `NYL-RUN-STOPPED` | `--fail-fast` stopped the teardown after a unit failed, became uncertain, or waited for an approval. |
 | `NYL-SOURCE-UNAVAILABLE` | The unit's recorded source commit cannot be fetched. Fetch it, or pass `--source <revision>`. |
+| `NYL-SOURCE-OVERRIDE` | A warning: `--source` took a unit's files from another revision than its recorded source commit. It names the unit, both commits, and the substitution is recorded in the transition commit. |
