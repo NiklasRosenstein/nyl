@@ -133,7 +133,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "d26c5793-ee2d-4c9c-826e-bdd8dc2aa653"
 type = "breaking change"
-description = "`nyl apply --target` uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
+description = "Every command that connects through a Cluster (`nyl apply --target`, `nyl diff --target`, `nyl release list`, `show`, `history`, `rollback`, and `delete` with `--target`, and `nyl capture cluster`) uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
 author = "@NiklasRosenstein"
 
 [[entries]]

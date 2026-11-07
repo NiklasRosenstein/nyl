@@ -40,7 +40,7 @@ for the behavior `render`, `diff`, and `apply` share.
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`. When the Cluster declares a `live.context`, it is used and the current context never is. Without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it; an in-cluster or by-name destination needs `--context`. The context's server must match the declared destination either way.
 
 ### Diff Options
 
