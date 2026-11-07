@@ -32,6 +32,14 @@ manifest and every target's catalog directory, and Nyl publishes its manifest
 under `_nyl/shared/previews/`. Every target on the revision must share it. See
 [One catalog for every instance](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance).
 
+## Reconciler
+
+By default Argo CD syncs the published tree. `reconciler: {direct: {}}` has Nyl
+apply the target's Releases to its Cluster itself, and the target then generates no
+catalog Application, AppProject, or Application. It is exclusive with `argocdRef`
+and `catalogApplication`. See
+[Apply directly without Argo CD](/nyl/kubernetes-gitops/workflow/direct-reconciler/).
+
 ## Release inputs
 
 `spec.releaseInputs` binds the typed inputs of the Releases the target renders,

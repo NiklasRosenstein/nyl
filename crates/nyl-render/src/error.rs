@@ -97,8 +97,32 @@ pub enum NylError {
     #[error("{0}")]
     OwnerFenced(String),
 
+    /// An apply was interrupted before it completed (Ctrl-C, or the unit's
+    /// deadline).
+    #[error("Interrupted")]
+    Interrupted(String),
+
+    /// A Kubernetes API failure whose kind callers act on: the message is what
+    /// every other Kubernetes error reads like, and `kind` says which it is, so
+    /// no caller matches on text. See [`NylError::kube_kind`].
+    #[error("{message}")]
+    KubernetesApi { kind: KubeErrorKind, message: String },
+
     #[error("{0}")]
     Other(String),
+}
+
+/// Which Kubernetes API failure a [`NylError::KubernetesApi`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KubeErrorKind {
+    /// HTTP 401: the credentials are invalid or have expired.
+    Unauthorized,
+    /// HTTP 403: the credentials may not do it.
+    Forbidden,
+    /// HTTP 422: the API or an admission webhook rejected the object itself.
+    Rejected,
+    /// The API did not answer: connection, timeout, transport.
+    Connection,
 }
 
 /// Result type alias for nyl operations
@@ -170,8 +194,19 @@ impl NylError {
     pub fn is_kubernetes_error(&self) -> bool {
         matches!(
             self,
-            NylError::Kubernetes(_) | NylError::Kubeconfig(_) | NylError::InferConfig(_)
+            NylError::Kubernetes(_)
+                | NylError::KubernetesApi { .. }
+                | NylError::Kubeconfig(_)
+                | NylError::InferConfig(_)
         )
+    }
+
+    /// The kind of a Kubernetes API failure that callers act on, if this is one.
+    pub fn kube_kind(&self) -> Option<KubeErrorKind> {
+        match self {
+            NylError::KubernetesApi { kind, .. } => Some(*kind),
+            _ => None,
+        }
     }
 
     /// Returns true if this error is related to Git operations
@@ -219,13 +254,23 @@ impl From<kube::Error> for NylError {
     fn from(err: kube::Error) -> Self {
         match &err {
             kube::Error::Api(api_err) => match api_err.code {
+                401 => NylError::KubernetesApi {
+                    kind: KubeErrorKind::Unauthorized,
+                    message: format!(
+                        "Unauthorized: {}\nHint: The credentials are invalid or have expired; log in again.",
+                        api_err.message
+                    ),
+                },
                 403 => {
                     // RBAC permission error
-                    NylError::Kubernetes(format!(
-                        "Permission denied: {}\nHint: Check RBAC permissions for your service account or user. \
-                         Ensure appropriate roles/bindings are in place.",
-                        api_err.message
-                    ))
+                    NylError::KubernetesApi {
+                        kind: KubeErrorKind::Forbidden,
+                        message: format!(
+                            "Permission denied: {}\nHint: Check RBAC permissions for your service account or user. \
+                             Ensure appropriate roles/bindings are in place.",
+                            api_err.message
+                        ),
+                    }
                 }
                 404 => {
                     // Resource not found (CRD might not exist)
@@ -237,19 +282,25 @@ impl From<kube::Error> for NylError {
                 }
                 422 => {
                     // Validation error (webhook or schema)
-                    NylError::Kubernetes(format!(
-                        "Validation failed: {}\nHint: Check webhook logs or resource schema. \
-                         The resource may violate admission controller policies or schema constraints.",
-                        api_err.message
-                    ))
+                    NylError::KubernetesApi {
+                        kind: KubeErrorKind::Rejected,
+                        message: format!(
+                            "Validation failed: {}\nHint: Check webhook logs or resource schema. \
+                             The resource may violate admission controller policies or schema constraints.",
+                            api_err.message
+                        ),
+                    }
                 }
                 _ => NylError::Kubernetes(format!("Kubernetes API error ({}): {}", api_err.code, api_err.message)),
             },
-            kube::Error::HyperError(_) | kube::Error::HttpError(_) => NylError::Kubernetes(format!(
-                "Connection error: {}\nHint: Check if the cluster is reachable and your kubeconfig is correct. \
+            kube::Error::HyperError(_) | kube::Error::HttpError(_) => NylError::KubernetesApi {
+                kind: KubeErrorKind::Connection,
+                message: format!(
+                    "Connection error: {}\nHint: Check if the cluster is reachable and your kubeconfig is correct. \
                      Verify network connectivity and cluster availability.",
-                err
-            )),
+                    err
+                ),
+            },
             _ => NylError::Kubernetes(format!("Kubernetes error: {}", err)),
         }
     }
@@ -258,6 +309,23 @@ impl From<kube::Error> for NylError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches callers having to match Kubernetes error text: the API failures
+    /// they act on carry a typed kind, and every other failure carries none.
+    #[test]
+    fn test_kubernetes_api_failures_carry_a_typed_kind() {
+        let api = |code: u16| {
+            NylError::from(kube::Error::Api(
+                kube::core::Status::failure("no", "Denied").with_code(code).boxed(),
+            ))
+        };
+        assert_eq!(api(401).kube_kind(), Some(KubeErrorKind::Unauthorized));
+        assert_eq!(api(403).kube_kind(), Some(KubeErrorKind::Forbidden));
+        assert_eq!(api(422).kube_kind(), Some(KubeErrorKind::Rejected));
+        assert_eq!(api(500).kube_kind(), None);
+        assert!(api(403).is_kubernetes_error());
+        assert!(api(403).to_string().starts_with("Permission denied"));
+    }
 
     #[test]
     fn test_error_constructor_methods() {

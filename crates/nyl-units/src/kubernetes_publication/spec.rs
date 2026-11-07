@@ -190,11 +190,14 @@ pub(crate) fn validate_observe(spec: &serde_json::Map<String, Value>) -> Result<
     if let Some(observe) = spec.get("observe") {
         let options = observe
             .as_object()
-            .ok_or_else(|| "spec.observe must be a mapping, written `observe: {}`: it has no options yet".to_owned())?;
-        if let Some(key) = options.keys().next() {
+            .ok_or_else(|| "spec.observe must be a mapping, written `observe: {}`".to_owned())?;
+        if let Some(key) = options.keys().find(|key| key.as_str() != "waitHealthy") {
             return Err(format!(
-                "spec.observe has unknown field {key:?}; it takes no options yet, write `observe: {{}}`"
+                "spec.observe has unknown field {key:?}; it has waitHealthy, or write `observe: {{}}`"
             ));
+        }
+        if let Some(wait) = options.get("waitHealthy") {
+            validate_wait_healthy(wait)?;
         }
     }
     if let Some(wait) = spec.get("teardownWait") {
@@ -208,6 +211,31 @@ pub(crate) fn validate_observe(spec: &serde_json::Map<String, Value>) -> Result<
         }
     }
     Ok(())
+}
+
+/// `observe.waitHealthy`: `{timeout: <duration>}`, how long a reconcile polls
+/// the reconciler until the target is healthy, such as `5m`.
+fn validate_wait_healthy(value: &Value) -> Result<(), String> {
+    let wait = value
+        .as_object()
+        .ok_or_else(|| "spec.observe.waitHealthy must be a mapping, written `waitHealthy: {timeout: 5m}`".to_owned())?;
+    if let Some(key) = wait.keys().find(|key| key.as_str() != "timeout") {
+        return Err(format!(
+            "spec.observe.waitHealthy has unknown field {key:?}; it has timeout"
+        ));
+    }
+    match wait.get("timeout") {
+        Some(Value::String(timeout)) => {
+            let timeout = timeout
+                .parse::<Duration>()
+                .map_err(|error| format!("spec.observe.waitHealthy.timeout: {error}"))?;
+            if timeout.as_secs() == 0 {
+                return Err("spec.observe.waitHealthy.timeout must be longer than zero, such as 5m".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err("spec.observe.waitHealthy.timeout is required, such as 5m".to_owned()),
+    }
 }
 
 /// How a unit's teardown waits after phase 1, from its stored spec: the
@@ -291,6 +319,19 @@ mod tests {
     fn test_validate_rejects_unknown_and_driver_owned_fields() {
         assert!(invalid(&json!({"target": "dev", "teardownwait": {}})).contains("unknown field \"teardownwait\""));
         assert!(invalid(&json!({"target": "dev", "teardownSettings": {}})).contains("must not be written by hand"));
+    }
+
+    /// Catches a wait for health accepted with no timeout, a zero or malformed
+    /// one, or an option the unit does not have.
+    #[test]
+    fn test_validate_checks_the_wait_for_health() {
+        let spec = |wait: Value| json!({"target": "dev", "observe": {"waitHealthy": wait}});
+        assert!(validate(&spec(json!({"timeout": "5m"}))).is_ok());
+        assert!(invalid(&spec(json!({}))).contains("timeout is required"));
+        assert!(invalid(&spec(json!({"timeout": "0s"}))).contains("longer than zero"));
+        assert!(invalid(&spec(json!({"timeout": "soon"}))).contains("waitHealthy.timeout"));
+        assert!(invalid(&spec(json!({"timeout": "5m", "interval": "1s"}))).contains("unknown field \"interval\""));
+        assert!(invalid(&json!({"target": "dev", "observe": {"wait": {}}})).contains("unknown field \"wait\""));
     }
 
     #[test]

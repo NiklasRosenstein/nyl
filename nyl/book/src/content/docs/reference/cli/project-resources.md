@@ -112,7 +112,7 @@ nyl capture cluster primary --context admin@primary
 nyl capture cluster primary --check
 ```
 
-The explicit context wins over `Cluster.spec.live.context`. The update changes
+The explicit context wins over `Cluster.spec.live.context`, which is used and the current context never is once the Cluster declares one; without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it. The update changes
 only the selected Cluster document and preserves the rest of a shared YAML
 file. `--check` reports drift without writing.
 

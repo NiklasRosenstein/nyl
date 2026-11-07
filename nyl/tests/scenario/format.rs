@@ -54,13 +54,16 @@ pub struct Scenario {
 /// Which `KubernetesPublication` drivers tier 1 runs a scenario with: the
 /// test kind that stands in for it and the built-in driver, or the built-in
 /// driver only, for a scenario that depends on what that driver derives from
-/// its render, which the test kind states in its declaration instead.
+/// its render, which the test kind states in its declaration instead, or the
+/// test kind only, for a scenario that scripts the publication's reconcile
+/// outcome, which the built-in driver, running for real, cannot be made to give.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PublicationDrivers {
     #[default]
     Both,
     Real,
+    Fake,
 }
 
 fn default_tiers() -> Vec<u8> {

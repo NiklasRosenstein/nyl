@@ -58,11 +58,13 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Recei
 use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor, TeardownSettings};
 use serde_json::{json, Value};
 
+use super::direct::ClusterAccess;
 use super::observe::{self, RECONCILER};
 use super::observed_values::{self, ClusterReader, LiveReader};
-use super::readiness::evaluate;
+use super::readiness::{evaluate, evaluate_direct};
+use super::run::publish_via;
 use super::spec::{OBSERVATION_SOURCES, WORKLOAD};
-use super::{build, plan, publish, render, resolution_inputs, teardown, teardown_wait, unit_owner, unit_target, KIND};
+use super::{build, plan, render, resolution_inputs, teardown, teardown_wait, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
 
 use super::reconciler::evaluate::{ACCEPTED, HEALTHY};
@@ -76,6 +78,8 @@ pub struct KubernetesPublicationDriver {
     resource_catalogue: nyl_render::config::ResourceCatalogue,
     /// How observed values are read from the live system.
     live: Arc<dyn LiveReader>,
+    /// How a direct target's cluster is reached.
+    cluster: ClusterAccess,
 }
 
 impl KubernetesPublicationDriver {
@@ -86,7 +90,16 @@ impl KubernetesPublicationDriver {
         Self {
             resource_catalogue,
             live: Arc::new(ClusterReader),
+            cluster: ClusterAccess::Live,
         }
+    }
+
+    /// The same driver reaching a direct target's cluster through `access`,
+    /// such as a fixed mock client for tests that run no cluster.
+    #[must_use]
+    pub fn with_cluster_access(mut self, access: ClusterAccess) -> Self {
+        self.cluster = access;
+        self
     }
 
     /// The same driver reading observed values through `live`, such as a
@@ -167,7 +180,18 @@ impl Driver for KubernetesPublicationDriver {
                 },
                 "observe": {
                     "type": "object",
-                    "description": "Opts the unit into observing the reconciler of its target (Argo CD): `nyl attest` reads it and attests `accepted` and `healthy`, the `observe` teardownWait strategy becomes available and its default. Written `observe: {}`; it takes no options yet. Which reconciler it reads follows the target.",
+                    "description": "Opts the unit into observing the reconciler of its target (Argo CD, or Nyl's direct reconciler): `nyl attest` reads it and attests `accepted` and `healthy`, the `observe` teardownWait strategy becomes available and its default. Written `observe: {}`. Which reconciler it reads follows the target. `waitHealthy` makes a reconcile wait for health.",
+                    "properties": {
+                        "waitHealthy": {
+                            "type": "object",
+                            "description": "After the publish (and, for a direct target, the apply), reconcile polls the reconciler with backoff until `healthy` passes, then records the `accepted` and `healthy` attestations `nyl attest` would. On the timeout the unit fails, retryable, with NYL-KUBERNETES-HEALTH-TIMEOUT naming the worst deployment and its last health; a health that cannot recover, such as a rollout past its progress deadline, fails at once with NYL-KUBERNETES-HEALTH-DEGRADED. Without it, reconcile does not wait.",
+                            "required": ["timeout"],
+                            "properties": {
+                                "timeout": {"type": "string", "description": "How long to wait, such as 5m; never longer than the unit's own timeout."}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
                     "additionalProperties": false
                 },
                 "teardownWait": {
@@ -266,7 +290,20 @@ impl Driver for KubernetesPublicationDriver {
             inputs.recorded.insert(SHARED_CATALOG_READING.to_owned(), reading);
             inputs.excluded_fields.push(SHARED_CATALOG_READING.to_owned());
         }
-        if observe::observes(spec) {
+        // A direct unit always records where it is applied and read: its
+        // teardown follows the recorded reconciler, never the declaration as it
+        // reads later, whether or not the unit observes.
+        let direct = matches!(rendered.delivery, nyl_render::gitops::observation::Delivery::Direct(_));
+        if let nyl_render::gitops::observation::Delivery::Direct(location) = &rendered.delivery {
+            if location.context.is_none() {
+                return Err(DriverError::before_effects(format!(
+                    "NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING: Cluster {} declares no spec.live.context, which a direct target \
+                     is applied and read through (Nyl never uses the current context); declare it on the Cluster",
+                    location.cluster
+                )));
+            }
+        }
+        if observe::observes(spec) || direct {
             let (facts, unkeyed) = observe::recorded(&rendered)?;
             inputs.recorded.insert(RECONCILER.to_owned(), facts);
             // How the reconciler is read (the declared access, the
@@ -294,7 +331,7 @@ impl Driver for KubernetesPublicationDriver {
     }
 
     fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        publish(&self.resource_catalogue, ctx, unit, json!({})).map(Supported::Supported)
+        publish_via(&self.resource_catalogue, ctx, unit, json!({}), &self.cluster).map(Supported::Supported)
     }
 
     fn detect_drift(
@@ -371,7 +408,7 @@ impl Driver for KubernetesPublicationDriver {
         unit: &DesiredUnit,
         _receipt: &Receipt,
     ) -> DriverResult<Supported<AttestationCheck>> {
-        observe::attest(ctx, unit).map(Supported::Supported)
+        observe::attest(ctx, unit, &self.cluster).map(Supported::Supported)
     }
 
     fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
@@ -386,7 +423,7 @@ impl Driver for KubernetesPublicationDriver {
     /// The workload deployments the reconciler still reports, for the
     /// `observe` teardown wait.
     fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
-        Ok(Supported::Supported(observe::observe_removal(ctx, unit)))
+        Ok(Supported::Supported(observe::observe_removal(ctx, unit, &self.cluster)))
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
@@ -394,7 +431,7 @@ impl Driver for KubernetesPublicationDriver {
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        teardown(&self.resource_catalogue, ctx, unit).map(Supported::Supported)
+        teardown(&self.resource_catalogue, ctx, unit, &self.cluster).map(Supported::Supported)
     }
 
     /// The readiness of a teardown, evaluated from the `teardownSettings`
@@ -413,7 +450,9 @@ impl Driver for KubernetesPublicationDriver {
             Some(settings) => {
                 let settings: TeardownSettings = serde_json::from_value(settings.clone())
                     .map_err(|error| DriverError::before_effects(format!("spec.teardownSettings: {error}")))?;
-                Ok(Supported::Supported(evaluate(
+                let direct = spec.pointer("/reconciler/kind").and_then(Value::as_str) == Some("direct");
+                let rows = if direct { evaluate_direct } else { evaluate };
+                Ok(Supported::Supported(rows(
                     &unit.unit.environment,
                     &unit.unit.name,
                     &settings,

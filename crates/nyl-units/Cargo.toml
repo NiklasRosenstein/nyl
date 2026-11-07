@@ -45,6 +45,8 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# A client that behaves like an API server where the mock is lenient, in tests.
+async-trait = { workspace = true }
 # File URLs for the test publication repository on every platform.
 url = { workspace = true }
 

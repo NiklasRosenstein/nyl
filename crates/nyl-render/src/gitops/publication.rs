@@ -155,10 +155,11 @@ pub struct RenderedTarget {
     /// The target Cluster's recorded Kubernetes capabilities, which the
     /// cleanup-scope check uses to resolve resource scope.
     pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
-    /// The target's Argo CD instance and how Nyl reads it. Declaration only:
-    /// it enters no rendered byte, and a driver that observes records it at
-    /// resolution ([`super::observation::ReconcilerFacts`]).
-    pub argocd: super::observation::ArgoCdLocation,
+    /// How the target is delivered: its Argo CD instance and how Nyl reads
+    /// it, or the Cluster Nyl applies it to. Declaration only: it enters no
+    /// rendered byte, and a driver that observes records it at resolution
+    /// ([`super::observation::ReconcilerFacts`]).
+    pub delivery: super::observation::Delivery,
     /// The target's workload Cluster, where its rendered resources live, and
     /// that Cluster's local context. Declaration only, like `argocd`: it
     /// enters no rendered byte, and a driver that reads resources from the
@@ -313,7 +314,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         reconcile: compiled.reconcile_options(false),
         publication_base: compiled.publication_base.clone(),
         cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
-        argocd: super::tree::argocd_location(&inventory, &compiled.target)?,
+        delivery: super::tree::delivery_of(&inventory, &compiled.target)?,
         workload: super::tree::workload_cluster(&inventory, &compiled.target)?,
         shared_catalog: None,
     };
@@ -416,6 +417,9 @@ pub fn target_render_index(
         source_dirty,
         inputs.clone(),
     );
+    if compiled.target.is_direct() {
+        index.reconciler = Some("direct".to_owned());
+    }
     if let Some(snapshot) = &compiled.publication_snapshot {
         index.version = super::reconcile::COMPILED_RENDER_INDEX_VERSION;
         index.compilation = Some(super::tree::partial::stamp_snapshot(
@@ -856,6 +860,12 @@ pub fn project_auth(project_dir: &Path, variable: &dyn Fn(&str) -> Option<String
     project_git_auth(&load_project_file(project_dir)?, variable)
 }
 
+/// The project's `[release] history_limit` (0 keeps every revision), which a
+/// direct apply honors as `nyl apply` does.
+pub fn release_history_limit(project_dir: &Path) -> Result<u32> {
+    Ok(load_project_file(project_dir)?.release.history_limit)
+}
+
 /// The project's `nyl.toml` in `project_dir`, or the defaults without one.
 fn load_project_file(project_dir: &Path) -> Result<ProjectFile> {
     let file = project_dir.join("nyl.toml");
@@ -1203,6 +1213,37 @@ pub fn without_workload_applications(rendered: &RenderedTarget) -> Result<Render
     Ok(phase1)
 }
 
+/// The publication destination of `target`, as a release revision records it
+/// and a rendered tree names it (`PublicationDestination`): the sanitized
+/// repository URL, the branch, and the path prefix.
+pub fn release_publication(
+    inventory: &GitOpsInventory,
+    target: &crate::resources::DeploymentTarget,
+) -> Result<crate::kubernetes::ReleasePublication> {
+    let (_, repository, _) = super::tree::resolve_git_publication(inventory, &target.spec.publication)?;
+    let revision = &target.spec.publication.revision;
+    Ok(crate::kubernetes::ReleasePublication {
+        repository: nyl_git::sanitize_url(&repository.repo_url),
+        branch: revision.strip_prefix("refs/heads/").unwrap_or(revision).to_owned(),
+        path_prefix: target.publication_path_prefix().to_owned(),
+        commit: None,
+    })
+}
+
+/// Phase 1 of a direct target's teardown: `rendered` without its Release
+/// directories. Only `_nyl/index.json` stays, so the tree still names its
+/// owner and the fence holds while the cluster is emptied; publishing it first
+/// keeps Git from ever lagging the cluster.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#teardown), phase 1.
+pub fn without_workloads(rendered: &RenderedTarget) -> RenderedTarget {
+    let mut phase1 = rendered.clone();
+    phase1
+        .files
+        .retain(|path, _| path.as_path() == Path::new(DEFAULT_INDEX_PATH));
+    phase1
+}
+
 /// A target's settings that decide whether its teardown can complete, read
 /// from the rendered tree ([`teardown_settings`]). A publication driver
 /// records them in the unit's resolved spec, a persisted format whose
@@ -1223,6 +1264,8 @@ pub struct TeardownSettings {
     /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
     pub namespace_delete_policies: BTreeMap<String, String>,
     /// Each owned Namespace's `prunePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
+    /// Absent in a document recorded before it existed.
+    #[serde(default)]
     pub namespace_prune_policies: BTreeMap<String, String>,
     /// Whether a parent owns the target's catalog, so phase 2 removes the
     /// catalog Application and AppProjects too.
@@ -2740,6 +2783,17 @@ spec:
         });
         assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
         assert_eq!(serde_json::from_value::<TeardownSettings>(stored).unwrap(), settings);
+        // A document recorded before the prune policies existed still reads.
+        let older = serde_json::json!({
+            "catalogPrunes": true,
+            "applicationDeletionPolicy": "Foreground",
+            "namespaceDeletePolicies": {"web": "Confirm"},
+            "catalogOwnedByParent": false,
+        });
+        assert!(serde_json::from_value::<TeardownSettings>(older)
+            .unwrap()
+            .namespace_prune_policies
+            .is_empty());
         // A catalog a parent owns records the settings Nyl cannot see as null.
         let external = serde_json::json!({
             "catalogPrunes": null,

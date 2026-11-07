@@ -60,6 +60,46 @@ pub struct ArgoCdLocation {
     pub access: ArgoCDAccess,
 }
 
+/// Where a direct target's Releases are applied and how Nyl reads them: the
+/// workload Cluster, its declared local context, and the server its
+/// destination declares.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectLocation {
+    /// The workload Cluster's name.
+    pub cluster: String,
+    /// The Cluster's declared local kubeconfig context (`spec.live.context`), if any.
+    pub context: Option<String>,
+    /// The Cluster's declared destination server when a context can be
+    /// verified against it (a concrete URL, not the in-cluster address and not
+    /// a destination by name). A connection whose server equals it proves the
+    /// cluster itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+}
+
+/// How a target is delivered, as the render knows it: the declaration the
+/// compile resolved, which enters no rendered byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// Argo CD syncs the published tree.
+    ArgoCd(ArgoCdLocation),
+    /// Nyl applies the Releases itself.
+    Direct(DirectLocation),
+}
+
+impl Delivery {
+    /// The reconciler's recorded kind: `argocd` or `direct`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ArgoCd(_) => "argocd",
+            Self::Direct(_) => "direct",
+        }
+    }
+}
+
 /// The reconciler that runs a target and where Nyl reads it. The tag is the
 /// recorded `kind`; a new reconciler kind is a new variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +107,8 @@ pub struct ArgoCdLocation {
 pub enum ReconcilerLocation {
     #[serde(rename = "argocd")]
     ArgoCd(ArgoCdLocation),
+    #[serde(rename = "direct")]
+    Direct(DirectLocation),
 }
 
 impl ReconcilerLocation {
@@ -77,6 +119,7 @@ impl ReconcilerLocation {
     pub fn unkeyed(&self) -> &'static [&'static str] {
         match self {
             Self::ArgoCd(_) => &["/access", "/context"],
+            Self::Direct(_) => &["/context"],
         }
     }
 
@@ -92,6 +135,10 @@ impl ReconcilerLocation {
                     ArgoCDAccessMethod::Kubernetes => "kubernetes",
                     ArgoCDAccessMethod::Api => "api",
                 },
+            }),
+            Self::Direct(location) => serde_json::json!({
+                "kind": "direct",
+                "cluster": location.cluster,
             }),
         }
     }
@@ -294,24 +341,153 @@ impl ReconcilerFacts {
             path_prefix,
             ..
         } = &rendered.destination;
-        let applications = generated_applications(rendered)?;
-        let location = &rendered.argocd;
-        Ok(Self {
-            location: ReconcilerLocation::ArgoCd(location.clone()),
-            expected: Expected {
-                publication: ObservedPublication {
-                    url: push_url.clone(),
-                    branch: branch.clone(),
-                    path_prefix: path_prefix.clone(),
-                },
-                deployments: applications
+        let publication = ObservedPublication {
+            url: push_url.clone(),
+            branch: branch.clone(),
+            path_prefix: path_prefix.clone(),
+        };
+        match &rendered.delivery {
+            Delivery::ArgoCd(location) => {
+                let applications = generated_applications(rendered)?;
+                Ok(Self {
+                    location: ReconcilerLocation::ArgoCd(location.clone()),
+                    expected: Expected {
+                        publication,
+                        deployments: applications
+                            .iter()
+                            .map(|application| application.expected(&location.namespace))
+                            .collect(),
+                        anchors: argocd_anchors(&applications, &location.namespace),
+                    },
+                })
+            }
+            Delivery::Direct(location) => {
+                let deployments = direct_deployments(rendered)?
                     .iter()
-                    .map(|application| application.expected(&location.namespace))
-                    .collect(),
-                anchors: argocd_anchors(&applications, &location.namespace),
-            },
-        })
+                    .map(|release| release.expected(&rendered.destination))
+                    .collect::<Vec<_>>();
+                let anchors = if deployments.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Anchor {
+                        id: DIRECT_ANCHOR.to_owned(),
+                        locator: Value::Null,
+                    }]
+                };
+                Ok(Self {
+                    location: ReconcilerLocation::Direct(location.clone()),
+                    expected: Expected {
+                        publication,
+                        deployments,
+                        anchors,
+                    },
+                })
+            }
+        }
     }
+}
+
+/// The id of the one anchor of a direct target: the release state of its
+/// Releases in the cluster.
+pub const DIRECT_ANCHOR: &str = "release-state";
+
+/// How the direct reader names an expected deployment: the Release's name and
+/// namespace, which key its release state, and the namespace its resources
+/// without one belong to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectRelease {
+    pub name: String,
+    pub namespace: String,
+    pub destination_namespace: String,
+}
+
+/// One Release of a rendered direct target, as the compilation record of its
+/// ownership index holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedDirectRelease {
+    /// `<group>/<release>`.
+    pub key: String,
+    pub group: String,
+    pub release: DirectRelease,
+    /// The Release's directory below the publication prefix.
+    pub directory: String,
+}
+
+impl PublishedDirectRelease {
+    /// The Release's state identity in the cluster: its namespace and name.
+    pub fn identity(&self) -> (&str, &str) {
+        (&self.release.namespace, &self.release.name)
+    }
+
+    /// The directory from the repository root.
+    pub fn path(&self, destination: &PublicationDestination) -> String {
+        join_repository_path(&destination.path_prefix, &self.directory)
+    }
+
+    /// This Release as an expected deployment.
+    pub fn expected(&self, destination: &PublicationDestination) -> ExpectedDeployment {
+        let path = self.path(destination);
+        ExpectedDeployment {
+            id: self.key.clone(),
+            display: format!("{}/{}", self.release.namespace, self.release.name),
+            role: DeploymentRole::Workload,
+            path: path.clone(),
+            release: Some(self.key.clone()),
+            source: Source {
+                repository: destination.repository.clone(),
+                path,
+                options: Value::Null,
+            },
+            locator: serde_json::to_value(&self.release).expect("a locator serializes"),
+        }
+    }
+}
+
+fn join_repository_path(prefix: &str, directory: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() {
+        directory.to_owned()
+    } else {
+        format!("{prefix}/{directory}")
+    }
+}
+
+/// The Releases an ownership index's compilation record lists, by
+/// `<group>/<release>`; empty without a record. The record is what a
+/// publication wrote, so this reads the Releases of a direct tree as well as
+/// the Releases a previous publication held.
+pub fn direct_releases_of(compilation: Option<&Value>) -> Vec<PublishedDirectRelease> {
+    compilation
+        .and_then(|compilation| compilation.get("releases"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, release)| {
+            let text = |pointer: &str| release.pointer(pointer).and_then(Value::as_str).map(str::to_owned);
+            Some(PublishedDirectRelease {
+                key: key.clone(),
+                group: text("/workload/group/metadata/name")?,
+                release: DirectRelease {
+                    name: text("/workload/release/metadata/name")?,
+                    namespace: text("/workload/release/metadata/namespace")?,
+                    destination_namespace: text("/workload/destination_namespace")?,
+                },
+                directory: text("/workload/release_directory")?.replace('\\', "/"),
+            })
+        })
+        .collect()
+}
+
+/// The Releases of a rendered direct target, ordered by key.
+pub fn direct_deployments(rendered: &RenderedTarget) -> Result<Vec<PublishedDirectRelease>> {
+    let Some(bytes) = rendered.files.get(Path::new(DEFAULT_INDEX_PATH)) else {
+        return Ok(Vec::new());
+    };
+    let index = parse_index(bytes, DEFAULT_INDEX_PATH)?;
+    let mut releases = direct_releases_of(index.compilation.as_ref());
+    releases.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(releases)
 }
 
 /// How Argo CD names an expected deployment: the Application's namespace,
@@ -650,6 +826,49 @@ fn owning_application_in(
     Ok(None)
 }
 
+/// The Release of a rendered direct target whose directory renders
+/// `resource`, `None` when the target renders no such resource: the check that
+/// keeps a driver from reading anything the declaration does not own. A
+/// manifest without `metadata.namespace` belongs to the Release's destination
+/// namespace, where `nyl apply` puts it.
+pub fn owning_direct_release(
+    rendered: &RenderedTarget,
+    resource: &ResourceRef,
+) -> Result<Option<PublishedDirectRelease>> {
+    for release in direct_deployments(rendered)? {
+        for (path, bytes) in &rendered.files {
+            let manifests = path.starts_with(&release.directory)
+                && matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("yaml" | "yml" | "json")
+                );
+            if !manifests {
+                continue;
+            }
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| NylError::config(format!("rendered file {} is not UTF-8", path.display())))?;
+            for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+                let text = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str);
+                if text("/apiVersion") != Some(resource.api_version.as_str())
+                    || text("/kind") != Some(resource.kind.as_str())
+                    || text("/metadata/name") != Some(resource.name.as_str())
+                {
+                    continue;
+                }
+                let namespace = match (text("/metadata/namespace"), &resource.namespace) {
+                    (Some(namespace), _) => Some(namespace),
+                    (None, Some(_)) => Some(release.release.destination_namespace.as_str()),
+                    (None, None) => None,
+                };
+                if namespace == resource.namespace.as_deref() {
+                    return Ok(Some(release));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// `<group>/<release>` by generated Application name, from the ownership
 /// index's compilation record; empty for an index without one.
 fn release_applications(rendered: &RenderedTarget) -> Result<BTreeMap<String, String>> {
@@ -826,6 +1045,70 @@ impl GitPublicationHistory {
             ))
         })?;
         Ok(Self::over(repository, &publication.path_prefix, Some(scratch)))
+    }
+
+    /// The Releases that every ownership index along the first-parent history of
+    /// the fetched branch holds, from its head back to the publication that was
+    /// current at `receipt` (the commit of the last complete execution's
+    /// `PublishedTree`), at most `limit` publications. Without a receipt, nothing
+    /// bounds the walk but `limit`: no execution of the unit completed, so every
+    /// publication on the branch may be its own. A history that holds more
+    /// publications than `limit` before reaching the receipt's, or than `limit` with no
+    /// receipt to reach, is an error (`NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP`), never a guess. Direct
+    /// targets use it to find the Releases that left the tree.
+    pub fn direct_releases_since(&self, receipt: Option<&str>, limit: usize) -> Result<Vec<PublishedDirectRelease>> {
+        let Some(head) = self.head()? else {
+            return Ok(Vec::new());
+        };
+        let (publications, truncated) = self.publication_commits(&head, limit)?;
+        let stop = match receipt {
+            Some(receipt) => self.publication_commits(receipt, 1)?.0.into_iter().next(),
+            None => None,
+        };
+        let mut releases = BTreeMap::new();
+        let mut reached = false;
+        for commit in &publications {
+            let Some(commit) = self.commit(commit)? else {
+                continue;
+            };
+            if let Some(blob) = self.index_blob(&commit)? {
+                let blob = git(self.repository.find_blob(blob))?;
+                let index = parse_index(blob.content(), DEFAULT_INDEX_PATH)?;
+                for release in direct_releases_of(index.compilation.as_ref()) {
+                    releases
+                        .entry((release.release.namespace.clone(), release.release.name.clone()))
+                        .or_insert(release);
+                }
+            }
+            if Some(commit.id().to_string()) == stop {
+                reached = true;
+                break;
+            }
+        }
+        if !reached && truncated {
+            // Fails closed in every case where the walk could not reach what bounds it: a
+            // receipt too far back, a receipt the branch no longer holds, or none at all.
+            let since = if stop.is_some() {
+                "since the last receipt's"
+            } else {
+                "and the last receipt's cannot be found, or there is none, so the walk has no start in the branch's"
+            };
+            return Err(NylError::config(format!(
+                "NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP: the publication branch holds more than {limit} publications \
+                 {since}, so the Releases that left the tree cannot be told; publish fewer commits between executions, or \
+                 release the leftovers by hand with `nyl release delete --target <target> --take-over`"
+            )));
+        }
+        Ok(releases.into_values().collect())
+    }
+
+    /// The commit the fetched branch points at, `None` for an empty history.
+    pub fn head(&self) -> Result<Option<String>> {
+        match self.repository.find_reference("refs/nyl/observed") {
+            Ok(reference) => Ok(reference.target().map(|oid| oid.to_string())),
+            Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(error) => Err(crate::git::GitError::from(error).into()),
+        }
     }
 
     /// Read `repository`, which already holds the history, beneath `path_prefix`.
@@ -1396,6 +1679,157 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<ReconcilerFacts>(value).unwrap(), facts);
+    }
+
+    /// Pins the direct location's recorded format and which of its fields never
+    /// key the unit: the context says only how the cluster is read, while the
+    /// server, the Release identities, and the anchor are what the render derives.
+    #[test]
+    fn test_direct_facts_serialize_with_camel_case_keys_and_leave_the_context_unkeyed() {
+        let location = DirectLocation {
+            cluster: "dev".to_owned(),
+            context: Some("kind".to_owned()),
+            server: Some("https://127.0.0.1:6443".to_owned()),
+        };
+        let release = PublishedDirectRelease {
+            key: "web/web".to_owned(),
+            group: "web".to_owned(),
+            release: DirectRelease {
+                name: "web".to_owned(),
+                namespace: "web".to_owned(),
+                destination_namespace: "app".to_owned(),
+            },
+            directory: "web/web".to_owned(),
+        };
+        let destination = PublicationDestination {
+            repository: "https://example.invalid/deploy.git".to_owned(),
+            push_url: "https://example.invalid/deploy.git".to_owned(),
+            branch: "deploy".to_owned(),
+            path_prefix: "dev".to_owned(),
+        };
+        let facts = ReconcilerFacts {
+            location: ReconcilerLocation::Direct(location),
+            expected: Expected {
+                publication: ObservedPublication {
+                    url: destination.push_url.clone(),
+                    branch: "deploy".to_owned(),
+                    path_prefix: "dev".to_owned(),
+                },
+                deployments: vec![release.expected(&destination)],
+                anchors: vec![Anchor {
+                    id: DIRECT_ANCHOR.to_owned(),
+                    locator: Value::Null,
+                }],
+            },
+        };
+        let value = serde_json::to_value(&facts).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "direct", "cluster": "dev", "context": "kind", "server": "https://127.0.0.1:6443",
+                "publication": {"url": "https://example.invalid/deploy.git", "branch": "deploy", "pathPrefix": "dev"},
+                "expected": [{
+                    "id": "web/web", "display": "web/web", "role": "workload", "path": "dev/web/web", "release": "web/web",
+                    "source": {"repository": "https://example.invalid/deploy.git", "path": "dev/web/web"},
+                    "locator": {"name": "web", "namespace": "web", "destinationNamespace": "app"}
+                }],
+                "anchors": [{"id": "release-state"}],
+            })
+        );
+        assert_eq!(serde_json::from_value::<ReconcilerFacts>(value).unwrap(), facts);
+        assert_eq!(
+            facts.unkeyed("/reconciler"),
+            ["/reconciler/context", "/reconciler/publication/url"]
+        );
+    }
+
+    /// Catches the Releases that left the tree being found only from the newest
+    /// publication when no execution recorded a receipt: a unit whose receipt is
+    /// missing (a teardown of one that never completed, or a state without
+    /// artifacts) must still find every Release the branch's publications held,
+    /// and with a receipt the walk stops at it.
+    #[test]
+    fn test_releases_that_left_the_tree_are_found_across_all_publications_without_a_receipt() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        git(root, &["init", "--quiet", "--initial-branch=deploy"]);
+        let publish = |releases: &[&str], message: &str| {
+            let records = releases
+                .iter()
+                .map(|name| {
+                    format!(
+                        r#""{name}/{name}":{{"workload":{{"group":{{"metadata":{{"name":"{name}"}}}},"release":{{"metadata":{{"name":"{name}","namespace":"{name}"}}}},"destination_namespace":"{name}","release_directory":"{name}/{name}"}}}}"#
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let file = root.join("dev/_nyl/index.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(
+                file,
+                format!(
+                    r#"{{"version":3,"target":"dev","cluster":"dev","publication":{{"repository":"r","revision":"deploy","pathPrefix":"dev"}},"dirty":false,"inputs":{{}},"files":{{}},"compilation":{{"releases":{{{records}}}}}}}"#
+                ),
+            )
+            .unwrap();
+            git(root, &["add", "--all"]);
+            git(root, &["commit", "--quiet", "--message", message]);
+            git(root, &["rev-parse", "HEAD"])
+        };
+        let _first = publish(&["a", "b"], "publish 1");
+        let second = publish(&["b"], "publish 2");
+        let _third = publish(&["c"], "publish 3");
+        git(root, &["update-ref", "refs/nyl/observed", "HEAD"]);
+        let history = GitPublicationHistory::over(Repository::open(root).unwrap(), "dev", None);
+        let names = |releases: Vec<PublishedDirectRelease>| {
+            let mut names = releases
+                .iter()
+                .map(|release| release.release.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+
+        assert_eq!(names(history.direct_releases_since(None, 10).unwrap()), ["a", "b", "c"]);
+        assert_eq!(
+            names(history.direct_releases_since(Some(&second), 10).unwrap()),
+            ["b", "c"],
+            "the walk stops at the receipt's publication"
+        );
+        let too_deep = history.direct_releases_since(Some(&second), 1).unwrap_err().to_string();
+        assert!(
+            too_deep.contains("NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP"),
+            "{too_deep}"
+        );
+        let no_start = history.direct_releases_since(None, 2).unwrap_err().to_string();
+        assert!(
+            no_start.contains("NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP"),
+            "{no_start}"
+        );
+        let unknown = history
+            .direct_releases_since(Some(&"0".repeat(40)), 2)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP"), "{unknown}");
+    }
+
+    /// Catches the Releases of an ownership index being read by anything but
+    /// their state identity: the compilation record's group, name, namespace,
+    /// destination namespace, and directory.
+    #[test]
+    fn test_direct_releases_are_read_from_the_compilation_record() {
+        let compilation = serde_json::json!({"releases": {"web/web": {"workload": {
+            "group": {"metadata": {"name": "web"}},
+            "release": {"metadata": {"name": "api", "namespace": "api-ns"}},
+            "destination_namespace": "app",
+            "release_directory": "web\\api"
+        }}}});
+        let releases = direct_releases_of(Some(&compilation));
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].identity(), ("api-ns", "api"));
+        assert_eq!(releases[0].release.destination_namespace, "app");
+        assert_eq!(releases[0].directory, "web/api");
+        assert!(direct_releases_of(None).is_empty());
     }
 
     fn generated(role: DeploymentRole, name: &str, namespace: &str, project: &str) -> GeneratedApplication {

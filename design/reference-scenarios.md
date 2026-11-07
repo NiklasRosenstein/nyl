@@ -180,7 +180,10 @@ Top-level fields are `contract`, `milestone`, optional `tiers` (default
 scenario directory, so scenarios can share one project), optional
 `publication` (`real` to run in tier 1 with the built-in publication driver
 only, for a scenario that depends on the settings that driver derives from its
-render, which the test kind states in its declaration instead; default both),
+render, which the test kind states in its declaration instead; `fake` to run
+it with the test kind only, for a scenario that scripts the publication's
+reconcile outcome, which the built-in driver, running for real, cannot be made
+to give; default both),
 and `steps`. Before
 the first commit, the harness replaces `%SCENARIO_TMP%` in project and patch
 files with a per-scenario temporary directory, `%PROJECT_URL%` with the URL
@@ -725,6 +728,7 @@ environment that exists and 1 for one that does not.
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication`: `reference/platform` (scenario 1, with the exit criterion's published values and static render), `reference/preview-closed` (scenario 2), and `reference/preview` (scenario 3), plus the tier-1 variants `preview-manual-wait`, `preview-not-ready`, `preview-no-keep-ref`, and `preview-name-collision`; the `attested-evidence` and `observed-value` walkthroughs also run with the real driver |
 | M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path; a fifth adds `prod-hotfix` and `hotfix-to-prod`, promotes a fix from `release/prod`, has the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, and covers `--supersede` with a range |
+| M10 | The `nyl-e2e` crate runs the platform scenario's Kubernetes publication three ways against Kind with a local registry, changing only the target's reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server ([direct reconciler](orchestration-core.md#end-to-end-harness)); tier 1 gains a `FakePublication` mode that mimics a direct target's attestation and teardown wait |
 
 The reference project grows with the milestones. A milestone's fixture omits
 resources whose kinds it does not have yet: M3 and M4 ran scenario 1 without

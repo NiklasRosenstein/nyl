@@ -286,6 +286,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     };
     let call = |operation: DriverOperation, now: Timestamp| ExecutionContext {
         instances: shared.context.instances,
+        clock: context.base.clock,
         secrets: secrets.clone(),
         interactive: false,
         artifacts: job.previous_artifacts.clone(),
