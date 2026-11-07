@@ -60,13 +60,19 @@ Cluster's `live.context` and the kubeconfig it admits as `KUBECONFIG`; the conte
 server must be the one the Cluster declares.
 
 Releases apply one at a time in waves (Releases that render CustomResourceDefinitions
-first), within the unit's deadline: no Release starts once it has passed, and the
+first, each prepared when its wave comes so a custom resource without a namespace
+resolves after its CRD applied), within the unit's deadline: no Release starts once it has passed, and the
 run fails as a retryable timeout. A Release never prunes an object another Release
-of the target renders, so moving an object between Releases leaves it in place. A
+of the target renders, so moving an object between Releases leaves it in place; if
+the Release that now renders it has not applied yet, the old one keeps tracking it
+until it does. A
 prune or purge never deletes an object whose `Prune` or `Delete` sync option it
 cannot read. A Release that left Git is purged after every Release applied, unless
 no unit owns it, such as one an apply by hand took over: that stays, with the
-warning `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`.
+warning `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`. Which Releases left is read from the
+publication branch back to the last receipt; a history deeper than the walk limit
+that never reaches it (or with no receipt at all) fails with
+`NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP` instead of guessing.
 
 ## Fencing and manual changes
 
@@ -86,7 +92,11 @@ sync option, but keeps the release state and the Namespaces that hold it. Phase 
 once the wait ends, deletes the state and then those Namespaces by their
 `deletePolicy`: `Automatic` removes them, `Confirm` and `Retain` leave them as a
 remnant that `nyl plan` warns about. Phase 1 keeps every Namespace that holds the
-state of any Release it removes, whichever Release owns the Namespace. A Release
+state of any Release it removes, whichever Release owns the Namespace. Phase 2
+deletes a Namespace only after the state in it is gone, and keeps the state of the
+Release that tracked it until the Namespace is deleted, so a failed deletion is
+retried; a Namespace that still holds the state of a Release that is not removed
+stays, with a warning. A Release
 that another unit or an apply by hand took over is left with its objects and its
 Namespaces, and the teardown reports it with `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`.
 If the target's declaration changed reconciler since the unit published,

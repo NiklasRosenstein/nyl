@@ -873,8 +873,11 @@ reader-specific code (owner: `nyl_units::kubernetes_publication::health_wait`).
   not applied yet, which is the normal state of a first deploy, since the
   catalog exists on the branch only after this publish), is `NotYet`, not an
   error: the wait polls until the timeout, whose failure names the reason and
-  that the catalog must be applied. Only the wait treats it so; `nyl attest` and
-  `observe` still report such a reading as unread.
+  that the catalog must be applied. The reader says which it is: `NotYet` (the
+  catalog Application or AppProject is not in the reading) keeps polling, while
+  `Hidden` (an explicit RBAC denial, such as Argo CD's `can-i` answering no for
+  an Application) fails at once like any denied credential. Only the wait treats
+  `NotYet` so; `nyl attest` and `observe` still report such a reading as unread.
 - **Early failure.** A `Degraded` reading ends the wait before the timeout only
   when the reader marks it terminal (`Observed::terminal`): the direct reader
   does for a rollout past its progress deadline and a failed Job, and Argo CD's
@@ -1598,12 +1601,22 @@ bounded by what is left of it and none starts once it has passed, so a slow
 Release cannot give the next one a fresh budget, and a run that times out
 applies nothing further and fails as a retryable `timeout`.
 
-A Release's prune never deletes an object another current Release renders. The
-driver collects the object identities of every Release of the run before the
-first wave and passes them to each apply, which drops them from the Release
-that lost them without deleting them: moving a CustomResourceDefinition, a
-PersistentVolumeClaim, or a Secret from one Release to another leaves it in
-place, whatever the apply order. Reading an object's `Prune` or `Delete` option
+Each Release is prepared (its namespaces resolved against the cluster) when its
+wave comes, not before, because a namespaced custom resource without a
+`metadata.namespace` cannot be resolved until the wave-0 Release that registers
+its kind applied.
+
+A Release's prune never deletes an object another Release of the run renders.
+The driver collects, from the documents alone and before the first wave, every
+identity an object of each Release can have once its kind's scope is known (the
+cluster-scoped one, and the namespaced one in the namespace it names or the
+Release's default), and gives each apply two sets. What a Release that applied
+already renders is dropped from the Release that lost it without being deleted.
+What a Release that has not applied renders (and may not, when a later wave
+aborts or the deadline passes) is left in the cluster and stays tracked by the
+Release that lost it, so no object is left that nothing tracks. Moving a
+CustomResourceDefinition, a PersistentVolumeClaim, or a Secret from one Release
+to another leaves it in place, whatever the apply order. Reading an object's `Prune` or `Delete` option
 fails closed in every prune and purge: an object whose live state cannot be read
 is reported as failed and never deleted, because the option that would have kept
 it may be the very thing the failed read hid.
@@ -1619,7 +1632,10 @@ the last receipt's `PublishedTree` commit to the head (bounded by the walk
 limit of the shared matching; a deeper history is a failure, never a guess),
 minus the identities of the new tree. Without a receipt, no execution of the
 unit completed, so every publication up to the walk limit may be its own and the
-walk covers them all, not just the newest. The span matters: a run that fails after
+walk covers them all, not just the newest. When the walk reaches the limit without
+reaching its start (a receipt too far back, a receipt the branch no longer holds,
+or none), it fails with `NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP` rather than
+guess. The span matters: a run that fails after
 publishing a tree without a Release, before purging it, leaves the receipt at
 the older commit, so the next run still finds it, whatever was published in
 between. Before deleting, the purge subtracts every key tracked by the latest
@@ -1630,13 +1646,24 @@ Release is purged only if its latest revision names this unit incarnation as
 owner, or an incarnation of the same environment and unit that is gone; an
 unowned or foreign one is left and reported with
 `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`, a warning, so a Release an apply by hand
-took over stays until it is removed with `nyl release delete --take-over`. A
-purge deletes what the Release still has in the cluster, which is what a prune
+took over stays until it is removed with `nyl release delete --take-over`. The
+purge of vanished Releases and the teardown are one planning and one purge
+(`classify_releases`, `execute_purge`): every Release of the set is classified
+first, the Namespace of every Release's state is deferred, and the foreign
+Releases' objects and Namespaces are protected, so the order in which Releases
+are processed decides nothing. A purge deletes what the Release still has in the
+cluster, which is what a prune
 reads (the objects of the latest `Deployed` revision and of the `Failed`
 revisions after it, never the union of every stored revision, so an object kept
 by `Prune=false` and later untracked is not deleted), by each object's `Delete`
-option, in reverse order with waits, then the Release's state, as
-`nyl release delete` does. Argo CD does this through the catalog's pruning
+option, in reverse order with waits. Only when every resource went does it delete
+state: first that of the Releases that track no deferred Namespace, then each
+deferred Namespace (left, with a `NYL-KUBERNETES-RELEASE-LEFT-BEHIND` warning, if
+release state that is not the purge's own remains in it), and last the state of
+the Releases that tracked them, because that state is the only record of those
+Namespaces and a failure before then must leave it for the retry. The apply's
+absolute deadline bounds the purge too, and each teardown phase takes one of its
+own. Argo CD does this through the catalog's pruning
 and the Application finalizers; the direct reconciler does it itself.
 
 #### Fencing and ownership in the cluster
@@ -1828,9 +1855,13 @@ generic engine rule, with no kind-specific branch.
 `teardownWait: observe` (the default with `observe: {}`) asks the reader which
 Releases are still present in the removal sense: an object the purge would
 delete (what a prune reads, as above) other than a Namespace still exists, for a
-Release whose latest revision is this publication's; a Release another
-publication or an apply by hand took over counts as gone, because the teardown
-leaves it. No Namespace ends or extends the wait, because phase 1 defers every
+Release this unit's teardown removes. One rule decides that
+(`direct::not_removable`), shared by the teardown's classification and this
+reading: the latest revision was applied for this publication and is owned by
+this unit or an earlier incarnation of it, or by no unit (an apply by hand of
+this target took it over: a teardown removes it, the purge of a vanished Release
+leaves it). A Release another publication or another unit owns counts as gone,
+because the teardown leaves it. No Namespace ends or extends the wait, because phase 1 defers every
 Namespace that holds the state of any Release it purges, those of Releases that
 left the tree included. The wait covers the workloads.
 `delay` and `manual` are unchanged. Removal is concluded only from the anchor
