@@ -8,13 +8,16 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Each crate and the Nyl crates it may depend on.
-const ALLOWED: [(&str, &[&str]); 7] = [
+const ALLOWED: [(&str, &[&str]); 8] = [
     ("crates/nyl-core", &[]),
     ("crates/nyl-git", &[]),
     ("crates/nyl-render", &["nyl-core", "nyl-git"]),
     ("crates/nyl-state", &["nyl-core", "nyl-git"]),
     ("crates/nyl-orchestration", &["nyl-core"]),
     ("crates/nyl-units", &["nyl-core", "nyl-render"]),
+    // The cluster E2E suite drives the `nyl` binary as a subprocess, so it
+    // depends on no Nyl crate.
+    ("crates/nyl-e2e", &[]),
     (
         "nyl",
         &[
@@ -46,5 +49,22 @@ fn test_crates_depend_only_in_the_architecture_direction() {
         let allowed = allowed.iter().copied().collect::<BTreeSet<_>>();
         let forbidden = nyl_dependencies.difference(&allowed).collect::<Vec<_>>();
         assert!(forbidden.is_empty(), "{directory} must not depend on {forbidden:?}");
+    }
+}
+
+/// A crate added under `crates/` must say which Nyl crates it may depend on.
+#[test]
+fn test_every_crate_directory_is_listed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let listed = ALLOWED.iter().map(|(directory, _)| *directory).collect::<BTreeSet<_>>();
+    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.join("Cargo.toml").is_file() {
+            let directory = format!("crates/{}", path.file_name().unwrap().to_string_lossy());
+            assert!(
+                listed.contains(directory.as_str()),
+                "{directory} is missing from ALLOWED"
+            );
+        }
     }
 }

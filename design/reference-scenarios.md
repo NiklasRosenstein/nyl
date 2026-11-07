@@ -97,6 +97,18 @@ The tiers are:
   still compiles all features. Tests never read environment variables to decide
   whether to run.
 
+- **Tier 3, a real cluster.** The `nyl-e2e` suite (`crates/nyl-e2e`) runs one
+  scenario against a kind cluster, a local registry, and a Git server that both
+  the host and the cluster reach, with each reconciler: Argo CD read through the
+  Kubernetes API (`argocd-kubernetes`), Argo CD read through its API server with
+  a token (`argocd-api`), and Nyl's direct reconciler (`direct`). The real binary builds an image, applies OpenTofu, and publishes a
+  Release that consumes both; the suite then makes the reconciler run it, checks
+  `attest` and `observe`, changes an input, reconciles again, and tears down
+  with the `observe` wait. Argo CD is therefore read for real here, which tiers 1
+  and 2 never do. The `e2e` job of `ci.yaml` runs it per variant; it is not part
+  of `cargo test --workspace`, which runs only the suite's own unit tests.
+  Running it locally: [`crates/nyl-e2e/README.md`](../crates/nyl-e2e/README.md).
+
 ### Fake kinds
 
 Test-only kinds in `units.test.nyl/v1` stand in for built-in kinds that do not
