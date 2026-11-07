@@ -329,3 +329,82 @@ async fn test_a_removal_reading_waits_for_workloads_but_not_for_the_state_namesp
         "the state is still there"
     );
 }
+
+async fn removal_reading(world: &Arc<World>) -> nyl_units::kubernetes_publication::reconciler::Reading {
+    tokio::task::spawn_blocking({
+        let world = world.clone();
+        move || read(&world.reader(None), true)
+    })
+    .await
+    .unwrap()
+}
+
+/// Catches a removal reading that waits on a Release another publication took
+/// over: its latest revision is not this publication's, a teardown leaves it,
+/// so it counts as gone however much of it is running.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_removal_reading_counts_a_release_taken_over_by_another_publication_as_gone() {
+    let world = World::new();
+    world
+        .save(revision(
+            1,
+            ReleaseStatus::Deployed,
+            Some(publication("dev", Some("abc"))),
+        ))
+        .await;
+    world
+        .save(revision(
+            2,
+            ReleaseStatus::Deployed,
+            Some(publication("other", Some("def"))),
+        ))
+        .await;
+    world.deployment(2);
+    let reading = removal_reading(&Arc::new(world)).await;
+
+    assert!(reading.deployments.is_empty());
+    assert_eq!(reading.absent["web/web"], Visibility::Visible);
+}
+
+/// Catches a removal reading that waits on a Namespace object, which a
+/// teardown's first phase defers whenever it holds the state of any Release it
+/// purges (this one's, or a Release that left the tree): no Namespace can end
+/// the wait, and the second phase deletes them.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_removal_reading_never_waits_on_a_namespace() {
+    let world = World::new();
+    let mut state = revision(1, ReleaseStatus::Deployed, Some(publication("dev", Some("abc"))));
+    state.resource_keys = vec![key("v1", "Namespace", None, "shared")];
+    world.save(state).await;
+    world.add(
+        key("v1", "Namespace", None, "shared"),
+        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shared"}}),
+    );
+    let reading = removal_reading(&Arc::new(world)).await;
+
+    assert!(reading.deployments.is_empty(), "only a Namespace remains");
+    assert_eq!(reading.absent["web/web"], Visibility::Visible);
+}
+
+/// Catches a removal reading that waits on what a purge leaves: an object an
+/// earlier revision tracked and the latest `Deployed` one dropped (as
+/// `Prune=false` does) stays in the cluster by design, and a purge does not
+/// touch it, so it must not keep the wait open.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_removal_reading_ignores_what_only_an_older_revision_tracked() {
+    let world = World::new();
+    let mut older = revision(1, ReleaseStatus::Superseded, Some(publication("dev", Some("abc"))));
+    older.resource_keys.push(key("v1", "ConfigMap", Some("web"), "kept"));
+    world.save(older).await;
+    let mut latest = revision(2, ReleaseStatus::Deployed, Some(publication("dev", Some("abc"))));
+    latest.resource_keys = vec![key("apps/v1", "Deployment", Some("web"), "web")];
+    world.save(latest).await;
+    world.add(
+        key("v1", "ConfigMap", Some("web"), "kept"),
+        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "kept", "namespace": "web"}}),
+    );
+    let reading = removal_reading(&Arc::new(world)).await;
+
+    assert!(reading.deployments.is_empty());
+    assert_eq!(reading.absent["web/web"], Visibility::Visible);
+}

@@ -10,7 +10,7 @@
 //! Release: the state of another target, or of a manual apply that recorded
 //! another destination or none, is `Unreadable` and never an anchor.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use nyl_render::gitops::observation::{DirectLocation, DirectRelease, ExpectedDeployment, ObservedPublication};
@@ -123,21 +123,6 @@ fn commit_of<'a>(state: &'a ReleaseState, destination: &ReleasePublication) -> O
         .as_ref()
         .filter(|publication| publication.same_destination(destination))
         .and_then(|publication| publication.commit.as_deref())
-}
-
-/// The Namespaces that hold release state: a teardown's first phase keeps
-/// them until the second, so the state it reads survives.
-pub fn state_namespaces(deployments: &[ExpectedDeployment]) -> BTreeSet<String> {
-    deployments
-        .iter()
-        .filter_map(|deployment| locator(deployment).ok())
-        .map(|release| release.namespace)
-        .collect()
-}
-
-/// Whether `key` is a Namespace in `namespaces`.
-pub fn is_state_namespace(key: &ResourceKey, namespaces: &BTreeSet<String>) -> bool {
-    key.gvk.group.is_empty() && key.gvk.kind == "Namespace" && namespaces.contains(&key.name)
 }
 
 /// What one Release's revisions say about what runs, for `destination`.
@@ -262,14 +247,27 @@ async fn health_of(cluster: &ClusterHandle, state: &ReleaseState) -> Result<(Hea
 }
 
 /// Every key any recorded revision tracks, for the removal reading.
-fn tracked(states: &[ReleaseState], destination: &ReleasePublication) -> Vec<ResourceKey> {
+fn tracked(states: &[ReleaseState]) -> Vec<ResourceKey> {
+    // What a purge deletes: the keys of the latest Deployed revision and of the
+    // Failed revisions after it (`collect_live_state`), never of older
+    // revisions, so an object a later revision untracked, for instance with
+    // `Prune=false`, does not keep a removal reading waiting. `states` run from
+    // the newest revision down.
     let mut seen = std::collections::HashSet::new();
-    states
-        .iter()
-        .filter(|state| applied_for(state, destination))
-        .flat_map(|state| state.resource_keys.iter().cloned())
-        .filter(|key| seen.insert(key.clone()))
-        .collect()
+    let mut keys = Vec::new();
+    for state in states {
+        keys.extend(
+            state
+                .resource_keys
+                .iter()
+                .filter(|key| seen.insert((*key).clone()))
+                .cloned(),
+        );
+        if state.status == ReleaseStatus::Deployed {
+            break;
+        }
+    }
+    keys
 }
 
 const NO_ANCHOR: &str = "no release state of this target's Releases is visible, and the context's server is not one the \
@@ -295,8 +293,12 @@ impl DirectReader {
             path_prefix: self.publication.path_prefix.clone(),
             commit: None,
         };
-        let state_namespaces = state_namespaces(request.deployments);
-        let excluded = |key: &ResourceKey| is_state_namespace(key, &state_namespaces);
+        // A removal reading waits for no Namespace at all: the first phase of a
+        // teardown defers every Namespace that holds the state of any Release it
+        // purges, those of Releases that left the tree and of foreign ones
+        // included, and the second phase deletes them once the state is gone.
+        // No Namespace is gone before that, so none can end the wait.
+        let excluded = |key: &ResourceKey| key.gvk.group.is_empty() && key.gvk.kind == "Namespace";
         let mut reading = Reading {
             deployments: BTreeMap::new(),
             anchors: BTreeMap::new(),
@@ -317,8 +319,15 @@ impl DirectReader {
             if request.concluding_absence {
                 // A removal reading: present while anything the release applied
                 // that a purge deletes remains, other than the Namespaces that
-                // hold the state the wait itself reads.
-                let keys = tracked(&states, &destination);
+                // hold the state the wait itself reads. A Release whose latest
+                // revision was applied for another publication, or by no
+                // target, is not this publication's, and a teardown leaves it:
+                // it is gone as far as this unit is concerned.
+                if !applied_for(&states[0], &destination) {
+                    reading.absent.insert(deployment.id.clone(), Visibility::Visible);
+                    continue;
+                }
+                let keys = tracked(&states);
                 let remaining = remaining_after_purge(cluster.client.as_ref(), &keys, &excluded)
                     .await
                     .map_err(|error| api_error(&error, "check what remains of a release"))?;
