@@ -29,17 +29,19 @@
 //!   that finds an owned file modified outside Nyl. A comparison that cannot
 //!   be made, such as an unreachable remote, is `unknown`.
 //!
-//! - **Observed values.** In `mode: observe` the unit reads a field of a
+//! - **Observed values.** With `observe: {}` the unit reads a field of a
 //!   resource its target renders from the workload Cluster, once the
 //!   Application that owns it runs the receipt's publication
 //!   ([`super::observed_values`]). Resolution checks the resource is the
 //!   target's (`NYL-KUBERNETES-OBSERVATION-UNOWNED`) and records its owning
 //!   Application and the workload Cluster.
-//! - **Observation.** A unit that observes Argo CD (`mode: observe`, or the
-//!   `observe` teardown wait) records the instance, its declared access, and
-//!   the target's Applications at resolution (`argocd`), declares the
-//!   attestations `accepted` and `healthy` in observe mode, and reads Argo
-//!   CD for `nyl attest` and the teardown wait ([`super::observe`]).
+//! - **Observation.** A unit that declares `observe: {}` records the
+//!   reconciler of its target at resolution (`reconciler`: its kind and
+//!   instance, how it is read, and the deployments and anchors the target
+//!   expects of it), declares the attestations `accepted` and `healthy`, and
+//!   reads the reconciler for `nyl attest` and the `observe` teardown wait
+//!   ([`super::observe`]); which reconciler it reads follows the target, not
+//!   the flag.
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -55,7 +57,7 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Recei
 use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor, TeardownSettings};
 use serde_json::{json, Value};
 
-use super::observe::{self, ARGOCD};
+use super::observe::{self, RECONCILER};
 use super::observed_values::{self, ClusterReader, LiveReader};
 use super::readiness::evaluate;
 use super::spec::{OBSERVATION_SOURCES, WORKLOAD};
@@ -121,8 +123,8 @@ impl Driver for KubernetesPublicationDriver {
             detect_drift: true,
             teardown: true,
             build: true,
-            attest: is_observe_mode(spec),
-            observed_values: is_observe_mode(spec),
+            attest: observe::observes(spec),
+            observed_values: observe::observes(spec),
             ..Capabilities::default()
         }
     }
@@ -179,7 +181,7 @@ impl Driver for KubernetesPublicationDriver {
                 },
                 "observations": {
                     "type": "object",
-                    "description": "Observed values, in `mode: observe`: a field of a resource the target renders, read from the workload Cluster once the Application that owns the resource runs the current publication.",
+                    "description": "Observed values, which need `observe: {}`: a field of a resource the target renders, read from the workload Cluster once the Application that owns the resource runs the current publication.",
                     "additionalProperties": {
                         "type": "object",
                         "required": ["type", "from"],
@@ -354,7 +356,7 @@ impl Driver for KubernetesPublicationDriver {
         )))
     }
 
-    /// `accepted` and `healthy` of the receipt's publication, read from Argo CD.
+    /// `accepted` and `healthy` of the receipt's publication, read from the reconciler.
     fn attest(
         &self,
         ctx: &ExecutionContext<'_>,

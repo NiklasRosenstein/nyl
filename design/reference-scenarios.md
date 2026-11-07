@@ -39,7 +39,7 @@ Everything lives in one per-test temporary directory, as the existing
 | Container registry | Tier 1: fake. Tier 2: a `registry:2` container on an ephemeral port |
 | Terraform backend | OpenTofu's `local` backend with a path inside the temporary directory |
 | Cloud resources | Only the built-in `terraform_data` resource and outputs, so no provider is downloaded |
-| Argo CD and the workload Cluster | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait, and scripted observed values for it; the real driver reads its observed values through the same script in tier 1 (its readings of Argo CD and of the workload Cluster are tested against local fakes of the Kubernetes API and the Argo CD API server). Publish mode needs none |
+| Argo CD and the workload Cluster | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait, and scripted observed values for it; the real driver reads its observed values through the same script in tier 1 (its readings of Argo CD and of the workload Cluster are tested against local fakes of the Kubernetes API and the Argo CD API server). A publication that does not declare `observe` needs none |
 | Time | An injected clock (see [Clock](#clock)) |
 
 ### Tiers

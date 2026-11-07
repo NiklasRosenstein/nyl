@@ -23,9 +23,10 @@ spec:
 `target` names a static DeploymentTarget, or declares one inline (see
 [Inline targets](#inline-targets)). The unit places that target into its
 environment: a target belongs to at most one environment, and a target no
-publication unit names rejects `fromUnit` bindings. `mode` is `publish`, the
-default, or `observe`, which publishes the same way and lets the unit read Argo CD
-(see [Observing Argo CD](#observing-argo-cd)) and the live cluster (see
+publication unit names rejects `fromUnit` bindings. A unit publishes only,
+unless it declares `observe: {}`: it then publishes the same way and also
+reads the reconciler that runs its target, Argo CD (see
+[Observing Argo CD](#observing-argo-cd)), and the live cluster (see
 [Observed values](#observed-values)). The common unit fields
 (`dependsOn`, `timeout`, `env`, and so on) apply; `timeout` defaults to `10m`.
 
@@ -322,7 +323,7 @@ of it is `NYL-ATTESTATION-UNDECLARED`.
 
 ## Observed values
 
-A unit with `mode: observe` can read a field of a resource its target renders
+A unit that declares `observe: {}` can read a field of a resource its target renders
 from the live cluster, such as the address a cloud load balancer assigns to a
 published Service, and let other units use it. The declaration, the way the
 value is referenced, and how reconcile and `nyl observe` read it are the same
@@ -331,7 +332,7 @@ section is what belongs to the publication:
 
 ```yaml
 spec:
-  mode: observe
+  observe: {}
   observations:
     ingressIp:
       type: string
@@ -347,8 +348,8 @@ for a namespaced kind), and `pointer` is a [JSON Pointer](https://www.rfc-editor
 to one field of it; an empty pointer, which would select the whole resource, is
 rejected. Observed values are committed in plain text to the state repository,
 so observe only non-secret fields: Secrets are rejected, but a ConfigMap or a
-custom resource can hold sensitive data too. A unit in `mode: publish` that declares `observations` is rejected
-(`NYL-OBSERVATIONS-UNSUPPORTED`): reading is a use of Argo CD and cluster
+custom resource can hold sensitive data too. A unit without `observe` that declares `observations` is rejected
+(`NYL-OBSERVATIONS-UNSUPPORTED`): reading is a use of the reconciler and cluster
 credentials that publishing alone does not need.
 
 - **Only what the target renders.** Resolution renders the target and checks
@@ -357,7 +358,8 @@ credentials that publishing alone does not need.
   cluster the unit reads is the target's Cluster and nothing outside the
   declaration. A manifest without `metadata.namespace` belongs to the namespace
   its Application deploys to. Secrets are never read. Resolution records the
-  Application that owns each resource and the workload Cluster in the stored
+  deployment that owns each resource (an Application's id, as the
+  reconciler facts name it) and the workload Cluster in the stored
   document (`observationSources` and `workload`; an authored one is rejected),
   so `observe` renders nothing.
 - **Only once its Application runs the publication.** Argo CD is read as

@@ -4,8 +4,8 @@
 //! The real driver ([`crate::kubernetes_publication`]) is the built-in kind.
 //! This fake delegates every publish and teardown to the same operations, so
 //! it publishes the same bytes, and adds what a scenario needs from a test
-//! kind: scripted outcomes ([`Script`]), `mode: observe` (answered by the
-//! fake Argo CD observer, [`super::FakeObserver`], and by scripted observed
+//! kind: scripted outcomes ([`Script`]), `observe: {}` (answered by the
+//! fake reconciler observer, [`super::FakeObserver`], and by scripted observed
 //! values), and `teardownSettings`
 //! that a scenario declares.
 //!
@@ -105,7 +105,7 @@ impl Driver for FakePublication {
             detect_drift: true,
             teardown: true,
             build: true,
-            observed_values: spec.get("mode").and_then(Value::as_str) == Some("observe"),
+            observed_values: spec.get("observe").is_some(),
             ..Capabilities::default()
         }
     }

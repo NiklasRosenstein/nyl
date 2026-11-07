@@ -135,28 +135,99 @@ fn locator_error(what: &str) -> ReadError {
     )
 }
 
-/// Run `future` on a thread with a current-thread runtime of its own.
-pub(crate) fn block_on<T: Send>(future: impl std::future::Future<Output = T> + Send) -> Result<T, ReadError> {
-    // Both clients build a TLS configuration, which needs a process-level
-    // crypto provider; the binary installs one at start, and a library caller
-    // may not have. Installing is idempotent: it fails only when one exists.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map(|runtime| runtime.block_on(future))
-                    .map_err(|error| {
-                        ReadError::new(
-                            ReadErrorKind::Unreachable,
-                            format!("cannot start a runtime to read Argo CD: {error}"),
-                        )
-                    })
-            })
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+/// Map Argo CD into a [`Reading`] of what `request` names: every Application
+/// of the namespaces involved is listed once, each expected deployment is
+/// parsed from the Application it names, and absence is proven the way the
+/// reader's `proof` says.
+///
+/// - Each expected deployment the listing lacks gets the credential's
+///   answer, from `can-i` for the API method (`Visible` for the Kubernetes
+///   method, which has no such question). A deployment whose project the unit
+///   did not record is a [`ReadErrorKind::Declaration`] error, since Argo CD's
+///   policy names an Application by it.
+/// - The anchors are established when the reader's proof rests on them or
+///   the caller concludes from absence, before any `can-i`: the catalog
+///   Application must be in the listing, and each AppProject must be visible.
+///   The first one that is not ends the check, and nothing more is asked of
+///   Argo CD, so that the anchor's error is the one shown.
+/// - With no anchor at all, the Kubernetes method can show nothing about
+///   which Argo CD its context reaches, so the reading is unprovable and says
+///   to declare the instance's access with method api.
+fn read_argocd(
+    queries: &dyn ArgoQueries,
+    namespace: &str,
+    proof: Proof,
+    request: &ReadRequest<'_>,
+) -> Result<Reading, ReadError> {
+    let applications = request
+        .deployments
+        .iter()
+        .map(|deployment| {
+            serde_json::from_value::<ArgoCdApplication>(deployment.locator.clone())
+                .map(|locator| (deployment, locator))
+                .map_err(|_| locator_error(&format!("deployment {}", deployment.id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let anchors = request
+        .anchors
+        .iter()
+        .map(|anchor| {
+            serde_json::from_value::<ArgoCdAnchor>(anchor.locator.clone())
+                .map(|locator| (anchor, locator))
+                .map_err(|_| locator_error(&format!("anchor {}", anchor.id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Whether a target needs anchors at all (it needs none without a workload
+    // deployment) is the shared evaluation's rule, not the reader's.
+    let establish = request.concluding_absence || proof == Proof::Anchors;
+
+    let namespaces = applications
+        .iter()
+        .map(|(_, locator)| locator.namespace.as_str())
+        .chain(
+            anchors
+                .iter()
+                .filter(|_| establish)
+                .filter_map(|(_, locator)| match locator {
+                    ArgoCdAnchor::Application { namespace, .. } => Some(namespace.as_str()),
+                    ArgoCdAnchor::Project { .. } => None,
+                }),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut live = BTreeMap::new();
+    for listed in namespaces {
+        for (name, application) in queries.applications(listed)? {
+            live.insert((listed.to_owned(), name), application);
+        }
+    }
+
+    // The anchors come before the per-Application `can-i`: when one is not
+    // visible, its error and fix are what the user must see, so nothing more
+    // is asked of Argo CD.
+    let mut established = BTreeMap::new();
+    let mut unprovable = None;
+    if establish {
+        established = establish_anchors(queries, namespace, &anchors, &live)?;
+        if proof == Proof::Anchors && anchors.is_empty() {
+            unprovable = Some(
+                "the target generates no catalog Application and no AppProject other than `default`, so nothing shows that \
+                 the Kubernetes context reaches the Argo CD that runs it; Nyl will not conclude anything from an empty list: \
+                 declare the ArgoCDInstance's access with method api, which asks Argo CD whether the token may get each \
+                 Application"
+                    .to_owned(),
+            );
+        }
+    }
+    let anchored = !established
+        .values()
+        .any(|visibility| matches!(visibility, Visibility::Hidden(_)));
+    let (deployments, absent) = observe_each(queries, namespace, &applications, &live, anchored)?;
+    Ok(Reading {
+        deployments,
+        anchors: established,
+        absent,
+        proof,
+        unprovable,
     })
 }
 

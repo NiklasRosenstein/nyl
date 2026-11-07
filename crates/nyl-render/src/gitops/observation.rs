@@ -60,9 +60,46 @@ pub struct ArgoCdLocation {
     pub access: ArgoCDAccess,
 }
 
+/// The reconciler that runs a target and where Nyl reads it. The tag is the
+/// recorded `kind`; a new reconciler kind is a new variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ReconcilerLocation {
+    #[serde(rename = "argocd")]
+    ArgoCd(ArgoCdLocation),
+}
+
+impl ReconcilerLocation {
+    /// The recorded fields of this kind's location (JSON Pointers relative to
+    /// the facts) that say only how the reconciler is read, never what the
+    /// unit produces: renaming a kube context or moving an API server must
+    /// not re-execute the unit. A new kind names its own.
+    pub fn unkeyed(&self) -> &'static [&'static str] {
+        match self {
+            Self::ArgoCd(_) => &["/access", "/context"],
+        }
+    }
+
+    /// The reconciler's kind and name, as an attestation's details name them:
+    /// `{kind, instance, ...}` with whatever identifies how it is read.
+    pub fn summary(&self) -> Value {
+        match self {
+            Self::ArgoCd(location) => serde_json::json!({
+                "kind": "argocd",
+                "instance": location.instance,
+                "namespace": location.namespace,
+                "access": match location.access.method {
+                    ArgoCDAccessMethod::Kubernetes => "kubernetes",
+                    ArgoCDAccessMethod::Api => "api",
+                },
+            }),
+        }
+    }
+}
+
 /// Where a target's rendered resources live: its workload Cluster, with that
 /// Cluster's declared local context (`spec.live.context`). It may differ from
-/// the Argo CD control-plane Cluster.
+/// the control-plane Cluster of the reconciler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadCluster {
@@ -72,7 +109,7 @@ pub struct WorkloadCluster {
     pub context: Option<String>,
 }
 
-/// The part an Application plays in a target.
+/// The part a deployment plays in a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeploymentRole {
@@ -570,7 +607,7 @@ fn owning_application_in(
     let prefix = prefix.trim_matches('/');
     for application in applications
         .iter()
-        .filter(|application| application.role == ApplicationRole::Workload)
+        .filter(|application| application.role == DeploymentRole::Workload)
     {
         let directory = application.path.trim_matches('/');
         let directory = if prefix.is_empty() {
@@ -1212,7 +1249,7 @@ mod tests {
         assert_eq!(matched.recorded, p1);
     }
 
-    fn application(name: &str, path: &str, role: ApplicationRole) -> GeneratedApplication {
+    fn application(name: &str, path: &str, role: DeploymentRole) -> GeneratedApplication {
         GeneratedApplication {
             role,
             name: name.to_owned(),
@@ -1256,9 +1293,9 @@ mod tests {
             ),
         ]);
         let applications = [
-            application("catalog", "dev/_nyl/catalog", ApplicationRole::Catalog),
-            application("web", "dev/web/web", ApplicationRole::Workload),
-            application("api", "dev/api/api", ApplicationRole::Workload),
+            application("catalog", "dev/_nyl/catalog", DeploymentRole::Catalog),
+            application("web", "dev/web/web", DeploymentRole::Workload),
+            application("api", "dev/api/api", DeploymentRole::Workload),
         ];
         let destinations = BTreeMap::from([
             (("argocd".to_owned(), "web".to_owned()), "web".to_owned()),

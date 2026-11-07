@@ -23,7 +23,7 @@ const KIND_FIELDS: [&str; 4] = ["target", "observe", "teardownWait", "releases"]
 /// Validate a rendered spec, references still as expressions.
 pub(super) fn validate(spec: &Value) -> Result<(), String> {
     let spec = spec.as_object().ok_or("spec must be a mapping")?;
-    if spec.contains_key("argocd") {
+    if spec.contains_key("reconciler") {
         return Err(
             "spec.reconciler is recorded from the target's reconciler (its ArgoCDInstance) when the unit is resolved and must not be written by hand; \
              declare the instance's access in its ArgoCDInstance spec.access instead"
@@ -64,14 +64,7 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
         Ok(PublicationTarget::Inline(inline)) => inline.validate().map_err(|error| error.to_string())?,
         Err(message) => return Err(message),
     }
-    match spec.get("mode") {
-        None => {}
-        Some(Value::String(mode)) if mode == "publish" || mode == "observe" => {}
-        Some(other) => return Err(format!("spec.mode must be publish or observe, got {other}")),
-    }
-    if let Some(wait) = spec.get("teardownWait") {
-        validate_teardown_wait(wait)?;
-    }
+    validate_observe(spec)?;
     observation_sources(&Value::Object(spec.clone()))?;
     if let Some(releases) = spec.get("releases") {
         let releases = releases
@@ -171,6 +164,44 @@ pub(super) fn observation_sources(
         sources.insert(name.clone(), ObservationSource { resource, pointer });
     }
     Ok(sources)
+}
+
+/// The opt-in to observing the reconciler, and what depends on it:
+///
+/// - `observe: {}` makes the unit declare the attestations `accepted` and
+///   `healthy`, lets it use the `observe` `teardownWait` strategy, and makes
+///   `observe` its default. It is an object so that options can be added
+///   later; only `{}` is accepted now. It says nothing about which
+///   reconciler runs: that follows the reconciler of the unit's target.
+/// - `teardownWait: {strategy: observe}` reads the reconciler, so it needs
+///   `observe: {}`. So do `observations`, which are read once the reconciler
+///   shows the owning Application running the current publication: the unit
+///   declares the `observe` capability only with the flag, and the engine
+///   rejects `observations` on a unit without it (`NYL-OBSERVATIONS-UNSUPPORTED`).
+///
+/// Shared with the test kind `FakePublication`.
+pub(crate) fn validate_observe(spec: &serde_json::Map<String, Value>) -> Result<(), String> {
+    if let Some(observe) = spec.get("observe") {
+        let options = observe
+            .as_object()
+            .ok_or_else(|| "spec.observe must be a mapping, written `observe: {}`: it has no options yet".to_owned())?;
+        if let Some(key) = options.keys().next() {
+            return Err(format!(
+                "spec.observe has unknown field {key:?}; it takes no options yet, write `observe: {{}}`"
+            ));
+        }
+    }
+    if let Some(wait) = spec.get("teardownWait") {
+        validate_teardown_wait(wait)?;
+        if wait.get("strategy").and_then(Value::as_str) == Some("observe") && !spec.contains_key("observe") {
+            return Err(
+                "spec.teardownWait.strategy observe reads the reconciler of the target, which a unit opts into with \
+                 `observe: {}`: add it, or choose strategy delay or manual"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// How a unit's teardown waits after phase 1, from its stored spec: the
@@ -289,17 +320,28 @@ mod tests {
     /// later milestone reads being accepted from an author.
     #[test]
     fn test_validate_accepts_observation_and_rejects_recorded_and_unavailable_fields() {
-        assert!(validate(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}})).is_ok());
-        assert!(validate(&json!({"target": "dev", "mode": "observe"})).is_ok());
-        assert!(validate(&json!({"target": "dev", "mode": "observe", "teardownWait": {"strategy": "manual"}})).is_ok());
-        assert!(invalid(&json!({"target": "dev", "mode": "apply"})).contains("must be publish or observe"));
-        assert!(invalid(&json!({"target": "dev", "argocd": {}})).contains("must not be written by hand"));
+        assert!(validate(&json!({"target": "dev", "observe": {}})).is_ok());
+        assert!(validate(&json!({"target": "dev", "observe": {}, "teardownWait": {"strategy": "observe"}})).is_ok());
+        assert!(validate(&json!({"target": "dev", "observe": {}, "teardownWait": {"strategy": "manual"}})).is_ok());
+        let without = invalid(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}}));
+        assert!(without.contains("`observe: {}`"), "{without}");
+        for observe in [json!(true), json!(null), json!("yes"), json!([])] {
+            let message = invalid(&json!({"target": "dev", "observe": observe}));
+            assert!(
+                message.contains("spec.observe must be a mapping"),
+                "{observe}: {message}"
+            );
+        }
+        let option = invalid(&json!({"target": "dev", "observe": {"interval": "5m"}}));
+        assert!(option.contains("unknown field \"interval\""), "{option}");
+        assert!(invalid(&json!({"target": "dev", "mode": "observe"})).contains("unknown field \"mode\""));
+        assert!(invalid(&json!({"target": "dev", "reconciler": {}})).contains("must not be written by hand"));
         assert!(invalid(&json!({"target": "dev", "observationSources": {}})).contains("must not be written by hand"));
         assert!(invalid(&json!({"target": "dev", "workload": {}})).contains("must not be written by hand"));
     }
 
     fn observing(from: &Value) -> Value {
-        json!({"target": "dev", "mode": "observe", "observations": {"ip": {"type": "string", "from": from}}})
+        json!({"target": "dev", "observe": {}, "observations": {"ip": {"type": "string", "from": from}}})
     }
 
     /// Catches a source the driver would only fail on at read time, or a

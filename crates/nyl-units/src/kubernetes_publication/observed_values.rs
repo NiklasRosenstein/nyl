@@ -10,13 +10,14 @@
 //! - **Recorded at resolution.** The driver renders the target anyway, so it
 //!   checks that the target renders each resource, with the code
 //!   `NYL-KUBERNETES-OBSERVATION-UNOWNED` otherwise ([`recorded`]), and
-//!   records the Application that owns it (`observationSources`) and the
+//!   records the deployment that owns it (`observationSources`, by the id
+//!   the reconciler facts give it) and the
 //!   workload Cluster with its local context (`workload`) in the resolved
 //!   spec. `observe` then reads the stored document and renders nothing, and
 //!   the cluster read is the target's Cluster: nothing outside the
 //!   declaration is read.
-//! - **Reading.** [`ClusterReader`] reads Argo CD as `nyl attest` does
-//!   (through the instance's declared access) and judges only the Applications
+//! - **Reading.** [`ClusterReader`] reads the reconciler as `nyl attest` does
+//!   (through the instance's declared access) and judges only the deployments
 //!   that own an observed resource, so an Application that did not change in
 //!   a publication resolves at once, and a slow, unrelated one holds nothing
 //!   back. Until an owning Application runs the receipt's publication its
@@ -40,17 +41,17 @@ use nyl_core::orchestration::driver::{DriverError, DriverResult, ObservedValue};
 use nyl_core::orchestration::state::DesiredUnit;
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::observation::{
-    generated_applications, owning_application, ArgoCdObservation, GitPublicationHistory, ResourceRef, WorkloadCluster,
+    generated_applications, owning_application, DeploymentRole, GitPublicationHistory, ReconcilerFacts, ResourceRef,
+    WorkloadCluster,
 };
 use nyl_render::gitops::publication::RenderedTarget;
 use serde_json::{json, Value};
 
-use super::argocd::evaluate::{evaluate, State};
-use super::argocd::{reader, ReadError, KUBECONFIG_ENV};
-use super::observe::{budget, ensure_anchored, ensure_gone_is_visible, read_all};
+use super::observe::budget;
+use super::reconciler::evaluate::{ensure_provable, evaluate, Conclusion, EvaluateError, State};
+use super::reconciler::{reader, ReadError, ReadRequest, KUBECONFIG_ENV};
 use super::spec::{observation_sources, OBSERVATION_SOURCES, WORKLOAD};
 use super::workload::{KubeResourceReader, ResourceReader};
-use nyl_render::resources::ArgoCDAccessMethod;
 
 /// The stable code of an observation of a resource the target does not render.
 pub const UNOWNED: &str = "NYL-KUBERNETES-OBSERVATION-UNOWNED";
@@ -65,15 +66,15 @@ pub const FIELD_NOT_SET: &str = "field-not-set";
 /// read (its local context) says nothing about what the unit produces.
 pub(super) const UNKEYED: [&str; 1] = ["/workload/context"];
 
-/// One observation as `observe` reads it: what to read, and the Application
+/// One observation as `observe` reads it: what to read, and the deployment
 /// whose publication gates the read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedSource {
     pub resource: ResourceRef,
     /// A JSON Pointer into the live resource.
     pub pointer: String,
-    /// The owning Application, by namespace and name.
-    pub application: (String, String),
+    /// The owning deployment, by the id the reconciler facts give it.
+    pub deployment: String,
 }
 
 /// What one reading of a unit's observed values needs.
@@ -86,7 +87,8 @@ pub struct LiveRequest<'a> {
     pub deadline: Timestamp,
     /// The receipt's publication commit.
     pub commit: &'a str,
-    pub argocd: &'a ArgoCdObservation,
+    /// What the target expects of its reconciler.
+    pub reconciler: &'a ReconcilerFacts,
     pub workload: &'a WorkloadCluster,
     /// Every declared observation, by name.
     pub sources: &'a BTreeMap<String, ObservedSource>,
@@ -119,7 +121,7 @@ pub(super) fn recorded(spec: &Value, rendered: &RenderedTarget, target: &str) ->
         let Some(owner) = owner else {
             let rendered_here = applications
                 .iter()
-                .filter(|application| application.role == nyl_render::gitops::observation::ApplicationRole::Workload)
+                .filter(|application| application.role == DeploymentRole::Workload)
                 .map(|application| application.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -132,7 +134,7 @@ pub(super) fn recorded(spec: &Value, rendered: &RenderedTarget, target: &str) ->
         };
         sources.insert(
             name.clone(),
-            json!({"application": {"namespace": owner.namespace, "name": owner.name}}),
+            json!({"deployment": owner.id(&rendered.argocd.namespace)}),
         );
     }
     let workload = serde_json::to_value(&rendered.workload)
@@ -147,17 +149,12 @@ pub(super) fn stored_sources(spec: &Value) -> Result<BTreeMap<String, ObservedSo
     declared
         .into_iter()
         .map(|(name, source)| {
-            let application = owners
+            let deployment = owners
                 .and_then(|owners| owners.get(&name))
-                .and_then(|owner| {
-                    Some((
-                        owner.pointer("/application/namespace")?.as_str()?.to_owned(),
-                        owner.pointer("/application/name")?.as_str()?.to_owned(),
-                    ))
-                })
+                .and_then(|owner| owner.pointer("/deployment")?.as_str().map(str::to_owned))
                 .ok_or_else(|| {
                     format!(
-                        "the unit records no owning Application for observation {name}: it was resolved before it observed values; reconcile it so it records them"
+                        "the unit records no owning deployment for observation {name}: it was resolved before it observed values; reconcile it so it records them"
                     )
                 })?;
             Ok((
@@ -165,7 +162,7 @@ pub(super) fn stored_sources(spec: &Value) -> Result<BTreeMap<String, ObservedSo
                 ObservedSource {
                     resource: source.resource,
                     pointer: source.pointer,
-                    application,
+                    deployment,
                 },
             ))
         })
@@ -208,7 +205,7 @@ pub(super) fn observe(
     let values = (|| {
         let sources = stored_sources(spec)?;
         let workload = stored_workload(spec)?;
-        let argocd = super::observe::observation_of(unit)?;
+        let reconciler = super::observe::facts_of(unit)?;
         let commit = ctx
             .artifacts
             .get("tree")
@@ -225,7 +222,7 @@ pub(super) fn observe(
             now: ctx.now,
             deadline: ctx.deadline,
             commit,
-            argocd: &argocd,
+            reconciler: &reconciler,
             workload: &workload,
             sources: &sources,
         }))
@@ -239,74 +236,77 @@ pub(super) fn observe(
     nyl_core::orchestration::driver::ObservedValues { values }
 }
 
-/// The production reader: Argo CD through the instance's declared access,
-/// then the workload Cluster through its declared context.
+/// The production reader: the reconciler through the instance's declared
+/// access, then the workload Cluster through its declared context.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClusterReader;
+
+impl ClusterReader {
+    /// What the reconciler runs of the owning deployments: judged against the
+    /// receipt's publication like `nyl attest` judges every deployment, over
+    /// a reading that proves what its absences mean. Everything that stops
+    /// the evaluation is an error message, which fails every observation.
+    fn evaluate(request: &LiveRequest<'_>) -> Result<super::reconciler::evaluate::Evaluation, String> {
+        let owners: BTreeSet<&str> = request
+            .sources
+            .values()
+            .map(|source| source.deployment.as_str())
+            .collect();
+        // Only the deployments that own an observed resource decide; the
+        // anchors stay whole.
+        let expected = request
+            .reconciler
+            .expected
+            .restricted_to(|deployment| owners.contains(deployment.id.as_str()));
+        let reader = reader(
+            &request.reconciler.location,
+            request.env,
+            budget(request.now, request.deadline),
+        )
+        .map_err(|error| error.message)?;
+        let reading = reader
+            .read(&ReadRequest {
+                deployments: &expected.deployments,
+                anchors: &expected.anchors,
+                concluding_absence: false,
+            })
+            .map_err(|error| error.message)?;
+        // As `nyl attest` does, before the branch is fetched: a credential or
+        // context for another reconciler is never mistaken for a target whose
+        // deployments are not running yet.
+        ensure_provable(&expected, expected.deployments.iter(), &reading, Conclusion::Presence)
+            .map_err(|error| error.message)?;
+        let variable = |name: &str| request.env.get(name).cloned();
+        let history =
+            GitPublicationHistory::fetch(&expected.publication, request.project_dir, &variable).map_err(|error| {
+                format!("cannot read the publication branch to match what the reconciler runs: {error}")
+            })?;
+        evaluate(&expected, request.commit, &reading, &history).map_err(|error| match error {
+            EvaluateError::Unprovable(error) => error.message,
+            EvaluateError::History(error) => {
+                format!("cannot match what the reconciler runs to the publication branch: {error}")
+            }
+        })
+    }
+}
 
 impl LiveReader for ClusterReader {
     fn read(&self, request: &LiveRequest<'_>) -> BTreeMap<String, ObservedValue> {
         let names = || request.sources.keys();
-        let owners: BTreeSet<&(String, String)> = request.sources.values().map(|source| &source.application).collect();
-        let argo = match reader(request.argocd, request.env, budget(request.now, request.deadline)) {
-            Ok(reader) => reader,
-            Err(error) => return fail_all(names(), &error.message),
-        };
-        // The whole reading, anchored as `nyl attest` anchors it, so a
-        // credential or context for another Argo CD is never mistaken for a
-        // target whose Applications are not running yet.
-        let live =
-            match read_all(argo.as_ref(), request.argocd).and_then(|live| {
-                if request.argocd.location.access.method == ArgoCDAccessMethod::Kubernetes {
-                    ensure_anchored(argo.as_ref(), request.argocd, &live)?;
-                }
-                ensure_gone_is_visible(
-                    argo.as_ref(),
-                    request.argocd,
-                    &live,
-                    request.argocd.applications.iter().filter(|application| {
-                        owners.contains(&(application.namespace.clone(), application.name.clone()))
-                    }),
-                )?;
-                Ok(live)
-            }) {
-                Ok(live) => live,
-                Err(error) => return fail_all(names(), &error.message),
-            };
-        let variable = |name: &str| request.env.get(name).cloned();
-        let history = match GitPublicationHistory::fetch(&request.argocd.publication, request.project_dir, &variable) {
-            Ok(history) => history,
-            Err(error) => {
-                return fail_all(
-                    names(),
-                    &format!("cannot read the publication branch to match what Argo CD runs: {error}"),
-                )
-            }
-        };
-        // Only the Applications that own an observed resource decide.
-        let mut owning = request.argocd.clone();
-        owning
-            .applications
-            .retain(|application| owners.contains(&(application.namespace.clone(), application.name.clone())));
-        let evaluation = match evaluate(&owning, request.commit, &live, &history) {
+        let evaluation = match Self::evaluate(request) {
             Ok(evaluation) => evaluation,
-            Err(error) => {
-                return fail_all(
-                    names(),
-                    &format!("cannot match what Argo CD runs to the publication branch: {error}"),
-                )
-            }
+            Err(message) => return fail_all(names(), &message),
         };
-        let state_of = |owner: &(String, String)| {
+        let state_of = |owner: &str| {
             evaluation
                 .findings
                 .iter()
-                .find(|finding| (&finding.application.namespace, &finding.application.name) == (&owner.0, &owner.1))
+                .find(|finding| finding.deployment.id == owner)
         };
         let mut cluster: Option<Result<KubeResourceReader, ReadError>> = None;
         let mut values = BTreeMap::new();
         for (name, source) in request.sources {
-            let running = state_of(&source.application);
+            let running = state_of(&source.deployment);
             if let Some(finding) = running.filter(|finding| finding.state != State::Accepted) {
                 values.insert(
                     name.clone(),

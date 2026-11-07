@@ -731,8 +731,8 @@ spec:
   `teardownWait: {strategy: observe}` is a validation error. Direct application through Nyl, which
   would attest `healthy` from rollout status during `reconcile`, is not a mode
   in the initial scope.
-- It supports [observed values](#observed-values) in `mode: observe`, whose
-  credentials it needs (a unit in `mode: publish` that declares
+- It supports [observed values](#observed-values) with `observe: {}`, whose
+  credentials it needs (a unit that does not declare `observe` and declares
   `observations` is rejected with `NYL-OBSERVATIONS-UNSUPPORTED`). Its `from`
   names a `resource` (`apiVersion`, `kind`, `namespace` for namespaced kinds,
   `name`) and a JSON `pointer` into it:
@@ -757,7 +757,8 @@ spec:
     ConfigMap or a custom resource can still hold sensitive data, which the
     declaration author must not observe. A manifest without `metadata.namespace`
     belongs to the namespace its Application deploys to. Resolution records,
-    in the resolved spec, the Application that owns each observed resource
+    in the resolved spec, the deployment (Application) that owns each observed
+    resource, by its id in the reconciler facts
     (`observationSources`, part of the execution key) and the target's
     workload Cluster with its local context (`workload`; the context, which
     only says how to read, is left out of the key), so `observe` renders

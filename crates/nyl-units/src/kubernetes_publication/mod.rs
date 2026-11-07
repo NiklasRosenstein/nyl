@@ -12,10 +12,12 @@
 //!   `FakePublication` shares them, so both kinds publish the same bytes.
 //! - [`build`] implements `nyl build`: render, `--diff` against the published
 //!   tree, and `--push` for a target no environment owns.
-//! - [`argocd`] reads Argo CD (the Kubernetes API of the control-plane
-//!   Cluster, or the Argo CD API server) and judges what it reports;
-//!   [`observe`] is the driver's use of it, for `nyl attest` and the
-//!   `observe` teardown wait.
+//! - [`reconciler`] reads the reconciler that runs the target into a neutral
+//!   [`Reading`](reconciler::Reading) and judges it against the publication
+//!   ([`reconciler::evaluate`]); [`argocd`] is the Argo CD reader (the
+//!   Kubernetes API of the control-plane Cluster, or the Argo CD API
+//!   server). [`observe`] is the driver's use of them, for `nyl attest` and
+//!   the `observe` teardown wait.
 //! - [`observed_values`] reads a field of a rendered resource from the
 //!   workload Cluster for the unit's observed values, once the Application
 //!   that owns the resource runs the current publication ([`workload`] reads

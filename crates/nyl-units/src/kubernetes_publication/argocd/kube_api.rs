@@ -80,7 +80,6 @@ impl Connection {
             context: context.to_owned(),
             kubeconfig: files,
             budget,
-            namespace: super::DEFAULT_NAMESPACE.to_owned(),
         })
     }
 
@@ -165,6 +164,8 @@ impl Connection {
 /// Reads Applications through a kubeconfig context.
 pub struct KubeApiReader {
     connection: Connection,
+    /// The instance's namespace, where its AppProjects live.
+    namespace: String,
 }
 
 impl KubeApiReader {
@@ -185,11 +186,19 @@ impl KubeApiReader {
                 budget,
                 ", or declare the ArgoCDInstance's spec.access with method api",
             )?,
+            namespace: super::DEFAULT_NAMESPACE.to_owned(),
         })
     }
 }
 
 impl KubeApiReader {
+    /// Read the instance that lives in `namespace`.
+    #[must_use]
+    pub fn in_namespace(mut self, namespace: &str) -> Self {
+        namespace.clone_into(&mut self.namespace);
+        self
+    }
+
     /// The `plural` objects (of `kind`) of `namespace`, by name, each as served.
     fn list(&self, kind: &str, plural: &str, namespace: &str) -> Result<BTreeMap<String, Value>, ReadError> {
         let budget = self.connection.budget;
@@ -225,7 +234,7 @@ impl KubeApiReader {
                 Err(ReadError::new(
                     ReadErrorKind::Unreachable,
                     format!(
-                        "reading {plural} of namespace {namespace} through context {:?} took longer than {}s",
+                        "cannot list {plural} of namespace {namespace} through context {:?}: no answer within {}s",
                         self.connection.context(),
                         budget.as_secs()
                     ),

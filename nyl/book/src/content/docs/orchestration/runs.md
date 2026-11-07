@@ -168,7 +168,7 @@ kind: KubernetesPublication
 metadata: {name: kubernetes}
 spec:
   target: '{{ values.target }}'
-  mode: observe
+  observe: {}
   observations:
     ingressIp:
       type: string
