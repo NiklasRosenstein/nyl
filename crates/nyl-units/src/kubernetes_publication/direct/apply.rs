@@ -33,7 +33,7 @@ use nyl_render::kubernetes::lifecycle::{
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{ReleasePublication, ReleaseState, ResourceKey, ResourceOrdering};
-use nyl_render::NylError;
+use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
 use super::reader::{api_error, is_state_namespace};
@@ -94,16 +94,12 @@ fn why(failure: &Failure) -> Why {
         },
         Failure::Nyl(error) => {
             let text = error.to_string();
-            if error.is_owner_fenced() {
-                Why::Fenced(text)
-            } else if text.starts_with("Connection error") {
-                Why::Connection(text)
-            } else if text.starts_with("Interrupted") {
-                Why::Timeout(text)
-            } else if text.starts_with("Validation failed") {
-                Why::Rejected(text)
-            } else {
-                Why::Failed(text)
+            match error.kube_kind() {
+                _ if error.is_owner_fenced() => Why::Fenced(text),
+                Some(KubeErrorKind::Connection) => Why::Connection(text),
+                Some(KubeErrorKind::Rejected) => Why::Rejected(text),
+                _ if matches!(error, NylError::Interrupted(_)) => Why::Timeout(text),
+                _ => Why::Failed(text),
             }
         }
     }
@@ -440,7 +436,11 @@ impl<'a, 'c> Direct<'a, 'c> {
                     key,
                     result: Err(error),
                 } => {
-                    applied.failure_texts.push((key.to_string(), error.to_string()));
+                    applied.failure_texts.push((
+                        key.to_string(),
+                        error.to_string(),
+                        error.kube_kind() == Some(KubeErrorKind::Rejected),
+                    ));
                 }
                 ApplyEvent::PruneKept {
                     key,
@@ -473,7 +473,7 @@ impl<'a, 'c> Direct<'a, 'c> {
             let detail = applied
                 .failure_texts
                 .iter()
-                .map(|(key, error)| format!("{key}: {}", error.lines().next().unwrap_or_default()))
+                .map(|(key, error, _)| format!("{key}: {}", error.lines().next().unwrap_or_default()))
                 .collect::<Vec<_>>()
                 .join("; ");
             let text = format!(
@@ -484,11 +484,8 @@ impl<'a, 'c> Direct<'a, 'c> {
                     format!(" ({detail})")
                 }
             );
-            let rejected = !applied.failure_texts.is_empty()
-                && applied
-                    .failure_texts
-                    .iter()
-                    .all(|(_, error)| error.starts_with("Validation failed"));
+            let rejected =
+                !applied.failure_texts.is_empty() && applied.failure_texts.iter().all(|(_, _, rejected)| *rejected);
             applied.failures.push(if rejected {
                 Why::Rejected(text)
             } else {
@@ -772,7 +769,8 @@ struct Applied {
     tracked: Vec<ResourceKey>,
     awaiting: Vec<String>,
     failures: Vec<Why>,
-    failure_texts: Vec<(String, String)>,
+    /// Each failed resource, its error, and whether the API rejected the object itself.
+    failure_texts: Vec<(String, String, bool)>,
 }
 
 enum Purge {
