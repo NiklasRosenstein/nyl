@@ -354,9 +354,15 @@ mod tests {
     fn test_validate_checks_an_inline_target_like_a_discovered_one() {
         let publication =
             json!({"repository": {"repoURL": "https://example.invalid/deploy.git"}, "revision": "deploy"});
-        assert!(validate(&inline(&json!({"publication": publication}))).is_ok());
-        assert!(invalid(&inline(&json!({"publication": publication, "bogus": 1}))).contains("bogus"));
-        assert!(invalid(&inline(&json!({}))).contains("publication"));
+        let reconciler = json!({"argocd": {}});
+        assert!(validate(&inline(&json!({"reconciler": reconciler, "publication": publication}))).is_ok());
+        assert!(invalid(&inline(
+            &json!({"reconciler": reconciler, "publication": publication, "bogus": 1})
+        ))
+        .contains("bogus"));
+        assert!(invalid(&inline(&json!({"reconciler": reconciler}))).contains("publication"));
+        // An inline target declares its reconciler like a discovered one.
+        assert!(invalid(&inline(&json!({"publication": publication}))).contains("NYL-TARGET-RECONCILER-MISSING"));
         assert!(invalid(&json!({"target": {"inline": {"publication": publication}}})).contains("spec.target.name"));
     }
 

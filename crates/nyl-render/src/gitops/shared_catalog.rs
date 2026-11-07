@@ -417,6 +417,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {{name: {name}}}
 spec:
+  reconciler: {{argocd: {{}}}}
   clusterRef: {{name: dev}}
   applicationGroupSelector: {{matchLabels: {{app: web}}}}
   catalogApplication: {catalog}
@@ -487,8 +488,8 @@ spec:
         let instances = "---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {name: one}\nspec: {clusterRef: {name: dev}, namespace: argocd}\n---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {name: two}\nspec: {clusterRef: {name: dev}, namespace: elsewhere}\n";
         let with_instance = |name: &str, instance: &str| {
             target(name, "previews", name, PREVIEWS).replace(
-                "  clusterRef: {name: dev}\n",
-                &format!("  clusterRef: {{name: dev}}\n  argocdRef: {{name: {instance}}}\n"),
+                "  reconciler: {argocd: {}}\n",
+                &format!("  reconciler: {{argocd: {{instanceRef: {{name: {instance}}}}}}}\n"),
             )
         };
         let across = [

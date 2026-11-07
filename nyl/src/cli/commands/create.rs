@@ -674,7 +674,7 @@ fn render_resource_scaffold(
             "apiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  namespace: argocd\n"
         ),
         GitOpsResourceKind::DeploymentTarget => format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  # Argo CD with the implicit target-local instance. With an ArgoCDInstance declared,\n  # write `argocd: {{instanceRef: {{name: <instance>}}}}`; for Nyl to apply the Releases, write `direct: {{}}`.\n  reconciler:\n    argocd: {{}}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n"
         ),
         GitOpsResourceKind::AppProjectDefinition => format!(
             "apiVersion: k8s.gitops.nyl/v1\nkind: AppProjectDefinition\nmetadata:\n  name: {name}\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: {name}\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n"
@@ -1043,6 +1043,7 @@ mod tests {
         assert!(cluster.contains("context: admin@production"));
         let target = fs::read_to_string(temp.path().join("config/targets/production.yaml")).unwrap();
         assert!(target.contains("kind: DeploymentTarget"));
+        assert!(target.contains("reconciler:\n    argocd: {}\n"));
         assert!(target.contains("publication:"));
         assert!(!target.contains("clusterRef:"));
         assert!(!target.contains("pathPrefix:"));

@@ -3,6 +3,7 @@ kind: DeploymentTarget
 metadata:
   name: minikube
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: minikube
   publication:

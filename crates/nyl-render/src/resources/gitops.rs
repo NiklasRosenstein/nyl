@@ -25,6 +25,16 @@ pub const KIND_CLUSTER: &str = "Cluster";
 pub const KIND_ARGOCD_INSTANCE: &str = "ArgoCDInstance";
 
 pub const KIND_DEPLOYMENT_TARGET: &str = "DeploymentTarget";
+/// A DeploymentTarget declares no reconciler, or an empty one.
+pub const TARGET_RECONCILER_MISSING: &str = "NYL-TARGET-RECONCILER-MISSING";
+/// A DeploymentTarget declares more than one reconciler.
+pub const TARGET_RECONCILER_AMBIGUOUS: &str = "NYL-TARGET-RECONCILER-AMBIGUOUS";
+/// A DeploymentTarget still uses the removed `spec.argocdRef`.
+pub const TARGET_ARGOCD_REF_REMOVED: &str = "NYL-TARGET-ARGOCD-REF-REMOVED";
+/// A DeploymentTarget with an Argo CD reconciler names no instance although explicit instances exist.
+pub const TARGET_ARGOCD_INSTANCE_REF_REQUIRED: &str = "NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED";
+/// A DeploymentTarget names an ArgoCDInstance although none is declared.
+pub const TARGET_ARGOCD_INSTANCE_UNDECLARED: &str = "NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED";
 
 pub const KIND_APP_PROJECT_DEFINITION: &str = "AppProjectDefinition";
 
@@ -159,7 +169,7 @@ pub struct ClusterLiveConfiguration {
 ///
 /// ## If omitted
 ///
-/// When no ArgoCDInstance resources are declared, each target uses an implicit instance in its workload Cluster, in namespace `argocd`, with the catalog defaults. Leave `spec.argocdRef` unset in this case. Once any explicit instance exists, every DeploymentTarget must set `spec.argocdRef.name` to a declared instance.
+/// When no ArgoCDInstance resources are declared, each target uses an implicit instance in its workload Cluster, in namespace `argocd`, with the catalog defaults. Write `reconciler: {argocd: {}}` on a target in this case. Once any explicit instance exists, every Argo CD DeploymentTarget must set `spec.reconciler.argocd.instanceRef.name` to a declared instance.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::ArgoCDInstance))]
@@ -366,16 +376,19 @@ pub struct DeploymentTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::catalog::deployment_target_constraints)]
 pub struct DeploymentTargetSpec {
     /// Project-local workload Cluster. Defaults to the target name when omitted.
     #[serde(rename = "clusterRef", skip_serializing_if = "Option::is_none")]
     pub cluster_ref: Option<LocalReference>,
-    /// Project-local ArgoCDInstance. Required for an Argo CD target when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace. Not allowed with `reconciler.direct`.
-    #[serde(rename = "argocdRef", skip_serializing_if = "Option::is_none")]
-    pub argocd_ref: Option<LocalReference>,
-    /// Who applies the rendered Releases. Omitted: Argo CD, which syncs the published tree. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog.
+    /// Who applies the rendered Releases. Required, with exactly one member. `argocd`: Argo CD syncs the published tree; `argocd.instanceRef` names the project-local ArgoCDInstance, which is required once any explicit instance exists, and `argocd: {}` uses the implicit target-local instance in the workload Cluster and the `argocd` namespace otherwise. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "TargetReconciler")]
     pub reconciler: Option<TargetReconciler>,
+    /// Removed in favor of `reconciler.argocd.instanceRef`. Parsed only so that using it fails with `NYL-TARGET-ARGOCD-REF-REMOVED` and the fix.
+    #[serde(rename = "argocdRef", default, skip_serializing)]
+    #[schemars(skip)]
+    pub legacy_argocd_ref: Option<serde::de::IgnoredAny>,
     /// Matches literal ApplicationGroup metadata labels before rendering their specs. An empty selector matches all groups.
     #[serde(rename = "applicationGroupSelector", default)]
     pub application_group_selector: LabelSelector,
@@ -400,10 +413,23 @@ pub struct DeploymentTargetSpec {
 /// Contract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::catalog::reconciler_constraints)]
 pub struct TargetReconciler {
+    /// Argo CD syncs the published tree. Write `argocd: {instanceRef: {name: <instance>}}` for an explicit ArgoCDInstance, or `argocd: {}` for the implicit target-local instance, which is valid only while no ArgoCDInstance is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argocd: Option<ArgoCdReconciler>,
     /// Nyl applies the target's Releases to its Cluster, in the order of `nyl apply`, and prunes by release state. Takes no options yet; write `direct: {}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct: Option<DirectReconciler>,
+}
+
+/// Options of the Argo CD reconciler.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgoCdReconciler {
+    /// Project-local ArgoCDInstance. Required when any explicit instance exists; not allowed when none is declared, where Nyl uses a target-local instance in the workload Cluster and `argocd` namespace.
+    #[serde(rename = "instanceRef", default, skip_serializing_if = "Option::is_none")]
+    pub instance_ref: Option<LocalReference>,
 }
 
 /// Options of the direct reconciler. None yet.
@@ -1400,6 +1426,23 @@ impl DeploymentTarget {
             .is_some_and(|reconciler| reconciler.direct.is_some())
     }
 
+    /// Whether Argo CD applies this target's Releases (`reconciler.argocd`).
+    pub fn is_argocd(&self) -> bool {
+        self.spec
+            .reconciler
+            .as_ref()
+            .is_some_and(|reconciler| reconciler.argocd.is_some())
+    }
+
+    /// The ArgoCDInstance `reconciler.argocd.instanceRef` names, if any.
+    pub fn argocd_instance_ref(&self) -> Option<&LocalReference> {
+        self.spec
+            .reconciler
+            .as_ref()
+            .and_then(|reconciler| reconciler.argocd.as_ref())
+            .and_then(|argocd| argocd.instance_ref.as_ref())
+    }
+
     pub fn publication_path_prefix(&self) -> &str {
         self.spec
             .publication
@@ -1416,25 +1459,43 @@ impl DeploymentTarget {
             &self.metadata,
         )?;
         validate_static_required("spec.clusterRef.name", self.cluster_name())?;
-        if let Some(reference) = &self.spec.argocd_ref {
-            validate_static_required("spec.argocdRef.name", &reference.name)?;
+        if self.spec.legacy_argocd_ref.is_some() {
+            return Err(CoreError::config(format!(
+                "{TARGET_ARGOCD_REF_REMOVED}: spec.argocdRef no longer exists; the reconciler is explicit. \
+                 Replace it with `reconciler: {{argocd: {{instanceRef: {{name: <instance>}}}}}}`, \
+                 or with `reconciler: {{argocd: {{}}}}` when no ArgoCDInstance is declared"
+            )));
         }
-        if let Some(reconciler) = &self.spec.reconciler {
-            if reconciler.direct.is_none() {
-                return Err(CoreError::config(
-                    "spec.reconciler must name a reconciler: write `reconciler: {direct: {}}` or omit it for Argo CD",
-                ));
+        let reconciler = self.spec.reconciler.as_ref();
+        match (
+            reconciler.and_then(|reconciler| reconciler.argocd.as_ref()),
+            reconciler.and_then(|reconciler| reconciler.direct.as_ref()),
+        ) {
+            (None, None) => {
+                return Err(CoreError::config(format!(
+                    "{TARGET_RECONCILER_MISSING}: spec.reconciler is required and names who applies the target's Releases; \
+                     write `reconciler: {{argocd: {{instanceRef: {{name: <instance>}}}}}}` (or `reconciler: {{argocd: {{}}}}` \
+                     for the implicit target-local instance) for Argo CD, or `reconciler: {{direct: {{}}}}` for Nyl to apply them itself"
+                )));
             }
-            if self.spec.argocd_ref.is_some() {
-                return Err(CoreError::config(
-                    "spec.reconciler.direct and spec.argocdRef are mutually exclusive: a direct target is applied by Nyl and generates no Argo CD Application",
-                ));
+            (Some(_), Some(_)) => {
+                return Err(CoreError::config(format!(
+                    "{TARGET_RECONCILER_AMBIGUOUS}: spec.reconciler has both argocd and direct; a target has exactly one reconciler. \
+                     Keep `argocd` to publish for Argo CD or `direct` for Nyl to apply the Releases itself"
+                )));
             }
-            let catalog = &self.spec.catalog_application;
-            if !catalog.enabled || catalog.shared.is_some() || catalog.has_target_settings() {
-                return Err(CoreError::config(
-                    "spec.reconciler.direct generates no catalog Application, so spec.catalogApplication must be omitted",
-                ));
+            (Some(argocd), None) => {
+                if let Some(reference) = &argocd.instance_ref {
+                    validate_static_required("spec.reconciler.argocd.instanceRef.name", &reference.name)?;
+                }
+            }
+            (None, Some(_)) => {
+                let catalog = &self.spec.catalog_application;
+                if !catalog.enabled || catalog.shared.is_some() || catalog.has_target_settings() {
+                    return Err(CoreError::config(
+                        "spec.reconciler.direct generates no catalog Application, so spec.catalogApplication must be omitted",
+                    ));
+                }
             }
         }
         self.spec.publication.validate()?;
@@ -1884,6 +1945,7 @@ mod tests {
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
                 "clusterRef": {"name": "prod-eu-1"},
+                "reconciler": {"argocd": {}},
                 "values": {"replicas": 3},
                 "publication": {
                     "repositoryRef": {"name": "deploy"},
@@ -2396,18 +2458,48 @@ mod tests {
         target
     }
 
-    /// Catches a direct target that also names Argo CD settings it would
-    /// ignore, an empty or unknown reconciler, and a valid direct declaration
-    /// being refused.
+    /// Catches a target whose reconciler is implied, empty, or doubled, the
+    /// removed `argocdRef` still being accepted, a direct target that also
+    /// declares Argo CD settings it would ignore, and a valid declaration of
+    /// either reconciler being refused. Each refusal carries its stable code
+    /// and the fix.
     #[test]
-    fn validates_the_reconciler_of_a_target_as_exclusive() {
-        assert!(parse_gitops_resource(&target_with(json!({"reconciler": {"direct": {}}}))).is_ok());
+    fn validates_the_reconciler_of_a_target_as_explicit_and_exclusive() {
+        for valid in [
+            json!({"reconciler": {"direct": {}}}),
+            json!({"reconciler": {"argocd": {}}}),
+            json!({"reconciler": {"argocd": {"instanceRef": {"name": "central"}}}}),
+        ] {
+            assert!(parse_gitops_resource(&target_with(valid.clone())).is_ok(), "{valid}");
+        }
         let refused = |extra: serde_json::Value| parse_gitops_resource(&target_with(extra)).unwrap_err().to_string();
-        assert!(refused(json!({"reconciler": {}})).contains("must name a reconciler"));
+
+        for missing in [json!({}), json!({"reconciler": {}})] {
+            let error = refused(missing);
+            assert!(error.contains(TARGET_RECONCILER_MISSING), "{error}");
+            assert!(
+                error.contains("reconciler: {argocd:") && error.contains("reconciler: {direct: {}}"),
+                "the fix names both forms: {error}"
+            );
+        }
+        let both = refused(json!({"reconciler": {"argocd": {}, "direct": {}}}));
+        assert!(both.contains(TARGET_RECONCILER_AMBIGUOUS), "{both}");
+        for legacy in [
+            json!({"argocdRef": {"name": "central"}}),
+            json!({"argocdRef": {"name": "central"}, "reconciler": {"direct": {}}}),
+        ] {
+            let error = refused(legacy);
+            assert!(error.contains(TARGET_ARGOCD_REF_REMOVED), "{error}");
+            assert!(error.contains("reconciler: {argocd: {instanceRef:"), "{error}");
+        }
+
         assert!(parse_gitops_resource(&target_with(json!({"reconciler": {"flux": {}}}))).is_err());
         assert!(
-            refused(json!({"reconciler": {"direct": {}}, "argocdRef": {"name": "central"}}))
-                .contains("mutually exclusive")
+            parse_gitops_resource(&target_with(
+                json!({"reconciler": {"direct": {"instanceRef": {"name": "x"}}}})
+            ))
+            .is_err(),
+            "a direct reconciler takes no Argo CD options"
         );
         for catalog in [
             json!({"enabled": false}),

@@ -631,6 +631,7 @@ fn inline_spec() -> Value {
         "name": "preview",
         "sourceFile": "nyl/platform.yaml",
         "inline": {
+            "reconciler": {"argocd": {}},
             "clusterRef": {"name": "dev"},
             "applicationGroupSelector": {"matchLabels": {"app": "web"}},
             "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "preview"},

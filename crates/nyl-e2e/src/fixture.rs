@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_a_placeholder_line_takes_the_values_lines_at_its_own_indent() {
-        let values = BTreeMap::from([("FIELDS", "argocdRef: {name: dev}\nother: 1\n".to_owned())]);
+        let values = BTreeMap::from([("FIELDS", "reconciler: {argocd: {}}\nother: 1\n".to_owned())]);
         let rendered = substitute(
             "spec:\n  clusterRef: x\n  %FIELDS%\n  next: y\n",
             &values,
@@ -293,7 +293,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             rendered,
-            "spec:\n  clusterRef: x\n  argocdRef: {name: dev}\n  other: 1\n  next: y\n"
+            "spec:\n  clusterRef: x\n  reconciler: {argocd: {}}\n  other: 1\n  next: y\n"
         );
     }
 
@@ -374,7 +374,7 @@ mod tests {
         let declarations = Declarations {
             instance_documents: "---\nkind: ArgoCDInstance\n".to_owned(),
             target_cluster: "dev".to_owned(),
-            target_fields: "argocdRef: {name: dev}".to_owned(),
+            target_fields: "reconciler: {argocd: {instanceRef: {name: dev}}}".to_owned(),
             publication_env: vec!["KUBECONFIG".to_owned()],
         };
         let files = render(&params(), &declarations).unwrap();
@@ -390,7 +390,7 @@ mod tests {
         assert!(platform.contains("live: {context: e2e-admin}"), "{platform}");
         assert!(platform.contains("kubeVersion: 1.36.4"), "{platform}");
         assert!(
-            platform.contains("\n  clusterRef: {name: dev}\n  argocdRef: {name: dev}\n  applicationGroupSelector:"),
+            platform.contains("\n  clusterRef: {name: dev}\n  reconciler: {argocd: {instanceRef: {name: dev}}}\n  applicationGroupSelector:"),
             "{platform}"
         );
         assert!(platform.contains("kind: ArgoCDInstance"), "{platform}");

@@ -115,7 +115,7 @@ mod tests {
         } else {
             (
                 "k8s.gitops.nyl/v1",
-                json!({"publication":{"repository":{"repoURL":"https://example.invalid/deploy.git"}, "revision":"deploy"}}),
+                json!({"reconciler":{"argocd":{}}, "publication":{"repository":{"repoURL":"https://example.invalid/deploy.git"}, "revision":"deploy"}}),
             )
         };
         let value = json!({"apiVersion":api, "kind":kind, "metadata":{"name":"dev"},

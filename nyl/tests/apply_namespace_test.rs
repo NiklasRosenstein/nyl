@@ -186,6 +186,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {{name: test}}
 spec:
+  reconciler: {{argocd: {{}}}}
   clusterRef: {{name: test}}
   publication:
     repository: {{repoURL: https://example.invalid/deploy.git}}

@@ -87,6 +87,7 @@ metadata:
   labels:
     environment: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   applicationGroupSelector:
@@ -1200,12 +1201,13 @@ spec:
         .args(["validate"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("must set spec.argocdRef"));
+        .stderr(predicate::str::contains("NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED"))
+        .stderr(predicate::str::contains("reconciler: {argocd: {instanceRef:"));
 
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path).unwrap().replace(
-        "  clusterRef:\n    name: prod-eu-1\n",
-        "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: central\n",
+        "  reconciler: {argocd: {}}\n",
+        "  reconciler: {argocd: {instanceRef: {name: central}}}\n",
     );
     fs::write(target_path, target).unwrap();
     let output = fixture.path().join("deploy");
@@ -1443,8 +1445,8 @@ spec:
     .unwrap();
     let production_path = fixture.path().join("config/targets/production.yaml");
     let production = fs::read_to_string(&production_path).unwrap().replace(
-        "  clusterRef:\n    name: prod-eu-1\n",
-        "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: central\n",
+        "  reconciler: {argocd: {}}\n",
+        "  reconciler: {argocd: {instanceRef: {name: central}}}\n",
     );
     fs::write(production_path, production).unwrap();
     fs::write(
@@ -1456,10 +1458,9 @@ metadata:
   labels:
     environment: production
 spec:
+  reconciler: {argocd: {instanceRef: {name: central}}}
   clusterRef:
     name: prod-eu-1
-  argocdRef:
-    name: central
   publication:
     repositoryRef:
       name: deploy
@@ -1484,6 +1485,7 @@ metadata:
   labels:
     environment: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   publication:
@@ -1754,15 +1756,15 @@ fn test_validate_rejects_distinct_argocd_instances_sharing_a_namespace() {
     }
     let production_path = fixture.path().join("config/targets/production.yaml");
     let production = fs::read_to_string(&production_path).unwrap().replace(
-        "  clusterRef:\n    name: prod-eu-1\n",
-        "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: argocd-a\n",
+        "  reconciler: {argocd: {}}\n",
+        "  reconciler: {argocd: {instanceRef: {name: argocd-a}}}\n",
     );
     fs::write(production_path, production).unwrap();
     fs::write(
         fixture.path().join("config/targets/staging.yaml"),
         STAGING_TARGET_ON_KASOKU.replace(
-            "  clusterRef:\n    name: prod-eu-1\n",
-            "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: argocd-b\n",
+            "  reconciler: {argocd: {}}\n",
+            "  reconciler: {argocd: {instanceRef: {name: argocd-b}}}\n",
         ),
     )
     .unwrap();
@@ -1904,6 +1906,7 @@ kind: DeploymentTarget
 metadata:
   name: overlap
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   publication:
@@ -1944,6 +1947,7 @@ kind: DeploymentTarget
 metadata:
   name: overlap
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   publication:
@@ -1992,6 +1996,7 @@ kind: DeploymentTarget
 metadata:
   name: overlap
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   publication:
@@ -5401,7 +5406,7 @@ fn test_update_source_locks_moves_publication_prefix_locks_to_the_branch_head() 
     fs::write(
         fixture.path().join("config/targets/dev.yaml"),
         format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: prod-eu-1\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  reconciler: {{argocd: {{}}}}\n  clusterRef:\n    name: prod-eu-1\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
         ),
     )
     .unwrap();
@@ -5522,7 +5527,7 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
     fs::write(
         fixture.path().join("config/targets/dev.yaml"),
         format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: prod-eu-1\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  reconciler: {{argocd: {{}}}}\n  clusterRef:\n    name: prod-eu-1\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
         ),
     )
     .unwrap();
@@ -7901,7 +7906,7 @@ fn partial_publication_reports_unselected_new_releases() {
 
 /// Catches a direct target generating Argo CD objects, needing an ArgoCDInstance,
 /// or losing its ownership identity: with explicit instances declared, a target
-/// that declares `reconciler: {direct: {}}` needs no `argocdRef`, renders its
+/// that declares `reconciler: {direct: {}}` needs no `instanceRef`, renders its
 /// Release directories and index, and no catalog, Application, or AppProject.
 #[test]
 fn direct_targets_render_a_tree_without_argocd_objects_and_need_no_instance() {
@@ -7915,7 +7920,7 @@ fn direct_targets_render_a_tree_without_argocd_objects_and_need_no_instance() {
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path)
         .unwrap()
-        .replace("spec:\n", "spec:\n  reconciler:\n    direct: {}\n");
+        .replace("  reconciler: {argocd: {}}\n", "  reconciler:\n    direct: {}\n");
     fs::write(&target_path, target).unwrap();
     // The cluster is declared with the context a direct target is applied through.
     let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
@@ -7954,14 +7959,19 @@ fn direct_targets_render_a_tree_without_argocd_objects_and_need_no_instance() {
     assert!(index.contains("\"reconciler\": \"direct\""), "{index}");
 }
 
-/// Catches the exclusivity of the declaration going unvalidated: a direct
-/// target that also names an ArgoCDInstance, or customizes a catalog it does
-/// not generate, is refused with what to remove.
+/// Catches the exclusivity of the declaration going unvalidated: a target
+/// that names both reconcilers, or a direct one that customizes a catalog it
+/// does not generate, is refused with what to remove.
 #[test]
-fn a_direct_target_rejects_argocd_settings() {
-    for (extra, message) in [
-        ("  argocdRef:\n    name: central\n", "mutually exclusive"),
+fn a_target_with_two_reconcilers_or_a_direct_catalog_is_rejected() {
+    for (reconciler, extra, message) in [
         (
+            "  reconciler: {argocd: {}, direct: {}}\n",
+            "",
+            "NYL-TARGET-RECONCILER-AMBIGUOUS",
+        ),
+        (
+            "  reconciler: {direct: {}}\n",
             "  catalogApplication:\n    enabled: false\n",
             "generates no catalog Application",
         ),
@@ -7970,7 +7980,7 @@ fn a_direct_target_rejects_argocd_settings() {
         let target_path = fixture.path().join("config/targets/production.yaml");
         let target = fs::read_to_string(&target_path)
             .unwrap()
-            .replace("spec:\n", &format!("spec:\n  reconciler:\n    direct: {{}}\n{extra}"));
+            .replace("  reconciler: {argocd: {}}\n", &format!("{reconciler}{extra}"));
         fs::write(&target_path, target).unwrap();
         Command::cargo_bin("nyl")
             .unwrap()
@@ -7980,6 +7990,85 @@ fn a_direct_target_rejects_argocd_settings() {
             .failure()
             .stderr(predicate::str::contains(message));
     }
+}
+
+/// Catches a target whose reconciler is implied or spelled the removed way
+/// being accepted: the command refuses it with the stable code and a fix that
+/// shows the explicit form, and a reconciler that names no member is the same
+/// as none.
+#[test]
+fn a_target_must_declare_its_reconciler_explicitly() {
+    for (reconciler, code, fix) in [
+        ("", "NYL-TARGET-RECONCILER-MISSING", "reconciler: {direct: {}}"),
+        (
+            "  reconciler: {}\n",
+            "NYL-TARGET-RECONCILER-MISSING",
+            "reconciler: {argocd: {}}",
+        ),
+        (
+            "  argocdRef:\n    name: central\n",
+            "NYL-TARGET-ARGOCD-REF-REMOVED",
+            "reconciler: {argocd: {instanceRef: {name: <instance>}}}",
+        ),
+    ] {
+        let fixture = fixture();
+        let target_path = fixture.path().join("config/targets/production.yaml");
+        let target = fs::read_to_string(&target_path)
+            .unwrap()
+            .replace("  reconciler: {argocd: {}}\n", reconciler);
+        fs::write(&target_path, target).unwrap();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args(["validate"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(code))
+            .stderr(predicate::str::contains(fix));
+    }
+}
+
+/// Catches `argocd: {}` ceasing to select the implicit target-local instance,
+/// or an instance being named where none is declared: without explicit
+/// instances, the Argo CD target renders its catalog Application into the
+/// workload Cluster's `argocd` namespace, and `instanceRef` has nothing to
+/// refer to.
+#[test]
+fn an_argocd_reconciler_without_explicit_instances_uses_the_implicit_instance() {
+    let fixture = fixture();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let catalog = fs::read_to_string(
+        output.join("production/_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml"),
+    )
+    .unwrap();
+    assert!(catalog.contains("namespace: argocd"), "{catalog}");
+
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap().replace(
+        "  reconciler: {argocd: {}}\n",
+        "  reconciler: {argocd: {instanceRef: {name: central}}}\n",
+    );
+    fs::write(target_path, target).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED"))
+        .stderr(predicate::str::contains("reconciler: {argocd: {}}"));
 }
 
 /// Catches a target changing reconciler by a publication: removing an Argo CD
@@ -8006,7 +8095,7 @@ fn a_target_does_not_change_reconciler_by_a_publication() {
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path)
         .unwrap()
-        .replace("spec:\n", "spec:\n  reconciler:\n    direct: {}\n");
+        .replace("  reconciler: {argocd: {}}\n", "  reconciler:\n    direct: {}\n");
     fs::write(&target_path, target).unwrap();
     render(&fixture)
         .failure()

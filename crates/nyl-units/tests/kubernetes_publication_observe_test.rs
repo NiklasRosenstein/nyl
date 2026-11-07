@@ -115,8 +115,8 @@ impl Observed {
         }
         if method == Method::Api {
             text = text.replace(
-                "  clusterRef: {name: dev}\n  applicationGroupSelector",
-                "  clusterRef: {name: dev}\n  argocdRef: {name: control}\n  applicationGroupSelector",
+                "  reconciler: {argocd: {}}\n",
+                "  reconciler: {argocd: {instanceRef: {name: control}}}\n",
             );
             text.push_str(&format!(
                 "---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {{name: control}}\nspec:\n  clusterRef: {{name: dev}}\n  namespace: argocd\n  access: {{method: api, api: {{server: '{}'}}}}\n",

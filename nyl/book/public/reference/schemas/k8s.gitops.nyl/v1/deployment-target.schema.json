@@ -19,6 +19,24 @@
         }
       ]
     },
+    "ArgoCdReconciler": {
+      "additionalProperties": false,
+      "description": "Options of the Argo CD reconciler.",
+      "properties": {
+        "instanceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Project-local ArgoCDInstance. Required when any explicit instance exists; not allowed when none is declared, where Nyl uses a target-local instance in the workload Cluster and `argocd` namespace."
+        }
+      },
+      "type": "object"
+    },
     "CatalogApplicationOverrides": {
       "additionalProperties": false,
       "properties": {
@@ -110,17 +128,6 @@
           "default": {},
           "description": "Matches literal ApplicationGroup metadata labels before rendering their specs. An empty selector matches all groups."
         },
-        "argocdRef": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LocalReference"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Project-local ArgoCDInstance. Required for an Argo CD target when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace. Not allowed with `reconciler.direct`."
-        },
         "catalogApplication": {
           "$ref": "#/$defs/CatalogApplicationOverrides",
           "default": {
@@ -144,15 +151,8 @@
           "description": "Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes."
         },
         "reconciler": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TargetReconciler"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Who applies the rendered Releases. Omitted: Argo CD, which syncs the published tree. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog."
+          "$ref": "#/$defs/TargetReconciler",
+          "description": "Who applies the rendered Releases. Required, with exactly one member. `argocd`: Argo CD syncs the published tree; `argocd.instanceRef` names the project-local ArgoCDInstance, which is required once any explicit instance exists, and `argocd: {}` uses the implicit target-local instance in the workload Cluster and the `argocd` namespace otherwise. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog."
         },
         "releaseInputs": {
           "additionalProperties": {
@@ -178,7 +178,8 @@
         }
       },
       "required": [
-        "publication"
+        "publication",
+        "reconciler"
       ],
       "type": "object"
     },
@@ -1236,7 +1237,80 @@
     "TargetReconciler": {
       "additionalProperties": false,
       "description": "The reconciler that applies a target's Releases: exactly one member.\n\nContract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).",
+      "oneOf": [
+        {
+          "description": "Argo CD syncs the published tree; `instanceRef` names the ArgoCDInstance when any is declared.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "direct": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "direct"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "argocd": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "argocd"
+          ],
+          "title": "argocd"
+        },
+        {
+          "description": "Nyl applies the Releases to the target's Cluster itself.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "argocd": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "argocd"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "direct": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "direct"
+          ],
+          "title": "direct"
+        }
+      ],
       "properties": {
+        "argocd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArgoCdReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Argo CD syncs the published tree. Write `argocd: {instanceRef: {name: <instance>}}` for an explicit ArgoCDInstance, or `argocd: {}` for the implicit target-local instance, which is valid only while no ArgoCDInstance is declared."
+        },
         "direct": {
           "anyOf": [
             {
@@ -1358,9 +1432,6 @@
         "name": "production"
       },
       "spec": {
-        "argocdRef": {
-          "name": "primary"
-        },
         "clusterRef": {
           "name": "primary"
         },
@@ -1370,6 +1441,13 @@
             "name": "deploy"
           },
           "revision": "deploy"
+        },
+        "reconciler": {
+          "argocd": {
+            "instanceRef": {
+              "name": "primary"
+            }
+          }
         }
       }
     }

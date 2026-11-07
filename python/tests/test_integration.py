@@ -28,6 +28,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: development}
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: local}
   applicationGroupSelector: {matchLabels: {group: workloads}}
   publication:
