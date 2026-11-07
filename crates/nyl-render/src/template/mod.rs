@@ -36,7 +36,6 @@ impl TemplateEngine {
         // Register custom filters
         env.add_filter("b64encode", filters::b64encode);
         env.add_filter("b64decode", filters::b64decode);
-        env.add_filter("tojson", filters::tojson);
 
         Self { env }
     }
@@ -169,17 +168,6 @@ mod filters {
     /// Base64 encode a string
     pub fn b64encode(value: String) -> Result<String, minijinja::Error> {
         Ok(general_purpose::STANDARD.encode(value.as_bytes()))
-    }
-
-    /// The value as compact JSON, which is also a YAML flow value: how a unit
-    /// document embeds a structured value, such as `target: {{ values.target | tojson }}`.
-    pub fn tojson(value: minijinja::Value) -> Result<String, minijinja::Error> {
-        serde_json::to_string(&value).map_err(|error| {
-            minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                format!("the value cannot be written as JSON: {error}"),
-            )
-        })
     }
 
     /// Base64 decode a string
