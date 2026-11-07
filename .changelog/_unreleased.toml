@@ -121,7 +121,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "12d1e950-dfe6-4ee2-89a0-3d1f9e07b489"
 type = "feature"
-description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment"
+description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment. An Argo CD catalog Application that is not visible yet, as on a first deploy before the operator applies the published tree, is waited for, and the timeout names it and says to apply it"
 author = "@NiklasRosenstein"
 
 [[entries]]

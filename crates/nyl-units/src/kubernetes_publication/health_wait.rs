@@ -18,6 +18,10 @@
 //! - A reading that is unreadable or whose absences are not provable is never
 //!   a pass: it is `Unread`, which retries until the timeout, except for a
 //!   credential or declaration the wait cannot fix.
+//! - A target the reader cannot see yet (its catalog Application or release
+//!   state is not applied) is not healthy yet, not an error: the first deploy
+//!   publishes before anyone applies the catalog. The wait keeps polling and,
+//!   on the timeout, names the reason and that the catalog must be applied.
 //! - A `Degraded` reading ends the wait early only when the reader says it is
 //!   terminal (a rollout past its progress deadline, a failed Job); Argo CD's
 //!   `Degraded` is never terminal, because controllers retry.
@@ -31,13 +35,13 @@ use nyl_core::orchestration::driver::{AttestationOutcome, ExecutionContext, Outc
 use nyl_core::orchestration::ports::Clock;
 use nyl_core::orchestration::state::{DesiredUnit, FailureCategory};
 use nyl_core::orchestration::time::{Duration, Timestamp};
-use nyl_render::gitops::observation::{GitPublicationHistory, ReconcilerFacts};
+use nyl_render::gitops::observation::{Expected, GitPublicationHistory, ReconcilerFacts};
 use serde_json::Value;
 
 use super::direct::ClusterAccess;
 use super::observe::{budget, facts_of};
 use super::reconciler::evaluate::{ensure_provable, evaluate, Conclusion, EvaluateError, Evaluation, State};
-use super::reconciler::{reader_with, Health, ReadError, ReadErrorKind, ReadRequest};
+use super::reconciler::{reader_with, Health, ReadError, ReadErrorKind, ReadRequest, Reading};
 
 /// The code of a wait that ran out of time.
 pub const HEALTH_TIMEOUT: &str = "NYL-KUBERNETES-HEALTH-TIMEOUT";
@@ -172,6 +176,34 @@ fn worst(evaluation: &Evaluation) -> (String, bool) {
     (text, false)
 }
 
+/// Whether `reading` shows the target's anchors and deployments at all yet.
+///
+/// A catalog Application, an AppProject, or release state that the reader
+/// cannot see is the normal state of a target on its first deploy: the tree is
+/// published, and whoever applies it (the operator for Argo CD, or the apply
+/// that comes before this wait for a direct target) has not made it visible.
+/// Inside the wait that is "not healthy yet", and it keeps polling until the
+/// timeout, whose message then names the reason and the way out. It is never a
+/// pass. What cannot be fixed by waiting still ends the wait at once: a read
+/// that fails ([`Poll::Unread`] with the reader's own kind, 401 and 403
+/// included) and a declaration the reader cannot read.
+fn visible_yet(expected: &Expected, reading: &Reading) -> Result<(), Poll> {
+    match ensure_provable(expected, expected.deployments.iter(), reading, Conclusion::Presence) {
+        Ok(()) => Ok(()),
+        // `ensure_provable` reports a hidden anchor or deployment as `Forbidden`; a
+        // credential the API rejected never gets here, it fails the read itself.
+        Err(error) if error.kind == ReadErrorKind::Forbidden => Err(Poll::NotYet {
+            worst: format!(
+                "the reconciler does not show the target yet, which is normal until its catalog or release state is \
+                 applied (apply it, and the wait passes): {}",
+                error.message
+            ),
+            terminal: false,
+        }),
+        Err(error) => Err(Poll::Unread(error)),
+    }
+}
+
 /// One reading of the unit's reconciler, judged against `commit`, the
 /// publication this execution published, exactly as `nyl attest` judges it.
 pub(super) fn poll_reconciler(
@@ -198,13 +230,8 @@ pub(super) fn poll_reconciler(
         Ok(reading) => reading,
         Err(error) => return Poll::Unread(error),
     };
-    if let Err(error) = ensure_provable(
-        &facts.expected,
-        facts.expected.deployments.iter(),
-        &reading,
-        Conclusion::Presence,
-    ) {
-        return Poll::Unread(error);
+    if let Err(poll) = visible_yet(&facts.expected, &reading) {
+        return poll;
     }
     let variable = |name: &str| ctx.env.get(name).cloned();
     let history = match GitPublicationHistory::fetch(&facts.expected.publication, &ctx.project_dir, &variable) {
@@ -368,6 +395,124 @@ mod tests {
             20,
             "the waits end exactly at the timeout: {pauses:?}"
         );
+    }
+
+    fn expected() -> Expected {
+        use nyl_render::gitops::observation::{
+            Anchor, DeploymentRole, ExpectedDeployment, ObservedPublication, Source,
+        };
+        Expected {
+            publication: ObservedPublication {
+                url: "https://example.invalid/deploy.git".to_owned(),
+                branch: "deploy".to_owned(),
+                path_prefix: "dev".to_owned(),
+            },
+            deployments: vec![ExpectedDeployment {
+                id: "argocd/web".to_owned(),
+                display: String::new(),
+                role: DeploymentRole::Workload,
+                path: "dev/web".to_owned(),
+                release: None,
+                source: Source {
+                    repository: "https://example.invalid/deploy.git".to_owned(),
+                    path: "dev/web".to_owned(),
+                    options: Value::Null,
+                },
+                locator: Value::Null,
+            }],
+            anchors: vec![Anchor {
+                id: "argocd/dev-catalog".to_owned(),
+                locator: Value::Null,
+            }],
+        }
+    }
+
+    fn reading(anchor: super::super::reconciler::Visibility) -> Reading {
+        Reading {
+            deployments: std::collections::BTreeMap::new(),
+            anchors: std::collections::BTreeMap::from([("argocd/dev-catalog".to_owned(), anchor)]),
+            absent: std::collections::BTreeMap::from([(
+                "argocd/web".to_owned(),
+                super::super::reconciler::Visibility::Visible,
+            )]),
+            proof: super::super::reconciler::Proof::Anchors,
+            unprovable: None,
+        }
+    }
+
+    /// Catches the first deploy failing at once: the catalog Application does
+    /// not exist until whoever applies the tree has applied it, after this very
+    /// publish. A reading that lacks the catalog is "not healthy yet" and the
+    /// wait keeps polling; once the catalog shows, the wait passes. A hidden
+    /// anchor is never a pass by itself, and what waiting cannot fix (an
+    /// unprovable declaration) still ends the wait at once.
+    #[test]
+    fn test_a_catalog_that_is_not_visible_yet_is_waited_for_not_failed() {
+        use super::super::reconciler::Visibility;
+        let hidden = || {
+            reading(Visibility::Hidden(
+                "the catalog Application argocd/dev-catalog is not in the reading (if the catalog was never applied, \
+                 apply it first)"
+                    .to_owned(),
+            ))
+        };
+        let expected = expected();
+        let poll_of = |reading: &Reading| match visible_yet(&expected, reading) {
+            Ok(()) => Poll::Healthy(Vec::new()),
+            Err(poll) => poll,
+        };
+        let clock = ScriptedClock {
+            now: Cell::new(start()),
+            pauses: RefCell::default(),
+        };
+        let mut polls = 0;
+        let waited = wait_until_healthy(
+            &clock,
+            start(),
+            Duration::from_secs(3600).after(start()),
+            Duration::from_secs(600),
+            || {
+                polls += 1;
+                poll_of(&if polls <= 3 {
+                    hidden()
+                } else {
+                    reading(Visibility::Visible)
+                })
+            },
+        );
+        assert!(matches!(waited, Waited::Healthy(_)));
+        assert_eq!(polls, 4);
+        assert_eq!(*clock.pauses.borrow(), vec![2, 4, 8]);
+
+        // Never visible: the timeout names the reason and the way out.
+        let clock = ScriptedClock {
+            now: Cell::new(start()),
+            pauses: RefCell::default(),
+        };
+        let waited = wait_until_healthy(
+            &clock,
+            start(),
+            Duration::from_secs(3600).after(start()),
+            Duration::from_secs(60),
+            || poll_of(&hidden()),
+        );
+        let (category, retryable, message) = failed(waited);
+        assert_eq!(category, FailureCategory::Timeout);
+        assert!(retryable);
+        assert!(message.starts_with("NYL-KUBERNETES-HEALTH-TIMEOUT:"), "{message}");
+        assert!(
+            message.contains("catalog Application argocd/dev-catalog is not in the reading"),
+            "{message}"
+        );
+        assert!(message.contains("apply it"), "{message}");
+
+        // A declaration the reader cannot read is no bootstrap state.
+        let mut unprovable = reading(Visibility::Visible);
+        unprovable.unprovable = Some("the Cluster declares no context".to_owned());
+        let Err(Poll::Unread(error)) = visible_yet(&expected, &unprovable) else {
+            panic!("an unprovable declaration is unread");
+        };
+        assert_eq!(error.kind, ReadErrorKind::Declaration);
     }
 
     /// Catches a clock that never advances turning the wait into an endless
