@@ -128,10 +128,12 @@ fn test_parallel_completion_keeps_dispatch_order_and_normalized_events() {
         events: Mutex::new(Vec::new()),
         fast_finished: signal.path().join("fast-finished"),
     };
+    // The slow unit waits for the fast unit's end event. The bound only
+    // ends a run that is broken; a loaded CI runner can take tens of seconds.
     let slow = command(
         "a-slow",
         &format!(
-            "i=0; while [ ! -f \"{}\" ]; do i=$((i+1)); test \"$i\" -lt 1000 || exit 1; sleep 0.01; done",
+            "i=0; while [ ! -f \"{}\" ]; do i=$((i+1)); test \"$i\" -lt 30000 || exit 1; sleep 0.01; done",
             events.fast_finished.display()
         ),
         "  idempotent: true\n  teardown: [sh, -c, 'true']\n",
