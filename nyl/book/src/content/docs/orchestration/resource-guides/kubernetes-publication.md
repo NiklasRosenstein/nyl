@@ -207,10 +207,11 @@ spec:
   env: {passthrough: [KUBECONFIG]}      # the credential for the access the ArgoCDInstance declares
 ```
 
-`observe` is an object so that options can be added later; only `{}` is
-accepted, and a field inside it is a validation error. It opts the unit in and
-says nothing about which reconciler runs: that follows the reconciler of the
-unit's target, its ArgoCDInstance, so the declaration stays the same if the
+`observe` is an object so that options can be added later; `{}` and `waitHealthy`
+(below) are the only forms, and any other field inside it is a validation error. It
+opts the unit in and says nothing about which reconciler runs: that follows the
+reconciler of the unit's target, its ArgoCDInstance or its
+[direct reconciler](#direct-targets), so the declaration stays the same if the
 target's reconciler changes. There is no `mode` field; a unit without
 `observe` only publishes, declares no attestations, and waits for an operator
 when it is torn down.
@@ -323,6 +324,64 @@ of it is `NYL-ATTESTATION-UNDECLARED`.
 
 `nyl attest --target` for a target no environment owns arrives with promotion
 (M6), as does `nyl attest --name … --result …`.
+
+## Waiting for health
+
+`observe: {waitHealthy: {timeout: 5m}}` makes `nyl reconcile` wait. After the
+publish (and, for a direct target, the apply) the unit polls its reconciler, with
+a pause that doubles from 2 to 30 seconds, until `healthy` passes, and then
+records the same `accepted` and `healthy` attestations `nyl attest` would. It works
+for a direct target and for both Argo CD access methods, because it runs the
+shared evaluation over whatever reader the target's reconciler has:
+
+```yaml
+spec:
+  target: '{{ values.target }}'
+  observe: {waitHealthy: {timeout: 5m}}
+  env: {passthrough: [KUBECONFIG]}
+```
+
+- An unreadable reconciler, a reading that cannot prove an absence, and a
+  publication that does not match are never a pass: the wait keeps polling, except
+  for a credential or declaration it cannot fix, which fails at once. On a first
+  deploy the Argo CD catalog Application does not exist until the operator applies
+  the published tree, so a catalog the reader does not see yet is waited for like
+  any other not-yet-healthy state; if it never appears, the timeout names it and
+  says to apply it.
+- A `Degraded` reading ends the wait early only when it cannot recover, such as a
+  Deployment past its progress deadline or a failed Job
+  (`NYL-KUBERNETES-HEALTH-DEGRADED`). Argo CD's `Degraded` is never final, because
+  its controllers retry.
+- On the timeout the unit fails, retryable, with `NYL-KUBERNETES-HEALTH-TIMEOUT`
+  naming the worst deployment and its last health. It fails rather than warns
+  because you asked for the wait; the tree is published and applied, so the next
+  reconcile publishes nothing, applies again, and waits again. The wait never
+  outlasts the unit's own `timeout`.
+- Without `waitHealthy`, reconcile does not wait, and a job that needs `healthy`
+  runs `nyl attest` until it passes.
+
+## Direct targets
+
+A target that declares `reconciler: {direct: {}}` (see
+[Apply directly without Argo CD](/nyl/kubernetes-gitops/workflow/direct-reconciler/))
+needs no change to the unit except its credentials: `env.passthrough: [KUBECONFIG]`,
+for the context the target's Cluster declares as `spec.live.context`. A reconcile
+then:
+
+1. checks the cluster before touching Git: the connection, that the context's server
+   is the Cluster's declared one, and the fence of every Release;
+2. publishes the tree;
+3. applies each Release from the pushed bytes, those that register kinds first,
+   as a new release revision that records the unit, the publication, and its commit;
+4. only when every Release is `Deployed`, deletes the Releases that left the tree.
+
+A failure after step 2 leaves Git ahead of the cluster, never behind: the unit has no
+receipt, and the next execution applies again. A second unit, environment, or
+manual `nyl apply` cannot take a Release over while its owner exists
+(`NYL-KUBERNETES-RELEASE-FENCED`). `nyl attest` reads the release state and the rollout
+status of the workloads; a revision applied outside the unit is `unreadable` until
+the next reconcile. Teardown deletes in two phases and keeps the Namespaces that hold
+the release state until its wait ends.
 
 ## Observed values
 

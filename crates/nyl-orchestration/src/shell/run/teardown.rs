@@ -265,6 +265,9 @@ struct Job<'j> {
     directory: PathBuf,
     completion: Option<WaitCompletion>,
     approved_digest: Option<nyl_core::orchestration::ids::ChangeDigest>,
+    /// The artifacts the unit's last executions recorded, so a driver can
+    /// tell what it published before, such as a tree's last commit.
+    artifacts: BTreeMap<String, ArtifactDocument>,
 }
 
 /// One teardown call's result.
@@ -578,6 +581,7 @@ impl Reconcile<'_, '_, '_> {
                         directory: session.execution_directory(name),
                         completion: None,
                         approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
+                        artifacts: artifacts.get(name).cloned().unwrap_or_default(),
                     })
                     .collect();
                 run_jobs(
@@ -1029,6 +1033,7 @@ impl Reconcile<'_, '_, '_> {
                 directory: session.execution_directory(name),
                 completion: Some(completion),
                 approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
+                artifacts: artifacts.get(name).cloned().unwrap_or_default(),
             }],
             &session.incarnations,
         );
@@ -1272,9 +1277,10 @@ fn call(
     };
     let execution = ExecutionContext {
         instances: context.instances,
+        clock: context.base.clock,
         secrets,
         interactive: false,
-        artifacts: BTreeMap::new(),
+        artifacts: job.artifacts,
         source_roots,
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Teardown,

@@ -105,3 +105,39 @@ id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
 type = "fix"
 description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ace1e9b6-2f4f-4722-8b3c-cb82c9247c39"
+type = "feature"
+description = "Add a direct reconciler: a DeploymentTarget with `reconciler: {direct: {}}` is applied by Nyl itself through `KubernetesPublication` (publish the tree, then apply each Release with the mechanics of `nyl apply`), generating no Argo CD Application, AppProject, or catalog. Release state records its owning unit and publication, Releases are fenced by owner, `observe: {}` reads the release state and rollout status, and teardown deletes in two phases"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "12d1e950-dfe6-4ee2-89a0-3d1f9e07b489"
+type = "feature"
+description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment. An Argo CD catalog Application that is not visible yet, as on a first deploy before the operator applies the published tree, is waited for, and the timeout names it and says to apply it"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "45acea14-0e8e-482d-930f-d95e57734ee0"
+type = "feature"
+description = "Add `--take-over` to `nyl apply`, `nyl release rollback`, and `nyl release delete`; without it they refuse a release an orchestrated unit owns (`NYL-RELEASE-OWNED-BY-UNIT`)"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d26c5793-ee2d-4c9c-826e-bdd8dc2aa653"
+type = "breaking change"
+description = "Every command that connects through a Cluster (`nyl apply --target`, `nyl diff --target`, `nyl release list`, `show`, `history`, `rollback`, and `delete` with `--target`, and `nyl capture cluster`) uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "96c08d12-ae5e-4be4-97b9-1b04dfcbfd57"
+type = "fix"
+description = "`nyl release delete` deletes a release's resources in reverse apply order, waiting for each kind to terminate, as a prune does, instead of in one plain loop"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ef4cda57-f220-4b05-8902-7e16d46a3acd"
+type = "fix"
+description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `KubernetesPublication` published for, and the unit's published tree records its reconciler and Cluster"
+author = "@NiklasRosenstein"

@@ -89,44 +89,40 @@ pub async fn load_target_kube_config(target_name: &str, context_override: Option
     load_cluster_kube_config(&resolved.cluster, context_override).await
 }
 
+/// The kube config for `cluster`: `context_override`, else the Cluster's
+/// declared `live.context`, never the current context once the Cluster
+/// declares one. With neither, the current context is used only when the
+/// Cluster's destination server can be verified against it; an in-cluster or
+/// by-name destination needs `--context`. The context's server must match the
+/// declared destination either way.
 pub async fn load_cluster_kube_config(cluster: &Cluster, context_override: Option<&str>) -> Result<kube::Config> {
     let context = resolved_cluster_context(cluster, context_override);
+    if context.is_none()
+        && !cluster
+            .spec
+            .destination
+            .server
+            .as_deref()
+            .is_some_and(nyl_render::kubernetes::verifiable_cluster_server)
+    {
+        return Err(NylError::config(format!(
+            "Cluster '{}' declares no live.context, and its destination cannot be checked against the current kube context \
+             (an in-cluster address or a registered name); pass --context or set spec.live.context",
+            cluster.metadata.name
+        )));
+    }
     let config = KubeRsClient::load_kube_config(None, context).await?;
-    verify_cluster_server(cluster, &config)?;
+    nyl_render::kubernetes::verify_cluster_server(cluster, &config)?;
     Ok(config)
 }
 
-fn verify_cluster_server(cluster: &Cluster, config: &kube::Config) -> Result<()> {
-    let Some(expected) = cluster.spec.destination.server.as_deref() else {
-        return Ok(());
-    };
-    let actual = config.cluster_url.to_string();
-    if normalize_cluster_url(expected) == "https://kubernetes.default.svc" {
-        tracing::debug!(
-            cluster = %cluster.metadata.name,
-            "Cannot verify an in-cluster Argo CD destination against a local kubeconfig endpoint"
-        );
-    } else if normalize_cluster_url(expected) != normalize_cluster_url(&actual) {
-        return Err(NylError::config(format!(
-            "Selected kube context points to {actual}, but Cluster '{}' expects {}",
-            cluster.metadata.name, expected
-        )));
-    }
-    Ok(())
-}
-
-fn normalize_cluster_url(value: &str) -> String {
-    let value = value.trim().trim_end_matches('/');
-    let Some((scheme, remainder)) = value.split_once("://") else {
-        return value.to_owned();
-    };
-    let boundary = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let (authority, suffix) = remainder.split_at(boundary);
-    format!(
-        "{}://{}{suffix}",
-        scheme.to_ascii_lowercase(),
-        authority.to_ascii_lowercase()
-    )
+/// The publication destination of `target_name`, which a release revision
+/// applied for that target records.
+pub fn target_release_publication(target_name: &str) -> Result<nyl_render::kubernetes::ReleasePublication> {
+    let cwd = std::env::current_dir()?;
+    let inventory = inventory(&cwd)?;
+    let target = get_target(&inventory, target_name)?;
+    nyl_render::gitops::publication::release_publication(&inventory, target)
 }
 
 pub(crate) async fn capture(args: ClusterCaptureArgs) -> Result<()> {
@@ -803,15 +799,30 @@ mod tests {
         assert!(output.contains("  kubernetes:\n    kubeVersion: 1.31.2"));
     }
 
-    #[test]
-    fn cluster_url_normalization_preserves_case_sensitive_paths() {
-        assert_eq!(
-            normalize_cluster_url("HTTPS://EXAMPLE.invalid/clusters/Prod/"),
-            "https://example.invalid/clusters/Prod"
-        );
-        assert_ne!(
-            normalize_cluster_url("https://example.invalid/clusters/Prod"),
-            normalize_cluster_url("https://example.invalid/clusters/prod")
-        );
+    fn cluster(spec: serde_json::Value) -> Cluster {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "k8s.nyl/v1", "kind": "Cluster", "metadata": {"name": "dev"}, "spec": spec
+        }))
+        .unwrap()
+    }
+
+    /// Catches a command applying to whichever cluster the current kube context
+    /// names when the Cluster's destination cannot be checked against it: an
+    /// in-cluster or by-name destination without a declared or explicit context
+    /// is refused, with the fix.
+    #[tokio::test]
+    async fn test_a_destination_that_cannot_be_verified_needs_a_context() {
+        for destination in [
+            serde_json::json!({"server": "https://kubernetes.default.svc"}),
+            serde_json::json!({"name": "in-cluster"}),
+        ] {
+            let error = load_cluster_kube_config(&cluster(serde_json::json!({"destination": destination})), None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("pass --context or set spec.live.context"),
+                "{error}"
+            );
+        }
     }
 }

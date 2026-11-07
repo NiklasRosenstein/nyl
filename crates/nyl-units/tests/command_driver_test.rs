@@ -72,6 +72,7 @@ impl World {
         let now = fixed_now();
         ExecutionContext {
             instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+            clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
             source_roots: std::collections::BTreeMap::default(),
             secrets: std::collections::BTreeMap::default(),
             artifacts: std::collections::BTreeMap::default(),

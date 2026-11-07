@@ -200,6 +200,7 @@ pub fn context_with<'a>(
         .with_timezone(&chrono::Utc);
     ExecutionContext {
         instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
         source_roots: std::collections::BTreeMap::default(),
         secrets: std::collections::BTreeMap::default(),
         artifacts: std::collections::BTreeMap::default(),
@@ -248,6 +249,28 @@ pub fn key(driver: &dyn Driver, world: &World) -> ExecutionKey {
     );
     assert!(inputs.files.contains_key("/applications/web/release.yaml"));
     ExecutionKey::from_digest_of(serde_json::to_string(&inputs.files).unwrap().as_bytes())
+}
+
+/// The message of the error resolution fails with for `spec`.
+pub fn resolve_error(driver: &dyn Driver, world: &World, spec: &Value) -> String {
+    driver
+        .execution_key_inputs(
+            &ResolutionContext {
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+                source_roots: std::collections::BTreeMap::default(),
+                environment: EnvironmentName::new("dev").unwrap(),
+                worktree: world.work(),
+                project_dir: world.work().join("nyl"),
+                env: BTreeMap::new(),
+                deadline: chrono::Utc::now(),
+                now: chrono::Utc::now(),
+                tools: &NoTools,
+                cache_dir: world.root.path().join("cache"),
+            },
+            spec,
+        )
+        .expect_err("resolution fails")
+        .to_string()
 }
 
 pub fn deleting(unit: DesiredUnit) -> DesiredUnit {

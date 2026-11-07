@@ -158,6 +158,27 @@ fn rendering_group(
     }
 }
 
+/// The documents of the files of `files` beneath `directory`, in path order:
+/// one Release's resources as a tree lays them out. A direct command takes them
+/// from the compiled target and the publication driver from the tree it pushed,
+/// both through this function, so what is applied is what the tree holds.
+pub fn release_documents(files: &std::collections::BTreeMap<PathBuf, Vec<u8>>, directory: &Path) -> Result<Vec<Value>> {
+    let mut manifests = Vec::new();
+    for (path, bytes) in files.range(directory.to_path_buf()..) {
+        if !path.starts_with(directory) {
+            break;
+        }
+        manifests.extend(file_documents(path, bytes)?);
+    }
+    Ok(manifests)
+}
+
+fn file_documents(path: &Path, bytes: &[u8]) -> Result<Vec<Value>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| NylError::config(format!("Rendered file {} is not UTF-8: {error}", path.display())))?;
+    serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)
+}
+
 /// The Release's resources as the compiled target lays them out for its
 /// Application.
 async fn from_compiled_target(
@@ -198,9 +219,7 @@ async fn from_compiled_target(
             break;
         }
         found = true;
-        let text = std::str::from_utf8(bytes)
-            .map_err(|error| NylError::config(format!("Rendered file {} is not UTF-8: {error}", path.display())))?;
-        let documents = serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)?;
+        let documents = file_documents(path, bytes)?;
         let provenance = compiled.provenance.get(path);
         for (index, manifest) in documents.into_iter().enumerate() {
             if let Some(origin) = provenance.and_then(|provenance| provenance.get(index)) {

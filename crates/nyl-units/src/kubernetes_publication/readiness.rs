@@ -129,6 +129,45 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
     readiness
 }
 
+/// The readiness of a direct target's teardown. Nothing here holds a
+/// finalizer, so nothing blocks: a Namespace whose `deletePolicy` is not
+/// `Automatic` is a remnant, and what a teardown's credentials may delete is
+/// not checked. `namespacePrunePolicies` do not matter, unlike for Argo CD,
+/// which holds an Application's cascade deletion for a `Prune=confirm`
+/// Namespace: a direct teardown purges by each object's `Delete` option alone,
+/// and `Prune` only decides whether the next apply deletes a Namespace a
+/// Release stopped declaring.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#teardown), readiness.
+pub fn evaluate_direct(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    settings: &TeardownSettings,
+) -> TeardownReadiness {
+    let mut readiness = TeardownReadiness::default();
+    let remaining = settings
+        .namespace_delete_policies
+        .iter()
+        .filter(|(_, policy)| policy.as_str() != "Automatic")
+        .map(|(namespace, _)| namespace.as_str())
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        readiness.remnants.push(Finding::new(
+            Code::TeardownNamespacesRemain,
+            format!(
+                "{environment}/{unit}: Namespaces {} remain after teardown",
+                remaining.join(", ")
+            ),
+            "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
+        ));
+    }
+    readiness.not_checked.push(
+        "resources with Delete=false or Delete=confirm, and the credentials' permission to delete: not checked"
+            .to_owned(),
+    );
+    readiness
+}
+
 /// The readiness of a target whose catalog is shared: the rows of the
 /// settings read from the Application the branch holds (`reading`, see
 /// [`super::run::read_shared_catalog`]), plus a blocking row when that
@@ -184,6 +223,31 @@ mod tests {
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), delete.to_owned())]),
             namespace_prune_policies: BTreeMap::from([("web".to_owned(), prune.to_owned())]),
             ..ready_settings()
+        }
+    }
+
+    /// Catches a direct target being held by a Namespace's `Prune=confirm`, which
+    /// Argo CD holds an Application's deletion for and a direct teardown never
+    /// consults: no policy blocks, `deletePolicy` alone decides the remnant.
+    #[test]
+    fn test_a_direct_teardown_ignores_the_prune_policy_and_never_blocks() {
+        for (delete, prune, remnant) in [
+            ("Automatic", "Automatic", false),
+            ("Automatic", "Confirm", false),
+            ("Confirm", "Automatic", true),
+            ("Retain", "Confirm", true),
+        ] {
+            let readiness = evaluate_direct(&env(), &name("kubernetes"), &namespace_policies(delete, prune));
+            assert!(readiness.ready(), "{delete}/{prune}");
+            assert_eq!(
+                codes(&readiness.remnants),
+                if remnant {
+                    vec![Code::TeardownNamespacesRemain]
+                } else {
+                    Vec::new()
+                },
+                "{delete}/{prune}"
+            );
         }
     }
 

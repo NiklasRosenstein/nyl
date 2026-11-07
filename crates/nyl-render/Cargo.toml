@@ -13,6 +13,7 @@ nyl-core = { workspace = true }
 nyl-git = { workspace = true }
 
 async-trait = { workspace = true }
+futures = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -44,3 +45,6 @@ tracing = { workspace = true }
 unicode-width = { workspace = true }
 walkdir = { workspace = true }
 zstd = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -194,6 +194,9 @@ pub fn ensure_provable<'a>(
                 Some(Visibility::Hidden(reason)) => {
                     return Err(ReadError::new(ReadErrorKind::Forbidden, reason.clone()))
                 }
+                Some(Visibility::NotYet(reason)) => {
+                    return Err(ReadError::new(ReadErrorKind::NotVisible, reason.clone()))
+                }
                 None => {
                     return Err(ReadError::new(
                         ReadErrorKind::Malformed,
@@ -213,6 +216,7 @@ pub fn ensure_provable<'a>(
         match reading.absent.get(&deployment.id) {
             Some(Visibility::Visible) => {}
             Some(Visibility::Hidden(reason)) => return Err(ReadError::new(ReadErrorKind::Forbidden, reason.clone())),
+            Some(Visibility::NotYet(reason)) => return Err(ReadError::new(ReadErrorKind::NotVisible, reason.clone())),
             None => {
                 return Err(ReadError::new(
                     ReadErrorKind::Malformed,
@@ -685,6 +689,7 @@ mod tests {
             health,
             reported: None,
             deleting: false,
+            terminal: false,
             source: Some(generated_source(path)),
             synced_source: Some(generated_source(path)),
         }

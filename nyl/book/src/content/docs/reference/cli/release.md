@@ -77,7 +77,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `-r, --revision <REVISION>` - Revision to roll back to. Defaults to the revision
   immediately before the latest one (i.e. undo the most recent deployment).
 - `-y, --yes` - Skip the confirmation prompt
-- `--context <CONTEXT>` - Kubernetes context to use
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`, as for
+  [`nyl apply`](/nyl/reference/cli/apply/): the target's declared `live.context` is used and the current context never is, and without either the current context is used only when the Cluster's destination server can be checked against it
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same
   time (default: 8; `1` applies serially). See [`nyl apply`](/nyl/reference/cli/apply/#apply-order-and-progress).
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest
@@ -88,6 +89,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `--handoff[=<MANAGER>]` - Apply as `MANAGER` (default `argocd-controller`) and
   release the fields applied as `nyl`, as with
   [`nyl apply`](/nyl/reference/cli/apply/#field-ownership-options).
+- `--take-over` - Roll back a release an environment owns anyway, recording no
+  owner, as with [`nyl apply`](/nyl/reference/cli/apply/).
 
 #### Examples
 
@@ -123,6 +126,7 @@ such as managed Namespaces, unless `--confirm-delete` is passed. See
 
 - `--no-purge` - Delete only the release records, not the resources
 - `--confirm-delete` - Also delete resources whose sync option is `Delete=confirm`
+- `--take-over` - Delete a release an environment owns anyway (see [`nyl apply --take-over`](/nyl/reference/cli/apply/)). Resources are deleted in reverse apply order, waiting for each kind to terminate before the next, as a prune does.
 - `--dry-run` - Show what would be deleted without deleting it
 
 ## See Also

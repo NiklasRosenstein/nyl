@@ -30,7 +30,9 @@
 
 pub mod argocd;
 mod build;
+pub mod direct;
 mod driver;
+mod health_wait;
 mod observe;
 mod observed_values;
 mod readiness;
@@ -46,7 +48,9 @@ pub use workload::{KubeResourceReader, ResourceReader};
 pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
-pub(crate) use run::{plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target};
+#[cfg(any(test, feature = "test-kinds"))]
+pub(crate) use run::publish;
+pub(crate) use run::{plan, render, resolution_inputs, teardown, unit_owner, unit_target};
 pub(crate) use spec::teardown_wait;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use spec::validate_observe;

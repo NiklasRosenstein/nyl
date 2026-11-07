@@ -2009,6 +2009,7 @@ dependencies = [
  "clap",
  "colored",
  "flate2",
+ "futures",
  "getrandom 0.4.3",
  "git2",
  "glob",
@@ -2060,6 +2061,7 @@ dependencies = [
 name = "nyl-units"
 version = "0.6.1"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "chrono",
  "glob",

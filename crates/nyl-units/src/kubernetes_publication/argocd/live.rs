@@ -85,6 +85,8 @@ pub fn parse(application: &Value) -> Result<Observed, String> {
         deleting: application
             .pointer("/metadata/deletionTimestamp")
             .is_some_and(|value| !value.is_null()),
+        // Argo CD's Degraded passes: controllers retry, and so does a wait.
+        terminal: false,
         source: application
             .pointer("/spec/source")
             .filter(|source| source.is_object())
