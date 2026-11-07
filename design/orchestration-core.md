@@ -868,7 +868,13 @@ reader-specific code (owner: `nyl_units::kubernetes_publication::health_wait`).
   does not match are `Unread` or `NotYet`, never `healthy`. A credential or
   declaration the wait cannot fix (`credentials`, `declaration`, `forbidden`,
   `rejected`) ends it at once as a retryable `credentials` failure; anything
-  else retries until the timeout.
+  else retries until the timeout. A target the reader cannot see yet, an anchor
+  or deployment reported hidden (an Argo CD catalog Application the operator has
+  not applied yet, which is the normal state of a first deploy, since the
+  catalog exists on the branch only after this publish), is `NotYet`, not an
+  error: the wait polls until the timeout, whose failure names the reason and
+  that the catalog must be applied. Only the wait treats it so; `nyl attest` and
+  `observe` still report such a reading as unread.
 - **Early failure.** A `Degraded` reading ends the wait before the timeout only
   when the reader marks it terminal (`Observed::terminal`): the direct reader
   does for a rollout past its progress deadline and a failed Job, and Argo CD's

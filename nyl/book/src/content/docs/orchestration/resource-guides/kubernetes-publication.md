@@ -343,7 +343,11 @@ spec:
 
 - An unreadable reconciler, a reading that cannot prove an absence, and a
   publication that does not match are never a pass: the wait keeps polling, except
-  for a credential or declaration it cannot fix, which fails at once.
+  for a credential or declaration it cannot fix, which fails at once. On a first
+  deploy the Argo CD catalog Application does not exist until the operator applies
+  the published tree, so a catalog the reader does not see yet is waited for like
+  any other not-yet-healthy state; if it never appears, the timeout names it and
+  says to apply it.
 - A `Degraded` reading ends the wait early only when it cannot recover, such as a
   Deployment past its progress deadline or a failed Job
   (`NYL-KUBERNETES-HEALTH-DEGRADED`). Argo CD's `Degraded` is never final, because
