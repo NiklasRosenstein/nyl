@@ -497,7 +497,7 @@ mod tests {
                 "metadata": {
                     "name": "widgets.example.com",
                     "annotations": {
-                        "gitops.nyl.niklasrosenstein.github.com/helm-source": "widget/crds/widgets.yaml"
+                        "k8s.gitops.nyl/helm-source": "widget/crds/widgets.yaml"
                     }
                 },
                 "spec": {}

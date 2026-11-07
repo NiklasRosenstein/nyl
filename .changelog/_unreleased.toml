@@ -1,0 +1,11 @@
+[[entries]]
+id = "b5bdf18c-6ffa-45ac-873c-3ef1ba06c20a"
+type = "deprecation"
+description = "Nyl's labels, annotations, and Secret types move from `nyl.niklasrosenstein.github.com/` to the `.nyl` API groups: `k8s.nyl/` for release state and Kyverno policies, `k8s.gitops.nyl/` for published catalog provenance. The `nyl.niklasrosenstein.github.com/apply-policy-scope` annotation on Kyverno policies and release state recorded under the old labels stay readable with a warning; new release revisions are recorded under `k8s.nyl/release` and `k8s.nyl/revision`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "a3e7186c-8ba7-4091-8323-0b79a728ce0c"
+type = "breaking change"
+description = "Rendered output changes key names: expanded manifests carry `k8s.nyl/parent-api-version`, `k8s.nyl/parent-kind`, `k8s.nyl/parent-name`, and `k8s.nyl/parent-namespace`, and catalog Applications and AppProjects carry `k8s.gitops.nyl/publication-context`. The next publication rewrites them; `diff-tree` and `publish-tree` still read the old publication-context annotation from baselines"
+author = "@NiklasRosenstein"

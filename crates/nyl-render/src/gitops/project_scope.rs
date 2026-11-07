@@ -16,7 +16,8 @@ use crate::kubernetes::prune::{delete_decision, prune_decision, PruneDecision, S
 use crate::resources::{ClusterKubernetesCapabilities, ResourceScope};
 use crate::{NylError, Result};
 
-pub(crate) const CONTEXT_ANNOTATION: &str = "nyl.niklasrosenstein.github.com/publication-context";
+use nyl_core::constants::legacy::ANNOTATION_PUBLICATION_CONTEXT as LEGACY_CONTEXT_ANNOTATION;
+pub(crate) use nyl_core::constants::ANNOTATION_PUBLICATION_CONTEXT as CONTEXT_ANNOTATION;
 
 pub(crate) fn annotate(manifest: &mut Value, context: &Value) -> Result<()> {
     if manifest["metadata"].get("annotations").is_none() {
@@ -118,7 +119,12 @@ fn identity(value: &Value) -> String {
 }
 
 fn context(value: &Value) -> Result<Value> {
-    match value["metadata"]["annotations"][CONTEXT_ANNOTATION].as_str() {
+    // Baselines published before the `.nyl` annotation carry the legacy key.
+    let annotations = &value["metadata"]["annotations"];
+    let annotation = annotations[CONTEXT_ANNOTATION]
+        .as_str()
+        .or_else(|| annotations[LEGACY_CONTEXT_ANNOTATION].as_str());
+    match annotation {
         Some(text) => {
             let invalid = |detail: &str| {
                 NylError::config(format!("Invalid publication context on {}: {detail}", identity(value)))
@@ -853,6 +859,21 @@ mod tests {
         check_project_scope(&borrowed(&old), &borrowed(&new), "production", "production", None, true).unwrap();
         let retained = tree(project(&["active", "retired"]), None, &[]);
         assert!(findings(&old, &retained).is_empty());
+    }
+
+    #[test]
+    fn test_baseline_with_legacy_context_annotation_names_the_group() {
+        let mut old = tree(project(&["retired"]), Some(app("example")), &[resource("retired")]);
+        for bytes in old.values_mut() {
+            let text = String::from_utf8(std::mem::take(bytes)).unwrap();
+            *bytes = text.replace(CONTEXT_ANNOTATION, LEGACY_CONTEXT_ANNOTATION).into_bytes();
+        }
+        let new = tree(project(&["active"]), None, &[]);
+        let found = findings(&old, &new);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].applications, BTreeSet::from(["apps/example".to_owned()]));
+        assert_eq!(found[0].application_group, "workloads");
+        assert_eq!(found[0].source, "config/group.yaml");
     }
 
     #[test]

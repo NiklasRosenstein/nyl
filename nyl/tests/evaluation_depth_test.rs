@@ -256,14 +256,10 @@ spec:
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains(
-            "nyl.niklasrosenstein.github.com/parent-api-version",
-        ))
-        .stdout(predicate::str::contains("nyl.niklasrosenstein.github.com/parent-kind"))
-        .stdout(predicate::str::contains("nyl.niklasrosenstein.github.com/parent-name"))
-        .stdout(predicate::str::contains(
-            "nyl.niklasrosenstein.github.com/parent-namespace",
-        ))
+        .stdout(predicate::str::contains("k8s.nyl/parent-api-version"))
+        .stdout(predicate::str::contains("k8s.nyl/parent-kind"))
+        .stdout(predicate::str::contains("k8s.nyl/parent-name"))
+        .stdout(predicate::str::contains("k8s.nyl/parent-namespace"))
         .stdout(predicate::str::contains("my-nginx")); // parent name
 }
 

@@ -43,6 +43,26 @@ pub fn warn_deprecated_api_version(path: &Path, document: &serde_json::Value) {
     }
 }
 
+/// The warning for an object that carries a deprecated label or annotation key.
+pub fn deprecated_key_warning(object: &str, deprecated: &str, replacement: &str) -> String {
+    format!(
+        "{object} uses deprecated key {deprecated}; use {replacement} instead. Support for {deprecated} ends in a future release, see {DEPRECATIONS_URL}"
+    )
+}
+
+/// Warn once per process for each object carrying a deprecated label or annotation key.
+pub fn warn_deprecated_key(object: &str, deprecated: &str, replacement: &str) {
+    static WARNED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    let warning = deprecated_key_warning(object, deprecated, replacement);
+    let first = WARNED
+        .get_or_init(|| Mutex::new(BTreeSet::new()))
+        .lock()
+        .map_or(true, |mut warned| warned.insert(warning.clone()));
+    if first {
+        tracing::warn!("{warning}");
+    }
+}
+
 /// The warning for a deprecated command-line flag.
 pub fn deprecated_flag_warning(flag: &str, fix: &str) -> String {
     format!("{flag} is deprecated: {fix}. Support ends in a future release, see {DEPRECATIONS_URL}")

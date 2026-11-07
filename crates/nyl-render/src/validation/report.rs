@@ -510,7 +510,7 @@ mod tests {
                         identity: "components.k8s.nyl/v1 PostgresDb rise/rise-db".into(),
                     },
                     ProvenanceFrame::Resource {
-                        identity: "nyl.niklasrosenstein.github.com/v1 HelmChart rise/postgres".into(),
+                        identity: "k8s.nyl/v1 HelmChart rise/postgres".into(),
                     },
                 ]),
                 schema_origin: None,
@@ -526,7 +526,7 @@ mod tests {
                 "    Rendered:      cloud/rise/resources.yaml     (document 21)\n",
                 "    Source:        applications/cloud/rise.yaml  (document 4)\n",
                 "    Expanded from: PostgresDb rise/rise-db       (components.k8s.nyl/v1)\n",
-                "    Expanded from: HelmChart rise/postgres       (nyl.niklasrosenstein.github.com/v1)\n\n",
+                "    Expanded from: HelmChart rise/postgres       (k8s.nyl/v1)\n\n",
             )
         );
         let styled = report.destination_text(&destination, true);

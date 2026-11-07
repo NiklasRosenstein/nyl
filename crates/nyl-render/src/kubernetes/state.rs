@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 use crate::{kubernetes::ResourceKey, NylError, Result};
-use nyl_core::constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE};
+use nyl_core::constants::{legacy, LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE};
 
 /// Status of a release
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -312,6 +312,71 @@ impl KubernetesReleaseStorage {
         })
     }
 
+    /// The release a Secret records, from its current or deprecated label.
+    fn release_label(secret: &Secret) -> Option<String> {
+        let labels = secret.metadata.labels.as_ref()?;
+        labels
+            .get(LABEL_RELEASE)
+            .or_else(|| labels.get(legacy::LABEL_RELEASE))
+            .cloned()
+    }
+
+    /// The revision a Secret records, from its current or deprecated label.
+    fn revision_label(secret: &Secret) -> Option<u32> {
+        let labels = secret.metadata.labels.as_ref()?;
+        labels
+            .get(LABEL_REVISION)
+            .or_else(|| labels.get(legacy::LABEL_REVISION))?
+            .parse()
+            .ok()
+    }
+
+    /// List release-state Secrets matching `selector`, a function of the release
+    /// label key, under the current label and then the deprecated one.
+    ///
+    /// Revisions recorded before the `k8s.nyl/` labels stay readable until the
+    /// release history limit removes them; reading one warns.
+    async fn list_release_secrets(
+        &self,
+        namespace: Option<&str>,
+        selector: impl Fn(&str) -> String,
+    ) -> Result<Vec<Secret>> {
+        let api: Api<Secret> = match namespace {
+            Some(namespace) => Api::namespaced(self.client.clone(), namespace),
+            None => Api::all(self.client.clone()),
+        };
+        let mut secrets = api
+            .list(&ListParams::default().labels(&selector(LABEL_RELEASE)))
+            .await?
+            .items;
+        for secret in api
+            .list(&ListParams::default().labels(&selector(legacy::LABEL_RELEASE)))
+            .await?
+            .items
+        {
+            // A Secret carrying both labels was already listed.
+            if secret
+                .metadata
+                .labels
+                .as_ref()
+                .is_some_and(|l| l.contains_key(LABEL_RELEASE))
+            {
+                continue;
+            }
+            crate::util::deprecation::warn_deprecated_key(
+                &format!(
+                    "Release state Secret {}/{}",
+                    secret.metadata.namespace.as_deref().unwrap_or_default(),
+                    secret.metadata.name.as_deref().unwrap_or_default()
+                ),
+                legacy::LABEL_RELEASE,
+                LABEL_RELEASE,
+            );
+            secrets.push(secret);
+        }
+        Ok(secrets)
+    }
+
     /// Convert Secret to ReleaseState
     fn from_secret(secret: &Secret) -> Result<ReleaseState> {
         let data = secret
@@ -319,11 +384,7 @@ impl KubernetesReleaseStorage {
             .as_ref()
             .ok_or_else(|| NylError::Config("Secret missing data field".to_string()))?;
 
-        let release_name = secret
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(LABEL_RELEASE))
+        let release_name = Self::release_label(secret)
             .ok_or_else(|| NylError::Config("Secret missing release label".to_string()))?
             .clone();
 
@@ -334,12 +395,7 @@ impl KubernetesReleaseStorage {
             .ok_or_else(|| NylError::Config("Secret missing namespace".to_string()))?
             .clone();
 
-        let revision: u32 = secret
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(LABEL_REVISION))
-            .and_then(|r| r.parse().ok())
+        let revision: u32 = Self::revision_label(secret)
             .ok_or_else(|| NylError::Config("Secret missing or invalid revision label".to_string()))?;
 
         // Deserialize resource keys
@@ -453,24 +509,13 @@ impl ReleaseStorage for KubernetesReleaseStorage {
     }
 
     async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>> {
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
-        let label_selector = format!("{}={}", LABEL_RELEASE, release_name);
-        let lp = ListParams::default().labels(&label_selector);
-
-        let secrets = api.list(&lp).await?;
-        let mut revisions: Vec<u32> = secrets
-            .items
-            .iter()
-            .filter_map(|s| {
-                s.metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(LABEL_REVISION))
-                    .and_then(|r| r.parse().ok())
-            })
-            .collect();
+        let secrets = self
+            .list_release_secrets(Some(namespace), |label| format!("{label}={release_name}"))
+            .await?;
+        let mut revisions: Vec<u32> = secrets.iter().filter_map(Self::revision_label).collect();
 
         revisions.sort_unstable();
+        revisions.dedup();
         Ok(revisions)
     }
 
@@ -520,22 +565,13 @@ impl ReleaseStorage for KubernetesReleaseStorage {
     async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
         use std::collections::HashMap;
 
-        // List all release secrets
-        let label_selector = LABEL_RELEASE.to_string(); // All secrets with release label (label existence selector)
-        let lp = ListParams::default().labels(&label_selector);
-
-        let secrets = if let Some(ns) = namespace {
-            let api: Api<Secret> = Api::namespaced(self.client.clone(), ns);
-            api.list(&lp).await?
-        } else {
-            let api: Api<Secret> = Api::all(self.client.clone());
-            api.list(&lp).await?
-        };
+        // All Secrets carrying a release label (label existence selector).
+        let secrets = self.list_release_secrets(namespace, str::to_owned).await?;
 
         // Group by release name and namespace, keeping only latest revision
         let mut releases: HashMap<(String, String), ReleaseState> = HashMap::new();
 
-        for secret in secrets.items {
+        for secret in secrets {
             match Self::from_secret(&secret) {
                 Ok(state) => {
                     let key = (state.release_name.clone(), state.release_namespace.clone());
@@ -1077,6 +1113,38 @@ mod tests {
 
         assert_eq!(release.manifest, restored.manifest);
         assert_eq!(release.release_name, restored.release_name);
+    }
+
+    #[test]
+    fn test_release_state_records_current_labels_and_reads_deprecated_ones() {
+        let release = ReleaseState {
+            release_name: "web".to_string(),
+            release_namespace: "default".to_string(),
+            revision: 3,
+            resource_keys: vec![],
+            manifest: String::new(),
+            status: ReleaseStatus::Deployed,
+            rendered_at: Utc::now(),
+            applied_at: None,
+            error: None,
+        };
+        let mut secret = KubernetesReleaseStorage::to_secret(&release).unwrap();
+        assert_eq!(secret.type_.as_deref(), Some("k8s.nyl/release.v1"));
+        assert_eq!(
+            secret.metadata.labels,
+            Some(BTreeMap::from([
+                ("k8s.nyl/release".to_string(), "web".to_string()),
+                ("k8s.nyl/revision".to_string(), "3".to_string()),
+            ]))
+        );
+
+        // Revisions recorded before the `k8s.nyl/` labels stay readable.
+        secret.metadata.labels = Some(BTreeMap::from([
+            (legacy::LABEL_RELEASE.to_string(), "web".to_string()),
+            (legacy::LABEL_REVISION.to_string(), "3".to_string()),
+        ]));
+        let restored = KubernetesReleaseStorage::from_secret(&secret).unwrap();
+        assert_eq!((restored.release_name.as_str(), restored.revision), ("web", 3));
     }
 
     #[tokio::test]
