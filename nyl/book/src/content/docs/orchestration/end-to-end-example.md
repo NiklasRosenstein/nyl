@@ -203,7 +203,7 @@ spec:
 The ApplicationGroup in `nyl/web.yaml` names its Applications and AppProject
 after the target, so no two targets generate the same Argo CD names
 (`nyl validate` rejects the project otherwise), and it declares its labels in
-block style because its spec uses template syntax:
+block style because its spec uses template syntax. Its `namespace` policy sets both `prunePolicy` and `deletePolicy` to `Automatic`: Argo CD holds an Application's deletion while a Namespace it would delete is marked `Prune=confirm` or `Delete=confirm`, and either default (`Confirm`) would stall a teardown:
 
 ```yaml
 apiVersion: k8s.gitops.nyl/v1
@@ -218,7 +218,7 @@ spec:
   applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
   projectTemplate:
     name: '{{ target.metadata.name }}-web'
-  namespace: {deletePolicy: Automatic}
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}
 ```
 
 The Release in `applications/web/release.yaml` is a plain Deployment whose image

@@ -22,7 +22,7 @@
 //! Unlike the real driver, which records the target's effective teardown
 //! settings at resolution, the fake reads the same shape from a
 //! `teardownSettings` that a scenario declares (`catalogPrunes`,
-//! `applicationDeletionPolicy`, `namespaceDeletePolicies`,
+//! `applicationDeletionPolicy`, `namespaceDeletePolicies`, `namespacePrunePolicies`,
 //! `catalogOwnedByParent`) and evaluates it with the real driver's readiness
 //! rules. A document without it records no settings, so the fake reports
 //! readiness as unsupported (no requirements).
@@ -141,6 +141,10 @@ impl Driver for FakePublication {
                         "catalogPrunes": {"type": ["boolean", "null"]},
                         "applicationDeletionPolicy": {"type": ["string", "null"]},
                         "namespaceDeletePolicies": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string", "enum": ["Automatic", "Retain", "Confirm"]}
+                        },
+                        "namespacePrunePolicies": {
                             "type": "object",
                             "additionalProperties": {"type": "string", "enum": ["Automatic", "Retain", "Confirm"]}
                         },

@@ -62,7 +62,7 @@ fn preview_project() -> tempfile::TempDir {
     edit(
         "nyl/web.yaml",
         "spec:\n",
-        "spec:\n  namespace: {deletePolicy: Automatic}\n  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n  projectRef: web\n",
+        "spec:\n  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n  projectRef: web\n",
     );
     // One project every target shares, kept outside Nyl's output.
     let platform = std::fs::read_to_string(copy.path().join("nyl/platform.yaml")).unwrap();

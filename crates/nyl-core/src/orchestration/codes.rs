@@ -206,8 +206,9 @@ codes! {
     TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
     /// Teardown readiness: deleting an Application orphans its workloads (blocking).
     TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
-    /// Teardown readiness: an owned Namespace's `deletePolicy: Confirm` holds
-    /// the Application's finalizer until someone confirms (blocking).
+    /// Teardown readiness: an owned Namespace with `prunePolicy: Confirm` or
+    /// `deletePolicy: Confirm` holds the Application's finalizer until someone
+    /// confirms (blocking).
     TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
     /// Teardown readiness: owned Namespaces remain after teardown (remnant).
     TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",

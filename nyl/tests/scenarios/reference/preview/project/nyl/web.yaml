@@ -15,4 +15,4 @@ spec:
   projectTemplate:
     name: '{{ target.metadata.name }}-web'
     destinations: [{server: '*', namespace: '{{ values.namespace | default("web") }}'}]
-  namespace: {deletePolicy: Automatic}
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}
