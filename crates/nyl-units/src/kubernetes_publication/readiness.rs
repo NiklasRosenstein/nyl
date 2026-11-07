@@ -132,7 +132,11 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
 /// The readiness of a direct target's teardown. Nothing here holds a
 /// finalizer, so nothing blocks: a Namespace whose `deletePolicy` is not
 /// `Automatic` is a remnant, and what a teardown's credentials may delete is
-/// not checked.
+/// not checked. `namespacePrunePolicies` do not matter, unlike for Argo CD,
+/// which holds an Application's cascade deletion for a `Prune=confirm`
+/// Namespace: a direct teardown purges by each object's `Delete` option alone,
+/// and `Prune` only decides whether the next apply deletes a Namespace a
+/// Release stopped declaring.
 ///
 /// Contract: [Direct reconciler](../../../../design/orchestration-core.md#teardown), readiness.
 pub fn evaluate_direct(
@@ -219,6 +223,31 @@ mod tests {
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), delete.to_owned())]),
             namespace_prune_policies: BTreeMap::from([("web".to_owned(), prune.to_owned())]),
             ..ready_settings()
+        }
+    }
+
+    /// Catches a direct target being held by a Namespace's `Prune=confirm`, which
+    /// Argo CD holds an Application's deletion for and a direct teardown never
+    /// consults: no policy blocks, `deletePolicy` alone decides the remnant.
+    #[test]
+    fn test_a_direct_teardown_ignores_the_prune_policy_and_never_blocks() {
+        for (delete, prune, remnant) in [
+            ("Automatic", "Automatic", false),
+            ("Automatic", "Confirm", false),
+            ("Confirm", "Automatic", true),
+            ("Retain", "Confirm", true),
+        ] {
+            let readiness = evaluate_direct(&env(), &name("kubernetes"), &namespace_policies(delete, prune));
+            assert!(readiness.ready(), "{delete}/{prune}");
+            assert_eq!(
+                codes(&readiness.remnants),
+                if remnant {
+                    vec![Code::TeardownNamespacesRemain]
+                } else {
+                    Vec::new()
+                },
+                "{delete}/{prune}"
+            );
         }
     }
 

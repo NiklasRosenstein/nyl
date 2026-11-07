@@ -1881,15 +1881,22 @@ shell displays the findings unchanged.
 | The credentials may delete | RBAC | Not checked |
 
 The Argo CD rows that stop a teardown (the catalog prunes, an Application
-deletion policy deletes workloads, a `Confirm` Namespace holds an
-Application's finalizer) have no counterpart, because nothing here holds a
+deletion policy deletes workloads, a Namespace rendering `Prune=confirm` or
+`Delete=confirm` holds an Application's finalizer) have no counterpart, because nothing here holds a
 finalizer: a kept Namespace is a remnant, not a blocker, so a direct target
 has no blocking requirement and `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
 `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`, and
 `NYL-TEARDOWN-CATALOG-REMAINS` never arise. Namespace policies mean: `prunePolicy`
 decides whether a Namespace a Release stops declaring is deleted by the next
 apply (`Confirm`, the default, keeps it tracked with the warning above),
-and `deletePolicy` whether the teardown deletes it.
+and `deletePolicy` whether the teardown deletes it. Unlike Argo CD's readiness,
+which blocks on either `prunePolicy` or `deletePolicy` being `Confirm`, a direct
+target's teardown reads `deletePolicy` alone, because the purge consults only
+each object's `Delete` option and `namespacePrunePolicies` is recorded for
+readiness evaluation by the recorded reconciler kind and ignored here; to remove
+Namespaces with a teardown, declare both `{prunePolicy: Automatic,
+deletePolicy: Automatic}`, which also keeps the same group valid for an Argo CD
+target.
 
 #### Recorded facts and keys
 
