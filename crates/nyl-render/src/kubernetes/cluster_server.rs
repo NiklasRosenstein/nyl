@@ -41,7 +41,9 @@ pub fn verify_server(cluster: &str, expected: &str, actual: &str) -> Result<()> 
     Ok(())
 }
 
-fn normalize_cluster_url(value: &str) -> String {
+/// A destination server in the form two spellings of one cluster share: no
+/// trailing slash, and the scheme and authority in lower case.
+pub fn normalize_cluster_url(value: &str) -> String {
     let value = value.trim().trim_end_matches('/');
     let Some((scheme, remainder)) = value.split_once("://") else {
         return value.to_owned();

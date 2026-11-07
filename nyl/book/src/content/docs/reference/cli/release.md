@@ -77,7 +77,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `-r, --revision <REVISION>` - Revision to roll back to. Defaults to the revision
   immediately before the latest one (i.e. undo the most recent deployment).
 - `-y, --yes` - Skip the confirmation prompt
-- `--context <CONTEXT>` - Kubernetes context to use
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`, as for
+  [`nyl apply`](/nyl/reference/cli/apply/): the target's declared `live.context` is used and the current context never is, and without either the current context is used only when the Cluster's destination server can be checked against it
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same
   time (default: 8; `1` applies serially). See [`nyl apply`](/nyl/reference/cli/apply/#apply-order-and-progress).
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest

@@ -28,15 +28,15 @@ use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::kubernetes::fence::{admit, may_purge, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
-    ensure_namespace_exists, prepare_desired_manifests, purge_resources, ApplyEvent, ApplySettings, Interruption,
-    ReleaseRecorder,
+    collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources, ApplyEvent, ApplySettings,
+    Interruption, ObjectScopes, ReleaseRecorder,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
-use nyl_render::kubernetes::{ReleasePublication, ReleaseState, ResourceKey, ResourceOrdering};
-use nyl_render::NylError;
+use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ResourceKey, ResourceOrdering};
+use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
-use super::reader::{api_error, is_state_namespace};
+use super::reader::api_error;
 use super::{ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, ReadErrorKind, KUBECONFIG_ENV};
 
@@ -94,16 +94,12 @@ fn why(failure: &Failure) -> Why {
         },
         Failure::Nyl(error) => {
             let text = error.to_string();
-            if error.is_owner_fenced() {
-                Why::Fenced(text)
-            } else if text.starts_with("Connection error") {
-                Why::Connection(text)
-            } else if text.starts_with("Interrupted") {
-                Why::Timeout(text)
-            } else if text.starts_with("Validation failed") {
-                Why::Rejected(text)
-            } else {
-                Why::Failed(text)
+            match error.kube_kind() {
+                _ if error.is_owner_fenced() => Why::Fenced(text),
+                Some(KubeErrorKind::Connection) => Why::Connection(text),
+                Some(KubeErrorKind::Rejected) => Why::Rejected(text),
+                _ if matches!(error, NylError::Interrupted(_)) => Why::Timeout(text),
+                _ => Why::Failed(text),
             }
         }
     }
@@ -153,7 +149,7 @@ fn wave_of(documents: &[Value]) -> u8 {
     u8::from(!registers)
 }
 
-fn identity(key: &ResourceKey) -> (String, String, Option<String>, String) {
+fn identity(key: &ResourceKey) -> ObjectKey {
     (
         key.gvk.group.clone(),
         key.gvk.kind.clone(),
@@ -200,8 +196,15 @@ impl<'a, 'c> Direct<'a, 'c> {
         }
     }
 
+    /// Now, by the injected clock, never earlier than the call's start: nothing
+    /// here reads the system clock.
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.ctx.now.max(self.ctx.clock.now())
+    }
+
+    /// What is left of the unit's deadline, after whatever came before (the publish).
     fn budget(&self) -> Duration {
-        (self.ctx.deadline - self.ctx.now).to_std().unwrap_or_default()
+        (self.ctx.deadline - self.now()).to_std().unwrap_or_default()
     }
 
     fn kubeconfig(&self) -> Option<&str> {
@@ -288,7 +291,9 @@ impl<'a, 'c> Direct<'a, 'c> {
 
     /// Apply every Release of the pushed `rendered` tree, published at
     /// `commit`, in waves; then, only when every Release reached `Deployed`,
-    /// purge the Releases that left the tree.
+    /// purge the Releases that left the tree. One absolute deadline bounds the
+    /// whole pass: no Release gets a fresh budget, and nothing continues after
+    /// the deadline passed.
     #[allow(clippy::too_many_lines)] // One ordered pass: read, apply by waves, purge, and map the outcome.
     pub(crate) fn apply(
         &self,
@@ -314,7 +319,7 @@ impl<'a, 'c> Direct<'a, 'c> {
             commit: Some(commit.to_owned()),
             ..self.destination.clone()
         };
-        let budget = self.budget();
+        let remaining = self.budget();
         let tree_namespaces: BTreeSet<String> = releases
             .iter()
             .zip(&documents)
@@ -330,14 +335,35 @@ impl<'a, 'c> Direct<'a, 'c> {
             .collect();
         let result = block_on(|| async {
             let cluster = self.open().await?;
+            let end = tokio::time::Instant::now() + remaining;
             let claim = self.claim(&publication, &probe);
-            let mut failures = Vec::new();
-            let mut awaiting = Vec::new();
-            let mut tracked: HashSet<(String, String, Option<String>, String)> = HashSet::new();
             let mut order = (0..releases.len()).collect::<Vec<_>>();
             order.sort_by_key(|index| (wave_of(&documents[*index]), releases[*index].key.clone()));
+            // What every current Release renders is known before any of them
+            // prunes, so an object that moved from one Release to another is
+            // not deleted by the one that gave it up.
+            let mut prepared = Vec::new();
+            let mut protected: HashSet<ObjectIdentity> = HashSet::new();
+            for &index in &order {
+                let mut duplicates = HashMap::new();
+                let (mut manifests, scopes) = prepare_desired_manifests(
+                    cluster.client.as_ref(),
+                    documents[index].clone(),
+                    &mut duplicates,
+                    Some(&releases[index].release.destination_namespace),
+                )
+                .await?;
+                ResourceOrdering::sort_by_priority(&mut manifests)?;
+                for manifest in &manifests {
+                    protected.insert(scopes.identity(&ResourceKey::from_json_value(manifest)?));
+                }
+                prepared.push((manifests, scopes));
+            }
+            let mut failures = Vec::new();
+            let mut awaiting = Vec::new();
+            let mut tracked: HashSet<ObjectKey> = HashSet::new();
             let mut current_wave = None;
-            for index in order {
+            for (&index, (manifests, scopes)) in order.iter().zip(prepared) {
                 let wave = wave_of(&documents[index]);
                 if current_wave.is_some_and(|current| current != wave) && !failures.is_empty() {
                     // Later waves may need what the failed Release registers.
@@ -345,17 +371,25 @@ impl<'a, 'c> Direct<'a, 'c> {
                 }
                 current_wave = Some(wave);
                 let release = &releases[index];
-                let outcome = self
+                if tokio::time::Instant::now() >= end {
+                    failures.push(Why::Timeout(format!(
+                        "the unit's deadline passed before Release {} was applied",
+                        release.key
+                    )));
+                    break;
+                }
+                match self
                     .apply_one(
                         &cluster,
                         release,
-                        documents[index].clone(),
+                        (manifests, scopes),
                         history_limit,
-                        budget,
+                        end,
                         &claim,
+                        &protected,
                     )
-                    .await;
-                match outcome {
+                    .await
+                {
                     Ok(done) => {
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
@@ -368,7 +402,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                 return Ok::<_, Failure>((failures, awaiting, Vec::new()));
             }
             let warnings = self
-                .purge_vanished(&cluster, rendered, releases, &tree_namespaces, &tracked, &probe)
+                .purge_vanished(&cluster, releases, &tree_namespaces, &tracked, &probe)
                 .await?;
             Ok((failures, awaiting, warnings))
         })
@@ -379,7 +413,10 @@ impl<'a, 'c> Direct<'a, 'c> {
         };
         if !failures.is_empty() {
             return Ok(Step::Stop(outcome_of(
-                &format!("the tree was published at {commit}, but applying it to the cluster failed (Git is ahead of the cluster; the next execution applies again)"),
+                &format!(
+                    "the tree was published at {commit}, but applying it to the cluster failed (Git is ahead of the \
+                     cluster; no Release that left the tree was purged; the next execution applies again)"
+                ),
                 &failures,
             )));
         }
@@ -401,25 +438,18 @@ impl<'a, 'c> Direct<'a, 'c> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
     async fn apply_one(
         &self,
         cluster: &ClusterHandle,
         release: &PublishedDirectRelease,
-        documents: Vec<Value>,
+        (manifests, mut scopes): (Vec<Value>, ObjectScopes),
         history_limit: u32,
-        budget: Duration,
+        end: tokio::time::Instant,
         claim: &ReleaseClaim<'_>,
+        protected: &HashSet<ObjectIdentity>,
     ) -> Result<Applied, NylError> {
         let (namespace, name) = release.identity();
-        let mut duplicates = HashMap::new();
-        let (mut manifests, mut scopes) = prepare_desired_manifests(
-            cluster.client.as_ref(),
-            documents,
-            &mut duplicates,
-            Some(&release.release.destination_namespace),
-        )
-        .await?;
-        ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
         ensure_namespace_exists(cluster.client.as_ref(), namespace, &ownership).await?;
         let recorder = ReleaseRecorder::reserve(
@@ -440,7 +470,11 @@ impl<'a, 'c> Direct<'a, 'c> {
                     key,
                     result: Err(error),
                 } => {
-                    applied.failure_texts.push((key.to_string(), error.to_string()));
+                    applied.failure_texts.push((
+                        key.to_string(),
+                        error.to_string(),
+                        error.kube_kind() == Some(KubeErrorKind::Rejected),
+                    ));
                 }
                 ApplyEvent::PruneKept {
                     key,
@@ -459,9 +493,10 @@ impl<'a, 'c> Direct<'a, 'c> {
                         history_limit,
                         confirm_prune: false,
                         ownership: &ownership,
+                        protected: Some(protected),
                     },
                     Interruption {
-                        interrupt: tokio::time::sleep(budget),
+                        interrupt: tokio::time::sleep_until(end),
                         escalate: std::future::pending(),
                     },
                     &mut sink,
@@ -473,7 +508,7 @@ impl<'a, 'c> Direct<'a, 'c> {
             let detail = applied
                 .failure_texts
                 .iter()
-                .map(|(key, error)| format!("{key}: {}", error.lines().next().unwrap_or_default()))
+                .map(|(key, error, _)| format!("{key}: {}", error.lines().next().unwrap_or_default()))
                 .collect::<Vec<_>>()
                 .join("; ");
             let text = format!(
@@ -484,11 +519,8 @@ impl<'a, 'c> Direct<'a, 'c> {
                     format!(" ({detail})")
                 }
             );
-            let rejected = !applied.failure_texts.is_empty()
-                && applied
-                    .failure_texts
-                    .iter()
-                    .all(|(_, error)| error.starts_with("Validation failed"));
+            let rejected =
+                !applied.failure_texts.is_empty() && applied.failure_texts.iter().all(|(_, _, rejected)| *rejected);
             applied.failures.push(if rejected {
                 Why::Rejected(text)
             } else {
@@ -499,14 +531,14 @@ impl<'a, 'c> Direct<'a, 'c> {
     }
 
     /// Purge the Releases that left the tree, by state identity, once every
-    /// Release of this run is `Deployed`.
+    /// Release of this run is `Deployed`. A Release this unit does not own (no
+    /// owner, or another unit's) is left and reported, never purged.
     async fn purge_vanished(
         &self,
         cluster: &ClusterHandle,
-        rendered: &RenderedTarget,
         releases: &[PublishedDirectRelease],
         tree_namespaces: &BTreeSet<String>,
-        tracked: &HashSet<(String, String, Option<String>, String)>,
+        tracked: &HashSet<ObjectKey>,
         probe: &(dyn Fn(&RenderIndexOwner) -> OwnerState + Sync),
     ) -> Result<Vec<Finding>, Failure> {
         let variable = |name: &str| self.ctx.env.get(name).cloned();
@@ -529,7 +561,6 @@ impl<'a, 'c> Direct<'a, 'c> {
             .filter(|release| !current.contains(&release.identity()))
             .map(|release| (release.release.namespace.clone(), release.release.name.clone()))
             .collect::<Vec<_>>();
-        let _ = rendered;
         let protect = Protect {
             keys: tracked.clone(),
             namespaces: tree_namespaces.clone(),
@@ -537,17 +568,33 @@ impl<'a, 'c> Direct<'a, 'c> {
         let mut warnings = Vec::new();
         let mut failures = Vec::new();
         for (namespace, name) in vanished {
-            match self
-                .purge_release(cluster, &namespace, &name, &protect, true, probe)
-                .await?
-            {
-                Purge::Done => {}
+            let defer = BTreeSet::from([namespace.clone()]);
+            let purge = self
+                .purge_release(cluster, &namespace, &name, &protect, &defer, true, false, probe)
+                .await?;
+            match purge {
+                Purge::Done { deferred } => {
+                    if !deferred.is_empty() {
+                        let purged = purge_resources(
+                            cluster.client.as_ref(),
+                            &deferred,
+                            &|key| protect.protects(key),
+                            CONCURRENCY,
+                            false,
+                            &mut |_| {},
+                        )
+                        .await;
+                        if !purged.failed.is_empty() {
+                            failures.push(format!("namespace {namespace} of release {name} failed to delete"));
+                        }
+                    }
+                }
                 Purge::Foreign(owner) => warnings.push(Finding::new(
                     Code::KubernetesReleaseLeftBehind,
                     format!(
                         "Release {namespace}/{name} left the tree but is not this unit's to remove ({}), so it stays",
                         owner.map_or_else(
-                            || "it records no owner".to_owned(),
+                            || "no unit owns it".to_owned(),
                             |owner| format!("it is owned by {owner}")
                         )
                     ),
@@ -567,16 +614,23 @@ impl<'a, 'c> Direct<'a, 'c> {
     }
 
     /// Delete one release's resources by their `Delete` option, in reverse
-    /// order with waits, keeping what `protect` names and the Namespaces that
-    /// hold release state; with `remove_state`, then delete its state and those
-    /// Namespaces. Only for a release this unit may purge.
+    /// order with waits, keeping what `protect` names and the Namespaces in
+    /// `defer`, which hold release state; with `remove_state`, then delete its
+    /// state and return the deferred Namespace objects it tracked, for the
+    /// caller to delete once no release state remains in them. Only for a
+    /// release this unit may purge: one it owns, or one an earlier incarnation of
+    /// the same unit owned, or, with `adoptable`, an unowned one applied for this
+    /// publication.
+    #[allow(clippy::too_many_arguments)] // The inputs of one release's purge are independent facts.
     async fn purge_release(
         &self,
         cluster: &ClusterHandle,
         namespace: &str,
         name: &str,
         protect: &Protect,
+        defer: &BTreeSet<String>,
         remove_state: bool,
+        adoptable: bool,
         probe: &(dyn Fn(&RenderIndexOwner) -> OwnerState + Sync),
     ) -> Result<Purge, Failure> {
         let what = format!("read the release state of {namespace}/{name}");
@@ -585,42 +639,43 @@ impl<'a, 'c> Direct<'a, 'c> {
             .list_revisions(name, namespace)
             .await
             .map_err(|error| api_error(&error, &what))?;
-        if revisions.is_empty() {
-            return Ok(Purge::Done);
-        }
-        let mut states: Vec<ReleaseState> = Vec::new();
-        for revision in &revisions {
-            if let Some(state) = cluster
-                .storage
-                .get_release(name, namespace, *revision)
-                .await
-                .map_err(|error| api_error(&error, &what))?
-            {
-                states.push(state);
-            }
-        }
-        let latest = states
-            .iter()
-            .max_by_key(|state| state.revision)
-            .expect("a release has a revision");
+        let Some(&latest_revision) = revisions.iter().max() else {
+            return Ok(Purge::Done { deferred: Vec::new() });
+        };
+        let Some(latest) = cluster
+            .storage
+            .get_release(name, namespace, latest_revision)
+            .await
+            .map_err(|error| api_error(&error, &what))?
+        else {
+            return Ok(Purge::Done { deferred: Vec::new() });
+        };
         let owner = latest.meta.owner.clone();
-        let adoptable = owner.is_none()
+        let unowned_here = owner.is_none()
             && latest
                 .meta
                 .publication
                 .as_ref()
                 .is_some_and(|publication| publication.same_destination(&self.destination));
-        if !adoptable && !may_purge(owner.as_ref(), &self.owner, probe) {
+        if !(may_purge(owner.as_ref(), &self.owner, probe) || adoptable && unowned_here) {
             return Ok(Purge::Foreign(owner));
         }
+        // What the release still has in the cluster: the most recent `Deployed`
+        // revision's keys and what failed revisions after it applied, as a prune
+        // reads it, so an object a retained revision left untracked is never deleted.
+        let (_, live) = collect_live_state(
+            cluster.storage.as_ref(),
+            name,
+            namespace,
+            &revisions,
+            latest_revision + 1,
+        )
+        .await
+        .map_err(|error| api_error(&error, &what))?;
         let mut seen = HashSet::new();
-        let keys: Vec<ResourceKey> = states
-            .iter()
-            .flat_map(|state| state.resource_keys.iter().cloned())
-            .filter(|key| seen.insert(identity(key)))
-            .collect();
-        let state_namespaces: BTreeSet<String> = BTreeSet::from([namespace.to_owned()]);
-        let excluded = |key: &ResourceKey| protect.protects(key) || is_state_namespace(key, &state_namespaces);
+        let mut keys: Vec<ResourceKey> = live.into_iter().filter(|key| seen.insert(identity(key))).collect();
+        keys.sort_by_key(identity);
+        let excluded = |key: &ResourceKey| protect.protects(key) || is_namespace(key, defer);
         let purged = purge_resources(
             cluster.client.as_ref(),
             &keys,
@@ -636,35 +691,25 @@ impl<'a, 'c> Direct<'a, 'c> {
                 purged.failed.len()
             )));
         }
-        if remove_state {
-            cluster
-                .storage
-                .delete_all_revisions(name, namespace)
-                .await
-                .map_err(|error| api_error(&error, &format!("delete the release state of {namespace}/{name}")))?;
-            let only_state_namespaces =
-                |key: &ResourceKey| protect.protects(key) || !is_state_namespace(key, &state_namespaces);
-            let purged = purge_resources(
-                cluster.client.as_ref(),
-                &keys,
-                &only_state_namespaces,
-                CONCURRENCY,
-                false,
-                &mut |_| {},
-            )
-            .await;
-            if !purged.failed.is_empty() {
-                return Ok(Purge::Failed(format!(
-                    "namespace {namespace} of release {name} failed to delete"
-                )));
-            }
+        if !remove_state {
+            return Ok(Purge::Done { deferred: Vec::new() });
         }
-        Ok(Purge::Done)
+        cluster
+            .storage
+            .delete_all_revisions(name, namespace)
+            .await
+            .map_err(|error| api_error(&error, &format!("delete the release state of {namespace}/{name}")))?;
+        let deferred = keys
+            .into_iter()
+            .filter(|key| is_namespace(key, defer))
+            .collect::<Vec<_>>();
+        Ok(Purge::Done { deferred })
     }
 
-    /// The Releases a teardown removes: those of the rendered tree and those
-    /// the history since the last receipt published.
-    fn teardown_releases(&self, rendered: &RenderedTarget) -> DriverResult<Vec<(String, String)>> {
+    /// What a teardown removes, read before anything is published or deleted: the
+    /// Releases of the rendered tree and those the history since the last receipt
+    /// published, in the reverse of the apply order (wave, then key).
+    pub(crate) fn teardown_plan(&self, rendered: &RenderedTarget) -> DriverResult<TeardownPlan> {
         let current = nyl_render::gitops::observation::direct_deployments(rendered)
             .map_err(|error| DriverError::before_effects(format!("cannot read the Releases of the target: {error}")))?;
         let variable = |name: &str| self.ctx.env.get(name).cloned();
@@ -683,87 +728,209 @@ impl<'a, 'c> Direct<'a, 'c> {
         let previous = history
             .direct_releases_since(receipt, MATCH_WALK_LIMIT)
             .map_err(|error| DriverError::before_effects(error.to_string()))?;
-        let mut all = std::collections::BTreeSet::new();
+        let mut all = std::collections::BTreeMap::new();
         for release in current.into_iter().chain(previous) {
-            all.insert((release.release.namespace.clone(), release.release.name.clone()));
+            all.entry((release.release.namespace.clone(), release.release.name.clone()))
+                .or_insert(release.key);
         }
-        Ok(all.into_iter().collect())
+        Ok(TeardownPlan {
+            releases: all
+                .into_iter()
+                .map(|((namespace, name), key)| (key, namespace, name))
+                .collect(),
+        })
     }
 
     /// Teardown, phase 1 (after the tree is published without its Releases):
     /// purge everything but the Namespaces that hold release state, which stay
     /// with the state until phase 2.
-    pub(crate) fn teardown_delete(&self, rendered: &RenderedTarget) -> DriverResult<Option<Outcome>> {
-        self.teardown(rendered, false)
+    pub(crate) fn teardown_delete(&self, plan: &TeardownPlan) -> DriverResult<TeardownResult> {
+        self.teardown(plan, false)
+    }
+
+    /// Sort a teardown's Releases into those this unit may purge and those it
+    /// may not, whose tracked objects and Namespaces then stay.
+    async fn classify_teardown(
+        &self,
+        cluster: &ClusterHandle,
+        plan: &TeardownPlan,
+        probe: &(dyn Fn(&RenderIndexOwner) -> OwnerState + Sync),
+    ) -> Result<Classified, Failure> {
+        let mut foreign_keys = HashSet::new();
+        let mut foreign_namespaces = BTreeSet::new();
+        let mut purgeable = Vec::new();
+        let mut skipped = Vec::new();
+        for (key, namespace, name) in &plan.releases {
+            let revisions = cluster
+                .storage
+                .list_revisions(name, namespace)
+                .await
+                .map_err(|error| api_error(&error, "read the release state"))?;
+            let Some(&latest_revision) = revisions.iter().max() else {
+                continue;
+            };
+            let Some(latest) = cluster
+                .storage
+                .get_release(name, namespace, latest_revision)
+                .await
+                .map_err(|error| api_error(&error, "read the release state"))?
+            else {
+                continue;
+            };
+            let unowned_here = latest.meta.owner.is_none()
+                && latest
+                    .meta
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.same_destination(&self.destination));
+            if unowned_here || may_purge(latest.meta.owner.as_ref(), &self.owner, probe) {
+                let wave = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&latest.manifest)
+                    .map_or(1, |docs| wave_of(&docs));
+                purgeable.push((wave, key.clone(), namespace.clone(), name.clone()));
+            } else {
+                let (_, live) = collect_live_state(
+                    cluster.storage.as_ref(),
+                    name,
+                    namespace,
+                    &revisions,
+                    latest_revision + 1,
+                )
+                .await
+                .map_err(|error| api_error(&error, "read the release state"))?;
+                foreign_keys.extend(live.iter().map(identity));
+                foreign_namespaces.insert(namespace.clone());
+                skipped.push(format!(
+                    "{namespace}/{name} ({})",
+                    latest.meta.owner.as_ref().map_or_else(
+                        || "applied for another publication".to_owned(),
+                        |owner| format!("owned by {owner}")
+                    )
+                ));
+            }
+        }
+        Ok(Classified {
+            foreign_keys,
+            foreign_namespaces,
+            purgeable,
+            skipped,
+        })
     }
 
     /// Teardown, phase 2: delete the release state, then the Namespaces that held it.
-    pub(crate) fn teardown_remove_state(&self, rendered: &RenderedTarget) -> DriverResult<Option<Outcome>> {
-        self.teardown(rendered, true)
+    pub(crate) fn teardown_remove_state(&self, plan: &TeardownPlan) -> DriverResult<TeardownResult> {
+        self.teardown(plan, true)
     }
 
-    fn teardown(&self, rendered: &RenderedTarget, remove_state: bool) -> DriverResult<Option<Outcome>> {
+    fn teardown(&self, plan: &TeardownPlan, remove_state: bool) -> DriverResult<TeardownResult> {
         if let Some(outcome) = self.missing_context() {
-            return Ok(Some(outcome));
+            return Ok(TeardownResult {
+                outcome: Some(outcome),
+                skipped: Vec::new(),
+            });
         }
-        let releases = self.teardown_releases(rendered)?;
         let probe = self.probe();
         let result = block_on(|| async {
             let cluster = self.open().await?;
-            // Classify first, so what a foreign release tracks is never deleted
-            // by another's purge.
-            let mut foreign_keys = HashSet::new();
-            let mut purgeable = Vec::new();
-            for (namespace, name) in &releases {
-                let states = cluster
-                    .storage
-                    .get_latest_release(name, namespace)
-                    .await
-                    .map_err(|error| api_error(&error, "read the release state"))?;
-                let Some(latest) = states else { continue };
-                let adoptable = latest.meta.owner.is_none()
-                    && latest
-                        .meta
-                        .publication
-                        .as_ref()
-                        .is_some_and(|publication| publication.same_destination(&self.destination));
-                if adoptable || may_purge(latest.meta.owner.as_ref(), &self.owner, &probe) {
-                    let wave = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&latest.manifest)
-                        .map_or(1, |docs| wave_of(&docs));
-                    purgeable.push((wave, namespace.clone(), name.clone()));
-                } else {
-                    foreign_keys.extend(latest.resource_keys.iter().map(identity));
-                }
-            }
-            // Reverse apply order: the last wave and the last Release first.
+            // Classify first, so what a release this unit may not purge tracks is never
+            // deleted by another's purge, and no Namespace holding any release's state,
+            // theirs included, is deleted before all state is gone.
+            let all_namespaces: BTreeSet<String> = plan
+                .releases
+                .iter()
+                .map(|(_, namespace, _)| namespace.clone())
+                .collect();
+            let Classified {
+                foreign_keys,
+                foreign_namespaces,
+                mut purgeable,
+                skipped,
+            } = self.classify_teardown(&cluster, plan, &probe).await?;
+            // The exact reverse of the apply order: the last wave and the last key first.
             purgeable.sort();
             purgeable.reverse();
             let protect = Protect {
                 keys: foreign_keys,
-                namespaces: BTreeSet::new(),
+                namespaces: foreign_namespaces,
             };
+            let defer = if remove_state {
+                BTreeSet::new()
+            } else {
+                all_namespaces.clone()
+            };
+            // Phase 2 defers the same Namespaces past each release's own state, to
+            // delete them once every release's state is gone.
+            let defer_until_all_state = if remove_state { all_namespaces } else { BTreeSet::new() };
             let mut failures = Vec::new();
-            for (_, namespace, name) in purgeable {
-                if let Purge::Failed(message) = self
-                    .purge_release(&cluster, &namespace, &name, &protect, remove_state, &probe)
+            let mut deferred = Vec::new();
+            for (_, _, namespace, name) in purgeable {
+                let defer = if remove_state { &defer_until_all_state } else { &defer };
+                match self
+                    .purge_release(&cluster, &namespace, &name, &protect, defer, remove_state, true, &probe)
                     .await?
                 {
-                    failures.push(message);
+                    Purge::Done { deferred: more } => deferred.extend(more),
+                    Purge::Failed(message) => failures.push(message),
+                    Purge::Foreign(_) => {}
                 }
             }
-            Ok::<_, Failure>(failures)
+            if failures.is_empty() && !deferred.is_empty() {
+                let purged = purge_resources(
+                    cluster.client.as_ref(),
+                    &deferred,
+                    &|key| protect.protects(key),
+                    CONCURRENCY,
+                    false,
+                    &mut |_| {},
+                )
+                .await;
+                if !purged.failed.is_empty() {
+                    failures.push(format!("{} Namespace(s) failed to delete", purged.failed.len()));
+                }
+            }
+            Ok::<_, Failure>((failures, skipped))
         })
         .map_err(|error| DriverError::after_effects(error.message))?;
         Ok(match result {
-            Ok(failures) if failures.is_empty() => None,
-            Ok(failures) => Some(Outcome::Failed {
-                category: FailureCategory::ToolError,
-                retryable: true,
-                message: format!("the teardown could not delete everything: {}", failures.join("; ")),
-            }),
-            Err(failure) => Some(outcome_of("the teardown could not reach the cluster", &[why(&failure)])),
+            Ok((failures, skipped)) if failures.is_empty() => TeardownResult { outcome: None, skipped },
+            Ok((failures, skipped)) => TeardownResult {
+                outcome: Some(Outcome::Failed {
+                    category: FailureCategory::ToolError,
+                    retryable: true,
+                    message: format!("the teardown could not delete everything: {}", failures.join("; ")),
+                }),
+                skipped,
+            },
+            Err(failure) => TeardownResult {
+                outcome: Some(outcome_of("the teardown could not reach the cluster", &[why(&failure)])),
+                skipped: Vec::new(),
+            },
         })
     }
+}
+
+/// What a teardown removes: `(key, release namespace, release name)` of each Release.
+pub(crate) struct TeardownPlan {
+    releases: Vec<(String, String, String)>,
+}
+
+/// A teardown's Releases, sorted by whether this unit may purge them.
+struct Classified {
+    /// The objects the Releases it may not purge track.
+    foreign_keys: HashSet<ObjectKey>,
+    /// The Namespaces holding their state.
+    foreign_namespaces: BTreeSet<String>,
+    /// (wave, key, namespace, name) of the Releases it purges.
+    purgeable: Vec<(u8, String, String, String)>,
+    /// The Releases it leaves, described for the warning.
+    skipped: Vec<String>,
+}
+
+/// What one teardown phase did.
+pub(crate) struct TeardownResult {
+    /// The outcome that ends the call, `None` when the phase completed.
+    pub outcome: Option<Outcome>,
+    /// The Releases it left alone because this unit may not remove them.
+    pub skipped: Vec<String>,
 }
 
 /// What applying one Release found.
@@ -772,26 +939,37 @@ struct Applied {
     tracked: Vec<ResourceKey>,
     awaiting: Vec<String>,
     failures: Vec<Why>,
-    failure_texts: Vec<(String, String)>,
+    /// Each failed resource, its error, and whether the API rejected the object itself.
+    failure_texts: Vec<(String, String, bool)>,
 }
 
 enum Purge {
-    Done,
+    /// Purged; the Namespace objects it left for the caller to delete once no release state is in them.
+    Done {
+        deferred: Vec<ResourceKey>,
+    },
     /// Not this unit's: the recorded owner, if any.
     Foreign(Option<RenderIndexOwner>),
     Failed(String),
 }
 
+/// An object's group, kind, namespace, and name.
+type ObjectKey = (String, String, Option<String>, String);
+
 /// What a purge must not delete: objects another release tracks, and the
-/// Namespaces a current release uses.
+/// Namespaces that hold state or that a current release uses.
 struct Protect {
-    keys: HashSet<(String, String, Option<String>, String)>,
+    keys: HashSet<ObjectKey>,
     namespaces: BTreeSet<String>,
 }
 
 impl Protect {
     fn protects(&self, key: &ResourceKey) -> bool {
-        self.keys.contains(&identity(key))
-            || (key.gvk.group.is_empty() && key.gvk.kind == "Namespace" && self.namespaces.contains(&key.name))
+        self.keys.contains(&identity(key)) || is_namespace(key, &self.namespaces)
     }
+}
+
+/// Whether `key` is a Namespace named in `names`.
+fn is_namespace(key: &ResourceKey, names: &BTreeSet<String>) -> bool {
+    key.gvk.group.is_empty() && key.gvk.kind == "Namespace" && names.contains(&key.name)
 }

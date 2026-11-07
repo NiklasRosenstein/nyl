@@ -1050,9 +1050,10 @@ impl GitPublicationHistory {
     /// The Releases that every ownership index along the first-parent history of
     /// the fetched branch holds, from its head back to the publication that was
     /// current at `receipt` (the commit of the last complete execution's
-    /// `PublishedTree`), at most `limit` publications. Without a receipt, only the
-    /// newest publication counts. A history that holds more publications than
-    /// `limit` before reaching the receipt's is an error, never a guess. Direct
+    /// `PublishedTree`), at most `limit` publications. Without a receipt, nothing
+    /// bounds the walk but `limit`: no execution of the unit completed, so every
+    /// publication on the branch may be its own. A history that holds more
+    /// publications than `limit` before reaching the receipt's is an error, never a guess. Direct
     /// targets use it to find the Releases that left the tree.
     pub fn direct_releases_since(&self, receipt: Option<&str>, limit: usize) -> Result<Vec<PublishedDirectRelease>> {
         let Some(head) = self.head()? else {
@@ -1061,7 +1062,7 @@ impl GitPublicationHistory {
         let (publications, truncated) = self.publication_commits(&head, limit)?;
         let stop = match receipt {
             Some(receipt) => self.publication_commits(receipt, 1)?.0.into_iter().next(),
-            None => publications.first().cloned(),
+            None => None,
         };
         let mut releases = BTreeMap::new();
         let mut reached = stop.is_none();
@@ -1731,6 +1732,63 @@ mod tests {
             facts.unkeyed("/reconciler"),
             ["/reconciler/context", "/reconciler/publication/url"]
         );
+    }
+
+    /// Catches the Releases that left the tree being found only from the newest
+    /// publication when no execution recorded a receipt: a unit whose receipt is
+    /// missing (a teardown of one that never completed, or a state without
+    /// artifacts) must still find every Release the branch's publications held,
+    /// and with a receipt the walk stops at it.
+    #[test]
+    fn test_releases_that_left_the_tree_are_found_across_all_publications_without_a_receipt() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        git(root, &["init", "--quiet", "--initial-branch=deploy"]);
+        let publish = |releases: &[&str], message: &str| {
+            let records = releases
+                .iter()
+                .map(|name| {
+                    format!(
+                        r#""{name}/{name}":{{"workload":{{"group":{{"metadata":{{"name":"{name}"}}}},"release":{{"metadata":{{"name":"{name}","namespace":"{name}"}}}},"destination_namespace":"{name}","release_directory":"{name}/{name}"}}}}"#
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let file = root.join("dev/_nyl/index.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(
+                file,
+                format!(
+                    r#"{{"version":3,"target":"dev","cluster":"dev","publication":{{"repository":"r","revision":"deploy","pathPrefix":"dev"}},"dirty":false,"inputs":{{}},"files":{{}},"compilation":{{"releases":{{{records}}}}}}}"#
+                ),
+            )
+            .unwrap();
+            git(root, &["add", "--all"]);
+            git(root, &["commit", "--quiet", "--message", message]);
+            git(root, &["rev-parse", "HEAD"])
+        };
+        let _first = publish(&["a", "b"], "publish 1");
+        let second = publish(&["b"], "publish 2");
+        let _third = publish(&["c"], "publish 3");
+        git(root, &["update-ref", "refs/nyl/observed", "HEAD"]);
+        let history = GitPublicationHistory::over(Repository::open(root).unwrap(), "dev", None);
+        let names = |releases: Vec<PublishedDirectRelease>| {
+            let mut names = releases
+                .iter()
+                .map(|release| release.release.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+
+        assert_eq!(names(history.direct_releases_since(None, 10).unwrap()), ["a", "b", "c"]);
+        assert_eq!(
+            names(history.direct_releases_since(Some(&second), 10).unwrap()),
+            ["b", "c"],
+            "the walk stops at the receipt's publication"
+        );
+        let too_deep = history.direct_releases_since(Some(&second), 1).unwrap_err().to_string();
+        assert!(too_deep.contains("more than 1 publications"), "{too_deep}");
     }
 
     /// Catches the Releases of an ownership index being read by anything but

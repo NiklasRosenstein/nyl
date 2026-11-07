@@ -59,6 +59,15 @@ bytes it pushed, so the cluster never runs what no commit holds. The unit needs 
 Cluster's `live.context` and the kubeconfig it admits as `KUBECONFIG`; the context's
 server must be the one the Cluster declares.
 
+Releases apply one at a time in waves (Releases that render CustomResourceDefinitions
+first), within the unit's deadline: no Release starts once it has passed, and the
+run fails as a retryable timeout. A Release never prunes an object another Release
+of the target renders, so moving an object between Releases leaves it in place. A
+prune or purge never deletes an object whose `Prune` or `Delete` sync option it
+cannot read. A Release that left Git is purged after every Release applied, unless
+no unit owns it, such as one an apply by hand took over: that stays, with the
+warning `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`.
+
 ## Fencing and manual changes
 
 The release state in the cluster records the owning unit and the publication it was
@@ -76,4 +85,15 @@ without its Releases and deletes their resources, honoring each object's `Delete
 sync option, but keeps the release state and the Namespaces that hold it. Phase 2,
 once the wait ends, deletes the state and then those Namespaces by their
 `deletePolicy`: `Automatic` removes them, `Confirm` and `Retain` leave them as a
-remnant that `nyl plan` warns about.
+remnant that `nyl plan` warns about. Phase 1 keeps every Namespace that holds the
+state of any Release it removes, whichever Release owns the Namespace. A Release
+that another unit or an apply by hand took over is left with its objects and its
+Namespaces, and the teardown reports it with `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`.
+If the target's declaration changed reconciler since the unit published,
+the teardown refuses with `NYL-KUBERNETES-RECONCILER-CHANGED`; restore the
+declaration so it can run. Only `deletePolicy` matters to a direct
+teardown; `prunePolicy` decides whether the next apply deletes a Namespace a
+Release stopped declaring (`Confirm`, the default, keeps it with a warning). A
+group shared with an Argo CD target declares both, as
+`namespace: {prunePolicy: Automatic, deletePolicy: Automatic}`, because Argo CD
+holds a teardown for either being `Confirm`.

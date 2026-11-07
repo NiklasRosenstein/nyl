@@ -517,10 +517,13 @@ impl<'s> ReleaseRecorder<'s> {
         // The fence comes first: a refused claim changes nothing. The revision
         // create below is the compare-and-swap that makes the reservation the
         // claim, so a concurrent claimant fails there instead.
-        if let Some(warning) = admit(storage, release_namespace, release_name, claim).await?.warning {
+        let admitted = admit(storage, release_namespace, release_name, claim).await?;
+        if let Some(warning) = &admitted.warning {
             tracing::warn!("{warning}");
         }
-        let revisions = storage.list_revisions(release_name, release_namespace).await?;
+        // The revisions the fence was decided on, not a second listing: a revision
+        // another claimant created since makes this create fail.
+        let revisions = admitted.revisions;
         let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
         let desired_keys = manifest_keys(desired_manifests)?;
 
@@ -632,7 +635,7 @@ impl<'s> ReleaseRecorder<'s> {
         };
         let result = tokio::select! {
             result = work => result,
-            () = interruption.interrupt => Err(NylError::Other("Interrupted".to_string())),
+            () = interruption.interrupt => Err(NylError::Interrupted("Interrupted".to_string())),
         };
 
         if let Err(err) = &result {
@@ -726,13 +729,24 @@ impl<'s> ReleaseRecorder<'s> {
 
                 let live_keys_list: Vec<ResourceKey> = live_keys.iter().cloned().collect();
                 scopes.load(client, &live_keys_list).await;
-                let to_prune = keys_to_prune(&live_keys, &release.resource_keys, scopes);
-                let (to_prune, awaiting) =
+                let to_prune: Vec<&ResourceKey> = keys_to_prune(&live_keys, &release.resource_keys, scopes)
+                    .into_iter()
+                    .filter(|key| {
+                        settings
+                            .protected
+                            .is_none_or(|protected| !protected.contains(&scopes.identity(key)))
+                    })
+                    .collect();
+                let (to_prune, awaiting, unreadable) =
                     filter_by_prune_option(client, to_prune, settings.confirm_prune, on_event).await;
                 // Resources awaiting confirmation stay tracked, so a confirmed apply prunes them.
                 release.resource_keys.extend(awaiting.into_iter().cloned());
+                // A resource whose live state cannot be read is never deleted on a guess:
+                // it stays tracked and counts as a failed prune, so the next apply retries.
+                prune_failed_count = unreadable.len();
+                release.resource_keys.extend(unreadable.into_iter().cloned());
                 let failed = prune_resources(client, to_prune, settings.concurrency, on_event).await;
-                prune_failed_count = failed.len();
+                prune_failed_count += failed.len();
                 release.resource_keys.extend(failed.into_iter().cloned());
             }
         }
@@ -758,21 +772,38 @@ pub struct ApplySettings<'a> {
     pub confirm_prune: bool,
     /// The field manager resources are applied as, and the one a handoff releases.
     pub ownership: &'a FieldOwnership,
+    /// Objects some other release now renders, which this release's prune must
+    /// not delete: an object that moved between releases is not removed from
+    /// the one that took it over. They are dropped from this release's tracking
+    /// without being deleted.
+    pub protected: Option<&'a HashSet<ObjectIdentity>>,
 }
 
 /// Split the resources to prune by their live Argo CD `Prune` sync option
 /// ([`prune_decision`]): returns those to delete and those awaiting
-/// confirmation, and reports every resource kept. A resource that cannot be read
-/// is pruned as before; deleting it reports the error.
+/// confirmation, and reports every resource kept. A resource whose live state
+/// cannot be read fails closed: its option is unknown, so it is returned as
+/// unreadable, never to be deleted.
 async fn filter_by_prune_option<'k>(
     client: &dyn KubeClient,
     keys: Vec<&'k ResourceKey>,
     confirmed: bool,
     on_event: &mut ApplyEventSink<'_>,
-) -> (Vec<&'k ResourceKey>, Vec<&'k ResourceKey>) {
-    let (prune, awaiting, _) =
-        filter_by_sync_option(client, keys, confirmed, ("Prune", prune_decision), on_event).await;
-    (prune, awaiting)
+) -> (Vec<&'k ResourceKey>, Vec<&'k ResourceKey>, Vec<&'k ResourceKey>) {
+    let filtered = filter_by_sync_option(client, keys, confirmed, ("Prune", prune_decision), on_event).await;
+    (filtered.delete, filtered.awaiting, filtered.unreadable)
+}
+
+/// What a sync option decided for a set of resources.
+struct SyncFiltered<'k> {
+    /// To delete.
+    delete: Vec<&'k ResourceKey>,
+    /// Kept until confirmed.
+    awaiting: Vec<&'k ResourceKey>,
+    /// Kept for good (`=false`).
+    retained: Vec<&'k ResourceKey>,
+    /// Whose live state could not be read, so the option is unknown.
+    unreadable: Vec<&'k ResourceKey>,
 }
 
 /// A sync option's name and how it decides from a live object's annotations.
@@ -789,16 +820,23 @@ async fn filter_by_sync_option<'k>(
     confirmed: bool,
     (option, decide): SyncOption,
     on_event: &mut ApplyEventSink<'_>,
-) -> (Vec<&'k ResourceKey>, Vec<&'k ResourceKey>, Vec<&'k ResourceKey>) {
+) -> SyncFiltered<'k> {
     let mut prune = Vec::new();
     let mut awaiting = Vec::new();
     let mut retained = Vec::new();
+    let mut unreadable = Vec::new();
     for key in keys {
-        let live = client
-            .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-            .await
-            .ok()
-            .flatten();
+        let live = match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+            Ok(live) => live,
+            // A kind the cluster no longer serves has no live object to read; deleting
+            // it is the executor's to settle (a removed kind's objects are gone).
+            Err(error) if error.is_api_resource_not_found_error() => None,
+            Err(error) => {
+                tracing::warn!(resource = %key, %error, "Cannot read a resource's sync option; it is not deleted");
+                unreadable.push(key);
+                continue;
+            }
+        };
         let decision = decide(
             live.as_ref().and_then(|object| object.metadata.annotations.as_ref()),
             confirmed,
@@ -815,7 +853,12 @@ async fn filter_by_sync_option<'k>(
             }
         }
     }
-    (prune, awaiting, retained)
+    SyncFiltered {
+        delete: prune,
+        awaiting,
+        retained,
+        unreadable,
+    }
 }
 
 /// Delete release revisions beyond `history_limit` once `release` deployed.
@@ -1151,10 +1194,16 @@ pub async fn purge_resources(
         .filter(|key| !excluded(key))
         .filter(|key| seen.insert(scopes.identity(key)))
         .collect();
-    let (deleting, awaiting, retained) =
-        filter_by_sync_option(client, candidates, confirmed, ("Delete", delete_decision), on_event).await;
+    let SyncFiltered {
+        delete: deleting,
+        awaiting,
+        retained,
+        unreadable,
+    } = filter_by_sync_option(client, candidates, confirmed, ("Delete", delete_decision), on_event).await;
     let mut purged = Purged {
         kept: awaiting.into_iter().chain(retained).cloned().collect(),
+        // Never deleted on a guess: a resource whose option cannot be read is failed.
+        failed: unreadable.into_iter().cloned().collect(),
         ..Purged::default()
     };
     let failed = prune_resources(client, deleting.clone(), concurrency, on_event).await;
@@ -1294,6 +1343,8 @@ mod tests {
         removed_kind: &'static str,
         /// Whether `removed_kind` is gone in every version.
         kind_gone: bool,
+        /// Reading this resource fails with an API error.
+        unreadable: &'static str,
     }
 
     impl LatencyClient {
@@ -1309,6 +1360,7 @@ mod tests {
                 terminating_reads: std::sync::Mutex::default(),
                 removed_kind: "",
                 kind_gone: true,
+                unreadable: "",
             }
         }
 
@@ -1332,6 +1384,9 @@ mod tests {
             namespace: Option<&str>,
             name: &str,
         ) -> Result<Option<DynamicObject>> {
+            if name == self.unreadable {
+                return Err(NylError::Kubernetes("the API server is unavailable".to_string()));
+            }
             if let Some(reads) = self.terminating_reads.lock().unwrap().get_mut(name) {
                 if *reads > 0 {
                     *reads -= 1;
@@ -1887,6 +1942,236 @@ mod tests {
         }
     }
 
+    /// Catches a purge that deletes an object whose `Delete` option it could not
+    /// read: with the read failing, `Delete=false` could be hiding, so the object
+    /// is reported failed and stays, while a readable plain object is deleted.
+    #[tokio::test]
+    async fn test_purge_never_deletes_an_object_whose_option_cannot_be_read() {
+        let client = LatencyClient {
+            unreadable: "guarded",
+            latency: Duration::ZERO,
+            ..LatencyClient::new("")
+        };
+        let keys = vec![
+            live(&client.inner, "plain", None),
+            live(&client.inner, "guarded", Some("Delete=false")),
+        ];
+
+        let purged = purge_resources(&client, &keys, &|_| false, 4, false, &mut |_| {}).await;
+
+        assert_eq!(
+            purged.deleted.iter().map(|key| key.name.as_str()).collect::<Vec<_>>(),
+            ["plain"]
+        );
+        assert_eq!(
+            purged.failed.iter().map(|key| key.name.as_str()).collect::<Vec<_>>(),
+            ["guarded"]
+        );
+        assert!(client.inner.get_all_resources().keys().any(|key| key.name == "guarded"));
+    }
+
+    /// Catches a prune that deletes an object whose `Prune` option it could not
+    /// read: the object stays, stays tracked so the next apply retries it, and
+    /// the apply reports a failed prune.
+    #[tokio::test]
+    async fn test_prune_never_deletes_an_object_whose_option_cannot_be_read() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient {
+            unreadable: "guarded",
+            latency: Duration::ZERO,
+            ..LatencyClient::new("")
+        };
+        let guarded = live(&client.inner, "guarded", Some("Prune=false"));
+        let stale = live(&client.inner, "stale", None);
+        storage
+            .save_release(&release_with_keys(1, ReleaseStatus::Deployed, vec![guarded, stale]))
+            .await
+            .unwrap();
+        let mut scopes = ObjectScopes::default();
+        let recorder = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &[],
+            false,
+            &client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+
+        let run = recorder
+            .run(
+                &client,
+                &[],
+                &mut scopes,
+                settings(0),
+                Interruption::never(),
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+
+        let mut live_names = client
+            .inner
+            .get_all_resources()
+            .into_keys()
+            .map(|key| key.name)
+            .collect::<Vec<_>>();
+        live_names.sort();
+        assert_eq!(live_names, ["guarded"]);
+        assert_eq!(
+            run.release
+                .resource_keys
+                .iter()
+                .map(|key| key.name.as_str())
+                .collect::<Vec<_>>(),
+            ["guarded"]
+        );
+        assert_eq!(run.prune_failed_count, 1);
+    }
+
+    /// Catches an object that moved from one Release to another being deleted by
+    /// the first Release's prune, which takes the second's object (and, for a
+    /// CRD, every custom resource) with it: what another current Release now
+    /// renders is neither deleted nor tracked by the Release that lost it.
+    #[tokio::test]
+    async fn test_prune_leaves_an_object_another_release_now_renders() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient {
+            latency: Duration::ZERO,
+            ..LatencyClient::new("")
+        };
+        let moved = live(&client.inner, "moved", None);
+        let old = live(&client.inner, "old", None);
+        storage
+            .save_release(&release_with_keys(1, ReleaseStatus::Deployed, vec![moved.clone(), old]))
+            .await
+            .unwrap();
+        let mut scopes = ObjectScopes::default();
+        let protected = HashSet::from([scopes.identity(&moved)]);
+        let recorder = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &[],
+            false,
+            &client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+        let settings = ApplySettings {
+            protected: Some(&protected),
+            ..settings(0)
+        };
+
+        let run = recorder
+            .run(&client, &[], &mut scopes, settings, Interruption::never(), &mut |_| {})
+            .await
+            .unwrap();
+
+        let live_names = client
+            .inner
+            .get_all_resources()
+            .into_keys()
+            .map(|key| key.name)
+            .collect::<Vec<_>>();
+        assert_eq!(live_names, ["moved"]);
+        assert!(run.release.resource_keys.is_empty(), "the Release no longer tracks it");
+        assert_eq!(run.prune_failed_count, 0);
+    }
+
+    /// Storage whose listing is followed by a competing claimant's revision,
+    /// the interleaving of two applies of one release.
+    struct RacingStorage {
+        inner: crate::kubernetes::memory::InMemoryReleaseStorage,
+        competitor: std::sync::Mutex<Option<ReleaseState>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReleaseStorage for RacingStorage {
+        async fn save_release(&self, release: &ReleaseState) -> Result<()> {
+            self.inner.save_release(release).await
+        }
+        async fn complete_release(&self, release: &ReleaseState) -> Result<()> {
+            self.inner.complete_release(release).await
+        }
+        async fn get_latest_release(&self, name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
+            self.inner.get_latest_release(name, namespace).await
+        }
+        async fn get_release(&self, name: &str, namespace: &str, revision: u32) -> Result<Option<ReleaseState>> {
+            self.inner.get_release(name, namespace, revision).await
+        }
+        async fn list_revisions(&self, name: &str, namespace: &str) -> Result<Vec<u32>> {
+            let listed = self.inner.list_revisions(name, namespace).await?;
+            let competitor = self.competitor.lock().unwrap().take();
+            if let Some(competitor) = competitor {
+                self.inner.save_release(&competitor).await?;
+            }
+            Ok(listed)
+        }
+        async fn update_release_status(
+            &self,
+            name: &str,
+            namespace: &str,
+            revision: u32,
+            status: ReleaseStatus,
+            error: Option<String>,
+        ) -> Result<()> {
+            self.inner
+                .update_release_status(name, namespace, revision, status, error)
+                .await
+        }
+        async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<crate::kubernetes::ReleaseInfo>> {
+            self.inner.list_releases(namespace).await
+        }
+        async fn delete_release(&self, name: &str, namespace: &str, revision: u32) -> Result<()> {
+            self.inner.delete_release(name, namespace, revision).await
+        }
+        async fn delete_all_revisions(&self, name: &str, namespace: &str) -> Result<u32> {
+            self.inner.delete_all_revisions(name, namespace).await
+        }
+    }
+
+    /// Catches a reservation that lists the revisions a second time after the
+    /// fence decided: a claimant that created the next revision in between would
+    /// be skipped over and both would apply. The reservation numbers its
+    /// revision from the list the fence read, so the create is the compare-and-swap.
+    #[tokio::test]
+    async fn test_a_reservation_loses_to_a_claimant_that_created_the_next_revision_first() {
+        let storage = RacingStorage {
+            inner: crate::kubernetes::memory::InMemoryReleaseStorage::new(),
+            competitor: std::sync::Mutex::new(Some(release_with_keys(2, ReleaseStatus::Rendered, Vec::new()))),
+        };
+        storage
+            .inner
+            .save_release(&release_with_keys(1, ReleaseStatus::Deployed, Vec::new()))
+            .await
+            .unwrap();
+        let client = crate::kubernetes::MockKubeClient::new();
+        let mut scopes = ObjectScopes::default();
+
+        let error = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &[],
+            false,
+            &client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .err()
+        .expect("the reservation must fail");
+
+        assert!(error.to_string().contains("revision 2 already exists"), "{error}");
+        assert_eq!(storage.inner.list_revisions("app", "app").await.unwrap(), [1, 2]);
+    }
+
     /// A release that renders nothing is still recorded and prunes everything the
     /// previous revision deployed.
     #[tokio::test(start_paused = true)]
@@ -2054,6 +2339,7 @@ mod tests {
             history_limit,
             confirm_prune: false,
             ownership: &NYL_OWNERSHIP,
+            protected: None,
         }
     }
 

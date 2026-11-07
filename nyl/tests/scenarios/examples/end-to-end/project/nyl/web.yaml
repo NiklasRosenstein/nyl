@@ -13,4 +13,4 @@ spec:
   applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
   projectTemplate:
     name: '{{ target.metadata.name }}-web'
-  namespace: {deletePolicy: Automatic}
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}

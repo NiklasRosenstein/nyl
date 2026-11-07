@@ -343,7 +343,11 @@ spec:
 
 - An unreadable reconciler, a reading that cannot prove an absence, and a
   publication that does not match are never a pass: the wait keeps polling, except
-  for a credential or declaration it cannot fix, which fails at once.
+  for a credential or declaration it cannot fix, which fails at once. On a first
+  deploy the Argo CD catalog Application does not exist until the operator applies
+  the published tree, so a catalog the reader does not see yet is waited for like
+  any other not-yet-healthy state; if it never appears, the timeout names it and
+  says to apply it.
 - A `Degraded` reading ends the wait early only when it cannot recover, such as a
   Deployment past its progress deadline or a failed Job
   (`NYL-KUBERNETES-HEALTH-DEGRADED`). Argo CD's `Degraded` is never final, because
@@ -543,7 +547,7 @@ read, the teardown is uncertain with `observation-failed` and the reason.
 
 Resolution records the target's effective teardown settings in the stored
 document: whether the catalog prunes removed Applications, the Applications'
-`applicationDeletionPolicy`, each owned Namespace's `deletePolicy`, and whether a
+`applicationDeletionPolicy`, each owned Namespace's `prunePolicy` and `deletePolicy`, and whether a
 parent owns the catalog. The unit itself judges them, from the stored document
 without rendering, so `status`, `plan`, `get units -o wide`, and every teardown
 agree:
@@ -552,7 +556,7 @@ agree:
 | --- | --- |
 | The catalog prunes removed workload Applications | Blocking, `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`: enable the catalog's `syncPolicy.automated` with `prune: true`. |
 | Deleting an Application deletes its workloads | Blocking, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`: set `applicationDeletionPolicy` to `Foreground` or `Background`. |
-| Owned Namespaces do not hold deletion | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: set the Namespaces' `deletePolicy` to `Automatic` or `Retain`. |
+| Owned Namespaces do not hold deletion | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: Argo CD holds an Application's deletion while a Namespace it would delete renders `Delete=confirm` or `Prune=confirm`, so set the Namespaces' `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`, which keeps the Namespace. The default of `Confirm` for either blocks. |
 | Owned Namespaces are removed | Remnant, `NYL-TEARDOWN-NAMESPACES-REMAIN`: set `deletePolicy: Automatic`. |
 | The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-CATALOG-REMAINS`: let a parent own the catalog (`catalogApplication.enabled: false`), or share one (`catalogApplication.shared`), whose Application is read for the rows above and prunes the target's objects. |
 

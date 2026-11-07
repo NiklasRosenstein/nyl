@@ -337,7 +337,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "12d1e950-dfe6-4ee2-89a0-3d1f9e07b489"
 type = "feature"
-description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment"
+description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment. An Argo CD catalog Application that is not visible yet, as on a first deploy before the operator applies the published tree, is waited for, and the timeout names it and says to apply it"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -349,7 +349,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "d26c5793-ee2d-4c9c-826e-bdd8dc2aa653"
 type = "breaking change"
-description = "`nyl apply --target` uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
+description = "Every command that connects through a Cluster (`nyl apply --target`, `nyl diff --target`, `nyl release list`, `show`, `history`, `rollback`, and `delete` with `--target`, and `nyl capture cluster`) uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -362,4 +362,10 @@ author = "@NiklasRosenstein"
 id = "ef4cda57-f220-4b05-8902-7e16d46a3acd"
 type = "fix"
 description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `KubernetesPublication` published for, and the unit's published tree records its reconciler and Cluster"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
 author = "@NiklasRosenstein"

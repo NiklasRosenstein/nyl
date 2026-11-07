@@ -332,7 +332,7 @@ async fn test_an_automatic_namespace_is_deleted_with_the_state_it_held() {
         &group,
         text.replace(
             "  applicationNamespace: argocd\n",
-            "  applicationNamespace: argocd\n  namespace: {deletePolicy: Automatic}\n",
+            "  applicationNamespace: argocd\n  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n",
         ),
     )
     .unwrap();
@@ -472,4 +472,383 @@ async fn test_a_wait_for_health_that_passes_reports_the_attestations() {
     assert!(attestations
         .iter()
         .all(|attestation| attestation.result == nyl_core::orchestration::state::AttestationResult::Pass));
+}
+
+const EXTRA: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: extra, namespace: extra}\nspec: {}\n---\n\
+                     apiVersion: v1\nkind: ConfigMap\nmetadata: {name: extra, namespace: extra}\ndata: {a: b}\n";
+
+/// Add a second Release, `extra`, to the walkthrough group.
+fn add_extra(world: &World) -> std::path::PathBuf {
+    let extra = world.work().join("applications/web/extra.yaml");
+    std::fs::write(&extra, EXTRA).unwrap();
+    extra
+}
+
+/// Make Release `web` own Namespace `extra`, where Release `extra` keeps its
+/// state, and let the Namespaces be deleted with their Release.
+fn share_namespace_of_extra_with_web(world: &World) {
+    let group = world.work().join("nyl/web.yaml");
+    let text = std::fs::read_to_string(&group).unwrap();
+    std::fs::write(
+        &group,
+        text.replace(
+            "  applicationNamespace: argocd\n",
+            "  applicationNamespace: argocd\n  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n  \
+             sharedNamespaces:\n    extra: {owner: {kind: Release, applicationGroup: web, release: web}}\n",
+        ),
+    )
+    .unwrap();
+    let release = world.work().join("applications/web/release.yaml");
+    let text = std::fs::read_to_string(&release).unwrap();
+    std::fs::write(
+        &release,
+        text.replacen(
+            "  namespace: web\nspec:\n",
+            "  namespace: web\nspec:\n  additionalNamespaces: [extra]\n",
+            1,
+        ),
+    )
+    .unwrap();
+}
+
+/// Catches a shared Namespace being deleted together with another Release's
+/// state: Release `web` owns Namespace `extra`, where Release `extra` keeps its
+/// release state. Phase 1 must purge both Releases' objects but leave the
+/// Namespace with the state in it, and phase 2 delete the state of both and
+/// then the Namespace, so the teardown neither wedges nor leaves state behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_namespace_owned_by_one_release_holding_the_state_of_another_survives_phase_1() {
+    let world = direct_world();
+    add_extra(&world);
+    share_namespace_of_extra_with_web(&world);
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    assert!(
+        cluster.exists("v1", "Namespace", None, "extra").await,
+        "web applies the shared Namespace"
+    );
+    assert!(!cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+
+    let identity = identity();
+    let deleting = deleting(unit);
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    ctx.artifacts.insert("tree".to_owned(), tree);
+    let outcome = driver.teardown(&ctx, &deleting);
+    assert!(
+        matches!(outcome, Ok(Supported::Supported(Outcome::Waiting { .. }))),
+        "{outcome:?}"
+    );
+    assert!(!cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
+    assert!(!cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
+    assert!(
+        cluster.exists("v1", "Namespace", None, "extra").await,
+        "the Namespace that holds the state of Release extra stays through phase 1"
+    );
+    assert!(!cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
+
+    ctx.teardown_wait = Some(WaitCompletion::Observed);
+    let outcome = driver.teardown(&ctx, &deleting);
+    assert!(
+        matches!(outcome, Ok(Supported::Supported(Outcome::Succeeded { .. }))),
+        "{outcome:?}"
+    );
+    assert!(cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
+    assert!(
+        !cluster.exists("v1", "Namespace", None, "extra").await,
+        "phase 2 deletes the Namespace once no state is left in it"
+    );
+}
+
+/// Catches an object that moves between two Releases being deleted: Release
+/// `extra` applies before Release `web` (keys run in order), so when a ClusterRole
+/// moves from `web` to `extra`, `web`'s prune would otherwise delete what `extra`
+/// just applied. What another current Release renders is left alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_an_object_that_moves_to_another_release_is_not_pruned_by_the_one_that_lost_it() {
+    let world = direct_world();
+    add_extra(&world);
+    let release = world.work().join("applications/web/release.yaml");
+    let original = std::fs::read_to_string(&release).unwrap();
+    let moving =
+        "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata: {name: moving}\nrules: []\n";
+    std::fs::write(&release, format!("{original}{moving}")).unwrap();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let first = tree_of(&reconcile(
+        &driver,
+        &world,
+        &unit_for(&driver, &world, "kubernetes"),
+        None,
+        &nobody(),
+    ));
+    let role = cluster.exists("rbac.authorization.k8s.io/v1", "ClusterRole", None, "moving");
+    assert!(role.await);
+
+    std::fs::write(&release, &original).unwrap();
+    std::fs::write(
+        world.work().join("applications/web/extra.yaml"),
+        format!("{EXTRA}{moving}"),
+    )
+    .unwrap();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    tree_of(&reconcile(&driver, &world, &unit, Some(&first), &nobody()));
+
+    assert!(
+        cluster
+            .exists("rbac.authorization.k8s.io/v1", "ClusterRole", None, "moving")
+            .await,
+        "Release extra renders it now, and Release web must not delete it"
+    );
+    let web = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
+    assert!(!web.resource_keys.iter().any(|key| key.name == "moving"));
+    let extra = cluster
+        .storage
+        .get_latest_release("extra", "extra")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(extra.resource_keys.iter().any(|key| key.name == "moving"));
+}
+
+/// Catches a unit whose deadline has passed going on to apply: no Release is
+/// applied, no state is recorded, and the unit fails retryably as a timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_passed_deadline_applies_nothing_and_fails_as_a_timeout() {
+    let world = direct_world();
+    add_extra(&world);
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let identity = identity();
+    let mut ctx = context(&world, DriverOperation::Reconcile, Some(&identity));
+    ctx.deadline = ctx.now;
+
+    let outcome = match driver.reconcile(&ctx, &unit).unwrap() {
+        Supported::Supported(outcome) => outcome,
+        Supported::Unsupported => panic!("the driver reconciles"),
+    };
+
+    let Outcome::Failed {
+        category, retryable, ..
+    } = outcome
+    else {
+        panic!("the deadline fails the unit: {outcome:?}");
+    };
+    assert_eq!(category, FailureCategory::Timeout);
+    assert!(retryable);
+    assert!(!cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
+    assert!(cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
+    assert!(cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// Record a new revision of Release `extra` as another claimant would: the
+/// same objects and publication, with `owner` (none for a `--take-over` apply
+/// by hand) in place of the unit.
+async fn reclaim_extra(cluster: &Cluster, owner: Option<nyl_render::gitops::reconcile::RenderIndexOwner>) {
+    let latest = cluster
+        .storage
+        .get_latest_release("extra", "extra")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next = latest.clone();
+    next.revision = latest.revision + 1;
+    next.status = ReleaseStatus::Deployed;
+    next.meta.owner = owner;
+    cluster.storage.save_release(&next).await.unwrap();
+}
+
+/// Catches a Release that an apply by hand took over being purged when it
+/// leaves Git: no unit owns it, so it is left with its objects, and the run
+/// reports it with the stable code instead of deleting what nobody this unit
+/// can tell is its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_release_taken_over_by_hand_is_left_and_reported_when_it_leaves_the_tree() {
+    let world = direct_world();
+    let extra = add_extra(&world);
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let first = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    reclaim_extra(&cluster, None).await;
+
+    std::fs::remove_file(&extra).unwrap();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let outcome = reconcile(&driver, &world, &unit, Some(&first), &nobody());
+
+    let Outcome::Succeeded { warnings, .. } = outcome else {
+        panic!("the apply still succeeds: {outcome:?}");
+    };
+    assert!(
+        warnings.iter().any(|warning| warning.code
+            == nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind
+            && warning.message.contains("extra/extra")),
+        "{warnings:?}"
+    );
+    assert!(cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
+    assert!(!cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// Catches a teardown that purges a Release another unit owns, or leaves its
+/// state Namespace to be deleted: the foreign Release's objects and the
+/// Namespace holding its state stay, the unit's own Release is removed, the
+/// first phase reports what it left, and the second phase completes with a
+/// warning instead of waiting on what is not this unit's.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_teardown_leaves_a_release_another_unit_took_over_and_reports_it() {
+    let world = direct_world();
+    add_extra(&world);
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    let other = nyl_render::gitops::reconcile::RenderIndexOwner::unit("dev", "other", "uid-other");
+    reclaim_extra(&cluster, Some(other)).await;
+    let alive = Incarnations(BTreeMap::from([("dev/other".to_owned(), IncarnationStatus::Exists)]));
+
+    let identity = identity();
+    let deleting = deleting(unit);
+    let mut ctx = context_with(&world, DriverOperation::Teardown, Some(&identity), &alive);
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    ctx.artifacts.insert("tree".to_owned(), tree);
+    let outcome = driver.teardown(&ctx, &deleting);
+    let Ok(Supported::Supported(Outcome::Waiting { reason, .. })) = outcome else {
+        panic!("phase 1 waits: {outcome:?}");
+    };
+    assert!(reason.contains("extra/extra"), "phase 1 names what it left: {reason}");
+    assert!(!cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
+    assert!(cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
+    assert!(cluster.exists("v1", "Namespace", None, "extra").await);
+
+    ctx.teardown_wait = Some(WaitCompletion::Observed);
+    let outcome = driver.teardown(&ctx, &deleting);
+    let Ok(Supported::Supported(Outcome::Succeeded { warnings, .. })) = outcome else {
+        panic!("phase 2 completes: {outcome:?}");
+    };
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.code == nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind),
+        "{warnings:?}"
+    );
+    assert!(cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
+    assert!(!cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
+    assert!(
+        cluster.exists("v1", "Namespace", None, "extra").await,
+        "the Namespace that holds the foreign Release's state is never deleted"
+    );
+}
+
+/// Catches a teardown that knows only the newest publication when the unit
+/// has no stored receipt (the engine's stored artifacts are empty for a unit
+/// that never completed): a Release that already left the tree is still in the
+/// cluster, and the teardown removes it with the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_teardown_without_a_receipt_removes_a_release_that_left_the_tree() {
+    let world = direct_world();
+    let extra = add_extra(&world);
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    // The Release leaves Git, and the unit is torn down before another reconcile.
+    std::fs::remove_file(&extra).unwrap();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    // A publication without the Release whose apply never ran: the deadline had passed.
+    let identity = identity();
+    let mut ctx = context(&world, DriverOperation::Reconcile, Some(&identity));
+    ctx.deadline = ctx.now;
+    let _ = driver.reconcile(&ctx, &unit);
+    let files = world.files("deploy");
+    assert!(files.iter().any(|path| path.starts_with("dev/web/web")), "{files:?}");
+    assert!(!files.iter().any(|path| path.starts_with("dev/web/extra")), "{files:?}");
+    assert!(cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
+
+    let deleting = deleting(unit);
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    assert!(ctx.artifacts.is_empty(), "no stored artifacts reach the driver");
+    driver.teardown(&ctx, &deleting).unwrap();
+
+    assert!(!cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
+    assert!(!cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
+}
+
+/// Catches a purge that takes the union of every stored revision: an object an
+/// earlier revision tracked and a later one untracked (as `Prune=false` does)
+/// is still in the cluster by design, and the teardown must leave it. The purge
+/// reads what a prune reads, the latest `Deployed` revision's objects and those
+/// of the `Failed` revisions after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_teardown_leaves_an_object_an_earlier_revision_tracked_and_a_later_one_dropped() {
+    let world = direct_world();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    let kept = serde_json::json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "kept", "namespace": "web", "annotations": {"argocd.argoproj.io/sync-options": "Prune=false"}}
+    });
+    let key = nyl_render::kubernetes::ResourceKey::from_json_value(&kept).unwrap();
+    cluster
+        .client
+        .add_resource(key.clone(), serde_json::from_value(kept).unwrap());
+    let mut first = cluster.storage.get_release("web", "web", 1).await.unwrap().unwrap();
+    let current = first.clone();
+    first.resource_keys.push(key);
+    first.status = ReleaseStatus::Superseded;
+    cluster.storage.complete_release(&first).await.unwrap();
+    let mut second = current;
+    second.revision = 2;
+    cluster.storage.save_release(&second).await.unwrap();
+
+    let identity = identity();
+    let deleting = deleting(unit);
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    ctx.artifacts.insert("tree".to_owned(), tree);
+    driver.teardown(&ctx, &deleting).unwrap();
+
+    assert!(!cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
+    assert!(
+        cluster.exists("v1", "ConfigMap", Some("web"), "kept").await,
+        "no current revision tracks it"
+    );
 }

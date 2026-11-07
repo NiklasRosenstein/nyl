@@ -528,7 +528,7 @@ spec:
   its name; the Release reads the secret by name.
 - The Cluster, ApplicationGroup, and catalog settings are teardown-ready:
   catalog `syncPolicy.automated` with `prune: true`, `Foreground` deletion,
-  and namespace `deletePolicy: Automatic`. The ApplicationGroup derives
+  and namespace `prunePolicy` and `deletePolicy` both `Automatic`. The ApplicationGroup derives
   Application and AppProject names from the target's name, and each preview
   sets its own namespace, so no preview can collide with dev or delete its
   namespace.
@@ -704,7 +704,7 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 
 Tier 1 variants:
 
-- **Not teardown-ready.** With the default namespace `deletePolicy: Confirm`,
+- **Not teardown-ready.** With the default namespace `prunePolicy` and `deletePolicy: Confirm`,
   step 2 reports `pr-124` as pending teardown with the reason
   (`NYL-TEARDOWN-INCOMPLETE`) and exits 2, until a run passes
   `--allow-incomplete`. `state init --template` warns about it at once when

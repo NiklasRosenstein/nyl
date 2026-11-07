@@ -85,7 +85,7 @@ fn reconciler_mismatch(unit: &DesiredUnit, rendered: &RenderedTarget) -> Option<
     (recorded != rendered.delivery.kind()).then(|| Outcome::Failed {
         category: FailureCategory::Ownership,
         retryable: true,
-        message: reconciler_changed(unit, recorded, rendered.delivery.kind()),
+        message: teardown_reconciler_changed(recorded, rendered.delivery.kind()),
     })
 }
 
@@ -516,7 +516,7 @@ fn target_changed(
     })
 }
 
-/// The refusal of a unit whose target changed reconciler.
+/// The refusal of a reconcile whose target changed reconciler.
 fn reconciler_changed(unit: &DesiredUnit, before: &str, now: &str) -> String {
     format!(
         "NYL-KUBERNETES-RECONCILER-CHANGED: the unit published for the {before} reconciler and its target now declares {now}; \
@@ -526,6 +526,33 @@ fn reconciler_changed(unit: &DesiredUnit, before: &str, now: &str) -> String {
         env = unit.unit.environment,
         name = unit.unit.name,
     )
+}
+
+/// The refusal of a teardown whose target changed reconciler. A teardown
+/// cannot be the remedy for itself, so the only way out is the declaration.
+fn teardown_reconciler_changed(before: &str, now: &str) -> String {
+    format!(
+        "NYL-KUBERNETES-RECONCILER-CHANGED: the unit published for the {before} reconciler and its target now declares {now}; \
+         nothing was changed, because removing one reconciler's files lets it delete what the other runs. Restore the \
+         declaration of the {before} reconciler so the teardown can run, then tear the unit down again"
+    )
+}
+
+/// The warnings of Releases a teardown left alone because this unit may not remove them.
+fn skipped_warnings(unit: &DesiredUnit, skipped: &[String]) -> Vec<nyl_core::orchestration::codes::Finding> {
+    skipped
+        .iter()
+        .map(|release| {
+            nyl_core::orchestration::codes::Finding::new(
+                nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind,
+                format!(
+                    "{}/{}: the teardown left Release {release} alone, because this unit may not remove it",
+                    unit.unit.environment, unit.unit.name
+                ),
+                "remove it with `nyl release delete --take-over` if it is stale, or leave it to its owner",
+            )
+        })
+        .collect()
 }
 
 /// What `plan` reports: the destroy a deleting unit's two phases amount to,
@@ -1070,10 +1097,14 @@ pub(crate) fn teardown(
         }
         // A direct target's release state and the Namespaces that held it go
         // first, so the index's owner keeps fencing until the cluster is done.
+        let mut skipped = Vec::new();
         if let Some(direct) = direct_of(ctx, unit, &rendered, access)? {
-            if let Some(outcome) = direct.teardown_remove_state(&rendered)? {
+            let plan = direct.teardown_plan(&rendered)?;
+            let result = direct.teardown_remove_state(&plan)?;
+            if let Some(outcome) = result.outcome {
                 return Ok(outcome);
             }
+            skipped = result.skipped;
         }
         let message = format!(
             "nyl: teardown {}/{}: remove the owned files",
@@ -1095,7 +1126,7 @@ pub(crate) fn teardown(
             outputs: json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
-            warnings: Vec::new(),
+            warnings: skipped_warnings(unit, &skipped),
         });
     }
     if let Some(waiting) = ctx.observed.and_then(|observed| observed.waiting.as_ref()) {
@@ -1127,6 +1158,12 @@ pub(crate) fn teardown(
             .map_err(|error| DriverError::before_effects(format!("cannot prepare phase 1 of the teardown: {error}")))
     };
     let direct = direct_of(ctx, unit, &rendered, access)?;
+    // What the teardown removes is read before anything is published or
+    // deleted, so a failure to read it leaves everything as it was.
+    let plan = direct
+        .as_ref()
+        .map(|direct| direct.teardown_plan(&rendered))
+        .transpose()?;
     let rendered_for_cluster = direct_target.then(|| rendered.clone());
     let mut phase1 = phase1_of(rendered)?;
     let message = format!(
@@ -1148,14 +1185,23 @@ pub(crate) fn teardown(
     };
     let commit = CommitId::new(published.commit)
         .map_err(|error| DriverError::after_effects(format!("phase 1 commit: {error}")))?;
-    if let (Some(direct), Some(rendered)) = (&direct, &rendered_for_cluster) {
-        if let Some(outcome) = direct.teardown_delete(rendered)? {
+    if let (Some(direct), Some(rendered), Some(plan)) = (&direct, &rendered_for_cluster, &plan) {
+        let result = direct.teardown_delete(plan)?;
+        if let Some(outcome) = result.outcome {
             return Ok(outcome);
         }
+        let left = if result.skipped.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; it left {} alone, which this unit may not remove",
+                result.skipped.join(", ")
+            )
+        };
         return Ok(Outcome::Waiting {
             phase: PHASE_RESOURCES_DELETED.to_owned(),
             reason: format!(
-                "phase 1 published {} without its Releases and deleted their resources from Cluster {}",
+                "phase 1 published {} without its Releases and deleted their resources from Cluster {}{left}",
                 published.path_prefix, rendered.workload.cluster
             ),
             until: None,
