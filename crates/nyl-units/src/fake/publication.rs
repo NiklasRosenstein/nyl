@@ -68,16 +68,23 @@ impl FakePublication {
     /// The recorded `teardownSettings`, with absent fields at their
     /// defaults: an absent catalog setting is external (`None`).
     fn recorded_settings(value: &Value) -> Result<TeardownSettings, String> {
-        let mut settings = serde_json::to_value(TeardownSettings::default()).map_err(|error| error.to_string())?;
-        let (Value::Object(defaults), Value::Object(recorded)) = (&mut settings, value) else {
+        let Value::Object(recorded) = value else {
             return Err("spec.teardownSettings must be a mapping".to_owned());
         };
-        // Recorded only when there is something to record, so the defaults omit it.
-        defaults.entry("catalogPruneHolds").or_insert_with(|| json!([]));
-        if let Some(key) = recorded.keys().find(|key| !defaults.contains_key(*key)) {
+        // The fields the settings have, whether or not their defaults serialize.
+        let schema =
+            serde_json::to_value(schemars::schema_for!(TeardownSettings)).map_err(|error| error.to_string())?;
+        let known = schema.get("properties").and_then(Value::as_object);
+        if let Some(key) = recorded
+            .keys()
+            .find(|key| !known.is_some_and(|known| known.contains_key(*key)))
+        {
             return Err(format!("spec.teardownSettings has unknown field {key:?}"));
         }
-        defaults.extend(recorded.clone());
+        let mut settings = serde_json::to_value(TeardownSettings::default()).map_err(|error| error.to_string())?;
+        if let Value::Object(defaults) = &mut settings {
+            defaults.extend(recorded.clone());
+        }
         serde_json::from_value(settings).map_err(|error| format!("spec.teardownSettings: {error}"))
     }
 }

@@ -20,7 +20,7 @@
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::TeardownReadiness;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_render::gitops::publication::TeardownSettings;
+use nyl_render::gitops::publication::{PruneHold, TeardownSettings};
 
 /// What a removal nobody attends would wait for: a `manual` `teardownWait`
 /// stops it after phase 1 until an operator confirms the removal, so a
@@ -55,15 +55,17 @@ fn catalog_prune_finding(subject: &str, settings: &TeardownSettings) -> Option<F
         let holding = settings
             .catalog_prune_holds
             .iter()
-            .map(|hold| match (&hold.application, hold.prune.as_str()) {
-                (Some(application), "confirm") => {
+            .map(|hold| match (&hold.application, hold.prune) {
+                (Some(application), PruneHold::Confirm) => {
                     format!("Application {application} requires confirmation to be pruned (Prune=confirm)")
                 }
-                (Some(application), prune) => format!("Application {application} is never pruned (Prune={prune})"),
-                (None, "confirm") => {
+                (Some(application), PruneHold::False) => {
+                    format!("Application {application} is never pruned (Prune=false)")
+                }
+                (None, PruneHold::Confirm) => {
                     "its spec.syncPolicy.syncOptions make pruning wait for confirmation (Prune=confirm)".to_owned()
                 }
-                (None, prune) => format!("its spec.syncPolicy.syncOptions skip pruning (Prune={prune})"),
+                (None, PruneHold::False) => "its spec.syncPolicy.syncOptions skip pruning (Prune=false)".to_owned(),
             })
             .collect::<Vec<_>>();
         not_pruning.extend(holding.into_iter().take(MAX_LISTED_CONFIRMATIONS));
@@ -139,7 +141,7 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
                 let options = confirmation
                     .options
                     .iter()
-                    .map(|option| format!("{option}=confirm"))
+                    .map(|option| format!("{}=confirm", option.name()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 match &confirmation.resource {
@@ -254,7 +256,7 @@ pub fn evaluate_reading(
 mod tests {
     use std::collections::BTreeMap;
 
-    use nyl_render::gitops::publication::{CatalogPruneHold, DeletionConfirmation};
+    use nyl_render::gitops::publication::{CatalogPruneHold, ConfirmedOption, DeletionConfirmation};
 
     use super::*;
 
@@ -281,7 +283,13 @@ mod tests {
         DeletionConfirmation {
             application: application.to_owned(),
             resource: resource.map(str::to_owned),
-            options: options.iter().map(|option| (*option).to_owned()).collect(),
+            options: options
+                .iter()
+                .map(|option| match *option {
+                    "Delete" => ConfirmedOption::Delete,
+                    _ => ConfirmedOption::Prune,
+                })
+                .collect(),
         }
     }
 
@@ -449,14 +457,17 @@ mod tests {
             catalog_prune_holds: holds,
             ..ready_settings()
         };
-        let hold = |application: Option<&str>, prune: &str| CatalogPruneHold {
+        let hold = |application: Option<&str>, prune: PruneHold| CatalogPruneHold {
             application: application.map(str::to_owned),
-            prune: prune.to_owned(),
+            prune,
         };
         let readiness = evaluate(
             &env(),
             &name("kubernetes"),
-            &holding(vec![hold(None, "confirm"), hold(Some("api"), "false")]),
+            &holding(vec![
+                hold(None, PruneHold::Confirm),
+                hold(Some("api"), PruneHold::False),
+            ]),
         );
         assert_eq!(codes(&readiness.blocking), vec![Code::TeardownCatalogManualSync]);
         let finding = &readiness.blocking[0];
@@ -478,7 +489,7 @@ mod tests {
         let single = evaluate(
             &env(),
             &name("kubernetes"),
-            &holding(vec![hold(Some("web"), "confirm")]),
+            &holding(vec![hold(Some("web"), PruneHold::Confirm)]),
         );
         assert!(
             single.blocking[0]
@@ -490,7 +501,7 @@ mod tests {
 
         let both = TeardownSettings {
             catalog_prunes: Some(false),
-            catalog_prune_holds: vec![hold(None, "false")],
+            catalog_prune_holds: vec![hold(None, PruneHold::False)],
             ..ready_settings()
         };
         let readiness = evaluate(&env(), &name("kubernetes"), &both);
@@ -499,14 +510,19 @@ mod tests {
         assert!(message.contains("it has no syncPolicy.automated with prune: true; its spec.syncPolicy.syncOptions skip pruning (Prune=false)"), "{message}");
 
         let many = (0..MAX_LISTED_CONFIRMATIONS + 2)
-            .map(|index| hold(Some(&format!("app-{index:02}")), "confirm"))
+            .map(|index| hold(Some(&format!("app-{index:02}")), PruneHold::Confirm))
             .collect();
         let message = &evaluate(&env(), &name("kubernetes"), &holding(many)).blocking[0].message;
         assert!(message.contains("app-07") && !message.contains("app-08"), "{message}");
         assert!(message.contains("and 2 more Applications"), "{message}");
 
         // A direct teardown has no catalog to prune through.
-        assert!(evaluate_direct(&env(), &name("kubernetes"), &holding(vec![hold(None, "confirm")])).ready());
+        assert!(evaluate_direct(
+            &env(),
+            &name("kubernetes"),
+            &holding(vec![hold(None, PruneHold::Confirm)])
+        )
+        .ready());
     }
 
     /// Catches a long list of confirmations flooding the finding: it names a

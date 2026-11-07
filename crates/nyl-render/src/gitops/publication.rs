@@ -1261,8 +1261,58 @@ pub struct DeletionConfirmation {
     /// Application's `spec.syncPolicy.syncOptions` carry them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
-    /// The options that require confirmation, `Delete` and `Prune`, each set to `confirm`.
-    pub options: Vec<String>,
+    /// The options that require confirmation, each set to `confirm`.
+    pub options: Vec<ConfirmedOption>,
+}
+
+/// A sync option set to `confirm`: Argo CD holds a deletion for either.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub enum ConfirmedOption {
+    /// `Delete=confirm`.
+    Delete,
+    /// `Prune=confirm`.
+    Prune,
+}
+
+impl ConfirmedOption {
+    /// The sync option's name, as Argo CD spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Delete => "Delete",
+            Self::Prune => "Prune",
+        }
+    }
+}
+
+/// What a `Prune` sync option does to the Application the catalog prunes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub enum PruneHold {
+    /// `Prune=confirm`: the whole prune waits for a confirmation.
+    #[serde(rename = "confirm")]
+    Confirm,
+    /// `Prune=false`: the Application is skipped.
+    #[serde(rename = "false")]
+    False,
+}
+
+impl PruneHold {
+    /// The option's value, as Argo CD spells it.
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::False => "false",
+        }
+    }
+
+    fn of(value: &str) -> Option<Self> {
+        match value {
+            "confirm" => Some(Self::Confirm),
+            "false" => Some(Self::False),
+            _ => None,
+        }
+    }
 }
 
 /// A workload Application the catalog cannot prune on its own, because Argo CD
@@ -1279,8 +1329,8 @@ pub struct CatalogPruneHold {
     /// `spec.syncPolicy.syncOptions` do, for every Application without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<String>,
-    /// The resolved `Prune` value, `confirm` or `false`.
-    pub prune: String,
+    /// The resolved `Prune` value.
+    pub prune: PruneHold,
 }
 
 /// A target's settings that decide whether its teardown can complete, read
@@ -1307,13 +1357,14 @@ pub struct TeardownSettings {
     /// What holds an Application's cascade deletion until someone confirms it
     /// in Argo CD: every resource or Application that makes a deletable
     /// resource require confirmation. Empty when nothing does.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deletion_confirmations: Vec<DeletionConfirmation>,
     /// What keeps the catalog from pruning removed workload Applications
     /// although it syncs automatically with pruning: a `Prune` sync option of
     /// `confirm` or `false`, from the catalog's `spec.syncPolicy.syncOptions`
-    /// or an Application's own annotation. Empty when nothing does, and when
-    /// the catalog is external.
+    /// or an Application's own annotation. An Application's own annotation is
+    /// recorded even when the catalog is external, because it holds whichever
+    /// catalog syncs the Application. Empty when nothing does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub catalog_prune_holds: Vec<CatalogPruneHold>,
     /// Whether a parent owns the target's catalog, so phase 2 removes the
@@ -1438,10 +1489,7 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
             })
     });
     let catalog_policy = catalog.as_ref().map(application_deletion_policy);
-    let catalog_prune_holds = catalog
-        .as_ref()
-        .map(|application| catalog_prune_holds(application, &pruned))
-        .unwrap_or_default();
+    let catalog_prune_holds = catalog_prune_holds(catalog.as_ref(), &pruned);
     Ok(TeardownSettings {
         catalog_prunes,
         application_deletion_policy: if workload_orphaned {
@@ -1455,7 +1503,7 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
             .map(|((application, resource), options)| DeletionConfirmation {
                 application,
                 resource,
-                options: options.into_iter().map(str::to_owned).collect(),
+                options: options.into_iter().collect(),
             })
             .collect(),
         catalog_prune_holds,
@@ -1463,23 +1511,29 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
     })
 }
 
-/// What keeps `catalog` from pruning the Applications in `pruned`. Argo CD's
-/// automated sync takes the Application's `spec.syncPolicy.syncOptions` as the
+/// What keeps the catalog from pruning the Applications in `pruned`. Argo CD's
+/// automated sync takes the catalog's `spec.syncPolicy.syncOptions` as the
 /// operation's options and resolves `Prune` for each pruned live object: its
 /// own annotation, else that default. `confirm` makes the sync wait before it
-/// prunes anything, and `false` skips the object.
-fn catalog_prune_holds(catalog: &serde_json::Value, pruned: &[(String, OptionValue)]) -> Vec<CatalogPruneHold> {
-    let holds = |value: &str| matches!(value, "confirm" | "false");
-    let default = application_sync_option(catalog, "Prune").filter(|value| holds(value));
+/// prunes anything, and `false` skips the object. An Application's own
+/// annotation holds whichever catalog syncs it, so it is recorded even when
+/// the catalog is unknown (`None`); only the catalog's default needs the catalog.
+fn catalog_prune_holds(catalog: Option<&serde_json::Value>, pruned: &[(String, OptionValue)]) -> Vec<CatalogPruneHold> {
+    let default = catalog
+        .and_then(|catalog| application_sync_option(catalog, "Prune"))
+        .and_then(|value| PruneHold::of(&value));
     let mut holding = Vec::new();
     let mut inherits = false;
     for (name, own) in pruned {
         match own {
-            Some((value, _)) if holds(value) => holding.push(CatalogPruneHold {
-                application: Some(name.clone()),
-                prune: value.clone(),
-            }),
-            Some(_) => {}
+            Some((value, _)) => {
+                if let Some(prune) = PruneHold::of(value) {
+                    holding.push(CatalogPruneHold {
+                        application: Some(name.clone()),
+                        prune,
+                    });
+                }
+            }
             None => inherits = true,
         }
     }
@@ -1538,7 +1592,7 @@ fn read_resources(
             "CustomResourceDefinition",
         ];
         if !distinguished.iter().any(|marker| text.contains(marker)) {
-            if let Some(owner) = owner {
+            if let Some(owner) = owner.filter(|_| has_documents(text)) {
                 owner.record_confirmations(&Resource::default(), &mut confirmations);
             }
             continue;
@@ -1570,6 +1624,15 @@ fn read_resources(
     Ok((delete_policies, confirmations))
 }
 
+/// Whether `text` has a YAML document: a line that is not blank, a comment, or
+/// a document marker. A cheap check, so a file Argo CD reads as no resource
+/// does not count as one.
+fn has_documents(text: &str) -> bool {
+    text.lines().map(str::trim).any(|line| {
+        !line.is_empty() && !line.starts_with('#') && line != "---" && line != "..." && !line.starts_with("--- #")
+    })
+}
+
 /// The text of a rendered YAML file; `None` for any other file.
 fn yaml_text<'a>(path: &Path, bytes: &'a [u8]) -> Option<&'a str> {
     matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("yaml" | "yml"))
@@ -1583,7 +1646,7 @@ type OptionValue = Option<(String, bool)>;
 
 /// What holds each Application's deletion, by Application and resource (`None`
 /// for the Application's own options), with the options that do.
-type Confirmations = BTreeMap<(String, Option<String>), std::collections::BTreeSet<&'static str>>;
+type Confirmations = BTreeMap<(String, Option<String>), std::collections::BTreeSet<ConfirmedOption>>;
 
 /// A workload Application as teardown readiness needs it: the directory it
 /// recursively sources, and the `Delete` and `Prune` values of its
@@ -1691,7 +1754,7 @@ impl WorkloadApplication {
         if resource.kept || delete.as_ref().is_some_and(|(value, _)| value == "false") {
             return;
         }
-        for (option, resolved) in [("Delete", delete), ("Prune", prune)] {
+        for (option, resolved) in [(ConfirmedOption::Delete, delete), (ConfirmedOption::Prune, prune)] {
             if let Some((_, from_resource)) = resolved.filter(|(value, _)| value == "confirm") {
                 let label = (from_resource && !resource.label.is_empty()).then(|| resource.label.clone());
                 confirmations
@@ -3072,22 +3135,22 @@ spec:
                 DeletionConfirmation {
                     application: "web".to_owned(),
                     resource: Some("Namespace web".to_owned()),
-                    options: vec!["Delete".to_owned(), "Prune".to_owned()],
+                    options: vec![ConfirmedOption::Delete, ConfirmedOption::Prune],
                 },
                 DeletionConfirmation {
                     application: "api".to_owned(),
                     resource: None,
-                    options: vec!["Prune".to_owned()],
+                    options: vec![ConfirmedOption::Prune],
                 },
             ],
             catalog_prune_holds: vec![
                 CatalogPruneHold {
                     application: None,
-                    prune: "confirm".to_owned(),
+                    prune: PruneHold::Confirm,
                 },
                 CatalogPruneHold {
                     application: Some("web".to_owned()),
-                    prune: "false".to_owned(),
+                    prune: PruneHold::False,
                 },
             ],
             catalog_owned_by_parent: false,
@@ -3110,7 +3173,6 @@ spec:
             "catalogPrunes": null,
             "applicationDeletionPolicy": null,
             "namespaceDeletePolicies": {},
-            "deletionConfirmations": [],
             "catalogOwnedByParent": true,
         });
         let parent_owned = TeardownSettings {
@@ -3173,7 +3235,12 @@ spec:
                 (
                     confirmation.application.clone(),
                     confirmation.resource.clone(),
-                    confirmation.options.join(","),
+                    confirmation
+                        .options
+                        .iter()
+                        .map(|option| option.name())
+                        .collect::<Vec<_>>()
+                        .join(","),
                 )
             })
             .collect()
@@ -3464,6 +3531,112 @@ metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-opt
         );
     }
 
+    /// Catches a resource being judged under the wrong Application, or a
+    /// stray file counting: with an Application nested in another's directory
+    /// the most specific one owns a file (its options apply, and it is the one
+    /// named), a file under no Application is ignored although it asks for
+    /// confirmation, and a file with no YAML document is no resource that an
+    /// Application's own options could hold.
+    #[test]
+    fn test_teardown_settings_attribute_a_resource_to_the_most_specific_application() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let mut rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        // Namespaces and the Application's defaults hold nothing, so only the added files can.
+        edit_workloads(&mut rendered, |manifest| {
+            let namespace = manifest["kind"] == "Namespace";
+            if namespace {
+                set_sync_options(manifest, "Prune=false,Delete=false");
+            }
+            namespace
+        });
+        let directory = workload_directory(&rendered);
+
+        // A second Application below the first one's directory, and its own catalog file.
+        let (path, bytes) = rendered
+            .files
+            .iter()
+            .find(|(path, bytes)| {
+                path.starts_with(super::super::CATALOG_DIRECTORY)
+                    && String::from_utf8_lossy(bytes).contains("kind: Application")
+                    && !String::from_utf8_lossy(bytes).contains("path: dev/_nyl/catalog")
+            })
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .unwrap();
+        let mut nested = serde_saphyr::from_str::<serde_json::Value>(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        nested["metadata"]["name"] = json!("web-jobs");
+        nested["spec"]["source"]["path"] = json!(format!("dev/{}/jobs", directory.display()));
+        rendered.files.insert(
+            path.with_file_name("web-jobs.yaml"),
+            serde_saphyr::to_string(&nested).unwrap().into_bytes(),
+        );
+
+        let held = |name: &str, option: &str| {
+            format!(
+                "apiVersion: v1\nkind: ConfigMap\nmetadata: {{name: {name}, namespace: web, annotations: {{argocd.argoproj.io/sync-options: '{option}'}}}}\n"
+            )
+        };
+        for (file, text) in [
+            (directory.join("outer.yaml"), held("outer", "Delete=confirm")),
+            (directory.join("jobs/inner.yaml"), held("inner", "Prune=confirm")),
+            (PathBuf::from("elsewhere/stray.yaml"), held("stray", "Delete=confirm")),
+            // Comments and document markers hold no resource, whatever the Application's options say.
+            (directory.join("empty.yaml"), "# nothing here\n---\n".to_owned()),
+        ] {
+            rendered.files.insert(file, text.into_bytes());
+        }
+        let settings = settings_of(&rendered);
+        assert_eq!(
+            confirmations_of(&settings),
+            vec![
+                (
+                    "web".to_owned(),
+                    Some("ConfigMap web/outer".to_owned()),
+                    "Delete".to_owned()
+                ),
+                (
+                    "web-jobs".to_owned(),
+                    Some("ConfigMap web/inner".to_owned()),
+                    "Prune".to_owned()
+                ),
+            ],
+            "{settings:?}"
+        );
+
+        // The nested Application's own options now hold everything below it, and nothing above.
+        edit_catalog(&mut rendered, |manifest| {
+            if manifest["metadata"]["name"] != "web-jobs" {
+                return false;
+            }
+            manifest["spec"]["syncPolicy"]["syncOptions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("Delete=confirm"));
+            true
+        });
+        rendered.files.remove(&directory.join("outer.yaml"));
+        rendered
+            .files
+            .insert(directory.join("jobs/empty.yaml"), b"# nothing here\n".to_vec());
+        let settings = settings_of(&rendered);
+        assert_eq!(
+            confirmations_of(&settings),
+            vec![
+                ("web-jobs".to_owned(), None, "Delete".to_owned()),
+                (
+                    "web-jobs".to_owned(),
+                    Some("ConfigMap web/inner".to_owned()),
+                    "Prune".to_owned()
+                ),
+            ],
+            "{settings:?}"
+        );
+        // Without a file below it the nested Application deletes nothing, so its options hold nothing.
+        rendered.files.remove(&directory.join("jobs/inner.yaml"));
+        rendered.files.remove(&directory.join("jobs/empty.yaml"));
+        assert_eq!(confirmations_of(&settings_of(&rendered)), Vec::new());
+    }
+
     fn edit_catalog(rendered: &mut RenderedTarget, edit: impl Fn(&mut serde_json::Value) -> bool) {
         let paths = rendered
             .files
@@ -3535,7 +3708,7 @@ metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-opt
         settings
             .catalog_prune_holds
             .iter()
-            .map(|hold| (hold.application.clone(), hold.prune.clone()))
+            .map(|hold| (hold.application.clone(), hold.prune.value().to_owned()))
             .collect()
     }
 
@@ -3657,6 +3830,16 @@ metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-opt
 
         let plain = render_inline(worktree.path(), &shared_inline("pr-1", pruning_shared()), None).unwrap();
         assert_eq!(holds_of(&teardown_settings(&plain).unwrap()), Vec::new());
+        // A shared catalog nothing has published yet is not checked, but an
+        // Application's own annotation still holds whichever catalog prunes it.
+        let mut annotated = plain.clone();
+        edit_catalog(&mut annotated, |manifest| {
+            set_sync_options(manifest, "Prune=confirm");
+            true
+        });
+        let unread = teardown_settings_with(&annotated, &SharedCatalogView::NotChecked).unwrap();
+        assert_eq!(unread.catalog_prunes, None);
+        assert_eq!(holds_of(&unread), vec![(Some("web".to_owned()), "confirm".to_owned())]);
         let published = json!({"spec": {"syncPolicy": {"automated": {"prune": true}, "syncOptions": ["Prune=false"]}}});
         let settings = teardown_settings_with(&plain, &SharedCatalogView::Published(published)).unwrap();
         assert_eq!(holds_of(&settings), vec![(None, "false".to_owned())]);
@@ -3677,6 +3860,22 @@ metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-opt
         assert_eq!(settings.catalog_prunes, None);
         assert_eq!(settings.application_deletion_policy, None);
         assert!(settings.catalog_owned_by_parent);
+        assert_eq!(holds_of(&settings), Vec::new());
+
+        // A workload Application's own `Prune` annotation holds whichever
+        // catalog syncs it, so it is recorded although the catalog is unknown.
+        annotate_application(&mut rendered, "Prune=confirm");
+        let settings = settings_of(&rendered);
+        assert_eq!(settings.catalog_prunes, None);
+        assert_eq!(
+            holds_of(&settings),
+            vec![(Some("web".to_owned()), "confirm".to_owned())]
+        );
+        annotate_application(&mut rendered, "Prune=false");
+        assert_eq!(
+            holds_of(&settings_of(&rendered)),
+            vec![(Some("web".to_owned()), "false".to_owned())]
+        );
     }
 
     /// Catches a lost race for the branch head being reported like a failed

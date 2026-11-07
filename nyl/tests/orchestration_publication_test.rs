@@ -182,7 +182,8 @@ fn test_ready_target_tears_down_in_two_phases() {
     let settings = &desired(&harness, "kubernetes")["resolvedSpec"]["teardownSettings"];
     assert_eq!(settings["catalogPrunes"], true, "{settings}");
     assert_eq!(settings["namespaceDeletePolicies"]["web"], "Automatic", "{settings}");
-    assert_eq!(settings["deletionConfirmations"], serde_json::json!([]), "{settings}");
+    // Nothing to confirm records nothing.
+    assert!(settings.get("deletionConfirmations").is_none(), "{settings}");
     // Only the self-managing catalog is left behind, which warns without blocking.
     let warnings = reconcile.report["environments"][0]["warnings"].to_string();
     assert!(warnings.contains("NYL-TEARDOWN-CATALOG-REMAINS"), "{warnings}");
