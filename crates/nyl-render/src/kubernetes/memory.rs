@@ -114,8 +114,32 @@ impl ReleaseStorage for InMemoryReleaseStorage {
         Ok(())
     }
 
-    async fn list_releases(&self, _namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
-        Ok(vec![])
+    async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
+        let store = self.releases.lock().unwrap();
+        let mut latest: HashMap<(String, String), &ReleaseState> = HashMap::new();
+        for release in store.values() {
+            if namespace.is_some_and(|namespace| namespace != release.release_namespace) {
+                continue;
+            }
+            let key = (release.release_namespace.clone(), release.release_name.clone());
+            if latest.get(&key).is_none_or(|known| known.revision < release.revision) {
+                latest.insert(key, release);
+            }
+        }
+        let mut infos: Vec<ReleaseInfo> = latest
+            .into_values()
+            .map(|release| ReleaseInfo {
+                release_name: release.release_name.clone(),
+                release_namespace: release.release_namespace.clone(),
+                latest_revision: release.revision,
+                status: release.status.clone(),
+                rendered_at: release.rendered_at,
+                applied_at: release.applied_at,
+                resource_count: release.resource_keys.len(),
+            })
+            .collect();
+        infos.sort_by(|a, b| (&a.release_namespace, &a.release_name).cmp(&(&b.release_namespace, &b.release_name)));
+        Ok(infos)
     }
 
     async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<()> {

@@ -408,3 +408,39 @@ async fn test_a_removal_reading_ignores_what_only_an_older_revision_tracked() {
     assert!(reading.deployments.is_empty());
     assert_eq!(reading.absent["web/web"], Visibility::Visible);
 }
+
+/// Catches the teardown wait waiting on a Release the teardown leaves: a Release
+/// another unit owns was applied for this publication, so only its owner tells it
+/// from this unit's. With the unit known, the removal reading counts it as gone,
+/// by the rule the teardown's own classification uses; an earlier incarnation of
+/// this very unit is this unit's.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_removal_reading_counts_a_release_another_unit_owns_as_gone() {
+    use nyl_render::gitops::reconcile::RenderIndexOwner;
+    let own = RenderIndexOwner::unit("dev", "kubernetes", "uid-own");
+    for (owner, present) in [
+        (RenderIndexOwner::unit("dev", "other", "uid-other"), false),
+        (RenderIndexOwner::unit("dev", "kubernetes", "uid-earlier"), true),
+        (own.clone(), true),
+    ] {
+        let world = World::new();
+        let mut state = revision(1, ReleaseStatus::Deployed, Some(publication("dev", Some("abc"))));
+        state.meta.owner = Some(owner.clone());
+        world.save(state).await;
+        world.deployment(2);
+        let world = Arc::new(world);
+        let reading = tokio::task::spawn_blocking({
+            let world = world.clone();
+            let own = own.clone();
+            move || read(&world.reader(None).with_owner(Some(own)), true)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reading.deployments.contains_key("web/web"),
+            present,
+            "owned by {owner}: {reading:?}"
+        );
+    }
+}

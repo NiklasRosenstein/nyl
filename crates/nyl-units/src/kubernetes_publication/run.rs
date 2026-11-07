@@ -539,15 +539,18 @@ fn teardown_reconciler_changed(before: &str, now: &str) -> String {
 }
 
 /// The warnings of Releases a teardown left alone because this unit may not remove them.
-fn skipped_warnings(unit: &DesiredUnit, skipped: &[String]) -> Vec<nyl_core::orchestration::codes::Finding> {
+fn skipped_warnings(
+    unit: &DesiredUnit,
+    skipped: &[super::direct::apply::Left],
+) -> Vec<nyl_core::orchestration::codes::Finding> {
     skipped
         .iter()
-        .map(|release| {
+        .map(|left| {
             nyl_core::orchestration::codes::Finding::new(
                 nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind,
                 format!(
-                    "{}/{}: the teardown left Release {release} alone, because this unit may not remove it",
-                    unit.unit.environment, unit.unit.name
+                    "{}/{}: the teardown left {} alone: {}",
+                    unit.unit.environment, unit.unit.name, left.what, left.reason
                 ),
                 "remove it with `nyl release delete --take-over` if it is stale, or leave it to its owner",
             )
@@ -1194,8 +1197,13 @@ pub(crate) fn teardown(
             String::new()
         } else {
             format!(
-                "; it left {} alone, which this unit may not remove",
-                result.skipped.join(", ")
+                "; it left {} alone",
+                result
+                    .skipped
+                    .iter()
+                    .map(|left| format!("{} ({})", left.what, left.reason))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         };
         return Ok(Outcome::Waiting {

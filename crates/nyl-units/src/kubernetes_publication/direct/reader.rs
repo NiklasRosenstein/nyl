@@ -19,8 +19,10 @@ use nyl_render::kubernetes::{ReleasePublication, ReleaseState, ReleaseStatus, Re
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
+use nyl_render::gitops::reconcile::RenderIndexOwner;
+
 use super::health::{fold, is_workload, Found};
-use super::{ClusterAccess, ClusterHandle};
+use super::{not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{
     block_on, Health, Observed, Proof, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, Running,
     Visibility,
@@ -33,9 +35,20 @@ pub struct DirectReader {
     kubeconfig: Option<String>,
     budget: Duration,
     access: ClusterAccess,
+    /// The unit whose Releases these are, so a removal reading counts only what
+    /// its teardown removes ([`super::not_removable`]); without it, every Release
+    /// of the publication.
+    owner: Option<RenderIndexOwner>,
 }
 
 impl DirectReader {
+    /// Judge Releases by whether `owner`'s teardown removes them.
+    #[must_use]
+    pub fn with_owner(mut self, owner: Option<RenderIndexOwner>) -> Self {
+        self.owner = owner;
+        self
+    }
+
     pub fn new(
         location: DirectLocation,
         publication: ObservedPublication,
@@ -49,6 +62,7 @@ impl DirectReader {
             kubeconfig,
             budget,
             access,
+            owner: None,
         }
     }
 }
@@ -323,7 +337,7 @@ impl DirectReader {
                 // revision was applied for another publication, or by no
                 // target, is not this publication's, and a teardown leaves it:
                 // it is gone as far as this unit is concerned.
-                if !applied_for(&states[0], &destination) {
+                if not_removable(&states[0], &destination, self.owner.as_ref(), true, None).is_some() {
                     reading.absent.insert(deployment.id.clone(), Visibility::Visible);
                     continue;
                 }
