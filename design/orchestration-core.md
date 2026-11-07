@@ -1530,7 +1530,7 @@ expired from the moment `expiresAt` is reached.
   that gate a teardown (`--allow-dependents`, `--approve`, `--source`) apply to
   it, except that an eviction by `--make-room` inherits neither `--source` nor
   `--approve`, which name the new pull request's instance. Removal also waits for each publication's `teardownWait`: with the
-  `manual` default of `mode: publish`, it stops after phase 1 until
+  `manual` default of a unit without `observe`, it stops after phase 1 until
   `--confirm-removed`, so templates meant to expire unattended use `observe`
   or `delay`. A removal stuck in phase 1 needs `--confirm-removed` (or
   `teardown --all` run again once the wait is over); until then the preview

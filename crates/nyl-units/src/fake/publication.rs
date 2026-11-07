@@ -44,7 +44,7 @@ use nyl_render::gitops::units::PublicationTarget;
 
 use crate::kubernetes_publication::{
     build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unattended_teardown,
-    unit_target, validate_teardown_wait,
+    unit_target, validate_observe,
 };
 
 pub(super) const KIND: &str = "FakePublication";

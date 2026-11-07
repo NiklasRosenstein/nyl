@@ -376,8 +376,8 @@ impl Driver for KubernetesPublicationDriver {
         super::unattended_teardown(unit)
     }
 
-    /// The workload Applications Argo CD still reports, for the `observe`
-    /// teardown wait.
+    /// The workload deployments the reconciler still reports, for the
+    /// `observe` teardown wait.
     fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
         Ok(Supported::Supported(observe::observe_removal(ctx, unit)))
     }
