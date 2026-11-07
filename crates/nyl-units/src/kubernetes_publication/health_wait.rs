@@ -13,7 +13,8 @@
 //! - [`wait_until_healthy`] owns the rule, over a poll function and the
 //!   injected clock ([`Clock`]): it backs off between polls, 2 seconds doubling
 //!   to 30, and never waits past the timeout or the unit's deadline. Nothing
-//!   in it reads the system clock or sleeps.
+//!   in it reads the system clock or sleeps. A clock that does not advance
+//!   still ends the wait, after a bounded number of polls.
 //! - A reading that is unreadable or whose absences are not provable is never
 //!   a pass: it is `Unread`, which retries until the timeout, except for a
 //!   credential or declaration the wait cannot fix.
@@ -46,6 +47,9 @@ pub const HEALTH_DEGRADED: &str = "NYL-KUBERNETES-HEALTH-DEGRADED";
 /// The first pause between polls, and the longest.
 const FIRST_PAUSE: u64 = 2;
 const LONGEST_PAUSE: u64 = 30;
+/// The most polls one wait makes. A clock that never advances would otherwise
+/// poll forever; a real wait of a day makes under 3000.
+const MAX_POLLS: usize = 4096;
 
 /// One reading of the reconciler, judged.
 pub enum Poll {
@@ -74,7 +78,9 @@ pub fn wait_until_healthy(
 ) -> Waited {
     let end = timeout.after(started).min(deadline);
     let mut pause = FIRST_PAUSE;
+    let mut polls = 0usize;
     loop {
+        polls += 1;
         let last = match poll() {
             Poll::Healthy(attestations) => return Waited::Healthy(attestations),
             Poll::NotYet { worst, terminal: true } => {
@@ -109,7 +115,7 @@ pub fn wait_until_healthy(
             Poll::Unread(error) => format!("the reconciler could not be read: {}", error.message),
         };
         let now = clock.now();
-        if now >= end {
+        if now >= end || polls >= MAX_POLLS {
             let allowed = (end - started).num_seconds().max(0);
             return Waited::Failed(Outcome::Failed {
                 category: FailureCategory::Timeout,
@@ -362,6 +368,24 @@ mod tests {
             20,
             "the waits end exactly at the timeout: {pauses:?}"
         );
+    }
+
+    /// Catches a clock that never advances turning the wait into an endless
+    /// poll loop: the poll count is bounded, and the wait ends as a timeout.
+    #[test]
+    fn test_a_clock_that_never_advances_still_ends_the_wait() {
+        struct Stuck;
+        impl Clock for Stuck {
+            fn now(&self) -> Timestamp {
+                start()
+            }
+            fn wait(&self, _: Duration) {}
+        }
+        let hour = Duration::from_secs(3600);
+        let waited = wait_until_healthy(&Stuck, start(), hour.after(start()), hour, || {
+            not_yet("web is Progressing")
+        });
+        assert_eq!(failed(waited).0, FailureCategory::Timeout);
     }
 
     /// Catches a wait that runs past the unit's own deadline when its timeout
