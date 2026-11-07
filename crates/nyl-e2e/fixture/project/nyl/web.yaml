@@ -13,4 +13,7 @@ spec:
   applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
   projectTemplate:
     name: '{{ target.metadata.name }}-web'
-  namespace: {deletePolicy: Automatic}
+  # Argo CD asks for confirmation before it deletes a resource that has either
+  # Prune=confirm or Delete=confirm when its Application is deleted, so both
+  # policies are Automatic: a teardown must complete without an operator.
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}
