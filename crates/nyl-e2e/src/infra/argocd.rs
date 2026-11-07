@@ -132,13 +132,19 @@ pub fn install(kubectl: &Kubectl, directory: &Path, host_port: u16) -> Result<()
         .timeout(Duration::from_secs(300))
         .echo()
         .run_ok()?;
-    kubectl.run(&[
-        "wait",
-        "--for=condition=Established",
-        "crd/applications.argoproj.io",
-        "crd/appprojects.argoproj.io",
-        "--timeout=120s",
-    ])?;
+    // `kubectl wait --for=condition=Established` fails at once, instead of
+    // waiting, on a CRD the API server has not given conditions yet.
+    for crd in ["applications.argoproj.io", "appprojects.argoproj.io"] {
+        Waiter::new(format!("CRD {crd} to be established"), Duration::from_secs(120))
+            .backoff(Duration::from_millis(500), Duration::from_secs(5))
+            .until(|| {
+                Ok(match kubectl.get_optional(&["crd", crd])? {
+                    Some(object) if crd_established(&object) => Poll::Ready(()),
+                    Some(_) => Poll::pending("not established yet"),
+                    None => Poll::pending("not found"),
+                })
+            })?;
+    }
 
     merge_patch(
         kubectl,
@@ -189,6 +195,18 @@ pub fn install(kubectl: &Kubectl, directory: &Path, host_port: u16) -> Result<()
         &format!("{}/api/version", api_url(host_port)),
         Duration::from_secs(180),
     )
+}
+
+/// Whether a CustomResourceDefinition has the condition `Established` set to
+/// `True`. A CRD the API server has not processed yet has no conditions.
+fn crd_established(crd: &serde_json::Value) -> bool {
+    crd.pointer("/status/conditions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|conditions| {
+            conditions
+                .iter()
+                .any(|condition| condition["type"] == "Established" && condition["status"] == "True")
+        })
 }
 
 fn rollout(kubectl: &Kubectl, workload: &str) -> Result<()> {
@@ -307,5 +325,21 @@ mod tests {
         let service = node_port_service();
         assert!(service.contains(&format!("nodePort: {ARGOCD_NODE_PORT}")));
         assert!(service.contains("app.kubernetes.io/name: argocd-server"));
+    }
+
+    #[test]
+    fn test_a_crd_is_established_only_once_its_condition_is_true() {
+        let crd = |status: serde_json::Value| serde_json::json!({"kind": "CustomResourceDefinition", "status": status});
+        assert!(!crd_established(&crd(serde_json::json!({}))));
+        assert!(!crd_established(&crd(serde_json::json!({"conditions": null}))));
+        assert!(!crd_established(&crd(serde_json::json!({
+            "conditions": [{"type": "Established", "status": "False"}]
+        }))));
+        assert!(crd_established(&crd(serde_json::json!({
+            "conditions": [
+                {"type": "NamesAccepted", "status": "True"},
+                {"type": "Established", "status": "True"}
+            ]
+        }))));
     }
 }
