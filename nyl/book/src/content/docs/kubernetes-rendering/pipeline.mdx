@@ -67,6 +67,31 @@ resource limits. Manifest streams apply complexity limits per document, so
 combining many resources does not impose a fixed document-count ceiling. Empty
 and null documents are omitted from manifest streams.
 
+## Embedding JSON in templates
+
+Templates print a list or mapping in Python-like syntax, such as
+`{'enabled': true}`, which is not JSON. To embed a value as JSON, for example
+in a ConfigMap or an annotation, serialize it with the `tojson` filter:
+
+```yaml
+data:
+  config.json: '{{ values.config | tojson }}'
+```
+
+`tojson` escapes quotes, newlines, and backslashes as JSON requires, and writes
+`<`, `>`, `&`, and `'` as `\u` escapes. That keeps the output valid JSON inside a
+single-quoted YAML string. For readable output in a block scalar, indent the
+serialized lines to the block's depth:
+
+```yaml
+data:
+  config.json: |
+    {{ values.config | tojson(indent=2) | indent(4) }}
+```
+
+Other values print as written in manifest templates, without JSON or HTML
+escaping.
+
 ## The Release's Application
 
 With `--target`, a Release that one of the target's enabled ApplicationGroups
