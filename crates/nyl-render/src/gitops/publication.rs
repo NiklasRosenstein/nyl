@@ -1264,6 +1264,8 @@ pub struct TeardownSettings {
     /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
     pub namespace_delete_policies: BTreeMap<String, String>,
     /// Each owned Namespace's `prunePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
+    /// Absent in a document recorded before it existed.
+    #[serde(default)]
     pub namespace_prune_policies: BTreeMap<String, String>,
     /// Whether a parent owns the target's catalog, so phase 2 removes the
     /// catalog Application and AppProjects too.
@@ -2781,6 +2783,17 @@ spec:
         });
         assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
         assert_eq!(serde_json::from_value::<TeardownSettings>(stored).unwrap(), settings);
+        // A document recorded before the prune policies existed still reads.
+        let older = serde_json::json!({
+            "catalogPrunes": true,
+            "applicationDeletionPolicy": "Foreground",
+            "namespaceDeletePolicies": {"web": "Confirm"},
+            "catalogOwnedByParent": false,
+        });
+        assert!(serde_json::from_value::<TeardownSettings>(older)
+            .unwrap()
+            .namespace_prune_policies
+            .is_empty());
         // A catalog a parent owns records the settings Nyl cannot see as null.
         let external = serde_json::json!({
             "catalogPrunes": null,

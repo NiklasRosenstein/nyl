@@ -22,7 +22,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nyl_render::gitops::observation::{DirectLocation, ObservedPublication};
-use nyl_render::kubernetes::{KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStorage};
+use nyl_render::gitops::reconcile::RenderIndexOwner;
+use nyl_render::kubernetes::fence::{OwnerProbe, OwnerState};
+use nyl_render::kubernetes::{
+    KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleasePublication, ReleaseState, ReleaseStorage,
+};
 
 use super::argocd::Connection;
 use super::reconciler::{ReadError, ReadErrorKind, ReconcilerReader, KUBECONFIG_ENV};
@@ -32,6 +36,53 @@ pub mod health;
 mod reader;
 
 pub use reader::DirectReader;
+
+/// Why this unit may not remove a Release whose latest revision is `latest`,
+/// or `None` when it may. The one rule a teardown, the purge of Releases that
+/// left the tree, and the removal reading share, so the first-phase wait never
+/// waits on a Release the teardown leaves.
+///
+/// A Release is this unit's to remove when its latest revision was applied for
+/// `destination` and either names this unit (or an earlier incarnation of it
+/// that is gone) as owner, or names none and `adoptable` (an apply by hand of
+/// this target took it over: a teardown removes it, the purge of a vanished
+/// Release leaves it). `probe` tells whether an earlier incarnation is gone; a
+/// reader without one takes it to be, and without `own` takes any owner to be.
+pub(crate) fn not_removable(
+    latest: &ReleaseState,
+    destination: &ReleasePublication,
+    own: Option<&RenderIndexOwner>,
+    adoptable: bool,
+    probe: Option<OwnerProbe<'_>>,
+) -> Option<String> {
+    if !latest
+        .meta
+        .publication
+        .as_ref()
+        .is_some_and(|publication| publication.same_destination(destination))
+    {
+        return Some("it was applied for another publication".to_owned());
+    }
+    let Some(recorded) = &latest.meta.owner else {
+        return (!adoptable).then(|| "no unit owns it".to_owned());
+    };
+    let own = own?;
+    if recorded == own {
+        return None;
+    }
+    let same_unit = matches!(
+        (recorded, own),
+        (
+            RenderIndexOwner::Unit { environment, unit, .. },
+            RenderIndexOwner::Unit { environment: own_environment, unit: own_unit, .. },
+        ) if environment == own_environment && unit == own_unit
+    );
+    let gone = match probe {
+        Some(probe) => probe(recorded) == OwnerState::Gone,
+        None => true,
+    };
+    (!(same_unit && gone)).then(|| format!("it is owned by {recorded}"))
+}
 
 /// A connection to the target's Cluster: what applies resources and what
 /// records releases there.
@@ -106,12 +157,16 @@ pub fn reader_with(
     env: &BTreeMap<String, String>,
     budget: Duration,
     access: ClusterAccess,
+    owner: Option<&RenderIndexOwner>,
 ) -> Result<Box<dyn ReconcilerReader>, ReadError> {
-    Ok(Box::new(DirectReader::new(
-        location.clone(),
-        publication.clone(),
-        env.get(KUBECONFIG_ENV).cloned(),
-        budget,
-        access,
-    )))
+    Ok(Box::new(
+        DirectReader::new(
+            location.clone(),
+            publication.clone(),
+            env.get(KUBECONFIG_ENV).cloned(),
+            budget,
+            access,
+        )
+        .with_owner(owner.cloned()),
+    ))
 }

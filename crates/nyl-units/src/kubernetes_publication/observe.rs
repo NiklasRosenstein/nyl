@@ -119,6 +119,7 @@ pub(super) fn attest(
         &ctx.env,
         budget(ctx.now, ctx.deadline),
         access,
+        None,
     ) {
         Ok(reader) => reader,
         Err(error) => return unknown(error.message),
@@ -174,6 +175,7 @@ pub(super) fn observe_removal(ctx: &RemovalContext, unit: &DesiredUnit, access: 
         &ctx.env,
         budget(ctx.now, ctx.deadline),
         access,
+        super::run::unit_owner(unit).ok().as_ref(),
     ) {
         Ok(reader) => reader,
         Err(error) => return RemovalObservation::Failed(error.message),

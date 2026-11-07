@@ -729,14 +729,20 @@ impl<'s> ReleaseRecorder<'s> {
 
                 let live_keys_list: Vec<ResourceKey> = live_keys.iter().cloned().collect();
                 scopes.load(client, &live_keys_list).await;
-                let to_prune: Vec<&ResourceKey> = keys_to_prune(&live_keys, &release.resource_keys, scopes)
-                    .into_iter()
-                    .filter(|key| {
-                        settings
-                            .protected
-                            .is_none_or(|protected| !protected.contains(&scopes.identity(key)))
-                    })
-                    .collect();
+                let mut to_prune: Vec<&ResourceKey> = Vec::new();
+                for key in keys_to_prune(&live_keys, &release.resource_keys, scopes) {
+                    let identity = scopes.identity(key);
+                    match settings.protected {
+                        // Another Release applied it already: it is theirs now.
+                        Some(protected) if protected.handed_over.contains(&identity) => {}
+                        // Another Release will render it but has not applied: the object stays in
+                        // the cluster, and stays tracked here until that Release applies it.
+                        Some(protected) if protected.pending.contains(&identity) => {
+                            release.resource_keys.push(key.clone());
+                        }
+                        _ => to_prune.push(key),
+                    }
+                }
                 let (to_prune, awaiting, unreadable) =
                     filter_by_prune_option(client, to_prune, settings.confirm_prune, on_event).await;
                 // Resources awaiting confirmation stay tracked, so a confirmed apply prunes them.
@@ -772,11 +778,22 @@ pub struct ApplySettings<'a> {
     pub confirm_prune: bool,
     /// The field manager resources are applied as, and the one a handoff releases.
     pub ownership: &'a FieldOwnership,
-    /// Objects some other release now renders, which this release's prune must
-    /// not delete: an object that moved between releases is not removed from
-    /// the one that took it over. They are dropped from this release's tracking
-    /// without being deleted.
-    pub protected: Option<&'a HashSet<ObjectIdentity>>,
+    /// Objects some other release renders, which this release's prune must not
+    /// delete: an object that moved between releases is not removed from the one
+    /// that took it over.
+    pub protected: Option<Protected<'a>>,
+}
+
+/// The objects other releases of one run render, by whether they applied yet.
+#[derive(Clone, Copy, Debug)]
+pub struct Protected<'a> {
+    /// Rendered by a release that applied already: dropped from this release's
+    /// tracking without being deleted, since the other release tracks it.
+    pub handed_over: &'a HashSet<ObjectIdentity>,
+    /// Rendered by a release that has not applied (and may not, when a later
+    /// wave aborts or the deadline passes): left in the cluster and kept
+    /// tracked here, so no release forgets an object nothing else tracks.
+    pub pending: &'a HashSet<ObjectIdentity>,
 }
 
 /// Split the resources to prune by their live Argo CD `Prune` sync option
@@ -2050,7 +2067,8 @@ mod tests {
             .await
             .unwrap();
         let mut scopes = ObjectScopes::default();
-        let protected = HashSet::from([scopes.identity(&moved)]);
+        let handed_over = HashSet::from([scopes.identity(&moved)]);
+        let nobody = HashSet::new();
         let recorder = ReleaseRecorder::reserve(
             &storage,
             "app",
@@ -2064,7 +2082,10 @@ mod tests {
         .await
         .unwrap();
         let settings = ApplySettings {
-            protected: Some(&protected),
+            protected: Some(Protected {
+                handed_over: &handed_over,
+                pending: &nobody,
+            }),
             ..settings(0)
         };
 
@@ -2081,6 +2102,72 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(live_names, ["moved"]);
         assert!(run.release.resource_keys.is_empty(), "the Release no longer tracks it");
+        assert_eq!(run.prune_failed_count, 0);
+    }
+
+    /// Catches an object handed to a Release that never applies in this run (a
+    /// later wave aborts, or the deadline passes) being forgotten: the old
+    /// Release leaves it in the cluster and keeps it tracked, so the next apply
+    /// of either Release still finds an owner for it.
+    #[tokio::test]
+    async fn test_prune_keeps_tracking_an_object_whose_new_release_has_not_applied() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient {
+            latency: Duration::ZERO,
+            ..LatencyClient::new("")
+        };
+        let moved = live(&client.inner, "moved", None);
+        let old = live(&client.inner, "old", None);
+        storage
+            .save_release(&release_with_keys(1, ReleaseStatus::Deployed, vec![moved.clone(), old]))
+            .await
+            .unwrap();
+        let mut scopes = ObjectScopes::default();
+        let pending = HashSet::from([scopes.identity(&moved)]);
+        let nobody = HashSet::new();
+        let recorder = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &[],
+            false,
+            &client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+        let settings = ApplySettings {
+            protected: Some(Protected {
+                handed_over: &nobody,
+                pending: &pending,
+            }),
+            ..settings(0)
+        };
+
+        let run = recorder
+            .run(&client, &[], &mut scopes, settings, Interruption::never(), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client
+                .inner
+                .get_all_resources()
+                .into_keys()
+                .map(|key| key.name)
+                .collect::<Vec<_>>(),
+            ["moved"]
+        );
+        assert_eq!(
+            run.release
+                .resource_keys
+                .iter()
+                .map(|key| key.name.as_str())
+                .collect::<Vec<_>>(),
+            ["moved"],
+            "still tracked, so a later apply can hand it over"
+        );
         assert_eq!(run.prune_failed_count, 0);
     }
 

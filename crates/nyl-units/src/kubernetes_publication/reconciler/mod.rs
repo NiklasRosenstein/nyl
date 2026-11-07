@@ -64,6 +64,8 @@ pub enum ReadErrorKind {
     Forbidden,
     /// The answer is not the one it should be.
     Malformed,
+    /// What anchors the reading is not there to see yet ([`Visibility::NotYet`]).
+    NotVisible,
 }
 
 /// A failed reading, with the fix attached to the message.
@@ -155,8 +157,15 @@ pub struct Observed {
 pub enum Visibility {
     Visible,
     /// It could not be seen, or that cannot be told: what an absence would
-    /// prove nothing about, with the fix.
+    /// prove nothing about, with the fix. A denial of the credential is this
+    /// (an explicit RBAC refusal), and waiting does not change it.
     Hidden(String),
+    /// It is not there to see yet, which is the normal state of a target whose
+    /// catalog the operator has not applied after the first publication: the
+    /// reader asked, and the reconciler has no such object. An absence proves
+    /// nothing, as with [`Self::Hidden`], but a wait for health keeps polling
+    /// instead of failing.
+    NotYet(String),
 }
 
 /// What proves that a deployment missing from a reading is really missing.
@@ -214,7 +223,14 @@ pub fn reader(
     env: &BTreeMap<String, String>,
     budget: Duration,
 ) -> Result<Box<dyn ReconcilerReader>, ReadError> {
-    reader_with(location, publication, env, budget, &super::direct::ClusterAccess::Live)
+    reader_with(
+        location,
+        publication,
+        env,
+        budget,
+        &super::direct::ClusterAccess::Live,
+        None,
+    )
 }
 
 /// [`reader`] reaching a direct target's cluster through `access`, which the
@@ -225,11 +241,12 @@ pub fn reader_with(
     env: &BTreeMap<String, String>,
     budget: Duration,
     access: &super::direct::ClusterAccess,
+    owner: Option<&nyl_render::gitops::reconcile::RenderIndexOwner>,
 ) -> Result<Box<dyn ReconcilerReader>, ReadError> {
     match location {
         ReconcilerLocation::ArgoCd(location) => super::argocd::reader(location, env, budget),
         ReconcilerLocation::Direct(location) => {
-            super::direct::reader_with(location, publication, env, budget, access.clone())
+            super::direct::reader_with(location, publication, env, budget, access.clone(), owner)
         }
     }
 }

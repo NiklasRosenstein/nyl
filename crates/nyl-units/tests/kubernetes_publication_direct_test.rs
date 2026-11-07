@@ -852,3 +852,320 @@ async fn test_a_teardown_leaves_an_object_an_earlier_revision_tracked_and_a_late
         "no current revision tracks it"
     );
 }
+
+/// A cluster client that behaves like an API server where the mock is lenient:
+/// a custom kind is unknown until its CustomResourceDefinition was applied, and
+/// deleting a named object can be made to fail.
+struct StrictClient {
+    inner: Arc<MockKubeClient>,
+    registered: std::sync::Mutex<std::collections::HashSet<String>>,
+    failing_deletes: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl StrictClient {
+    fn new(inner: Arc<MockKubeClient>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            registered: std::sync::Mutex::default(),
+            failing_deletes: std::sync::Mutex::default(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl KubeClient for StrictClient {
+    async fn get_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> nyl_render::Result<Option<kube::api::DynamicObject>> {
+        self.inner.get_resource(gvk, namespace, name).await
+    }
+
+    async fn apply_resource(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+        dry_run: bool,
+    ) -> nyl_render::Result<nyl_render::kubernetes::ApplyOutcome> {
+        let object = serde_json::to_value(resource).unwrap();
+        if object["kind"] == "CustomResourceDefinition" && !dry_run {
+            if let Some(kind) = object.pointer("/spec/names/kind").and_then(serde_json::Value::as_str) {
+                self.registered.lock().unwrap().insert(kind.to_owned());
+            }
+        }
+        self.inner.apply_resource(resource, manager, dry_run).await
+    }
+
+    async fn get_server_version(&self) -> nyl_render::Result<String> {
+        self.inner.get_server_version().await
+    }
+
+    async fn get_api_versions(&self) -> nyl_render::Result<Vec<String>> {
+        self.inner.get_api_versions().await
+    }
+
+    async fn is_namespaced(&self, gvk: &GroupVersionKind) -> nyl_render::Result<bool> {
+        if gvk.group == "example.com" && !self.registered.lock().unwrap().contains(&gvk.kind) {
+            return Err(nyl_render::NylError::ApiResourceNotFound(gvk.kind.clone()));
+        }
+        self.inner.is_namespaced(gvk).await
+    }
+
+    fn default_namespace(&self) -> &str {
+        self.inner.default_namespace()
+    }
+
+    async fn delete_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> nyl_render::Result<()> {
+        if gvk.kind == "Namespace" && self.failing_deletes.lock().unwrap().contains(name) {
+            return Err(nyl_render::NylError::Kubernetes(
+                "the API server is unavailable".to_owned(),
+            ));
+        }
+        self.inner.delete_resource(gvk, namespace, name).await
+    }
+
+    async fn get_normalized_resource(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+    ) -> nyl_render::Result<kube::api::DynamicObject> {
+        self.inner.get_normalized_resource(resource, manager).await
+    }
+
+    async fn release_field_manager(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.release_field_manager(resource, manager).await
+    }
+}
+
+impl Cluster {
+    /// The same cluster, reached through `client`.
+    fn driver_through(&self, client: Arc<dyn KubeClient>) -> KubernetesPublicationDriver {
+        KubernetesPublicationDriver::new(catalogue()).with_cluster_access(ClusterAccess::Fixed(ClusterHandle {
+            client,
+            storage: self.storage.clone(),
+        }))
+    }
+}
+
+/// Catches the first deploy of a custom resource failing before it starts: Releases
+/// are prepared when their wave comes, because a namespaced custom resource
+/// without a `metadata.namespace` cannot be resolved until the wave-0 Release
+/// that registers its CustomResourceDefinition applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_custom_resource_in_wave_1_resolves_after_its_crd_applied_in_wave_0() {
+    let world = direct_world();
+    std::fs::write(
+        world.work().join("applications/web/crds.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: crds, namespace: crds}\nspec: {}\n---\n\
+         apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata: {name: widgets.example.com}\n\
+         spec:\n  group: example.com\n  scope: Namespaced\n  names: {kind: Widget, plural: widgets}\n  \
+         versions: [{name: v1, served: true, storage: true, schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}}]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        world.work().join("applications/web/widgets.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: widgets, namespace: widgets}\nspec: {}\n---\n\
+         apiVersion: example.com/v1\nkind: Widget\nmetadata: {name: first}\nspec: {size: 1}\n",
+    )
+    .unwrap();
+    let cluster = Cluster::new();
+    let strict: Arc<dyn KubeClient> = StrictClient::new(cluster.client.clone());
+    let driver = cluster.driver_through(strict);
+    let unit = unit_for(&driver, &world, "kubernetes");
+
+    let outcome = reconcile(&driver, &world, &unit, None, &nobody());
+
+    tree_of(&outcome);
+    assert!(
+        cluster
+            .exists("example.com/v1", "Widget", Some("widgets"), "first")
+            .await,
+        "the custom resource lands in its Release's namespace"
+    );
+    assert!(
+        cluster
+            .exists(
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                None,
+                "widgets.example.com"
+            )
+            .await
+    );
+}
+
+/// Catches a teardown retry that cannot find a Namespace: Release `web` owns
+/// Namespace `extra`, where Release `extra` keeps its state. When phase 2 fails to
+/// delete the Namespace, the state of `web`, the only record that it tracked
+/// it, stays, so the retry finds it and the Namespace does not leak.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_failed_namespace_deletion_keeps_the_state_that_tracks_it_for_the_retry() {
+    let world = direct_world();
+    add_extra(&world);
+    share_namespace_of_extra_with_web(&world);
+    let cluster = Cluster::new();
+    let strict = StrictClient::new(cluster.client.clone());
+    let driver = cluster.driver_through(strict.clone());
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    let identity = identity();
+    let deleting = deleting(unit);
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    ctx.artifacts.insert("tree".to_owned(), tree);
+    driver.teardown(&ctx, &deleting).unwrap();
+
+    strict.failing_deletes.lock().unwrap().insert("extra".to_owned());
+    ctx.teardown_wait = Some(WaitCompletion::Observed);
+    let outcome = driver.teardown(&ctx, &deleting);
+    let Ok(Supported::Supported(Outcome::Failed { retryable, .. })) = outcome else {
+        panic!("phase 2 fails: {outcome:?}");
+    };
+    assert!(retryable);
+    assert!(cluster.exists("v1", "Namespace", None, "extra").await);
+    assert!(
+        !cluster.storage.list_revisions("web", "web").await.unwrap().is_empty(),
+        "the state of the Release that tracked the Namespace stays for the retry"
+    );
+
+    strict.failing_deletes.lock().unwrap().clear();
+    let outcome = driver.teardown(&ctx, &deleting);
+    assert!(
+        matches!(outcome, Ok(Supported::Supported(Outcome::Succeeded { .. }))),
+        "{outcome:?}"
+    );
+    assert!(
+        !cluster.exists("v1", "Namespace", None, "extra").await,
+        "the retry deleted it"
+    );
+    assert!(cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
+    assert!(cluster
+        .storage
+        .list_revisions("extra", "extra")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// Catches the purge of Releases that left Git deleting a Namespace that another
+/// Release's state is in: Release `web` (namespace `web`, sorts last) owns
+/// Namespace `aaa-state`, where Release `aaa` keeps its state, and both leave the
+/// tree. Planned together, the Namespace is deleted after all state is gone, so
+/// the purge neither destroys state early nor leaks the Namespace.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_vanished_releases_sharing_a_state_namespace_are_purged_together() {
+    let world = direct_world();
+    let applications = world.work().join("applications/web");
+    std::fs::write(
+        applications.join("keep.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: keep, namespace: keep}\nspec: {}\n---\n\
+         apiVersion: v1\nkind: ConfigMap\nmetadata: {name: keep, namespace: keep}\ndata: {a: b}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        applications.join("aaa.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: aaa, namespace: aaa-state}\nspec: {}\n---\n\
+         apiVersion: v1\nkind: ConfigMap\nmetadata: {name: aaa, namespace: aaa-state}\ndata: {a: b}\n",
+    )
+    .unwrap();
+    let group = world.work().join("nyl/web.yaml");
+    let original = std::fs::read_to_string(&group).unwrap();
+    std::fs::write(
+        &group,
+        original.replace(
+            "  applicationNamespace: argocd\n",
+            "  applicationNamespace: argocd\n  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n  \
+             sharedNamespaces:\n    aaa-state: {owner: {kind: Release, applicationGroup: web, release: web}}\n",
+        ),
+    )
+    .unwrap();
+    let release = applications.join("release.yaml");
+    let web = std::fs::read_to_string(&release).unwrap();
+    std::fs::write(
+        &release,
+        web.replacen(
+            "  namespace: web\nspec:\n",
+            "  namespace: web\nspec:\n  additionalNamespaces: [aaa-state]\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let first = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    assert!(cluster.exists("v1", "Namespace", None, "aaa-state").await);
+    assert!(!cluster
+        .storage
+        .list_revisions("aaa", "aaa-state")
+        .await
+        .unwrap()
+        .is_empty());
+
+    // `web` and `aaa` leave the tree, and the group stops sharing the Namespace.
+    std::fs::remove_file(&release).unwrap();
+    std::fs::remove_file(applications.join("aaa.yaml")).unwrap();
+    std::fs::write(&group, original).unwrap();
+    let platform = world.work().join("nyl/platform.yaml");
+    let text = std::fs::read_to_string(&platform).unwrap();
+    let start = text.find("  releaseInputs:\n").unwrap();
+    let end = text[start..].find("---\n").unwrap() + start;
+    std::fs::write(&platform, format!("{}{}", &text[..start], &text[end..])).unwrap();
+    let unit = unit_with(&driver, &world, "kubernetes", serde_json::json!({"target": "dev"}));
+    let outcome = reconcile(&driver, &world, &unit, Some(&first), &nobody());
+
+    assert!(matches!(outcome, Outcome::Succeeded { .. }), "{outcome:?}");
+    assert!(!cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
+    assert!(!cluster.exists("v1", "ConfigMap", Some("aaa-state"), "aaa").await);
+    assert!(
+        !cluster.exists("v1", "Namespace", None, "aaa-state").await,
+        "deleted once the state in it was gone"
+    );
+    assert!(cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
+    assert!(cluster
+        .storage
+        .list_revisions("aaa", "aaa-state")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(cluster.exists("v1", "ConfigMap", Some("keep"), "keep").await);
+    assert!(!cluster.storage.list_revisions("keep", "keep").await.unwrap().is_empty());
+}
+
+/// Catches the teardown refusal after a reconciler change pointing at the very
+/// operation that is refused: the teardown says to restore the declaration.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_teardown_after_a_reconciler_change_says_to_restore_the_declaration() {
+    let world = direct_world();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_for(&driver, &world, "kubernetes");
+    tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    let platform = world.work().join("nyl/platform.yaml");
+    let text = std::fs::read_to_string(&platform).unwrap();
+    std::fs::write(&platform, text.replace("  reconciler: {direct: {}}\n", "")).unwrap();
+
+    let identity = identity();
+    let deleting = deleting(unit);
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    let outcome = driver.teardown(&ctx, &deleting);
+
+    let Ok(Supported::Supported(Outcome::Failed { message, .. })) = outcome else {
+        panic!("the teardown is refused: {outcome:?}");
+    };
+    assert!(message.contains("NYL-KUBERNETES-RECONCILER-CHANGED"), "{message}");
+    assert!(message.contains("Restore the declaration"), "{message}");
+    assert!(!message.contains("nyl teardown"), "{message}");
+}
