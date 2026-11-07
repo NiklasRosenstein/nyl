@@ -42,7 +42,7 @@
         },
         "enabled": {
           "default": true,
-          "description": "Whether to generate a catalog Application recursively sourcing `_nyl/catalog`.",
+          "description": "Whether to generate a catalog Application recursively sourcing `_nyl/catalog`. A target with `shared` generates none, whatever this says.",
           "type": "boolean"
         },
         "labels": {
@@ -77,6 +77,17 @@
           ],
           "description": "Self-pruning override; inherits the instance default when omitted."
         },
+        "shared": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SharedCatalogApplication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sync this target's catalog directory through a catalog Application shared by many targets, such as every preview on a branch. Nyl renders that Application once, under `_nyl/shared/<name>/`, and the target generates no catalog Application of its own. The other `catalogApplication` fields then belong in this block, because they describe the shared Application."
+        },
         "syncPolicy": {
           "anyOf": [
             {
@@ -108,7 +119,7 @@
               "type": "null"
             }
           ],
-          "description": "Project-local ArgoCDInstance. Required when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace."
+          "description": "Project-local ArgoCDInstance. Required for an Argo CD target when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace. Not allowed with `reconciler.direct`."
         },
         "catalogApplication": {
           "$ref": "#/$defs/CatalogApplicationOverrides",
@@ -131,6 +142,17 @@
         "publication": {
           "$ref": "#/$defs/GitPublication",
           "description": "Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes."
+        },
+        "reconciler": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who applies the rendered Releases. Omitted: Argo CD, which syncs the published tree. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog."
         },
         "releaseInputs": {
           "additionalProperties": {
@@ -159,6 +181,26 @@
         "publication"
       ],
       "type": "object"
+    },
+    "DirectReconciler": {
+      "additionalProperties": false,
+      "description": "Options of the direct reconciler. None yet.",
+      "type": "object"
+    },
+    "Evidence": {
+      "description": "Evidence a consumer requires from its producer.",
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "A current receipt.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "A current receipt whose required attestations pass.",
+          "type": "string"
+        }
+      ]
     },
     "FileInputSource": {
       "additionalProperties": false,
@@ -1123,19 +1165,105 @@
       ],
       "type": "object"
     },
+    "SharedCatalogApplication": {
+      "additionalProperties": false,
+      "description": "The shared catalog Application of `catalogApplication.shared`: its name and the policy it overrides.\n\nContract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).\nEvery target that names the same catalog must describe it identically,\nbecause one manifest is rendered for all of them.",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations added to the shared Application.",
+          "type": "object"
+        },
+        "applicationDeletionPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Application deletion override; inherits the instance default when omitted."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels added to the shared Application.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Name of the shared catalog and of its Argo CD Application. It also names the reserved publication prefix `_nyl/shared/<name>/` that holds the manifest.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Argo CD project override; inherits the instance catalog default when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selfPrunePolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedResourceDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Self-pruning override; inherits the instance default when omitted."
+        },
+        "syncPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Catalog synchronization override; inherits the instance default when omitted. Previews tear down only when this prunes."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "TargetReconciler": {
+      "additionalProperties": false,
+      "description": "The reconciler that applies a target's Releases: exactly one member.\n\nContract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).",
+      "properties": {
+        "direct": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DirectReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nyl applies the target's Releases to its Cluster, in the order of `nyl apply`, and prunes by release state. Takes no options yet; write `direct: {}`."
+        }
+      },
+      "type": "object"
+    },
     "UnitInputSource": {
       "additionalProperties": false,
       "description": "Reserved orchestration reference to a unit output or artifact field.",
       "properties": {
         "artifact": {
-          "description": "Published artifact name. Set exactly one of `output` and `artifact`.",
+          "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
           "type": [
             "string",
             "null"
           ]
         },
         "attestations": {
-          "description": "Required attestations.",
+          "description": "The producer's attestations to require, instead of all it declares; each must pass for the producer's current receipt.",
           "items": {
             "type": "string"
           },
@@ -1149,11 +1277,15 @@
           ]
         },
         "evidence": {
-          "description": "Required evidence level: `published` or `attested`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required evidence level: `published` (a current receipt, the default) or `attested` (every attestation the producer declares passes)."
         },
         "kind": {
           "description": "Expected artifact kind.",
@@ -1162,15 +1294,22 @@
             "null"
           ]
         },
+        "observation": {
+          "description": "Declared observed value name: a value the unit's driver reads from the system the unit manages. Set exactly one of `output`, `artifact`, and `observation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "output": {
-          "description": "Declared output name. Set exactly one of `output` and `artifact`.",
+          "description": "Declared output name. Set exactly one of `output`, `artifact`, and `observation`.",
           "type": [
             "string",
             "null"
           ]
         },
         "pointer": {
-          "description": "JSON Pointer inside the output or artifact.",
+          "description": "JSON Pointer inside the output, artifact, or observed value.",
           "type": [
             "string",
             "null"
