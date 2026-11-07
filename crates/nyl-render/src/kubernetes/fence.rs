@@ -104,6 +104,11 @@ impl From<Fenced> for NylError {
 pub struct Admitted {
     /// A warning to show: the release was adopted from an older `nyl`.
     pub warning: Option<String>,
+    /// The revision numbers the fence was decided on, ascending. The next
+    /// revision is one past the last of them, so that creating it fails when
+    /// another claimant created it since: the check and the claim read one
+    /// list, and the create is the compare-and-swap.
+    pub revisions: Vec<u32>,
 }
 
 fn name(namespace: &str, release: &str) -> String {
@@ -175,6 +180,7 @@ pub fn check_claim(
                         "{what} has a revision that records no owner after revisions this unit owned: an older nyl \
                          applied it, and it is adopted"
                     )),
+                    ..Admitted::default()
                 }),
                 None => Err(Fenced {
                     code: RELEASE_FENCED,
@@ -237,7 +243,9 @@ pub async fn admit(
             .collect::<Vec<_>>()
     });
     let earlier_owner = earlier.as_deref().and_then(earlier_owner);
-    Ok(check_claim(namespace, release, latest, earlier_owner.as_ref(), claim)?)
+    let mut admitted = check_claim(namespace, release, latest, earlier_owner.as_ref(), claim)?;
+    admitted.revisions = recorded.iter().map(|state| state.revision).collect();
+    Ok(admitted)
 }
 
 #[cfg(test)]

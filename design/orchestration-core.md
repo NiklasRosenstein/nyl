@@ -1586,6 +1586,22 @@ owned by another Release (`sharedNamespaces`) creates a bare Namespace to hold
 its state if the owner has not applied yet, as `nyl apply` does for any release
 namespace, and the owner's later apply adopts it.
 
+One absolute deadline bounds the whole apply: the unit's deadline less the time
+the publication took, read from the injected clock. Each Release's apply is
+bounded by what is left of it and none starts once it has passed, so a slow
+Release cannot give the next one a fresh budget, and a run that times out
+applies nothing further and fails as a retryable `timeout`.
+
+A Release's prune never deletes an object another current Release renders. The
+driver collects the object identities of every Release of the run before the
+first wave and passes them to each apply, which drops them from the Release
+that lost them without deleting them: moving a CustomResourceDefinition, a
+PersistentVolumeClaim, or a Secret from one Release to another leaves it in
+place, whatever the apply order. Reading an object's `Prune` or `Delete` option
+fails closed in every prune and purge: an object whose live state cannot be read
+is reported as failed and never deleted, because the option that would have kept
+it may be the very thing the failed read hid.
+
 **Releases that left the tree.** A Release the tree no longer holds is
 purged by its state identity (namespace, name), and only after every Release
 of the run reached `Deployed`: a failed apply may be the very thing that
@@ -1595,7 +1611,9 @@ comes from Git, so it needs no cluster-wide listing: the Releases of every
 ownership index along the first-parent history of the publication branch from
 the last receipt's `PublishedTree` commit to the head (bounded by the walk
 limit of the shared matching; a deeper history is a failure, never a guess),
-minus the identities of the new tree. The span matters: a run that fails after
+minus the identities of the new tree. Without a receipt, no execution of the
+unit completed, so every publication up to the walk limit may be its own and the
+walk covers them all, not just the newest. The span matters: a run that fails after
 publishing a tree without a Release, before purging it, leaves the receipt at
 the older commit, so the next run still finds it, whatever was published in
 between. Before deleting, the purge subtracts every key tracked by the latest
@@ -1604,9 +1622,15 @@ not deleted) and never deletes a Namespace that a current Release uses as its
 release namespace, destination namespace, or additional namespace. A vanished
 Release is purged only if its latest revision names this unit incarnation as
 owner, or an incarnation of the same environment and unit that is gone; an
-unowned or foreign one is left and reported. A purge deletes by each object's
-`Delete` option, in reverse order with waits, then the Release's state, exactly
-as `nyl release delete` does. Argo CD does this through the catalog's pruning
+unowned or foreign one is left and reported with
+`NYL-KUBERNETES-RELEASE-LEFT-BEHIND`, a warning, so a Release an apply by hand
+took over stays until it is removed with `nyl release delete --take-over`. A
+purge deletes what the Release still has in the cluster, which is what a prune
+reads (the objects of the latest `Deployed` revision and of the `Failed`
+revisions after it, never the union of every stored revision, so an object kept
+by `Prune=false` and later untracked is not deleted), by each object's `Delete`
+option, in reverse order with waits, then the Release's state, as
+`nyl release delete` does. Argo CD does this through the catalog's pruning
 and the Application finalizers; the direct reconciler does it itself.
 
 #### Fencing and ownership in the cluster
@@ -1629,7 +1653,10 @@ answers both questions (`ExecutionContext::incarnations`, the `fence`
 function of the driver). `ReleaseRecorder::reserve` creates the next revision
 with a create that fails when it exists, so the revision number is a
 compare-and-swap and the claim is the reservation itself: two executions
-cannot both record revision N+1.
+cannot both record revision N+1. The revision is numbered from the list of
+revisions the fence decided on, not from a second listing, so a claimant that
+created the next revision between the check and the create makes the create
+fail instead of being skipped over.
 
 | Latest revision | Orchestrated apply |
 | --- | --- |
@@ -1754,7 +1781,11 @@ declaration: the recorded reconciler kind (`/reconciler/kind`, which a direct
 unit records whether or not it observes), the location, and the recorded
 teardown settings decide how the unit is torn down. A declaration that now
 renders another reconciler fails the teardown before effects with
-`NYL-KUBERNETES-RECONCILER-CHANGED`, whose fix is to restore it.
+`NYL-KUBERNETES-RECONCILER-CHANGED`, whose fix is to restore the declaration
+(a teardown cannot be the remedy for itself). The engine hands every driver's
+teardown the unit's stored artifacts, as it does a reconcile, so a driver can
+tell what the unit published before, such as a tree's last commit; that is a
+generic engine rule, with no kind-specific branch.
 
 1. **Delete.** The unit publishes the tree without its Release directories
    (`without_workloads`: only `_nyl/index.json` stays, so the owner fence
@@ -1762,12 +1793,19 @@ renders another reconciler fails the teardown before effects with
    every vanished Release the apply would purge (the same union), by
    `purge_release`, honoring each object's `Delete` option (`Delete=false`
    keeps it, `Delete=confirm` keeps it because the driver never confirms), in
-   reverse apply order with waits for termination. Phase 1 **defers every
-   Namespace that holds this target's release state** (the Releases' release
-   namespaces, which `sharedNamespaces` ownership by a Release or a plain
-   destination also covers): deleting such a Namespace would destroy the state
-   that the wait and phase 2 read, and the anchor with it. Release state is
-   kept. Git first, like a publication, so the record never lags the cluster;
+   the exact reverse of the apply order (wave, then `<group>/<release>` key)
+   with waits for termination. What the teardown removes is read before anything
+   is published or deleted: the union above, so a failure to read it leaves
+   everything as it was. Phase 1 **defers every Namespace that holds the release
+   state of any Release in that set** (the Releases' release namespaces, which
+   `sharedNamespaces` ownership by a Release or a plain destination also
+   covers, whichever Release owns the Namespace object): deleting such a
+   Namespace would destroy the state that the wait and phase 2 read, and the
+   anchor with it. A Release this unit may not remove (one another unit owns,
+   or one applied for another publication) is left with its objects, and its
+   state Namespaces are protected like the rest; the phase reports each one with
+   `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`, a warning, and the wait does not wait
+   for it. Release state is kept. Git first, like a publication, so the record never lags the cluster;
    that commit is phase 1's `published` evidence. A purge failure is a
    `Failed` outcome that a new run converges. The simpler alternative to
    deferring, a per-target marker outside those Namespaces, would need an
@@ -1782,8 +1820,13 @@ renders another reconciler fails the teardown before effects with
    idempotent.
 
 `teardownWait: observe` (the default with `observe: {}`) asks the reader which
-Releases are still present in the removal sense: a tracked, deletable object
-other than a deferred Namespace still exists. The wait covers the workloads.
+Releases are still present in the removal sense: an object the purge would
+delete (what a prune reads, as above) other than a Namespace still exists, for a
+Release whose latest revision is this publication's; a Release another
+publication or an apply by hand took over counts as gone, because the teardown
+leaves it. No Namespace ends or extends the wait, because phase 1 defers every
+Namespace that holds the state of any Release it purges, those of Releases that
+left the tree included. The wait covers the workloads.
 `delay` and `manual` are unchanged. Removal is concluded only from the anchor
 and a successful list. No evaluation code changes: the present set is what
 `reconciler::evaluate::removal` returns as remaining.

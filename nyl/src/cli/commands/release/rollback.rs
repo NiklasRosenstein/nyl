@@ -163,6 +163,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
                 history_limit,
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
+                protected: None,
             },
             Interruption {
                 interrupt: async {
