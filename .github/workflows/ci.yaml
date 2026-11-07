@@ -86,10 +86,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Windows Defender scans every file the build writes and the tests'
-      # temporary Git repositories synchronously, which dominated the Windows
-      # job. A trusted Dev Drive (ReFS) scans asynchronously, so the target
-      # directory and the temporary directory move onto one.
+      # The target directory and the tests' temporary repositories live on a
+      # trusted ReFS Dev Drive. Defender's real-time scanning is already off on
+      # the hosted Windows image, so this is not what makes Windows slower; see
+      # the rust-lld and Git steps below for that.
       - name: Set up a Dev Drive
         if: runner.os == 'Windows'
         uses: samypr100/setup-dev-drive@v4
@@ -113,6 +113,15 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.98.1
+
+      # MSVC's link.exe spent about a minute and a half longer than rust-lld
+      # linking the ~50 test executables; Linux already links with lld. The
+      # linker is part of every crate's fingerprint, so this is set before the
+      # cache key is computed.
+      - name: Link with rust-lld
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld" >> $env:GITHUB_ENV'
 
       # The Cargo workspace is the repository root, so its target directory is
       # ./target (the default). Only develop saves caches; pull requests restore
@@ -138,14 +147,31 @@ jobs:
         run: echo "TMPDIR=/dev/shm" >> "$GITHUB_ENV"
 
       # Tests create throwaway Git repositories and push to them hundreds of
-      # times; syncing each pack and ref to disk dominated the Linux runners'
-      # test time, so the test step turns Git's disk sync off.
+      # times. Syncing each pack and ref to disk dominated the Linux runners'
+      # test time, and every push also started an automatic `gc` in the
+      # receiving repository. Global configuration reaches the receiving side
+      # of a local push; `GIT_CONFIG_*` variables are dropped there.
+      - name: Configure Git for throwaway repositories
+        run: |
+          git config --global core.fsync none
+          git config --global gc.auto 0
+          git config --global maintenance.auto false
+          git config --global receive.autogc false
+
+      # The tests start some 25,000 processes, most of them Git, and starting
+      # a process costs Windows about 25 ms. Git for Windows' `git` on PATH is
+      # a shim that starts the real `git.exe` as a second process; calling the
+      # real one directly makes the Git-heavy tests about 7% faster.
+      - name: Call Git without its Windows shim
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = Join-Path (Split-Path (Split-Path (git --exec-path))) 'bin'
+          if (-not (Test-Path (Join-Path $bin 'git.exe'))) { throw "no git.exe in $bin" }
+          $bin >> $env:GITHUB_PATH
+
       - name: Run tests
         working-directory: nyl
-        env:
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: core.fsync
-          GIT_CONFIG_VALUE_0: none
         run: cargo test --workspace --features nyl/test-clock,nyl/test-kinds
 
   native-tools:
