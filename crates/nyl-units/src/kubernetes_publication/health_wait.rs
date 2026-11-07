@@ -190,9 +190,10 @@ fn worst(evaluation: &Evaluation) -> (String, bool) {
 fn visible_yet(expected: &Expected, reading: &Reading) -> Result<(), Poll> {
     match ensure_provable(expected, expected.deployments.iter(), reading, Conclusion::Presence) {
         Ok(()) => Ok(()),
-        // `ensure_provable` reports a hidden anchor or deployment as `Forbidden`; a
-        // credential the API rejected never gets here, it fails the read itself.
-        Err(error) if error.kind == ReadErrorKind::Forbidden => Err(Poll::NotYet {
+        // Only what is not there to see yet waits. A credential that is denied (a
+        // `Hidden` anchor or an explicit RBAC refusal, `Forbidden`) or rejected fails
+        // at once, as does a read that failed.
+        Err(error) if error.kind == ReadErrorKind::NotVisible => Err(Poll::NotYet {
             worst: format!(
                 "the reconciler does not show the target yet, which is normal until its catalog or release state is \
                  applied (apply it, and the wait passes): {}",
@@ -218,6 +219,7 @@ pub(super) fn poll_reconciler(
         &ctx.env,
         budget(ctx.clock.now(), ctx.deadline),
         access,
+        None,
     ) {
         Ok(reader) => reader,
         Err(error) => return Poll::Unread(error),
@@ -450,7 +452,7 @@ mod tests {
     fn test_a_catalog_that_is_not_visible_yet_is_waited_for_not_failed() {
         use super::super::reconciler::Visibility;
         let hidden = || {
-            reading(Visibility::Hidden(
+            reading(Visibility::NotYet(
                 "the catalog Application argocd/dev-catalog is not in the reading (if the catalog was never applied, \
                  apply it first)"
                     .to_owned(),
@@ -505,6 +507,30 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("apply it"), "{message}");
+
+        // An explicit denial is no bootstrap state either: the credential may not read,
+        // and waiting does not change that, so the wait ends at once.
+        let denied = reading(Visibility::Hidden(
+            "the credential may not get Application argocd/web".to_owned(),
+        ));
+        let mut polls = 0;
+        let waited = wait_until_healthy(
+            &ScriptedClock {
+                now: Cell::new(start()),
+                pauses: RefCell::default(),
+            },
+            start(),
+            Duration::from_secs(3600).after(start()),
+            Duration::from_secs(600),
+            || {
+                polls += 1;
+                poll_of(&denied)
+            },
+        );
+        assert_eq!(polls, 1);
+        let (category, _, message) = failed(waited);
+        assert_eq!(category, FailureCategory::Credentials);
+        assert!(message.contains("may not get Application"), "{message}");
 
         // A declaration the reader cannot read is no bootstrap state.
         let mut unprovable = reading(Visibility::Visible);

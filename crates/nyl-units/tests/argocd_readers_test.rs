@@ -332,7 +332,7 @@ fn test_api_server_reader_reads_into_the_neutral_reading() {
     // The catalog is not served, so concluding from absence cannot trust the token.
     let concluding = read(true);
     assert!(
-        matches!(&concluding.anchors["argocd/dev-catalog"], Visibility::Hidden(reason) if reason.contains("catalog Application argocd/dev-catalog is not in the reading")),
+        matches!(&concluding.anchors["argocd/dev-catalog"], Visibility::NotYet(reason) if reason.contains("catalog Application argocd/dev-catalog is not in the reading")),
         "{:?}",
         concluding.anchors
     );
@@ -395,7 +395,7 @@ fn test_kube_api_reader_reads_into_the_neutral_reading_and_anchors_itself() {
     );
     assert_eq!(reading.anchors["argocd/dev-catalog"], Visibility::Visible);
     assert!(
-        matches!(&reading.anchors["project/missing"], Visibility::Hidden(reason) if reason.contains("AppProject missing is not visible in namespace argocd")),
+        matches!(&reading.anchors["project/missing"], Visibility::NotYet(reason) if reason.contains("AppProject missing is not visible in namespace argocd")),
         "{:?}",
         reading.anchors
     );
