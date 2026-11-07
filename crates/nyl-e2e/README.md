@@ -4,13 +4,18 @@ One scenario, run against a real Kubernetes cluster with each reconciler:
 
 1. `nyl reconcile` builds an image (`OciImage`), applies an OpenTofu
    configuration (`OpenTofu`), and publishes a Release that consumes the image
-   digest and the OpenTofu output (`KubernetesPublication` with `observe: {}`
-   and two `observations`).
-2. The suite makes the reconciler run the published tree and waits until the
-   workload is ready, running the image from the local registry.
-3. `nyl attest` is polled until it records `accepted` and `healthy`;
-   `nyl observe` reads the live values (the Service's cluster IP and the ready
-   replicas) and the suite compares them with the cluster.
+   digest and the OpenTofu output (`KubernetesPublication` with
+   `observe: {waitHealthy: {timeout: 5m}}` and two `observations`). The reconcile
+   waits until the reconciler reports the workload healthy and records the
+   `accepted` and `healthy` attestations. A direct target is applied by the
+   reconcile itself; for Argo CD the workload sync is manual, so the suite runs
+   the reconcile on a thread while it applies the catalog Application and syncs
+   the workload Application, the way an operator would.
+2. The suite waits until the workload runs the image from the local registry.
+3. It reads the attestations the reconcile recorded in the observed state
+   (`accepted` and `healthy`, source `reconcile`) and cross-checks them with a
+   single `nyl attest`. `nyl observe` reads the live values (the Service's
+   cluster IP and the ready replicas) and the suite compares them with the cluster.
 4. An input changes (the page the image serves and the OpenTofu output), the
    suite reconciles again, and the new revision runs and is attested. A third
    reconcile executes nothing.
@@ -22,7 +27,7 @@ One scenario, run against a real Kubernetes cluster with each reconciler:
 | --- | --- | --- |
 | `argocd-kubernetes` | Argo CD, read through the Kubernetes API of its Cluster (`KUBECONFIG`) | runs |
 | `argocd-api` | Argo CD, read through its API server with a token (`ARGOCD_AUTH_TOKEN`) | runs |
-| `direct` | Nyl's direct reconciler | **pending**: waits for `m5/10-direct-reconciler`; see `src/reconciler/direct.rs` |
+| `direct` | Nyl's direct reconciler: `DeploymentTarget.spec.reconciler: {direct: {}}`, applied through `nyl apply`'s mechanics, with a Cluster of its own that names the kind API server | runs |
 
 The suite drives the real `nyl` binary as a subprocess, with an empty
 environment of its own and only what the project's units admit, so it also
@@ -58,7 +63,8 @@ target/debug/nyl-e2e run --variant all --nyl path/to/nyl --keep
 kubeconfig, checkout, and logs; the default is `nyl-e2e` in the temporary
 directory. Each variant creates and removes its own cluster and containers
 (`nyl-e2e-<variant>`), one after the other. The exit code is 1 when a variant
-failed, 3 when only pending variants were requested, and 0 otherwise.
+failed, 3 when only variants that cannot run yet were requested (none today),
+and 0 otherwise.
 
 To debug, keep the infrastructure and poke at it:
 

@@ -24,10 +24,7 @@ spec:
   # The kubeconfig context that reaches this cluster, for `nyl attest` and
   # `nyl observe`; the kubeconfig itself reaches Nyl only as an admitted variable.
   live: {context: %KUBE_CONTEXT%}
-  kubernetes:
-    kubeVersion: %KUBE_VERSION%
-    apiVersions: [v1, apps/v1, v1/Namespace, v1/Service, apps/v1/Deployment]
-    clusterScopedKinds: [core/Namespace]
+  %CLUSTER_CAPABILITIES%
 %INSTANCE_DOCUMENTS%
 ---
 apiVersion: k8s.gitops.nyl/v1

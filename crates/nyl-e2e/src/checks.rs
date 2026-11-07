@@ -4,6 +4,8 @@
 //! the commit. Each returns [`Poll::Pending`] with the reason it is not so
 //! yet, which a timed-out wait then reports.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::error::{Context, Error, Result};
@@ -200,6 +202,66 @@ fn short(revision: &str) -> &str {
     revision.get(..8).unwrap_or(revision)
 }
 
+/// One attestation of an `AttestationRecord` in the observed state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedAttestation {
+    /// `pass`, `fail`, ...
+    pub result: String,
+    /// Who recorded it: `attest` for `nyl attest`, `reconcile` for the wait of
+    /// `observe.waitHealthy`.
+    pub driver: String,
+}
+
+/// The attestations of an `observed/units/<unit>/attestations.yaml` file, by
+/// name. The file is Nyl's own, written in one fixed layout (see the golden
+/// file `attestation-record.v1.yaml`), so a line scan is enough.
+pub fn parse_attestation_record(text: &str) -> BTreeMap<String, RecordedAttestation> {
+    let mut found = BTreeMap::new();
+    let mut in_block = false;
+    let mut name: Option<String> = None;
+    let mut result = None;
+    let mut driver = None;
+    let mut finish = |name: &mut Option<String>, result: &mut Option<String>, driver: &mut Option<String>| {
+        if let (Some(name), Some(result), Some(driver)) = (name.take(), result.take(), driver.take()) {
+            found.insert(name, RecordedAttestation { result, driver });
+        }
+    };
+    for line in text.lines() {
+        let indent = line.len() - line.trim_start().len();
+        let content = line.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if indent == 0 {
+            finish(&mut name, &mut result, &mut driver);
+            in_block = content == "attestations:";
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        let value = |key: &str| {
+            content
+                .strip_prefix(key)
+                .map(|value| value.trim().trim_matches('"').to_owned())
+        };
+        if indent == 2 && content.ends_with(':') {
+            finish(&mut name, &mut result, &mut driver);
+            name = Some(content.trim_end_matches(':').to_owned());
+        } else if indent == 4 {
+            if let Some(value) = value("result:") {
+                result = Some(value);
+            }
+        } else if indent == 6 {
+            if let Some(value) = value("driver:") {
+                driver = Some(value);
+            }
+        }
+    }
+    finish(&mut name, &mut result, &mut driver);
+    found
+}
+
 /// The token in the body Argo CD answers a session or token request with.
 pub fn parse_token(body: &str) -> Result<String> {
     let value = serde_json::from_str::<Value>(body)
@@ -389,6 +451,55 @@ mod tests {
         failed["status"]["operationState"] = json!({"phase": "Failed", "message": "project not found"});
         assert!(needs_sync(&failed, head));
         assert!(reason(application_converged(&failed, head)).ends_with("last operation Failed: project not found"));
+    }
+
+    #[test]
+    fn test_an_attestation_record_is_read_by_name_with_its_result_and_driver() {
+        // The layout of the golden file crates/nyl-core/tests/golden/state/attestation-record.v1.yaml.
+        let record = [
+            "apiVersion: gitops.nyl/v1",
+            "kind: AttestationRecord",
+            "unit:",
+            "  environment: dev",
+            "  name: kubernetes",
+            "attestations:",
+            "  accepted:",
+            "    executionKey: sha256:9f2c",
+            "    result: pass",
+            "    at: \"2026-09-25T16:40:00Z\"",
+            "    source:",
+            "      driver: reconcile",
+            "    reason: null",
+            "  healthy:",
+            "    executionKey: sha256:9f2c",
+            "    result: fail",
+            "    source:",
+            "      driver: attest",
+            "    reason: Degraded",
+            "    details:",
+            "      applications:",
+            "        web:",
+            "          health: Degraded",
+            "",
+        ]
+        .join("\n");
+        let recorded = parse_attestation_record(&record);
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert_eq!(
+            recorded["accepted"],
+            RecordedAttestation {
+                result: "pass".to_owned(),
+                driver: "reconcile".to_owned()
+            }
+        );
+        assert_eq!(
+            recorded["healthy"],
+            RecordedAttestation {
+                result: "fail".to_owned(),
+                driver: "attest".to_owned()
+            }
+        );
+        assert!(parse_attestation_record("kind: AttestationRecord\n").is_empty());
     }
 
     #[test]

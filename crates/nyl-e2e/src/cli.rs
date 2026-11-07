@@ -37,7 +37,7 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct Common {
-    /// Which reconciler to run: `direct` (pending), `argocd-kubernetes`,
+    /// Which reconciler to run: `direct`, `argocd-kubernetes`,
     /// `argocd-api`, or `all`.
     #[arg(long, value_enum, default_value = "all")]
     variant: Selection,
@@ -97,7 +97,7 @@ fn run(args: RunArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // A pending variant needs no tools, so it is reported without them.
+    // A variant that cannot run yet needs no tools, so it is reported without them.
     let runnable = variants
         .iter()
         .any(|variant| reconciler_for(*variant).availability().is_ok());

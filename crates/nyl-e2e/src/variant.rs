@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Variant {
-    /// Nyl's direct reconciler applies the tree itself (pending: it lands in
-    /// the M5 direct-reconciler branch).
+    /// Nyl's direct reconciler applies the tree itself, with no Argo CD.
     Direct,
     /// Argo CD, read through the Kubernetes API of its control-plane Cluster.
     ArgocdKubernetes,
@@ -80,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_runs_every_variant_once_and_the_pending_one_last() {
+    fn test_all_runs_every_variant_once_with_direct_last() {
         let all = Selection::All.variants();
         assert_eq!(all.len(), 3);
         assert_eq!(all.last(), Some(&Variant::Direct));
