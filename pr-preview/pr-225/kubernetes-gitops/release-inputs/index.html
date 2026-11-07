@@ -142,8 +142,9 @@ and reports all problems together:</p>
 <li>a required input without a binding, named with its description;</li>
 <li>a value that does not match the declared type or <code dir="auto">enum</code>.</li>
 </ul>
-<p>Keys of a selected ApplicationGroup whose <code dir="auto">spec.enabled</code> is false are ignored,
-so <code dir="auto">enabled</code> can still toggle the group. Remote ApplicationGroups receive
+<p>Keys of a selected ApplicationGroup whose <code dir="auto">spec.enabled</code> is false, or whose
+document renders to no document for the target, are ignored, so <code dir="auto">enabled</code> can
+still toggle the group. Remote ApplicationGroups receive
 resolved values like local groups; the binding key on the platform’s own target
 is the admission, and the remote session never sees binding definitions or
 file paths.</p>
