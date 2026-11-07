@@ -1919,6 +1919,7 @@ harness.
 | `reconciler` field, validation, `Delivery`, tree without Applications, index `reconciler`, direct renderer of expected deployments, `without_workloads`, `TeardownSettings` for direct | `nyl-render` (`resources/gitops.rs`, `gitops/`) |
 | Apply, prune, purge, release state with `meta`, `verify_cluster_server`, `release_manifests` | `nyl-render` (`kubernetes/lifecycle.rs`, `kubernetes/state.rs`) |
 | Direct driver operations (preflight, waves, vanished Releases, fence, outcome mapping), `DirectReader`, health rules, readiness rows | `nyl-units` (`kubernetes_publication/direct/`) |
+| The wait for health (`observe.waitHealthy`): the poll loop, backoff, early failure, and codes, over any reader | `nyl-units` (`kubernetes_publication/health_wait.rs`), with `ExecutionContext::clock` from `nyl-core` |
 | Wiring, `--take-over`, `ApplyEvent` rendering | `nyl` (the CLI role) |
 | Engine, state, `Driver`, `RemovalObservation`, `RecoveryPolicy`, `Outcome` | Unchanged: they never name `direct`, a release, or a kube object |
 

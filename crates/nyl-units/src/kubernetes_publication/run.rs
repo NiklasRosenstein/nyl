@@ -47,7 +47,7 @@ use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, FailureCategory};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
-use nyl_render::gitops::observation::{direct_deployments, Delivery};
+use nyl_render::gitops::observation::{direct_deployments, Delivery, ReconcilerLocation};
 use nyl_render::gitops::publication::{
     inspect_shared_catalog, prepare_target_publication_fenced, prepare_target_removal_fenced, render_target,
     without_workload_applications, without_workloads, PublicationAuthor, RenderedTarget, SharedCatalogState,
@@ -96,13 +96,27 @@ fn direct_of<'a, 'c>(
     rendered: &RenderedTarget,
     access: &'a ClusterAccess,
 ) -> DriverResult<Option<Direct<'a, 'c>>> {
-    let Delivery::Direct(location) = &rendered.delivery else {
+    let Delivery::Direct(declared) = &rendered.delivery else {
         return Ok(None);
     };
-    // The location the render declares is what the unit recorded at
-    // resolution, plus its context, which only says how to read.
+    // A teardown acts on what the stored document recorded, never on the
+    // declaration as it reads now: the recorded Cluster, context, and server
+    // decide where it deletes. A document without them (resolved before a
+    // direct unit recorded its facts) falls back to the declaration.
+    let recorded = super::observe::facts_of(unit)
+        .ok()
+        .and_then(|facts| match facts.location {
+            ReconcilerLocation::Direct(location) => Some(location),
+            ReconcilerLocation::ArgoCd(_) => None,
+        });
     let owner = unit_owner(unit)?;
-    Ok(Some(Direct::new(ctx, access, location, owner, rendered)))
+    Ok(Some(Direct::new(
+        ctx,
+        access,
+        recorded.as_ref().unwrap_or(declared),
+        owner,
+        rendered,
+    )))
 }
 
 /// How often a publication is built again on a branch head that moved.
