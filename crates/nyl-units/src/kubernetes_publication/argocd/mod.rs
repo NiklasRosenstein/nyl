@@ -220,7 +220,7 @@ fn read_argocd(
     }
     let anchored = !established
         .values()
-        .any(|visibility| matches!(visibility, Visibility::Hidden(_)));
+        .any(|visibility| !matches!(visibility, Visibility::Visible));
     let (deployments, absent) = observe_each(queries, namespace, &applications, &live, anchored)?;
     Ok(Reading {
         deployments,
@@ -309,7 +309,7 @@ fn establish_anchors(
                 if live.contains_key(&(catalog_namespace.clone(), name.clone())) {
                     Visibility::Visible
                 } else {
-                    Visibility::Hidden(format!(
+                    Visibility::NotYet(format!(
                         "the catalog Application {catalog_namespace}/{name} is not in the reading, so the credential or context \
                          does not see this target's Applications and their absence would prove nothing (if the catalog was \
                          never applied, apply it first): check that the ArgoCDInstance's access reaches the Argo CD that runs \
@@ -321,7 +321,7 @@ fn establish_anchors(
                 if queries.project_exists(namespace, name)? {
                     Visibility::Visible
                 } else {
-                    Visibility::Hidden(format!(
+                    Visibility::NotYet(format!(
                         "the target generates no catalog Application, and its AppProject {name} is not visible in \
                          namespace {namespace}, so the credential or context does not see this target's Argo CD and the \
                          absence of its Applications would prove nothing: check that the ArgoCDInstance's access reaches \
@@ -330,7 +330,7 @@ fn establish_anchors(
                 }
             }
         };
-        let hidden = matches!(visibility, Visibility::Hidden(_));
+        let hidden = !matches!(visibility, Visibility::Visible);
         established.insert(anchor.id.clone(), visibility);
         if hidden {
             break;
@@ -442,7 +442,7 @@ mod tests {
         );
         assert!(reading.anchors.is_empty() && reading.unprovable.is_none());
         let concluding = read_argocd(&fake, "argocd", Proof::PerDeployment, &request(true)).unwrap();
-        assert!(matches!(&concluding.anchors["project/web"], Visibility::Hidden(reason)
+        assert!(matches!(&concluding.anchors["project/web"], Visibility::NotYet(reason)
             if reason.contains("AppProject web is not visible in namespace argocd")));
         let kubernetes = read_argocd(&fake, "argocd", Proof::Anchors, &request(false)).unwrap();
         assert!(kubernetes.anchors.contains_key("project/web"));
@@ -512,7 +512,7 @@ mod tests {
         };
         let reading = read_argocd(&fake, "argocd", Proof::PerDeployment, &request).unwrap();
         assert!(
-            matches!(&reading.anchors["project/web"], Visibility::Hidden(reason) if reason.contains("AppProject web"))
+            matches!(&reading.anchors["project/web"], Visibility::NotYet(reason) if reason.contains("AppProject web"))
         );
         assert!(fake.asked.borrow().is_empty(), "{:?}", fake.asked.borrow());
         assert!(reading
