@@ -1,7 +1,13 @@
 [[entries]]
+id = "630f9659-a268-4d91-9f19-383f1f55decf"
+type = "fix"
+description = "ApplicationGroups with a templated spec that cannot be parsed before rendering, such as `projectTemplate.name: '{{ target.metadata.name }}-web'`, are no longer silently left out of the targets that select them when they write `metadata.labels` in flow style or with a trailing comment (or `metadata: # ...`): targets now select them by the labels the document declares, so existing `render-tree` and `publish-tree` output may gain their Applications, Releases, and AppProject (selection only grows). A group that renders to no document now counts as disabled, so `--application-group` and ignored `releaseInputs` treat it like `enabled: false`. A document that is not valid YAML before rendering and writes labels in a form that cannot be read statically (template syntax among them, anchors, aliases, merge keys, multi-line flow) now fails with an error instead of being read as fewer labels, and a group whose rendered labels differ from its literal ones is rejected"
+author = "@NiklasRosenstein"
+
+[[entries]]
 id = "d73eec00-08f7-4582-90d0-eab32d080800"
 type = "feature"
-description = "Orchestration can publish Kubernetes trees: the `KubernetesPublication` unit renders its DeploymentTarget with the `fromUnit` Release inputs (image digests, infrastructure outputs) its environment resolved, publishes the tree and its ownership index to the target's branch with a compare-and-swap push, and tears it down in two phases. Its effective teardown settings are recorded when the unit is resolved, so `status` and `plan` report teardown readiness without rendering. Observing Argo CD is the unit's opt-in `observe: {}`, described below"
+description = "Orchestration can publish Kubernetes trees: the `KubernetesPublication` unit renders its DeploymentTarget with the `fromUnit` Release inputs (image digests, infrastructure outputs) its environment resolved, publishes the tree and its ownership index to the target's branch with a compare-and-swap push, and tears it down in two phases. Its effective teardown settings are recorded when the unit is resolved, so `status` and `plan` report teardown readiness without rendering. `mode: observe` and inline targets are not available yet"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -37,7 +43,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "cced6584-cb1c-4838-b3fb-fdba2a18fd0b"
 type = "feature"
-description = "Add the `EnvironmentTemplate` resource for preview environments. An instance is created with `nyl state init -e <name> --template <template> --param <name>=<value>`, or by `nyl reconcile --template`, which then reconciles it from its own checkout; it exists only in state (`state.yaml` records the template, its parameters, the source commit, and `expiresAt`), shares one state ref with other instances through `state.path`, and behaves like a declared Environment for `plan`, `reconcile`, `status`, `get`, `attest`, `observe`, `teardown`, `state delete`, and `build`. A plain run renders an instance at its recorded source commit. A template's `deletionPolicy: Teardown` overrides every unit's policy for kinds that support teardown, and `allowTeardown` lets omission teardown proceed unattended. `nyl get environments` lists instances by listing their state; `nyl validate` checks each template through sample instances, so generated Argo CD names, publication prefixes, and state locations that would collide across instances are found early, and every publication render and direct `build --push` includes the instances state lists. New codes: `NYL-INSTANCE-TEMPLATE-UNKNOWN`, `NYL-INSTANCE-PARAMETER-INVALID`, `NYL-INSTANCE-NAME-TAKEN`, `NYL-INSTANCE-TEMPLATE-REQUIRED`, `NYL-INSTANCE-AMBIGUOUS`, and `NYL-TEMPLATE-INVALID`. The shared catalog is still to come"
+description = "Add the `EnvironmentTemplate` resource for preview environments. An instance is created with `nyl state init -e <name> --template <template> --param <name>=<value>`, or by `nyl reconcile --template`, which then reconciles it from its own checkout; it exists only in state (`state.yaml` records the template, its parameters, the source commit, and `expiresAt`), shares one state ref with other instances through `state.path`, and behaves like a declared Environment for `plan`, `reconcile`, `status`, `get`, `attest`, `observe`, `teardown`, `state delete`, and `build`. A plain run renders an instance at its recorded source commit. A template's `deletionPolicy: Teardown` overrides every unit's policy for kinds that support teardown, and `allowTeardown` lets omission teardown proceed unattended. `nyl get environments` lists instances by listing their state; `nyl validate` checks each template through sample instances, so generated Argo CD names, publication prefixes, and state locations that would collide across instances are found early, and every publication render and direct `build --push` includes the instances state lists. New codes: `NYL-INSTANCE-TEMPLATE-UNKNOWN`, `NYL-INSTANCE-PARAMETER-INVALID`, `NYL-INSTANCE-NAME-TAKEN`, `NYL-INSTANCE-TEMPLATE-REQUIRED`, `NYL-INSTANCE-AMBIGUOUS`, and `NYL-TEMPLATE-INVALID`. Expiry removal, `maxInstances`, and the shared catalog are still to come"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -56,6 +62,12 @@ author = "@NiklasRosenstein"
 id = "5af2a924-6a49-4274-abe0-be4c90afca35"
 type = "feature"
 description = "A recorded source commit that the entry clone lacks is fetched by its exact id from the clone's `origin`, after the retained snapshots and the instance's keep ref and with the same credentials, so a pull request closed job that checks out the default branch tears a preview down at its recorded commit without `keepSource` or `--source` wherever the host keeps `refs/pull/<n>/head` (GitHub) or `refs/merge-requests/<n>/head` (GitLab) after the branch is deleted. An explicit full commit id passed to `--source` that the clone lacks is fetched the same way. A failed fetch leaves the commit missing as before, and `--local` fetches nothing"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
+type = "feature"
+description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -89,9 +101,9 @@ description = "`nyl state delete --teardown` prints the warnings of the teardown
 author = "@NiklasRosenstein"
 
 [[entries]]
-id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
-type = "feature"
-description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
+id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -128,10 +140,4 @@ author = "@NiklasRosenstein"
 id = "ef4cda57-f220-4b05-8902-7e16d46a3acd"
 type = "fix"
 description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `KubernetesPublication` published for, and the unit's published tree records its reconciler and Cluster"
-author = "@NiklasRosenstein"
-
-[[entries]]
-id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
-type = "fix"
-description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count. The recorded `teardownSettings` gain `namespacePrunePolicies`"
 author = "@NiklasRosenstein"
