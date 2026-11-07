@@ -475,6 +475,7 @@ fn check_unit(
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
     };
     let outcome = match check {
         Check::DetectDrift => driver

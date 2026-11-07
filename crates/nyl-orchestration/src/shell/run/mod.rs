@@ -96,6 +96,7 @@ use slots::Slots;
 
 mod cancel;
 mod execute;
+mod incarnations;
 pub(crate) mod slots;
 mod teardown;
 pub(crate) mod wait;
@@ -377,6 +378,9 @@ impl RunContext<'_> {
 struct Session<'r, 'a> {
     context: &'r RunContext<'a>,
     request: &'r RunRequest,
+    /// Whether other units' incarnations still exist in their environments'
+    /// state, for drivers that fence resources by owner.
+    incarnations: incarnations::StateIncarnations<'r>,
     /// This operation's own directory beneath the workspace.
     directory: PathBuf,
     default_branch: OnceCell<Result<String, Finding>>,
@@ -444,6 +448,7 @@ impl<'r, 'a> Session<'r, 'a> {
         Self {
             context,
             request,
+            incarnations: incarnations::StateIncarnations::over(context.base.store, &request.environments),
             directory,
             default_branch: OnceCell::new(),
             revisions: RefCell::new(BTreeMap::new()),
@@ -1431,6 +1436,10 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         }
     };
     report.errors.extend(resolved.errors.values().flatten().cloned());
+    report.warnings.extend(crate::rules::teardown::readiness_warnings(
+        context.drivers,
+        resolved.units.values(),
+    ));
     let attempted = BTreeSet::new();
     let selectable = selection_view(&resolved, &held_view);
     let candidates = Candidates {
@@ -1658,7 +1667,7 @@ fn plan_leaving(
         if !teardown_unit {
             continue;
         }
-        if let Some(preflight) = teardown::readiness(context.drivers, environment, name, unit) {
+        if let Some(preflight) = teardown::readiness(context.drivers, unit) {
             let blocking = &preflight.blocking;
             readiness_state.insert(
                 name.clone(),
@@ -1861,6 +1870,7 @@ fn plan_unit(
         commit_identity: context.commit_identity,
         cache_dir: session.context.cache_dir(),
         teardown_wait: None,
+        incarnations: &session.incarnations,
     };
     match driver.plan(&execution, unit) {
         Ok(Supported::Supported(plan)) => {
@@ -2574,6 +2584,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         };
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
+        self.report.warnings.extend(crate::rules::teardown::readiness_warnings(
+            context.drivers,
+            resolved.units.values(),
+        ));
         // Drift repairs and reapplies list only the units the run executed
         // again, with a new receipt replacing the drifted one.
         let executed = |name: &UnitName| {

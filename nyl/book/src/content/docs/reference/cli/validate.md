@@ -87,6 +87,14 @@ reference between units is checked only for the producer's existence. A
 names into that Environment. A target placed by publication units of two
 Environments fails with `NYL-TARGET-ENVIRONMENT-CONFLICT`.
 
+A unit that declares its target inline (`spec.target.inline`) places the
+inline target, named `<environment>-<unit>` or by `spec.target.name`. Validation
+parses it as strictly as a discovered target, compiles it with every other
+target, and checks the Argo CD Application and AppProject names it generates
+against theirs. A name that a declared target already uses fails, and so does a
+spec that is no DeploymentTarget spec, naming the unit's file. A disabled unit
+contributes no inline target.
+
 A placed target compiles with a placeholder of the declared type for each
 `fromUnit` and `fromPromotion` binding, because only a run resolves their
 values. Each `fromUnit` binding must instead name a unit the Environment

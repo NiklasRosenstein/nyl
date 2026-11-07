@@ -33,6 +33,11 @@ asks each ready unit's driver what executing it would change, and reports:
   `NYL-TEARDOWN-HAS-DEPENDENTS` naming the tombstones that cite it, or a
   publication's unmet teardown readiness. Retained tombstones are listed as
   `retained`. See [Deletion and holds](/nyl/orchestration/deletion/);
+- warnings for each unmet teardown requirement, and each remnant, of every
+  publication that would be torn down (`NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
+  `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`,
+  `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS`), each naming
+  the setting that fixes it;
 - each unit's state: `ready` for a unit that would execute, with the driver's
   change summary and digest, `drifted` for a current unit whose drift the
   run would repair, `current`, `held`, or `blocked` with the references it

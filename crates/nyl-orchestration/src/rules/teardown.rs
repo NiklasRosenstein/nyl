@@ -78,8 +78,8 @@ pub struct TeardownInputs<'a> {
     /// completed; the units they depend on wait with them.
     pub waiting: &'a BTreeSet<UnitName>,
     /// Unmet blocking readiness requirements per unit, from the preflight
-    /// ([`super::teardown_readiness`]).
-    pub readiness: &'a BTreeMap<UnitName, super::teardown_readiness::Readiness>,
+    /// (`Driver::teardown_readiness`).
+    pub readiness: &'a BTreeMap<UnitName, nyl_core::orchestration::driver::TeardownReadiness>,
     /// `retained` tombstones the run drops (a kind change of their name, or
     /// a release under `teardown --all`): they wait for their deleting
     /// dependents like every other leaving unit (Q6).
@@ -398,6 +398,31 @@ pub fn dependencies(units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitNam
             producers.retain(|producer| producer != name && units.contains_key(producer));
             (name.clone(), producers)
         })
+        .collect()
+}
+
+/// The warnings `plan` and `reconcile` give for units that stay in the
+/// ownership set and would be torn down when they leave it: each unmet
+/// requirement and each remnant their driver finds
+/// ([`nyl_core::orchestration::driver::Driver::teardown_readiness`]), with
+/// the setting that fixes it, so the problem is known long before a teardown
+/// runs. A unit that would be retained, held markers, and units whose driver
+/// states no requirements give none. Contract: [Kubernetes publication
+/// unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+pub fn readiness_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item = &'a DesiredUnit>) -> Vec<Finding> {
+    units
+        .into_iter()
+        .filter(|unit| !unit.is_held_marker())
+        .filter(|unit| super::desired::deletion_intent(drivers, unit) == DeletionIntent::Teardown)
+        .filter_map(|unit| {
+            let driver = drivers.get(&unit.unit.api_version, &unit.unit.kind)?;
+            match driver.teardown_readiness(unit) {
+                Ok(nyl_core::orchestration::driver::Supported::Supported(readiness)) => Some(readiness),
+                _ => None,
+            }
+        })
+        .flat_map(|readiness| readiness.blocking.into_iter().chain(readiness.remnants))
         .collect()
 }
 
@@ -869,5 +894,29 @@ mod tests {
         assert_eq!(case.plan().wave, names(&["release"]));
         case.desired.remove(&name("release"));
         assert_eq!(case.plan().wave, names(&["producer"]));
+    }
+
+    /// Catches a unit that stays in the ownership set going unwarned about a
+    /// teardown that cannot complete or leaves objects behind, and a unit
+    /// that would be retained, or one whose driver states no requirements,
+    /// being warned about a teardown it will not run.
+    #[test]
+    fn test_readiness_warnings_cover_teardown_units_with_findings() {
+        let unready = fixtures::desired("web", "Publication", json!({"unreadyTeardown": true}), "web");
+        let ready = fixtures::desired("api", "Publication", json!({"unreadyTeardown": false}), "api");
+        let silent = fixtures::desired("db", "Publication", json!({}), "db");
+        let retained = fixtures::desired(
+            "kept",
+            "Publication",
+            json!({"unreadyTeardown": true, "deletionPolicy": "Retain"}),
+            "kept",
+        );
+        let command = fixtures::desired("job", "Command", json!({"unreadyTeardown": true}), "job");
+        let warnings = readiness_warnings(&drivers(), [&unready, &ready, &silent, &retained, &command]);
+        assert_eq!(
+            warnings.iter().map(|warning| warning.code).collect::<Vec<_>>(),
+            vec![Code::TeardownCatalogManualSync, Code::TeardownCatalogRemains]
+        );
+        assert!(warnings.iter().all(|warning| warning.message.starts_with("dev/web: ")));
     }
 }

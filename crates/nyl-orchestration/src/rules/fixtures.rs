@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use nyl_core::constants::API_VERSION_UNITS;
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope,
-    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
+    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, TeardownReadiness,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitName};
 use nyl_core::orchestration::ports::RunState;
@@ -324,5 +324,28 @@ impl Driver for TestDriver {
         _: &Receipt,
     ) -> DriverResult<Supported<DriftDetection>> {
         Ok(Supported::Unsupported)
+    }
+    /// A `Publication` whose spec sets `unreadyTeardown: true` has one
+    /// unmet requirement and one remnant; with `unreadyTeardown: false`, it
+    /// is ready.
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
+        use nyl_core::orchestration::codes::{Code, Finding};
+        let Some(unready) = unit.spec["unreadyTeardown"].as_bool() else {
+            return Ok(Supported::Unsupported);
+        };
+        let mut readiness = TeardownReadiness::default();
+        if unready {
+            readiness.blocking.push(Finding::new(
+                Code::TeardownCatalogManualSync,
+                format!("{}/{}: needs a manual sync", unit.unit.environment, unit.unit.name),
+                "enable pruning",
+            ));
+            readiness.remnants.push(Finding::new(
+                Code::TeardownCatalogRemains,
+                format!("{}/{}: leaves its catalog", unit.unit.environment, unit.unit.name),
+                "let a parent own the catalog",
+            ));
+        }
+        Ok(Supported::Supported(readiness))
     }
 }

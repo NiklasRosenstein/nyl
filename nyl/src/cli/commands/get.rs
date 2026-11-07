@@ -304,7 +304,7 @@ fn units_table(
     drivers: &nyl_core::orchestration::driver::DriverSet,
 ) -> Result<CommandOutcome> {
     // Readiness reads the stored desired documents, never source.
-    let readiness = inspect::teardown_readiness(environment, snapshot, drivers);
+    let readiness = inspect::teardown_readiness(snapshot, drivers);
     // No run refs are read here, so `now` decides nothing.
     let report = nyl_orchestration::rules::unit_state::status_with_readiness(
         environment,

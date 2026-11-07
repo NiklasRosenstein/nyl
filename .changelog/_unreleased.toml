@@ -9,3 +9,9 @@ id = "d73eec00-08f7-4582-90d0-eab32d080800"
 type = "feature"
 description = "Orchestration can publish Kubernetes trees: the `KubernetesPublication` unit renders its DeploymentTarget with the `fromUnit` Release inputs (image digests, infrastructure outputs) its environment resolved, publishes the tree and its ownership index to the target's branch with a compare-and-swap push, and tears it down in two phases. Its effective teardown settings are recorded when the unit is resolved, so `status` and `plan` report teardown readiness without rendering. `mode: observe` and inline targets are not available yet"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "fe1f4df2-e59c-4637-a945-a3078b4e23c5"
+type = "feature"
+description = "A `KubernetesPublication` unit can declare its DeploymentTarget inline (`spec.target.inline`), named `<environment>-<unit>`, and publishes it through the same path as a named target; `nyl validate` compiles it with the other targets. The published ownership index records the owning unit, and a publication or teardown refuses a prefix another existing unit owns (`NYL-KUBERNETES-OWNER-FENCED`, or `NYL-KUBERNETES-OWNER-UNKNOWN` when the owner's state cannot be read). Renaming a publication's target fails with `NYL-KUBERNETES-TARGET-CHANGED` until the unit is replaced with `nyl teardown --unit`. `nyl plan` and `nyl reconcile` warn about unmet teardown requirements and leftovers of every publication that would be torn down. The `observe` teardown wait is rejected until Nyl can read Argo CD"
+author = "@NiklasRosenstein"

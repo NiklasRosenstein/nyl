@@ -23,6 +23,14 @@
 //!   each `<group>/<release>` of its target's `releaseInputs`, the bindings
 //!   orchestration resolves, as reference objects, so references at
 //!   `/releases/<group>~1<release>/<input>` become graph edges.
+//! - A publication unit names a static DeploymentTarget, or declares one
+//!   inline in `spec.target.inline`, rendered with the unit per environment.
+//!   The renderer fills the inline target's `name` (`<environment>-<unit>`
+//!   unless the unit sets `target.name`) and `sourceFile`, the file that
+//!   declares the unit, where its `valuesFrom` files resolve; both are
+//!   renderer-owned, so an authored `sourceFile` is rejected. An inline
+//!   target is an ordinary target of the inventory from then on
+//!   ([`GitOpsInventory::with_inline_target`]).
 //! - A target is placed into an environment by a publication unit of that
 //!   environment naming it; a target placed by two environments is an error
 //!   ([`Code::TargetEnvironmentConflict`](nyl_core::orchestration::codes::Code::TargetEnvironmentConflict)).
@@ -393,10 +401,11 @@ fn render_environment_units(
         if let Some(spec) = &mut spec {
             apply_unit_defaults(inventory, &unit.envelope.kind, spec);
             if unit.is_publication() {
+                let environment = environment.metadata.name.as_str();
                 if spec_enabled(spec) {
-                    expand_publication_releases(inventory, unit, spec)?;
+                    expand_publication_releases(inventory, unit, environment, spec)?;
                 } else {
-                    check_disabled_publication(unit, spec)?;
+                    check_disabled_publication(unit, environment, spec)?;
                 }
             }
         }
@@ -470,24 +479,38 @@ fn render_unit(unit: &DiscoveredUnit, context: &Value) -> Result<Option<Value>> 
 /// Fill a publication unit's `releases` with the target's bindings that only
 /// orchestration resolves, as reference objects. Other binding kinds stay
 /// with rendering (M3 status of the publication unit contract).
-fn expand_publication_releases(inventory: &GitOpsInventory, unit: &DiscoveredUnit, spec: &mut Value) -> Result<()> {
+fn expand_publication_releases(
+    inventory: &GitOpsInventory,
+    unit: &DiscoveredUnit,
+    environment: &str,
+    spec: &mut Value,
+) -> Result<()> {
     let location = unit.location();
-    let target = publication_target(unit, spec)?;
-    let spec = spec.as_object_mut().expect("rendered specs are mappings");
-    if spec.contains_key("releases") {
+    if spec.get("releases").is_some() {
         return Err(unit_invalid(
             &location,
             "spec.releases is filled from the target's releaseInputs and must not be written by hand",
         ));
     }
-    let deployment_target = static_target(inventory, &target).map_err(|reason| {
-        unit_invalid(
-            &location,
-            &format!("spec.target names DeploymentTarget {target:?}, which {reason}"),
-        )
-    })?;
+    let target = publication_target(unit, environment, spec)?;
+    let release_inputs = match &target {
+        PublicationTarget::Static(name) => static_target(inventory, name)
+            .map_err(|reason| {
+                unit_invalid(
+                    &location,
+                    &format!("spec.target names DeploymentTarget {name:?}, which {reason}"),
+                )
+            })?
+            .spec
+            .release_inputs
+            .clone(),
+        PublicationTarget::Inline(inline) => inline_release_inputs(&inline.spec)
+            .map_err(|message| unit_invalid(&location, &format!("spec.target.inline.releaseInputs: {message}")))?,
+    };
+    let spec = spec.as_object_mut().expect("rendered specs are mappings");
+    let deployment_target_release_inputs = &release_inputs;
     let mut releases = Map::new();
-    for (release, bindings) in &deployment_target.spec.release_inputs {
+    for (release, bindings) in deployment_target_release_inputs {
         let mut inputs = Map::new();
         for (input, binding) in bindings {
             if binding_requires_orchestration(binding) {
@@ -505,9 +528,9 @@ fn expand_publication_releases(inventory: &GitOpsInventory, unit: &DiscoveredUni
 /// A disabled publication unit is torn down from its stored desired
 /// document, never resolved, so its target need not exist any more (it may
 /// be removed in the same change) and it gains no `releases`. Its spec is
-/// still checked for an authored `releases` and a static target name.
-fn check_disabled_publication(unit: &DiscoveredUnit, spec: &Value) -> Result<()> {
-    publication_target(unit, spec)?;
+/// still checked for an authored `releases` and a valid target.
+fn check_disabled_publication(unit: &DiscoveredUnit, environment: &str, spec: &mut Value) -> Result<()> {
+    publication_target(unit, environment, spec)?;
     if spec.get("releases").is_some() {
         return Err(unit_invalid(
             &unit.location(),
@@ -515,6 +538,118 @@ fn check_disabled_publication(unit: &DiscoveredUnit, spec: &Value) -> Result<()>
         ));
     }
     Ok(())
+}
+
+/// The DeploymentTarget a rendered publication spec names or declares.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PublicationTarget {
+    /// A static DeploymentTarget, by name.
+    Static(String),
+    /// A DeploymentTarget declared inline by the unit.
+    Inline(InlineTarget),
+}
+
+impl PublicationTarget {
+    /// The target's name, which the unit places into its environment.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Static(name) => name,
+            Self::Inline(inline) => &inline.name,
+        }
+    }
+
+    /// Read the target of a rendered or stored publication spec: a name, or
+    /// `{name, inline, sourceFile}` as rendering fills it.
+    pub fn from_spec(spec: &Value) -> std::result::Result<Self, String> {
+        match spec.get("target") {
+            Some(Value::String(name)) if !name.is_empty() => Ok(Self::Static(name.clone())),
+            Some(Value::Object(target)) => {
+                if let Some(field) = target
+                    .keys()
+                    .find(|field| !matches!(field.as_str(), "name" | "inline" | "sourceFile"))
+                {
+                    return Err(format!(
+                        "spec.target has unknown field {field:?}; an inline target has inline and optionally name"
+                    ));
+                }
+                let Some(inline) = target.get("inline").filter(|inline| inline.is_object()) else {
+                    return Err(
+                        "spec.target must name a static DeploymentTarget or declare one in spec.target.inline"
+                            .to_owned(),
+                    );
+                };
+                let text = |field: &str| match target.get(field) {
+                    None => Ok(None),
+                    Some(Value::String(text)) if !text.is_empty() => Ok(Some(text.clone())),
+                    Some(_) => Err(format!("spec.target.{field} must be a non-empty string")),
+                };
+                Ok(Self::Inline(InlineTarget {
+                    name: text("name")?.ok_or(
+                        "spec.target.name is filled from the environment and unit when the unit is rendered; \
+                         render the unit instead of writing a resolved spec by hand",
+                    )?,
+                    source_file: PathBuf::from(
+                        text("sourceFile")?.ok_or("spec.target.sourceFile is filled when the unit is rendered")?,
+                    ),
+                    spec: inline.clone(),
+                }))
+            }
+            _ => Err("spec.target must name a static DeploymentTarget or declare one in spec.target.inline".to_owned()),
+        }
+    }
+}
+
+/// A DeploymentTarget a publication unit declares inline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineTarget {
+    /// `<environment>-<unit>`, or `spec.target.name`.
+    pub name: String,
+    /// The project-relative file that declares the unit.
+    pub source_file: PathBuf,
+    /// The rendered DeploymentTarget spec.
+    pub spec: Value,
+}
+
+impl InlineTarget {
+    /// Whether the rendered spec is a valid DeploymentTarget spec, parsed as
+    /// strictly as a discovered target.
+    pub fn validate(&self) -> Result<()> {
+        let document = serde_json::json!({
+            "apiVersion": nyl_core::constants::API_VERSION_K8S_GITOPS,
+            "kind": GitOpsResourceKind::DeploymentTarget.as_str(),
+            "metadata": {"name": self.name},
+            "spec": self.spec,
+        });
+        crate::resources::parse_gitops_resource(&document)
+            .map(drop)
+            .map_err(|error| NylError::from_core_at(error, format!("inline target {:?}", self.name)))
+    }
+}
+
+/// Check a publication unit's rendered target and fill what rendering owns:
+/// an inline target's `name` (default `<environment>-<unit>`) and
+/// `sourceFile`. A static target must be named by a non-empty string.
+fn publication_target(unit: &DiscoveredUnit, environment: &str, spec: &mut Value) -> Result<PublicationTarget> {
+    let location = unit.location();
+    if let Some(target) = spec.get_mut("target").and_then(Value::as_object_mut) {
+        if target.contains_key("sourceFile") {
+            return Err(unit_invalid(
+                &location,
+                "spec.target.sourceFile is filled when the unit is rendered and must not be written by hand",
+            ));
+        }
+        if target.get("inline").is_some_and(Value::is_object) {
+            let name = unit
+                .envelope
+                .name()
+                .map_err(|error| unit_invalid(&location, &error.to_string()))?;
+            target
+                .entry("name")
+                .or_insert_with(|| Value::String(format!("{environment}-{name}")));
+            target.insert("sourceFile".to_owned(), Value::String(slash_path(&unit.source_path)));
+        }
+    }
+    PublicationTarget::from_spec(spec).map_err(|message| unit_invalid(&location, &message))
 }
 
 /// The static DeploymentTarget `name`, or why there is none.
@@ -531,19 +666,13 @@ fn static_target<'a>(
     }
 }
 
-/// The static DeploymentTarget name of a rendered publication spec.
-fn publication_target(unit: &DiscoveredUnit, spec: &Value) -> Result<String> {
-    let location = unit.location();
-    match spec.get("target") {
-        Some(Value::String(name)) if !name.is_empty() => Ok(name.clone()),
-        Some(Value::Object(target)) if target.contains_key("inline") => Err(unit_invalid(
-            &location,
-            "spec.target.inline is not supported yet; name a static DeploymentTarget",
-        )),
-        _ => Err(unit_invalid(
-            &location,
-            "spec.target must name a static DeploymentTarget",
-        )),
+/// The Release input bindings of an inline target's spec.
+fn inline_release_inputs(
+    spec: &Value,
+) -> std::result::Result<crate::resources::release_inputs::ReleaseInputBindings, String> {
+    match spec.get("releaseInputs") {
+        None => Ok(BTreeMap::default()),
+        Some(inputs) => serde_json::from_value(inputs.clone()).map_err(|error| error.to_string()),
     }
 }
 
@@ -581,7 +710,10 @@ pub fn target_placements(inventory: &GitOpsInventory) -> Result<BTreeMap<String,
             if !unit.is_publication() {
                 continue;
             }
-            let target = publication_target(unit, spec)?;
+            let target = PublicationTarget::from_spec(spec)
+                .map_err(|message| unit_invalid(&unit.location(), &message))?
+                .name()
+                .to_owned();
             let placed_by = format!("unit {unit_name} of Environment {name}");
             if let Some((other, other_by)) = placements.get(&target) {
                 if *other != name {
@@ -600,6 +732,53 @@ pub fn target_placements(inventory: &GitOpsInventory) -> Result<BTreeMap<String,
         .into_iter()
         .map(|(target, (environment, _))| (target, environment))
         .collect())
+}
+
+/// The inventory with every inline target the declared environments'
+/// enabled publication units declare, so that every compile checks them
+/// against every other target (publication prefixes that overlap, generated
+/// Argo CD names that collide), whether it runs in `nyl validate` or when a
+/// publication unit renders its own target. A disabled unit is torn down from
+/// its stored document and contributes none.
+pub fn with_inline_targets(inventory: &GitOpsInventory) -> Result<GitOpsInventory> {
+    with_inline_targets_except(inventory, None)
+}
+
+/// [`with_inline_targets`] without the inline target named `except`: the
+/// caller adds that one from the document it renders (a unit's stored spec),
+/// which may differ from what source declares now.
+pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&str>) -> Result<GitOpsInventory> {
+    let (environments, _) = declared(inventory);
+    if environments.is_empty() {
+        return Ok(inventory.clone());
+    }
+    let units = discover_units(inventory)?;
+    let mut extended = inventory.clone();
+    for environment in environments {
+        let effective = resolve_effective_environment(inventory, &environment.name()?)?;
+        for (unit_name, spec) in render_environment_units(inventory, &units, &effective)? {
+            let unit = &units[&unit_name];
+            let Some(spec) = spec.filter(|spec| unit.is_publication() && spec_enabled(spec)) else {
+                continue;
+            };
+            let target =
+                PublicationTarget::from_spec(&spec).map_err(|message| unit_invalid(&unit.location(), &message))?;
+            if let PublicationTarget::Inline(inline) = target {
+                if except == Some(inline.name.as_str()) {
+                    continue;
+                }
+                extended = extended
+                    .with_inline_target(&inline.name, &inline.source_file, &inline.spec)
+                    .map_err(|error| {
+                        NylError::config(format!(
+                            "unit {unit_name} of Environment {}: {error}",
+                            environment.metadata.name
+                        ))
+                    })?;
+            }
+        }
+    }
+    Ok(extended)
 }
 
 /// Check the `fromUnit` bindings of a target placed into `environment`: each
@@ -628,7 +807,7 @@ pub fn check_unit_bindings(
         let Some(spec) = spec else { return false };
         units[name].is_publication()
             && spec_enabled(spec)
-            && publication_target(&units[name], spec).is_ok_and(|placed| placed == target)
+            && PublicationTarget::from_spec(spec).is_ok_and(|placed| placed.name() == target)
     });
     if !placed_by_enabled_unit {
         return Ok(Vec::new());
@@ -1069,13 +1248,24 @@ spec:
     }
 
     #[test]
-    fn test_render_rejects_authored_releases_and_inline_targets() {
+    fn test_render_rejects_authored_releases_and_malformed_targets() {
         for (spec, expected) in [
             (
                 "  target: dev\n  releases: {}\n",
                 "spec.releases is filled from the target's releaseInputs",
             ),
-            ("  target:\n    inline: {}\n", "spec.target.inline is not supported yet"),
+            (
+                "  target:\n    inline: {}\n    sourceFile: nyl/units.yaml\n",
+                "spec.target.sourceFile is filled when the unit is rendered",
+            ),
+            (
+                "  target:\n    inline: {}\n    other: 1\n",
+                "spec.target has unknown field \"other\"",
+            ),
+            (
+                "  target: 7\n",
+                "spec.target must name a static DeploymentTarget or declare one",
+            ),
             (
                 "  target: missing\n",
                 "DeploymentTarget \"missing\", which does not exist",
@@ -1110,6 +1300,149 @@ spec:
         assert!(error.contains("NYL-TARGET-ENVIRONMENT-CONFLICT:"), "{error}");
         assert!(error.contains("Environment dev"), "{error}");
         assert!(error.contains("Environment staging"), "{error}");
+    }
+
+    const INLINE_UNIT: &str = r"apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {dev: 'true'}
+spec:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      publication:
+        repository: {repoURL: 'https://example.invalid/deploy.git'}
+        revision: previews
+        pathPrefix: '{{ environment.name }}-{{ values.region }}'
+      values: {hostname: '{{ values.region }}.example.com'}
+      releaseInputs:
+        web/web:
+          image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+          replicas: {value: 2}
+";
+
+    /// The project of `INLINE_UNIT`: its Environment and Cluster, but no static target.
+    fn inline_project(unit: &str) -> TempDir {
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        project(&[
+            ("platform.yaml", &platform),
+            ("units.yaml", UNITS),
+            ("image.yaml", IMAGE),
+            ("kubernetes.yaml", unit),
+        ])
+    }
+
+    fn units_without_publication() -> String {
+        UNITS.split("---\n").take(1).collect()
+    }
+
+    /// Catches an inline target that renders differently from a declared
+    /// one: the renderer names it `<environment>-<unit>`, records the file
+    /// that declares the unit, expands the target's `fromUnit` bindings into
+    /// `releases` as for any target, and renders its templates with the
+    /// environment's context.
+    #[test]
+    fn test_render_names_and_expands_an_inline_target() {
+        let worktree = inline_project(INLINE_UNIT);
+        let worktree = {
+            // The database unit only; `kubernetes.yaml` declares the publication.
+            fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+            worktree
+        };
+        let source = render(&worktree, "dev").unwrap();
+        let spec = unit(&source, "kubernetes").spec.clone().unwrap();
+        assert_eq!(spec["target"]["name"], json!("dev-kubernetes"));
+        assert_eq!(spec["target"]["sourceFile"], json!("kubernetes.yaml"));
+        assert_eq!(spec["target"]["inline"]["publication"]["pathPrefix"], json!("dev-eu"));
+        assert_eq!(spec["target"]["inline"]["values"]["hostname"], json!("eu.example.com"));
+        assert_eq!(
+            spec["releases"],
+            json!({"web/web": {"image": {"fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}}}})
+        );
+        let PublicationTarget::Inline(inline) = PublicationTarget::from_spec(&spec).unwrap() else {
+            panic!("the unit declares its target");
+        };
+        assert_eq!(
+            (inline.name.as_str(), &inline.source_file),
+            ("dev-kubernetes", &PathBuf::from("kubernetes.yaml"))
+        );
+        inline.validate().unwrap();
+
+        // `target.name` overrides the name, which the unit then places.
+        let named = INLINE_UNIT.replace("  target:\n    inline:", "  target:\n    name: preview\n    inline:");
+        let worktree = inline_project(&named);
+        fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+        let spec = unit(&render(&worktree, "dev").unwrap(), "kubernetes")
+            .spec
+            .clone()
+            .unwrap();
+        assert_eq!(spec["target"]["name"], json!("preview"));
+        assert_eq!(
+            target_placements(&inventory(&worktree)).unwrap(),
+            BTreeMap::from([("preview".to_owned(), EnvironmentName::new("dev").unwrap())])
+        );
+    }
+
+    /// Catches an inline target skipped by validation: it joins the
+    /// inventory as an ordinary target (and is checked against its names), and
+    /// one that collides with a declared target's name is refused.
+    #[test]
+    fn test_with_inline_targets_adds_each_enabled_unit_target_to_the_inventory() {
+        let worktree = inline_project(INLINE_UNIT);
+        fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+        let extended = with_inline_targets(&inventory(&worktree)).unwrap();
+        let target = extended
+            .get(GitOpsResourceKind::DeploymentTarget, "dev-kubernetes")
+            .unwrap();
+        assert_eq!(target.source_path, PathBuf::from("kubernetes.yaml"));
+        let Some(GitOpsResource::DeploymentTarget(target)) = &target.resource else {
+            panic!("a static, parsed target");
+        };
+        assert_eq!(target.spec.publication.path_prefix.as_deref(), Some("dev-eu"));
+        assert_eq!(target.spec.values["hostname"], json!("eu.example.com"));
+        assert_eq!(
+            target_placements(&extended).unwrap(),
+            BTreeMap::from([("dev-kubernetes".to_owned(), EnvironmentName::new("dev").unwrap())])
+        );
+        assert!(
+            check_unit_bindings(&extended, "dev-kubernetes", &EnvironmentName::new("dev").unwrap())
+                .unwrap()
+                .is_empty()
+        );
+
+        // A disabled unit contributes no target: it is torn down from its stored document.
+        let disabled = INLINE_UNIT.replace("spec:\n  target:", "spec:\n  enabled: false\n  target:");
+        let worktree = inline_project(&disabled);
+        fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+        let extended = with_inline_targets(&inventory(&worktree)).unwrap();
+        assert!(extended
+            .get(GitOpsResourceKind::DeploymentTarget, "dev-kubernetes")
+            .is_none());
+
+        // The name of a declared target is taken.
+        let clash = INLINE_UNIT.replace("  target:\n    inline:", "  target:\n    name: dev\n    inline:");
+        let worktree = project(&[
+            ("platform.yaml", PLATFORM),
+            ("units.yaml", &units_without_publication()),
+            ("image.yaml", IMAGE),
+            ("kubernetes.yaml", &clash),
+        ]);
+        let error = with_inline_targets(&inventory(&worktree)).unwrap_err().to_string();
+        assert!(error.contains("unit kubernetes of Environment dev"), "{error}");
+        assert!(error.contains("target names are unique"), "{error}");
+    }
+
+    /// Catches an inline target that is not a valid DeploymentTarget being
+    /// accepted by the renderer and failing only at publication.
+    #[test]
+    fn test_with_inline_targets_rejects_an_invalid_target_spec() {
+        let invalid = INLINE_UNIT.replace("      values:", "      bogus: true\n      values:");
+        let worktree = inline_project(&invalid);
+        fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
+        let error = with_inline_targets(&inventory(&worktree)).unwrap_err().to_string();
+        assert!(error.contains("bogus"), "{error}");
     }
 
     #[test]

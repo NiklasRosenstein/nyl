@@ -2,12 +2,13 @@
 //! effective settings: the preflight every teardown runs.
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
-//! teardown readiness and catalog ownership. Three blocking requirements
-//! decide whether the teardown can succeed (the catalog prunes removed
-//! workload Applications on its own, `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`;
-//! deleting an Application deletes its workloads,
-//! `NYL-TEARDOWN-APPLICATIONS-ORPHANED`; owned Namespaces do not stop
-//! deletion, `NYL-TEARDOWN-NAMESPACE-CONFIRM`); two remnant rows leave
+//! teardown readiness and catalog ownership. The driver owns these
+//! semantics; the orchestration shell only coordinates and displays the
+//! findings. Three blocking requirements decide whether the teardown can
+//! succeed (the catalog prunes removed workload Applications on its own,
+//! `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`; deleting an Application deletes its
+//! workloads, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`; owned Namespaces do not
+//! stop deletion, `NYL-TEARDOWN-NAMESPACE-CONFIRM`); two remnant rows leave
 //! objects behind (`NYL-TEARDOWN-NAMESPACES-REMAIN`,
 //! `NYL-TEARDOWN-CATALOG-REMAINS`). Settings a parent Application owns are
 //! `external: not checked` and never block. An unmet blocking requirement
@@ -16,33 +17,16 @@
 //! condition listing what may remain.
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::TeardownSettings;
+use nyl_core::orchestration::driver::TeardownReadiness;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-
-/// The preflight's verdict for one unit.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Readiness {
-    /// Unmet blocking requirements, each with the setting that fixes it.
-    pub blocking: Vec<Finding>,
-    /// What teardown leaves behind.
-    pub remnants: Vec<Finding>,
-    /// Requirements Nyl cannot see, such as a parent's catalog settings.
-    pub not_checked: Vec<String>,
-}
-
-impl Readiness {
-    /// Whether no blocking requirement is unmet.
-    pub fn ready(&self) -> bool {
-        self.blocking.is_empty()
-    }
-}
+use nyl_render::gitops::publication::TeardownSettings;
 
 /// Evaluate a unit's teardown settings against the contract's readiness
 /// table. Each finding names the unit and the setting that fixes it; a
 /// setting Nyl cannot see (`None`) is listed in `not_checked` and never
 /// blocks.
-pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &TeardownSettings) -> Readiness {
-    let mut readiness = Readiness::default();
+pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &TeardownSettings) -> TeardownReadiness {
+    let mut readiness = TeardownReadiness::default();
     let subject = format!("{environment}/{unit}");
     match settings.catalog_prunes {
         Some(false) => readiness.blocking.push(Finding::new(
@@ -110,7 +94,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::rules::fixtures::{env, name};
+
+    fn env() -> EnvironmentName {
+        EnvironmentName::new("dev").unwrap()
+    }
+
+    fn name(unit: &str) -> UnitName {
+        UnitName::new(unit).unwrap()
+    }
 
     fn ready_settings() -> TeardownSettings {
         TeardownSettings {
@@ -130,7 +121,7 @@ mod tests {
     fn test_ready_settings_have_no_findings() {
         let readiness = evaluate(&env(), &name("kubernetes"), &ready_settings());
         assert!(readiness.ready());
-        assert_eq!(readiness, Readiness::default());
+        assert_eq!(readiness, TeardownReadiness::default());
     }
 
     /// Catches a teardown starting although its Applications or workloads

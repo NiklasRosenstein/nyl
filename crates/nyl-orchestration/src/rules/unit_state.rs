@@ -405,8 +405,7 @@ pub fn status(
 
 /// [`status`], with each publication unit's teardown readiness, which the
 /// shell computes from the stored desired document
-/// (`Driver::teardown_settings` and
-/// [`crate::rules::teardown_readiness::evaluate`]) without rendering.
+/// (`Driver::teardown_readiness`) without rendering.
 #[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
 pub fn status_with_readiness(
     environment: &EnvironmentName,

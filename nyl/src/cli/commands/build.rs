@@ -85,6 +85,7 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         commit_identity: None,
         cache_dir: prepared.workspace.path().join("cache"),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
         interactive: false,
     };
     let artifacts = match driver

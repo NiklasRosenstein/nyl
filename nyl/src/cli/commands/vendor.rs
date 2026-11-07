@@ -59,11 +59,11 @@ struct VendorCheckArgs {
 
 pub async fn execute(args: VendorArgs) -> Result<()> {
     if args.check {
-        return check(VendorCheckArgs {
+        return Box::pin(check(VendorCheckArgs {
             path: args.path,
             target: args.target,
             progress: args.progress,
-        })
+        }))
         .await;
     }
     let path = args.path.clone();

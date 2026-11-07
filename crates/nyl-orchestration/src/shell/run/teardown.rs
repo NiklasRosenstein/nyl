@@ -12,7 +12,7 @@ use crate::rules::desired::{self as desired_rules, LifecycleOutcome, LifecycleWr
 use crate::rules::lifecycle::{self, Event as LifecycleEvent, Next};
 use crate::rules::teardown::{self as teardown_rules, Pending, TeardownInputs, TeardownOptions};
 use crate::rules::transitions::{self, Applied, Event};
-use nyl_core::orchestration::driver::{DriverError, DriverResult, WaitCompletion};
+use nyl_core::orchestration::driver::{DriverError, DriverResult, IncarnationDirectory, WaitCompletion};
 use nyl_core::orchestration::state::{
     DeletionIntent, DeletionReason, Hold, Request, TeardownProgress, TeardownWaiting,
 };
@@ -50,7 +50,7 @@ pub(super) struct Life {
     /// Units the run tore down, released, retained, or tried to.
     pub(super) attempted: BTreeSet<UnitName>,
     /// Cached preflight results, including successful checks and remnants.
-    pub(super) readiness: BTreeMap<UnitName, crate::rules::teardown_readiness::Readiness>,
+    pub(super) readiness: BTreeMap<UnitName, nyl_core::orchestration::driver::TeardownReadiness>,
     /// The unit after which `--fail-fast` stopped the run.
     pub(super) stopped: Option<UnitName>,
     /// The hold signals the run acted on.
@@ -438,7 +438,7 @@ impl Reconcile<'_, '_, '_> {
             }
             life.readiness.insert(
                 name.clone(),
-                readiness(self.context().drivers, self.environment(), name, unit).unwrap_or_default(),
+                readiness(self.context().drivers, unit).unwrap_or_default(),
             );
         }
     }
@@ -567,7 +567,14 @@ impl Reconcile<'_, '_, '_> {
                         approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
                     })
                     .collect();
-                run_jobs(context, &session.slots, &environment, inputs.project_dir, jobs)
+                run_jobs(
+                    context,
+                    &session.slots,
+                    &environment,
+                    inputs.project_dir,
+                    jobs,
+                    &session.incarnations,
+                )
             };
             for call in results {
                 if call.killed {
@@ -1011,6 +1018,7 @@ impl Reconcile<'_, '_, '_> {
                 completion: Some(completion),
                 approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
             }],
+            &session.incarnations,
         );
         for call in results {
             if call.killed {
@@ -1128,15 +1136,11 @@ impl Reconcile<'_, '_, '_> {
 /// states no requirements.
 pub(super) fn readiness(
     drivers: &DriverSet,
-    environment: &EnvironmentName,
-    name: &UnitName,
     unit: &DesiredUnit,
-) -> Option<crate::rules::teardown_readiness::Readiness> {
+) -> Option<nyl_core::orchestration::driver::TeardownReadiness> {
     let driver = drivers.get(&unit.unit.api_version, &unit.unit.kind)?;
-    match driver.teardown_settings(unit) {
-        Ok(Supported::Supported(settings)) => {
-            Some(crate::rules::teardown_readiness::evaluate(environment, name, &settings))
-        }
+    match driver.teardown_readiness(unit) {
+        Ok(Supported::Supported(readiness)) => Some(readiness),
         Ok(Supported::Unsupported) | Err(_) => None,
     }
 }
@@ -1148,6 +1152,7 @@ fn run_jobs(
     environment: &EnvironmentName,
     project_dir: &str,
     jobs: Vec<Job<'_>>,
+    incarnations: &dyn IncarnationDirectory,
 ) -> Vec<Call> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -1161,7 +1166,7 @@ fn run_jobs(
                     None,
                 )
                 .into_event();
-                scope.spawn(move || call(context, slots, environment, project_dir, job, &progress))
+                scope.spawn(move || call(context, slots, environment, project_dir, job, &progress, incarnations))
             })
             .collect();
         handles.into_iter().map(join).collect()
@@ -1176,6 +1181,7 @@ fn call(
     project_dir: &str,
     job: Job<'_>,
     progress: &nyl_core::orchestration::progress::UnitProgress,
+    incarnations: &dyn IncarnationDirectory,
 ) -> Call {
     let name = job.unit.unit.name.clone();
     let now = context.base.clock.now();
@@ -1269,6 +1275,7 @@ fn call(
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: job.completion,
+        incarnations,
     };
     let outcome = driver.teardown(&execution, job.unit);
     let killed = context.base.faults.at(FaultPoint::AfterEffect, Some(&name)) == FaultAction::Kill;

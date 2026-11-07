@@ -7242,6 +7242,8 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
     Repository::clone(fixture.path().to_str().unwrap(), checkout.path()).unwrap();
     change_partial_api(&checkout);
     let rendered = render_target(&TargetRender {
+        inline: None,
+        owner: None,
         resource_catalogue: nyl::resource_catalogue(),
         worktree: checkout.path(),
         project_dir: checkout.path(),
@@ -7306,21 +7308,42 @@ fn partial_publication_requires_full_target_for_shared_control_changes() {
     assert_eq!(publication_files(&destination), before);
 }
 
+/// Catches a change to the index format: version 3 (compilation metadata and
+/// an optional owning unit incarnation) must read and write back as the same
+/// JSON document, an index without an owner and the released version 2
+/// envelope must stay readable so the first orchestrated publication can
+/// adopt them, and only version 3 may name an owner.
 #[test]
-fn partial_index_format_roundtrips_versioned_golden_and_legacy_envelope() {
+fn index_format_roundtrips_versioned_golden_and_reads_the_ownerless_and_legacy_envelopes() {
     use nyl_render::gitops::reconcile::parse_index;
     use nyl_render::gitops::tree::partial::PublicationSnapshot;
+    let read = |value: &serde_json::Value, origin: &str| parse_index(&serde_json::to_vec(value).unwrap(), origin);
     let golden: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/partial-publication/index-v3.json")).unwrap();
-    let index = parse_index(&serde_json::to_vec(&golden).unwrap(), "index-v3.json").unwrap();
+    let index = read(&golden, "index-v3.json").unwrap();
     assert_eq!(serde_json::to_value(&index).unwrap(), golden);
+    assert_eq!(
+        golden["owner"],
+        serde_json::json!({"environment": "dev", "unit": "kubernetes", "uid": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90"})
+    );
     let metadata: PublicationSnapshot = serde_json::from_value(index.compilation.unwrap()).unwrap();
     assert_eq!(serde_json::to_value(metadata).unwrap(), golden["compilation"]);
-    let mut legacy = golden;
+
+    // Without the owner it is the index `publish-tree` writes.
+    let mut ownerless = golden.clone();
+    ownerless.as_object_mut().unwrap().remove("owner");
+    let index = read(&ownerless, "index-v3.json").unwrap();
+    assert!(index.owner.is_none());
+    assert_eq!(serde_json::to_value(index).unwrap(), ownerless);
+
+    // Version 2 carries neither compilation metadata nor an owner.
+    let mut legacy = ownerless;
     legacy["version"] = 2.into();
     legacy.as_object_mut().unwrap().remove("compilation");
-    let index = parse_index(&serde_json::to_vec(&legacy).unwrap(), "index-v2.json").unwrap();
+    let index = read(&legacy, "index-v2.json").unwrap();
     assert_eq!(serde_json::to_value(index).unwrap(), legacy);
+    legacy["owner"] = golden["owner"].clone();
+    assert!(read(&legacy, "index-v2.json").is_err());
 }
 
 #[test]
@@ -7424,6 +7447,8 @@ fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
     // The shared publication API also keeps the published generation when only
     // imperative settings and the source revision change.
     let rendered = render_target(&TargetRender {
+        inline: None,
+        owner: None,
         resource_catalogue: nyl::resource_catalogue(),
         worktree: fixture.path(),
         project_dir: fixture.path(),

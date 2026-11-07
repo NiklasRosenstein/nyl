@@ -2,12 +2,15 @@
 //! validates about it.
 //!
 //! The spec is `{target, mode?, teardownWait?, releases?}` plus the fields
-//! every unit shares. `releases` is filled by the renderer from the target's
-//! `releaseInputs`, and `teardownSettings` is recorded by the driver at
-//! resolution; neither is authored.
+//! every unit shares. `target` names a static DeploymentTarget, or declares
+//! one inline (`{inline, name?}`), in which case the renderer fills the
+//! target's `name` and `sourceFile`. `releases` is filled by the renderer
+//! from the target's `releaseInputs`, and `teardownSettings` is recorded by
+//! the driver at resolution; neither is authored.
 
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::units::COMMON_UNIT_FIELDS;
+use nyl_render::gitops::units::PublicationTarget;
 use nyl_render::resources::release_inputs::ReleaseKey;
 use serde_json::Value;
 
@@ -39,12 +42,15 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
             "spec has unknown field {field:?}; a KubernetesPublication has target, mode, and teardownWait besides the fields every unit shares"
         ));
     }
-    match spec.get("target") {
-        Some(Value::String(name)) if !name.is_empty() => {}
-        Some(Value::Object(target)) if target.contains_key("inline") => {
-            return Err("spec.target.inline is not supported yet; name a static DeploymentTarget".to_owned())
-        }
-        _ => return Err("spec.target is required and must name a static DeploymentTarget".to_owned()),
+    if spec.get("target").is_none() {
+        return Err(
+            "spec.target is required: name a static DeploymentTarget, or declare one in spec.target.inline".to_owned(),
+        );
+    }
+    match PublicationTarget::from_spec(&Value::Object(spec.clone())) {
+        Ok(PublicationTarget::Static(_)) => {}
+        Ok(PublicationTarget::Inline(inline)) => inline.validate().map_err(|error| error.to_string())?,
+        Err(message) => return Err(message),
     }
     match spec.get("mode") {
         None => {}
@@ -60,6 +66,13 @@ pub(super) fn validate(spec: &Value) -> Result<(), String> {
     }
     if let Some(wait) = spec.get("teardownWait") {
         validate_teardown_wait(wait)?;
+        if wait.get("strategy").and_then(Value::as_str) == Some("observe") {
+            return Err(
+                "NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED: spec.teardownWait.strategy observe needs to read Argo CD, which is not available yet; \
+                 use strategy delay with a duration, or manual and confirm with nyl teardown --confirm-removed"
+                    .to_owned(),
+            );
+        }
     }
     if let Some(releases) = spec.get("releases") {
         let releases = releases
@@ -134,11 +147,42 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_requires_a_static_target() {
+    fn test_validate_requires_a_named_or_inline_target() {
         assert!(invalid(&json!({"mode": "publish"})).contains("spec.target is required"));
-        assert!(invalid(&json!({"target": 1})).contains("spec.target is required"));
-        assert!(invalid(&json!({"target": ""})).contains("spec.target is required"));
-        assert!(invalid(&json!({"target": {"inline": {}}})).contains("spec.target.inline is not supported yet"));
+        assert!(invalid(&json!({"target": 1})).contains("spec.target must name"));
+        assert!(invalid(&json!({"target": ""})).contains("spec.target must name"));
+        assert!(invalid(&json!({"target": {"name": "dev"}})).contains("spec.target must name"));
+        assert!(invalid(&json!({"target": {"inline": {}, "other": 1}})).contains("unknown field \"other\""));
+    }
+
+    fn inline(spec: &Value) -> Value {
+        json!({"target": {"name": "dev-kubernetes", "sourceFile": "nyl/units.yaml", "inline": spec}})
+    }
+
+    /// Catches an inline target accepted although it is no DeploymentTarget,
+    /// which would fail only when the unit renders, and one the renderer has
+    /// not given its name and source file.
+    #[test]
+    fn test_validate_checks_an_inline_target_like_a_discovered_one() {
+        let publication =
+            json!({"repository": {"repoURL": "https://example.invalid/deploy.git"}, "revision": "deploy"});
+        assert!(validate(&inline(&json!({"publication": publication}))).is_ok());
+        assert!(invalid(&inline(&json!({"publication": publication, "bogus": 1}))).contains("bogus"));
+        assert!(invalid(&inline(&json!({}))).contains("publication"));
+        assert!(invalid(&json!({"target": {"inline": {"publication": publication}}})).contains("spec.target.name"));
+    }
+
+    /// Catches `observe` waiting forever, or being accepted and ending every
+    /// teardown as uncertain, while nothing can read Argo CD.
+    #[test]
+    fn test_validate_rejects_the_observe_teardown_wait_with_its_own_code() {
+        let message = invalid(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}}));
+        assert!(
+            message.starts_with("NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED:"),
+            "{message}"
+        );
+        assert!(message.contains("delay") && message.contains("manual"), "{message}");
+        assert!(validate(&json!({"target": "dev", "teardownWait": {"strategy": "manual"}})).is_ok());
     }
 
     /// Catches observe mode being accepted before anything can read Argo CD,
