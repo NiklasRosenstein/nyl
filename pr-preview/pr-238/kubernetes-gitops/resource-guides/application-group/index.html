@@ -210,7 +210,19 @@ customized, even when an allowed path pattern matches. With no allowed paths,
 ordinary release overrides are rejected.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="structural-templating">Structural templating</h2><a class="sl-anchor-link" href="#structural-templating"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Structural templating”</span></a></div>
 <p>The ApplicationGroup <code dir="auto">spec</code> can vary per target or render to no document to
-omit the group. Its API version, kind, and metadata name remain static. Remote
+omit the group, which then counts as <code dir="auto">enabled: false</code> for that target. Any other
+result that is not one ApplicationGroup with the same identity is an error;
+Nyl never drops a selected group silently. Its API version, kind, and metadata
+name remain static, and so do its <code dir="auto">metadata.labels</code>, which targets select on
+before rendering. A document that is valid YAML before rendering may write them
+in any YAML form, with string values and no template syntax. One that is not,
+such as a spec wrapped in <code dir="auto">{% if %}</code>, must write them directly under <code dir="auto">metadata</code>
+as a block mapping of plain <code dir="auto">key: value</code> lines or a one-line <code dir="auto">{key: value}</code>
+mapping, with no template syntax among them, no label after a template line, and
+no anchors, aliases, or merge keys. A statement right after the labels, such as
+the <code dir="auto">{% if %}</code> that wraps the spec, is fine. Nyl rejects any other form instead
+of reading it as fewer labels, and rejects a group whose rendered labels differ
+from the literal ones. Remote
 source coordinates and commit locks must remain statically parseable for
 <code dir="auto">nyl update source-locks</code>.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="see-also">See also</h2><a class="sl-anchor-link" href="#see-also"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “See also”</span></a></div>
