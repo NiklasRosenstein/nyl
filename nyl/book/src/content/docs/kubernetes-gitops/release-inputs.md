@@ -70,6 +70,7 @@ kind: DeploymentTarget
 metadata:
   name: staging
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: shared}
   publication: {repositoryRef: {name: deploy}, revision: deploy, pathPrefix: staging}
   releaseInputs:

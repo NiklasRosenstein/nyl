@@ -45,10 +45,7 @@ fn direct_world() -> World {
             "  destination:\n    server: https://kubernetes.default.svc\n",
             "  destination:\n    server: https://kubernetes.default.svc\n  live: {context: kind}\n",
         )
-        .replace(
-            "  clusterRef: {name: dev}\n",
-            "  clusterRef: {name: dev}\n  reconciler: {direct: {}}\n",
-        );
+        .replace("  reconciler: {argocd: {}}\n", "  reconciler: {direct: {}}\n");
     assert_ne!(text, edited);
     std::fs::write(&platform, edited).unwrap();
     world
@@ -365,10 +362,7 @@ fn test_a_direct_cluster_without_a_context_fails_resolution_before_effects() {
     let text = std::fs::read_to_string(&platform).unwrap();
     std::fs::write(
         &platform,
-        text.replace(
-            "  clusterRef: {name: dev}\n",
-            "  clusterRef: {name: dev}\n  reconciler: {direct: {}}\n",
-        ),
+        text.replace("  reconciler: {argocd: {}}\n", "  reconciler: {direct: {}}\n"),
     )
     .unwrap();
     let driver = KubernetesPublicationDriver::new(catalogue());
@@ -1154,7 +1148,11 @@ async fn test_a_teardown_after_a_reconciler_change_says_to_restore_the_declarati
     tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
     let platform = world.work().join("nyl/platform.yaml");
     let text = std::fs::read_to_string(&platform).unwrap();
-    std::fs::write(&platform, text.replace("  reconciler: {direct: {}}\n", "")).unwrap();
+    std::fs::write(
+        &platform,
+        text.replace("  reconciler: {direct: {}}\n", "  reconciler: {argocd: {}}\n"),
+    )
+    .unwrap();
 
     let identity = identity();
     let deleting = deleting(unit);

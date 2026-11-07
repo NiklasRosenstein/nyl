@@ -153,7 +153,7 @@ impl Driver for KubernetesPublicationDriver {
     }
 
     fn spec_schema(&self) -> schemars::Schema {
-        schemars::json_schema!({
+        let schema = schemars::json_schema!({
             "type": "object",
             "required": ["target"],
             "properties": {
@@ -243,7 +243,14 @@ impl Driver for KubernetesPublicationDriver {
                     "additionalProperties": {"type": "object"}
                 }
             }
-        })
+        });
+        let (inline, definitions) = inline_target_schema();
+        let mut root = Value::from(schema);
+        root["properties"]["target"]["oneOf"][1]["properties"]["inline"] = inline;
+        if let Some(definitions) = definitions {
+            root["$defs"] = definitions;
+        }
+        schemars::Schema::try_from(root).expect("an object schema")
     }
 
     fn validate_spec(&self, spec: &Value) -> Result<(), String> {
@@ -478,4 +485,20 @@ impl Driver for KubernetesPublicationDriver {
     ) -> DriverResult<Supported<ExecStatus>> {
         Ok(Supported::Unsupported)
     }
+}
+
+/// The schema of an inline target, a DeploymentTarget spec, so editors complete
+/// it, and the definitions it references, which belong at the document root
+/// where its `#/$defs/...` references resolve.
+fn inline_target_schema() -> (Value, Option<Value>) {
+    let mut inline = serde_json::to_value(schemars::schema_for!(nyl_render::resources::DeploymentTargetSpec))
+        .expect("a schema serializes");
+    let object = inline.as_object_mut().expect("a spec schema is an object");
+    let definitions = object.remove("$defs");
+    object.remove("$schema");
+    object.insert(
+        "description".to_owned(),
+        json!("A DeploymentTarget spec, rendered with the unit per environment."),
+    );
+    (inline, definitions)
 }

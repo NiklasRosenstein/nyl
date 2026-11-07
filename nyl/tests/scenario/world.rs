@@ -238,6 +238,11 @@ impl World {
         path
     }
 
+    /// `project.git`, for reads that need no `git` process.
+    pub fn repository(&self) -> git2::Repository {
+        git2::Repository::open_bare(self.bare()).expect("project.git opens")
+    }
+
     /// The commit a revision of `project.git` names, such as `main~1`.
     pub fn rev_parse(&self, revision: &str) -> String {
         git_output(&self.bare(), &["rev-parse", revision])

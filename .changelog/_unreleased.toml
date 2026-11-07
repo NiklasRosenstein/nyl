@@ -149,6 +149,12 @@ description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `Kube
 author = "@NiklasRosenstein"
 
 [[entries]]
+id = "a6c115c5-7b48-43d8-adae-ad6f33485a0d"
+type = "breaking change"
+description = "A DeploymentTarget declares its reconciler explicitly: `spec.reconciler` is required and has exactly one member, `argocd` or `direct`, and a target that omits it fails with `NYL-TARGET-RECONCILER-MISSING`. The top-level `spec.argocdRef` is removed (`NYL-TARGET-ARGOCD-REF-REMOVED`); name the ArgoCDInstance in `reconciler: {argocd: {instanceRef: {name: <instance>}}}`, which stays mandatory once any explicit ArgoCDInstance exists (`NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED`), and write `reconciler: {argocd: {}}` for the implicit target-local instance a target without `argocdRef` used to get (naming an instance with none declared is `NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED`; naming both members is `NYL-TARGET-RECONCILER-AMBIGUOUS`). `reconciler: {direct: {}}` is unchanged. The same applies to inline targets (`spec.target.inline`), `nyl init` scaffolds `reconciler: {argocd: {}}`, and `nyl create target` names the project's ArgoCDInstance (`--argocd-instance <name>` is required when several are declared) or takes `--reconciler direct`. Migrate each target: `argocdRef: {name: dev}` becomes `reconciler: {argocd: {instanceRef: {name: dev}}}`, and a target with neither field gains `reconciler: {argocd: {}}`. Published trees and their ownership indexes are unchanged"
+author = "@NiklasRosenstein"
+
+[[entries]]
 id = "083f441d-6b33-4407-9c01-cb10fe49e34b"
 type = "fix"
 description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) resolves `Delete` and `Prune` as Argo CD does: a resource without the option itself takes its Application's `spec.syncPolicy.syncOptions`, so a `Prune=confirm` or `Delete=confirm` that an ApplicationGroup's `syncPolicy.syncOptions` (or a Release's allowed `+syncOptions`) puts on its workload Applications is no longer reported ready while Argo CD holds the deletion, and a resource's own value still wins one option at a time. The finding now covers every rendered resource of a workload Application, not only Namespaces (a resource with `Delete=false`, a CustomResourceDefinition, or `helm.sh/resource-policy: keep` does not hold the deletion), and names the resource or the Application option. The recorded `teardownSettings` list them as `deletionConfirmations` instead of `namespacePrunePolicies`, and `namespaceDeletePolicies` holds each Namespace's effective `Delete`"

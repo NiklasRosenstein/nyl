@@ -375,9 +375,13 @@ fn test_operation() -> Result<()> {
 - `DeploymentTarget.spec.applicationGroupSelector` matches literal
   `ApplicationGroup.metadata.labels` before target rendering. Effective
   `ApplicationGroup.spec.enabled` is evaluated after selection.
-- An explicit `ArgoCDInstance` makes `DeploymentTarget.spec.argocdRef` mandatory for
-  every target. With no explicit instances, each target receives an implicit
-  target-local instance using its workload Cluster and the `argocd` namespace.
+- `DeploymentTarget.spec.reconciler` is required and names exactly one of
+  `argocd` and `direct`; no reconciler is implied. An explicit `ArgoCDInstance`
+  makes `reconciler.argocd.instanceRef` mandatory for every Argo CD target.
+  With no explicit instances, `reconciler: {argocd: {}}` selects an implicit
+  target-local instance using the target's workload Cluster and the `argocd`
+  namespace, and `instanceRef` is refused. The former top-level `argocdRef` is
+  rejected with its fix.
 - Every enabled catalog Application recursively sources `_nyl/catalog`. Its
   defaults require manual sync with apply-only-out-of-sync and server-side
   apply options, cascade deletion in the foreground, and require confirmation

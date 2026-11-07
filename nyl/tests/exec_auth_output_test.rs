@@ -72,6 +72,7 @@ kind: DeploymentTarget
 metadata:
   name: test
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: test
   publication:

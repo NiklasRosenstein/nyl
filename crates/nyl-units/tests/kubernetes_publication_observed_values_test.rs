@@ -113,8 +113,8 @@ impl Live {
             "  live: {context: workload-admin}\n  kubernetes:\n    kubeVersion: 1.31.4",
         );
         text = text.replace(
-            "  clusterRef: {name: dev}\n  applicationGroupSelector",
-            "  clusterRef: {name: dev}\n  argocdRef: {name: control}\n  applicationGroupSelector",
+            "  reconciler: {argocd: {}}\n",
+            "  reconciler: {argocd: {instanceRef: {name: control}}}\n",
         );
         let access = match method {
             Method::Kubernetes => String::new(),

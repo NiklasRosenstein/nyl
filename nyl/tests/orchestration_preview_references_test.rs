@@ -393,6 +393,7 @@ metadata: {name: kubernetes, labels: {scope: preview}}
 spec:
   target:
     inline:
+      reconciler: {argocd: {}}
       clusterRef: {name: dev}
       applicationGroupSelector: {matchLabels: {app: web}}
       catalogApplication: {shared: {name: previews}}
@@ -417,7 +418,7 @@ spec:
     const RELEASE: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web, namespace: web}\n";
     let target = |revision: &str| {
         format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata: {{name: stray}}\nspec:\n  clusterRef: {{name: dev}}\n  applicationGroupSelector: {{matchLabels: {{app: web}}}}\n  publication: {{repositoryRef: {{name: platform}}, revision: {revision}, pathPrefix: stray}}\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata: {{name: stray}}\nspec:\n  reconciler: {{argocd: {{}}}}\n  clusterRef: {{name: dev}}\n  applicationGroupSelector: {{matchLabels: {{app: web}}}}\n  publication: {{repositoryRef: {{name: platform}}, revision: {revision}, pathPrefix: stray}}\n"
         )
     };
     let world = |revision: &str| {

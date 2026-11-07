@@ -635,6 +635,7 @@ fn inline_spec() -> Value {
         "name": "preview",
         "sourceFile": "nyl/platform.yaml",
         "inline": {
+            "reconciler": {"argocd": {}},
             "clusterRef": {"name": "dev"},
             "applicationGroupSelector": {"matchLabels": {"app": "web"}},
             "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "preview"},
@@ -1254,4 +1255,19 @@ fn test_units_claim_their_target_as_an_ownership_scope() {
     let [other] = scopes("prod").try_into().unwrap();
     assert!(first.overlaps(&again));
     assert!(!first.overlaps(&other));
+}
+
+/// Catches the inline target being an untyped object in the unit's schema, so
+/// editors cannot complete it: it is the DeploymentTarget spec, whose
+/// definitions resolve at the schema root.
+#[test]
+fn test_the_unit_schema_types_an_inline_target_as_a_deployment_target_spec() {
+    let schema = serde_json::to_value(KubernetesPublicationDriver::new(catalogue()).spec_schema()).unwrap();
+    let inline = &schema["properties"]["target"]["oneOf"][1]["properties"]["inline"];
+    assert!(inline["properties"]["reconciler"].is_object(), "{inline}");
+    assert!(
+        inline["required"].as_array().unwrap().contains(&json!("reconciler")),
+        "{inline}"
+    );
+    assert!(schema["$defs"]["TargetReconciler"].is_object(), "{schema}");
 }

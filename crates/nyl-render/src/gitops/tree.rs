@@ -17,7 +17,8 @@ use crate::resources::{
     AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
     ArgoCDAccess, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination,
     DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy,
-    RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    RendererConfig, RendererConfigMode, SharedNamespaceOwner, TARGET_ARGOCD_INSTANCE_REF_REQUIRED,
+    TARGET_ARGOCD_INSTANCE_UNDECLARED,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
@@ -2357,9 +2358,11 @@ fn resolve_argocd_instance(
     // never joins the explicit-instance rule; the compile still carries an
     // implicit one for the settings it shares with every target.
     if instance_count == 0 || target.is_direct() {
-        if let Some(reference) = &target.spec.argocd_ref {
+        if let Some(reference) = target.argocd_instance_ref() {
             return Err(NylError::config(format!(
-                "DeploymentTarget {:?} references ArgoCDInstance {:?}, but no ArgoCDInstance resources are defined",
+                "{TARGET_ARGOCD_INSTANCE_UNDECLARED}: DeploymentTarget {:?} references ArgoCDInstance {:?} in \
+                 spec.reconciler.argocd.instanceRef, but no ArgoCDInstance resources are defined; \
+                 write `reconciler: {{argocd: {{}}}}` to use the implicit target-local instance, or declare the ArgoCDInstance",
                 target.metadata.name, reference.name
             )));
         }
@@ -2393,9 +2396,10 @@ fn resolve_argocd_instance(
         });
     }
 
-    let reference = target.spec.argocd_ref.as_ref().ok_or_else(|| {
+    let reference = target.argocd_instance_ref().ok_or_else(|| {
         NylError::config(format!(
-            "DeploymentTarget {:?} must set spec.argocdRef because explicit ArgoCDInstance resources are defined",
+            "{TARGET_ARGOCD_INSTANCE_REF_REQUIRED}: DeploymentTarget {:?} must set spec.reconciler.argocd.instanceRef \
+             because explicit ArgoCDInstance resources are defined; write `reconciler: {{argocd: {{instanceRef: {{name: <instance>}}}}}}`",
             target.metadata.name
         ))
     })?;
@@ -4496,6 +4500,7 @@ metadata:
   labels:
     environment: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   applicationGroupSelector:

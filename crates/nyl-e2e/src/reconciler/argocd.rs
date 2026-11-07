@@ -182,7 +182,7 @@ fn declarations(access: Access, api_server: Option<&str>) -> Declarations {
     Declarations {
         instance_documents: instance_document(access, api_server),
         target_cluster: "dev".to_owned(),
-        target_fields: "argocdRef: {name: dev}".to_owned(),
+        target_fields: "reconciler: {argocd: {instanceRef: {name: dev}}}".to_owned(),
         publication_env: match access {
             // The kubeconfig reads the Applications, and the workload's live fields.
             Access::Kubernetes => vec!["KUBECONFIG".to_owned()],
@@ -313,7 +313,10 @@ mod tests {
             "{platform}"
         );
         assert!(!platform.contains("access:"), "{platform}");
-        assert!(platform.contains("\n  argocdRef: {name: dev}\n"), "{platform}");
+        assert!(
+            platform.contains("\n  reconciler: {argocd: {instanceRef: {name: dev}}}\n"),
+            "{platform}"
+        );
         assert!(units(Access::Kubernetes).contains("env: {passthrough: [\"KUBECONFIG\"]}"));
     }
 

@@ -678,54 +678,46 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
     }
     /// Commits on the environment's desired and observed refs.
     fn state_counts(&self, environment: &str) -> (usize, usize) {
-        let count = |side: &str| {
-            let reference = format!("refs/heads/nyl/{environment}/{side}");
-            let exists = std::process::Command::new("git")
-                .current_dir(self.world.bare())
-                .args(["rev-parse", "--verify", "--quiet", &reference])
-                .output()
-                .is_ok_and(|output| output.status.success());
-            if exists {
-                git_output(&self.world.bare(), &["rev-list", "--count", &reference])
-                    .parse()
-                    .expect("count")
-            } else {
-                0
-            }
-        };
+        let repository = self.world.repository();
+        let count = |side: &str| history(&repository, &format!("refs/heads/nyl/{environment}/{side}")).count();
         (count("desired"), count("observed"))
     }
 
     /// Path to blob of every file on `branch`, empty when it does not exist.
     fn tree(&self, branch: &str) -> BTreeMap<String, String> {
-        let output = std::process::Command::new("git")
-            .current_dir(self.world.bare())
-            .args(["ls-tree", "-r", &format!("refs/heads/{branch}")])
-            .output()
-            .expect("git runs");
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let (meta, path) = line.split_once('\t')?;
-                Some((path.to_owned(), meta.split_whitespace().nth(2)?.to_owned()))
-            })
-            .collect()
+        let repository = self.world.repository();
+        let mut files = BTreeMap::new();
+        let Ok(tree) = repository
+            .revparse_single(&format!("refs/heads/{branch}"))
+            .and_then(|object| object.peel_to_tree())
+        else {
+            return files;
+        };
+        tree.walk(git2::TreeWalkMode::PreOrder, |directory, entry| {
+            if entry.kind() != Some(git2::ObjectType::Tree) {
+                let name = entry.name().expect("UTF-8 path");
+                files.insert(format!("{directory}{name}"), entry.id().to_string());
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .expect("the tree walks");
+        files
     }
 
     /// The YAML summaries of the step's `count` newest transition commits
     /// on the environment's `side` ref, newest first.
     fn commit_summaries(&self, environment: &str, side: &str, count: usize) -> Result<Vec<Value>, String> {
-        let log = git_output(
-            &self.world.bare(),
-            &[
-                "log",
-                &format!("-{count}"),
-                "--format=%B%x00",
-                &format!("refs/heads/nyl/{environment}/{side}"),
-            ],
-        );
-        log.split('\0')
-            .map(str::trim)
+        let repository = self.world.repository();
+        let messages = history(&repository, &format!("refs/heads/nyl/{environment}/{side}"))
+            .take(count)
+            .map(|oid| {
+                let commit = repository.find_commit(oid).expect("a state commit");
+                String::from_utf8_lossy(commit.message_bytes()).into_owned()
+            })
+            .collect::<Vec<_>>();
+        messages
+            .iter()
+            .map(|message| message.trim())
             .filter(|message| !message.is_empty())
             .map(|message| {
                 let body = message
@@ -955,6 +947,17 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
 }
 
 /// Whether `expect` names a key checked against the transition summary.
+/// The commits `reference` reaches, newest first; none when it does not exist.
+fn history<'r>(repository: &'r git2::Repository, reference: &str) -> impl Iterator<Item = git2::Oid> + 'r {
+    let mut walk = repository.revwalk().expect("a revision walk");
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+        .expect("sorting");
+    if let Ok(tip) = repository.refname_to_id(reference) {
+        walk.push(tip).expect("the tip");
+    }
+    walk.map(|oid| oid.expect("a reachable commit"))
+}
+
 fn reads_summary(expect: &Expect) -> bool {
     outcome_sets(expect).iter().any(|(_, set)| set.is_some())
         || list_keys(expect).iter().any(|(_, list)| list.is_some())

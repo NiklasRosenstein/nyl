@@ -93,3 +93,9 @@ set. In that 1:1 form the DeploymentTarget omits `clusterRef`; Nyl resolves the
 same-named Cluster. The target also omits `publication.pathPrefix`, which makes
 the target name its rendered-tree prefix. Pass an explicit empty
 `--path-prefix ''` to publish at the repository root.
+
+The DeploymentTarget declares `reconciler: {argocd: {}}`: Argo CD syncs the tree,
+through the implicit target-local instance. Edit it to
+`reconciler: {argocd: {instanceRef: {name: <instance>}}}` once the project declares an
+ArgoCDInstance, or to `reconciler: {direct: {}}` for Nyl to apply the Releases itself.
+See [Using DeploymentTarget](/nyl/kubernetes-gitops/resource-guides/deployment-target/#reconciler).

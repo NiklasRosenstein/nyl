@@ -2112,6 +2112,7 @@ kind: DeploymentTarget
 metadata:
   name: dev
 spec:
+  reconciler: {{argocd: {{}}}}
   clusterRef: {{name: dev}}
   applicationGroupSelector:
     matchLabels: {{app: web}}
@@ -2313,6 +2314,7 @@ spec:
             name: "dev".to_owned(),
             source_file: PathBuf::from("platform.yaml"),
             spec: json!({
+                "reconciler": {"argocd": {}},
                 "clusterRef": {"name": "dev"},
                 "applicationGroupSelector": {"matchLabels": {"app": "web"}},
                 "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "dev"},
@@ -2398,6 +2400,7 @@ metadata:
 spec:
   target:
     inline:
+      reconciler: {argocd: {}}
       clusterRef: {name: dev}
       applicationGroupSelector: {matchLabels: {app: web}}
       publication: {repositoryRef: {name: platform}, revision: deploy, pathPrefix: '{{ values.prefix }}'}
@@ -2426,6 +2429,7 @@ spec:
             name: "dev-kubernetes".to_owned(),
             source_file: PathBuf::from("units.yaml"),
             spec: json!({
+                "reconciler": {"argocd": {}},
                 "clusterRef": {"name": "dev"},
                 "applicationGroupSelector": {"matchLabels": {"app": "web"}},
                 "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": prefix},

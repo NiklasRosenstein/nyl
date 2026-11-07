@@ -395,7 +395,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: prod}
 spec:
-  argocdRef: {name: prod}
+  reconciler: {argocd: {instanceRef: {name: prod}}}
   releaseInputs:
     web/web:
       image: {fromPromotion: {value: webImage}}   # from the record that supplied prod's source
@@ -490,7 +490,7 @@ spec:
     target:
       inline:
         clusterRef: {name: dev}
-        argocdRef: {name: dev}
+        reconciler: {argocd: {instanceRef: {name: dev}}}
         catalogApplication:
           shared: {name: previews}   # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}

@@ -40,11 +40,13 @@ spec:
         - ServerSideApply=true
 ```
 
-When no ArgoCDInstance resources exist, each target gets an implicit local
-instance using its workload Cluster, the `argocd` namespace, and these defaults.
-`--verbose` logs that choice. Once any explicit instance exists, every target must set
-`spec.argocdRef.name`; this prevents accidental attachment to the wrong control
-plane.
+When no ArgoCDInstance resources exist, a target that declares
+`reconciler: {argocd: {}}` gets an implicit local instance using its workload
+Cluster, the `argocd` namespace, and these defaults. `--verbose` logs that choice.
+Once any explicit instance exists, every Argo CD target must name one with
+`spec.reconciler.argocd.instanceRef.name` (`NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED`);
+this prevents accidental attachment to the wrong control plane. Naming an instance
+that is not declared fails with `NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED`.
 
 The `default` AppProject must exist before the catalog can manage itself. After
 rendering and publishing a target for the first time, seed its parent once:

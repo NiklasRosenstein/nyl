@@ -29,6 +29,7 @@ kind: DeploymentTarget
 metadata:
   name: dev
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: dev}
   applicationGroupSelector:
     matchLabels: {app: web}
@@ -76,6 +77,7 @@ kind: DeploymentTarget
 metadata:
   name: static
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: static}
   applicationGroupSelector:
     matchLabels: {app: web}

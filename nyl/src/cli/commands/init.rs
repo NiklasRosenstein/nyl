@@ -559,7 +559,11 @@ fn build_documents(config: &GitOpsInitConfig) -> Result<Vec<Value>> {
     }
     let cluster = resource("Cluster", &config.cluster_name, cluster_spec);
 
+    // No ArgoCDInstance is scaffolded, so the target uses the implicit
+    // target-local instance; naming an explicit instance is the next step for a
+    // project that adds one.
     let mut target_spec = json!({
+        "reconciler": {"argocd": {}},
         "publication": {
             "repositoryRef": {"name": config.repository_name},
             "revision": config.revision
@@ -765,6 +769,7 @@ mod tests {
             .unwrap();
         assert!(target["spec"].get("clusterRef").is_none());
         assert!(target["spec"]["publication"].get("pathPrefix").is_none());
+        assert_eq!(target["spec"]["reconciler"], json!({"argocd": {}}));
         let group = documents
             .iter()
             .find(|value| value["kind"] == "ApplicationGroup")

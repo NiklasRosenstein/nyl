@@ -45,6 +45,7 @@ metadata:
 spec:
   target:
     inline:
+      reconciler: {argocd: {}}
       clusterRef: {name: preview-cluster}
       applicationGroupSelector: {matchLabels: {app: web}}
       publication:
@@ -105,6 +106,7 @@ kind: DeploymentTarget
 metadata:
   name: dev
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: dev}
   applicationGroupSelector: {matchLabels: {app: web}}
   publication:

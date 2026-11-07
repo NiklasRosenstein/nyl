@@ -255,6 +255,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: dev}
 spec:
+  reconciler: {argocd: {}}
   # existing fields unchanged
   releaseInputs:
     platform/web:
@@ -664,9 +665,10 @@ resolved Release inputs, participates in dependency recording; cache entries are
 disposable and never establish execution success.
 
 Kubernetes delivery is chosen by the DeploymentTarget, never by the unit that
-places it: publication for an external reconciler (Argo CD, the default),
-publication plus observation of it (`observe: {}`), or the **direct
-reconciler** (`reconciler: {direct: {}}`, M10), where Nyl applies the target's
+places it, and the choice is always written down (`reconciler` is required and
+has no default): publication for an external reconciler
+(`reconciler: {argocd: …}`), publication plus observation of it (`observe: {}`),
+or the **direct reconciler** (`reconciler: {direct: {}}`, M10), where Nyl applies the target's
 Releases to its Cluster itself. Observing Argo CD never authorizes Nyl to apply
 or prune its workloads; a direct target has no Argo CD, so nothing else
 applies them. The direct reconciler reuses `nyl apply`'s mechanics (server-side
