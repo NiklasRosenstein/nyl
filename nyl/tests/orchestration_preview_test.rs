@@ -490,3 +490,75 @@ fn test_a_prefix_owned_by_a_live_instance_fences_until_the_instance_is_deleted()
     assert_ne!(taken.exit, 3, "{}\n{}", taken.stderr, taken.stdout);
     assert!(!taken.report.to_string().contains("OWNER-"), "{}", taken.report);
 }
+
+/// `state init --template` says what an instance's teardown would meet before
+/// the instance exists: the publication's unmet readiness requirements, and
+/// that its `manual` `teardownWait` stops an unattended removal, such as an
+/// expiry, after the first phase. A unit that waits for another's outputs
+/// cannot be resolved yet, so only drivers that read their requirements from
+/// the declaration (the fake publication here) show them this early; the
+/// real publication shows them from its first `plan`. Catches a template whose
+/// previews can never be removed unattended being found only when the first
+/// one expires.
+#[test]
+fn test_state_init_warns_what_an_unattended_removal_would_wait_for() {
+    let project = preview_project();
+    let units = project.path().join("nyl/units.yaml");
+    let text = std::fs::read_to_string(&units).unwrap().replace("\r\n", "\n");
+    let declared = text.replace(
+        "  target: {{ values.target | tojson }}\n",
+        "  target: {{ values.target | tojson }}\n  teardownSettings: {catalogPrunes: false}\n",
+    );
+    assert_ne!(text, declared);
+    std::fs::write(&units, declared).unwrap();
+    // The fake kinds, whose publication reads `teardownSettings` from the declaration.
+    let harness = harness::Harness::new(project.path(), true);
+    let init = invoke(
+        &harness,
+        &[
+            "state",
+            "init",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+        ],
+    );
+    assert_eq!(init.exit, 0, "{}\n{}", init.stderr, init.stdout);
+    assert!(
+        init.stderr.contains("NYL-TEARDOWN-CATALOG-MANUAL-SYNC"),
+        "{}",
+        init.stderr
+    );
+    assert!(init.stderr.contains("NYL-TEARDOWN-WAIT-MANUAL"), "{}", init.stderr);
+    assert!(init.stderr.contains("pr-1/kubernetes"), "{}", init.stderr);
+}
+
+/// A `manual` `teardownWait` is read from the declaration, so `state init
+/// --template` warns about it for the real publication before any producer
+/// ran and the unit could resolve; the unit's readiness requirements follow
+/// from the first `plan`. Catches the warning depending on resolution that
+/// a fresh preview cannot have.
+#[test]
+fn test_state_init_warns_a_manual_wait_before_the_publication_resolves() {
+    let project = preview_project();
+    let harness = real_publication_harness(project.path());
+    let init = invoke(
+        &harness,
+        &[
+            "state",
+            "init",
+            "-e",
+            "pr-1",
+            "--template",
+            "preview",
+            "--param",
+            "pr=1",
+        ],
+    );
+    assert_eq!(init.exit, 0, "{}\n{}", init.stderr, init.stdout);
+    assert!(init.stderr.contains("NYL-TEARDOWN-WAIT-MANUAL"), "{}", init.stderr);
+    assert!(init.stderr.contains("pr-1/kubernetes"), "{}", init.stderr);
+}

@@ -21,6 +21,25 @@ use nyl_core::orchestration::driver::TeardownReadiness;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_render::gitops::publication::TeardownSettings;
 
+/// What a removal nobody attends would wait for: a `manual` `teardownWait`
+/// stops it after phase 1 until an operator confirms the removal, so a
+/// template whose instances expire unattended wants `observe` or `delay`.
+pub fn unattended_wait(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    wait: nyl_core::orchestration::driver::WaitStrategy,
+) -> Option<Finding> {
+    (wait == nyl_core::orchestration::driver::WaitStrategy::Manual).then(|| {
+        Finding::new(
+            Code::TeardownWaitManual,
+            format!(
+                "{environment}/{unit}: its teardownWait is manual, so a removal nobody attends, such as the expiry of an instance, stops after the first phase until an operator confirms it"
+            ),
+            "set teardownWait to observe or delay on the publication unit, or confirm each removal with `nyl teardown --confirm-removed`",
+        )
+    })
+}
+
 /// Evaluate a unit's teardown settings against the contract's readiness
 /// table. Each finding names the unit and the setting that fixes it; a
 /// setting Nyl cannot see (`None`) is listed in `not_checked` and never
@@ -114,6 +133,22 @@ mod tests {
 
     fn codes(findings: &[Finding]) -> Vec<Code> {
         findings.iter().map(|finding| finding.code).collect()
+    }
+
+    /// Only a `manual` wait needs an operator, so only it warns an unattended
+    /// removal: catches `observe` and `delay` previews being warned about, and
+    /// the default (manual) passing silently.
+    #[test]
+    fn test_only_a_manual_wait_warns_an_unattended_removal() {
+        use nyl_core::orchestration::driver::WaitStrategy;
+        let warned = unattended_wait(&env(), &name("kubernetes"), WaitStrategy::Manual).unwrap();
+        assert_eq!(warned.code, Code::TeardownWaitManual);
+        assert!(warned.message.contains("dev/kubernetes"));
+        assert!(unattended_wait(&env(), &name("kubernetes"), WaitStrategy::Observe).is_none());
+        let delay = WaitStrategy::Delay {
+            duration: nyl_core::orchestration::time::Duration::from_mins(5),
+        };
+        assert!(unattended_wait(&env(), &name("kubernetes"), delay).is_none());
     }
 
     /// Catches a teardown-ready target being held back or reported with remnants.

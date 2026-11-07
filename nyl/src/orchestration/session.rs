@@ -13,7 +13,8 @@ use nyl_core::orchestration::state::StateLocation;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
 use nyl_orchestration::run_report::{
-    EnvironmentRunReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport, UnitReport,
+    EnvironmentRunReport, InstanceAction, InstanceReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport,
+    UnitReport,
 };
 use nyl_orchestration::shell::run::{RunContext, RunRequest};
 use nyl_orchestration::shell::{Context, Settings};
@@ -62,6 +63,9 @@ pub struct Session {
     /// Whether the command was entered from the instance's own source: it
     /// named `--template`, so the entry checkout is the instance's source.
     entered: bool,
+    /// `--local`: no network access, so no keep refs are fetched or moved and no
+    /// recorded commit is fetched from the origin.
+    offline: bool,
     /// Where every known instance keeps its state, the session's own included.
     instance_locations: BTreeMap<EnvironmentName, StateLocation>,
     /// Instances whose location cannot be computed, and templates whose
@@ -151,6 +155,7 @@ impl Session {
             inventory,
             resolved,
             entered: request.template.is_some(),
+            offline: request.offline,
             instance_locations,
             instance_errors,
         })
@@ -221,9 +226,59 @@ impl Session {
     pub fn sources(&self) -> Result<GitSourceResolver, NylError> {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
         let state = self.store(None)?;
-        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
+        let mut sources = GitSourceResolver::new(&self.resolved.git_dir, auth)
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
-            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root()))
+            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root());
+        // A recorded commit the clone lacks is fetched first through the instance's keep ref,
+        // then by its id from the clone's origin.
+        if !self.offline {
+            sources = sources.with_origin_fetch();
+        }
+        if let Some(prefix) = self.keep_prefix() {
+            sources = sources.with_kept_source(prefix);
+        }
+        if let Some(reference) = self.source_ref() {
+            sources = sources.with_source_ref(reference);
+        }
+        Ok(sources)
+    }
+
+    /// The prefix of the keep refs the instance this session works on
+    /// recorded, read from its `keepId`: `None` for a declared environment, an
+    /// instance that kept nothing, and a run without network access. Contract:
+    /// [Instances](../../../design/orchestration-core.md#instances), `keepSource`.
+    pub fn keep_prefix(&self) -> Option<String> {
+        let id = self.resolved.instance.as_ref()?.record.as_ref()?.keep_id.as_ref()?;
+        (!self.offline).then(|| nyl_orchestration::rules::keep::keep_prefix(id))
+    }
+
+    /// The `--source-ref` hint of the instance this session works on, as data
+    /// from the command line or the instance's record: the ref to fetch by name
+    /// from `origin` when the host will not serve the recorded commit by its
+    /// id. `None` for a declared environment, an instance that recorded none,
+    /// and a run without network access. Contract:
+    /// [Instances](../../../design/orchestration-core.md#instances).
+    pub fn source_ref(&self) -> Option<String> {
+        let instance = self.resolved.instance.as_ref()?;
+        (!self.offline)
+            .then(|| {
+                instance
+                    .source_ref
+                    .clone()
+                    .or_else(|| instance.record.as_ref()?.source_ref.clone())
+            })
+            .flatten()
+    }
+
+    /// Whether a write of the instance's record keeps its source commit: the
+    /// template says `keepSource` and the run has network access.
+    pub fn keeps_source(&self) -> bool {
+        !self.offline
+            && self
+                .resolved
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.terms.keep_source)
     }
 
     /// Wire explicit working-file capture through the shared source shell.
@@ -298,7 +353,7 @@ impl Session {
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
         let mut report = self.run_with(wiring, store, identity, request, operation)?;
-        self.annotate_report(&mut report);
+        self.annotate_report(&mut report, wiring.clock.now());
         Ok(report)
     }
 
@@ -336,9 +391,42 @@ impl Session {
         Ok(operation(&context, request))
     }
 
-    /// Add source repository context and environment-resolution warnings to the report.
-    pub fn annotate_report(&self, report: &mut RunReport) {
+    /// The instance's lifecycle as its record says at `now`, for a report.
+    pub fn instance_report(&self, now: nyl_core::orchestration::time::Timestamp) -> Option<InstanceReport> {
+        let instance = self.resolved.instance.as_ref()?;
+        let expires_at = instance.record.as_ref().and_then(|record| record.expires_at);
+        Some(InstanceReport {
+            template: instance.template.clone(),
+            expires_at,
+            expired: nyl_orchestration::rules::expiry::expired(expires_at, instance.terms.ttl, now),
+            action: None,
+        })
+    }
+
+    /// Add source repository context, environment-resolution warnings, and
+    /// an instance's lifecycle to the report; an expired instance warns that
+    /// its next reconcile removes it.
+    pub fn annotate_report(&self, report: &mut RunReport, now: nyl_core::orchestration::time::Timestamp) {
         for environment in &mut report.environments {
+            if environment.instance.is_none() {
+                environment.instance = self.instance_report(now);
+            }
+            if let Some(instance) = environment.instance.as_ref().filter(|instance| instance.expired) {
+                if instance.action.is_none() && report.kind != ReportKind::ReconcileReport {
+                    environment.warnings.push(Finding::new(
+                        Code::InstanceExpired,
+                        format!(
+                            "{} expired at {}; the next reconcile removes it",
+                            environment.name,
+                            instance.expires_at.map_or_else(String::new, |at| at.to_rfc3339())
+                        ),
+                        format!(
+                            "keep it with `nyl reconcile -e {} --renew`, or remove it now with `nyl state delete -e {0} --teardown`",
+                            environment.name
+                        ),
+                    ));
+                }
+            }
             if environment.source_commit.is_some() {
                 environment.source_repository = Some(self.resolved.source_repository.clone());
             }
@@ -399,6 +487,7 @@ impl Session {
             reapply: options.reapply,
             fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
+            keep_prefix: self.keep_prefix(),
         })
     }
 }
@@ -624,8 +713,41 @@ fn table(report: &RunReport) -> String {
                 styled(commit.as_ref(), Style::Dim)
             );
         }
+        if let Some(instance) = &environment.instance {
+            let _ = writeln!(
+                text,
+                "  {} {}",
+                styled("instance:", Style::Dim),
+                instance_line(instance)
+            );
+        }
     }
     text
+}
+
+/// The instance line of the table form: its template, expiry, and what the command did about it.
+fn instance_line(instance: &InstanceReport) -> String {
+    let mut line = format!("template {}", instance.template);
+    match instance.expires_at {
+        Some(at) if instance.expired => {
+            let _ = write!(line, ", expired at {}", at.to_rfc3339());
+        }
+        Some(at) => {
+            let _ = write!(line, ", expires at {}", at.to_rfc3339());
+        }
+        None => line.push_str(", never expires"),
+    }
+    if let Some(action) = instance.action {
+        let text = match action {
+            InstanceAction::Extended => "expiry extended",
+            InstanceAction::Removed => "removed",
+            InstanceAction::RemovalPending => "removal waits for --allow-teardown",
+            InstanceAction::RemovalIncomplete => "removal incomplete",
+            InstanceAction::Busy => "busy: another run holds its lease",
+        };
+        let _ = write!(line, "; {text}");
+    }
+    line
 }
 
 /// A table cell for a value that serializes as a string, such as a receipt

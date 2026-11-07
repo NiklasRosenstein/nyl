@@ -663,6 +663,23 @@ pub trait SourceResolver: Send + Sync {
     }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
+    /// Keep `commit` fetchable with the keep ref `reference` of this
+    /// repository, a ref of its own for this commit that is never moved:
+    /// created when absent, left alone when it already names `commit`, and an
+    /// error when it names another commit. Contract:
+    /// [Instances](../../../../design/orchestration-core.md#instances),
+    /// `keepSource`. A resolver that keeps nothing succeeds without effect.
+    fn keep(&self, reference: &str, commit: &CommitId) -> SourceResult<()> {
+        let _ = (reference, commit);
+        Ok(())
+    }
+    /// Remove the keep refs under `prefix` (`<prefix>/<commit>`), except the
+    /// one for `except`, and return the refs it left alone because they do not
+    /// name the commit their name says: they are not this instance's.
+    fn release(&self, prefix: &str, except: Option<&CommitId>) -> SourceResult<Vec<String>> {
+        let _ = (prefix, except);
+        Ok(Vec::new())
+    }
 }
 
 /// Local source-cache refs for worktree snapshots, keyed by base commit and tree.

@@ -48,7 +48,7 @@ spec:
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
     path: ''                                # optional directory within the refs; default the root
-    coordinationRefPrefix: refs/nyl/        # where leases, runs, signals, evidence, and keep refs live
+    coordinationRefPrefix: refs/nyl/        # where leases, runs, signals, and evidence live
     admissionRef: nyl/production/admission  # optional (M8); default the desired ref
   source: {revision: main, commit: 3e7b…}   # optional; omitted: the entry worktree's commit (see Source)
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
@@ -104,8 +104,7 @@ spec:
 - `coordinationRefPrefix` places the refs Nyl creates and deletes on every
   run, `<prefix><env>/lease`, `<prefix><env>/runs/<run-id>`,
   `<prefix><env>/signals/<run-id>`, and `<prefix><env>/evidence/<run-id>`
-  (see [Runs and leases](#runs-and-leases)), and a template instance's keep
-  ref, `<prefix><env>/keep`. The default custom
+  (see [Runs and leases](#runs-and-leases)). The default custom
   namespace keeps them out of the branch list and out of push-triggered CI;
   a branch prefix such as `refs/heads/nyl-run/` suits hosts that reject custom
   refs. Changing it goes through `nyl state move` (see
@@ -229,6 +228,36 @@ spec:
   `reconcile -e <instance> --template <name> --param …` moves an instance's
   recorded commit to its entry worktree, so a job run from another checkout
   never moves an instance.
+- A recorded source commit that the entry clone lacks is looked up in the
+  retained worktree snapshots of the state repository, then fetched through
+  the instance's keep ref (`keepSource`), and then by its exact id from the
+  clone's `origin`, with the credentials of the other Git fetches, and last,
+  for a host that will not serve a commit by its id, through the instance's
+  recorded `sourceRef` (below). Only the clone's `origin` remote is contacted and only
+  the recorded id, or the recorded ref, is requested; a failed
+  fetch leaves the commit missing, which the caller reports, and `--local`
+  fetches nothing.
+- `--source-ref <ref>` on `nyl reconcile -e <instance> --template <name>` and
+  `nyl state init --template`, the commands that record an instance's commit,
+  records a full ref name of the source repository's `origin` in the
+  instance's `state.yaml` as `sourceRef`, next to `sourceCommit`. It is a
+  hint, validated by its syntax alone (a full name under `refs/` following
+  `git check-ref-format`; `NYL-INSTANCE-OPTION-INVALID` otherwise, before
+  anything is written) with no network check. It is a flag of the job and not
+  a field of the template, so a template is not specific to a pull request
+  and works the same locally. A run that passes it overwrites the recorded
+  ref; a run without it keeps the recorded one. The resolver is given the
+  recorded ref as data from the instance record (never read globally), and
+  after the local clone, the keep ref, and the fetch by id all miss, fetches
+  that ref by name from `origin` with the same credentials, online only,
+  writing no ref. It then checks whether the recorded commit is present; it
+  never uses the ref's tip. If the commit is still absent the caller reports
+  it missing as before (`NYL-SOURCE-UNAVAILABLE`), so a ref that moved on, or
+  one the host dropped, can never substitute another commit for the recorded
+  one. Rendering and teardown always use the recorded commit. A host that keeps a pull request's commits reachable after
+  its branch is gone (GitHub's `refs/pull/<n>/head`, GitLab's
+  `refs/merge-requests/<n>/head`) therefore serves a closed job running on a
+  checkout of the default branch.
 - An EnvironmentTemplate takes the same field and may template it from
   `params`, for example `revision: 'refs/pull/{{ params.pr }}/merge'`.
 - `--source <rev>` overrides S for one single-environment `plan`,
@@ -237,7 +266,9 @@ spec:
   changes the environment's `source`: the run records it as that run's S, as
   every run does, and the next run uses the environment's source again. It
   must satisfy the same reachability rules, the transition commit marks it as
-  an override, and a fleet reconcile rejects it.
+  an override, and a fleet reconcile rejects it. A full commit id that the
+  entry clone lacks is fetched from the clone's `origin` like a recorded
+  commit.
 - `reconcile -e <env> --worktree` snapshots Git-visible tracked and untracked
   working files once, with deletions and executable modes. It leaves HEAD and
   the user's index untouched, preserves internal symbolic links without following
@@ -1121,7 +1152,15 @@ Nyl reports unmet requirements where they matter:
   `deletionPolicy` is `Teardown`, including every unit of a template instance,
   naming each unmet requirement and the setting that fixes it.
 - `nyl state init --template` warns when the template contains publication
-  units that are not teardown-ready, because instances are always torn down.
+  units that are not teardown-ready, because instances are always torn down,
+  and when a unit's teardown would wait for an operator that an unattended
+  removal, such as an expiry, lacks (`teardownWait: manual`,
+  `NYL-TEARDOWN-WAIT-MANUAL`). The units render at the entry checkout and
+  resolve against the instance's state like a `plan`, so a unit that waits for
+  the outputs of another cannot show its requirements before its producers
+  ran, and `plan` and `reconcile` show them from then on. A driver reports what
+  an unattended removal would wait for in `TeardownReadiness::unattended`,
+  which never blocks.
 - `nyl get units -e <env> -o wide` and `nyl status` show teardown readiness per
   publication unit (`ready`, or `incomplete: <reasons>`).
 - Every teardown runs a preflight listing what would remain, however it was
@@ -1166,7 +1205,7 @@ spec:
     observedRef: nyl/previews
     path: '{{ environment.name }}'       # all instances share one ref
   allowUnprotectedSource: true           # instances run from pull request branches
-  keepSource: true                       # default: keep each instance's source commit fetchable
+  # keepSource: true                     # opt in: keep refs for instances that outlive their branches
   deletionPolicy: Teardown               # forced for every unit kind that supports teardown
   allowTeardown: true                    # omission teardown without --allow-teardown
   ttl: 7d
@@ -1202,6 +1241,10 @@ project; credentials do, and that is a property of the pipeline:
 - Teams that want template changes reviewed before they take effect protect
   the template files with code-owner review; Nyl still reads the template at
   the instance's source commit.
+- A template that sets `keepSource: true` makes the source repository take
+  the instances' keep refs (`refs/nyl-keep/*`, see [Instances](#instances)),
+  so its preview jobs need push access to that namespace. By default nothing
+  is pushed to the source repository.
 - State may live in one ref for every environment through `state.path`, in
   one ref per template, or in one ref per instance. Branch protection follows
   the layout: the more state a ref holds, the more a preview credential can
@@ -1246,11 +1289,27 @@ nyl get environments                                         # declared environm
   `state.path` that ends in `{{ environment.name }}` and refs and a repository
   that do not read the name. A template whose refs depend on the name has its
   instances found by name only, and `get environments` and the fleet job do not
-  list them. Changing a template's `state` would hide the
-  instances at the old location from the fleet job and the close jobs, so
-  `plan` and `reconcile` refuse such a change while instances exist at the
-  old location and name `nyl state move --template <name> --from …`, which
-  moves every instance like `state move` moves one environment.
+  list them. Changing a template's `state` hides the instances at the old
+  location from the fleet job, the close jobs, and every command that names
+  one (`NYL-ENVIRONMENT-UNKNOWN`), because the old location is recorded
+  nowhere in source, and they never expire. Change the `state` and run
+  `nyl state move --template` in the same change, before the scheduled job
+  runs from the new definition; `nyl state move --template <name> [--state-path …
+  --desired-ref … --observed-ref … --coordination-refs … --from …]`, with the
+  old location's options like `state move`, moves every instance found by
+  listing the old location, one `state move` each. The old `--state-path`
+  ends in `{{ environment.name }}` like the template's, and the old location
+  must be listable the same way. Without any old-location option it refuses
+  (`NYL-STATE-LOCATION-MISMATCH`); naming no instance at the old location
+  refuses too (`NYL-STATE-MISSING`), and moving again finds the instances
+  already there. A template renamed in source leaves its instances' records
+  naming the old one, so no command finds them (`NYL-INSTANCE-TEMPLATE-UNKNOWN`):
+  `nyl state move --template <new> --from-template <old>` records the
+  instances found at the new template's location as the new template's, one
+  transition commit each, and combined with old-location options moves them
+  first. An instance renders at its recorded source commit, which predates the
+  rename, so its next run is its pull request job's `reconcile --template
+  <new>`, which moves the recorded commit; closing it needs no source.
 - `state init --template` records its entry worktree's commit as the
   instance's source commit (`sourceCommit` in `state.yaml`), so a later plain
   run of the instance has one: it renders at that commit and records
@@ -1317,14 +1376,64 @@ nyl get environments                                         # declared environm
   commit trailers or history. The recommended layout for previews is a
   shared ref with `state.path`, so an instance's state is a directory;
   separate refs per instance need permission to create refs matching the
-  template's ref pattern.
-- With `keepSource` (the default), Nyl keeps each instance's latest source
-  commit fetchable with a keep ref in the source repository,
-  `refs/nyl/<instance>/keep` under the default `coordinationRefPrefix`, moved
-  by every reconcile and removed by `state delete`. Teardown after the pull
-  request branch is deleted or squash-merged therefore still finds its source.
-  It needs push access to that ref pattern. `keepSource: false` turns it off, and the
-  pipeline should then remove instances before their branches disappear.
+  template's ref pattern. A template instance is the exception for its pull
+  request job: `reconcile -e <instance> --template <name>` treats an instance
+  whose state was deleted as missing and creates it again, as a new instance
+  under `maxInstances`, so a pull request whose preview the fleet job removed
+  gets it back with its next push; `state init --template` still needs
+  `--fresh`. Whether the record is deleted is decided under the lease, on the
+  record the write reads: of two jobs that saw it deleted, the first restarts
+  the instance and the second finds it live and only updates it, so the second
+  never drops the first's documents.
+- By default Nyl pushes nothing to the source repository: an instance is torn
+  down by the pull request closed job, which runs `state delete -e <instance>
+  --teardown` while the recorded commit is still reachable. With `keepSource:
+  true` (an opt-in, for previews that may expire, through the fleet, long after
+  their branches are gone), Nyl keeps each instance's recorded source commit
+  fetchable with a keep ref in the source repository, so teardown after the
+  pull request branch is deleted or squash-merged still finds its source. The
+  refs are `refs/nyl-keep/<keepId>/<commit>`, one per commit and never moved:
+  - `<keepId>` is minted from the injected id generator when an instance first
+    keeps a commit and recorded in its `state.yaml` (`keepId`); every lookup and
+    release reads it from the record. It is unique across projects of one
+    source repository, and survives moves of the state and of the project
+    directory and renames of the template, because nothing about the name is
+    derived from where the instance lives. A restarted instance (a deleted
+    one that starts over) mints a new one. The namespace does not depend on
+    `coordinationRefPrefix`, and it is reserved: a state ref or prefix inside it
+    is `NYL-STATE-REF-CONFLICT`.
+  - `state init --template` and `reconcile --template` create the ref of the
+    commit they record under the lease, past every refusal and before the
+    record is written, and remove the instance's other refs after the record is
+    committed. The recorded commit is therefore never unkept, a refused write
+    pushes nothing, and a ref that already names another commit is an error,
+    never overwritten.
+  - A push the source repository refuses refuses the job
+    (`NYL-INSTANCE-KEEP-FAILED`, exit 1) before any state is written, rather
+    than promise a teardown it cannot deliver. The keep refs need push access
+    to `refs/nyl-keep/*`, which a read-only token does not have, such as
+    GitHub's default `contents: read` or a fork pull request's; the finding
+    names both ways out: grant the access, or leave `keepSource` off. A
+    run with `--local` pushes nothing.
+  - Every command that needs a recorded commit the clone lacks fetches it from
+    its ref. `state delete` removes the instance's refs after its deleted
+    marker is committed, and leaves a ref that does not name the commit its
+    name says (not this instance's) with a warning; a ref that cannot be
+    removed is a warning too, because it is no reason to keep the state.
+- The recommended teardown is the pull request closed job: it checks out the
+  default branch and runs `state delete -e <instance> --teardown`, with no
+  `--source`. The recorded commit is the pull request's last head, which the
+  host keeps reachable through its pull request ref after the branch is
+  deleted or squash-merged, and Nyl fetches it by id from the clone's `origin`
+  remote (see [Source](#source)); no keep ref is needed. The fleet job fetches
+  the same way, so an expired preview whose branch is gone is removed without
+  keep refs on such a host. The preview job must therefore record the pull
+  request's head: it checks out `${{ github.event.pull_request.head.sha }}`
+  on GitHub, because the default checkout of a `pull_request` event is the
+  synthetic merge commit `refs/pull/<n>/merge`, which the host does not keep
+  once the pull request closes. A host without pull request refs, history the
+  host may prune before an instance expires, and a job run with `--local` need
+  `keepSource: true` or `--source`.
 - When an instance's recorded source commit cannot be fetched, teardown fails
   with a message suggesting `--source <revision>`. `nyl teardown --all` and
   `nyl state delete --teardown` accept `--source` to take the units' source
@@ -1346,12 +1455,12 @@ Implementation status (M5): a template's `values`, `source`, and
 `protectedRefs` strings render with `params` and `environment.name` when an
 instance is loaded, so a `values.target` object carries concrete prefixes and
 names into a unit's `target: {{ values.target | tojson }}`. `deletionPolicy`,
-`allowTeardown`, and `ttl` (`expiresAt` is recorded by `state init --template`)
-are implemented. Not yet implemented: removal of expired instances and the
-`--renew`, `--no-extend`, and `--make-room` flags, `maxInstances`, `keepSource`
-and its keep refs, `catalogApplication.shared`, `nyl state move --template`,
-the fleet `reconcile --template` without `-e`, and cross-environment references
-to declared environments.
+`allowTeardown`, `ttl`, `maxInstances`, `keepSource` with its keep refs,
+sliding expiry and the removal of expired instances, `--renew`, `--no-extend`,
+`--make-room`, the fleet `reconcile --template` without `-e`, and `nyl state
+move --template` are implemented. Not yet implemented:
+`catalogApplication.shared`, and cross-environment references to declared
+environments.
 
 ### Template changes
 
@@ -1371,7 +1480,15 @@ that pull request would deploy, whichever job reconciles it.
   [Expiry](#expiry)). An instance whose lease is held is skipped and reported
   as `busy`, not as a failure, because another run is reconciling it; the
   exit category reflects only the instances the fleet run processed, and a
-  busy expired instance is removed by a later run. It never renders an
+  busy expired instance is removed by a later run. The fleet finds the
+  instances by listing the template's state location, so it needs a listable
+  one (`NYL-INSTANCE-NOT-LISTABLE`); an unreadable listing fails the run
+  (`NYL-STATE-UNAVAILABLE`) instead of sweeping what it could not see. It
+  names no source: `--source` and `--worktree` are rejected, because each
+  instance runs at its own recorded commit. The removal of an expired instance
+  does not render its source, so a recorded commit that is gone fails only the
+  teardown that needs its files (`--source <revision>` supplies them) and
+  never the sweep of the other instances. It never renders an
   instance's units with a template from another commit, because that
   combination was never reviewed together; pulling the default branch into
   every pull request remains a pipeline choice.
@@ -1379,34 +1496,76 @@ that pull request would deploy, whichever job reconciles it.
 ### Expiry
 
 Nyl has no daemon, so expiry works through ordinary CI runs, and a continuous
-runner (M7) could add timely enforcement later:
+runner (M7) could add timely enforcement later. Whether an instance is expired
+is decided from its record's `expiresAt`, the template's `ttl`, and the
+injected clock (`nyl_orchestration::rules::expiry`); a template without `ttl`
+never expires its instances, whatever an older record says. An instance is
+expired from the moment `expiresAt` is reached.
 
 - `state.yaml` records `expiresAt`. Only activity on one instance extends it:
-  `state init --template` and every `reconcile -e <instance>` without
-  `--no-extend` move it to now plus `ttl` when they start, whether or not the
-  run succeeds, so an active pull request keeps its preview even while its
-  preview fails.
+  `state init --template`, `reconcile -e <instance> --template <name>`, and
+  every other `reconcile -e <instance>` that finds the instance live and is not
+  `--no-extend` move it to now plus `ttl` when they start, in a commit of its
+  own (operation `state-renew`, none when the time does not change), whether or
+  not the run succeeds, so an active pull request keeps its preview even
+  while its preview fails. `plan`, `status`, `get`, and `teardown` never
+  extend it.
 - Expiry is the declared intent to clean up, so every reconcile that finds an
-  instance expired removes it instead of reconciling it: `reconcile -e
-  <instance>`, `reconcile -e <instance> --no-extend`, and `reconcile
-  --template <name>`. Removal runs `teardown --all` and then `state delete`.
-  The template's `allowTeardown` authorizes that teardown; without it, the
-  instance is reported as pending teardown and the run exits 2. An instance
-  whose teardown readiness is incomplete is reported and left in place unless
-  the run passes `--allow-incomplete`. Removal also waits for each
-  publication's `teardownWait`: with the `manual` default of a unit without `observe`,
-  it stops after phase 1 until `--confirm-removed`, so templates meant to
-  expire unattended use `observe` or `delay`, and `state init --template`
-  warns otherwise. `status` and `get environments` show expired instances
-  until they are removed.
-- `--renew` is the only way to keep an expired instance: it extends the expiry
-  and then reconciles.
+  instance expired removes it instead of reconciling it, checking expiry
+  before it extends anything: `reconcile -e <instance>`, `reconcile -e
+  <instance> --no-extend`, and `reconcile --template <name>`. Removal runs
+  `teardown --all` and then `state delete`, with the teardown's units
+  recorded as deleting with the reason `expired`. Nothing is deleted while a
+  unit has an incarnation, a teardown in progress, or a recorded request, so
+  the state stays until every teardown completed, and the run's report says
+  what remains (`action: removal-incomplete`; exit 2 for waits, 3 and 4 for a
+  failed or uncertain teardown). The teardown starts only when the template's
+  `allowTeardown` (read at the entry checkout, which is the scheduled job's
+  trusted one) or `--allow-teardown` authorizes it; without either, the units
+  are recorded as pending teardown, the instance is reported as pending
+  (`action: removal-pending`, `NYL-INSTANCE-REMOVAL-PENDING`), and the run exits
+  2. The report says pending only when units were held back for that reason,
+  never for a lease another run holds or an instance renewed meanwhile. An instance whose teardown readiness is incomplete is reported and left in
+  place unless the run passes `--allow-incomplete`, and the options of `reconcile`
+  that gate a teardown (`--allow-dependents`, `--approve`, `--source`) apply to
+  it, except that an eviction by `--make-room` inherits neither `--source` nor
+  `--approve`, which name the new pull request's instance. Removal also waits for each publication's `teardownWait`: with the
+  `manual` default of a unit without `observe`, it stops after phase 1 until
+  `--confirm-removed`, so templates meant to expire unattended use `observe`
+  or `delay`. A removal stuck in phase 1 needs `--confirm-removed` (or
+  `teardown --all` run again once the wait is over); until then the preview
+  is half torn down, every reconcile of it, the pull request job's included,
+  exits 2, and nothing recreates its workloads. `state init --template` warns otherwise
+  (`NYL-TEARDOWN-WAIT-MANUAL`, read from the unit's declaration, so it shows
+  before any producer ran; the unmet readiness requirements of the unit are
+  shown for the units that can resolve then, and by `plan` for the rest). The decision is made
+  from the record the command read and repeated under the lease: a record
+  whose `expiresAt` changed since (another run renewed or removed it) leaves
+  everything in place (`NYL-INSTANCE-RENEWED`, exit 2). `status`, `plan`, and
+  `get environments` show expired instances until they are removed
+  (`NYL-INSTANCE-EXPIRED` warning).
+- `--renew` is the only way to keep an expired instance by a plain
+  reconcile: it extends the expiry and then reconciles.
+- A renewal, whichever command renews, undoes a removal that was recorded and
+  has not started: in the commit that moves the expiry, under the lease, the
+  units that `teardown --all` marked as deleting for the reason `expired`,
+  pending, are active again (lifecycle event `renewed`; the table does not
+  return `expired` deletions on any other event). A teardown that has started
+  continues, because effects exist that only the teardown ends: the next
+  reconcile completes it, and the units are created again after it completes.
+  Without this, a preview renewed after an unauthorized removal would stay
+  fenced, and a later run with `--allow-teardown` would tear a live preview
+  down.
 - `reconcile -e <instance>` extends a live instance's expiry;
   `reconcile -e <instance> --no-extend` reconciles it as maintenance without
   extending; `reconcile --template <name>` never extends.
 - `--renew` and `--no-extend` conflict and are rejected together. Both are
   rejected for declared environments, which have no expiry, and for the fleet
-  reconcile, `--template` without `-e`.
+  reconcile, `--template` without `-e` (`NYL-INSTANCE-OPTION-INVALID`, exit 1),
+  as are `--param` and `--make-room` there. `--no-extend` is also rejected with
+  `--template`, which is activity by definition; `--renew` with it is
+  redundant and accepted. Each of these is the coded finding, not a usage error,
+  as are `--renew` and `--no-extend` with a label or group selection.
 - The pull request job's `reconcile -e <instance> --template <name> --param …`
   is activity by definition, so it renews an expired instance instead of
   removing it: updating an active pull request never removes its preview.
@@ -1415,12 +1574,35 @@ runner (M7) could add timely enforcement later:
   updates its parameters when they changed, extends the expiry, and
   reconciles, so updating an active pull request never removes its preview. `state delete --teardown` removes one instance explicitly,
   expired or not.
-- At `maxInstances`, `state init --template` refuses with exit 2 and names
-  the expired instances that could be removed. Removing them is the scheduled
+- `maxInstances` counts the template's live instances, expired ones included
+  until they are removed, and limits creation only: updating an existing
+  instance is never refused, and a deleted one starts over (`--fresh`) as a
+  new one. It needs the instances to be listable, so `nyl validate` rejects a
+  template with `maxInstances` whose state location depends on the instance
+  name, and creation refuses (`NYL-INSTANCE-NOT-LISTABLE`). At `maxInstances`,
+  `state init --template` and the pull request job's `reconcile --template`
+  refuse with exit 2 (`NYL-INSTANCE-LIMIT`) and write nothing, naming the
+  expired instances that could be removed. Removing them is the scheduled
   fleet job's work, never a side effect of another pull request's job:
   hitting the limit is a project configuration concern, not the new pull
   request's. `--make-room` opts in to removing expired instances first, the
-  same way the fleet job does, and then creating the instance.
+  same way the fleet job does (the same removal, authorized by
+  `allowTeardown` or `--allow-teardown`, with `--allow-incomplete` for
+  incomplete readiness), and then creating the instance. It removes the
+  expired instances with the oldest `expiresAt` first and only as many as the
+  new instance needs, never a live instance. When too few instances are
+  expired, or a removal does not finish, nothing is created and the refusal
+  says which (`NYL-INSTANCE-LIMIT`, exit 2). An expired instance renewed in
+  the meantime is skipped, and a removal that does not finish is left, and
+  `--make-room` goes on to the next expired instance until enough are removed.
+  The removal of another pull request's preview is authorized by
+  `allowTeardown` of the template as this job's checkout declares it, the
+  trust point of the preview credentials: Nyl enforces no boundary between pull
+  requests (see [Trust and credentials](#trust-and-credentials)), and a job
+  that cannot be trusted with that cannot hold credentials that reach other
+  previews. Creation under a limit is not
+  atomic across jobs: two jobs creating at once can exceed it by one, which
+  the next `--make-room` or fleet run absorbs.
 
 A typical pipeline runs `reconcile -e <instance> --template <name> --param …`
 when a pull request opens or updates, `state delete --teardown` when it closes, and
@@ -1544,7 +1726,7 @@ files cover every version, and a reader rejects a version it does not know.
 
 | Kind | Location | Content |
 | --- | --- | --- |
-| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
+| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `sourceCommit`, `keepId`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
 | `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, `admission` with the generation, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
 | `DeploymentAdmission` (M8) | `admission.yaml` on the admission ref | The current generation: ID, sequence, source commit and how it was chosen, semantic graph digest, and normalized authorizing actor, request, and reason; only a newer admission replaces it (see [Deployment admission](ci-execution.md#deployment-admission)) |
 | `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file; a held marker is a DesiredUnit with `lifecycle.state: held` and only the unit's environment and name (see [Deletion](#deletion)) |
@@ -2001,7 +2183,7 @@ Nyl-Version: 0.7.0
   of the summary and of each receipt.
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
   `recover`, `detect-drift`, `attest`, `observe`, `exec`, `ci-admit`, `state-init`,
-  `state-move`, `state-delete`,
+  `state-renew`, `state-move`, `state-delete`,
   and `state-forget`. `lease break` writes only the lease ref; the
   transition commit that imports the broken run lists the break under
   `leaseBroken` with who broke it and why.

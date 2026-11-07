@@ -21,6 +21,17 @@ use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_render::gitops::GitOpsInventory;
 
+/// What a command that removes expired instances says about expiry: an
+/// instance it removes is not rendered by the preflight, because removing it
+/// needs its stored documents and not its source.
+///
+/// Contract: [Expiry](../../../design/orchestration-core.md#expiry).
+#[derive(Debug, Clone, Copy)]
+pub struct Expiry {
+    pub intent: nyl_orchestration::rules::expiry::Intent,
+    pub now: nyl_core::orchestration::time::Timestamp,
+}
+
 /// Selected environments in dependency order, with independent preflight errors.
 pub struct Selection {
     names: Vec<String>,
@@ -40,6 +51,7 @@ pub fn select(
     offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
     instance: &InstanceRequest,
+    expiry: Option<Expiry>,
 ) -> Result<Selection, Stop> {
     let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let (environments, groups) = declared(&inventory);
@@ -54,7 +66,7 @@ pub fn select(
             InstanceRequest::default()
         }
     };
-    let (instances, mut errors, undeclared, unlisted) = known_instances(&inventory, names, &hint, offline);
+    let (instances, mut errors, undeclared, unlisted, expiries) = known_instances(&inventory, names, &hint, offline);
     let inventory = inventory.with_instances(instances);
     let selection = selection_names(&environments, &groups, names, labels, group, &undeclared)?;
     if selection.is_empty() {
@@ -64,6 +76,7 @@ pub fn select(
         });
     }
     single_source(source_override, &selection.iter().cloned().collect::<Vec<_>>())?;
+    let removing = removing_instances(&inventory, &expiries, &selection, expiry);
     let repository = git2::Repository::discover(&inventory.project_root)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
     let commit = repository
@@ -94,7 +107,7 @@ pub fn select(
             &name,
             &commit,
             &renderer,
-            source_graph,
+            source_graph && !removing.contains(&name),
             source_override.filter(|_| selection.contains(name.as_str())),
             &hint(name.as_str()),
         ) {
@@ -127,6 +140,7 @@ pub fn select(
             &errors
                 .keys()
                 .filter_map(|name| EnvironmentName::new(name).ok())
+                .chain(removing.iter().cloned())
                 .collect(),
         )?
     } else {
@@ -156,14 +170,20 @@ fn known_instances(
     BTreeMap<String, Finding>,
     Vec<String>,
     Vec<String>,
+    Expiries,
 ) {
     let (declared_environments, _) = declared(inventory);
     let mut instances = nyl_core::orchestration::instance::Instances::new();
+    let mut expiries = Expiries::new();
     let mut errors = BTreeMap::new();
     let mut undeclared = Vec::new();
     let listing = super::project::list_instances(inventory, offline);
     let unlisted = listing.unavailable;
     for instance in listing.instances {
+        expiries.insert(
+            instance.name.clone(),
+            (instance.descriptor.template.clone(), instance.record.expires_at),
+        );
         instances.insert(instance.name, instance.descriptor);
     }
     for name in names {
@@ -176,6 +196,14 @@ fn known_instances(
         match resolve_environment_with(inventory, name, &hint(name)) {
             Ok(resolved) => {
                 if let Some(found) = resolved.instance {
+                    // The record the command read is newer than the listing's.
+                    expiries.insert(
+                        resolved.name.clone(),
+                        (
+                            found.template.clone(),
+                            found.record.as_ref().and_then(|record| record.expires_at),
+                        ),
+                    );
                     instances.insert(resolved.name, found.descriptor());
                 }
             }
@@ -185,8 +213,36 @@ fn known_instances(
         }
         undeclared.push(name.clone());
     }
-    (instances, errors, undeclared, unlisted)
+    (instances, errors, undeclared, unlisted, expiries)
 }
+
+/// The selected instances a reconcile with `expiry` removes: expired ones are
+/// not rendered by the preflight, because removing one runs from its stored
+/// documents, so a lost source commit cannot keep it alive.
+fn removing_instances(
+    inventory: &GitOpsInventory,
+    expiries: &Expiries,
+    selection: &BTreeSet<String>,
+    expiry: Option<Expiry>,
+) -> BTreeSet<EnvironmentName> {
+    let Some(expiry) = expiry else {
+        return BTreeSet::new();
+    };
+    expiries
+        .iter()
+        .filter(|(name, _)| selection.contains(name.as_str()))
+        .filter(|(_, (template, expires_at))| {
+            let ttl = nyl_render::gitops::instances::find_template(inventory, template)
+                .and_then(|template| template.spec.ttl);
+            nyl_orchestration::rules::expiry::decide(expiry.intent, *expires_at, ttl, expiry.now)
+                == nyl_orchestration::rules::expiry::Disposition::Remove
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Each known instance's template and recorded expiry.
+type Expiries = BTreeMap<EnvironmentName, (String, Option<nyl_core::orchestration::time::Timestamp>)>;
 
 /// Stored incarnations keep their resource claims until they leave state,
 /// including when source changes or stops selecting a held or deleting unit.
@@ -284,7 +340,33 @@ fn read_environment(
         return Err(finding.into());
     }
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
-    let sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
+    let mut sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
+    // A recorded commit the clone lacks is fetched first through the instance's keep refs,
+    // then by its id from the clone's origin.
+    if !request.offline {
+        sources = sources.with_origin_fetch();
+    }
+    if let Some(id) = resolved
+        .instance
+        .as_ref()
+        .and_then(|instance| instance.record.as_ref()?.keep_id.as_ref())
+        .filter(|_| !request.offline)
+    {
+        sources = sources.with_kept_source(nyl_orchestration::rules::keep::keep_prefix(id));
+    }
+    if let Some(reference) = resolved
+        .instance
+        .as_ref()
+        .and_then(|instance| {
+            instance
+                .source_ref
+                .clone()
+                .or_else(|| instance.record.as_ref()?.source_ref.clone())
+        })
+        .filter(|_| !request.offline)
+    {
+        sources = sources.with_source_ref(reference);
+    }
     // An instance not entered from its own checkout renders at its recorded commit.
     let recorded = resolved
         .instance

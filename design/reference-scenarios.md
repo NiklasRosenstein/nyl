@@ -519,7 +519,7 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | --- | --- | --- |
 | `main` | People, through pull requests | Nyl: dev runs from its worktree; `protectedRefs` default |
 | `pr-<n>` | People | Nyl: each preview instance runs from its pull request job's worktree, recorded in state (`allowUnprotectedSource`) |
-| `refs/nyl/<instance>/keep` | Nyl, on every instance reconcile; removed by `state delete` | Nyl: teardown after the branch is gone |
+| `refs/nyl-keep/<keepId>/<commit>` | Nyl, when an instance records a new source commit (the previous commit's ref is removed after the record lands); removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
 | `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the fleet reconcile publishes the shared catalog under `_nyl/shared/previews/` | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
@@ -620,19 +620,21 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | The instance is created: its `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, recording `pr-123`'s commit as its source and `expiresAt` now plus 7 days |
-| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; keep ref `refs/nyl/pr-123/keep` points at `pr-123`'s tip |
+| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; the template sets `keepSource: true`, so the keep ref of `pr-123`'s tip commit exists in the source repository |
 | 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
-| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep ref are removed |
+| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep refs are removed |
 | 8 | From the `main` checkout: `nyl reconcile -e pr-124` → 0 | The run renders `pr-124` at its recorded commit, not at `main`, and says so; nothing executes |
 | 9 | `nyl get environments` | Lists `dev`, `prod`, and `pr-124`; `pr-123` is gone |
 
 Tier 1 variants:
 
-- **No keep ref.** With `keepSource: false`, step 7 fails and suggests
-  `--source`; `nyl state delete -e pr-123 --teardown --source main` warns about
-  the substituted source, records it, and succeeds.
+- **No keep ref.** The template omits `keepSource`, as is the default, so
+  nothing keeps the commit but its branch: step 3 pushes no keep ref, and with
+  the branch gone step 7 fails and suggests `--source`; `nyl state delete -e
+  pr-123 --teardown --source main` warns about the substituted source, records
+  it, and succeeds.
 - **Name collision.** With an `applicationNameTemplate` that ignores the
   target's name, `nyl validate` rejects the template because two instances
   would generate the same Argo CD names.
@@ -655,11 +657,15 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 Tier 1 variants:
 
 - **Not teardown-ready.** With the default namespace `deletePolicy: Confirm`,
-  `state init --template` warns, and step 2 reports `pr-124` as pending
-  teardown with the reason and exits 2, until a run passes
-  `--allow-incomplete`.
+  step 2 reports `pr-124` as pending teardown with the reason and exits 2,
+  until a run passes `--allow-incomplete`. `state init --template` warns about
+  it at once when the publication states its settings in its declaration (the
+  fake publication's `teardownSettings`); the real publication records them
+  when its unit resolves, which waits for the outputs it reads, so its
+  readiness warning comes with the first `plan`.
 - **Manual wait.** With `kubernetes` on the `manual` default, `state init
-  --template` warns that instances cannot expire unattended, and step 2 stops
+  --template` warns (`NYL-TEARDOWN-WAIT-MANUAL`, from the declaration, before
+  anything ran) that instances cannot expire unattended, and step 2 stops
   after phase 1 with exit 2.
 
 ## Coverage by milestone

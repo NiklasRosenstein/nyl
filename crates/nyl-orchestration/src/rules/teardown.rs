@@ -426,6 +426,27 @@ pub fn readiness_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item
         .collect()
 }
 
+/// What the removal of an instance nobody attends would wait for: the
+/// findings of each unit's driver
+/// ([`nyl_core::orchestration::driver::Driver::unattended_teardown`]),
+/// shown by `nyl state init --template` because every instance is torn down
+/// some day, and by nothing that tears down with an operator present.
+pub fn unattended_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item = &'a DesiredUnit>) -> Vec<Finding> {
+    units
+        .into_iter()
+        .filter(|unit| !unit.is_held_marker())
+        .filter(|unit| super::desired::deletion_intent(drivers, unit) == DeletionIntent::Teardown)
+        .filter_map(|unit| {
+            Some(
+                drivers
+                    .get(&unit.unit.api_version, &unit.unit.kind)?
+                    .unattended_teardown(unit),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
 /// The warning a pending unit reports, with its stable code and fix, such
 /// as `NYL-TEARDOWN-PENDING` naming `--allow-teardown` or
 /// `NYL-TEARDOWN-HAS-DEPENDENTS` naming the tombstones and `--allow-dependents`.

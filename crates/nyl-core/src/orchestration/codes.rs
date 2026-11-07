@@ -208,6 +208,10 @@ codes! {
     /// Teardown readiness: a self-managing catalog Application and its
     /// AppProjects remain after teardown (remnant).
     TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
+    /// Teardown readiness: the unit's teardown waits for an operator to
+    /// confirm the removal, so an unattended removal, such as the expiry of a
+    /// template instance, stops after its first phase. A warning.
+    TeardownWaitManual => "NYL-TEARDOWN-WAIT-MANUAL",
     /// A unit whose kind cannot tear down was released: its resources were
     /// left in place and the transition commit lists them.
     UnitReleased => "NYL-UNIT-RELEASED",
@@ -240,6 +244,26 @@ codes! {
     InstanceAmbiguous => "NYL-INSTANCE-AMBIGUOUS",
     /// An EnvironmentTemplate does not render to a valid Environment for an instance.
     TemplateInvalid => "NYL-TEMPLATE-INVALID",
+    /// `--renew` or `--no-extend` where it does not apply: for a declared
+    /// Environment, which has no expiry, or for the fleet reconcile.
+    InstanceOptionInvalid => "NYL-INSTANCE-OPTION-INVALID",
+    /// An instance is expired: the next `reconcile` of it removes it, unless
+    /// `--renew` or the pull request job's `--template` renews it. A warning.
+    InstanceExpired => "NYL-INSTANCE-EXPIRED",
+    /// The removal of an expired instance waits: its teardown needs
+    /// `allowTeardown` on the template or `--allow-teardown`. Exit 2.
+    InstanceRemovalPending => "NYL-INSTANCE-REMOVAL-PENDING",
+    /// An instance was renewed while its removal was starting, so nothing was removed. Exit 2.
+    InstanceRenewed => "NYL-INSTANCE-RENEWED",
+    /// A template is at `maxInstances`: no instance is created until an
+    /// expired one is removed (`--make-room`). Exit 2.
+    InstanceLimit => "NYL-INSTANCE-LIMIT",
+    /// The instances of a template cannot be listed, which `maxInstances` and
+    /// the fleet reconcile need: its state location depends on the instance name.
+    InstanceNotListable => "NYL-INSTANCE-NOT-LISTABLE",
+    /// An instance's source commit could not be kept fetchable with a keep ref
+    /// in the source repository, or its keep ref could not be removed.
+    InstanceKeepFailed => "NYL-INSTANCE-KEEP-FAILED",
     /// `nyl hold` was delivered to the run holding the lease, through its
     /// signal ref: the run starts no held unit and writes the hold in its
     /// own transition commit. Exit 0.

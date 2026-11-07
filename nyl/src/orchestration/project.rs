@@ -44,6 +44,8 @@ pub struct ResolvedInstance {
     pub params: BTreeMap<String, Value>,
     /// The template's terms for the instance.
     pub terms: InstanceTerms,
+    /// The `--source-ref` this command was given, if any.
+    pub source_ref: Option<String>,
     /// The instance's `state.yaml`; `None` before `state init --template` created it.
     pub record: Option<StateRecord>,
 }
@@ -66,6 +68,10 @@ impl ResolvedInstance {
 pub struct InstanceRequest {
     pub template: Option<String>,
     pub params: BTreeMap<String, Value>,
+    /// `--source-ref`: a full ref name of `origin` that carries the commit the
+    /// run records, validated by [`parse_source_ref`] and recorded only by a
+    /// command that records the instance's commit.
+    pub source_ref: Option<String>,
     /// `--local`: read the record without network access.
     pub offline: bool,
 }
@@ -225,6 +231,7 @@ pub fn resolve_environment_with(
         template: template.metadata.name.clone(),
         params: terms.params.clone(),
         terms,
+        source_ref: request.source_ref.clone(),
         record,
     });
     Ok(located)
@@ -641,6 +648,17 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
     // instance would find the first's `state.yaml` at its own location.
     let (_, groups) = declared(inventory);
     for template in nyl_render::gitops::instances::templates(inventory) {
+        // A limit counts the instances, which only a listable location lets Nyl do.
+        if template.spec.max_instances.is_some() && listing_location(inventory, template).is_none() {
+            return Err(finding_error(&Finding::new(
+                Code::TemplateInvalid,
+                format!(
+                    "EnvironmentTemplate {} sets maxInstances, but its instances cannot be listed: its state location depends on the instance name",
+                    template.metadata.name
+                ),
+                "end spec.state.path with `{{ environment.name }}` and keep the repository and refs independent of the name, or drop maxInstances",
+            )));
+        }
         let mut sampled = Vec::new();
         for (name, _) in nyl_render::gitops::instances::sample_instances(template) {
             let state = nyl_render::gitops::instances::instance_state(template, &name)
@@ -728,6 +746,25 @@ pub fn parse_params(params: &[String]) -> std::result::Result<BTreeMap<String, V
     Ok(parsed)
 }
 
+/// `--source-ref <ref>`: a full ref name under `refs/`, checked by its syntax
+/// alone (it is only a hint, so no remote is asked). Contract:
+/// [Instances](../../../design/orchestration-core.md#instances).
+pub fn parse_source_ref(reference: Option<&str>) -> std::result::Result<Option<String>, Finding> {
+    reference
+        .map(|reference| {
+            nyl_orchestration::rules::source_ref::validate(reference)
+                .map(|()| reference.to_owned())
+                .map_err(|why| {
+                    Finding::new(
+                        Code::InstanceOptionInvalid,
+                        format!("--source-ref {why}"),
+                        "pass the full name of a ref of the source repository's origin, such as refs/pull/123/head",
+                    )
+                })
+        })
+        .transpose()
+}
+
 /// An instance found by listing its template's state.
 pub struct ListedInstance {
     pub name: EnvironmentName,
@@ -752,28 +789,11 @@ const SENTINEL_NAME: &str = "nyl-instance-sentinel";
 /// reported in [`Listing::unavailable`] so checks across environments fail closed.
 pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> Listing {
     let mut listing = Listing::default();
-    let Ok(sentinel) = EnvironmentName::new(SENTINEL_NAME) else {
-        return listing;
-    };
-    let (declared_environments, groups) = declared(inventory);
+    let (declared_environments, _) = declared(inventory);
     for template in nyl_render::gitops::instances::templates(inventory) {
-        let Ok(state) = nyl_render::gitops::instances::instance_state(template, &sentinel) else {
+        let Some((located, parent_location)) = listing_location(inventory, template) else {
             continue;
         };
-        let mut skeleton = template.environment_skeleton(SENTINEL_NAME);
-        skeleton.spec.state = state;
-        let Ok(located) = locate(inventory, &skeleton, &groups) else {
-            continue;
-        };
-        let location = &located.location;
-        let by_name = [&location.repository, &location.desired_ref, &location.observed_ref]
-            .iter()
-            .any(|part| part.contains(SENTINEL_NAME));
-        let Some(parent) = location.path.strip_suffix(SENTINEL_NAME).filter(|_| !by_name) else {
-            continue;
-        };
-        let mut parent_location = location.clone();
-        parent.trim_matches('/').clone_into(&mut parent_location.path);
         let records = open_store_mode(inventory, &located, None, offline)
             .map_err(|error| error.to_string())
             .and_then(|store| store.list_records(&parent_location).map_err(|error| error.to_string()));
@@ -835,6 +855,31 @@ pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> Listing {
         }
     }
     listing
+}
+
+/// Where the instances of `template` are listed, when one location holds
+/// them all: the template's state location for a sentinel name, and the
+/// directory of that location whose records are the instances. `None` when
+/// the refs or the repository depend on the instance name, or `state.path`
+/// does not end in it, so the instances are found by name only.
+pub fn listing_location(
+    inventory: &GitOpsInventory,
+    template: &EnvironmentTemplate,
+) -> Option<(ResolvedEnvironment, StateLocation)> {
+    let sentinel = EnvironmentName::new(SENTINEL_NAME).ok()?;
+    let (_, groups) = declared(inventory);
+    let state = nyl_render::gitops::instances::instance_state(template, &sentinel).ok()?;
+    let mut skeleton = template.environment_skeleton(SENTINEL_NAME);
+    skeleton.spec.state = state;
+    let located = locate(inventory, &skeleton, &groups).ok()?;
+    let location = &located.location;
+    let by_name = [&location.repository, &location.desired_ref, &location.observed_ref]
+        .iter()
+        .any(|part| part.contains(SENTINEL_NAME));
+    let parent = location.path.strip_suffix(SENTINEL_NAME).filter(|_| !by_name)?;
+    let mut parent_location = location.clone();
+    parent.trim_matches('/').clone_into(&mut parent_location.path);
+    Some((located, parent_location))
 }
 
 /// What listing the instances of every template found.
