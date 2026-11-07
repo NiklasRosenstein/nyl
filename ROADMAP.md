@@ -391,8 +391,12 @@ Cluster.
   Publication is a receipt; Argo CD acceptance and observed health are the
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
-  that requires a healthy deployment.
-- In observe mode, the publication unit's observed values read a field of a
+  that requires a healthy deployment. A unit that declares `observe: {}` reads the
+  reconciler of its target (Argo CD) through one driver-owned,
+  reconciler-neutral reader whose neutral reading one set of shared rules
+  judges, declared on the ArgoCDInstance (see "Health evidence"), and the
+  same reading serves the `observe` `teardownWait`.
+- With `observe: {}`, the publication unit's observed values read a field of a
   resource its target renders, from the target's Cluster, once the
   Application owning that resource runs the current publication. Reading
   needs workload-cluster credentials that publication alone does not.
@@ -517,11 +521,17 @@ Evidence beyond a receipt is an **attestation**: a named pass or fail result
 about one unit's current receipt or an environment's recorded state, written by
 the unit's driver during `reconcile` or when `nyl attest` asks it, or by people
 and external systems through `nyl attest --name … --result …`. A
-KubernetesPublication in observe mode attests `accepted` and `healthy` from
+KubernetesPublication that declares `observe: {}` attests `accepted` and `healthy` from
 Argo CD, matching each Application's running revision to the publication
 commit that introduced it and listing them in the attestations' details.
-Attestations are recorded where the credentials exist, typically in CI, and
-decisions read the recorded evidence. Attestations are evidence for promotion
+Argo CD is read one of two ways, declared once in Git on the ArgoCDInstance
+(`spec.access`): the Kubernetes API of its control-plane Cluster, through the
+Cluster's declared local context and the kubeconfig the unit admits, or the
+Argo CD API server, at a declared address with a token the unit admits. The
+credential is never read from anywhere but the unit's admitted environment,
+and an observation that cannot establish a result records nothing rather than
+a failure. Attestations are recorded where the credentials exist, typically in
+CI, and decisions read the recorded evidence. Attestations are evidence for promotion
 and dependents; drift, which `nyl detect-drift` records, is separate: it is a
 reason for the next reconcile to act, not evidence. Argo CD health means Kubernetes considers the resources
 ready, not that the application works; application-level checks are further
@@ -774,7 +784,6 @@ reasons to delay independent work.
 
 | Decision | Needed by |
 | --- | --- |
-| Argo CD control-plane credentials for health checks in CI | M5/M6 |
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |

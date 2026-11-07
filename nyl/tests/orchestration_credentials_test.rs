@@ -44,7 +44,6 @@ fn reconcile_with_progress(
         process_env: &harness.process_env,
         secrets,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress,
         prompt: None,
     };

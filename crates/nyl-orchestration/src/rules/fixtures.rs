@@ -325,6 +325,43 @@ impl Driver for TestDriver {
     ) -> DriverResult<Supported<DriftDetection>> {
         Ok(Supported::Unsupported)
     }
+    /// `teardownWait: {strategy: observe | delay, duration}`, else manual.
+    fn teardown_wait(&self, spec: &Value) -> nyl_core::orchestration::driver::WaitStrategy {
+        use nyl_core::orchestration::driver::WaitStrategy;
+        match spec.pointer("/teardownWait/strategy").and_then(Value::as_str) {
+            Some("observe") => WaitStrategy::Observe,
+            Some("delay") => spec
+                .pointer("/teardownWait/duration")
+                .and_then(Value::as_str)
+                .and_then(|duration| duration.parse().ok())
+                .map_or(WaitStrategy::Manual, |duration| WaitStrategy::Delay { duration }),
+            _ => WaitStrategy::Manual,
+        }
+    }
+    /// Reports the spec's `remaining` names as still existing, `removalFails`
+    /// as a failed reading, and `removalUnsupported: true` as unsupported.
+    fn observe_removal(
+        &self,
+        _: &nyl_core::orchestration::driver::RemovalContext,
+        unit: &DesiredUnit,
+    ) -> DriverResult<Supported<nyl_core::orchestration::driver::RemovalObservation>> {
+        use nyl_core::orchestration::driver::RemovalObservation;
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        if spec["removalUnsupported"] == json!(true) {
+            return Ok(Supported::Unsupported);
+        }
+        if let Some(reason) = spec["removalFails"].as_str() {
+            return Ok(Supported::Supported(RemovalObservation::Failed(reason.to_owned())));
+        }
+        let remaining = spec["remaining"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        Ok(Supported::Supported(RemovalObservation::Remaining(remaining)))
+    }
     /// A `Publication` whose spec sets `unreadyTeardown: true` has one
     /// unmet requirement and one remnant; with `unreadyTeardown: false`, it
     /// is ready.

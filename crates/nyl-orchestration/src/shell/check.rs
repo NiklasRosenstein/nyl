@@ -536,6 +536,8 @@ fn check_unit(
                 attestations(environment, unit, receipt, &outcomes, now),
                 snapshot.attestations.get(name),
                 receipt,
+                now,
+                context.base.settings.attestation_refresh,
             );
             Checked {
                 name: name.clone(),

@@ -15,9 +15,9 @@ use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
     AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
-    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
-    GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy, RendererConfig,
-    RendererConfigMode, SharedNamespaceOwner,
+    ArgoCDAccess, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination,
+    DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy,
+    RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
@@ -265,7 +265,11 @@ struct PreparedGroup {
 
 struct EffectiveArgoCDInstance {
     identity: String,
+    /// The instance as rendering sees it: without `spec.access`, which never
+    /// affects rendered bytes and so stays out of every render input.
     resource: ArgoCDInstance,
+    /// How Nyl reads the instance's Applications; see [`argocd_observation`].
+    access: ArgoCDAccess,
     source_path: Option<PathBuf>,
     cluster: Cluster,
     cluster_path: PathBuf,
@@ -2226,6 +2230,31 @@ pub(super) fn target_selects_group(target: &DeploymentTarget, group_labels: &BTr
         .all(|(key, value)| group_labels.get(key) == Some(value))
 }
 
+/// Where `target`'s Argo CD instance is and how Nyl reads it: the instance,
+/// its namespace, its control-plane Cluster with that Cluster's local
+/// context, and the declared access (the Kubernetes API unless the instance
+/// says otherwise).
+///
+/// Contract: [Kubernetes publications](../../../../design/promotion.md#kubernetes-publications), observer.
+pub(super) fn argocd_location(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<super::observation::ArgoCdLocation> {
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+    Ok(super::observation::ArgoCdLocation {
+        instance: argocd.identity,
+        namespace: argocd.resource.spec.namespace,
+        cluster: argocd.cluster.metadata.name,
+        context: argocd.cluster.spec.live.map(|live| live.context),
+        access: argocd.access,
+    })
+}
+
 fn resolve_argocd_instance(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
@@ -2254,8 +2283,10 @@ fn resolve_argocd_instance(
                     },
                     namespace: "argocd".to_owned(),
                     catalog_application_defaults: CatalogApplicationDefaults::default(),
+                    access: None,
                 },
             },
+            access: ArgoCDAccess::kubernetes(),
             source_path: None,
             cluster,
             cluster_path,
@@ -2278,9 +2309,12 @@ fn resolve_argocd_instance(
         )));
     };
     let (cluster, cluster_path) = resolve_cluster(inventory, &instance.spec.cluster_ref.name)?;
+    let mut resource = instance.clone();
+    let access = resource.spec.access.take().unwrap_or_else(ArgoCDAccess::kubernetes);
     Ok(EffectiveArgoCDInstance {
         identity: reference.name.clone(),
-        resource: instance.clone(),
+        resource,
+        access,
         source_path: Some(discovered.source_path.clone()),
         cluster,
         cluster_path,

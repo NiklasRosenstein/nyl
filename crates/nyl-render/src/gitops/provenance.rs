@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use git2::Repository;
 
 use super::{CompiledTargetTree, GitOpsInventory};
-use crate::resources::GitOpsResourceKind;
+use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
 /// The commit a worktree is at and whether it differs from it.
@@ -133,8 +133,10 @@ fn is_project_cache_status(repository: &Repository, project_root: &Path, status_
 /// project-relative path, plus the `@`-prefixed digests of its resolved
 /// Release inputs: the `inputs` map of the ownership index.
 ///
-/// The Cluster document is hashed without its local `live` connection
-/// settings, which never affect rendered bytes.
+/// Every Cluster document is hashed without its local `live` connection
+/// settings, which never affect rendered bytes (the target's Cluster always
+/// through its normalized form; another one, such as the control-plane Cluster
+/// of the ArgoCDInstance, when it declares `live`).
 pub fn hash_inputs(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -> Result<BTreeMap<String, String>> {
     let cluster_resource = inventory
         .get(GitOpsResourceKind::Cluster, &compiled.cluster.metadata.name)
@@ -153,24 +155,73 @@ pub fn hash_inputs(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -
         }
         let path = paths.path_for_key(relative);
         if path.is_file() {
-            let bytes = if relative == cluster_path {
-                let contents = std::fs::read_to_string(&path)?;
-                if contents.matches(&cluster_resource.raw_document).count() != 1 {
+            let mut contents = None;
+            let mut replace = |raw: &str, replacement: &str, what: &str| -> Result<()> {
+                let text = match contents.take() {
+                    Some(text) => text,
+                    None => std::fs::read_to_string(&path)?,
+                };
+                if text.matches(raw).count() != 1 {
                     return Err(NylError::config(format!(
-                        "Cannot safely locate Cluster '{}' in {} for provenance hashing",
-                        compiled.cluster.metadata.name,
+                        "Cannot safely locate {what} in {} for provenance hashing",
                         path.display()
                     )));
                 }
-                contents
-                    .replacen(
-                        &cluster_resource.raw_document,
-                        std::str::from_utf8(&cluster_bytes).expect("JSON serialization is UTF-8"),
-                        1,
-                    )
-                    .into_bytes()
-            } else {
-                std::fs::read(path)?
+                contents = Some(text.replacen(raw, replacement, 1));
+                Ok(())
+            };
+            if relative == cluster_path {
+                replace(
+                    &cluster_resource.raw_document,
+                    std::str::from_utf8(&cluster_bytes).expect("JSON serialization is UTF-8"),
+                    &format!("Cluster '{}'", compiled.cluster.metadata.name),
+                )?;
+            }
+            // Every other Cluster document in the file that declares `live`
+            // (the ArgoCDInstance's control-plane Cluster, for one) is hashed
+            // without it too, so moving a kube context never changes the
+            // index. A Cluster without `live` keeps its bytes as written.
+            for discovered in inventory.resources.values().filter(|discovered| {
+                &discovered.source_path == relative && discovered.identity.kind == GitOpsResourceKind::Cluster
+            }) {
+                if let Some(GitOpsResource::Cluster(cluster)) = &discovered.resource {
+                    if cluster.spec.live.is_some() && cluster.metadata.name != compiled.cluster.metadata.name {
+                        let mut render_cluster = cluster.clone();
+                        render_cluster.spec.live = None;
+                        replace(
+                            &discovered.raw_document,
+                            std::str::from_utf8(&serde_json::to_vec(&render_cluster)?)
+                                .expect("JSON serialization is UTF-8"),
+                            &format!("Cluster '{}'", cluster.metadata.name),
+                        )?;
+                    }
+                }
+            }
+            // An ArgoCDInstance that declares `spec.access` is hashed without
+            // it: how Nyl reads Argo CD never affects rendered bytes, so
+            // editing it must not change the index. An instance without
+            // `access` keeps its bytes as written.
+            for discovered in inventory
+                .resources
+                .values()
+                .filter(|discovered| &discovered.source_path == relative)
+            {
+                if let Some(GitOpsResource::ArgoCDInstance(instance)) = &discovered.resource {
+                    if instance.spec.access.is_some() {
+                        let mut render_instance = instance.clone();
+                        render_instance.spec.access = None;
+                        replace(
+                            &discovered.raw_document,
+                            std::str::from_utf8(&serde_json::to_vec(&render_instance)?)
+                                .expect("JSON serialization is UTF-8"),
+                            &format!("ArgoCDInstance '{}'", instance.metadata.name),
+                        )?;
+                    }
+                }
+            }
+            let bytes = match contents {
+                Some(text) => text.into_bytes(),
+                None => std::fs::read(&path)?,
             };
             hashes.insert(
                 relative.to_string_lossy().replace('\\', "/"),

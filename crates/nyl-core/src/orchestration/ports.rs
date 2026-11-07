@@ -715,25 +715,11 @@ pub trait SourceRenderer: Send + Sync {
     ) -> SourceResult<RenderedSource>;
 }
 
-/// What an Argo CD observer reports for a target's workload Applications.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplicationsObservation {
-    /// The Applications that still exist; empty when all are gone.
-    Remaining(Vec<String>),
-    /// The observer could not read them, such as for missing credentials.
-    Failed(String),
-}
-
 /// Reads a named project secret at execution, never during key calculation.
 /// Errors must not contain secret values. Strings remain strings; other
 /// values are serialized to compact JSON by the shell.
 pub trait SecretProvider: Send + Sync {
     fn get(&self, key: &str) -> Result<Value, String>;
-}
-
-/// Reads Argo CD for teardown waits and health evidence.
-pub trait ArgoObserver: Send + Sync {
-    fn workload_applications(&self, target: &str) -> ApplicationsObservation;
 }
 
 /// The terminal of a run that waits on a teardown: when its stdin is a

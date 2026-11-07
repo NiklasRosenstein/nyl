@@ -17,18 +17,17 @@ metadata:
   labels: {stage: dev}
 spec:
   target: '{{ values.target }}'
-  mode: publish
   teardownWait: {strategy: manual}
 ```
 
 `target` names a static DeploymentTarget, or declares one inline (see
 [Inline targets](#inline-targets)). The unit places that target into its
 environment: a target belongs to at most one environment, and a target no
-publication unit names rejects `fromUnit` bindings. `mode` is `publish`, the
-default. `mode: observe` is not available yet; the unit rejects it with
-`NYL-KUBERNETES-MODE-UNSUPPORTED`, because nothing would check what the
-publication promises. The common unit fields (`dependsOn`, `timeout`, `env`,
-and so on) apply; `timeout` defaults to `10m`.
+publication unit names rejects `fromUnit` bindings. A unit publishes only,
+unless it declares `observe: {}`: it then publishes the same way and also
+reads the reconciler that runs its target, Argo CD (see
+[Observing Argo CD](#observing-argo-cd)). The common unit fields
+(`dependsOn`, `timeout`, `env`, and so on) apply; `timeout` defaults to `10m`.
 
 ## Inline targets
 
@@ -186,6 +185,118 @@ To release a prefix deliberately, commit to the publication branch a change to
 `<prefix>/_nyl/index.json` that removes its `owner` member and sets `version`
 to `3`. The prefix is then unowned, and the next publication adopts it.
 
+## Observing Argo CD
+
+Publishing is a receipt: the tree is on the branch. Whether Argo CD took it
+and the workloads are healthy is a separate fact that only Argo CD knows. A
+unit that declares `observe: {}` declares two attestations, `accepted` and
+`healthy`, and `nyl attest` reads Argo CD to record them:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+spec:
+  target: '{{ values.target }}'
+  observe: {}
+  env: {passthrough: [KUBECONFIG]}      # the credential for the access the ArgoCDInstance declares
+```
+
+`observe` is an object so that options can be added later; only `{}` is
+accepted, and a field inside it is a validation error. It opts the unit in and
+says nothing about which reconciler runs: that follows the reconciler of the
+unit's target, its ArgoCDInstance, so the declaration stays the same if the
+target's reconciler changes. There is no `mode` field; a unit without
+`observe` only publishes, declares no attestations, and waits for an operator
+when it is torn down.
+
+```bash
+nyl attest -e dev
+nyl attest -e dev --unit kubernetes -o json
+```
+
+How Argo CD is read, the Kubernetes API of the control-plane Cluster or the
+Argo CD API server, is declared once on the
+[ArgoCDInstance](/nyl/kubernetes-gitops/resource-guides/argocd-instance/#reading-argo-cd)
+in Git, never chosen per command, and the credential comes only from the
+unit's admitted `env` (`KUBECONFIG` for the Kubernetes API; the declared token
+variable, `ARGOCD_AUTH_TOKEN` by default, for the API server). Resolution
+records what the readings need in the stored document (`reconciler`: its
+`kind` (`argocd`), the instance, how it is read, the publication destination,
+the Applications the target expects Argo CD to run, and the anchors that show
+a reading comes from the Argo CD that runs the target), so `nyl attest`
+renders nothing; an authored `reconciler` is rejected. Only what the render
+derives keys the unit: how Argo CD is read (`access`, `context`, and the
+publication URL) is recorded but never re-executes it.
+
+Matching reads the publication branch, from the destination the unit
+publishes to, with the project's `[[git.credentials]]` as a publication does,
+so the unit admits the same Git credential variables for `nyl attest` as for
+publishing.
+
+`nyl attest` judges every Application the target generates, the catalog
+Application included, against the publication of the unit's current receipt:
+
+- **Running revision.** An Application runs the revision of its newest
+  `status.history` entry, which Argo CD appends for full syncs only. Whether
+  it is Synced or OutOfSync is ignored, because an Application that runs an
+  older publication reports OutOfSync once a newer one is published. A selective
+  sync, a full sync that failed or is still running, or a dry run, as new as
+  that entry leaves the Application running a mix of revisions (`mixed`),
+  which proves no revision (the Application keeps only its latest operation, so
+  a dry run may hide a selective sync before it).
+- **Matching.** An Application *runs the publication* when the directory it
+  sources, and the recorded inputs of its Release, are the same at its running
+  revision as at the receipt's publication commit. The commit Argo CD reports
+  may be another target's commit on a shared branch or a write-back: only the
+  Application's own directory counts. A commit that edited that directory
+  without publishing (`unmatched`), or one not on the publication branch
+  (`not-on-branch`), matches nothing.
+- **Results.** `accepted` passes when every Application runs the receipt's
+  publication, and `healthy` when, besides, every one reports `Healthy`.
+  Otherwise the attestation fails with the Applications that fell short.
+
+The attestations' details name the reconciler that was read (`reconciler`)
+and list each Application (`deployments`) with its `id` (its name, qualified by
+its namespace outside the instance's), role (`catalog` or `workload`),
+directory, `state`, `health` (`Healthy`, `Progressing`, `Degraded`, or
+`Unknown`, which covers anything else Argo CD reports and is never healthy;
+Argo CD's own word, such as `Suspended`, is kept in `reported` and shown in
+the reason, as in `web is Unknown (Suspended)`, and never affects a result),
+the revision it runs (`running`), and the publication commit that introduced
+what runs (`publication`), and, for one that fell short, why. The states are `accepted`,
+`other-publication`, `unmatched`, `not-on-branch`, `mixed`, `never-synced`,
+`missing`, `deleting`, `other-source` (its source, or the source of its last
+sync, differs from the generated one, such as an edited `directory.recurse`,
+`exclude`, or tool block), and `unreadable`. Argo CD's list leaves out
+Applications the token may not read and still answers success, so with the API
+server Nyl asks Argo CD (`can-i`) about every Application the list lacks: a token that may not
+get it makes the unit `unknown`, and only an Application the token could see
+counts as `missing`. With the Kubernetes method, a reading without the target's catalog Application
+(or, without a catalog, its AppProjects) makes the unit `unknown` instead of
+`missing`: a context for another Argo CD never records a failure. Apply the
+catalog before the first attest, and point `spec.live.context` at the control
+plane that runs the target. A target that generates no
+Application attests both vacuously.
+
+An attestation that could not establish its result is never recorded as a
+failure. When Argo CD does not answer, the credential is rejected (an expired
+token is reported as invalid or expired) or lacks permission, one Application
+namespace of several cannot be read, or the publication branch cannot be
+fetched, the unit is `unknown` (`NYL-ATTEST-UNKNOWN`, exit 2), the reason names
+the fix, and the attestations recorded earlier stay. A recorded `fail` always
+means Argo CD was read and an Application fell short; a failing attestation
+exits 3 (`NYL-ATTESTATION-FAILED`). A new receipt starts with both attestations
+pending until `nyl attest` runs again. Attest from where the credentials are,
+typically a CI job after Argo CD synced. A repeated attest of an unchanged
+system writes nothing for 15 minutes; after that it rewrites the attestation with
+its new time, so a system a CI job re-verifies stays within `maxAttestationAge`
+while one that cannot be reached goes stale.
+
+`nyl attest --target` for a target no environment owns arrives with promotion
+(M6), as does `nyl attest --name … --result …`.
+
 ## Direct builds
 
 `nyl build` renders the unit's tree without orchestration: no lease, receipt, or
@@ -249,11 +360,21 @@ files its `_nyl/index.json` records. Files other tools committed in the prefix
 stay. See [Publication teardown waits](/nyl/orchestration/deletion/#publication-teardown-waits)
 for the strategies and the confirmation commands.
 
-`teardownWait` is `{strategy: manual}` (the default: an operator confirms with
-`nyl teardown --confirm-removed`) or `{strategy: delay, duration: 10m}` (phase 1
-completes after `duration`, recorded as not observed). The `observe` strategy
-needs to read Argo CD and is rejected with
-`NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` until the unit can.
+`teardownWait` is `{strategy: manual}` (the default for a unit without
+`observe`: an operator confirms with `nyl teardown --confirm-removed`),
+`{strategy: delay, duration: 10m}` (phase 1 completes after `duration`,
+recorded as not observed), or `{strategy: observe}` (the default for a unit
+that declares `observe: {}`, and an error for one that does not: phase 1 completes
+once Argo CD no longer has any of the target's workload Applications, read as
+[Observing Argo CD](#observing-argo-cd) describes, within the unit's `timeout`;
+the wait concludes removal only from what the credential could see: the catalog
+Application must be in the same reading (for a target without one, its
+AppProjects must be visible; with the Kubernetes method and neither, the wait
+fails closed and the API method is the way out), and with the API server each
+missing Application needs Argo CD's `can-i` to say the token may get it).
+A unit that waits by observing records the same reconciler facts at resolution
+and needs the same credential admitted; without one, or when Argo CD cannot be
+read, the teardown is uncertain with `observation-failed` and the reason.
 
 ### Teardown readiness
 

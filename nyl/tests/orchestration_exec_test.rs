@@ -105,7 +105,6 @@ fn exec(harness: &Harness, checkout: &std::path::Path, worktree: bool) -> Comman
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let mut args = vec![

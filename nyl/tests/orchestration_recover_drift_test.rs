@@ -85,7 +85,6 @@ impl Harness {
             process_env: self.process_env.clone(),
             cancellation: Cancellation::default(),
             prompt: None,
-            observer: None,
             progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -1378,7 +1377,6 @@ fn exec_repair(harness: &Harness) -> nyl_orchestration::report::StateOperationRe
         process_env: &harness.process_env,
         secrets: None,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress: None,
         prompt: None,
     };
