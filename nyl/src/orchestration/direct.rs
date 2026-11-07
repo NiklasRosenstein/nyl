@@ -1,6 +1,6 @@
 //! Read-only preparation of a unit from the current worktree or a source revision.
 //! Shared by direct artifact builds and operator tools using a worktree spec.
-use crate::orchestration::project::{open_store, resolve_environment};
+use crate::orchestration::project::{list_instances, open_store, resolve_environment};
 use crate::orchestration::run::Wiring;
 use nyl_core::orchestration::driver::{ResolutionContext, SourceRoot};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
@@ -12,7 +12,8 @@ use nyl_orchestration::rules::{
     sources,
 };
 use nyl_render::gitops::discover_gitops_inventory;
-use nyl_render::gitops::units::{render_direct_unit, resolve_effective_environment};
+use nyl_render::gitops::instances::resolve_environment as resolve_effective_environment;
+use nyl_render::gitops::units::render_direct_unit;
 use nyl_render::gitops::GitOpsInventory;
 use nyl_render::{NylError, Result};
 use nyl_state::source::GitSourceResolver;
@@ -84,6 +85,32 @@ pub fn prepare(
     };
     let name = UnitName::new(name).map_err(config)?;
     let selected = environment.map(EnvironmentName::new).transpose().map_err(config)?;
+    // An instance of an EnvironmentTemplate is known by its record.
+    let selected_environment = selected
+        .as_ref()
+        .map(|name| resolve_environment(&entry, name.as_str()).map_err(config))
+        .transpose()?;
+    // Every listed instance joins the inventory, so a direct `--push` consults
+    // all the targets environments own; a listing that fails refuses the build.
+    let listing = list_instances(&entry, false);
+    if !listing.unavailable.is_empty() {
+        return Err(config(format!(
+            "cannot list the instances of EnvironmentTemplate {}, whose targets a direct build must check; \
+             check access to the template's state repository",
+            listing.unavailable.join(", ")
+        )));
+    }
+    let mut instances: nyl_core::orchestration::instance::Instances = listing
+        .instances
+        .into_iter()
+        .map(|instance| (instance.name, instance.descriptor))
+        .collect();
+    if let Some((resolved, name)) = selected_environment.as_ref().zip(selected.as_ref()) {
+        if let Some(instance) = &resolved.instance {
+            instances.insert(name.clone(), instance.descriptor());
+        }
+    }
+    let inventory = inventory.with_instances(instances);
     let effective = selected
         .as_ref()
         .map(|name| resolve_effective_environment(&inventory, name))
@@ -97,8 +124,8 @@ pub fn prepare(
     let mut snapshot = EnvironmentSnapshot::default();
     let mut environments = BTreeMap::new();
     if let Some(environment) = selected.as_ref() {
-        let resolved = resolve_environment(&entry, environment.as_str()).map_err(config)?;
-        snapshot = open_store(&entry, &resolved, None)?
+        let resolved = selected_environment.as_ref().expect("selected");
+        snapshot = open_store(&entry, resolved, None)?
             .snapshot(&resolved.location)
             .map_err(config)?;
         for name in nyl_orchestration::rules::multi_environment::dependencies(&spec) {
@@ -204,7 +231,7 @@ pub fn prepare(
             let default = resolver.default_branch(&lock.repository).map_err(config)?;
             let refs = effective.as_ref().map_or_else(
                 || vec![default.clone(), lock.revision.clone()],
-                |environment| sources::pin_refs(environment, &default, Some(&lock.revision)),
+                |environment| sources::pin_refs(&environment.environment, &default, Some(&lock.revision)),
             );
             if resolver
                 .reachable_from(&lock.repository, locked, &refs)
@@ -300,6 +327,7 @@ pub fn prepare(
         deadline,
     };
     let context = ResolutionContext {
+        instances: &prepared.inventory.instances,
         environment,
         worktree: prepared.worktree.clone(),
         project_dir: prepared.project_dir.clone(),

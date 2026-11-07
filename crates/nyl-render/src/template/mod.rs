@@ -36,6 +36,7 @@ impl TemplateEngine {
         // Register custom filters
         env.add_filter("b64encode", filters::b64encode);
         env.add_filter("b64decode", filters::b64decode);
+        env.add_filter("tojson", filters::tojson);
 
         Self { env }
     }
@@ -170,6 +171,17 @@ mod filters {
         Ok(general_purpose::STANDARD.encode(value.as_bytes()))
     }
 
+    /// The value as compact JSON, which is also a YAML flow value: how a unit
+    /// document embeds a structured value, such as `target: {{ values.target | tojson }}`.
+    pub fn tojson(value: minijinja::Value) -> Result<String, minijinja::Error> {
+        serde_json::to_string(&value).map_err(|error| {
+            minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("the value cannot be written as JSON: {error}"),
+            )
+        })
+    }
+
     /// Base64 decode a string
     pub fn b64decode(value: String) -> Result<String, minijinja::Error> {
         let decoded = general_purpose::STANDARD.decode(value.as_bytes()).map_err(|e| {
@@ -190,6 +202,25 @@ mod filters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a template that cannot embed a structured value: unit
+    /// documents write `target: {{ values.target | tojson }}` so an object
+    /// from `values` becomes the YAML flow mapping the unit declares.
+    #[test]
+    fn test_tojson_filter_writes_structured_values_as_yaml_flow() {
+        let engine = TemplateEngine::new();
+        let context = serde_json::json!({"values": {"target": {"inline": {"prefix": "pr-1", "ports": [80, 443]}}}});
+        let rendered = engine.render("target: {{ values.target | tojson }}", &context).unwrap();
+        let (key, json) = rendered.split_once(": ").unwrap();
+        assert_eq!(key, "target");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            context["values"]["target"]
+        );
+        // Strings stay unquoted outside the filter: documents are YAML, not JSON.
+        let plain = serde_json::json!({"values": {"name": "r.invalid"}});
+        assert_eq!(engine.render("{{ values.name }}/web", &plain).unwrap(), "r.invalid/web");
+    }
 
     #[test]
     fn test_b64encode_filter() {

@@ -87,6 +87,7 @@ pub fn run(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> Result<Comman
             None,
             false,
             wiring.drivers,
+            &crate::orchestration::project::InstanceRequest::default(),
         ),
         |environment, selected, _planned, _unavailable| {
             let mut args = args.clone();

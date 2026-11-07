@@ -152,6 +152,7 @@ impl Live {
         let inputs: KeyInputs = driver
             .execution_key_inputs(
                 &ResolutionContext {
+                    instances: &nyl_core::orchestration::instance::NO_INSTANCES,
                     source_roots: BTreeMap::default(),
                     environment: EnvironmentName::new("dev").unwrap(),
                     worktree: self.world.work(),

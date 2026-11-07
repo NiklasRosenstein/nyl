@@ -6,6 +6,7 @@ pub mod direct;
 pub mod direct_inputs;
 pub mod discovery;
 pub mod inputs;
+pub mod instances;
 pub mod layout;
 pub mod observation;
 pub mod project_scope;

@@ -30,6 +30,7 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
     let tools = ProcessRunner::new();
     let now = "2026-10-28T12:00:00Z".parse().unwrap();
     let mut context = ExecutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         source_roots: BTreeMap::new(),
         unit: "dev/network".parse().unwrap(),
         operation: DriverOperation::Reconcile,
@@ -134,6 +135,7 @@ fn real_empty(driver: &TerraformDriver, count_zero: bool) {
     let tools = ProcessRunner::new();
     let now = "2026-10-28T12:00:00Z".parse().unwrap();
     let mut context = ExecutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         source_roots: BTreeMap::new(),
         unit: "dev/network".parse().unwrap(),
         operation: DriverOperation::Reconcile,

@@ -66,6 +66,24 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "state-record-instance.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "StateRecord", "environment": "pr-123",
+                "template": "preview",
+                "params": {"pr": 123, "size": "small"},
+                "expiresAt": "2026-10-01T09:00:00Z",
+                "sourceCommit": COMMIT,
+                "location": {
+                    "repository": "https://example.invalid/platform.git",
+                    "desiredRef": "nyl/previews",
+                    "observedRef": "nyl/previews",
+                    "path": "pr-123",
+                    "coordinationRefPrefix": "refs/nyl/"
+                },
+                "events": [{"type": "state-initialized", "at": "2026-09-24T09:00:00Z", "by": "alice"}]
+            }),
+        ),
+        (
             "state-record-deleted.v1.yaml",
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "StateRecord", "environment": "dev",

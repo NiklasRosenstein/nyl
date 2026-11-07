@@ -517,6 +517,10 @@ pub struct ExecutionContext<'a> {
     /// from a direct build uses it to refuse attributing the output to a
     /// commit that does not hold it.
     pub dirty_source: bool,
+    /// The instances of EnvironmentTemplates the run knows, which a render
+    /// across environments (placements, inline targets) includes like
+    /// declared environments.
+    pub instances: &'a super::instance::Instances,
 }
 
 /// How a driver's teardown wait after phase 1 ends
@@ -674,6 +678,8 @@ pub struct ResolutionContext<'a> {
     pub tools: &'a dyn ToolRunner,
     /// A cache directory of this invocation's workspace, as for executions.
     pub cache_dir: PathBuf,
+    /// The instances of EnvironmentTemplates the run knows, as for executions.
+    pub instances: &'a super::instance::Instances,
 }
 
 /// A spec field holding a local path, or an array of local path globs, by

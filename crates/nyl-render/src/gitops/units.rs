@@ -43,8 +43,8 @@ use std::path::{Path, PathBuf};
 use nyl_core::bindings::{InputBinding, InputDeclaration, InputType};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
+use nyl_core::orchestration::instance::InstanceDescriptor;
 use nyl_core::orchestration::ports::{RenderedSource, RenderedUnit, SourceError, SourceRenderer, SourceResult};
-use nyl_core::resources::environment::{effective_environment, Environment, EnvironmentGroup};
 use nyl_core::resources::units::{is_builtin_unit_api_version, UnitEnvelope, UnitMetadata};
 use nyl_core::template_syntax::has_template_syntax;
 use serde_json::{Map, Value};
@@ -52,6 +52,7 @@ use serde_json::{Map, Value};
 use super::discovery::{
     scan_static_envelope_fields, scan_static_metadata_labels, split_yaml_documents, top_level_value,
 };
+use super::instances::{environment_names, resolve_environment, EffectiveEnvironment};
 use super::GitOpsInventory;
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::template::TemplateEngine;
@@ -142,7 +143,7 @@ pub fn discover_units(inventory: &GitOpsInventory) -> Result<BTreeMap<UnitName, 
 pub fn render_direct_unit(
     inventory: &GitOpsInventory,
     name: &UnitName,
-    environment: Option<&Environment>,
+    environment: Option<&EffectiveEnvironment>,
 ) -> Result<(UnitEnvelope, Value)> {
     let units = discover_units(inventory)?;
     let unit = units
@@ -183,7 +184,7 @@ pub const INLINE_TARGET_NEEDS_ENVIRONMENT: &str = "NYL-KUBERNETES-BUILD-INLINE-T
 fn prepare_direct_publication(
     inventory: &GitOpsInventory,
     unit: &DiscoveredUnit,
-    environment: Option<&Environment>,
+    environment: Option<&EffectiveEnvironment>,
     spec: &mut Value,
 ) -> Result<()> {
     let declares_inline = spec
@@ -200,7 +201,7 @@ fn prepare_direct_publication(
              `<environment>-<unit>` and rendered with an environment's values; pass -e <environment> to build it"
         )));
     }
-    let environment = environment.map_or("", |environment| environment.metadata.name.as_str());
+    let environment = environment.map_or("", |environment| environment.environment.metadata.name.as_str());
     expand_publication_releases(inventory, unit, environment, spec)
 }
 
@@ -292,6 +293,8 @@ pub struct UnitSourceRenderer {
     /// `[project] previous_paths` of the entry `nyl.toml`.
     previous_paths: Vec<String>,
     resource_catalogue: crate::config::ResourceCatalogue,
+    /// Instances of EnvironmentTemplates the caller read from state.
+    instances: BTreeMap<EnvironmentName, InstanceDescriptor>,
 }
 
 impl UnitSourceRenderer {
@@ -302,7 +305,16 @@ impl UnitSourceRenderer {
             entry_project_dir: entry_project_dir.into(),
             previous_paths: Vec::new(),
             resource_catalogue,
+            instances: BTreeMap::new(),
         }
+    }
+
+    /// Render these instances of EnvironmentTemplates, and include them in every
+    /// environment-wide check, with the template as the rendered source declares it.
+    #[must_use]
+    pub fn with_instances(mut self, instances: BTreeMap<EnvironmentName, InstanceDescriptor>) -> Self {
+        self.instances = instances;
+        self
     }
 
     /// Also look for the project at the entry `nyl.toml`'s
@@ -322,8 +334,9 @@ impl UnitSourceRenderer {
         let same = self.entry_project_dir.trim_start_matches('/');
         let located =
             crate::util::project_path::locate_checkout_project(worktree, Path::new(same), &[], &self.previous_paths)?;
-        let inventory = super::discover_gitops_inventory(&located.directory, None, self.resource_catalogue.clone())?;
-        let effective = resolve_effective_environment(&inventory, environment)?;
+        let inventory = super::discover_gitops_inventory(&located.directory, None, self.resource_catalogue.clone())?
+            .with_instances(self.instances.clone());
+        let effective = resolve_environment(&inventory, environment)?;
         let units = discover_units(&inventory)?;
         let mut rendered = render_environment_units(&inventory, &units, &effective)?;
         let units = units
@@ -355,7 +368,8 @@ impl UnitSourceRenderer {
                 .collect(),
             source_commit: commit.clone(),
             project_dir: worktree_rooted(&inventory, Path::new("")),
-            environment: effective,
+            environment: effective.environment,
+            instance: effective.instance,
             units,
         })
     }
@@ -390,44 +404,15 @@ fn worktree_rooted(inventory: &GitOpsInventory, project_relative: &Path) -> Stri
     format!("/{relative}")
 }
 
-/// Declared Environments and EnvironmentGroups of the inventory.
-fn declared(inventory: &GitOpsInventory) -> (Vec<&Environment>, Vec<EnvironmentGroup>) {
-    let mut environments = Vec::new();
-    let mut groups = Vec::new();
-    for discovered in inventory.resources.values() {
-        match &discovered.resource {
-            Some(GitOpsResource::Environment(environment)) => environments.push(environment.as_ref()),
-            Some(GitOpsResource::EnvironmentGroup(group)) => groups.push(group.clone()),
-            _ => {}
-        }
-    }
-    (environments, groups)
-}
-
-/// The Environment `name` with its group defaults applied, through the one
-/// group rule of nyl-core.
-pub fn resolve_effective_environment(inventory: &GitOpsInventory, name: &EnvironmentName) -> Result<Environment> {
-    let (environments, groups) = declared(inventory);
-    let environment = environments
-        .into_iter()
-        .find(|environment| environment.metadata.name == name.as_str())
-        .ok_or_else(|| {
-            NylError::config(format!(
-                "{}: Environment {name} is not declared in this project",
-                Code::EnvironmentUnknown
-            ))
-        })?;
-    effective_environment(environment, &groups).map_err(|finding| NylError::config(finding.to_string()))
-}
-
 /// Render the units `environment` selects, by name; a document that renders
 /// to nothing maps to `None`. Unselected units are absent.
 fn render_environment_units(
     inventory: &GitOpsInventory,
     units: &BTreeMap<UnitName, DiscoveredUnit>,
-    environment: &Environment,
+    effective: &EffectiveEnvironment,
 ) -> Result<BTreeMap<UnitName, Option<Value>>> {
-    let context = unit_template_context(environment);
+    let context = unit_template_context(effective);
+    let environment = &effective.environment;
     let selector = &environment.spec.unit_selector.match_labels;
     let mut rendered = BTreeMap::new();
     for (name, unit) in units {
@@ -457,16 +442,21 @@ fn render_environment_units(
 /// The only context unit templates see: the effective `values` and the
 /// sanitized Environment (`name`, `labels`, `values`). Never secrets, state
 /// locations, or the process environment.
-fn unit_template_context(environment: &Environment) -> Value {
+fn unit_template_context(effective: &EffectiveEnvironment) -> Value {
+    let environment = &effective.environment;
     let values = Value::Object(environment.spec.values.clone().into_iter().collect::<Map<_, _>>());
-    serde_json::json!({
+    let mut context = serde_json::json!({
         "values": values,
         "environment": {
             "name": environment.metadata.name,
             "labels": environment.metadata.labels,
             "values": values,
         },
-    })
+    });
+    if let Some(params) = effective.params() {
+        context["params"] = serde_json::to_value(params).unwrap_or(Value::Null);
+    }
+    context
 }
 
 /// Render one unit document. The rendered envelope must equal the literal
@@ -734,15 +724,14 @@ fn spec_enabled(spec: &Value) -> bool {
 /// with `enabled: false`, because a unit being deleted still owns its target
 /// until its teardown completes.
 pub fn target_placements(inventory: &GitOpsInventory) -> Result<BTreeMap<String, EnvironmentName>> {
-    let (environments, _) = declared(inventory);
-    if environments.is_empty() {
+    let names = environment_names(inventory)?;
+    if names.is_empty() {
         return Ok(BTreeMap::new());
     }
     let units = discover_units(inventory)?;
     let mut placements: BTreeMap<String, (EnvironmentName, String)> = BTreeMap::new();
-    for environment in environments {
-        let name = environment.name()?;
-        let effective = resolve_effective_environment(inventory, &name)?;
+    for name in names {
+        let effective = resolve_environment(inventory, &name)?;
         let rendered = render_environment_units(inventory, &units, &effective)?;
         for (unit_name, spec) in &rendered {
             let unit = &units[unit_name];
@@ -788,14 +777,14 @@ pub fn with_inline_targets(inventory: &GitOpsInventory) -> Result<GitOpsInventor
 /// caller adds that one from the document it renders (a unit's stored spec),
 /// which may differ from what source declares now.
 pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&str>) -> Result<GitOpsInventory> {
-    let (environments, _) = declared(inventory);
-    if environments.is_empty() {
+    let names = environment_names(inventory)?;
+    if names.is_empty() {
         return Ok(inventory.clone());
     }
     let units = discover_units(inventory)?;
     let mut extended = inventory.clone();
-    for environment in environments {
-        let effective = resolve_effective_environment(inventory, &environment.name()?)?;
+    for environment in names {
+        let effective = resolve_environment(inventory, &environment)?;
         for (unit_name, spec) in render_environment_units(inventory, &units, &effective)? {
             let unit = &units[&unit_name];
             let Some(spec) = spec.filter(|spec| unit.is_publication() && spec_enabled(spec)) else {
@@ -810,10 +799,7 @@ pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&s
                 extended = extended
                     .with_inline_target(&inline.name, &inline.source_file, &inline.spec)
                     .map_err(|error| {
-                        NylError::config(format!(
-                            "unit {unit_name} of Environment {}: {error}",
-                            environment.metadata.name
-                        ))
+                        NylError::config(format!("unit {unit_name} of Environment {environment}: {error}"))
                     })?;
             }
         }
@@ -840,7 +826,7 @@ pub fn check_unit_bindings(
 ) -> Result<Vec<String>> {
     let deployment_target = static_target(inventory, target)
         .map_err(|reason| NylError::config(format!("DeploymentTarget {target:?} {reason}")))?;
-    let effective = resolve_effective_environment(inventory, environment)?;
+    let effective = resolve_environment(inventory, environment)?;
     let units = discover_units(inventory)?;
     let rendered = render_environment_units(inventory, &units, &effective)?;
     let placed_by_enabled_unit = rendered.iter().any(|(name, spec)| {
@@ -865,7 +851,7 @@ pub fn check_unit_bindings(
             } else {
                 let name =
                     EnvironmentName::new(producer_environment).map_err(|error| NylError::config(error.to_string()))?;
-                let producer = resolve_effective_environment(inventory, &name)?;
+                let producer = resolve_environment(inventory, &name)?;
                 external = render_environment_units(inventory, &units, &producer)?;
                 &external
             };
@@ -1280,9 +1266,7 @@ spec:
         let direct = |worktree: &TempDir, environment: Option<&str>| {
             let inventory = inventory(worktree);
             let environment = environment
-                .map(|environment| {
-                    resolve_effective_environment(&inventory, &EnvironmentName::new(environment).unwrap())
-                })
+                .map(|environment| resolve_environment(&inventory, &EnvironmentName::new(environment).unwrap()))
                 .transpose()
                 .unwrap();
             render_direct_unit(&inventory, &name, environment.as_ref())
@@ -1533,6 +1517,241 @@ spec:
         let error = with_inline_targets(&inventory(&worktree)).unwrap_err().to_string();
         assert!(error.contains("unit kubernetes of Environment dev"), "{error}");
         assert!(error.contains("target names are unique"), "{error}");
+    }
+
+    const PREVIEW_TEMPLATE: &str = r"apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata: {name: preview}
+spec:
+  parameters:
+    pr: {type: integer}
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values:
+    region: eu
+    host: 'pr-{{ params.pr }}.preview.example.com'
+    prefix: '{{ environment.name }}'
+  state:
+    desiredRef: nyl/previews
+    observedRef: nyl/previews
+    path: '{{ environment.name }}'
+";
+
+    /// The publication unit a template instance renders: its target is inline,
+    /// named and prefixed from the environment, with the instance's values.
+    const PREVIEW_UNIT: &str = r"apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {preview: 'true'}
+spec:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      publication:
+        repository: {repoURL: 'https://example.invalid/deploy.git'}
+        revision: previews
+        pathPrefix: '{{ values.prefix }}'
+      values: {hostname: '{{ values.host }}', pr: '{{ params.pr }}'}
+";
+
+    fn preview_project(unit: &str) -> TempDir {
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        project(&[
+            ("platform.yaml", &platform),
+            ("preview.yaml", PREVIEW_TEMPLATE),
+            ("kubernetes.yaml", unit),
+        ])
+    }
+
+    fn instances(pairs: &[(&str, i64)]) -> BTreeMap<EnvironmentName, InstanceDescriptor> {
+        pairs
+            .iter()
+            .map(|(name, pr)| {
+                (
+                    EnvironmentName::new(*name).unwrap(),
+                    InstanceDescriptor {
+                        template: "preview".to_owned(),
+                        params: BTreeMap::from([("pr".to_owned(), json!(pr))]),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Catches an instance that renders with anything but its template and
+    /// recorded parameters: the template's values render over `params` and
+    /// the instance's name, units read `params`, and the inline target is
+    /// named and prefixed per instance, so instances share nothing.
+    #[test]
+    fn test_an_instance_renders_its_templates_values_and_params() {
+        let worktree = preview_project(PREVIEW_UNIT);
+        let renderer = UnitSourceRenderer::new("/nyl", crate::config::test_catalogue())
+            .with_instances(instances(&[("pr-1", 1), ("pr-22", 22)]));
+        let commit = CommitId::new("a".repeat(40)).unwrap();
+        let source = renderer
+            .render(worktree.path(), &EnvironmentName::new("pr-22").unwrap(), &commit)
+            .unwrap();
+        assert_eq!(source.environment.metadata.name, "pr-22");
+        assert_eq!(
+            source.environment.spec.values["host"],
+            json!("pr-22.preview.example.com")
+        );
+        assert_eq!(source.environment.spec.state.path, "pr-22");
+        let terms = source.instance.expect("an instance");
+        assert_eq!(
+            (terms.template.as_str(), terms.params["pr"].clone()),
+            ("preview", json!(22))
+        );
+        let spec = unit(&render_with(&worktree, &renderer, "pr-22"), "kubernetes")
+            .spec
+            .clone()
+            .unwrap();
+        assert_eq!(spec["target"]["name"], json!("pr-22-kubernetes"));
+        assert_eq!(spec["target"]["inline"]["publication"]["pathPrefix"], json!("pr-22"));
+        assert_eq!(
+            spec["target"]["inline"]["values"]["hostname"],
+            json!("pr-22.preview.example.com")
+        );
+        assert_eq!(spec["target"]["inline"]["values"]["pr"], json!("22"));
+
+        // An environment that is neither declared nor a known instance is unknown.
+        let error = renderer
+            .render(worktree.path(), &EnvironmentName::new("pr-3").unwrap(), &commit)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-ENVIRONMENT-UNKNOWN"), "{error}");
+    }
+
+    fn render_with(worktree: &TempDir, renderer: &UnitSourceRenderer, environment: &str) -> RenderedSource {
+        renderer
+            .render(
+                worktree.path(),
+                &EnvironmentName::new(environment).unwrap(),
+                &CommitId::new("a".repeat(40)).unwrap(),
+            )
+            .unwrap()
+    }
+
+    /// Catches instances missing from the checks across environments: each
+    /// instance's target is placed by it (so a direct `--push` refuses
+    /// it) and joins the inventory, and instances whose targets would
+    /// collide, here by publishing to the same prefix, fail the compile of every
+    /// publication render.
+    #[test]
+    fn test_instances_join_placements_and_inline_target_checks() {
+        let worktree = preview_project(PREVIEW_UNIT);
+        let known = inventory(&worktree).with_instances(instances(&[("pr-1", 1), ("pr-2", 2)]));
+        assert_eq!(
+            target_placements(&known).unwrap(),
+            BTreeMap::from([
+                ("pr-1-kubernetes".to_owned(), EnvironmentName::new("pr-1").unwrap()),
+                ("pr-2-kubernetes".to_owned(), EnvironmentName::new("pr-2").unwrap()),
+            ])
+        );
+        let extended = with_inline_targets(&known).unwrap();
+        for name in ["pr-1-kubernetes", "pr-2-kubernetes"] {
+            assert!(
+                extended.get(GitOpsResourceKind::DeploymentTarget, name).is_some(),
+                "{name}"
+            );
+        }
+        super::super::validate_gitops_inventory(&extended).unwrap();
+
+        // Targets of every instance publishing to one prefix is the template's error.
+        let shared = PREVIEW_UNIT.replace("pathPrefix: '{{ values.prefix }}'", "pathPrefix: previews");
+        let worktree = preview_project(&shared);
+        let known = inventory(&worktree).with_instances(instances(&[("pr-1", 1), ("pr-2", 2)]));
+        let extended = with_inline_targets(&known).unwrap();
+        let error = super::super::validate_gitops_inventory(&extended)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlapping publication path prefixes"), "{error}");
+        assert!(
+            error.contains("pr-1-kubernetes") && error.contains("pr-2-kubernetes"),
+            "{error}"
+        );
+    }
+
+    /// Catches a template that renders for no instance without anything
+    /// saying why: a parameter of the wrong type, a missing one, and an
+    /// undeclared one each name the parameter and the template.
+    #[test]
+    fn test_instantiate_binds_parameters_against_the_declarations() {
+        let worktree = preview_project(PREVIEW_UNIT);
+        let discovered = inventory(&worktree);
+        let template = super::super::instances::find_template(&discovered, "preview").unwrap();
+        let name = EnvironmentName::new("pr-1").unwrap();
+        let attempt = |params: Value| {
+            let params = params
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            super::super::instances::instantiate(template, &name, &params)
+                .map(|_| ())
+                .map_err(|finding| format!("{}: {}", finding.code, finding.message))
+        };
+        assert_eq!(attempt(json!({"pr": 1})), Ok(()));
+        for (params, expected) in [
+            (json!({"pr": "one"}), "parameter \"pr\": expected integer, got string"),
+            (
+                json!({}),
+                "parameter \"pr\" of EnvironmentTemplate preview has no default",
+            ),
+            (json!({"pr": 1, "other": true}), "parameter \"other\" is not declared"),
+        ] {
+            let error = attempt(params).unwrap_err();
+            assert!(error.starts_with("NYL-INSTANCE-PARAMETER-INVALID"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
+
+        // A state location that reads parameters cannot locate the state holding them.
+        let params_in_state = PREVIEW_TEMPLATE.replace("path: '{{ environment.name }}'", "path: 'pr-{{ params.pr }}'");
+        let worktree = project(&[("preview.yaml", &params_in_state)]);
+        let discovered = inventory(&worktree);
+        let template = super::super::instances::find_template(&discovered, "preview").unwrap();
+        let finding = super::super::instances::instance_state(template, &name).unwrap_err();
+        assert_eq!(finding.code, Code::TemplateInvalid);
+        assert!(
+            finding.message.contains("spec.state may only read environment.name"),
+            "{}",
+            finding.message
+        );
+    }
+
+    /// Catches a template whose `values.target` object, written as the
+    /// reference scenario writes it, reaches the unit unrendered: strings in
+    /// the object read `params` and the instance's name once, when the
+    /// instance is created, so the unit's `tojson` carries concrete values.
+    #[test]
+    fn test_templated_values_inside_a_target_object_render_for_the_instance() {
+        let template = PREVIEW_TEMPLATE.replace(
+            "    prefix: '{{ environment.name }}'\n",
+            "    target:\n      inline:\n        clusterRef: {name: dev}\n        publication:\n          repository: {repoURL: 'https://example.invalid/deploy.git'}\n          revision: previews\n          pathPrefix: '{{ environment.name }}'\n        values: {hostname: 'pr-{{ params.pr }}.example.com'}\n",
+        );
+        let unit = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels:\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}\n";
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        let worktree = project(&[
+            ("platform.yaml", &platform),
+            ("preview.yaml", &template),
+            ("kubernetes.yaml", unit),
+        ]);
+        let renderer =
+            UnitSourceRenderer::new("/nyl", crate::config::test_catalogue()).with_instances(instances(&[("pr-5", 5)]));
+        let source = render_with(&worktree, &renderer, "pr-5");
+        let spec = self::unit(&source, "kubernetes")
+            .spec
+            .clone()
+            .expect("the unit renders");
+        assert_eq!(spec["target"]["name"], json!("pr-5-kubernetes"));
+        assert_eq!(spec["target"]["inline"]["publication"]["pathPrefix"], json!("pr-5"));
+        assert_eq!(
+            spec["target"]["inline"]["values"]["hostname"],
+            json!("pr-5.example.com")
+        );
     }
 
     /// Catches an inline target that is not a valid DeploymentTarget being

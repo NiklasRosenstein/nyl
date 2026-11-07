@@ -23,6 +23,7 @@ where state lives, how the lease protects it, and which Git hosts support it.
 ```bash
 nyl state init -e dev
 nyl state init -e dev --fresh --reason "start over after restoring the cluster"
+nyl state init -e pr-123 --template preview --param pr=123
 ```
 
 Creates `state.yaml` on the environment's state refs. Running it again
@@ -50,6 +51,21 @@ JSON output includes this description in `details.location`.
 executes again at the next reconcile. It is also the way to start over at a
 location whose state was deleted with [`nyl state delete`](#nyl-state-delete):
 a plain `state init` there exits 1 with `NYL-STATE-DELETED`.
+
+`--template <name>` creates the environment as an instance of an
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
+instead of an Environment, with `--param <name>=<value>` (repeatable) for its
+parameters. The value is parsed as YAML and checked against the template's
+declaration; defaults fill the rest. The instance's `state.yaml` records the
+template, the bound parameters, the entry checkout's commit as the instance's
+source, and `expiresAt` (now plus the template's `ttl`). Run again for an
+existing instance, it updates what differs and extends `expiresAt`. It refuses
+a name a declared Environment or an instance of another template uses
+(`NYL-INSTANCE-NAME-TAKEN`), a template the project does not declare
+(`NYL-INSTANCE-TEMPLATE-UNKNOWN`), parameters that do not satisfy the
+declarations (`NYL-INSTANCE-PARAMETER-INVALID`), and `--param` without
+`--template` (`NYL-INSTANCE-TEMPLATE-REQUIRED`), all with exit 1 before anything
+is written. `--fresh` with `--template` starts a deleted instance over.
 
 ## `nyl state move`
 

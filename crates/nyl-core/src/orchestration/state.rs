@@ -168,6 +168,12 @@ pub struct StateRecord {
     /// An instance's expiry.
     #[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
+    /// An instance's source commit: the entry worktree's commit when
+    /// `state init --template` or `reconcile --template` last created or
+    /// updated it. A run that is not entered from the instance's own source
+    /// renders at this commit.
+    #[serde(rename = "sourceCommit", default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<CommitId>,
     pub location: StateLocation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<StateEvent>,
@@ -261,6 +267,8 @@ pub struct EnvironmentRecord {
 pub enum SourceChoice {
     /// The entry worktree's commit.
     Entry,
+    /// An instance's recorded source commit: a run that is not entered from the instance's own source.
+    Recorded,
     /// The tip of the Environment's `source.revision`.
     Revision { revision: String },
     /// The Environment's `source.commit` lock.

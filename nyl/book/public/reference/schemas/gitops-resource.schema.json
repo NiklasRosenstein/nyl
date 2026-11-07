@@ -27,6 +27,9 @@
       "$ref": "environment-group.schema.json"
     },
     {
+      "$ref": "environment-template.schema.json"
+    },
+    {
       "$ref": "release.schema.json"
     }
   ],

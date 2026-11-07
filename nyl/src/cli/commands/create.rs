@@ -583,6 +583,7 @@ fn scaffold_resource(
             GitOpsResourceKind::ApplicationGroup => "application-groups",
             GitOpsResourceKind::Environment => "environments",
             GitOpsResourceKind::EnvironmentGroup => "environment-groups",
+            GitOpsResourceKind::EnvironmentTemplate => "environment-templates",
         };
         config
             .get_gitops_scaffold_path()
@@ -693,6 +694,11 @@ fn render_resource_scaffold(
         ),
         GitOpsResourceKind::EnvironmentGroup => format!(
             "apiVersion: gitops.nyl/v1\nkind: EnvironmentGroup\nmetadata:\n  name: {name}\nspec:\n  environmentSelector:\n    matchLabels:\n      stage: {name}\n"
+        ),
+        // Instances share one state ref, a directory each, and are created with
+        // `nyl state init -e <instance> --template {name} --param id=<value>`.
+        GitOpsResourceKind::EnvironmentTemplate => format!(
+            "apiVersion: gitops.nyl/v1\nkind: EnvironmentTemplate\nmetadata:\n  name: {name}\nspec:\n  parameters:\n    id: {{type: string}}\n  unitSelector:\n    matchLabels:\n      {name}: 'true'\n  values: {{}}\n  state:\n    desiredRef: nyl/{name}\n    observedRef: nyl/{name}\n    path: '{{{{ environment.name }}}}'\n"
         ),
     };
     format!("# yaml-language-server: $schema={schema}\n{body}")

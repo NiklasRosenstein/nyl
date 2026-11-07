@@ -98,6 +98,7 @@ pub(crate) fn build(
             &ctx.worktree,
             &ctx.project_dir,
             &ctx.cache_dir,
+            ctx.instances,
             spec,
             None,
             source,
@@ -142,7 +143,8 @@ fn refuse_owned(
     target: &str,
 ) -> DriverResult<()> {
     let inventory = nyl_render::gitops::discover_gitops_inventory(&ctx.project_dir, None, catalogue.clone())
-        .map_err(|error| DriverError::before_effects(format!("cannot discover the project: {error}")))?;
+        .map_err(|error| DriverError::before_effects(format!("cannot discover the project: {error}")))?
+        .with_instances(ctx.instances.clone());
     let placements = nyl_render::gitops::units::target_placements(&inventory).map_err(|error| {
         DriverError::before_effects(format!("cannot read which environments place targets: {error}"))
     })?;
