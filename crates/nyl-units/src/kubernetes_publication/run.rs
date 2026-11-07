@@ -638,7 +638,7 @@ fn publish_with(
             },
         };
         if let (Step::Continue { attestations, .. }, Some(timeout)) = (&mut step, wait) {
-            match health_wait::wait_for_target(ctx, unit, commit, timeout) {
+            match health_wait::wait_for_target(ctx, unit, commit, timeout, access) {
                 Waited::Healthy(found) => *attestations = found,
                 Waited::Failed(outcome) => return Ok(Step::Stop(outcome)),
             }

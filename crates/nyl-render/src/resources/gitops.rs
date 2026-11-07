@@ -2382,6 +2382,45 @@ mod tests {
         assert!(parse_gitops_resource(&value).is_ok());
     }
 
+    fn target_with(extra: serde_json::Value) -> serde_json::Value {
+        let mut target = json!({
+            "apiVersion": "k8s.gitops.nyl/v1",
+            "kind": "DeploymentTarget",
+            "metadata": {"name": "dev"},
+            "spec": {"publication": {"repositoryRef": {"name": "deploy"}, "revision": "deploy"}}
+        });
+        target["spec"]
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        target
+    }
+
+    /// Catches a direct target that also names Argo CD settings it would
+    /// ignore, an empty or unknown reconciler, and a valid direct declaration
+    /// being refused.
+    #[test]
+    fn validates_the_reconciler_of_a_target_as_exclusive() {
+        assert!(parse_gitops_resource(&target_with(json!({"reconciler": {"direct": {}}}))).is_ok());
+        let refused = |extra: serde_json::Value| parse_gitops_resource(&target_with(extra)).unwrap_err().to_string();
+        assert!(refused(json!({"reconciler": {}})).contains("must name a reconciler"));
+        assert!(parse_gitops_resource(&target_with(json!({"reconciler": {"flux": {}}}))).is_err());
+        assert!(
+            refused(json!({"reconciler": {"direct": {}}, "argocdRef": {"name": "central"}}))
+                .contains("mutually exclusive")
+        );
+        for catalog in [
+            json!({"enabled": false}),
+            json!({"name": "x"}),
+            json!({"shared": {"name": "previews"}}),
+        ] {
+            assert!(
+                refused(json!({"reconciler": {"direct": {}}, "catalogApplication": catalog}))
+                    .contains("generates no catalog Application")
+            );
+        }
+    }
+
     fn argocd_instance_with_access(access: serde_json::Value) -> serde_json::Value {
         json!({
             "apiVersion": "k8s.gitops.nyl/v1",

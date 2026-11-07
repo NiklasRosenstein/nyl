@@ -180,7 +180,10 @@ Top-level fields are `contract`, `milestone`, optional `tiers` (default
 scenario directory, so scenarios can share one project), optional
 `publication` (`real` to run in tier 1 with the built-in publication driver
 only, for a scenario that depends on the settings that driver derives from its
-render, which the test kind states in its declaration instead; default both),
+render, which the test kind states in its declaration instead; `fake` to run
+it with the test kind only, for a scenario that scripts the publication's
+reconcile outcome, which the built-in driver, running for real, cannot be made
+to give; default both),
 and `steps`. Before
 the first commit, the harness replaces `%SCENARIO_TMP%` in project and patch
 files with a per-scenario temporary directory, `%PROJECT_URL%` with the URL

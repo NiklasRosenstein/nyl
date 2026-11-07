@@ -152,6 +152,7 @@ export default defineConfig({
                   "kubernetes-gitops/workflow/diff",
                   "kubernetes-gitops/workflow/publish",
                   "kubernetes-gitops/workflow/handoff",
+                  "kubernetes-gitops/workflow/direct-reconciler",
                   "kubernetes-gitops/workflow/partial-publication",
                   "kubernetes-gitops/workflow/move-publication",
                 ],

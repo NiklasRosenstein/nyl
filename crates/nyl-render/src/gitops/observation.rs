@@ -1671,6 +1671,87 @@ mod tests {
         assert_eq!(serde_json::from_value::<ReconcilerFacts>(value).unwrap(), facts);
     }
 
+    /// Pins the direct location's recorded format and which of its fields never
+    /// key the unit: the context says only how the cluster is read, while the
+    /// server, the Release identities, and the anchor are what the render derives.
+    #[test]
+    fn test_direct_facts_serialize_with_camel_case_keys_and_leave_the_context_unkeyed() {
+        let location = DirectLocation {
+            cluster: "dev".to_owned(),
+            context: Some("kind".to_owned()),
+            server: Some("https://127.0.0.1:6443".to_owned()),
+        };
+        let release = PublishedDirectRelease {
+            key: "web/web".to_owned(),
+            group: "web".to_owned(),
+            release: DirectRelease {
+                name: "web".to_owned(),
+                namespace: "web".to_owned(),
+                destination_namespace: "app".to_owned(),
+            },
+            directory: "web/web".to_owned(),
+        };
+        let destination = PublicationDestination {
+            repository: "https://example.invalid/deploy.git".to_owned(),
+            push_url: "https://example.invalid/deploy.git".to_owned(),
+            branch: "deploy".to_owned(),
+            path_prefix: "dev".to_owned(),
+        };
+        let facts = ReconcilerFacts {
+            location: ReconcilerLocation::Direct(location),
+            expected: Expected {
+                publication: ObservedPublication {
+                    url: destination.push_url.clone(),
+                    branch: "deploy".to_owned(),
+                    path_prefix: "dev".to_owned(),
+                },
+                deployments: vec![release.expected(&destination)],
+                anchors: vec![Anchor {
+                    id: DIRECT_ANCHOR.to_owned(),
+                    locator: Value::Null,
+                }],
+            },
+        };
+        let value = serde_json::to_value(&facts).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "direct", "cluster": "dev", "context": "kind", "server": "https://127.0.0.1:6443",
+                "publication": {"url": "https://example.invalid/deploy.git", "branch": "deploy", "pathPrefix": "dev"},
+                "expected": [{
+                    "id": "web/web", "display": "web/web", "role": "workload", "path": "dev/web/web", "release": "web/web",
+                    "source": {"repository": "https://example.invalid/deploy.git", "path": "dev/web/web"},
+                    "locator": {"name": "web", "namespace": "web", "destinationNamespace": "app"}
+                }],
+                "anchors": [{"id": "release-state"}],
+            })
+        );
+        assert_eq!(serde_json::from_value::<ReconcilerFacts>(value).unwrap(), facts);
+        assert_eq!(
+            facts.unkeyed("/reconciler"),
+            ["/reconciler/context", "/reconciler/publication/url"]
+        );
+    }
+
+    /// Catches the Releases of an ownership index being read by anything but
+    /// their state identity: the compilation record's group, name, namespace,
+    /// destination namespace, and directory.
+    #[test]
+    fn test_direct_releases_are_read_from_the_compilation_record() {
+        let compilation = serde_json::json!({"releases": {"web/web": {"workload": {
+            "group": {"metadata": {"name": "web"}},
+            "release": {"metadata": {"name": "api", "namespace": "api-ns"}},
+            "destination_namespace": "app",
+            "release_directory": "web\\api"
+        }}}});
+        let releases = direct_releases_of(Some(&compilation));
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].identity(), ("api-ns", "api"));
+        assert_eq!(releases[0].release.destination_namespace, "app");
+        assert_eq!(releases[0].directory, "web/api");
+        assert!(direct_releases_of(None).is_empty());
+    }
+
     fn generated(role: DeploymentRole, name: &str, namespace: &str, project: &str) -> GeneratedApplication {
         GeneratedApplication {
             role,

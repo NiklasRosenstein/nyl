@@ -209,6 +209,13 @@ impl RenderIndex {
         }
     }
 
+    /// Record that the tree is delivered by Nyl's direct reconciler, not Argo CD.
+    #[must_use]
+    pub fn delivered_directly(mut self, direct: bool) -> Self {
+        self.reconciler = direct.then(|| "direct".to_owned());
+        self
+    }
+
     /// Record the orchestration unit that owns this index.
     #[must_use]
     pub fn owned_by(mut self, owner: RenderIndexOwner) -> Self {

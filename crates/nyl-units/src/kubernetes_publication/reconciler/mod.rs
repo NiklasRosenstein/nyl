@@ -214,9 +214,23 @@ pub fn reader(
     env: &BTreeMap<String, String>,
     budget: Duration,
 ) -> Result<Box<dyn ReconcilerReader>, ReadError> {
+    reader_with(location, publication, env, budget, &super::direct::ClusterAccess::Live)
+}
+
+/// [`reader`] reaching a direct target's cluster through `access`, which the
+/// driver holds so that tests can run without a cluster.
+pub fn reader_with(
+    location: &ReconcilerLocation,
+    publication: &ObservedPublication,
+    env: &BTreeMap<String, String>,
+    budget: Duration,
+    access: &super::direct::ClusterAccess,
+) -> Result<Box<dyn ReconcilerReader>, ReadError> {
     match location {
         ReconcilerLocation::ArgoCd(location) => super::argocd::reader(location, env, budget),
-        ReconcilerLocation::Direct(location) => super::direct::reader(location, publication, env, budget),
+        ReconcilerLocation::Direct(location) => {
+            super::direct::reader_with(location, publication, env, budget, access.clone())
+        }
     }
 }
 

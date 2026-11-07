@@ -88,6 +88,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `--handoff[=<MANAGER>]` - Apply as `MANAGER` (default `argocd-controller`) and
   release the fields applied as `nyl`, as with
   [`nyl apply`](/nyl/reference/cli/apply/#field-ownership-options).
+- `--take-over` - Roll back a release an environment owns anyway, recording no
+  owner, as with [`nyl apply`](/nyl/reference/cli/apply/).
 
 #### Examples
 
@@ -123,6 +125,7 @@ such as managed Namespaces, unless `--confirm-delete` is passed. See
 
 - `--no-purge` - Delete only the release records, not the resources
 - `--confirm-delete` - Also delete resources whose sync option is `Delete=confirm`
+- `--take-over` - Delete a release an environment owns anyway (see [`nyl apply --take-over`](/nyl/reference/cli/apply/)). Resources are deleted in reverse apply order, waiting for each kind to terminate before the next, as a prune does.
 - `--dry-run` - Show what would be deleted without deleting it
 
 ## See Also

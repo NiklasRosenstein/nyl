@@ -152,7 +152,8 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         source_commit,
         dirty,
         inputs,
-    );
+    )
+    .delivered_directly(compiled.target.is_direct());
     reconcile_rendered_tree_with_options(
         &output_root,
         &compiled.owned_files(),
@@ -242,6 +243,7 @@ fn render_index_owner(target_name: &str, target: &DeploymentTarget) -> RenderInd
         false,
         BTreeMap::new(),
     )
+    .delivered_directly(target.is_direct())
 }
 
 fn format_file_count(count: usize) -> String {

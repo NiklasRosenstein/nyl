@@ -781,8 +781,8 @@ spec:
   `nyl_units::kubernetes_publication::argocd` for the Argo CD readers). The
   publication still happens first: `observe` adds a reading, makes the
   `observe` strategy available for `teardownWait`, and makes it the default.
-  `observe` is an object so that options can be added later; only `{}` is
-  accepted. It does not say which reconciler is read: that follows the
+  `observe` is an object so that options can be added later; `{}` and
+  `waitHealthy` (see [Waiting for health](#waiting-for-health)) are accepted. It does not say which reconciler is read: that follows the
   reconciler of the unit's target (its ArgoCDInstance, or its direct
   reconciler), so the same declaration observes whatever runs the target. Without `observe`
   the unit only publishes, its default `teardownWait` is `manual`, and
@@ -847,6 +847,40 @@ spec:
     in-cluster configuration, and a Cluster without a declared context
     cannot be read. A job that holds the read credentials a reconcile may
     lack runs [`nyl observe`](#observed-values).
+
+#### Waiting for health
+
+`observe: {waitHealthy: {timeout: <duration>}}` is opt-in; absent, reconcile does
+not wait. After a successful publish (and, for a direct target, the apply), the
+driver polls the unit's `ReconcilerReader` and runs the shared `evaluate` until
+`healthy` passes, up to `timeout` and never past the unit's own deadline, then
+reports the `accepted` and `healthy` attestations `nyl attest` would record,
+which the engine records with the receipt (`source: {driver: reconcile}`). It
+works for a direct target and for both Argo CD access methods, with no
+reader-specific code (owner: `nyl_units::kubernetes_publication::health_wait`).
+
+- **Time.** The wait uses the injected clock the execution context carries
+  (`ExecutionContext::clock`): it reads `now` and waits through it, so a test
+  clock advances instead of sleeping and nothing reads the system clock. Polls
+  back off, a pause of 2 seconds doubling to 30.
+- **Never a pass.** An unreadable reconciler, a reading whose absences are not
+  provable (no anchor, a credential that cannot see), and a publication that
+  does not match are `Unread` or `NotYet`, never `healthy`. A credential or
+  declaration the wait cannot fix (`credentials`, `declaration`, `forbidden`,
+  `rejected`) ends it at once as a retryable `credentials` failure; anything
+  else retries until the timeout.
+- **Early failure.** A `Degraded` reading ends the wait before the timeout only
+  when the reader marks it terminal (`Observed::terminal`): the direct reader
+  does for a rollout past its progress deadline and a failed Job, and Argo CD's
+  reader never does, because its controllers retry. A terminal reading fails the
+  unit with `NYL-KUBERNETES-HEALTH-DEGRADED`.
+- **Timeout.** The unit fails, retryable, with category `timeout` and
+  `NYL-KUBERNETES-HEALTH-TIMEOUT`, naming the worst deployment and its last
+  health. It fails rather than succeeds with a warning because the author asked
+  for the wait: a receipt would tell dependents that the target is healthy, or
+  at least settled, which it is not. The tree is published and applied, so the
+  next execution (recovery `converge`) publishes nothing new, applies again, and
+  waits again; no receipt exists in between.
 
 **Direct builds.** The unit declares the `build` capability
 (`nyl build <unit> [-e <env>] [-- --diff | --push]`, see
@@ -1706,10 +1740,11 @@ several fails) is unknown; the receipt's commit missing from the branch fails
 both attestations as for Argo CD. Credentials are `KUBECONFIG` and the
 declared context alone.
 
-`healthy` is not attested by `reconcile`, and no rollout wait is added:
-Argo CD reconciles asynchronously and direct apply synchronously, but both are
-read afterwards by `nyl attest`, so the evidence path is one. A job that needs
-`healthy` runs `nyl attest` until it passes, with a timeout.
+Without `waitHealthy`, `reconcile` attests nothing: Argo CD reconciles
+asynchronously and direct apply synchronously, but both are read afterwards by
+`nyl attest`, so the evidence path is one, and a job that needs `healthy` runs
+`nyl attest` until it passes, with a timeout. With `waitHealthy`, the unit waits
+for it inside the reconcile (see [Waiting for health](#waiting-for-health)).
 
 #### Teardown
 
@@ -1754,10 +1789,10 @@ and a successful list. No evaluation code changes: the present set is what
 `reconciler::evaluate::removal` returns as remaining.
 
 **Readiness.** The teardown settings recorded at resolution become the
-reconciler's own: `TeardownSettings` is tagged by reconciler kind, and a
-direct target records its owned Namespaces with their `deletePolicy`. The
-publication driver evaluates them (`readiness.rs`); the shell displays the
-findings unchanged.
+reconciler's own: the settings keep one shape, a direct target's Namespaces
+with their `deletePolicy` being the part it uses, and the publication driver
+evaluates them by the unit's recorded reconciler kind (`readiness.rs`); the
+shell displays the findings unchanged.
 
 | Requirement | Setting | If unmet |
 | --- | --- | --- |
@@ -1902,7 +1937,7 @@ Follow-ups, not part of the first version:
 | Item | Needed by |
 | --- | --- |
 | A `Dedicated` shared-namespace owner for a direct target: a synthetic Release `<group>/_ns-<name>` to hold its release state (rejected for now) | Before direct targets are recommended for shared namespaces |
-| Cluster drift detection for a direct unit, and `reconcile` waiting for rollout | After the first direct runs |
+| Cluster drift detection for a direct unit | After the first direct runs |
 | Skipping the write of a revision when nothing changed (the apply itself always runs, because server-side apply is idempotent and self-heals) | After revision churn is measured |
 | A `nyl release delete --keep-resources` that keeps the resources and the state (`--no-purge` keeps the resources and deletes the state) | With the Argo CD to direct procedure |
 
@@ -4768,6 +4803,16 @@ longer counts: both are blocked again until `attest` records a pass for the new
 receipt, after which they are `current` without executing, because their own
 inputs did not change.
 ([`attested-evidence`](../nyl/tests/scenarios/walkthroughs/attested-evidence/scenario.yaml))
+
+**A publication that waits for health.** `kubernetes` declares
+`observe: {waitHealthy: {timeout: 5m}}` and its rollout does not finish in time.
+The reconcile executes `network`, `database`, and `web-image`; `kubernetes`
+fails, retryable, with category `timeout` and no receipt, because it published and
+applied but cannot say it is healthy, and the run exits 3. The next reconcile
+executes only `kubernetes`, which converges, records its receipt with the
+`accepted` and `healthy` attestations the wait found, and leaves the rest
+`current`.
+([`health-wait`](../nyl/tests/scenarios/walkthroughs/health-wait/scenario.yaml))
 
 **Preview expiry.** Instance `pr-123` of template `preview` (`ttl: 7d`,
 `allowTeardown: true`) was last reconciled with `reconcile -e pr-123` eight days
