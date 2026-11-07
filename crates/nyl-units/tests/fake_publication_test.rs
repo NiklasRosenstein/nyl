@@ -56,6 +56,7 @@ fn test_fake_publication_readiness_comes_from_the_stored_document() {
         "catalogPrunes": false,
         "applicationDeletionPolicy": "Foreground",
         "namespaceDeletePolicies": {"web": "Confirm"},
+        "deletionConfirmations": [{"application": "web", "resource": "Namespace web", "options": ["Delete"]}],
         "catalogOwnedByParent": true,
     });
     let unit = desired(recorded, ExecutionKey::from_digest_of(b"key"));

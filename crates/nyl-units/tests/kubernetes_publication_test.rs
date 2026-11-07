@@ -19,7 +19,7 @@ use nyl_core::orchestration::driver::{
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId};
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{Drift, Receipt};
-use nyl_render::gitops::publication::TeardownSettings;
+use nyl_render::gitops::publication::{DeletionConfirmation, TeardownSettings};
 use nyl_units::kubernetes_publication::KubernetesPublicationDriver;
 use publication_world::{conformance, context, context_with, desired, git, spec, Incarnations, NoTools, World};
 use serde_json::{json, Value};
@@ -129,8 +129,12 @@ fn test_resolution_records_the_targets_effective_teardown_settings() {
         BTreeMap::from([("web".to_owned(), "Confirm".to_owned())])
     );
     assert_eq!(
-        settings.namespace_prune_policies,
-        BTreeMap::from([("web".to_owned(), "Confirm".to_owned())])
+        settings.deletion_confirmations,
+        vec![DeletionConfirmation {
+            application: "web".to_owned(),
+            resource: Some("Namespace web".to_owned()),
+            options: vec!["Delete".to_owned(), "Prune".to_owned()],
+        }]
     );
 
     // The stored document answers without rendering anything.

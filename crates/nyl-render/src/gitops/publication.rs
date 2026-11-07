@@ -1244,6 +1244,27 @@ pub fn without_workloads(rendered: &RenderedTarget) -> RenderedTarget {
     phase1
 }
 
+/// One thing that holds a workload Application's cascade deletion in Argo CD
+/// until someone confirms it: a rendered resource that requires confirmation
+/// to be deleted, or the Application's own sync options when they make every
+/// resource it deletes require it.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletionConfirmation {
+    /// The workload Application whose deletion it holds.
+    pub application: String,
+    /// The rendered resource (`Kind namespace/name`) that carries the options
+    /// in its `argocd.argoproj.io/sync-options` annotation; `None` when the
+    /// Application's `spec.syncPolicy.syncOptions` carry them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// The options that require confirmation, `Delete` and `Prune`, each set to `confirm`.
+    pub options: Vec<String>,
+}
+
 /// A target's settings that decide whether its teardown can complete, read
 /// from the rendered tree ([`teardown_settings`]). A publication driver
 /// records them in the unit's resolved spec, a persisted format whose
@@ -1261,12 +1282,15 @@ pub struct TeardownSettings {
     pub catalog_prunes: Option<bool>,
     /// The catalog's `applicationDeletionPolicy`, such as `Foreground` or `Orphan`; `None` when external.
     pub application_deletion_policy: Option<String>,
-    /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
+    /// Each owned Namespace's effective `Delete` sync option (`Automatic`,
+    /// `Retain`, or `Confirm`), by name, as Argo CD resolves it: the
+    /// Namespace's own annotation, else its Application's option.
     pub namespace_delete_policies: BTreeMap<String, String>,
-    /// Each owned Namespace's `prunePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
-    /// Absent in a document recorded before it existed.
+    /// What holds an Application's cascade deletion until someone confirms it
+    /// in Argo CD: every resource or Application that makes a deletable
+    /// resource require confirmation. Empty when nothing does.
     #[serde(default)]
-    pub namespace_prune_policies: BTreeMap<String, String>,
+    pub deletion_confirmations: Vec<DeletionConfirmation>,
     /// Whether a parent owns the target's catalog, so phase 2 removes the
     /// catalog Application and AppProjects too.
     pub catalog_owned_by_parent: bool,
@@ -1286,10 +1310,18 @@ pub struct TeardownSettings {
 ///   that Application then leaves its workloads running. A tree without a
 ///   catalog Application leaves a parent to sync it, which cannot be seen:
 ///   both settings are `None`, and `catalog_owned_by_parent` is true.
-/// - Each Namespace the tree renders reports its `Delete` and `Prune` sync
-///   options: `confirm` is `Confirm`, `false` is `Retain`, and none is
-///   `Automatic`. The rendered annotation decides, not the policy defaults,
-///   so templates and overrides count.
+/// - Each resource of a workload Application resolves its `Delete` and
+///   `Prune` sync options as Argo CD does: its own
+///   `argocd.argoproj.io/sync-options` annotation, else the Application's
+///   `spec.syncPolicy.syncOptions`, per option. A Namespace reports its
+///   effective `Delete` as `confirm` (`Confirm`), `false` (`Retain`), or
+///   anything else (`Automatic`). The rendered annotation and Application
+///   decide, not the policy defaults, so templates and overrides count.
+/// - A resource Argo CD would delete (not a CustomResourceDefinition, not
+///   `Delete=false`, not `helm.sh/resource-policy: keep`) with `Delete=confirm`
+///   or `Prune=confirm` holds its Application's deletion, and is listed in
+///   `deletion_confirmations`; an Application whose own options do it for
+///   every resource is listed once.
 ///
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
@@ -1318,40 +1350,32 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
     let catalog_source = catalog_source(&rendered.destination.path_prefix);
     let mut catalog: Option<Value> = None;
     let mut workload_orphaned = false;
-    let mut delete_policies = BTreeMap::new();
-    let mut prune_policies = BTreeMap::new();
+    let mut applications = Vec::new();
+    // The Applications first: a resource's options depend on the Application
+    // whose directory holds it, whichever file sorts first.
     for (path, bytes) in &rendered.files {
-        let in_catalog = path.starts_with(super::CATALOG_DIRECTORY);
-        if !matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("yaml" | "yml")) {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(bytes) else {
+        let Some(text) = yaml_text(path, bytes).filter(|_| path.starts_with(super::CATALOG_DIRECTORY)) else {
             continue;
         };
-        // Only catalog files and Namespaces matter; leave other manifests unparsed.
-        if !in_catalog && !text.contains("Namespace") {
-            continue;
-        }
-        let manifests = serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)?;
-        for manifest in manifests {
-            let kind = manifest.get("kind").and_then(Value::as_str);
-            if in_catalog && kind == Some("Application") {
-                if manifest.pointer("/spec/source/path").and_then(Value::as_str) == Some(catalog_source.as_str()) {
-                    catalog = Some(manifest);
-                } else if application_deletion_policy(&manifest) == "Orphan" {
-                    workload_orphaned = true;
-                }
-            } else if !in_catalog
-                && kind == Some("Namespace")
-                && manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
-            {
-                if let Some(name) = manifest.pointer("/metadata/name").and_then(Value::as_str) {
-                    delete_policies.insert(name.to_owned(), namespace_sync_policy(&manifest, "Delete").to_owned());
-                    prune_policies.insert(name.to_owned(), namespace_sync_policy(&manifest, "Prune").to_owned());
-                }
+        for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+            if manifest.get("kind").and_then(Value::as_str) != Some("Application") {
+                continue;
+            }
+            let source = manifest.pointer("/spec/source/path").and_then(Value::as_str);
+            if source == Some(catalog_source.as_str()) {
+                catalog = Some(manifest);
+                continue;
+            }
+            if application_deletion_policy(&manifest) == "Orphan" {
+                workload_orphaned = true;
+            }
+            if let Some(application) = WorkloadApplication::of(&manifest, &rendered.destination.path_prefix) {
+                applications.push(application);
             }
         }
     }
+
+    let (delete_policies, confirmations) = read_resources(rendered, &applications)?;
     // A shared catalog is rendered by Nyl, so its settings are read like a
     // per-target catalog's. It is no parent the project writes: it prunes this
     // target's objects as phase 1 and phase 2 remove them, and itself stays
@@ -1381,9 +1405,221 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
             catalog_policy.map(str::to_owned)
         },
         namespace_delete_policies: delete_policies,
-        namespace_prune_policies: prune_policies,
+        deletion_confirmations: confirmations
+            .into_iter()
+            .map(|((application, resource), options)| DeletionConfirmation {
+                application,
+                resource,
+                options: options.into_iter().map(str::to_owned).collect(),
+            })
+            .collect(),
         catalog_owned_by_parent: owned_by_parent,
     })
+}
+
+/// Each owned Namespace's effective `Delete` policy and what holds the
+/// Applications' deletion, read from the rendered resources outside the catalog.
+fn read_resources(
+    rendered: &RenderedTarget,
+    applications: &[WorkloadApplication],
+) -> Result<(BTreeMap<String, String>, Confirmations)> {
+    use serde_json::Value;
+
+    let mut delete_policies = BTreeMap::new();
+    let mut confirmations = Confirmations::new();
+    for (path, bytes) in &rendered.files {
+        if path.starts_with(super::CATALOG_DIRECTORY) {
+            continue;
+        }
+        let Some(text) = yaml_text(path, bytes) else {
+            continue;
+        };
+        // The most specific Application whose directory holds the file.
+        let owner = applications
+            .iter()
+            .filter(|application| path.starts_with(&application.directory))
+            .max_by_key(|application| application.directory.components().count());
+        // Only Namespaces and resources that can differ from their
+        // Application's options are parsed; any other manifest of a workload
+        // Application is a plain resource Argo CD deletes with its options.
+        let distinguished = [
+            "Namespace",
+            "sync-options",
+            "resource-policy",
+            "CustomResourceDefinition",
+        ];
+        if !distinguished.iter().any(|marker| text.contains(marker)) {
+            if let Some(owner) = owner {
+                owner.record_confirmations(&Resource::default(), &mut confirmations);
+            }
+            continue;
+        }
+        for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+            let Some(kind) = manifest.get("kind").and_then(Value::as_str) else {
+                continue;
+            };
+            let resource = Resource::of(&manifest, kind);
+            if kind == "Namespace" && manifest.get("apiVersion").and_then(Value::as_str) == Some("v1") {
+                if let Some(name) = manifest.pointer("/metadata/name").and_then(Value::as_str) {
+                    let delete = match owner {
+                        Some(owner) => owner.effective_options(&resource).0,
+                        None => resource.delete.clone(),
+                    };
+                    let policy = match delete.as_ref().map(|(value, _)| value.as_str()) {
+                        Some("confirm") => "Confirm",
+                        Some("false") => "Retain",
+                        _ => "Automatic",
+                    };
+                    delete_policies.insert(name.to_owned(), policy.to_owned());
+                }
+            }
+            if let Some(owner) = owner {
+                owner.record_confirmations(&resource, &mut confirmations);
+            }
+        }
+    }
+    Ok((delete_policies, confirmations))
+}
+
+/// The text of a rendered YAML file; `None` for any other file.
+fn yaml_text<'a>(path: &Path, bytes: &'a [u8]) -> Option<&'a str> {
+    matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("yaml" | "yml"))
+        .then(|| std::str::from_utf8(bytes).ok())
+        .flatten()
+}
+
+/// The `Delete` or `Prune` value of a sync option and whether the resource's
+/// own annotation (rather than its Application) sets it.
+type OptionValue = Option<(String, bool)>;
+
+/// What holds each Application's deletion, by Application and resource (`None`
+/// for the Application's own options), with the options that do.
+type Confirmations = BTreeMap<(String, Option<String>), std::collections::BTreeSet<&'static str>>;
+
+/// A workload Application as teardown readiness needs it: the directory it
+/// recursively sources, and the `Delete` and `Prune` values of its
+/// `spec.syncPolicy.syncOptions` (Argo CD's first `key=value` entry).
+struct WorkloadApplication {
+    name: String,
+    /// Relative to the target's publication prefix, like the rendered files.
+    directory: PathBuf,
+    delete: Option<String>,
+    prune: Option<String>,
+}
+
+/// What a rendered resource says about its own deletion: the `Delete` and
+/// `Prune` values of its `argocd.argoproj.io/sync-options` annotation, and
+/// whether Argo CD never deletes it with its Application.
+#[derive(Default)]
+struct Resource {
+    label: String,
+    delete: OptionValue,
+    prune: OptionValue,
+    kept: bool,
+}
+
+impl Resource {
+    fn of(manifest: &serde_json::Value, kind: &str) -> Self {
+        let annotation = |key: &str| {
+            manifest
+                .pointer("/metadata/annotations")
+                .and_then(|annotations| annotations.get(key))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        };
+        // Argo CD splits the annotation on commas, trims, and takes the first
+        // `key=` entry.
+        let option = |key: &str| {
+            let prefix = format!("{key}=");
+            annotation("argocd.argoproj.io/sync-options")
+                .split(',')
+                .map(str::trim)
+                .find_map(|candidate| candidate.strip_prefix(prefix.as_str()))
+                .map(|value| (value.to_owned(), true))
+        };
+        let name = manifest
+            .pointer("/metadata/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let label = match manifest
+            .pointer("/metadata/namespace")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(namespace) => format!("{kind} {namespace}/{name}"),
+            None => format!("{kind} {name}"),
+        };
+        Self {
+            label,
+            delete: option("Delete"),
+            prune: option("Prune"),
+            // Argo CD deletes no CustomResourceDefinition with an Application,
+            // and honours Helm's keep policy.
+            kept: kind == "CustomResourceDefinition"
+                || annotation("helm.sh/resource-policy")
+                    .split(',')
+                    .any(|policy| policy.trim() == "keep"),
+        }
+    }
+}
+
+impl WorkloadApplication {
+    /// The Application a catalog manifest describes, when it names itself and its source.
+    fn of(manifest: &serde_json::Value, path_prefix: &str) -> Option<Self> {
+        let name = manifest.pointer("/metadata/name")?.as_str()?;
+        let source = manifest.pointer("/spec/source/path")?.as_str()?;
+        let option = |key: &str| {
+            manifest
+                .pointer("/spec/syncPolicy/syncOptions")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .find_map(|option| option.strip_prefix(key)?.strip_prefix('=').map(str::to_owned))
+        };
+        Some(Self {
+            name: name.to_owned(),
+            directory: Path::new(source)
+                .strip_prefix(path_prefix)
+                .unwrap_or(Path::new(source))
+                .to_path_buf(),
+            delete: option("Delete"),
+            prune: option("Prune"),
+        })
+    }
+
+    /// The resource's `Delete` and `Prune` as Argo CD resolves them, per
+    /// option: the resource's annotation, else the Application's option.
+    fn effective_options(&self, resource: &Resource) -> (OptionValue, OptionValue) {
+        let resolve = |own: &OptionValue, application: &Option<String>| {
+            own.clone()
+                .or_else(|| application.as_ref().map(|value| (value.clone(), false)))
+        };
+        (
+            resolve(&resource.delete, &self.delete),
+            resolve(&resource.prune, &self.prune),
+        )
+    }
+
+    /// Record what holds this Application's deletion because of `resource`.
+    /// Argo CD's cascade deletion skips a resource it keeps (`Delete=false`
+    /// at either level, a CustomResourceDefinition, Helm's keep policy) and
+    /// otherwise holds the Application while it carries `Delete=confirm` or
+    /// `Prune=confirm`.
+    fn record_confirmations(&self, resource: &Resource, confirmations: &mut Confirmations) {
+        let (delete, prune) = self.effective_options(resource);
+        if resource.kept || delete.as_ref().is_some_and(|(value, _)| value == "false") {
+            return;
+        }
+        for (option, resolved) in [("Delete", delete), ("Prune", prune)] {
+            if let Some((_, from_resource)) = resolved.filter(|(value, _)| value == "confirm") {
+                let label = (from_resource && !resource.label.is_empty()).then(|| resource.label.clone());
+                confirmations
+                    .entry((self.name.clone(), label))
+                    .or_default()
+                    .insert(option);
+            }
+        }
+    }
 }
 
 /// The Application a shared catalog's tree holds.
@@ -1414,26 +1650,6 @@ fn application_deletion_policy(application: &serde_json::Value) -> &'static str 
         "Background"
     } else {
         "Orphan"
-    }
-}
-
-/// A Namespace's `deletePolicy` or `prunePolicy` as its `Delete` or `Prune`
-/// Argo CD sync option (`option`) renders.
-fn namespace_sync_policy(namespace: &serde_json::Value, option: &str) -> &'static str {
-    let options = namespace
-        .pointer("/metadata/annotations")
-        .and_then(|annotations| annotations.get("argocd.argoproj.io/sync-options"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let prefix = format!("{option}=");
-    match options
-        .split(',')
-        .map(str::trim)
-        .find_map(|candidate| candidate.strip_prefix(prefix.as_str()))
-    {
-        Some("confirm") => "Confirm",
-        Some("false") => "Retain",
-        _ => "Automatic",
     }
 }
 
@@ -2771,35 +2987,38 @@ spec:
             catalog_prunes: Some(true),
             application_deletion_policy: Some("Foreground".to_owned()),
             namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
-            namespace_prune_policies: BTreeMap::from([("web".to_owned(), "Retain".to_owned())]),
+            deletion_confirmations: vec![
+                DeletionConfirmation {
+                    application: "web".to_owned(),
+                    resource: Some("Namespace web".to_owned()),
+                    options: vec!["Delete".to_owned(), "Prune".to_owned()],
+                },
+                DeletionConfirmation {
+                    application: "api".to_owned(),
+                    resource: None,
+                    options: vec!["Prune".to_owned()],
+                },
+            ],
             catalog_owned_by_parent: false,
         };
         let stored = serde_json::json!({
             "catalogPrunes": true,
             "applicationDeletionPolicy": "Foreground",
             "namespaceDeletePolicies": {"web": "Confirm"},
-            "namespacePrunePolicies": {"web": "Retain"},
+            "deletionConfirmations": [
+                {"application": "web", "resource": "Namespace web", "options": ["Delete", "Prune"]},
+                {"application": "api", "options": ["Prune"]},
+            ],
             "catalogOwnedByParent": false,
         });
         assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
         assert_eq!(serde_json::from_value::<TeardownSettings>(stored).unwrap(), settings);
-        // A document recorded before the prune policies existed still reads.
-        let older = serde_json::json!({
-            "catalogPrunes": true,
-            "applicationDeletionPolicy": "Foreground",
-            "namespaceDeletePolicies": {"web": "Confirm"},
-            "catalogOwnedByParent": false,
-        });
-        assert!(serde_json::from_value::<TeardownSettings>(older)
-            .unwrap()
-            .namespace_prune_policies
-            .is_empty());
         // A catalog a parent owns records the settings Nyl cannot see as null.
         let external = serde_json::json!({
             "catalogPrunes": null,
             "applicationDeletionPolicy": null,
             "namespaceDeletePolicies": {},
-            "namespacePrunePolicies": {},
+            "deletionConfirmations": [],
             "catalogOwnedByParent": true,
         });
         let parent_owned = TeardownSettings {
@@ -2829,48 +3048,57 @@ spec:
         assert_eq!(settings.catalog_prunes, Some(false));
         assert_eq!(settings.application_deletion_policy.as_deref(), Some("Foreground"));
         assert!(!settings.catalog_owned_by_parent);
-        for policies in [&settings.namespace_delete_policies, &settings.namespace_prune_policies] {
-            assert!(
-                !policies.is_empty() && policies.values().all(|policy| policy == "Confirm"),
-                "{settings:?}"
-            );
-        }
+        assert!(
+            !settings.namespace_delete_policies.is_empty()
+                && settings
+                    .namespace_delete_policies
+                    .values()
+                    .all(|policy| policy == "Confirm"),
+            "{settings:?}"
+        );
+        assert_eq!(
+            confirmations_of(&settings),
+            vec![(
+                "web".to_owned(),
+                Some("Namespace web".to_owned()),
+                "Delete,Prune".to_owned()
+            )],
+            "the default Namespace policies hold the Application's deletion"
+        );
     }
 
-    /// Catches readiness judging a Namespace by the policy defaults instead of
-    /// the sync options the tree renders (templates and overrides land in the
-    /// annotation): `Delete` and `Prune` each read as Automatic, Retain, or
-    /// Confirm, independently of one another and of other options.
-    #[test]
-    fn test_teardown_settings_read_the_rendered_namespace_sync_options() {
-        let (_publication, url) = publication_repository();
-        let worktree = project(&url);
-        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
-        let cases = [
-            ("ServerSideApply=true", "Automatic", "Automatic"),
-            ("Prune=confirm", "Automatic", "Confirm"),
-            ("Delete=confirm", "Confirm", "Automatic"),
-            ("Delete=false,Prune=confirm", "Retain", "Confirm"),
-            ("Prune=false, Delete=confirm", "Confirm", "Retain"),
-        ];
-        for (options, delete, prune) in cases {
-            let mut edited = rendered.clone();
-            let mut annotated = 0;
-            for (path, bytes) in &mut edited.files {
-                if path.starts_with(super::super::CATALOG_DIRECTORY)
-                    || path.extension().and_then(std::ffi::OsStr::to_str) != Some("yaml")
-                    || !String::from_utf8_lossy(bytes).contains("Namespace")
-                {
-                    continue;
-                }
-                let mut manifests =
-                    serde_saphyr::from_multiple::<serde_json::Value>(&String::from_utf8_lossy(bytes)).unwrap();
-                for manifest in &mut manifests {
-                    if manifest["kind"] == "Namespace" {
-                        manifest["metadata"]["annotations"] = json!({"argocd.argoproj.io/sync-options": options});
-                        annotated += 1;
-                    }
-                }
+    type Held = Vec<(String, Option<String>, String)>;
+
+    /// `(application, resource, options)` of each recorded confirmation, options comma-joined.
+    fn confirmations_of(settings: &TeardownSettings) -> Held {
+        settings
+            .deletion_confirmations
+            .iter()
+            .map(|confirmation| {
+                (
+                    confirmation.application.clone(),
+                    confirmation.resource.clone(),
+                    confirmation.options.join(","),
+                )
+            })
+            .collect()
+    }
+
+    /// Edit every workload manifest (outside the catalog) that `edit` returns true for.
+    fn edit_workloads(rendered: &mut RenderedTarget, edit: impl Fn(&mut serde_json::Value) -> bool) {
+        for (path, bytes) in &mut rendered.files {
+            if path.starts_with(super::super::CATALOG_DIRECTORY)
+                || path.extension().and_then(std::ffi::OsStr::to_str) != Some("yaml")
+            {
+                continue;
+            }
+            let mut manifests =
+                serde_saphyr::from_multiple::<serde_json::Value>(&String::from_utf8_lossy(bytes)).unwrap();
+            let mut changed = false;
+            for manifest in &mut manifests {
+                changed |= edit(manifest);
+            }
+            if changed {
                 *bytes = manifests
                     .iter()
                     .map(|manifest| serde_saphyr::to_string(manifest).unwrap())
@@ -2878,20 +3106,267 @@ spec:
                     .join("---\n")
                     .into_bytes();
             }
-            assert!(annotated > 0, "the tree owns a Namespace");
+        }
+    }
+
+    fn set_sync_options(manifest: &mut serde_json::Value, options: &str) {
+        manifest["metadata"]["annotations"] = json!({"argocd.argoproj.io/sync-options": options});
+    }
+
+    /// The workload Application's directory in the tree, where a test adds a resource.
+    fn workload_directory(rendered: &RenderedTarget) -> PathBuf {
+        let (_, bytes) = rendered
+            .files
+            .iter()
+            .find(|(path, bytes)| {
+                path.starts_with(super::super::CATALOG_DIRECTORY)
+                    && String::from_utf8_lossy(bytes).contains("kind: Application")
+                    && !String::from_utf8_lossy(bytes).contains("path: dev/_nyl/catalog")
+            })
+            .expect("the tree has a workload Application");
+        let application = serde_saphyr::from_str::<serde_json::Value>(std::str::from_utf8(bytes).unwrap()).unwrap();
+        Path::new(application["spec"]["source"]["path"].as_str().unwrap())
+            .strip_prefix("dev")
+            .unwrap()
+            .to_path_buf()
+    }
+
+    /// Set the workload Application's own `syncOptions` (keeping its generated ones).
+    fn set_application_options(rendered: &mut RenderedTarget, options: &[&str]) {
+        edit_catalog(rendered, |manifest| {
+            if manifest["spec"]["source"]["path"] == "dev/_nyl/catalog" {
+                return false;
+            }
+            let existing = manifest["spec"]["syncPolicy"]["syncOptions"].as_array_mut().unwrap();
+            existing.extend(options.iter().map(|option| json!(option)));
+            true
+        });
+    }
+
+    /// Catches readiness judging a Namespace by the policy defaults instead of
+    /// the sync options the tree renders (templates and overrides land in the
+    /// annotation): `Delete` and `Prune` each read independently of one
+    /// another and of other options, the first entry of a key wins as in
+    /// Argo CD, and `Delete=false` keeps the Namespace without any
+    /// confirmation being consulted.
+    #[test]
+    fn test_teardown_settings_read_the_rendered_namespace_sync_options() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        let cases = [
+            ("ServerSideApply=true", "Automatic", ""),
+            ("Prune=confirm", "Automatic", "Prune"),
+            ("Delete=confirm", "Confirm", "Delete"),
+            ("Delete=false,Prune=confirm", "Retain", ""),
+            ("Prune=false, Delete=confirm", "Confirm", "Delete"),
+            ("Delete=confirm,Delete=false", "Confirm", "Delete"),
+            ("Delete=confirm,Prune=confirm", "Confirm", "Delete,Prune"),
+        ];
+        for (options, delete, confirming) in cases {
+            let mut edited = rendered.clone();
+            edit_workloads(&mut edited, |manifest| {
+                let namespace = manifest["kind"] == "Namespace";
+                if namespace {
+                    set_sync_options(manifest, options);
+                }
+                namespace
+            });
             let settings = settings_of(&edited);
+            assert!(
+                !settings.namespace_delete_policies.is_empty()
+                    && settings
+                        .namespace_delete_policies
+                        .values()
+                        .all(|policy| policy == delete),
+                "{options}: {settings:?}"
+            );
+            let expected = if confirming.is_empty() {
+                Vec::new()
+            } else {
+                vec![(
+                    "web".to_owned(),
+                    Some("Namespace web".to_owned()),
+                    confirming.to_owned(),
+                )]
+            };
+            assert_eq!(confirmations_of(&settings), expected, "{options}");
+        }
+    }
+
+    /// Catches the stall found against Argo CD v3.5.7: a resource without the
+    /// option itself takes its Application's `syncPolicy.syncOptions`, so an
+    /// Application-level `Prune=confirm` or `Delete=confirm` holds its
+    /// deletion although no resource says so, while a resource's own value
+    /// replaces the Application's one option at a time and `Delete=false` at
+    /// either level exempts the resource.
+    #[test]
+    fn test_teardown_settings_resolve_application_options_as_argo_cd_does() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        let application = |options: &str| ("web".to_owned(), None, options.to_owned());
+        let namespace = |options: &str| ("web".to_owned(), Some("Namespace web".to_owned()), options.to_owned());
+        // (Application options, resource annotation, Namespace Delete policy, recorded confirmations)
+        let cases: Vec<(&[&str], Option<&str>, &str, Held)> = vec![
+            // No option anywhere: nothing holds the deletion.
+            (&[], Some("ServerSideApply=true"), "Automatic", vec![]),
+            // The Application's option covers resources that carry none, the Namespace included.
+            (
+                &["Prune=confirm"],
+                Some("ServerSideApply=true"),
+                "Automatic",
+                vec![application("Prune")],
+            ),
+            (
+                &["Delete=confirm"],
+                Some("ServerSideApply=true"),
+                "Confirm",
+                vec![application("Delete")],
+            ),
+            // Both keys of the Application and a resource's annotation of one: the other still applies.
+            (
+                &["Prune=confirm"],
+                Some("Delete=confirm"),
+                "Confirm",
+                vec![application("Prune"), namespace("Delete")],
+            ),
+            // A resource's own value wins over the Application's, per key.
+            (
+                &["Prune=confirm"],
+                Some("Prune=false"),
+                "Automatic",
+                vec![application("Prune")],
+            ),
+            // `Delete=false` on the Application keeps every resource that does not set `Delete`.
+            (
+                &["Delete=false", "Prune=confirm"],
+                Some("ServerSideApply=true"),
+                "Retain",
+                vec![],
+            ),
+            // The Namespace's own `Delete=confirm` replaces the Application's `Delete=false`.
+            (
+                &["Delete=false"],
+                Some("Delete=confirm"),
+                "Confirm",
+                vec![namespace("Delete")],
+            ),
+        ];
+        for (application_options, annotation, delete, expected) in cases {
+            let mut edited = rendered.clone();
+            set_application_options(&mut edited, application_options);
+            edit_workloads(&mut edited, |manifest| {
+                let namespace = manifest["kind"] == "Namespace";
+                if let (true, Some(annotation)) = (namespace, annotation) {
+                    set_sync_options(manifest, annotation);
+                }
+                namespace
+            });
+            let settings = settings_of(&edited);
+            let context = format!("{application_options:?} with {annotation:?}: {settings:?}");
             assert!(
                 settings
                     .namespace_delete_policies
                     .values()
                     .all(|policy| policy == delete),
-                "{options}: {settings:?}"
+                "{context}"
             );
-            assert!(
-                settings.namespace_prune_policies.values().all(|policy| policy == prune),
-                "{options}: {settings:?}"
-            );
+            // Other resources of the Application hold only through the Application's options.
+            let mut expected = expected;
+            expected.sort();
+            assert_eq!(confirmations_of(&settings), expected, "{context}");
         }
+
+        // A resource that sets both keys itself is independent of the Application's options.
+        let mut independent = rendered.clone();
+        set_application_options(&mut independent, &["Delete=confirm", "Prune=confirm"]);
+        edit_workloads(&mut independent, |manifest| {
+            manifest["metadata"]["annotations"] =
+                json!({"argocd.argoproj.io/sync-options": "Delete=false,Prune=false"});
+            true
+        });
+        assert_eq!(
+            confirmations_of(&settings_of(&independent)),
+            Vec::new(),
+            "every resource overrides both options"
+        );
+    }
+
+    /// Catches the Application-level option being unreachable by readiness in
+    /// a real render: an ApplicationGroup's `syncPolicy.syncOptions` reaches
+    /// every workload Application it generates, so a `Prune=confirm` there
+    /// holds the teardown even after the Namespace policies are `Automatic`.
+    #[test]
+    fn test_a_group_sync_option_holds_the_deletion_of_its_applications() {
+        let (_publication, url) = publication_repository();
+        let group = format!(
+            "{GROUP}  syncPolicy: {{syncOptions: [Prune=confirm]}}\n  namespace: {{prunePolicy: Automatic, deletePolicy: Automatic}}\n"
+        );
+        let worktree = project_with_group(&url, &group);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        let settings = settings_of(&rendered);
+        assert_eq!(
+            confirmations_of(&settings),
+            vec![("web".to_owned(), None, "Prune".to_owned())],
+            "{settings:?}"
+        );
+        assert_eq!(
+            settings.namespace_delete_policies.get("web").map(String::as_str),
+            Some("Automatic")
+        );
+    }
+
+    /// Catches readiness judging resources Argo CD never deletes with their
+    /// Application, or ignoring those it does: any kind of resource holds the
+    /// deletion by its own options, while a CustomResourceDefinition and a
+    /// resource with Helm's keep policy do not.
+    #[test]
+    fn test_teardown_settings_name_any_resource_that_requires_confirmation() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let mut rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        // The Namespace policies are Automatic, so only added resources can hold.
+        edit_workloads(&mut rendered, |manifest| {
+            let namespace = manifest["kind"] == "Namespace";
+            if namespace {
+                set_sync_options(manifest, "Prune=false,Delete=false");
+            }
+            namespace
+        });
+        assert_eq!(confirmations_of(&settings_of(&rendered)), Vec::new());
+
+        let directory = workload_directory(&rendered);
+        let added = "\
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: held, namespace: web, annotations: {argocd.argoproj.io/sync-options: 'Prune=confirm'}}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: kept, namespace: web, annotations: {argocd.argoproj.io/sync-options: 'Delete=confirm', helm.sh/resource-policy: keep}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: retained, namespace: web, annotations: {argocd.argoproj.io/sync-options: 'Delete=false,Prune=confirm'}}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-options: 'Delete=confirm'}}
+";
+        rendered
+            .files
+            .insert(directory.join("extra.yaml"), added.as_bytes().to_vec());
+        let settings = settings_of(&rendered);
+        assert_eq!(
+            confirmations_of(&settings),
+            vec![(
+                "web".to_owned(),
+                Some("ConfigMap web/held".to_owned()),
+                "Prune".to_owned()
+            )],
+            "{settings:?}"
+        );
     }
 
     fn edit_catalog(rendered: &mut RenderedTarget, edit: impl Fn(&mut serde_json::Value) -> bool) {
