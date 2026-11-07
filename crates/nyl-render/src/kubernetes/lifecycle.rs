@@ -632,7 +632,7 @@ impl<'s> ReleaseRecorder<'s> {
         };
         let result = tokio::select! {
             result = work => result,
-            () = interruption.interrupt => Err(NylError::Other("Interrupted".to_string())),
+            () = interruption.interrupt => Err(NylError::Interrupted("Interrupted".to_string())),
         };
 
         if let Err(err) = &result {

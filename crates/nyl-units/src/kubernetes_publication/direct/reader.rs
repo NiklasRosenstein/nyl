@@ -16,7 +16,7 @@ use std::time::Duration;
 use nyl_render::gitops::observation::{DirectLocation, DirectRelease, ExpectedDeployment, ObservedPublication};
 use nyl_render::kubernetes::lifecycle::remaining_after_purge;
 use nyl_render::kubernetes::{ReleasePublication, ReleaseState, ReleaseStatus, ResourceKey};
-use nyl_render::NylError;
+use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
 use super::health::{fold, is_workload, Found};
@@ -56,12 +56,10 @@ impl DirectReader {
 /// A read error of the Kubernetes API, as the reader reports it.
 pub(super) fn api_error(error: &NylError, what: &str) -> ReadError {
     let text = error.to_string();
-    let kind = if text.starts_with("Permission denied") {
-        ReadErrorKind::Forbidden
-    } else if text.contains("Unauthorized") || text.contains("(401)") {
-        ReadErrorKind::Rejected
-    } else {
-        ReadErrorKind::Unreachable
+    let kind = match error.kube_kind() {
+        Some(KubeErrorKind::Forbidden) => ReadErrorKind::Forbidden,
+        Some(KubeErrorKind::Unauthorized) => ReadErrorKind::Rejected,
+        _ => ReadErrorKind::Unreachable,
     };
     let first = text.lines().next().unwrap_or_default();
     let message = match kind {
