@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nyl_core::orchestration::driver::{
-    Change, Driver, DriverOperation, DriverResult, ExecutionContext, Outcome, ResolutionContext, Supported, ToolExit,
-    ToolInvocation, ToolRunner, WaitCompletion,
+    Change, Driver, DriverOperation, DriverResult, ExecutionContext, IncarnationDirectory, IncarnationStatus, Outcome,
+    ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner, WaitCompletion,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::CommitIdentity;
@@ -163,10 +163,38 @@ pub fn desired(spec: Value, key: ExecutionKey) -> DesiredUnit {
     }
 }
 
+/// What a state directory answers about unit incarnations, by
+/// `<environment>/<unit>`: anything not listed is gone.
+pub struct Incarnations(pub BTreeMap<String, IncarnationStatus>);
+
+impl IncarnationDirectory for Incarnations {
+    fn status(&self, environment: &EnvironmentName, unit: &UnitName, _uid: &Uid) -> IncarnationStatus {
+        self.0
+            .get(&format!("{environment}/{unit}"))
+            .cloned()
+            .unwrap_or(IncarnationStatus::Gone)
+    }
+}
+
 pub fn context<'a>(
     world: &World,
     operation: DriverOperation,
     identity: Option<&'a CommitIdentity>,
+) -> ExecutionContext<'a> {
+    context_with(
+        world,
+        operation,
+        identity,
+        &nyl_core::orchestration::driver::UnknownIncarnations,
+    )
+}
+
+/// [`context`] with a state directory that answers for other incarnations.
+pub fn context_with<'a>(
+    world: &World,
+    operation: DriverOperation,
+    identity: Option<&'a CommitIdentity>,
+    incarnations: &'a dyn IncarnationDirectory,
 ) -> ExecutionContext<'a> {
     let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
         .unwrap()
@@ -190,6 +218,7 @@ pub fn context<'a>(
         commit_identity: identity,
         cache_dir: world.root.path().join("cache"),
         teardown_wait: None,
+        incarnations,
     }
 }
 

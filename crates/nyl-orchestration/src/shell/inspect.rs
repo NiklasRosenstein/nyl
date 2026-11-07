@@ -44,7 +44,7 @@ pub fn status_with(
             .store
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
-        let readiness = drivers.map(|drivers| teardown_readiness(environment, &snapshot, drivers));
+        let readiness = drivers.map(|drivers| teardown_readiness(&snapshot, drivers));
         let mut report = crate::rules::unit_state::status_with_readiness(
             environment,
             &snapshot,
@@ -77,13 +77,12 @@ pub fn status_with(
     report
 }
 
-/// The teardown readiness of every unit whose driver reports teardown
-/// settings (publications), read from the stored desired document alone,
+/// The teardown readiness of every unit whose driver states teardown
+/// requirements (publications), read from the stored desired document alone,
 /// so status never renders. Held markers and retained tombstones have none.
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
 pub fn teardown_readiness(
-    environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     drivers: &DriverSet,
 ) -> BTreeMap<UnitName, TeardownReadiness> {
@@ -93,10 +92,9 @@ pub fn teardown_readiness(
         .filter(|(_, desired)| !desired.is_held_marker() && !matches!(desired.lifecycle, Lifecycle::Retained { .. }))
         .filter_map(|(name, desired)| {
             let driver = drivers.get(&desired.unit.api_version, &desired.unit.kind)?;
-            let Ok(Supported::Supported(settings)) = driver.teardown_settings(desired) else {
+            let Ok(Supported::Supported(readiness)) = driver.teardown_readiness(desired) else {
                 return None;
             };
-            let readiness = crate::rules::teardown_readiness::evaluate(environment, name, &settings);
             Some((
                 name.clone(),
                 if readiness.ready() {

@@ -890,6 +890,7 @@ mod tests {
             commit_identity: None,
             cache_dir: temp.join("cache"),
             teardown_wait: None,
+            incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
         }
     }
     fn fixture() -> tempfile::TempDir {

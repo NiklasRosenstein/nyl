@@ -35,7 +35,7 @@ nyl-cli ─┬─► nyl-orchestration ─┬► nyl-core (types + traits)
 | `nyl-render` | Kubernetes rendering and Kubernetes GitOps, including their resources (Release, HelmChart, Component, RemoteManifest, Cluster, DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) and their catalogue descriptors | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
 | `nyl-units` | The built-in unit kinds, one module each holding the kind's declaration, validation, schema descriptor, and `Driver` implementation; the driver registry and the process runner with masking; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
-| `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` and `nyl-collections` |
+| `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown waits and warnings, expiry | Everything except `nyl-core` and `nyl-collections` |
 | `nyl-cli` | Argument parsing, output formats, exit categories, the assembled resource catalogue, and wiring the concrete implementations into orchestration | Business rules |
 
 - The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
@@ -139,7 +139,8 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 
 - Each rule in the contracts has one owning module, such as `rules::freshness`,
   `rules::execution_key`, `rules::approval`, `rules::lifecycle`,
-  `rules::teardown_readiness`, `rules::teardown_wait`, or `rules::expiry`. Its doc comment links the
+  `rules::teardown_wait`, or `rules::expiry`; a driver's own rules, such as the
+  publication driver's teardown readiness, are owned by its module. Its doc comment links the
   contract section.
 - Contract walkthroughs are executable scenarios against the Git
   `StateStore` on local bare repositories, fake drivers, and a fake clock, so

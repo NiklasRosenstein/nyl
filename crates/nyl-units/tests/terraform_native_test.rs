@@ -48,6 +48,7 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
         commit_identity: None,
         cache_dir: root.path().join("cache"),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
     };
     let unit = desired(&spec);
     let Supported::Supported(first) = driver.reconcile(&context, &unit).unwrap() else {
@@ -150,6 +151,7 @@ fn real_empty(driver: &TerraformDriver, count_zero: bool) {
         commit_identity: None,
         cache_dir: root.path().join("cache"),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
     };
     let Supported::Supported(first) = driver.reconcile(&context, &unit).unwrap() else {
         panic!("unsupported")

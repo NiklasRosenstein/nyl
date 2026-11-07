@@ -11,33 +11,40 @@
 //!   policy, Namespace delete policies, catalog ownership) in the resolved
 //!   spec through [`KeyInputs::recorded`]. `status`, `plan`, and a teardown
 //!   then read the same settings from the stored document without rendering.
-//! - **Ownership.** The unit claims its DeploymentTarget by name. Two units
-//!   that publish one target overlap
+//! - **Ownership.** The unit claims its DeploymentTarget by name, inline
+//!   targets included. Two units that publish one target overlap
 //!   (`NYL-UNIT-OWNERSHIP-OVERLAP`); the destination (repository, revision,
 //!   and prefix) belongs to the target, and the ownership index refuses a
-//!   tree owned by another target at publication.
+//!   tree owned by another target at publication. The index also records
+//!   the owning unit incarnation, and publication and teardown refuse a
+//!   prefix another existing incarnation owns (owner fencing, see
+//!   [`super::run`]).
+//! - **Teardown readiness.** The driver evaluates the recorded settings
+//!   itself ([`super::readiness`]); the shell only displays the findings.
 //! - **Drift.** Drift is the destination branch no longer holding the tree
 //!   the unit renders: a dry publication that would commit something, or one
 //!   that finds an owned file modified outside Nyl. A comparison that cannot
 //!   be made, such as an unreachable remote, is `unknown`.
 //!
-//! `mode: observe` is rejected by validation until the driver can read
-//! Argo CD, so nothing promises health that is never checked.
+//! `mode: observe` and the `observe` teardown wait are rejected by validation
+//! until the driver can read Argo CD, so nothing promises health that is
+//! never checked.
 
 use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext, Inspection,
     KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
-    TeardownSettings,
+    TeardownReadiness,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
-use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor};
+use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor, TeardownSettings};
 use serde_json::{json, Value};
 
-use super::{plan, publish, render, resolution_inputs, teardown, unit_target, KIND};
+use super::readiness::evaluate;
+use super::{plan, publish, render, resolution_inputs, teardown, unit_owner, unit_target, KIND};
 use crate::command::resolved_spec;
 
 /// The pointer, in the resolved spec, of the recorded teardown settings.
@@ -99,8 +106,25 @@ impl Driver for KubernetesPublicationDriver {
             "required": ["target"],
             "properties": {
                 "target": {
-                    "type": "string",
-                    "description": "The static DeploymentTarget this unit renders and publishes."
+                    "description": "The DeploymentTarget this unit renders and publishes: the name of a static one, or one declared inline and owned by the unit.",
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "required": ["inline"],
+                            "properties": {
+                                "inline": {
+                                    "type": "object",
+                                    "description": "A DeploymentTarget spec, rendered with the unit per environment."
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "Overrides the inline target's name, `<environment>-<unit>` by default; unique like every target name."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    ]
                 },
                 "mode": {
                     "type": "string",
@@ -113,7 +137,7 @@ impl Driver for KubernetesPublicationDriver {
                     "description": "When phase 1 of a teardown counts as complete.",
                     "required": ["strategy"],
                     "properties": {
-                        "strategy": {"type": "string", "enum": ["observe", "delay", "manual"]},
+                        "strategy": {"type": "string", "enum": ["delay", "manual"]},
                         "duration": {"type": "string", "description": "How long after phase 1, for strategy delay, such as 10m."}
                     },
                     "additionalProperties": false
@@ -136,13 +160,13 @@ impl Driver for KubernetesPublicationDriver {
     }
 
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
-        spec.get("target")
-            .and_then(Value::as_str)
+        unit_target(spec)
+            .ok()
             .map(|target| OwnershipScope {
-                namespace: "kubernetes-target".to_owned(),
-                key: vec![target.to_owned()],
-                path: Vec::new(),
                 description: format!("DeploymentTarget {target}"),
+                namespace: "kubernetes-target".to_owned(),
+                key: vec![target],
+                path: Vec::new(),
             })
             .into_iter()
             .collect()
@@ -183,6 +207,7 @@ impl Driver for KubernetesPublicationDriver {
             &ctx.project_dir,
             &ctx.cache_dir,
             spec,
+            Some(unit_owner(unit)?),
         )?;
         // Nothing is committed to the destination: the commit this prepares
         // in a temporary checkout is only compared, so its author is a
@@ -208,6 +233,10 @@ impl Driver for KubernetesPublicationDriver {
                 Err(error) if error.is_owned_file_modified() => Drift::Drifted {
                     summary: error.to_string(),
                 },
+                // Another incarnation's prefix is not this unit's to compare; reconciling decides whether it takes it over.
+                Err(error) if error.is_owner_fenced() => Drift::Unknown {
+                    reason: error.to_string(),
+                },
                 Err(error) => Drift::Unknown {
                     reason: format!("cannot compare the publication branch with the rendered tree: {error}"),
                 },
@@ -223,15 +252,22 @@ impl Driver for KubernetesPublicationDriver {
         teardown(&self.resource_catalogue, ctx, unit).map(Supported::Supported)
     }
 
-    /// The `teardownSettings` resolution recorded in the stored document;
-    /// unsupported (no requirements) for a document resolved without them.
-    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+    /// The readiness of a teardown, evaluated from the `teardownSettings`
+    /// resolution recorded in the stored document; unsupported (no
+    /// requirements) for a document resolved without them.
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
         match spec.pointer(TEARDOWN_SETTINGS) {
             None => Ok(Supported::Unsupported),
-            Some(settings) => serde_json::from_value(settings.clone())
-                .map(Supported::Supported)
-                .map_err(|error| DriverError::before_effects(format!("spec.teardownSettings: {error}"))),
+            Some(settings) => {
+                let settings: TeardownSettings = serde_json::from_value(settings.clone())
+                    .map_err(|error| DriverError::before_effects(format!("spec.teardownSettings: {error}")))?;
+                Ok(Supported::Supported(evaluate(
+                    &unit.unit.environment,
+                    &unit.unit.name,
+                    &settings,
+                )))
+            }
         }
     }
 

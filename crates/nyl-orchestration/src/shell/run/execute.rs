@@ -23,7 +23,7 @@
 #[allow(clippy::wildcard_imports)] // The run module's private helpers and imports.
 use super::*;
 use crate::rules::transitions::{self, Applied, Event};
-use nyl_core::orchestration::driver::{Inspection, RecoveryPolicy};
+use nyl_core::orchestration::driver::{IncarnationDirectory, Inspection, RecoveryPolicy};
 use nyl_core::orchestration::state::{ApprovalRecord, FailureCategory};
 
 /// One finished execution.
@@ -102,6 +102,7 @@ pub(super) fn execute_batch(
         read_desired: snapshot.tips.desired.as_ref(),
         cancellation: &session.request.cancellation,
         lease_deadline: session.lease_deadline.get(),
+        incarnations: &session.incarnations,
     };
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -133,6 +134,7 @@ struct Shared<'s> {
     read_desired: Option<&'s CommitId>,
     cancellation: &'s super::Cancellation,
     lease_deadline: Option<Timestamp>,
+    incarnations: &'s dyn IncarnationDirectory,
 }
 
 /// The condition reason of a unit that was running when the run was cancelled.
@@ -295,6 +297,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         commit_identity: context.commit_identity,
         cache_dir: shared.cache_dir.clone(),
         teardown_wait: None,
+        incarnations: shared.incarnations,
     };
 
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);

@@ -380,7 +380,14 @@ Cluster.
   keyed by `<applicationGroup>/<release>`, and the target's effective teardown
   settings, which the driver records when it resolves the unit; the other
   bindings resolve inside the render and enter its execution key. Its recorded
-  result is the published commit and index digest.
+  result is the published commit and index digest. The unit may declare its
+  target inline, which then compiles and publishes as any target does. The
+  published index records the owning unit incarnation, and a publication
+  refuses a prefix another existing incarnation owns; the shell answers
+  whether an incarnation still exists through a generic directory, so the
+  rule stays in the driver. The driver also judges its target's teardown
+  readiness from the recorded settings, and shared code only displays the
+  findings.
   Publication is a receipt; Argo CD acceptance and observed health are the
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
@@ -625,7 +632,7 @@ API exposes selection and the pinned publication base for orchestration callers;
 a scoped result cannot establish target-wide source freshness. See
 [partial publication](design/partial-publication.md). The KubernetesPublication
 driver continues to publish the full target. M5 adds environment and unit
-ownership in index version 4, migrating versions 2 and 3; scoped receipts and promotion
+ownership in the version 3 index, which stays readable without an owner; scoped receipts and promotion
 coverage need an explicit caller contract before it adopts selection.
 
 `nyl.toml` may sit at the repository root or beside the configuration in

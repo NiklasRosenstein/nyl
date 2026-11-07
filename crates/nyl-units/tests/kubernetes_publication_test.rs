@@ -12,14 +12,16 @@ mod publication_world;
 
 use std::collections::BTreeMap;
 
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
-    Driver, DriverOperation, DriverResult, KeyInputs, ResolutionContext, Supported, TeardownSettings,
+    Driver, DriverOperation, DriverResult, IncarnationStatus, KeyInputs, Outcome, ResolutionContext, Supported,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId};
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{Drift, Receipt};
+use nyl_render::gitops::publication::TeardownSettings;
 use nyl_units::kubernetes_publication::KubernetesPublicationDriver;
-use publication_world::{conformance, context, desired, git, spec, NoTools, World};
+use publication_world::{conformance, context, context_with, desired, git, spec, Incarnations, NoTools, World};
 use serde_json::{json, Value};
 
 fn catalogue() -> nyl_render::config::ResourceCatalogue {
@@ -96,7 +98,7 @@ fn test_kubernetes_publication_plans_a_deleting_unit_as_destroy() {
 /// Catches readiness reading anything but the target's effective settings
 /// as the render produced them, or a stored document that cannot answer
 /// without rendering: resolution records the settings in the resolved
-/// spec, and `teardown_settings` reads them back from the document alone.
+/// spec, and `teardown_readiness` evaluates them from the document alone.
 #[test]
 fn test_resolution_records_the_targets_effective_teardown_settings() {
     let world = World::new();
@@ -119,10 +121,29 @@ fn test_resolution_records_the_targets_effective_teardown_settings() {
 
     // The stored document answers without rendering anything.
     let unit = resolved_unit(&driver, &world, spec());
-    assert_eq!(driver.teardown_settings(&unit).unwrap(), Supported::Supported(settings));
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
+        panic!("recorded settings give a readiness");
+    };
+    assert_eq!(
+        readiness
+            .blocking
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownCatalogManualSync, Code::TeardownNamespaceConfirm]
+    );
+    assert_eq!(
+        readiness
+            .remnants
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownNamespacesRemain, Code::TeardownCatalogRemains]
+    );
+    assert!(readiness.blocking[0].message.starts_with("dev/kubernetes: "));
     // A document resolved before settings were recorded has no requirements.
     let unrecorded = desired(spec(), ExecutionKey::from_digest_of(b"key"));
-    assert_eq!(driver.teardown_settings(&unrecorded).unwrap(), Supported::Unsupported);
+    assert_eq!(driver.teardown_readiness(&unrecorded).unwrap(), Supported::Unsupported);
 }
 
 /// Catches a target setting that changes what a teardown leaves behind
@@ -150,11 +171,22 @@ fn test_recorded_teardown_settings_follow_the_target_and_its_key() {
     );
     let after = resolved_unit(&driver, &world, spec());
 
-    let Supported::Supported(settings) = driver.teardown_settings(&after).unwrap() else {
-        panic!("recorded");
-    };
+    let settings: TeardownSettings =
+        serde_json::from_value(after.resolved_spec.as_ref().unwrap()["teardownSettings"].clone()).unwrap();
     assert_eq!(settings.catalog_prunes, Some(true));
     assert_eq!(settings.application_deletion_policy.as_deref(), Some("Background"));
+    // A catalog that prunes leaves one blocking requirement: Namespaces that confirm.
+    let Supported::Supported(readiness) = driver.teardown_readiness(&after).unwrap() else {
+        panic!("recorded");
+    };
+    assert_eq!(
+        readiness
+            .blocking
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownNamespaceConfirm]
+    );
     assert_ne!(before.execution_key, after.execution_key);
 }
 
@@ -333,7 +365,7 @@ fn test_drift_compares_the_branch_with_the_rendered_tree_without_publishing() {
     assert!(summary.contains("modified outside Nyl"), "{summary}");
 }
 
-/// Catches observe mode, inline targets, and a hand-written
+/// Catches observe mode, the `observe` teardown wait, and a hand-written
 /// `teardownSettings` being accepted before the driver can honor them.
 #[test]
 fn test_validation_rejects_what_the_driver_cannot_do_yet() {
@@ -346,13 +378,387 @@ fn test_validation_rejects_what_the_driver_cannot_do_yet() {
     assert!(driver.validate_spec(&spec()).is_ok());
     let observe = with("mode", json!("observe")).unwrap_err();
     assert!(observe.starts_with("NYL-KUBERNETES-MODE-UNSUPPORTED"), "{observe}");
-    assert!(with("target", json!({"inline": {}}))
-        .unwrap_err()
-        .contains("inline is not supported yet"));
+    let wait = with("teardownWait", json!({"strategy": "observe"})).unwrap_err();
+    assert!(wait.starts_with("NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED"), "{wait}");
     assert!(with("teardownSettings", json!({"catalogPrunes": true}))
         .unwrap_err()
         .contains("must not be written by hand"));
     assert!(with("teardownWait", json!({"strategy": "delay"})).is_err());
+}
+
+fn unit_with(spec: Value, name: &str, uid: &str, key: &ExecutionKey) -> nyl_core::orchestration::state::DesiredUnit {
+    let mut unit = desired(spec, key.clone());
+    unit.unit.name = name.parse().unwrap();
+    unit.unit.uid = Some(uid.parse().unwrap());
+    unit
+}
+
+const FIRST: &str = "00000000-0000-7000-8000-000000000004";
+const SECOND: &str = "00000000-0000-7000-8000-000000000005";
+
+/// The ownership index published for `dev`, parsed.
+fn published_index(world: &World) -> Value {
+    serde_json::from_str(&git(&world.bare(), &["show", "deploy:dev/_nyl/index.json"])).unwrap()
+}
+
+fn owner(index: &Value) -> Value {
+    index["owner"].clone()
+}
+
+/// A directory in which `dev/kubernetes` is `status`; every other unit is gone.
+fn first_is(status: IncarnationStatus) -> Incarnations {
+    Incarnations(BTreeMap::from([("dev/kubernetes".to_owned(), status)]))
+}
+
+/// Catches a published prefix that records no owner, or a publication that
+/// rewrites it as a different version: an orchestrated publication writes a
+/// version 3 index with the environment, the unit, and the incarnation's uid.
+#[test]
+fn test_publication_records_its_unit_incarnation_as_the_owner_of_the_prefix() {
+    let world = World::new();
+    let driver = real();
+    let id = identity();
+    let key = ExecutionKey::from_digest_of(b"key");
+    let unit = unit_with(spec(), "kubernetes", FIRST, &key);
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+        .unwrap();
+    let index = published_index(&world);
+    assert_eq!(index["version"], 3);
+    assert_eq!(
+        owner(&index),
+        json!({"environment": "dev", "unit": "kubernetes", "uid": FIRST})
+    );
+}
+
+/// Catches a unit overwriting the prefix of another incarnation that still
+/// exists, which would take its published tree away from it: the publication
+/// fails with its own code, retryably because the next run reads state
+/// again, and the branch is untouched. Once that incarnation is gone from
+/// state the new owner takes the prefix over and records itself; when state
+/// cannot say, the fence holds.
+#[test]
+fn test_a_prefix_owned_by_an_existing_incarnation_is_fenced_until_it_is_gone() {
+    let world = World::new();
+    let driver = real();
+    let id = identity();
+    let key = ExecutionKey::from_digest_of(b"key");
+    driver
+        .reconcile(
+            &context(&world, DriverOperation::Reconcile, Some(&id)),
+            &unit_with(spec(), "kubernetes", FIRST, &key),
+        )
+        .unwrap();
+    let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
+
+    // Another incarnation of the unit, with a new image so it would change the tree.
+    let mut changed = spec();
+    changed["releases"]["web/web"]["image"] = json!("registry.invalid:5000/web@sha256:4567");
+    let successor = unit_with(changed, "kubernetes", SECOND, &key);
+    let publish = |directory: &Incarnations| {
+        let Supported::Supported(outcome) = driver
+            .reconcile(
+                &context_with(&world, DriverOperation::Reconcile, Some(&id), directory),
+                &successor,
+            )
+            .unwrap()
+        else {
+            panic!("the driver reconciles");
+        };
+        outcome
+    };
+    for (status, code) in [
+        (IncarnationStatus::Exists, "NYL-KUBERNETES-OWNER-FENCED"),
+        (
+            IncarnationStatus::Unknown("the state of environment dev cannot be read".to_owned()),
+            "NYL-KUBERNETES-OWNER-UNKNOWN",
+        ),
+    ] {
+        let Outcome::Failed {
+            category,
+            retryable,
+            message,
+        } = publish(&first_is(status.clone()))
+        else {
+            panic!("a fenced publication fails: {status:?}");
+        };
+        assert_eq!(category, nyl_core::orchestration::state::FailureCategory::Ownership);
+        assert!(retryable, "the next run reads state again");
+        assert!(message.starts_with(&format!("{code}:")), "{message}");
+        assert!(
+            message.contains(&format!("unit dev/kubernetes (uid {FIRST})")),
+            "{message}"
+        );
+        if code.ends_with("UNKNOWN") {
+            // The way out of an owner that state can no longer answer for.
+            assert!(message.contains("remove the `owner` member"), "{message}");
+        }
+        assert_eq!(git(&world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
+    }
+
+    assert!(matches!(
+        publish(&first_is(IncarnationStatus::Gone)),
+        Outcome::Succeeded { .. }
+    ));
+    assert_eq!(
+        owner(&published_index(&world)),
+        json!({"environment": "dev", "unit": "kubernetes", "uid": SECOND})
+    );
+}
+
+/// Catches a prefix published before orchestration owned it (index version 3,
+/// as `publish-tree` writes it) being refused or left without an owner: the
+/// first publication of a unit adopts it, without asking whether anyone else
+/// exists, and records its owner in it.
+#[test]
+fn test_a_prefix_without_an_owner_is_adopted_and_upgraded() {
+    let world = World::new();
+    let driver = real();
+    let id = identity();
+    let key = ExecutionKey::from_digest_of(b"key");
+    let unit = unit_with(spec(), "kubernetes", FIRST, &key);
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+        .unwrap();
+
+    // The index as `publish-tree` wrote it: version 3, no owner.
+    let other = world.root.path().join("publish-tree");
+    git(
+        world.root.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "deploy",
+            &world.project_url(),
+            "publish-tree",
+        ],
+    );
+    let mut index = published_index(&world);
+    index.as_object_mut().unwrap().remove("owner");
+    std::fs::write(
+        other.join("dev/_nyl/index.json"),
+        serde_json::to_string_pretty(&index).unwrap() + "\n",
+    )
+    .unwrap();
+    git(
+        &other,
+        &["commit", "--quiet", "--all", "--message", "As publish-tree wrote it"],
+    );
+    git(&other, &["push", "--quiet", "origin", "HEAD:refs/heads/deploy"]);
+    assert_eq!(published_index(&world)["version"], 3);
+
+    // A directory that knows nothing is never asked.
+    let successor = unit_with(spec(), "kubernetes", SECOND, &key);
+    let Supported::Supported(outcome) = driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &successor)
+        .unwrap()
+    else {
+        panic!("the driver reconciles");
+    };
+    assert!(matches!(outcome, Outcome::Succeeded { .. }), "{outcome:?}");
+    let index = published_index(&world);
+    assert_eq!(index["version"], 3);
+    assert_eq!(
+        owner(&index),
+        json!({"environment": "dev", "unit": "kubernetes", "uid": SECOND})
+    );
+}
+
+/// Catches a teardown deleting files another existing incarnation owns, in
+/// either phase: both fail fenced and leave the branch as it was.
+#[test]
+fn test_teardown_of_a_fenced_prefix_removes_nothing() {
+    let world = World::new();
+    let driver = real();
+    let id = identity();
+    let key = ExecutionKey::from_digest_of(b"key");
+    driver
+        .reconcile(
+            &context(&world, DriverOperation::Reconcile, Some(&id)),
+            &unit_with(spec(), "kubernetes", FIRST, &key),
+        )
+        .unwrap();
+    let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
+    let successor = publication_world::deleting(unit_with(spec(), "kubernetes", SECOND, &key));
+    let directory = first_is(IncarnationStatus::Exists);
+
+    let teardown = |completion| {
+        let mut ctx = context_with(&world, DriverOperation::Teardown, Some(&id), &directory);
+        ctx.teardown_wait = completion;
+        let Supported::Supported(outcome) = driver.teardown(&ctx, &successor).unwrap() else {
+            panic!("the driver tears down");
+        };
+        outcome
+    };
+    for completion in [None, Some(nyl_core::orchestration::driver::WaitCompletion::Delayed)] {
+        let Outcome::Failed { message, .. } = teardown(completion.clone()) else {
+            panic!("a fenced teardown fails: {completion:?}");
+        };
+        assert!(message.starts_with("NYL-KUBERNETES-OWNER-FENCED:"), "{message}");
+        assert_eq!(git(&world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
+    }
+}
+
+/// The unit of the world with its target declared inline: the `preview`
+/// target publishes to its own prefix, of the same cluster and repository.
+fn inline_spec() -> Value {
+    let mut spec = spec();
+    spec["target"] = json!({
+        "name": "preview",
+        "sourceFile": "nyl/platform.yaml",
+        "inline": {
+            "clusterRef": {"name": "dev"},
+            "applicationGroupSelector": {"matchLabels": {"app": "web"}},
+            "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "preview"},
+            "values": {"hostname": "preview.example.com"},
+            // What resolving the unit leaves of the `fromUnit` bindings: their values.
+            "releaseInputs": {"web/web": {
+                "image": "registry.invalid:5000/web@sha256:0123",
+                "databaseHost": "db.vpc-walkthrough.internal",
+            }},
+        },
+    });
+    spec
+}
+
+/// The world with its ApplicationGroup naming Applications and AppProjects
+/// from their target: they are unique among every target of the cluster,
+/// inline ones included.
+fn named_per_target() -> World {
+    let world = World::new();
+    let group = world.work().join("nyl/web.yaml");
+    let text = std::fs::read_to_string(&group).unwrap();
+    std::fs::write(
+        &group,
+        text.trim_end().to_owned()
+            + "\n  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n    destinations: [{server: '*', namespace: web}]\n",
+    )
+    .unwrap();
+    git(&world.work(), &["add", "--all"]);
+    git(
+        &world.work(),
+        &["commit", "--quiet", "--message", "Name applications per target"],
+    );
+    world
+}
+
+/// Catches an inline target going through any other path than a declared
+/// one: it keys the unit like a target (the render's input record names the
+/// target by its inline name), publishes beneath its own prefix with its own
+/// name in the ownership index, records the unit as owner, and tears down in
+/// two phases like every target.
+#[test]
+fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
+    let world = named_per_target();
+    let driver = real();
+    let id = identity();
+    let unit = resolved_unit(&driver, &world, inline_spec());
+    let inputs = resolve(&driver, &world, &inline_spec()).unwrap();
+    assert!(
+        inputs.files.contains_key("@resource:DeploymentTarget/preview"),
+        "{:?}",
+        inputs.files
+    );
+
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+        .unwrap();
+    let files = world.files("deploy");
+    assert!(files.contains(&"preview/_nyl/index.json".to_owned()), "{files:?}");
+    assert!(!files.iter().any(|path| path.starts_with("dev/")), "{files:?}");
+    let index: Value = serde_json::from_str(&git(&world.bare(), &["show", "deploy:preview/_nyl/index.json"])).unwrap();
+    assert_eq!(index["target"], "preview");
+    assert_eq!(index["version"], 3);
+    assert_eq!(owner(&index)["unit"], "kubernetes");
+    // The target's own values reach the render, and a changed one changes the key.
+    let mut moved = inline_spec();
+    moved["target"]["inline"]["values"]["hostname"] = json!("other.example.com");
+    assert_ne!(resolved_unit(&driver, &world, moved).execution_key, unit.execution_key);
+
+    // Two phases, the second removing exactly what the index owns.
+    let deleting = publication_world::deleting(unit);
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&id));
+    let Supported::Supported(Outcome::Waiting { published, .. }) = driver.teardown(&ctx, &deleting).unwrap() else {
+        panic!("phase 1 waits");
+    };
+    assert!(published.is_some());
+    ctx.teardown_wait = Some(nyl_core::orchestration::driver::WaitCompletion::Delayed);
+    driver.teardown(&ctx, &deleting).unwrap();
+    assert!(!world.files("deploy").iter().any(|path| path.starts_with("preview/")));
+
+    // Two units naming one inline target claim one ownership scope.
+    let dev = EnvironmentName::new("dev").unwrap();
+    let [first] = driver.ownership_scopes(&dev, &inline_spec()).try_into().unwrap();
+    let [second] = driver.ownership_scopes(&dev, &inline_spec()).try_into().unwrap();
+    assert!(first.overlaps(&second));
+}
+
+/// Catches a renamed target publishing a second tree and orphaning the first,
+/// or failing in the ownership index with no way out: nothing in the engine
+/// replaces a unit when its destination changes, so the driver fails closed
+/// before any effect with `NYL-KUBERNETES-TARGET-CHANGED`, naming what changed
+/// and how to replace the unit. It holds with an explicit prefix, which stays
+/// while the name changes, and with the default prefix, which follows the name.
+#[test]
+fn test_a_changed_target_destination_fails_before_publishing_anything() {
+    let driver = real();
+    let id = identity();
+    let key = ExecutionKey::from_digest_of(b"key");
+    for (explicit_prefix, changed) in [
+        (true, "target \"preview\" became \"preview-2\""),
+        (false, "pathPrefix \"preview-1\" became \"preview-2\""),
+    ] {
+        let world = named_per_target();
+        let published = |spec: Value| desired(spec, key.clone());
+        let mut before = inline_spec();
+        if !explicit_prefix {
+            before["target"]["inline"]["publication"]
+                .as_object_mut()
+                .unwrap()
+                .remove("pathPrefix");
+            before["target"]["name"] = json!("preview-1");
+        }
+        let Supported::Supported(Outcome::Succeeded { artifacts, .. }) = driver
+            .reconcile(
+                &context(&world, DriverOperation::Reconcile, Some(&id)),
+                &published(before.clone()),
+            )
+            .unwrap()
+        else {
+            panic!("the first publication succeeds");
+        };
+        let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
+        assert_eq!(artifacts[0].spec["target"], before["target"]["name"]);
+
+        let mut renamed = before.clone();
+        renamed["target"]["name"] = json!("preview-2");
+        let mut ctx = context(&world, DriverOperation::Reconcile, Some(&id));
+        ctx.artifacts = artifacts
+            .into_iter()
+            .map(|artifact| ("tree".to_owned(), artifact))
+            .collect();
+        let Supported::Supported(Outcome::Failed { retryable, message, .. }) =
+            driver.reconcile(&ctx, &published(renamed.clone())).unwrap()
+        else {
+            panic!("a changed destination fails");
+        };
+        assert!(retryable, "restoring the name needs no recovery");
+        assert!(message.starts_with("NYL-KUBERNETES-TARGET-CHANGED:"), "{message}");
+        assert!(message.contains(changed), "{message}");
+        assert!(message.contains("nyl teardown -e dev --unit kubernetes"), "{message}");
+        assert_eq!(
+            git(&world.bare(), &["rev-parse", "refs/heads/deploy"]),
+            head,
+            "nothing was published"
+        );
+
+        // The unchanged destination still publishes.
+        let Supported::Supported(outcome) = driver.reconcile(&ctx, &published(before)).unwrap() else {
+            panic!("the driver reconciles");
+        };
+        assert!(matches!(outcome, Outcome::Succeeded { .. }), "{outcome:?}");
+    }
 }
 
 /// Catches two units publishing one DeploymentTarget going unnoticed.

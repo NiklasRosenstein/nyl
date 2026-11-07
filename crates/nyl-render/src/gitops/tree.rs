@@ -134,6 +134,7 @@ impl CompiledTargetTree {
             force_owned,
             adopt: self.adoptable_paths(),
             release: self.committed_state_paths.clone(),
+            take_over_from: None,
         }
     }
 }

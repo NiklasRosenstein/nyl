@@ -240,13 +240,18 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     }
 }
 
-/// Compile every DeploymentTarget and check generated Argo CD names across them.
+/// Compile every DeploymentTarget, inline ones included, and check generated
+/// Argo CD names across them.
 ///
 /// A target an environment's publication unit places compiles with
 /// placeholders for the bindings orchestration resolves, and its `fromUnit`
 /// references are checked against that environment's units instead. Other
 /// targets compile as `render-tree` does, so those bindings stay rejected.
-async fn validate_targets(inventory: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
+async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
+    // The inline targets of the environments' publication units are targets
+    // like any other: they compile, and their generated names join the check.
+    let extended = nyl_render::gitops::units::with_inline_targets(declared)?;
+    let inventory = &extended;
     let target_names = inventory
         .resources
         .values()

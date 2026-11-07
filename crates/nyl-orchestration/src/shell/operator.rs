@@ -294,6 +294,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 commit_identity: context.commit_identity,
                 cache_dir: context.cache_dir(),
                 teardown_wait: None,
+                incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
             };
             let status = match driver.exec(&execution, &unit, &options.arguments) {
                 Ok(Supported::Supported(status)) => status,

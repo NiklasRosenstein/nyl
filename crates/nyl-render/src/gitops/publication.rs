@@ -34,9 +34,10 @@ use nyl_core::orchestration::time::Timestamp;
 
 use super::inputs::{verify_publication_base, InputSnapshot, OrchestratedInputs, PublicationBase};
 use super::reconcile::{
-    parse_index, reconcile_rendered_tree_with_options, DesiredFiles, ReconcileOptions, RenderIndex,
-    RenderIndexPublication, DEFAULT_INDEX_PATH,
+    parse_index, read_index_owner, reconcile_rendered_tree_with_options, DesiredFiles, ReconcileOptions, RenderIndex,
+    RenderIndexOwner, RenderIndexPublication, DEFAULT_INDEX_PATH,
 };
+use super::units::InlineTarget;
 use super::{
     compile_target_tree_recorded, CacheMode, CompiledTargetTree, GitOpsCache, GitOpsInventory, TargetDependencies,
     TreeRenderOptions,
@@ -54,6 +55,13 @@ pub struct TargetRender<'a> {
     pub project_dir: &'a Path,
     /// The DeploymentTarget's name.
     pub target: &'a str,
+    /// The target's declaration when the publication unit declares it
+    /// inline: the target is then not discovered but added to the inventory
+    /// under `target`, as every other target is compiled from there.
+    pub inline: Option<&'a InlineTarget>,
+    /// The orchestration unit incarnation that publishes the tree; the
+    /// ownership index then records it and fences the prefix.
+    pub owner: Option<RenderIndexOwner>,
     /// Scoped replacement authority; empty selects the complete target.
     pub selection: super::tree::partial::PublicationSelection,
     /// Optional pinned destination base, shared with the caller's input snapshot.
@@ -196,7 +204,16 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         let relative = request.project_dir.strip_prefix("/").unwrap_or(request.project_dir);
         request.worktree.join(relative)
     };
-    let inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?;
+    let mut inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?;
+    // Every environment's inline targets join the inventory, so the compile's
+    // checks across targets see them whichever unit renders. The target this
+    // render is for comes from the document it was given.
+    inventory =
+        super::units::with_inline_targets_except(&inventory, request.inline.map(|inline| inline.name.as_str()))?;
+    if let Some(inline) = request.inline {
+        let spec = pinned_inline_spec(&inline.spec, request.inputs);
+        inventory = inventory.with_inline_target(request.target, &inline.source_file, &spec)?;
+    }
     super::resolve_deployment_target_name(&inventory, Some(request.target))?;
 
     // A render without a cache directory still keeps its source checkouts
@@ -221,6 +238,9 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         .and_then(|repository| repository.head().ok().and_then(|head| head.target()))
         .map(|oid| oid.to_string());
     let mut index = target_render_index(&inventory, &compiled, request.target, source_commit, false)?;
+    if let Some(owner) = &request.owner {
+        index = index.owned_by(owner.clone());
+    }
     let desired = compiled.owned_files();
     index.files = desired
         .iter()
@@ -267,6 +287,24 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         publication_base: compiled.publication_base.clone(),
         cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
     })
+}
+
+/// An inline target's spec without the Release input bindings the pinned
+/// `inputs` supply. A unit's reference resolution replaces each `fromUnit`
+/// binding in the stored spec with the value it resolved, which is no
+/// binding any more; the render takes that value from the snapshot instead,
+/// where an input's value takes an override's precedence over its binding.
+fn pinned_inline_spec(spec: &serde_json::Value, inputs: &InputSnapshot) -> serde_json::Value {
+    let mut spec = spec.clone();
+    if let Some(bindings) = spec.get_mut("releaseInputs").and_then(serde_json::Value::as_object_mut) {
+        for (release, pinned) in inputs {
+            if let Some(release_bindings) = bindings.get_mut(release).and_then(serde_json::Value::as_object_mut) {
+                release_bindings.retain(|input, _| !pinned.contains_key(input));
+            }
+        }
+        bindings.retain(|_, release| release.as_object().is_none_or(|release| !release.is_empty()));
+    }
+    spec
 }
 
 /// The compile's dependency record in portable form (see
@@ -385,9 +423,9 @@ pub struct PublishedTree {
 /// passes a lookup over the execution's admitted environment, `publish-tree`
 /// one over the process environment. `author` is the commit's author and committer.
 ///
-/// Index v4 (owning environment and unit uid) is deferred to the
-/// KubernetesPublication driver (M5): the index is written as `publish-tree`
-/// writes it, so non-orchestrated output stays byte-identical.
+/// The published ownership index is the one `rendered` carries: it names an
+/// owner only when the render was given one (an orchestrated publication), so
+/// `publish-tree` output stays byte-identical.
 pub fn publish_target(
     rendered: &RenderedTarget,
     project_dir: &Path,
@@ -407,6 +445,21 @@ pub fn prepare_target_publication(
     message: &str,
     author: &PublicationAuthor,
     variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<PreparedTarget> {
+    prepare_target_publication_fenced(rendered, project_dir, message, author, variable, None)
+}
+
+/// [`prepare_target_publication`] with the decision whether the tree's owner
+/// may take the prefix over from another owner: owner fencing. Without one,
+/// a prefix owned by another incarnation refuses with
+/// [`NylError::OwnerFenced`].
+pub fn prepare_target_publication_fenced(
+    rendered: &RenderedTarget,
+    project_dir: &Path,
+    message: &str,
+    author: &PublicationAuthor,
+    variable: &dyn Fn(&str) -> Option<String>,
+    takeover: Option<&OwnerTakeover<'_>>,
 ) -> Result<PreparedTarget> {
     let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
     let branch = writable_branch_name(&rendered.destination.branch)?;
@@ -434,6 +487,7 @@ pub fn prepare_target_publication(
             ignore_project_scope_contraction: false,
             cluster_kubernetes: rendered.cluster_kubernetes.as_ref(),
             publication_base: rendered.publication_base.as_ref(),
+            takeover,
             auth: &auth,
         },
         message,
@@ -531,7 +585,35 @@ pub struct TreePublication<'a> {
     pub cluster_kubernetes: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
     /// The branch head `fromPublication` bindings read, if any.
     pub publication_base: Option<&'a PublicationBase>,
+    /// Decides whether this publication's owner (`index.owner`) may take
+    /// over a prefix whose index names another owner: `Ok` when that
+    /// incarnation is gone, the reason it still holds the prefix otherwise.
+    /// Without it, another owner always refuses.
+    pub takeover: Option<&'a OwnerTakeover<'a>>,
     pub auth: &'a GitAuth,
+}
+
+/// A decision on a prefix owned by another orchestration unit incarnation;
+/// see [`TreePublication::takeover`].
+pub type OwnerTakeover<'a> = dyn Fn(&RenderIndexOwner) -> std::result::Result<(), String> + 'a;
+
+/// The reconcile options that let `next` take over the prefix beneath
+/// `output_root` from another owner, if `takeover` allows it. Nothing
+/// changes for a prefix without an owner or one `next` already owns.
+fn takeover_options(
+    output_root: &Path,
+    next: Option<&RenderIndexOwner>,
+    takeover: Option<&OwnerTakeover<'_>>,
+    mut options: ReconcileOptions,
+) -> Result<ReconcileOptions> {
+    let (Some(next), Some(takeover)) = (next, takeover) else {
+        return Ok(options);
+    };
+    if let Some(previous) = read_index_owner(output_root)?.filter(|previous| previous != next) {
+        takeover(&previous).map_err(NylError::OwnerFenced)?;
+        options.take_over_from = Some(previous);
+    }
+    Ok(options)
 }
 
 /// A publication committed in a temporary checkout of its branch, not pushed yet.
@@ -571,12 +653,13 @@ pub fn prepare_publication(
     } else {
         checkout.path().join(request.path_prefix)
     };
-    let index = reconcile_rendered_tree_with_options(
+    let options = takeover_options(
         &output_root,
-        request.desired,
-        request.index.clone(),
+        request.index.owner.as_ref(),
+        request.takeover,
         request.options.clone(),
     )?;
+    let index = reconcile_rendered_tree_with_options(&output_root, request.desired, request.index.clone(), options)?;
     // Reconciliation verified the baseline's owned files, so the scope check
     // and the change summary read them once from the branch head; nothing is
     // committed if the check fails.
@@ -792,6 +875,30 @@ pub fn without_workload_applications(rendered: &RenderedTarget) -> Result<Render
     Ok(phase1)
 }
 
+/// A target's settings that decide whether its teardown can complete, read
+/// from the rendered tree ([`teardown_settings`]). A publication driver
+/// records them in the unit's resolved spec, a persisted format whose
+/// camelCase keys are pinned by a test, and evaluates them against its
+/// teardown readiness table.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TeardownSettings {
+    /// Whether the catalog prunes removed workload Applications on its own
+    /// (`syncPolicy.automated` with `prune: true`); `None` when a parent the
+    /// project writes syncs it, which Nyl cannot see (`external: not checked`).
+    pub catalog_prunes: Option<bool>,
+    /// The catalog's `applicationDeletionPolicy`, such as `Foreground` or `Orphan`; `None` when external.
+    pub application_deletion_policy: Option<String>,
+    /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
+    pub namespace_delete_policies: BTreeMap<String, String>,
+    /// Whether a parent owns the target's catalog, so phase 2 removes the
+    /// catalog Application and AppProjects too.
+    pub catalog_owned_by_parent: bool,
+}
+
 /// The settings that decide whether `rendered`'s teardown can complete, read
 /// from the tree itself: the catalog Application and workload Applications
 /// as Argo CD will see them, and the Namespaces the tree owns. A driver
@@ -811,7 +918,7 @@ pub fn without_workload_applications(rendered: &RenderedTarget) -> Result<Render
 ///
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
-pub fn teardown_settings(rendered: &RenderedTarget) -> Result<nyl_core::orchestration::driver::TeardownSettings> {
+pub fn teardown_settings(rendered: &RenderedTarget) -> Result<TeardownSettings> {
     use serde_json::Value;
 
     let catalog_source = catalog_source(&rendered.destination.path_prefix);
@@ -858,7 +965,7 @@ pub fn teardown_settings(rendered: &RenderedTarget) -> Result<nyl_core::orchestr
             })
     });
     let catalog_policy = catalog.as_ref().map(application_deletion_policy);
-    Ok(nyl_core::orchestration::driver::TeardownSettings {
+    Ok(TeardownSettings {
         catalog_prunes,
         application_deletion_policy: if workload_orphaned {
             Some("Orphan".to_owned())
@@ -935,6 +1042,20 @@ pub fn prepare_target_removal(
     author: &PublicationAuthor,
     variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<PreparedRemoval> {
+    prepare_target_removal_fenced(rendered, project_dir, message, author, variable, None)
+}
+
+/// [`prepare_target_removal`] with the decision whether the tree's owner may
+/// remove the files of a prefix whose index names another owner (owner
+/// fencing, as for [`prepare_target_publication_fenced`]).
+pub fn prepare_target_removal_fenced(
+    rendered: &RenderedTarget,
+    project_dir: &Path,
+    message: &str,
+    author: &PublicationAuthor,
+    variable: &dyn Fn(&str) -> Option<String>,
+    takeover: Option<&OwnerTakeover<'_>>,
+) -> Result<PreparedRemoval> {
     let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
     let branch = writable_branch_name(&rendered.destination.branch)?;
     let index_bytes = rendered.files.get(Path::new(DEFAULT_INDEX_PATH)).ok_or_else(|| {
@@ -955,12 +1076,8 @@ pub fn prepare_target_removal(
     };
     let index_path = output_root.join(DEFAULT_INDEX_PATH);
     let commit = if index_path.is_file() {
-        reconcile_rendered_tree_with_options(
-            &output_root,
-            &DesiredFiles::new(),
-            owner.clone(),
-            rendered.reconcile.clone(),
-        )?;
+        let options = takeover_options(&output_root, owner.owner.as_ref(), takeover, rendered.reconcile.clone())?;
+        reconcile_rendered_tree_with_options(&output_root, &DesiredFiles::new(), owner.clone(), options)?;
         std::fs::remove_file(&index_path)?;
         commit_worktree(&repository, branch, &output_root, message, || author.git())?
     } else {
@@ -1295,6 +1412,8 @@ spec:
 
     fn render(worktree: &Path, inputs: &InputSnapshot, cache_dir: Option<&Path>) -> Result<RenderedTarget> {
         render_target(&TargetRender {
+            inline: None,
+            owner: None,
             selection: super::super::tree::partial::PublicationSelection::default(),
             publication_base: None,
             worktree,
@@ -1392,6 +1511,207 @@ spec:
                 path_prefix: "dev".to_owned(),
             }
         );
+    }
+
+    /// A project like [`project`], whose `dev` target the unit declares inline.
+    fn inline_project(publication_url: &str) -> TempDir {
+        let platform = platform(publication_url);
+        let platform = platform.split("---\n").take(2).collect::<Vec<_>>().join("---\n");
+        let directory = project_with_group(publication_url, GROUP);
+        fs::write(directory.path().join("nyl/platform.yaml"), platform).unwrap();
+        commit_all(&Repository::open(directory.path()).unwrap());
+        directory
+    }
+
+    fn inline_dev() -> InlineTarget {
+        InlineTarget {
+            name: "dev".to_owned(),
+            source_file: PathBuf::from("platform.yaml"),
+            spec: json!({
+                "clusterRef": {"name": "dev"},
+                "applicationGroupSelector": {"matchLabels": {"app": "web"}},
+                "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "dev"},
+                // What resolving the unit leaves of a `fromUnit` binding: its value.
+                "releaseInputs": {"web/web": {"image": "registry.invalid/web@sha256:feed"}},
+            }),
+        }
+    }
+
+    fn render_inline(
+        worktree: &Path,
+        inline: &InlineTarget,
+        owner: Option<RenderIndexOwner>,
+    ) -> Result<RenderedTarget> {
+        render_target(&TargetRender {
+            inline: Some(inline),
+            owner,
+            selection: super::super::tree::partial::PublicationSelection::default(),
+            publication_base: None,
+            worktree,
+            project_dir: &worktree.join("nyl"),
+            target: &inline.name,
+            inputs: &snapshot("registry.invalid/web@sha256:feed"),
+            cache_dir: None,
+            resource_catalogue: crate::config::test_catalogue(),
+        })
+    }
+
+    /// Catches an inline target that renders differently from the same
+    /// declared target: it goes through the same compile and publish path,
+    /// so every file is identical, and the pinned input a unit's reference
+    /// resolution left in its place wins over the binding it replaced.
+    #[test]
+    fn test_render_target_renders_an_inline_target_like_a_declared_one() {
+        let (_repository, url) = publication_repository();
+        let declared = render(
+            project(&url).path(),
+            &snapshot("registry.invalid/web@sha256:feed"),
+            None,
+        )
+        .unwrap();
+        let worktree = inline_project(&url);
+        let inline = render_inline(worktree.path(), &inline_dev(), None).unwrap();
+        let files = |rendered: &RenderedTarget| {
+            rendered
+                .files
+                .iter()
+                .filter(|(path, _)| path.as_path() != Path::new(DEFAULT_INDEX_PATH))
+                .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(files(&inline), files(&declared));
+        assert_eq!(inline.destination, declared.destination);
+        assert!(deployment(&inline).contains("registry.invalid/web@sha256:feed"));
+        // The snapshot alone supplies an input the target holds no binding for.
+        let mut unpinned = inline_dev();
+        unpinned.spec["releaseInputs"] = json!({});
+        assert!(render_inline(worktree.path(), &unpinned, None).is_ok());
+    }
+
+    const ENVIRONMENTS: &str = r"apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: dev}
+spec:
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values: {prefix: deploy}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: staging}
+spec:
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values: {prefix: STAGING_PREFIX}
+";
+
+    const PREVIEW_UNIT: &str = r"apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {preview: 'true'}
+spec:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      applicationGroupSelector: {matchLabels: {app: web}}
+      publication: {repositoryRef: {name: platform}, revision: deploy, pathPrefix: '{{ values.prefix }}'}
+      releaseInputs: {web/web: {image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}}}
+";
+
+    /// A project whose one publication unit, selected by `dev` and `staging`,
+    /// declares an inline target on the same Cluster, with `staging_prefix`
+    /// as staging's publication prefix and `group` as the ApplicationGroup.
+    fn two_environments(publication_url: &str, staging_prefix: &str, group: &str) -> TempDir {
+        let worktree = inline_project(publication_url);
+        fs::write(worktree.path().join("nyl/web.yaml"), group).unwrap();
+        fs::write(
+            worktree.path().join("nyl/environments.yaml"),
+            ENVIRONMENTS.replace("STAGING_PREFIX", staging_prefix),
+        )
+        .unwrap();
+        fs::write(worktree.path().join("nyl/units.yaml"), PREVIEW_UNIT).unwrap();
+        commit_all(&Repository::open(worktree.path()).unwrap());
+        worktree
+    }
+
+    /// What `dev`'s unit renders: its inline target, named by the environment.
+    fn dev_inline(prefix: &str) -> InlineTarget {
+        InlineTarget {
+            name: "dev-kubernetes".to_owned(),
+            source_file: PathBuf::from("units.yaml"),
+            spec: json!({
+                "clusterRef": {"name": "dev"},
+                "applicationGroupSelector": {"matchLabels": {"app": "web"}},
+                "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": prefix},
+            }),
+        }
+    }
+
+    /// A group whose Applications and AppProjects are named from their target.
+    const PER_TARGET_GROUP: &str = r"apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata:
+  name: web
+  labels: {app: web}
+spec:
+  applicationNamespace: argocd
+  source: {path: ../applications/web}
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
+  projectTemplate:
+    name: '{{ target.metadata.name }}-web'
+    destinations: [{server: '*', namespace: web}]
+";
+
+    /// Catches the checks across targets missing inline targets of other
+    /// environments when a unit renders its own: the one unit selected by `dev`
+    /// and `staging` on one Cluster generates colliding Application names in
+    /// both, which the render of either refuses, and a staging prefix nested
+    /// in dev's overlaps it, which the render also refuses, while disjoint
+    /// prefixes and per-target names render.
+    #[test]
+    fn test_render_target_checks_the_inline_targets_of_every_environment() {
+        let (_repository, url) = publication_repository();
+        let render_dev =
+            |worktree: &TempDir, prefix: &str| render_inline(worktree.path(), &dev_inline(prefix), None).map(|_| ());
+
+        let collision = two_environments(&url, "staging", GROUP);
+        let error = render_dev(&collision, "deploy").unwrap_err().to_string();
+        assert!(error.contains("default Release Application names"), "{error}");
+        assert!(
+            error.contains("dev-kubernetes") && error.contains("staging-kubernetes"),
+            "{error}"
+        );
+
+        let nested = two_environments(&url, "deploy/staging", PER_TARGET_GROUP);
+        let error = render_dev(&nested, "deploy").unwrap_err().to_string();
+        assert!(error.contains("overlap") || error.contains("prefix"), "{error}");
+        assert!(
+            error.contains("dev-kubernetes") && error.contains("staging-kubernetes"),
+            "{error}"
+        );
+
+        let disjoint = two_environments(&url, "staging", PER_TARGET_GROUP);
+        render_dev(&disjoint, "deploy").unwrap();
+    }
+
+    /// Catches an owner missing from, or leaking into, the published index:
+    /// a tree rendered for a unit records that owner in its version 3 index,
+    /// and one rendered without records none, as `publish-tree` writes it.
+    #[test]
+    fn test_render_target_records_its_owner_in_the_index() {
+        let (_repository, url) = publication_repository();
+        let worktree = inline_project(&url);
+        let owner = RenderIndexOwner {
+            environment: "dev".to_owned(),
+            unit: "kubernetes".to_owned(),
+            uid: "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90".to_owned(),
+        };
+        let index = |rendered: &RenderedTarget| {
+            parse_index(&rendered.files[Path::new(DEFAULT_INDEX_PATH)], DEFAULT_INDEX_PATH).unwrap()
+        };
+        let owned = index(&render_inline(worktree.path(), &inline_dev(), Some(owner.clone())).unwrap());
+        assert_eq!((owned.version, owned.owner), (3, Some(owner)));
+        let plain = index(&render_inline(worktree.path(), &inline_dev(), None).unwrap());
+        assert_eq!((plain.version, plain.owner), (3, None));
     }
 
     #[test]
@@ -2019,7 +2339,44 @@ spec:
         assert!(branch_files(&bare, "deploy").contains(&owned));
     }
 
-    fn settings_of(rendered: &RenderedTarget) -> nyl_core::orchestration::driver::TeardownSettings {
+    /// Catches a serde rename of `TeardownSettings` breaking every stored
+    /// publication: the recorded settings live in desired documents, which
+    /// are read back strictly, so their camelCase keys are a persisted format.
+    #[test]
+    fn test_recorded_teardown_settings_have_a_pinned_json_shape() {
+        let settings = TeardownSettings {
+            catalog_prunes: Some(true),
+            application_deletion_policy: Some("Foreground".to_owned()),
+            namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
+            catalog_owned_by_parent: false,
+        };
+        let stored = serde_json::json!({
+            "catalogPrunes": true,
+            "applicationDeletionPolicy": "Foreground",
+            "namespaceDeletePolicies": {"web": "Confirm"},
+            "catalogOwnedByParent": false,
+        });
+        assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
+        assert_eq!(serde_json::from_value::<TeardownSettings>(stored).unwrap(), settings);
+        // A catalog a parent owns records the settings Nyl cannot see as null.
+        let external = serde_json::json!({
+            "catalogPrunes": null,
+            "applicationDeletionPolicy": null,
+            "namespaceDeletePolicies": {},
+            "catalogOwnedByParent": true,
+        });
+        let parent_owned = TeardownSettings {
+            catalog_owned_by_parent: true,
+            ..TeardownSettings::default()
+        };
+        assert_eq!(
+            serde_json::from_value::<TeardownSettings>(external.clone()).unwrap(),
+            parent_owned
+        );
+        assert_eq!(serde_json::to_value(parent_owned).unwrap(), external);
+    }
+
+    fn settings_of(rendered: &RenderedTarget) -> TeardownSettings {
         teardown_settings(rendered).unwrap()
     }
 

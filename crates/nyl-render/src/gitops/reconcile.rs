@@ -12,7 +12,12 @@ use crate::{NylError, Result};
 
 /// Index version without compilation metadata, written by `render-tree`.
 pub const RENDER_INDEX_VERSION: u32 = 2;
-/// Index version carrying per-Release compilation metadata, written by publications.
+/// Index version carrying per-Release compilation metadata, written by
+/// publications, and optionally the owning orchestration unit, written by
+/// orchestrated publications (`KubernetesPublication`). An index without an
+/// owner (every version 2 index and a version 3 index written by
+/// `publish-tree`) stays readable: the first orchestrated publication over
+/// one records its owner.
 pub const COMPILED_RENDER_INDEX_VERSION: u32 = 3;
 pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
 const TRANSACTION_PATH: &str = "_nyl/transaction.json";
@@ -39,6 +44,10 @@ pub struct ReconcileOptions {
     /// as a state file whose `fromPublication` binding no longer declares
     /// `carryFileFromWorktree` and which other tools now commit.
     pub release: BTreeSet<PathBuf>,
+    /// The owner of an existing index that the caller established
+    /// is gone, so the new owner takes the prefix over. Any other owner
+    /// named by the index refuses the reconciliation.
+    pub take_over_from: Option<RenderIndexOwner>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +65,29 @@ pub struct RenderIndexPublication {
     pub path_prefix: String,
 }
 
+/// The orchestration unit incarnation that owns a published prefix, as a
+/// version 3 index records it: the environment, the unit, and the
+/// incarnation's uid.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// ownership index. Owner fencing: [`ensure_same_owner`] refuses to
+/// overwrite or remove a prefix whose index names another owner, unless the
+/// caller established that the other incarnation is gone
+/// ([`ReconcileOptions::take_over_from`]).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct RenderIndexOwner {
+    pub environment: String,
+    pub unit: String,
+    pub uid: String,
+}
+
+impl std::fmt::Display for RenderIndexOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "unit {}/{} (uid {})", self.environment, self.unit, self.uid)
+    }
+}
+
 /// Provenance and ownership record for one rendered target prefix.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -69,9 +101,12 @@ pub struct RenderIndex {
     pub dirty: bool,
     pub inputs: BTreeMap<String, String>,
     pub files: BTreeMap<String, String>,
-    /// Version 3 compilation metadata; absent in legacy version 2 indexes.
+    /// Version 3 compilation metadata; absent in version 2 indexes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compilation: Option<serde_json::Value>,
+    /// The owning orchestration unit; only a version 3 index can name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<RenderIndexOwner>,
 }
 
 impl RenderIndex {
@@ -93,7 +128,15 @@ impl RenderIndex {
             inputs,
             files: BTreeMap::new(),
             compilation: None,
+            owner: None,
         }
+    }
+
+    /// Record the orchestration unit that owns this index.
+    #[must_use]
+    pub fn owned_by(mut self, owner: RenderIndexOwner) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     fn same_owner(&self, other: &Self) -> bool {
@@ -143,9 +186,18 @@ pub fn validate_rendered_tree_owner(output_root: &Path, expected: &RenderIndex) 
     reject_symlink_components(output_root, output_root)?;
     reject_symlink_components(output_root, &index_path)?;
     if let Some(previous) = load_index(&index_path)? {
-        ensure_same_owner(&index_path, &previous, expected)?;
+        ensure_same_owner(&index_path, &previous, expected, &ReconcileOptions::default())?;
     }
     Ok(())
+}
+
+/// The owner the ownership index beneath `output_root` records, if the
+/// prefix has an index with one.
+pub fn read_index_owner(output_root: &Path) -> Result<Option<RenderIndexOwner>> {
+    let index_path = output_root.join(DEFAULT_INDEX_PATH);
+    reject_symlink_components(output_root, output_root)?;
+    reject_symlink_components(output_root, &index_path)?;
+    Ok(load_index(&index_path)?.and_then(|index| index.owner))
 }
 
 /// Reconcile a complete desired target tree with explicit recovery options.
@@ -186,7 +238,7 @@ pub fn reconcile_rendered_tree_with_options(
         .is_some_and(|transaction| transaction.index == next_index);
 
     if let Some(previous) = &previous {
-        ensure_same_owner(&index_path, previous, &next_index)?;
+        ensure_same_owner(&index_path, previous, &next_index, &options)?;
         verify_owned_files(output_root, previous, desired, resumes_transaction, &options)?;
     }
 
@@ -323,25 +375,71 @@ fn remove_empty_parents(output_root: &Path, relative: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_same_owner(path: &Path, actual: &RenderIndex, expected: &RenderIndex) -> Result<()> {
-    if actual.same_owner(expected) {
+/// Refuse an index that belongs to another target, publication, or another
+/// orchestration unit incarnation.
+///
+/// An index without an owner (version 2, or version 3 from `publish-tree`) is
+/// taken over by an owned publication, which then records itself. An index with an owner is
+/// reconciled only by that owner, by a caller that established the owner is
+/// gone (`options.take_over_from`), and never by a publication that records
+/// no owner, such as `publish-tree`, which cannot tell whether the unit still
+/// exists.
+fn ensure_same_owner(
+    path: &Path,
+    actual: &RenderIndex,
+    expected: &RenderIndex,
+    options: &ReconcileOptions,
+) -> Result<()> {
+    if !actual.same_owner(expected) {
+        return Err(NylError::config(format!(
+            "Rendered ownership index {} belongs to target {:?}, cluster {:?}, publication {:?}@{} path {:?}; expected target {:?}, cluster {:?}, publication {:?}@{} path {:?}",
+            path.display(),
+            actual.target,
+            actual.cluster,
+            actual.publication.repository,
+            actual.publication.revision,
+            actual.publication.path_prefix,
+            expected.target,
+            expected.cluster,
+            expected.publication.repository,
+            expected.publication.revision,
+            expected.publication.path_prefix,
+        )));
+    }
+    let Some(owner) = &actual.owner else {
+        return Ok(());
+    };
+    if expected.owner.as_ref() == Some(owner) {
         return Ok(());
     }
-    Err(NylError::config(format!(
-        "Rendered ownership index {} belongs to target {:?}, cluster {:?}, publication {:?}@{} path {:?}; expected target {:?}, cluster {:?}, publication {:?}@{} path {:?}",
-        path.display(),
-        actual.target,
-        actual.cluster,
-        actual.publication.repository,
-        actual.publication.revision,
-        actual.publication.path_prefix,
-        expected.target,
-        expected.cluster,
-        expected.publication.repository,
-        expected.publication.revision,
-        expected.publication.path_prefix,
-    )))
+    if expected.owner.is_some() && options.take_over_from.as_ref() == Some(owner) {
+        return Ok(());
+    }
+    Err(NylError::OwnerFenced(match &expected.owner {
+        Some(next) => format!(
+            "NYL-KUBERNETES-OWNER-FENCED: rendered ownership index {} is owned by {owner}, not by {next}; \
+             it stays fenced while that incarnation exists in its environment's state",
+            path.display()
+        ),
+        None => format!(
+            "{OWNED_PREFIX_CODE}: rendered ownership index {} is owned by {owner}, and a publication outside \
+             orchestration cannot overwrite or remove it; {OWNED_PREFIX_FIX}",
+            path.display()
+        ),
+    }))
 }
+
+/// The stable code of a refusal by a publication that records no owner, such
+/// as `publish-tree` and `render-tree`, of a prefix an orchestrated unit owns.
+pub const OWNED_PREFIX_CODE: &str = "NYL-TREE-OWNED-BY-UNIT";
+
+/// How to release a prefix deliberately: the way out when its owner can no
+/// longer release it, such as an environment that was renamed or removed, or
+/// a unit released with `nyl state forget`.
+pub const OWNED_PREFIX_FIX: &str =
+    "publish it through the environment that owns it, or release it deliberately: in a commit to the \
+     publication branch, remove the `owner` member from `<prefix>/_nyl/index.json`, \
+     which makes the prefix unowned, so the next publication adopts it";
 
 fn is_unchanged(
     previous: Option<&RenderIndex>,
@@ -429,15 +527,20 @@ pub fn read_indexed_files(
 pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
     let index: RenderIndex = serde_json::from_slice(bytes)
         .map_err(|error| NylError::config(format!("Invalid rendered ownership index {origin}: {error}")))?;
-    if index.version != RENDER_INDEX_VERSION && index.version != COMPILED_RENDER_INDEX_VERSION {
+    if ![RENDER_INDEX_VERSION, COMPILED_RENDER_INDEX_VERSION].contains(&index.version) {
         return Err(NylError::config(format!(
             "Unsupported rendered ownership index version {} in {origin}",
             index.version
         )));
     }
-    if (index.version == COMPILED_RENDER_INDEX_VERSION) != index.compilation.is_some() {
+    if (index.version != RENDER_INDEX_VERSION) != index.compilation.is_some() {
         return Err(NylError::config(
             "Rendered index compilation metadata does not match its version",
+        ));
+    }
+    if index.version == RENDER_INDEX_VERSION && index.owner.is_some() {
+        return Err(NylError::config(
+            "Rendered index owner does not match its version; only version 3 names an owner",
         ));
     }
     Ok(index)
@@ -803,5 +906,124 @@ mod tests {
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
         assert!(error.to_string().contains("symbolic link"));
         assert!(!outside.join("a.yaml").exists());
+    }
+
+    fn owner(unit: &str, uid: &str) -> RenderIndexOwner {
+        RenderIndexOwner {
+            environment: "dev".to_owned(),
+            unit: unit.to_owned(),
+            uid: uid.to_owned(),
+        }
+    }
+
+    /// An index as an orchestrated publication writes it: version 3
+    /// compilation metadata plus `owner`.
+    fn owned(owner: RenderIndexOwner) -> RenderIndex {
+        let mut index = index();
+        index.version = COMPILED_RENDER_INDEX_VERSION;
+        index.compilation = Some(serde_json::json!({
+            "version": 1, "controlDigest": "sha256-example", "groups": {}, "releases": {}, "bindings": {}
+        }));
+        index.owned_by(owner)
+    }
+
+    /// A version 3 index without an owner, as `publish-tree` writes it.
+    fn compiled() -> RenderIndex {
+        let mut index = owned(owner("kubernetes", "u1"));
+        index.owner = None;
+        index
+    }
+
+    fn reconcile_with(root: &Path, index: RenderIndex, options: ReconcileOptions) -> Result<RenderIndex> {
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
+        reconcile_rendered_tree_with_options(root, &desired, index, options)
+    }
+
+    /// Catches an index naming an owner under a version that cannot carry
+    /// one: only version 3 can, and an owner is optional there.
+    #[test]
+    fn test_index_owner_is_only_valid_in_version_three() {
+        let bytes = |index: &RenderIndex| serde_json::to_vec(index).unwrap();
+        assert!(parse_index(&bytes(&index()), "v2").is_ok());
+        assert!(parse_index(&bytes(&compiled()), "v3").is_ok());
+        let owned = owned(owner("kubernetes", "u1"));
+        assert_eq!(owned.version, COMPILED_RENDER_INDEX_VERSION);
+        assert!(parse_index(&bytes(&owned), "v3-owned").is_ok());
+
+        let mut owned_v2 = index();
+        owned_v2.owner = Some(owner("kubernetes", "u1"));
+        assert!(parse_index(&bytes(&owned_v2), "v2-owned").is_err());
+        let mut unsupported = owned;
+        unsupported.version = 9;
+        assert!(parse_index(&bytes(&unsupported), "unsupported").is_err());
+    }
+
+    /// Catches an owner being lost, or a publication outside orchestration
+    /// overwriting an owned prefix: the owner reconciles it again, an index
+    /// without an owner (version 2, or version 3 as `publish-tree` writes it)
+    /// is adopted, and nothing else may change or remove it.
+    #[test]
+    fn test_owner_fencing_refuses_every_owner_but_the_recorded_one() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let me = owner("kubernetes", "u1");
+        let other = owner("kubernetes", "u2");
+
+        // A released version 2 index is adopted by the first orchestrated publication.
+        let released = temp.path().join("released");
+        reconcile_with(&released, index(), ReconcileOptions::default()).unwrap();
+        let adopted = reconcile_with(&released, owned(me.clone()), ReconcileOptions::default()).unwrap();
+        assert_eq!((adopted.version, adopted.owner.as_ref()), (3, Some(&me)));
+
+        // So is a version 3 index without an owner, as `publish-tree` writes it.
+        reconcile_with(&root, compiled(), ReconcileOptions::default()).unwrap();
+        let adopted = reconcile_with(&root, owned(me.clone()), ReconcileOptions::default()).unwrap();
+        assert_eq!((adopted.version, adopted.owner.as_ref()), (3, Some(&me)));
+
+        // The owner again, and no change at all.
+        reconcile_with(&root, owned(me.clone()), ReconcileOptions::default()).unwrap();
+
+        // Another incarnation, and publication outside orchestration, are refused.
+        let error = reconcile_with(&root, owned(other.clone()), ReconcileOptions::default()).unwrap_err();
+        assert!(error.is_owner_fenced(), "{error}");
+        assert!(error.to_string().contains("dev/kubernetes (uid u1)"), "{error}");
+        let error = reconcile_with(&root, compiled(), ReconcileOptions::default()).unwrap_err();
+        assert!(error.is_owner_fenced(), "{error}");
+        assert!(error.to_string().contains("outside orchestration"), "{error}");
+        // The refusal carries its stable code and the way out when the owner is gone for good.
+        assert!(error.to_string().starts_with("NYL-TREE-OWNED-BY-UNIT:"), "{error}");
+        assert!(error.to_string().contains("remove the `owner` member"), "{error}");
+        assert!(validate_rendered_tree_owner(&root, &compiled()).is_err());
+        assert_eq!(read_index_owner(&root).unwrap(), Some(me.clone()));
+
+        // A takeover decided for the recorded owner, and only for it.
+        let wrong = ReconcileOptions {
+            take_over_from: Some(other.clone()),
+            ..ReconcileOptions::default()
+        };
+        assert!(reconcile_with(&root, owned(other.clone()), wrong)
+            .unwrap_err()
+            .is_owner_fenced());
+        let takeover = ReconcileOptions {
+            take_over_from: Some(me),
+            ..ReconcileOptions::default()
+        };
+        let taken = reconcile_with(&root, owned(other.clone()), takeover).unwrap();
+        assert_eq!(taken.owner, Some(other));
+    }
+
+    /// Catches a publication of another target over an owned prefix being
+    /// reported as an owner problem, or passing: target identity is checked
+    /// before the owner, with its own message.
+    #[test]
+    fn test_another_target_is_refused_before_the_owner_is_considered() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        reconcile_with(&root, owned(owner("kubernetes", "u1")), ReconcileOptions::default()).unwrap();
+        let mut elsewhere = owned(owner("kubernetes", "u1"));
+        elsewhere.target = "staging".to_owned();
+        let error = reconcile_with(&root, elsewhere, ReconcileOptions::default()).unwrap_err();
+        assert!(!error.is_owner_fenced(), "{error}");
+        assert!(error.to_string().contains("belongs to target"), "{error}");
     }
 }
