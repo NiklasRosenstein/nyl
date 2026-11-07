@@ -148,14 +148,18 @@ fn context(value: &Value) -> Result<Value> {
     }
 }
 
-fn parse(path: &Path, bytes: &[u8]) -> Result<Value> {
+/// Every resource a rendered file holds. Earlier publications wrote whole
+/// Release streams to one file, so a baseline may hold several documents.
+fn parse(path: &Path, bytes: &[u8]) -> Result<Vec<Value>> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| NylError::config(format!("Invalid rendered manifest {}: {error}", path.display())))?;
-    let value = crate::yaml::parse_yaml_value_k8s_compatible(text)
+    let documents = crate::yaml::parse_yaml_documents_k8s_compatible(text)
         .map_err(|error| NylError::config(format!("Invalid rendered manifest {}: {error}", path.display())))?;
-    crate::kubernetes::ResourceKey::from_json_value(&value)
-        .map_err(|error| NylError::config(format!("Invalid rendered resource {}: {error}", path.display())))?;
-    Ok(value)
+    for document in &documents {
+        crate::kubernetes::ResourceKey::from_json_value(document)
+            .map_err(|error| NylError::config(format!("Invalid rendered resource {}: {error}", path.display())))?;
+    }
+    Ok(documents)
 }
 
 fn validate_catalog_manifest(manifest: &Value) -> Result<()> {
@@ -240,21 +244,22 @@ impl<'a> Snapshot<'a> {
             projects: BTreeMap::new(),
         };
         for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(CATALOG_DIRECTORY)) {
-            let manifest = parse(path, bytes)?;
-            if field(&manifest, "/apiVersion") != "argoproj.io/v1alpha1" {
-                continue;
-            }
-            validate_catalog_manifest(&manifest)?;
-            let collection = match field(&manifest, "/kind") {
-                "Application" => &mut snapshot.applications,
-                "AppProject" => &mut snapshot.projects,
-                _ => continue,
-            };
-            if collection.insert(identity(&manifest), manifest).is_some() {
-                return Err(NylError::config(format!(
-                    "Duplicate catalog identity in {}",
-                    path.display()
-                )));
+            for manifest in parse(path, bytes)? {
+                if field(&manifest, "/apiVersion") != "argoproj.io/v1alpha1" {
+                    continue;
+                }
+                validate_catalog_manifest(&manifest)?;
+                let collection = match field(&manifest, "/kind") {
+                    "Application" => &mut snapshot.applications,
+                    "AppProject" => &mut snapshot.projects,
+                    _ => continue,
+                };
+                if collection.insert(identity(&manifest), manifest).is_some() {
+                    return Err(NylError::config(format!(
+                        "Duplicate catalog identity in {}",
+                        path.display()
+                    )));
+                }
             }
         }
         Ok(snapshot)
@@ -339,20 +344,21 @@ impl<'a> Snapshot<'a> {
         })?;
         let mut resources = BTreeMap::new();
         for (path, bytes) in self.files.iter().filter(|(path, _)| path.starts_with(root)) {
-            let resource = parse(path, bytes)?;
-            if field(&resource, "/metadata/namespace").is_empty() && !is_namespace(&resource) {
-                let scope = scopes.scope(api_group(&resource), field(&resource, "/kind"));
-                if scope != Some(ResourceScope::Namespaced) {
-                    resources.insert(resource_identity(&resource), resource.clone());
+            for resource in parse(path, bytes)? {
+                if field(&resource, "/metadata/namespace").is_empty() && !is_namespace(&resource) {
+                    let scope = scopes.scope(api_group(&resource), field(&resource, "/kind"));
+                    if scope != Some(ResourceScope::Namespaced) {
+                        resources.insert(resource_identity(&resource), resource.clone());
+                    }
+                    if scope != Some(ResourceScope::Cluster) {
+                        let mut namespaced = resource;
+                        namespaced["metadata"]["namespace"] = app["spec"]["destination"]["namespace"].clone();
+                        resources.insert(resource_identity(&namespaced), namespaced);
+                    }
+                    continue;
                 }
-                if scope != Some(ResourceScope::Cluster) {
-                    let mut namespaced = resource;
-                    namespaced["metadata"]["namespace"] = app["spec"]["destination"]["namespace"].clone();
-                    resources.insert(resource_identity(&namespaced), namespaced);
-                }
-                continue;
+                resources.insert(resource_identity(&resource), resource);
             }
-            resources.insert(resource_identity(&resource), resource);
         }
         Ok(resources)
     }
@@ -376,7 +382,10 @@ impl<'a> Scopes<'a> {
             .into_iter()
             .flat_map(|files| files.iter())
             .filter(|(_, bytes)| bytes.windows(CRD_MARKER.len()).any(|window| window == CRD_MARKER))
+            // An unreadable file leaves its kinds of unknown scope, which are
+            // checked both ways, so skipping it cannot hide a contraction.
             .filter_map(|(path, bytes)| parse(path, bytes).ok())
+            .flatten()
             .filter(|resource| field(resource, "/kind") == "CustomResourceDefinition")
             .collect::<Vec<_>>();
         Self {
@@ -1045,6 +1054,38 @@ mod tests {
         new.insert(PathBuf::from("crds/widget.yaml"), serde_json::to_vec(&crd).unwrap());
         let found = findings(&old, &new);
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn test_multi_document_baseline_files_are_read_whole() {
+        // Earlier publications wrote a Release's stream, CRDs included, to one file.
+        let crd = json!({"apiVersion":"apiextensions.k8s.io/v1", "kind":"CustomResourceDefinition",
+            "metadata":{"name":"widgets.example.com"},
+            "spec":{"group":"example.com", "scope":"Namespaced", "names":{"kind":"Widget"}}});
+        let widget = json!({"apiVersion":"example.com/v1", "kind":"Widget", "metadata":{"name":"example"}});
+        let mut wide = project(&["retired"]);
+        wide["spec"]["namespaceResourceWhitelist"] = json!([{"group":"*", "kind":"*"}]);
+        wide["spec"]["clusterResourceWhitelist"] = json!([{"group":"*", "kind":"*"}]);
+        let mut old = tree(wide.clone(), Some(app("example")), &[]);
+        let stream = [&resource("retired"), &crd, &widget]
+            .map(|document| crate::yaml::serialize_yaml_value(document).unwrap())
+            .join("---\n");
+        old.insert(PathBuf::from("workloads/api/resources.yaml"), stream.into_bytes());
+        // The CRD in the stream makes Widget namespaced, so dropping cluster
+        // permission for every other kind loses nothing.
+        let mut retained = wide;
+        retained["spec"]["clusterResourceWhitelist"] =
+            json!([{"group":"apiextensions.k8s.io", "kind":"CustomResourceDefinition"}]);
+        let found = findings(&old, &tree(retained.clone(), None, &[]));
+        assert!(found.is_empty(), "{found:?}");
+        // Every namespaced document of the stream still detects a contraction.
+        retained["spec"]["namespaceResourceWhitelist"] = json!([]);
+        let found = findings(&old, &tree(retained, None, &[]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].namespace, "retired");
+        for kind in ["ConfigMap", "Widget"] {
+            assert!(found[0].permissions.iter().any(|p| p.contains(kind)), "{found:?}");
+        }
     }
 
     #[test]
