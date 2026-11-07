@@ -263,6 +263,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                 history_limit,
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
+                protected: None,
             },
             Interruption {
                 interrupt: async {
