@@ -887,7 +887,7 @@ expected deployments, and the anchors); how the reconciler is read, its
 `access`, local `context`, and the publication URL, is recorded but never
 keys it. The strategies `delay`, `manual`, and `observe` work
 as the table below says. Inline targets,
-the version 4 ownership index, and owner fencing work as described above, in
+the owner in the ownership index, and owner fencing work as described above, in
 both phases of the teardown. Tier-1 tests keep the test kind
 `FakePublication` (scripted outcomes, the fake Argo CD observer
 `FakeObserver` for the `observe` wait, accepting inline targets and evaluating
