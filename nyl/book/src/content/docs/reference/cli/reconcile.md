@@ -7,9 +7,10 @@ results in its state. See [Runs](/nyl/orchestration/runs/) for how a run
 chooses its source commit, resolves references, and decides what executes.
 
 :::note
-`reconcile` runs selected environments' Command, OciImage, Terraform, and
-OpenTofu units, with recorded approvals, recovery, drift repair, and lifecycle
-handling. Kubernetes publication and promotion drivers follow in M5 and M6.
+`reconcile` runs selected environments' Command, OciImage, Terraform,
+OpenTofu, and [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/)
+units, with recorded approvals, recovery, drift repair, and lifecycle
+handling. Publication observation and promotion drivers follow in M5 and M6.
 :::
 
 ```bash

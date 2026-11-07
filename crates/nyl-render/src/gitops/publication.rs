@@ -140,6 +140,36 @@ pub struct RenderedTarget {
     pub cluster_kubernetes: Option<crate::resources::ClusterKubernetesCapabilities>,
 }
 
+impl RenderedTarget {
+    /// The values this render read from state, as its ownership index
+    /// records them: the digests of every resolved Release input
+    /// (`@input/…`), of `fromPublication` state files read from the base
+    /// commit (`@publication/…`), and of carried ones (`@carried/…`). Two
+    /// renders with equal state inputs read the same state.
+    pub fn state_inputs(&self) -> Result<BTreeMap<String, String>> {
+        let bytes = self.files.get(Path::new(DEFAULT_INDEX_PATH)).ok_or_else(|| {
+            NylError::config(format!(
+                "Rendered target tree for {} has no {DEFAULT_INDEX_PATH}",
+                self.destination.repository
+            ))
+        })?;
+        let index = parse_index(bytes, DEFAULT_INDEX_PATH)?;
+        Ok(index
+            .inputs
+            .into_iter()
+            .filter(|(key, _)| {
+                [
+                    super::inputs::INDEX_INPUT_PREFIX,
+                    super::inputs::INDEX_PUBLICATION_PREFIX,
+                    super::inputs::INDEX_CARRIED_PREFIX,
+                ]
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+            })
+            .collect())
+    }
+}
+
 /// Render `request.target` at `request.worktree` with `request.inputs` as
 /// [`super::inputs::OrchestratedInputs::Pinned`].
 ///
@@ -425,6 +455,12 @@ pub struct PreparedTarget {
 }
 
 impl PreparedTarget {
+    /// Whether the destination branch already holds exactly this tree, so
+    /// pushing would create no commit.
+    pub fn is_unchanged(&self) -> bool {
+        self.prepared.commit().is_none()
+    }
+
     /// Push the commit, if any, and describe the published tree.
     pub fn push(self) -> Result<PublishedTree> {
         let commit = self.prepared.head()?;
@@ -676,7 +712,7 @@ impl PreparedPublication {
         fetch_branch(&self.repository, &self.push_url, &self.branch, auth)?;
         let actual = remote_branch_oid(&self.repository, &self.branch);
         if actual != self.expected {
-            return Err(NylError::config(format!(
+            return Err(NylError::PublicationMoved(format!(
                 "Publication {}@{} advanced from {:?} to {actual:?}; refusing stale publish",
                 nyl_git::sanitize_url(&self.push_url),
                 self.branch,
@@ -699,7 +735,13 @@ impl PreparedPublication {
             self.expected,
             auth,
         )
-        .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
+        .map_err(|error| {
+            let message = format!("Failed to publish publication branch: {error}");
+            match &error {
+                crate::git::GitError::Remote(remote) if remote.is_stale() => NylError::PublicationMoved(message),
+                _ => NylError::config(message),
+            }
+        })
     }
 }
 
@@ -716,11 +758,7 @@ impl PreparedPublication {
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// Teardown, phase 1.
 pub fn without_workload_applications(rendered: &RenderedTarget) -> Result<RenderedTarget> {
-    let catalog_source = if rendered.destination.path_prefix.is_empty() {
-        super::CATALOG_DIRECTORY.to_owned()
-    } else {
-        format!("{}/{}", rendered.destination.path_prefix, super::CATALOG_DIRECTORY)
-    };
+    let catalog_source = catalog_source(&rendered.destination.path_prefix);
     let mut phase1 = rendered.clone();
     let mut removed = Vec::new();
     for (path, bytes) in &rendered.files {
@@ -752,6 +790,130 @@ pub fn without_workload_applications(rendered: &RenderedTarget) -> Result<Render
         phase1.files.remove(&path);
     }
     Ok(phase1)
+}
+
+/// The settings that decide whether `rendered`'s teardown can complete, read
+/// from the tree itself: the catalog Application and workload Applications
+/// as Argo CD will see them, and the Namespaces the tree owns. A driver
+/// records them at resolution, so readiness agrees with what a teardown of
+/// that document would publish.
+///
+/// - `catalog_prunes` and `application_deletion_policy` come from the
+///   catalog Application, the one sourcing `_nyl/catalog`: `syncPolicy.automated`
+///   enabled with `prune: true`, and its finalizer (`Foreground`,
+///   `Background`, or `Orphan` without one). Any workload Application
+///   without a finalizer also makes the policy `Orphan`, because deleting
+///   that Application then leaves its workloads running. A tree without a
+///   catalog Application leaves a parent to sync it, which cannot be seen:
+///   both settings are `None`, and `catalog_owned_by_parent` is true.
+/// - Each Namespace the tree renders reports its `Delete` sync option:
+///   `confirm` is `Confirm`, `false` is `Retain`, and none is `Automatic`.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+pub fn teardown_settings(rendered: &RenderedTarget) -> Result<nyl_core::orchestration::driver::TeardownSettings> {
+    use serde_json::Value;
+
+    let catalog_source = catalog_source(&rendered.destination.path_prefix);
+    let mut catalog: Option<Value> = None;
+    let mut workload_orphaned = false;
+    let mut namespaces = BTreeMap::new();
+    for (path, bytes) in &rendered.files {
+        let in_catalog = path.starts_with(super::CATALOG_DIRECTORY);
+        if !matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("yaml" | "yml")) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        // Only catalog files and Namespaces matter; leave other manifests unparsed.
+        if !in_catalog && !text.contains("Namespace") {
+            continue;
+        }
+        let manifests = serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)?;
+        for manifest in manifests {
+            let kind = manifest.get("kind").and_then(Value::as_str);
+            if in_catalog && kind == Some("Application") {
+                if manifest.pointer("/spec/source/path").and_then(Value::as_str) == Some(catalog_source.as_str()) {
+                    catalog = Some(manifest);
+                } else if application_deletion_policy(&manifest) == "Orphan" {
+                    workload_orphaned = true;
+                }
+            } else if !in_catalog
+                && kind == Some("Namespace")
+                && manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
+            {
+                if let Some(name) = manifest.pointer("/metadata/name").and_then(Value::as_str) {
+                    namespaces.insert(name.to_owned(), namespace_delete_policy(&manifest).to_owned());
+                }
+            }
+        }
+    }
+    let catalog_prunes = catalog.as_ref().map(|application| {
+        application
+            .pointer("/spec/syncPolicy/automated")
+            .is_some_and(|automated| {
+                automated.get("enabled").and_then(Value::as_bool) != Some(false)
+                    && automated.get("prune").and_then(Value::as_bool) == Some(true)
+            })
+    });
+    let catalog_policy = catalog.as_ref().map(application_deletion_policy);
+    Ok(nyl_core::orchestration::driver::TeardownSettings {
+        catalog_prunes,
+        application_deletion_policy: if workload_orphaned {
+            Some("Orphan".to_owned())
+        } else {
+            catalog_policy.map(str::to_owned)
+        },
+        namespace_delete_policies: namespaces,
+        catalog_owned_by_parent: catalog.is_none(),
+    })
+}
+
+/// The `Foreground`, `Background`, or `Orphan` policy an Application's
+/// finalizers express.
+fn application_deletion_policy(application: &serde_json::Value) -> &'static str {
+    use super::argocd::{BACKGROUND_FINALIZER, FOREGROUND_FINALIZER};
+    let finalizers = application
+        .pointer("/metadata/finalizers")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let has = |finalizer: &str| finalizers.iter().any(|value| value.as_str() == Some(finalizer));
+    if has(FOREGROUND_FINALIZER) {
+        "Foreground"
+    } else if has(BACKGROUND_FINALIZER) {
+        "Background"
+    } else {
+        "Orphan"
+    }
+}
+
+/// A Namespace's `deletePolicy` as its `Delete` Argo CD sync option renders.
+fn namespace_delete_policy(namespace: &serde_json::Value) -> &'static str {
+    let options = namespace
+        .pointer("/metadata/annotations")
+        .and_then(|annotations| annotations.get("argocd.argoproj.io/sync-options"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    match options
+        .split(',')
+        .map(str::trim)
+        .find_map(|option| option.strip_prefix("Delete="))
+    {
+        Some("confirm") => "Confirm",
+        Some("false") => "Retain",
+        _ => "Automatic",
+    }
+}
+
+/// The directory the catalog Application sources, as its `spec.source.path`.
+fn catalog_source(path_prefix: &str) -> String {
+    if path_prefix.is_empty() {
+        super::CATALOG_DIRECTORY.to_owned()
+    } else {
+        format!("{path_prefix}/{}", super::CATALOG_DIRECTORY)
+    }
 }
 
 /// Phase 2 of a publication's teardown: remove exactly the files the
@@ -1855,5 +2017,136 @@ spec:
             .to_string();
         assert!(error.contains("modified outside Nyl"), "{error}");
         assert!(branch_files(&bare, "deploy").contains(&owned));
+    }
+
+    fn settings_of(rendered: &RenderedTarget) -> nyl_core::orchestration::driver::TeardownSettings {
+        teardown_settings(rendered).unwrap()
+    }
+
+    /// Catches readiness judging a different catalog than the one the tree
+    /// publishes: the default catalog syncs manually, cascades in the
+    /// foreground, and the owned Namespaces ask for confirmation.
+    #[test]
+    fn test_teardown_settings_describe_the_default_rendered_tree() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        let settings = settings_of(&rendered);
+        assert_eq!(settings.catalog_prunes, Some(false));
+        assert_eq!(settings.application_deletion_policy.as_deref(), Some("Foreground"));
+        assert!(!settings.catalog_owned_by_parent);
+        assert!(
+            !settings.namespace_delete_policies.is_empty()
+                && settings
+                    .namespace_delete_policies
+                    .values()
+                    .all(|policy| policy == "Confirm"),
+            "{settings:?}"
+        );
+    }
+
+    fn edit_catalog(rendered: &mut RenderedTarget, edit: impl Fn(&mut serde_json::Value) -> bool) {
+        let paths = rendered
+            .files
+            .keys()
+            .filter(|path| path.starts_with(super::super::CATALOG_DIRECTORY))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths {
+            let text = String::from_utf8(rendered.files[&path].clone()).unwrap();
+            let mut manifest = serde_saphyr::from_str::<serde_json::Value>(&text).unwrap();
+            if manifest["kind"] == "Application" && edit(&mut manifest) {
+                rendered
+                    .files
+                    .insert(path, serde_saphyr::to_string(&manifest).unwrap().into_bytes());
+            }
+        }
+    }
+
+    /// Catches each setting being read from the wrong Application: pruning
+    /// and the catalog's finalizer come from the catalog Application, and a
+    /// workload Application without a finalizer orphans its workloads.
+    #[test]
+    fn test_teardown_settings_follow_the_catalog_and_workload_applications() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        let is_catalog = |manifest: &serde_json::Value| manifest["spec"]["source"]["path"] == "dev/_nyl/catalog";
+
+        let mut pruning = rendered.clone();
+        edit_catalog(&mut pruning, |manifest| {
+            if !is_catalog(manifest) {
+                return false;
+            }
+            manifest["spec"]["syncPolicy"]["automated"] = json!({"prune": true});
+            manifest["metadata"]["finalizers"] = json!(["resources-finalizer.argocd.argoproj.io/background"]);
+            true
+        });
+        let settings = settings_of(&pruning);
+        assert_eq!(settings.catalog_prunes, Some(true));
+        assert_eq!(settings.application_deletion_policy.as_deref(), Some("Background"));
+
+        let mut disabled = rendered.clone();
+        edit_catalog(&mut disabled, |manifest| {
+            if !is_catalog(manifest) {
+                return false;
+            }
+            manifest["spec"]["syncPolicy"]["automated"] = json!({"enabled": false, "prune": true});
+            true
+        });
+        assert_eq!(settings_of(&disabled).catalog_prunes, Some(false));
+
+        let mut orphaning = rendered.clone();
+        edit_catalog(&mut orphaning, |manifest| {
+            if is_catalog(manifest) {
+                return false;
+            }
+            manifest["metadata"]["finalizers"] = json!([]);
+            true
+        });
+        assert_eq!(
+            settings_of(&orphaning).application_deletion_policy.as_deref(),
+            Some("Orphan"),
+            "the catalog's own Foreground finalizer does not make orphaned workloads safe"
+        );
+    }
+
+    /// Catches a target whose catalog a parent owns being judged on settings
+    /// Nyl cannot see: they are unknown, and the parent removes the catalog.
+    #[test]
+    fn test_teardown_settings_of_a_tree_without_a_catalog_application_are_external() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let mut rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        rendered.files.retain(|path, bytes| {
+            !(path.starts_with(super::super::CATALOG_DIRECTORY)
+                && String::from_utf8_lossy(bytes).contains("path: dev/_nyl/catalog"))
+        });
+        let settings = settings_of(&rendered);
+        assert_eq!(settings.catalog_prunes, None);
+        assert_eq!(settings.application_deletion_policy, None);
+        assert!(settings.catalog_owned_by_parent);
+    }
+
+    /// Catches a lost race for the branch head being reported like a failed
+    /// publication: the driver retries only a stale head, where nothing was
+    /// pushed.
+    #[test]
+    fn test_publication_that_lost_the_branch_head_is_stale() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let project_dir = worktree.path().join("nyl");
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        publish_target(&rendered, &project_dir, "nyl: publish", &author(10), &|_| None).unwrap();
+
+        // The second publication changes a file, and is prepared on the branch head.
+        let changed = render(worktree.path(), &snapshot("registry.test/web:2"), None).unwrap();
+        let prepared =
+            prepare_target_publication(&changed, &project_dir, "nyl: update", &author(20), &|_| None).unwrap();
+        assert!(!prepared.is_unchanged());
+        // Another writer moves the head before it pushes.
+        commit_unowned(&url, "deploy", "elsewhere/state.json", "{}\n");
+        let error = prepared.push().expect_err("the push loses the compare-and-swap");
+        assert!(error.is_stale_publication(), "{error}");
     }
 }

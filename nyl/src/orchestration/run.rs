@@ -81,9 +81,9 @@ pub struct ProcessWiring {
 }
 
 impl ProcessWiring {
-    /// The built-in drivers (plus the fake kinds with the `test-kinds`
-    /// feature, sharing an empty script), the process runner, and no faults,
-    /// never cancelled.
+    /// The built-in drivers (the fake kinds instead with the `test-kinds`
+    /// feature, sharing an empty script, unless `tier2` runs the real
+    /// tools), the process runner, and no faults, never cancelled.
     pub fn new() -> Self {
         Self::cancelled_by(Cancellation::new())
     }
@@ -91,17 +91,11 @@ impl ProcessWiring {
     /// [`Self::new`], cancelled when `cancellation` is set: the process
     /// runner forwards its signal to every running tool's process group.
     pub fn cancelled_by(cancellation: Cancellation) -> Self {
-        #[cfg(feature = "test-kinds")]
-        let drivers = {
-            let script = nyl_units::fake::Script::new();
-            #[cfg(feature = "tier2")]
-            let drivers = nyl_units::registry::with_fake_publication(&script, crate::resource_catalogue());
-            #[cfg(not(feature = "tier2"))]
-            let drivers = nyl_units::registry::with_test_kinds(&script, crate::resource_catalogue());
-            drivers
-        };
-        #[cfg(not(feature = "test-kinds"))]
-        let drivers = nyl_units::registry::builtin();
+        #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
+        let drivers =
+            nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new(), crate::resource_catalogue());
+        #[cfg(not(all(feature = "test-kinds", not(feature = "tier2"))))]
+        let drivers = nyl_units::registry::builtin(crate::resource_catalogue());
         Self {
             ids: crate::orchestration::ids::UuidV7,
             drivers,

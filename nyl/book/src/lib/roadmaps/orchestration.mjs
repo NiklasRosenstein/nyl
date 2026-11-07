@@ -9,9 +9,9 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M4 is complete. Continue with M5: Kubernetes publications that consume image digests and infrastructure outputs.',
+    intro: 'M4 is complete, and M5 has begun: the `KubernetesPublication` unit publishes trees with image digests and infrastructure outputs. Continue with M5: observing Argo CD, attestations, and preview environments.',
     steps: [
-      { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: false },
+      { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: true },
       { text: 'Add publication observation, attestations, direct builds, and teardown ownership fences.', done: false },
       { text: 'Add preview environment templates, expiry, limits, and end-to-end reference scenarios.', done: false },
     ],
@@ -104,8 +104,8 @@ export const orchestrationRoadmap = {
       needs: ['M2', 'M4'],
       exitCriterion: 'One reconcile builds an image, applies Terraform, and publishes Kubernetes manifests consuming both; the same Releases still render with static inputs in a target that does not use orchestration; all three reference scenarios, including preview closure and expiry, pass in both tiers.',
       items: [
-        { text: 'Add the Kubernetes publication unit over `render-tree`/`publish-tree`.', done: false },
-        { text: 'Resolve `fromUnit` Release input bindings into an explicit pinned input snapshot for rendering.', done: false },
+        { text: 'Add the Kubernetes publication unit over `render-tree`/`publish-tree`.', done: true },
+        { text: 'Resolve `fromUnit` Release input bindings into an explicit pinned input snapshot for rendering.', done: true },
         { text: 'Distinguish `published` from `attested` evidence and named attestations for dependents.', done: false },
         { text: 'Add the publication unit\'s observe mode: read generated Argo CD Applications\' last successful sync and health, match them to publication commits by Application directory tree, and attest `accepted` and `healthy` through `nyl attest`, with each Application\'s running publication and health in the attestations\' details.', done: false },
         { text: 'Add observed values: the generic `observe` driver capability, `fromUnit: {unit, observation}`, re-observation in `reconcile` and a `nyl observe` command for jobs that hold the read credentials, `observationWait`, and the publication unit\'s reads of rendered resource fields once their Application runs the current publication (the `observed-value` walkthrough).', done: false },

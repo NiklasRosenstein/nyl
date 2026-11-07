@@ -170,16 +170,30 @@ impl Shared {
 
 /// Run every step of `loaded`, returning the first failed check.
 pub fn run(loaded: &Loaded) -> Result<(), String> {
-    run_tier(loaded, 1)
+    run_tier(loaded, 1, Publication::Fake)
+}
+
+/// Which publication driver tier 1 runs against.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Publication {
+    /// `FakePublication`, which scenarios can script and observe.
+    Fake,
+    /// The real `KubernetesPublication` driver.
+    Real,
+}
+
+/// [`run`] with the real `KubernetesPublication` driver.
+pub fn run_real_publication(loaded: &Loaded) -> Result<(), String> {
+    run_tier(loaded, 1, Publication::Real)
 }
 
 /// Run the same scenario and assertions through separate binary processes.
 #[cfg(feature = "tier2")]
 pub fn run_binary(loaded: &Loaded) -> Result<(), String> {
-    run_tier(loaded, 2)
+    run_tier(loaded, 2, Publication::Fake)
 }
 
-fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
+fn run_tier(loaded: &Loaded, tier: u8, publication: Publication) -> Result<(), String> {
     let start = chrono::DateTime::parse_from_rfc3339(START)
         .expect("start time")
         .to_utc();
@@ -207,7 +221,10 @@ fn run_tier(loaded: &Loaded, tier: u8) -> Result<(), String> {
         world,
         clock: Arc::new(FakeClock::new(start)),
         ids: SequentialIds::new(),
-        drivers: nyl_units::registry::with_test_kinds(&script, nyl::resource_catalogue()),
+        drivers: match publication {
+            Publication::Fake => nyl_units::registry::with_test_kinds(&script, nyl::resource_catalogue()),
+            Publication::Real => nyl_units::registry::with_real_publication(&script, nyl::resource_catalogue()),
+        },
         script,
         tools: ProcessRunner::new(),
         faults: FaultSlot::default(),
@@ -1097,8 +1114,8 @@ fn names(list: Option<&Value>) -> BTreeSet<String> {
 }
 
 /// A fresh CI checkout, isolated process environment, and the same injected
-/// time as tier 1. Image and infrastructure drivers are real; publication
-/// remains fake until M5.
+/// time as tier 1. Image, infrastructure, and publication drivers are the
+/// built-in ones, as in a release build.
 fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
     let checkout = shared.world.fresh_clone(branch);
     super::world::git(&checkout, &["config", "user.name", "Scenario"]);

@@ -721,3 +721,47 @@ fn test_summary_lists_and_lease_break_are_read_from_the_summary() {
         Ok(())
     );
 }
+
+/// Scenarios that need `FakePublication` in tier 1, with why: the real
+/// driver cannot be scripted, and cannot observe Argo CD yet.
+const FAKE_PUBLICATION: [(&str, &str); 1] = [(
+    "walkthroughs/observed-value",
+    "scripts the observer of a publication in mode observe",
+)];
+
+/// Tier 1 keeps the test kinds, which scenarios script, but a scenario that
+/// scripts no publication also holds the real `KubernetesPublication`
+/// driver to its contract: every walkthrough and reference scenario passes
+/// the same checks with images and infrastructure faked and publication real.
+#[test]
+fn test_reached_scenarios_pass_in_tier_one_with_the_real_publication_driver() {
+    let (loaded, problems) = scenario::load_all();
+    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
+    let fake = FAKE_PUBLICATION.into_iter().collect::<BTreeMap<_, _>>();
+    let runnable = loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.milestone <= REACHED)
+        .filter(|loaded| loaded.scenario.tiers.contains(&1))
+        .filter(|loaded| !fake.contains_key(loaded.name.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        runnable.iter().any(|loaded| loaded.name == "reference/platform"),
+        "the reference platform runs against the real driver"
+    );
+    let failures = std::thread::scope(|scope| {
+        let handles = runnable
+            .iter()
+            .map(|loaded| scope.spawn(|| scenario::runner::run_real_publication(loaded)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()))
+                    .err()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert!(failures.is_empty(), "failed scenarios:\n{}", failures.join("\n\n"));
+}

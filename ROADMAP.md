@@ -375,9 +375,12 @@ Cluster.
   payloads stay outside Git.
 - The Kubernetes publication unit wraps `render-tree` and `publish-tree` for one
   DeploymentTarget, because one target owns one publication tree and ownership
-  index. Its desired unit contains the resolved Release input snapshot, keyed by
-  `<applicationGroup>/<release>`; its recorded result is the published commit
-  and index digest.
+  index. Its desired unit contains the Release inputs only orchestration can
+  resolve (`fromUnit`, and later `fromPromotion`) as the pinned input snapshot,
+  keyed by `<applicationGroup>/<release>`, and the target's effective teardown
+  settings, which the driver records when it resolves the unit; the other
+  bindings resolve inside the render and enter its execution key. Its recorded
+  result is the published commit and index digest.
   Publication is a receipt; Argo CD acceptance and observed health are the
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
