@@ -2736,9 +2736,11 @@ pub fn check_direct_collisions(facts: &[DirectFacts]) -> Result<()> {
     let mut identities: BTreeMap<(String, String, String), (String, String)> = BTreeMap::new();
     let mut objects: BTreeMap<DirectObject, (String, String)> = BTreeMap::new();
     for fact in facts {
+        // `https://Cluster.example/` and `https://cluster.example` are one cluster.
+        let destination = crate::kubernetes::normalize_cluster_url(&fact.destination);
         for release in &fact.releases {
             let (namespace, name) = release.identity();
-            let key = (fact.destination.clone(), namespace.to_owned(), name.to_owned());
+            let key = (destination.clone(), namespace.to_owned(), name.to_owned());
             if let Some(previous) = identities.insert(key, (fact.target.clone(), release.key.clone())) {
                 let message = if previous.0 == fact.target {
                     format!(
@@ -2756,7 +2758,7 @@ pub fn check_direct_collisions(facts: &[DirectFacts]) -> Result<()> {
         }
         for (release, group, kind, namespace, name) in &fact.objects {
             let key = (
-                fact.destination.clone(),
+                destination.clone(),
                 group.clone(),
                 kind.clone(),
                 namespace.clone(),
@@ -4124,6 +4126,9 @@ mod tests {
         assert!(error.contains("NYL-KUBERNETES-DIRECT-RELEASE-COLLISION"), "{error}");
         let other_cluster = facts("b", "https://other:6443", vec![release("web", "api", "api")]);
         assert!(check_direct_collisions(&[one.clone(), other_cluster]).is_ok());
+        // Two spellings of one server are one cluster.
+        let respelled = facts("b", "HTTPS://Kind:6443/", vec![release("web", "api", "api")]);
+        assert!(check_direct_collisions(&[one.clone(), respelled]).is_err());
         let twice = facts(
             "a",
             "https://kind:6443",
