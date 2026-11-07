@@ -134,8 +134,8 @@ mv "${tmp_file}" Cargo.toml
 
 # Refresh the Cargo.lock entries of every workspace member from the bumped
 # manifest, then confirm the lockfile is consistent with it.
-cargo update --workspace --offline
-cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null
+cargo update --workspace
+cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
 git add Cargo.toml Cargo.lock
 

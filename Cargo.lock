@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "nyl"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -1957,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-core"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "hex",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-git"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "git2",
  "schemars",
@@ -1988,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-orchestration"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "nyl-core",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-render"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-state"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "git2",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "nyl-units"
-version = "0.5.9"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
