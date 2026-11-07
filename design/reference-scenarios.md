@@ -186,7 +186,7 @@ the first commit, the harness replaces `%SCENARIO_TMP%` in project and patch
 files with a per-scenario temporary directory, `%PROJECT_URL%` with the URL
 of `project.git`, and `%REGISTRY%` with the registry's host and port. Besides
 `PATH` and the Docker selectors, the harness admits `KUBECONFIG`, naming a file
-that does not exist: a unit in observe mode admits it for `nyl attest`, and an
+that does not exist: a unit that declares `observe: {}` admits it for `nyl attest`, and an
 admitted variable must be set wherever the unit runs, while no scenario reads
 Argo CD. The
 harness knows every step kind and field this format documents, including those

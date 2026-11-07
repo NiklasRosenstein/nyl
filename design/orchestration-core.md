@@ -943,6 +943,31 @@ in two phases, both through Git:
    Unowned files in the prefix, such as state files committed by other tools,
    are preserved, as in every reconciliation.
 
+Implementation notes (reading a reconciler): the driver observes through one
+seam that no reconciler's types cross. A
+`nyl_units::kubernetes_publication::reconciler::ReconcilerReader` is given the
+deployments and anchors a target expects (`nyl_render::gitops::observation`:
+`ExpectedDeployment`, `Anchor`, recorded under `/reconciler`) and returns a
+neutral `Reading`: per deployment its running revision (`Exact(commit)`,
+`Mixed(reason)`, or none), health (`Healthy`, `Progressing`, `Degraded`, or
+`Unknown`), and live source; per anchor whether it is visible; and, for each
+expected deployment the reading lacks, whether the credential could have seen
+it. One `reconciler::evaluate` owns the rules over those types: `accepted`
+and `healthy` (`evaluate`), and the answer of a teardown wait (`removal`),
+both refusing to conclude from what is not provably visible. Argo CD's two
+readers (the Kubernetes API of the control-plane Cluster, with the anchors as
+its proof of absence, and the Argo CD API server, with `can-i` per
+Application) map into the reading in `kubernetes_publication::argocd`, and the
+Argo CD renderer in `nyl_render::gitops::observation` derives the expected
+deployments from the generated Applications. A second reconciler kind adds a
+variant of `ReconcilerLocation` with its renderer next to Argo CD's, and a
+reader implementing `ReconcilerReader` plus the one match arm of
+`reconciler::reader` that builds it; `evaluate`, the driver's observation, the
+orchestration engine, state, and the CLI do not change. The facts recorded at
+resolution follow the same split: the neutral part (`kind`, `publication`,
+`expected`, `anchors`) and the kind's location (for Argo CD `instance`,
+`namespace`, `cluster`, `context`, and `access`).
+
 As implemented: the `KubernetesPublication` driver
 (`nyl_units::kubernetes_publication`) carries out both phases through Git on
 the real publication path (the tree changes are in
