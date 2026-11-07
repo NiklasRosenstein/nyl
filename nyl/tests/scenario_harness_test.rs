@@ -25,7 +25,7 @@ fn test_reached_scenarios_pass_in_tier_one() {
         .iter()
         .filter(|loaded| loaded.scenario.milestone <= REACHED)
         .filter(|loaded| loaded.scenario.tiers.contains(&1))
-        .filter(|loaded| loaded.scenario.publication == PublicationDrivers::Both)
+        .filter(|loaded| loaded.scenario.publication != PublicationDrivers::Real)
         .filter(|loaded| !pending.contains_key(loaded.name.as_str()))
         .collect::<Vec<_>>();
     assert!(!runnable.is_empty(), "no scenario runs in tier 1");
@@ -752,6 +752,7 @@ fn test_reached_scenarios_pass_in_tier_one_with_the_real_publication_driver() {
         .iter()
         .filter(|loaded| loaded.scenario.milestone <= REACHED)
         .filter(|loaded| loaded.scenario.tiers.contains(&1))
+        .filter(|loaded| loaded.scenario.publication != PublicationDrivers::Fake)
         .collect::<Vec<_>>();
     assert!(
         runnable.iter().any(|loaded| loaded.name == "reference/platform"),
@@ -827,6 +828,12 @@ fn test_publication_drivers_default_to_both_and_real_narrows_them() {
         .map(|loaded| loaded.name.as_str())
         .collect::<Vec<_>>();
     assert_eq!(real_only, ["reference/preview-not-ready"]);
-    let bad = "contract: design/reference-scenarios.md#tiers\nmilestone: M3\npublication: fake\nsteps: []\n";
+    let fake_only = loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.publication == PublicationDrivers::Fake)
+        .map(|loaded| loaded.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(fake_only, ["walkthroughs/health-wait"]);
+    let bad = "contract: design/reference-scenarios.md#tiers\nmilestone: M3\npublication: neither\nsteps: []\n";
     assert!(serde_saphyr::from_str::<scenario::format::Scenario>(bad).is_err());
 }

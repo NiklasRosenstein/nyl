@@ -38,8 +38,9 @@ use nyl_render::gitops::observation::{GitPublicationHistory, ReconcilerFacts};
 use nyl_render::gitops::publication::RenderedTarget;
 use serde_json::Value;
 
+use super::direct::ClusterAccess;
 use super::reconciler::evaluate::{ensure_provable, evaluate, removal, Conclusion, EvaluateError};
-use super::reconciler::{reader, ReadRequest};
+use super::reconciler::{reader_with, ReadRequest};
 
 /// The pointer, in the resolved spec, of the recorded reconciler facts.
 pub(super) const RECONCILER: &str = "/reconciler";
@@ -92,7 +93,11 @@ pub(super) fn budget(
 }
 
 /// `nyl attest`: `accepted` and `healthy` of the receipt's publication.
-pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<AttestationCheck> {
+pub(super) fn attest(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    access: &ClusterAccess,
+) -> DriverResult<AttestationCheck> {
     let unknown = |reason: String| Ok(AttestationCheck::Unknown { reason });
     let facts = match facts_of(unit) {
         Ok(facts) => facts,
@@ -108,11 +113,12 @@ pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverRe
             "the receipt records no PublishedTree artifact, so there is no publication to attest".to_owned(),
         );
     };
-    let reader = match reader(
+    let reader = match reader_with(
         &facts.location,
         &facts.expected.publication,
         &ctx.env,
         budget(ctx.now, ctx.deadline),
+        access,
     ) {
         Ok(reader) => reader,
         Err(error) => return unknown(error.message),
@@ -157,16 +163,17 @@ pub(super) fn attest(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverRe
 
 /// The workload deployments the reconciler still has, for the `observe`
 /// teardown wait.
-pub(super) fn observe_removal(ctx: &RemovalContext, unit: &DesiredUnit) -> RemovalObservation {
+pub(super) fn observe_removal(ctx: &RemovalContext, unit: &DesiredUnit, access: &ClusterAccess) -> RemovalObservation {
     let facts = match facts_of(unit) {
         Ok(facts) => facts,
         Err(reason) => return RemovalObservation::Failed(reason),
     };
-    let reader = match reader(
+    let reader = match reader_with(
         &facts.location,
         &facts.expected.publication,
         &ctx.env,
         budget(ctx.now, ctx.deadline),
+        access,
     ) {
         Ok(reader) => reader,
         Err(error) => return RemovalObservation::Failed(error.message),

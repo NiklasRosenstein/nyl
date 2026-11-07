@@ -180,7 +180,18 @@ impl Driver for KubernetesPublicationDriver {
                 },
                 "observe": {
                     "type": "object",
-                    "description": "Opts the unit into observing the reconciler of its target (Argo CD): `nyl attest` reads it and attests `accepted` and `healthy`, the `observe` teardownWait strategy becomes available and its default. Written `observe: {}`; it takes no options yet. Which reconciler it reads follows the target.",
+                    "description": "Opts the unit into observing the reconciler of its target (Argo CD, or Nyl's direct reconciler): `nyl attest` reads it and attests `accepted` and `healthy`, the `observe` teardownWait strategy becomes available and its default. Written `observe: {}`. Which reconciler it reads follows the target. `waitHealthy` makes a reconcile wait for health.",
+                    "properties": {
+                        "waitHealthy": {
+                            "type": "object",
+                            "description": "After the publish (and, for a direct target, the apply), reconcile polls the reconciler with backoff until `healthy` passes, then records the `accepted` and `healthy` attestations `nyl attest` would. On the timeout the unit fails, retryable, with NYL-KUBERNETES-HEALTH-TIMEOUT naming the worst deployment and its last health; a health that cannot recover, such as a rollout past its progress deadline, fails at once with NYL-KUBERNETES-HEALTH-DEGRADED. Without it, reconcile does not wait.",
+                            "required": ["timeout"],
+                            "properties": {
+                                "timeout": {"type": "string", "description": "How long to wait, such as 5m; never longer than the unit's own timeout."}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
                     "additionalProperties": false
                 },
                 "teardownWait": {
@@ -397,7 +408,7 @@ impl Driver for KubernetesPublicationDriver {
         unit: &DesiredUnit,
         _receipt: &Receipt,
     ) -> DriverResult<Supported<AttestationCheck>> {
-        observe::attest(ctx, unit).map(Supported::Supported)
+        observe::attest(ctx, unit, &self.cluster).map(Supported::Supported)
     }
 
     fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
@@ -412,7 +423,7 @@ impl Driver for KubernetesPublicationDriver {
     /// The workload deployments the reconciler still reports, for the
     /// `observe` teardown wait.
     fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
-        Ok(Supported::Supported(observe::observe_removal(ctx, unit)))
+        Ok(Supported::Supported(observe::observe_removal(ctx, unit, &self.cluster)))
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {

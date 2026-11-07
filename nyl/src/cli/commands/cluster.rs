@@ -798,4 +798,31 @@ mod tests {
         assert!(output.contains("      kubernetes:\n        keep: true"));
         assert!(output.contains("  kubernetes:\n    kubeVersion: 1.31.2"));
     }
+
+    fn cluster(spec: serde_json::Value) -> Cluster {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "k8s.nyl/v1", "kind": "Cluster", "metadata": {"name": "dev"}, "spec": spec
+        }))
+        .unwrap()
+    }
+
+    /// Catches a command applying to whichever cluster the current kube context
+    /// names when the Cluster's destination cannot be checked against it: an
+    /// in-cluster or by-name destination without a declared or explicit context
+    /// is refused, with the fix.
+    #[tokio::test]
+    async fn test_a_destination_that_cannot_be_verified_needs_a_context() {
+        for destination in [
+            serde_json::json!({"server": "https://kubernetes.default.svc"}),
+            serde_json::json!({"name": "in-cluster"}),
+        ] {
+            let error = load_cluster_kube_config(&cluster(serde_json::json!({"destination": destination})), None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("pass --context or set spec.live.context"),
+                "{error}"
+            );
+        }
+    }
 }

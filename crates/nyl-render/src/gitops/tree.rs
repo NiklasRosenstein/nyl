@@ -868,7 +868,8 @@ async fn compile_target_tree_recording(
         });
         match project.manifest {
             ProjectManifest::Fixed(manifest) => {
-                if emitted_projects.insert(project.catalog_id.clone()) {
+                // A direct target generates no AppProject, whatever its group names.
+                if !direct && emitted_projects.insert(project.catalog_id.clone()) {
                     catalog_manifests.push(manifest);
                 }
             }
@@ -4086,6 +4087,74 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::observation::{DirectRelease, PublishedDirectRelease};
+
+    fn release(group: &str, name: &str, namespace: &str) -> PublishedDirectRelease {
+        PublishedDirectRelease {
+            key: format!("{group}/{name}"),
+            group: group.to_owned(),
+            release: DirectRelease {
+                name: name.to_owned(),
+                namespace: namespace.to_owned(),
+                destination_namespace: namespace.to_owned(),
+            },
+            directory: format!("{group}/{name}"),
+        }
+    }
+
+    fn facts(target: &str, destination: &str, releases: Vec<PublishedDirectRelease>) -> DirectFacts {
+        DirectFacts {
+            target: target.to_owned(),
+            destination: destination.to_owned(),
+            releases,
+            objects: Vec::new(),
+        }
+    }
+
+    /// Catches two Releases sharing one release state: within a target, and
+    /// across two targets that reach one cluster, however their Cluster
+    /// resources are named; targets on other clusters never collide.
+    #[test]
+    fn test_direct_releases_collide_by_state_identity_on_one_destination() {
+        let one = facts("a", "https://kind:6443", vec![release("web", "api", "api")]);
+        let same_cluster = facts("b", "https://kind:6443", vec![release("web", "api", "api")]);
+        let error = check_direct_collisions(&[one.clone(), same_cluster])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-KUBERNETES-DIRECT-RELEASE-COLLISION"), "{error}");
+        let other_cluster = facts("b", "https://other:6443", vec![release("web", "api", "api")]);
+        assert!(check_direct_collisions(&[one.clone(), other_cluster]).is_ok());
+        let twice = facts(
+            "a",
+            "https://kind:6443",
+            vec![release("web", "api", "api"), release("jobs", "api", "api")],
+        );
+        assert!(check_direct_collisions(&[twice]).is_err());
+        let other_namespace = facts("b", "https://kind:6443", vec![release("web", "api", "b-api")]);
+        assert!(check_direct_collisions(&[one, other_namespace]).is_ok());
+    }
+
+    /// Catches one object being rendered by Releases of two direct targets
+    /// on one cluster, where the last writer would win silently.
+    #[test]
+    fn test_one_object_has_one_owner_across_direct_targets_on_a_cluster() {
+        let object = |release: &str| {
+            (
+                release.to_owned(),
+                String::new(),
+                "ConfigMap".to_owned(),
+                Some("shared".to_owned()),
+                "settings".to_owned(),
+            )
+        };
+        let mut a = facts("a", "https://kind:6443", vec![release("web", "a", "a")]);
+        a.objects.push(object("web/a"));
+        let mut b = facts("b", "https://kind:6443", vec![release("web", "b", "b")]);
+        b.objects.push(object("web/b"));
+        let error = check_direct_collisions(&[a, b]).unwrap_err().to_string();
+        assert!(error.contains("ConfigMap shared/settings"), "{error}");
+    }
+
     use super::*;
 
     #[test]

@@ -687,6 +687,11 @@ path:
   prefix: another existing owner, or a manual `nyl apply`, is refused. A
   target's reconciler is part of the publication's identity, so switching one
   is refused, never an edit.
+- `observe: {waitHealthy: {timeout}}` makes a reconcile wait for health, for the
+  direct reconciler and both Argo CD access methods alike: it polls the
+  target's reader with backoff on the injected clock and records the same
+  `accepted` and `healthy` attestations as `nyl attest`, or fails retryably on
+  the timeout. Without it, reconcile does not wait.
 - `observe: {}` reads Nyl's own release state and the rollout status of the
   workloads through a second `ReconcilerReader`; the shared evaluation, the
   attestations, and the teardown wait do not change, and teardown deletes in

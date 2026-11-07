@@ -2124,4 +2124,63 @@ mod tests {
 
         assert_eq!(failed.len(), 1);
     }
+
+    fn live(client: &crate::kubernetes::MockKubeClient, name: &str, options: Option<&str>) -> ResourceKey {
+        let mut object =
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name, "namespace": "app"}});
+        if let Some(options) = options {
+            object["metadata"]["annotations"] = json!({"argocd.argoproj.io/sync-options": options});
+        }
+        let key = ResourceKey::from_json_value(&object).unwrap();
+        client.add_resource(key.clone(), serde_json::from_value(object).unwrap());
+        key
+    }
+
+    /// Catches a purge that ignores a resource's `Delete` option, deletes what
+    /// the caller excluded, or counts what it kept as remaining: `Delete=false`
+    /// and unconfirmed `Delete=confirm` stay, an excluded object stays, and what
+    /// a purge would still delete is what `remaining_after_purge` lists.
+    #[tokio::test]
+    async fn test_purge_honors_the_delete_option_and_the_exclusions() {
+        let client = crate::kubernetes::MockKubeClient::new();
+        let keys = vec![
+            live(&client, "plain", None),
+            live(&client, "kept", Some("Delete=false")),
+            live(&client, "awaiting", Some("Delete=confirm")),
+            live(&client, "excluded", None),
+        ];
+        let excluded = |key: &ResourceKey| key.name == "excluded";
+        let before = remaining_after_purge(&client, &keys, &excluded).await.unwrap();
+        assert_eq!(
+            before.iter().map(|key| key.name.as_str()).collect::<Vec<_>>(),
+            ["plain"]
+        );
+
+        let purged = purge_resources(&client, &keys, &excluded, 4, false, &mut |_| {}).await;
+        assert_eq!(
+            purged.deleted.iter().map(|key| key.name.as_str()).collect::<Vec<_>>(),
+            ["plain"]
+        );
+        let mut kept = purged.kept.iter().map(|key| key.name.as_str()).collect::<Vec<_>>();
+        kept.sort_unstable();
+        assert_eq!(kept, ["awaiting", "kept"]);
+        assert!(purged.failed.is_empty());
+        assert!(remaining_after_purge(&client, &keys, &excluded)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(client
+            .get_resource(&keys[3].gvk, Some("app"), "excluded")
+            .await
+            .unwrap()
+            .is_some());
+
+        let confirmed = purge_resources(&client, &keys, &excluded, 4, true, &mut |_| {}).await;
+        assert!(confirmed.deleted.iter().any(|key| key.name == "awaiting"));
+        assert!(client
+            .get_resource(&keys[2].gvk, Some("app"), "awaiting")
+            .await
+            .unwrap()
+            .is_none());
+    }
 }

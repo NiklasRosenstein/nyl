@@ -33,9 +33,10 @@ use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_render::gitops::observation::{GitPublicationHistory, ReconcilerFacts};
 use serde_json::Value;
 
+use super::direct::ClusterAccess;
 use super::observe::{budget, facts_of};
 use super::reconciler::evaluate::{ensure_provable, evaluate, Conclusion, EvaluateError, Evaluation, State};
-use super::reconciler::{reader, Health, ReadError, ReadErrorKind, ReadRequest};
+use super::reconciler::{reader_with, Health, ReadError, ReadErrorKind, ReadRequest};
 
 /// The code of a wait that ran out of time.
 pub const HEALTH_TIMEOUT: &str = "NYL-KUBERNETES-HEALTH-TIMEOUT";
@@ -167,12 +168,18 @@ fn worst(evaluation: &Evaluation) -> (String, bool) {
 
 /// One reading of the unit's reconciler, judged against `commit`, the
 /// publication this execution published, exactly as `nyl attest` judges it.
-pub(super) fn poll_reconciler(ctx: &ExecutionContext<'_>, facts: &ReconcilerFacts, commit: &str) -> Poll {
-    let reader = match reader(
+pub(super) fn poll_reconciler(
+    ctx: &ExecutionContext<'_>,
+    facts: &ReconcilerFacts,
+    commit: &str,
+    access: &ClusterAccess,
+) -> Poll {
+    let reader = match reader_with(
         &facts.location,
         &facts.expected.publication,
         &ctx.env,
         budget(ctx.clock.now(), ctx.deadline),
+        access,
     ) {
         Ok(reader) => reader,
         Err(error) => return Poll::Unread(error),
@@ -232,6 +239,7 @@ pub(super) fn wait_for_target(
     unit: &DesiredUnit,
     commit: &str,
     timeout: Duration,
+    access: &ClusterAccess,
 ) -> Waited {
     let facts = match facts_of(unit) {
         Ok(facts) => facts,
@@ -244,7 +252,7 @@ pub(super) fn wait_for_target(
         }
     };
     wait_until_healthy(ctx.clock, ctx.clock.now(), ctx.deadline, timeout, || {
-        poll_reconciler(ctx, &facts, commit)
+        poll_reconciler(ctx, &facts, commit, access)
     })
 }
 

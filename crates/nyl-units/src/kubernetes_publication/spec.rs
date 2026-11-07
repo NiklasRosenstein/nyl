@@ -321,6 +321,19 @@ mod tests {
         assert!(invalid(&json!({"target": "dev", "teardownSettings": {}})).contains("must not be written by hand"));
     }
 
+    /// Catches a wait for health accepted with no timeout, a zero or malformed
+    /// one, or an option the unit does not have.
+    #[test]
+    fn test_validate_checks_the_wait_for_health() {
+        let spec = |wait: Value| json!({"target": "dev", "observe": {"waitHealthy": wait}});
+        assert!(validate(&spec(json!({"timeout": "5m"}))).is_ok());
+        assert!(invalid(&spec(json!({}))).contains("timeout is required"));
+        assert!(invalid(&spec(json!({"timeout": "0s"}))).contains("longer than zero"));
+        assert!(invalid(&spec(json!({"timeout": "soon"}))).contains("waitHealthy.timeout"));
+        assert!(invalid(&spec(json!({"timeout": "5m", "interval": "1s"}))).contains("unknown field \"interval\""));
+        assert!(invalid(&json!({"target": "dev", "observe": {"wait": {}}})).contains("unknown field \"wait\""));
+    }
+
     #[test]
     fn test_validate_requires_a_named_or_inline_target() {
         assert!(invalid(&json!({"observe": {}})).contains("spec.target is required"));

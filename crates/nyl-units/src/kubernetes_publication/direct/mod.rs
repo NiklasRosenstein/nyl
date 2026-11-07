@@ -100,17 +100,18 @@ impl ClusterAccess {
 
 /// The reader the recorded location asks for, built from the unit's admitted
 /// environment, finishing each reading within `budget`.
-pub fn reader(
+pub fn reader_with(
     location: &DirectLocation,
     publication: &ObservedPublication,
     env: &BTreeMap<String, String>,
     budget: Duration,
+    access: ClusterAccess,
 ) -> Result<Box<dyn ReconcilerReader>, ReadError> {
     Ok(Box::new(DirectReader::new(
         location.clone(),
         publication.clone(),
         env.get(KUBECONFIG_ENV).cloned(),
         budget,
-        ClusterAccess::Live,
+        access,
     )))
 }

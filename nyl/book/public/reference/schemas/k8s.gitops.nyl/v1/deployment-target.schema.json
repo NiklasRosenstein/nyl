@@ -119,7 +119,7 @@
               "type": "null"
             }
           ],
-          "description": "Project-local ArgoCDInstance. Required when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace."
+          "description": "Project-local ArgoCDInstance. Required for an Argo CD target when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace. Not allowed with `reconciler.direct`."
         },
         "catalogApplication": {
           "$ref": "#/$defs/CatalogApplicationOverrides",
@@ -142,6 +142,17 @@
         "publication": {
           "$ref": "#/$defs/GitPublication",
           "description": "Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes."
+        },
+        "reconciler": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who applies the rendered Releases. Omitted: Argo CD, which syncs the published tree. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog."
         },
         "releaseInputs": {
           "additionalProperties": {
@@ -169,6 +180,11 @@
       "required": [
         "publication"
       ],
+      "type": "object"
+    },
+    "DirectReconciler": {
+      "additionalProperties": false,
+      "description": "Options of the direct reconciler. None yet.",
       "type": "object"
     },
     "Evidence": {
@@ -1215,6 +1231,24 @@
       "required": [
         "name"
       ],
+      "type": "object"
+    },
+    "TargetReconciler": {
+      "additionalProperties": false,
+      "description": "The reconciler that applies a target's Releases: exactly one member.\n\nContract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).",
+      "properties": {
+        "direct": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DirectReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nyl applies the target's Releases to its Cluster, in the order of `nyl apply`, and prunes by release state. Takes no options yet; write `direct: {}`."
+        }
+      },
       "type": "object"
     },
     "UnitInputSource": {

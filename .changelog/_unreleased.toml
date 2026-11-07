@@ -327,3 +327,39 @@ id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
 type = "feature"
 description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ace1e9b6-2f4f-4722-8b3c-cb82c9247c39"
+type = "feature"
+description = "Add a direct reconciler: a DeploymentTarget with `reconciler: {direct: {}}` is applied by Nyl itself through `KubernetesPublication` (publish the tree, then apply each Release with the mechanics of `nyl apply`), generating no Argo CD Application, AppProject, or catalog. Release state records its owning unit and publication, Releases are fenced by owner, `observe: {}` reads the release state and rollout status, and teardown deletes in two phases"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "12d1e950-dfe6-4ee2-89a0-3d1f9e07b489"
+type = "feature"
+description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "45acea14-0e8e-482d-930f-d95e57734ee0"
+type = "feature"
+description = "Add `--take-over` to `nyl apply`, `nyl release rollback`, and `nyl release delete`; without it they refuse a release an orchestrated unit owns (`NYL-RELEASE-OWNED-BY-UNIT`)"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d26c5793-ee2d-4c9c-826e-bdd8dc2aa653"
+type = "breaking change"
+description = "`nyl apply --target` uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "96c08d12-ae5e-4be4-97b9-1b04dfcbfd57"
+type = "fix"
+description = "`nyl release delete` deletes a release's resources in reverse apply order, waiting for each kind to terminate, as a prune does, instead of in one plain loop"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ef4cda57-f220-4b05-8902-7e16d46a3acd"
+type = "fix"
+description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `KubernetesPublication` published for, and the unit's published tree records its reconciler and Cluster"
+author = "@NiklasRosenstein"
