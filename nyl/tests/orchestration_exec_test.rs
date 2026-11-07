@@ -58,6 +58,7 @@ impl Driver for OperatorDriver {
             outputs: serde_json::json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
     fn detect_drift(
@@ -105,7 +106,6 @@ fn exec(harness: &Harness, checkout: &std::path::Path, worktree: bool) -> Comman
         process_env: harness.process_env.clone(),
         cancellation: Cancellation::default(),
         prompt: None,
-        observer: None,
         progress: None,
     };
     let mut args = vec![

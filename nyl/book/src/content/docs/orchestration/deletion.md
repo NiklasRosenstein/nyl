@@ -231,10 +231,28 @@ A `KubernetesPublication` unit tears down in two phases: it publishes the remova
 removes the rest. While it waits, the units it depends on wait with it,
 reported with `NYL-TEARDOWN-WAITING`, and units with no path to it proceed.
 Before a publication's teardown starts, Nyl checks that its target's settings
-let the teardown complete; an unmet requirement keeps the unit
-`pending-teardown` unless the invocation passes `--allow-incomplete`, and a
-teardown completed without a claim of removal is recorded under `incomplete`
-with `NYL-TEARDOWN-INCOMPLETE`.
+let the teardown complete, as the unit judges them
+([Teardown readiness](/nyl/orchestration/resource-guides/kubernetes-publication/#teardown-readiness));
+an unmet requirement keeps the unit `pending-teardown` unless the invocation
+passes `--allow-incomplete`, and a teardown completed without a claim of
+removal is recorded under `incomplete` with `NYL-TEARDOWN-INCOMPLETE`. `plan`
+and `reconcile` warn about the same requirements for every publication that
+would be torn down.
+
+| `teardownWait` | Phase 1 completes when |
+| --- | --- |
+| `manual` (the default) | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and the run exits 2. |
+| `delay` (`duration: 10m`) | The duration has passed since the phase 1 commit; the teardown is recorded as not observed. |
+| `observe` (the default for a unit that declares `observe: {}`) | The unit reads Argo CD and no workload Application of the target remains (the catalog Application does not count), within the unit's `timeout`. Applications that remain make the teardown uncertain with `applications-remain` and their names; a reading that fails, such as for a credential the unit does not admit, an expired token, or an unreachable Argo CD, makes it uncertain with `observation-failed` and the reason. A credential that cannot see the target's Applications (the catalog Application, or for a target without one its AppProjects, is missing from the reading, or the token may not `get` an Application the list lacks) is `observation-failed` too: the wait never concludes removal from what it could not see. Fix the cause and run the teardown again, or confirm the removal by hand. |
+
+The `observe` strategy reads Argo CD the way `nyl attest` does, from the
+[ArgoCDInstance's declared access](/nyl/kubernetes-gitops/resource-guides/argocd-instance/#reading-argo-cd)
+with the credential the unit admits, from the stored document, so it works for a
+unit torn down after it left the source.
+
+A publication refuses to publish or remove a prefix that another existing unit
+incarnation owns, with `NYL-KUBERNETES-OWNER-FENCED`
+([Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership)).
 
 ## Codes
 
@@ -244,6 +262,12 @@ with `NYL-TEARDOWN-INCOMPLETE`.
 | `NYL-TEARDOWN-HAS-DEPENDENTS` | Retained tombstones cite the unit. Pass `--allow-dependents`, or forget the tombstones first. |
 | `NYL-TEARDOWN-WAITING` | A publication it depends on waits under its `teardownWait`. Run again once the wait is over, or confirm the removal with `nyl teardown --confirm-removed`. |
 | `NYL-TEARDOWN-INCOMPLETE` | The teardown cannot complete, or completed without a claim of removal. Meet the requirements, or pass `--allow-incomplete` and check what remains. |
+| `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM` | A publication's target does not let its teardown complete. Each names the setting that fixes it. `NYL-TEARDOWN-CATALOG-MANUAL-SYNC` also covers a catalog that syncs with pruning but cannot prune a removed workload Application, because its `syncPolicy.syncOptions` or the Application's own `argocd.argoproj.io/sync-options` annotation say `Prune=confirm` (Argo CD waits for a confirmation) or `Prune=false` (it skips the Application). `NYL-TEARDOWN-NAMESPACE-CONFIRM` covers any resource a workload Application would delete that requires confirmation, through its own sync options or the Application's `syncPolicy.syncOptions` (`Prune=confirm` or `Delete=confirm`), because Argo CD holds the Application's deletion for either: it names the resource or Application, and for an owned Namespace the fix is `prunePolicy` and `deletePolicy` set to `Automatic`, or `deletePolicy` to `Retain`. |
+| `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS` | A publication's teardown leaves these objects behind. Each names the setting that removes them. |
+| `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
+| `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read. Declare the environment again and tear its unit down, or release the prefix as [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership) describes. |
+| `NYL-TREE-OWNED-BY-UNIT` | `publish-tree` or `render-tree` met a prefix an orchestrated unit owns, such as after `nyl state forget`. Publish through the owning environment, or release the prefix as above. |
+| `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published; nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile to publish the new target. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting. Pass `--allow-teardown`, restore the old kind, or forget the old incarnation. |
 | `NYL-UNIT-HELD` | A held unit keeps changes or a teardown from applying. Lift the hold with `nyl resume`. |

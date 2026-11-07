@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nyl_core::orchestration::driver::{
-    Change, Driver, DriverOperation, DriverResult, ExecutionContext, Outcome, ResolutionContext, Supported, ToolExit,
-    ToolInvocation, ToolRunner, WaitCompletion,
+    Change, Driver, DriverOperation, DriverResult, ExecutionContext, IncarnationDirectory, IncarnationStatus, Outcome,
+    ResolutionContext, Supported, ToolExit, ToolInvocation, ToolRunner, WaitCompletion,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::CommitIdentity;
@@ -129,7 +129,6 @@ impl World {
 pub fn spec() -> Value {
     json!({
         "target": "dev",
-        "mode": "publish",
         "releases": {
             "web/web": {
                 "image": "registry.invalid:5000/web@sha256:0123",
@@ -163,15 +162,45 @@ pub fn desired(spec: Value, key: ExecutionKey) -> DesiredUnit {
     }
 }
 
+/// What a state directory answers about unit incarnations, by
+/// `<environment>/<unit>`: anything not listed is gone.
+pub struct Incarnations(pub BTreeMap<String, IncarnationStatus>);
+
+impl IncarnationDirectory for Incarnations {
+    fn status(&self, environment: &EnvironmentName, unit: &UnitName, _uid: &Uid) -> IncarnationStatus {
+        self.0
+            .get(&format!("{environment}/{unit}"))
+            .cloned()
+            .unwrap_or(IncarnationStatus::Gone)
+    }
+}
+
 pub fn context<'a>(
     world: &World,
     operation: DriverOperation,
     identity: Option<&'a CommitIdentity>,
 ) -> ExecutionContext<'a> {
+    context_with(
+        world,
+        operation,
+        identity,
+        &nyl_core::orchestration::driver::UnknownIncarnations,
+    )
+}
+
+/// [`context`] with a state directory that answers for other incarnations.
+pub fn context_with<'a>(
+    world: &World,
+    operation: DriverOperation,
+    identity: Option<&'a CommitIdentity>,
+    incarnations: &'a dyn IncarnationDirectory,
+) -> ExecutionContext<'a> {
     let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
     ExecutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
         source_roots: std::collections::BTreeMap::default(),
         secrets: std::collections::BTreeMap::default(),
         artifacts: std::collections::BTreeMap::default(),
@@ -190,6 +219,8 @@ pub fn context<'a>(
         commit_identity: identity,
         cache_dir: world.root.path().join("cache"),
         teardown_wait: None,
+        incarnations,
+        dirty_source: false,
     }
 }
 
@@ -197,6 +228,7 @@ pub fn key(driver: &dyn Driver, world: &World) -> ExecutionKey {
     let inputs = driver
         .execution_key_inputs(
             &ResolutionContext {
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
                 source_roots: std::collections::BTreeMap::default(),
                 environment: EnvironmentName::new("dev").unwrap(),
                 worktree: world.work(),
@@ -217,6 +249,28 @@ pub fn key(driver: &dyn Driver, world: &World) -> ExecutionKey {
     );
     assert!(inputs.files.contains_key("/applications/web/release.yaml"));
     ExecutionKey::from_digest_of(serde_json::to_string(&inputs.files).unwrap().as_bytes())
+}
+
+/// The message of the error resolution fails with for `spec`.
+pub fn resolve_error(driver: &dyn Driver, world: &World, spec: &Value) -> String {
+    driver
+        .execution_key_inputs(
+            &ResolutionContext {
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+                source_roots: std::collections::BTreeMap::default(),
+                environment: EnvironmentName::new("dev").unwrap(),
+                worktree: world.work(),
+                project_dir: world.work().join("nyl"),
+                env: BTreeMap::new(),
+                deadline: chrono::Utc::now(),
+                now: chrono::Utc::now(),
+                tools: &NoTools,
+                cache_dir: world.root.path().join("cache"),
+            },
+            spec,
+        )
+        .expect_err("resolution fails")
+        .to_string()
 }
 
 pub fn deleting(unit: DesiredUnit) -> DesiredUnit {

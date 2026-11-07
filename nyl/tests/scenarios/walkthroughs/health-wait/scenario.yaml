@@ -1,0 +1,30 @@
+# A publication that waits for health and runs out of time: the unit fails
+# retryably with the category `timeout`, holds no receipt (the tree is published
+# and applied, so the next run converges), and the next reconcile succeeds
+# (design/orchestration-core.md, Kubernetes publication unit, waiting for health).
+# The wait itself, its backoff, its terminal readings, and its stable codes are
+# tested where they live, in the publication driver; this scenario holds the
+# engine to what a failed wait means for the run.
+contract: design/orchestration-core.md#kubernetes-publication-unit
+milestone: M5
+tiers: [1]                            # scripts the fake kind
+publication: fake                     # the built-in driver, running for real, cannot be scripted to time out
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - driver: {unit: kubernetes, operation: reconcile, outcome: failed, category: timeout, retryable: true}
+  - nyl: [reconcile, -e, dev]
+    exit: 3                           # a failed unit outranks everything else
+    expect:
+      executed: [network, database, web-image]
+      failed: [kubernetes]
+      units:
+        kubernetes: {condition: {state: failed, category: timeout, retryable: true}, receipt: none}
+  - nyl: [reconcile, -e, dev]
+    exit: 0                           # converges: nothing the first run did needs undoing
+    expect:
+      executed: [kubernetes]
+      current: [network, database, web-image]
+      units:
+        kubernetes: {condition: null, receipt: current}

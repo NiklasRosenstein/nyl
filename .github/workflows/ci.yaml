@@ -86,10 +86,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Windows Defender scans every file the build writes and the tests'
-      # temporary Git repositories synchronously, which dominated the Windows
-      # job. A trusted Dev Drive (ReFS) scans asynchronously, so the target
-      # directory and the temporary directory move onto one.
+      # The target directory and the tests' temporary repositories live on a
+      # trusted ReFS Dev Drive. Defender's real-time scanning is already off on
+      # the hosted Windows image, so this is not what makes Windows slower; see
+      # the rust-lld and Git steps below for that.
       - name: Set up a Dev Drive
         if: runner.os == 'Windows'
         uses: samypr100/setup-dev-drive@v4
@@ -113,6 +113,15 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.98.1
+
+      # MSVC's link.exe spent about a minute and a half longer than rust-lld
+      # linking the ~50 test executables; Linux already links with lld. The
+      # linker is part of every crate's fingerprint, so this is set before the
+      # cache key is computed.
+      - name: Link with rust-lld
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld" >> $env:GITHUB_ENV'
 
       # The Cargo workspace is the repository root, so its target directory is
       # ./target (the default). Only develop saves caches; pull requests restore
@@ -138,19 +147,37 @@ jobs:
         run: echo "TMPDIR=/dev/shm" >> "$GITHUB_ENV"
 
       # Tests create throwaway Git repositories and push to them hundreds of
-      # times; syncing each pack and ref to disk dominated the Linux runners'
-      # test time, so the test step turns Git's disk sync off.
+      # times. Syncing each pack and ref to disk dominated the Linux runners'
+      # test time, and every push also started an automatic `gc` in the
+      # receiving repository. Global configuration reaches the receiving side
+      # of a local push; `GIT_CONFIG_*` variables are dropped there.
+      - name: Configure Git for throwaway repositories
+        run: |
+          git config --global core.fsync none
+          git config --global gc.auto 0
+          git config --global maintenance.auto false
+          git config --global receive.autogc false
+
+      # The tests start some 25,000 processes, most of them Git, and starting
+      # a process costs Windows about 25 ms. Git for Windows' `git` on PATH is
+      # a shim that starts the real `git.exe` as a second process; calling the
+      # real one directly makes the Git-heavy tests about 7% faster.
+      - name: Call Git without its Windows shim
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = Join-Path (Split-Path (Split-Path (git --exec-path))) 'bin'
+          if (-not (Test-Path (Join-Path $bin 'git.exe'))) { throw "no git.exe in $bin" }
+          $bin >> $env:GITHUB_PATH
+
       - name: Run tests
         working-directory: nyl
-        env:
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: core.fsync
-          GIT_CONFIG_VALUE_0: none
         run: cargo test --workspace --features nyl/test-clock,nyl/test-kinds
 
   native-tools:
     name: Native tools (M4)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -382,3 +409,93 @@ jobs:
           kubectl get events -A --sort-by='.lastTimestamp' | tail -50 || true
           kubectl get pods -A -o wide || true
           kubectl describe pods -A || true
+
+  # The cluster end-to-end suite (crates/nyl-e2e): one scenario on a kind cluster
+  # with a local registry, a Git server, and each reconciler. It tests the
+  # binary the pipeline builds for release (default features, so the real
+  # drivers), and runs for pushes to develop, pull requests from this repository,
+  # and workflow_dispatch: CI does not trigger on stacked pull requests, so a
+  # dispatch on the branch is how a stack is tested. (The Minikube job above is
+  # skipped on workflow_dispatch.)
+  e2e:
+    name: E2E (${{ matrix.variant }})
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+    needs: [build-linux-musl]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [argocd-kubernetes, argocd-api, direct]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Nyl x86_64 musl binary
+        uses: actions/download-artifact@v8
+        with:
+          name: nyl-x86_64-unknown-linux-musl
+          path: ./nyl-bin
+
+      - name: Check Nyl
+        run: |
+          chmod +x ./nyl-bin/nyl
+          ./nyl-bin/nyl --version
+
+      - name: Install kind and kubectl
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --output kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind" | sha256sum --check
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --output kubectl https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl
+          echo "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a  kubectl" | sha256sum --check
+          sudo install --mode 0755 kind /usr/local/bin/kind
+          sudo install --mode 0755 kubectl /usr/local/bin/kubectl
+          kind version
+          kubectl version --client
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.13.2
+          tofu_wrapper: false
+
+      - name: Check Docker Buildx
+        run: |
+          docker buildx use default
+          docker buildx version
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build the E2E suite
+        run: cargo build -p nyl-e2e
+
+      - name: Run the E2E scenario (${{ matrix.variant }})
+        run: >-
+          target/debug/nyl-e2e run
+          --variant ${{ matrix.variant }}
+          --nyl ./nyl-bin/nyl
+          --work-dir "${{ runner.temp }}/nyl-e2e"
+
+      - name: Upload the E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-logs-${{ matrix.variant }}
+          path: ${{ runner.temp }}/nyl-e2e/*/logs/
+          if-no-files-found: ignore
+          retention-days: 7

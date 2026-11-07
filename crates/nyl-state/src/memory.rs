@@ -23,8 +23,8 @@ use nyl_core::orchestration::ports::{
     RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
-    StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 
 /// The state of one environment directory on one ref.
@@ -36,6 +36,7 @@ struct Directory {
     observed: BTreeMap<UnitName, ObservedUnit>,
     artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
     drift: BTreeMap<UnitName, DriftRecord>,
+    observations: BTreeMap<UnitName, ObservationRecord>,
     attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
 }
 
@@ -181,6 +182,7 @@ fn apply_side(
         apply_map(&mut directory.observed, &changes.observed);
         apply_map(&mut directory.artifacts, &changes.artifacts);
         apply_map(&mut directory.drift, &changes.drift);
+        apply_map(&mut directory.observations, &changes.observations);
         apply_map(&mut directory.attestations, &changes.attestations);
     }
     if directory == before && !(changes.commit_unchanged && observed_side) {
@@ -312,6 +314,32 @@ impl StateStore for MemoryStateStore {
             desired_directory,
             observed_directory,
         ))
+    }
+
+    fn list_records(&self, location: &StateLocation) -> StateResult<Vec<StateRecord>> {
+        let mut inner = self.lock();
+        follow(&mut inner, location, &location.desired_ref);
+        follow(&mut inner, location, &location.observed_ref);
+        let prefix = if location.path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", location.path.trim_matches('/'))
+        };
+        let mut records = BTreeMap::new();
+        for reference in [&location.observed_ref, &location.desired_ref] {
+            let Some(state_ref) = inner.refs.get(&ref_key(location, reference)) else {
+                continue;
+            };
+            for (path, directory) in &state_ref.directories {
+                let listed = path
+                    .strip_prefix(&prefix)
+                    .is_some_and(|name| !name.is_empty() && !name.contains('/'));
+                if let (true, Some(record)) = (listed, &directory.record) {
+                    records.insert(path.clone(), record.clone());
+                }
+            }
+        }
+        Ok(records.into_values().collect())
     }
 
     fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
@@ -753,6 +781,9 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
             .map(|directory| directory.artifacts.clone())
             .unwrap_or_default(),
         drift: observed.map(|directory| directory.drift.clone()).unwrap_or_default(),
+        observations: observed
+            .map(|directory| directory.observations.clone())
+            .unwrap_or_default(),
         attestations: observed
             .map(|directory| directory.attestations.clone())
             .unwrap_or_default(),
@@ -853,6 +884,9 @@ mod tests {
                     template: None,
                     params: BTreeMap::new(),
                     expires_at: None,
+                    source_commit: None,
+                    source_ref: None,
+                    keep_id: None,
                     location: location.clone(),
                     events: Vec::new(),
                 }),

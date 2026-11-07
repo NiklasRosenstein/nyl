@@ -49,6 +49,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_units(PRODUCER, CONSUMER)
+    }
+
+    fn with_units(producer: &str, consumer: &str) -> Self {
         let environment = |name: &str| {
             format!("apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: {name}\n  labels: {{stage: test}}\nspec:\n  unitSelector:\n    matchLabels: {{scope: {name}}}\n  allowUnprotectedSource: true\n")
         };
@@ -56,8 +60,8 @@ impl Harness {
             NYL_TOML,
             ("nyl/infra.yaml", &environment("infra")),
             ("nyl/app.yaml", &environment("app")),
-            ("nyl/network.yaml", PRODUCER),
-            ("nyl/consumer.yaml", CONSUMER),
+            ("nyl/network.yaml", producer),
+            ("nyl/consumer.yaml", consumer),
             ("nyl/group.yaml", "apiVersion: gitops.nyl/v1\nkind: EnvironmentGroup\nmetadata: {name: testing}\nspec:\n  environmentSelector:\n    matchLabels: {stage: test}\n"),
         ]);
         let harness = Self {
@@ -85,7 +89,6 @@ impl Harness {
             process_env: self.shell.process_env.clone(),
             cancellation: Cancellation::default(),
             prompt: None,
-            observer: None,
             progress: None,
         };
         let argv = std::iter::once("nyl".to_owned())
@@ -237,4 +240,61 @@ fn test_busy_producer_blocks_old_receipts_but_independent_consumer_units_execute
     assert!(run.stderr.contains("NYL-LEASE-HELD"), "{}", run.stderr);
     assert_eq!(section(&run, "app")["units"]["app"]["result"], "blocked");
     assert_eq!(section(&run, "app")["units"]["independent"]["result"], "executed");
+}
+
+/// A consumer of another environment's unit that requires its attestation:
+/// the report and the table name the producer with its environment, the
+/// consumer runs after `attest` records a pass in the producer's
+/// environment, and requirements no one can meet (a name the producer does
+/// not declare, one only an external source supplies) fail the run with
+/// their own codes. Catches a cross-environment wait that shows only a
+/// pointer and a reason, and one that waits forever.
+#[test]
+fn test_a_consumer_waits_for_an_attestation_of_another_environments_unit() {
+    let producer = PRODUCER.replace(
+        "  outputs:\n    id: {type: string}\n",
+        "  outputs:\n    id: {type: string}\n  attest: [sh, -c, 'printf \"{\\\"healthy\\\": \\\"pass\\\"}\" > \"$NYL_ATTESTATIONS\"']\n  attestations: [{name: healthy}, {name: qa, from: external}]\n",
+    );
+    assert!(producer.contains("attestations:"), "{producer}");
+    let consumer = |requirement: &str| {
+        CONSUMER.replace(
+            "  values:\n",
+            &format!("  dependsOn: [{{environment: infra, unit: network, {requirement}}}]\n  values:\n"),
+        )
+    };
+    let harness = Harness::with_units(&producer, &consumer("attestations: [healthy]"));
+    let waiting = harness.invoke(&["reconcile", "-e", "infra", "-e", "app", "-o", "json"]);
+    assert_eq!(waiting.exit, 2, "{}", waiting.stderr);
+    assert_eq!(
+        section(&waiting, "app")["units"]["app"]["blockedBy"],
+        serde_json::json!([{
+            "pointer": "/dependsOn/0",
+            "environment": "infra",
+            "unit": "network",
+            "reason": "attestation-pending",
+            "attestation": "healthy",
+        }])
+    );
+    let shown = harness.invoke(&["status", "-e", "app"]);
+    assert!(
+        shown.stdout.contains("attestation healthy of infra/network"),
+        "{}",
+        shown.stdout
+    );
+    assert!(shown.stderr.contains("NYL-ATTESTATION-PENDING"), "{}", shown.stderr);
+    assert_eq!(harness.invoke(&["attest", "-e", "infra"]).exit, 0);
+    let run = harness.invoke(&["reconcile", "-e", "app", "-o", "json"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert_eq!(section(&run, "app")["units"]["app"]["result"], "executed");
+
+    for (requirement, code) in [
+        ("attestations: [helthy]", "NYL-ATTESTATION-UNDECLARED"),
+        ("attestations: [qa]", "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED"),
+        ("evidence: attested", "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED"),
+    ] {
+        let harness = Harness::with_units(&producer, &consumer(requirement));
+        let rejected = harness.invoke(&["reconcile", "-e", "infra", "-e", "app"]);
+        assert_eq!(rejected.exit, 1, "{requirement}: {}", rejected.stderr);
+        assert!(rejected.stderr.contains(code), "{requirement}: {}", rejected.stderr);
+    }
 }

@@ -112,11 +112,11 @@ mod tests {
             ),
             (
                 json!({"g/r": {"image": {"fromUnit": {"unit": "db"}}}}),
-                "exactly one of output and artifact",
+                "exactly one of output, artifact, and observation",
             ),
             (
                 json!({"g/r": {"image": {"fromUnit": {"unit": "db", "output": "a", "artifact": "b"}}}}),
-                "exactly one of output and artifact",
+                "exactly one of output, artifact, and observation",
             ),
         ];
         for (value, expected) in cases {

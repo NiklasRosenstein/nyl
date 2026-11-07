@@ -42,5 +42,4 @@ metadata:
   labels: {dev: 'true'}
 spec:
   target: '{{ values.target }}'
-  mode: publish
   timeout: 10m

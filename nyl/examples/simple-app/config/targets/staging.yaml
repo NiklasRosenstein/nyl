@@ -3,6 +3,7 @@ kind: DeploymentTarget
 metadata:
   name: staging
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: local
   values:

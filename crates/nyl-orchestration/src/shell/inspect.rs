@@ -44,7 +44,7 @@ pub fn status_with(
             .store
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
-        let readiness = drivers.map(|drivers| teardown_readiness(environment, &snapshot, drivers));
+        let readiness = drivers.map(|drivers| teardown_readiness(&snapshot, drivers));
         let mut report = crate::rules::unit_state::status_with_readiness(
             environment,
             &snapshot,
@@ -77,13 +77,12 @@ pub fn status_with(
     report
 }
 
-/// The teardown readiness of every unit whose driver reports teardown
-/// settings (publications), read from the stored desired document alone,
+/// The teardown readiness of every unit whose driver states teardown
+/// requirements (publications), read from the stored desired document alone,
 /// so status never renders. Held markers and retained tombstones have none.
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
 pub fn teardown_readiness(
-    environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     drivers: &DriverSet,
 ) -> BTreeMap<UnitName, TeardownReadiness> {
@@ -93,10 +92,9 @@ pub fn teardown_readiness(
         .filter(|(_, desired)| !desired.is_held_marker() && !matches!(desired.lifecycle, Lifecycle::Retained { .. }))
         .filter_map(|(name, desired)| {
             let driver = drivers.get(&desired.unit.api_version, &desired.unit.kind)?;
-            let Ok(Supported::Supported(settings)) = driver.teardown_settings(desired) else {
+            let Ok(Supported::Supported(readiness)) = driver.teardown_readiness(desired) else {
                 return None;
             };
-            let readiness = crate::rules::teardown_readiness::evaluate(environment, name, &settings);
             Some((
                 name.clone(),
                 if readiness.ready() {
@@ -170,7 +168,7 @@ pub enum GetValue {
     },
 }
 
-/// `nyl get output u/o` and `nyl get artifact u/n`: resolve `source` like a
+/// `nyl get output u/o`, `nyl get artifact u/n`, and `nyl get observation u/o`: resolve `source` like a
 /// `fromUnit` reference against `snapshot`. Unresolvable is
 /// [`Code::ReferenceUnresolved`](nyl_core::orchestration::codes::Code::ReferenceUnresolved),
 /// unless `allow_stale` finds an older value.
@@ -178,17 +176,23 @@ pub enum GetValue {
 /// The stale form resolves through the same resolver, against a view in
 /// which the producer's desired document names its latest receipt's uid and
 /// execution key, so the declaration, digest, and pointer checks still apply.
+/// `now` judges an observed value's `maxAge`.
 pub fn get_value(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     source: &UnitInputSource,
     allow_stale: bool,
+    now: nyl_core::orchestration::time::Timestamp,
 ) -> Result<GetValue, Finding> {
     let unresolved = |message: String| {
         Finding::new(
             Code::ReferenceUnresolved,
             format!("{}: {message}", describe(source)),
-            "run nyl reconcile so the unit has a current receipt, or pass --allow-stale for its latest value",
+            if source.observation.is_some() {
+                "run `nyl observe` so the value is recorded for the unit's current receipt (the unit needs one: run nyl reconcile first), or pass --allow-stale for its latest value"
+            } else {
+                "run nyl reconcile so the unit has a current receipt, or pass --allow-stale for its latest value"
+            },
         )
     };
     let produced = BTreeSet::new();
@@ -200,6 +204,9 @@ pub fn get_value(
                 desired,
                 observed: &snapshot.observed,
                 artifacts: &snapshot.artifacts,
+                attestations: &snapshot.attestations,
+                observations: &snapshot.observations,
+                now,
                 observed_commit: snapshot.tips.observed.as_ref(),
                 run: None,
                 produced_in_run: &produced,
@@ -211,7 +218,7 @@ pub fn get_value(
     let reason = match resolve(&snapshot.desired) {
         Ok(ReferenceValue::Value { value, .. }) => return Ok(GetValue::Value(value)),
         Ok(ReferenceValue::Blocked { reason, .. }) => reason,
-        Err(message) => return Err(unresolved(message)),
+        Err(error) => return Err(unresolved(error.message)),
     };
     if !allow_stale {
         return Err(unresolved(reason));
@@ -239,16 +246,17 @@ pub fn get_value(
             ),
         }),
         Ok(ReferenceValue::Blocked { reason, .. }) => Err(unresolved(reason)),
-        Err(message) => Err(unresolved(message)),
+        Err(error) => Err(unresolved(error.message)),
     }
 }
 
-/// `unit/output` or `unit/artifact`, as the command names it.
+/// `unit/output`, `unit/artifact`, or `unit/observation`, as the command names it.
 fn describe(source: &UnitInputSource) -> String {
     let name = source
         .output
         .as_ref()
         .or(source.artifact.as_ref())
+        .or(source.observation.as_ref())
         .map_or("", String::as_str);
     format!("{}/{name}", source.unit)
 }
@@ -256,6 +264,7 @@ fn describe(source: &UnitInputSource) -> String {
 #[cfg(test)]
 mod tests {
     use nyl_core::orchestration::state::Receipt;
+    use nyl_core::orchestration::time::Timestamp;
     use serde_json::json;
 
     use super::*;
@@ -321,13 +330,13 @@ mod tests {
     #[test]
     fn test_get_value_resolves_like_a_reference() {
         assert_eq!(
-            get_value(&dev(), &snapshot('a', 'a'), &output(), false).unwrap(),
+            get_value(&dev(), &snapshot('a', 'a'), &output(), false, Timestamp::UNIX_EPOCH).unwrap(),
             GetValue::Value(json!("vpc-1"))
         );
         let stale = snapshot('b', 'a');
-        let error = get_value(&dev(), &stale, &output(), false).unwrap_err();
+        let error = get_value(&dev(), &stale, &output(), false, Timestamp::UNIX_EPOCH).unwrap_err();
         assert_eq!(error.code, Code::ReferenceUnresolved);
-        match get_value(&dev(), &stale, &output(), true).unwrap() {
+        match get_value(&dev(), &stale, &output(), true, Timestamp::UNIX_EPOCH).unwrap() {
             GetValue::Stale { value, warning } => {
                 assert_eq!(value, json!("vpc-1"));
                 assert_eq!(warning.code, Code::ReferenceStale);
@@ -336,7 +345,7 @@ mod tests {
         }
         let undeclared: UnitInputSource =
             serde_json::from_value(json!({"unit": "network", "output": "subnet"})).unwrap();
-        assert!(get_value(&dev(), &stale, &undeclared, true).is_err());
+        assert!(get_value(&dev(), &stale, &undeclared, true, Timestamp::UNIX_EPOCH).is_err());
     }
 
     /// Catches `get unit` synthesizing documents for a unit state lacks.

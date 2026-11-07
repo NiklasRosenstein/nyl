@@ -2,7 +2,6 @@ pub(crate) mod apply_output;
 pub mod commands;
 pub mod filter;
 pub mod git_auth;
-pub(crate) mod namespace_resolution;
 pub(crate) mod presentation;
 pub(crate) mod resource_file;
 mod signals;
@@ -131,6 +130,9 @@ enum Commands {
     /// Ask the drivers to attest an environment's current receipts
     Attest(commands::check::CheckArgs),
 
+    /// Read the observed values of an environment's current receipts and record them
+    Observe(commands::check::CheckArgs),
+
     /// Clear a unit's uncertain or failed condition, or accept a checkpointed result
     Recover(commands::recover::RecoverArgs),
 
@@ -175,6 +177,7 @@ impl Cli {
             | Commands::Status(_)
             | Commands::DetectDrift(_)
             | Commands::Attest(_)
+            | Commands::Observe(_)
             | Commands::Recover(_)
             | Commands::Teardown(_)
             | Commands::Hold(_)
@@ -182,7 +185,7 @@ impl Cli {
                 #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
                 eprintln!("Nyl test build: fake drivers enabled; use a production build for real orchestration");
                 let cancellation = nyl_orchestration::shell::run::Cancellation::new();
-                // reconcile, detect-drift, attest, and recover end cleanly on SIGINT or
+                // reconcile, detect-drift, attest, observe, and recover end cleanly on SIGINT or
                 // SIGTERM instead of dying with the lease held.
                 let handler = self
                     .cancels_on_signal()
@@ -223,6 +226,47 @@ impl Cli {
         }
     }
 
+    /// Whether the command is one of the orchestration commands, which
+    /// [`Self::execute_in_process`] runs with injected dependencies. The match
+    /// is exhaustive, so a new command must say which kind it is; the
+    /// scenario harness reads this to decide what runs in-process.
+    pub fn is_orchestration(&self) -> bool {
+        match self.command {
+            Commands::Exec(_)
+            | Commands::Build(_)
+            | Commands::Get(_)
+            | Commands::State(_)
+            | Commands::Lease(_)
+            | Commands::Plan(_)
+            | Commands::Reconcile(_)
+            | Commands::Status(_)
+            | Commands::DetectDrift(_)
+            | Commands::Attest(_)
+            | Commands::Observe(_)
+            | Commands::Recover(_)
+            | Commands::Teardown(_)
+            | Commands::Hold(_)
+            | Commands::Resume(_) => true,
+            Commands::Comment(_)
+            | Commands::Render(_)
+            | Commands::RenderTree(_)
+            | Commands::PublishTree(_)
+            | Commands::Create(_)
+            | Commands::Capture(_)
+            | Commands::Update(_)
+            | Commands::Delete(_)
+            | Commands::Diff(_)
+            | Commands::DiffTree(_)
+            | Commands::Apply(_)
+            | Commands::Schema(_)
+            | Commands::Init(_)
+            | Commands::Validate(_)
+            | Commands::Release(_)
+            | Commands::Argocd(_)
+            | Commands::Vendor(_) => false,
+        }
+    }
+
     /// Whether the command cancels on SIGINT and SIGTERM ("Runs and leases"
     /// item 7): the commands that take the lease to execute, check, or
     /// recover units, and the state operations, whose `--wait-lease` a
@@ -236,6 +280,7 @@ impl Cli {
                 | Commands::Reconcile(_)
                 | Commands::DetectDrift(_)
                 | Commands::Attest(_)
+                | Commands::Observe(_)
                 | Commands::Recover(_)
                 | Commands::State(_)
                 | Commands::Teardown(_)
@@ -245,7 +290,7 @@ impl Cli {
     }
 
     /// Run an orchestration command (`plan`, `reconcile`, `status`,
-    /// `detect-drift`, `attest`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
+    /// `detect-drift`, `attest`, `observe`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
     /// instead of printing and exiting. The tier-1 scenario harness calls
     /// this. An orchestration command that fails before producing its report,
     /// such as on a project that cannot be discovered, is an outcome with
@@ -265,13 +310,14 @@ impl Cli {
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
             Commands::DetectDrift(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::DetectDrift, wiring),
             Commands::Attest(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Attest, wiring),
+            Commands::Observe(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Observe, wiring),
             Commands::Recover(args) => commands::recover::run(&args, wiring),
             Commands::Teardown(args) => commands::teardown::run(&args, wiring),
             Commands::Hold(args) => commands::hold::run_hold(&args, wiring),
             Commands::Resume(args) => commands::hold::run_resume(&args, wiring),
             _ => {
                 return Err(nyl_render::NylError::config(
-                    "only plan, reconcile, status, detect-drift, attest, recover, teardown, hold, resume, get, state, and lease run in-process",
+                    "only plan, reconcile, status, detect-drift, attest, observe, recover, teardown, hold, resume, get, state, and lease run in-process",
                 ))
             }
         };

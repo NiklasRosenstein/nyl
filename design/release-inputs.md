@@ -1,14 +1,15 @@
 # Release inputs and bindings
 
-**Status:** implemented in M2; the orchestration binding kinds follow in M5 and M6. See [ROADMAP.md](../ROADMAP.md).
+**Status:** implemented in M2; `fromUnit` joined in M5, and `fromPromotion` follows in M6. See [ROADMAP.md](../ROADMAP.md).
 
 This contract lets a Release declare typed inputs and a DeploymentTarget bind
 them. Bindings in M2 resolve without orchestration: from inline values, from
 project files, from locked Git state, or from state files in the target's own
 publication branch, either committed by another tool or carried from the
 working tree by `publish-tree`. The orchestration-only binding kinds
-are reserved here so that M5 and M6 can add them without changing the schema
-shape.
+were reserved here so that M5 and M6 could add them without changing the schema
+shape: `fromUnit` resolves in orchestrated environments since M5, and
+`fromPromotion` is reserved for M6.
 
 ## Compatibility
 
@@ -128,6 +129,7 @@ kind: DeploymentTarget
 metadata:
   name: staging
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: shared}
   publication: {…}
   releaseInputs:
@@ -177,7 +179,7 @@ Each binding sets exactly one of these fields:
 | `fromFile` | Yes | YAML or JSON file of this repository under the local path rule; `pointer` defaults to `""` |
 | `fromGit` | Yes | A file at a locked commit; `pointer` defaults to `""` |
 | `fromPublication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |
-| `fromUnit` | Reserved | A recorded unit output or artifact field in an orchestrated environment (M5) |
+| `fromUnit` | Orchestration (M5) | A recorded unit output, artifact field, or observed value in an orchestrated environment |
 | `fromPromotion` | Reserved | A value recorded through a PromotionPath (M6) |
 
 `fromFile`:

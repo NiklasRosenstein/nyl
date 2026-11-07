@@ -16,5 +16,10 @@
     "groups": {},
     "releases": {},
     "bindings": {}
+  },
+  "owner": {
+    "environment": "dev",
+    "unit": "kubernetes",
+    "uid": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90"
   }
 }

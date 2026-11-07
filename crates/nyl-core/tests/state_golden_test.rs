@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::state::{
-    ArtifactDocument, AttestationRecord, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
-    StateRecord,
+    ArtifactDocument, AttestationRecord, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord,
+    ObservedUnit, Run, Signal, StateRecord,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -62,6 +62,26 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "StateRecord", "environment": "dev",
                 "location": location(),
+                "events": [{"type": "state-initialized", "at": "2026-09-24T09:00:00Z", "by": "alice"}]
+            }),
+        ),
+        (
+            "state-record-instance.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "StateRecord", "environment": "pr-123",
+                "template": "preview",
+                "params": {"pr": 123, "size": "small"},
+                "expiresAt": "2026-10-01T09:00:00Z",
+                "sourceCommit": COMMIT,
+                "sourceRef": "refs/pull/123/head",
+                "keepId": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90",
+                "location": {
+                    "repository": "https://example.invalid/platform.git",
+                    "desiredRef": "nyl/previews",
+                    "observedRef": "nyl/previews",
+                    "path": "pr-123",
+                    "coordinationRefPrefix": "refs/nyl/"
+                },
                 "events": [{"type": "state-initialized", "at": "2026-09-24T09:00:00Z", "by": "alice"}]
             }),
         ),
@@ -185,6 +205,30 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "observation-record.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord", "unit": identity("kubernetes", "KubernetesPublication"),
+                "executionKey": KEY, "run": RUN, "at": "2026-09-25T16:40:00Z",
+                "values": {
+                    "ingressIp": {"value": "203.0.113.10", "observedAt": "2026-09-25T16:40:00Z"},
+                    "ingressPort": {"pending": "field-not-set: /status/loadBalancer/ingress/0/port"}
+                }
+            }),
+        ),
+        (
+            "desired-unit-observed-reference.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("dns", "Command"),
+                "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
+                "spec": {"values": {"address": {"fromUnit": {"unit": "kubernetes", "observation": "ingressIp"}}}},
+                "resolvedSpec": {"values": {"address": "203.0.113.10"}},
+                "provenance": {"/values/address": {"unit": "kubernetes", "uid": UID, "executionKey": KEY,
+                                                    "observedCommit": COMMIT, "observation": "ingressIp",
+                                                    "observedAt": "2026-09-25T16:40:00Z"}},
+                "executionKey": KEY, "readiness": {"state": "ready"}
+            }),
+        ),
+        (
             "attestation-record.v1.yaml",
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "AttestationRecord",
@@ -271,6 +315,7 @@ fn render(name: &str, sample: &Value) -> String {
         "ObservedUnit" => typed::<ObservedUnit>(name, sample),
         "ContainerImage" => typed::<ArtifactDocument>(name, sample),
         "DriftRecord" => typed::<DriftRecord>(name, sample),
+        "ObservationRecord" => typed::<ObservationRecord>(name, sample),
         "AttestationRecord" => typed::<AttestationRecord>(name, sample),
         "Lease" => typed::<Lease>(name, sample),
         "Run" => typed::<Run>(name, sample),

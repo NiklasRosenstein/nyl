@@ -105,6 +105,7 @@ fn run(harness: &Harness, observer: &Events, mode: RunMode) -> EnvironmentRunRep
     let base = harness.context();
     let tools = ProcessRunner::new();
     let context = RunContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         base: &base,
         sources: &job.sources,
         renderer: &job.renderer,
@@ -114,7 +115,6 @@ fn run(harness: &Harness, observer: &Events, mode: RunMode) -> EnvironmentRunRep
         process_env: &harness.process_env,
         secrets: None,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress: Some(observer),
         prompt: None,
     };
@@ -128,10 +128,13 @@ fn test_parallel_completion_keeps_dispatch_order_and_normalized_events() {
         events: Mutex::new(Vec::new()),
         fast_finished: signal.path().join("fast-finished"),
     };
+    // The bound only keeps a broken run from hanging (about five minutes):
+    // the fast unit's end event comes after its state commit, which took
+    // longer than ten seconds on loaded CI runners.
     let slow = command(
         "a-slow",
         &format!(
-            "i=0; while [ ! -f \"{}\" ]; do i=$((i+1)); test \"$i\" -lt 1000 || exit 1; sleep 0.01; done",
+            "i=0; while [ ! -f \"{}\" ]; do i=$((i+1)); test \"$i\" -lt 30000 || exit 1; sleep 0.01; done",
             events.fast_finished.display()
         ),
         "  idempotent: true\n  teardown: [sh, -c, 'true']\n",

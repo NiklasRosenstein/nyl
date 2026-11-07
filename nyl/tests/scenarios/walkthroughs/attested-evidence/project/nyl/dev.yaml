@@ -1,0 +1,8 @@
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  allowUnprotectedSource: true

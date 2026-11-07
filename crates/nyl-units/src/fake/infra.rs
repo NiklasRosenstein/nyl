@@ -260,6 +260,7 @@ impl Driver for FakeInfra {
             outputs,
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
 
@@ -293,8 +294,8 @@ impl Driver for FakeInfra {
                 },
                 artifacts: Vec::new(),
             },
-            // A drift result scripts `detect_drift`, never `inspect`.
-            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Drifted) => {
+            // A drift or pending result scripts `detect_drift` or `observe`, never `inspect`.
+            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Drifted | Scripted::Pending) => {
                 Inspection::NotApplied
             }
             Some(Scripted::Uncertain) => Inspection::Unknown {
@@ -329,6 +330,7 @@ impl Driver for FakeInfra {
             outputs: json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
 

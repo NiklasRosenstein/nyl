@@ -44,14 +44,14 @@ export const resourceSections = [
     label: 'Kubernetes GitOps Resources',
     route: '/reference/resources/kubernetes-gitops/',
     apiVersions: ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'],
-    exclude: ['Release', 'Environment', 'EnvironmentGroup'],
+    exclude: ['Release', 'Environment', 'EnvironmentGroup', 'EnvironmentTemplate'],
   },
   {
     id: 'orchestration',
     label: 'Orchestration Resources',
     route: '/reference/resources/orchestration/',
     apiVersions: ['units.gitops.nyl/v1'],
-    include: ['Environment', 'EnvironmentGroup'],
+    include: ['Environment', 'EnvironmentGroup', 'EnvironmentTemplate'],
   },
 ];
 /** Each resource's usage guide: its section's guide directory, unless it lives elsewhere. */

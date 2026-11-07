@@ -33,6 +33,7 @@ closely related pair.
   - [`reconcile`](/nyl/reference/cli/reconcile/) - Execute an environment's ready units and record the results
   - [`status`](/nyl/reference/cli/status/) - Report each unit's state from one snapshot of an environment's state
   - [`detect-drift and attest`](/nyl/reference/cli/detect-drift/) - Check current receipts for drift, or have their drivers attest them
+  - [`observe`](/nyl/reference/cli/observe/) - Read and record the observed values of current receipts, for jobs that hold the read credentials
   - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
   - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result

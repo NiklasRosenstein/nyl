@@ -4,15 +4,16 @@
 //! The real driver ([`crate::kubernetes_publication`]) is the built-in kind.
 //! This fake delegates every publish and teardown to the same operations, so
 //! it publishes the same bytes, and adds what a scenario needs from a test
-//! kind: scripted outcomes ([`Script`]), `mode: observe` (answered by the
-//! fake Argo CD observer, [`super::FakeObserver`]), and `teardownSettings`
+//! kind: scripted outcomes ([`Script`]), `observe: {}` (answered by the
+//! fake reconciler observer, [`super::FakeObserver`], and by scripted observed
+//! values), and `teardownSettings`
 //! that a scenario declares.
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit)
 //! and [Artifacts](../../../../design/orchestration-core.md#artifacts);
 //! [Fake kinds](../../../../design/reference-scenarios.md#fake-kinds).
 //!
-//! After resolution the spec is `{target, mode: publish|observe,
+//! After resolution the spec is `{target, observe?: {},
 //! teardownWait?, teardownSettings?, releases: {"<group>/<release>":
 //! {<input>: <value>}}}`. The execution key's inputs are the render's
 //! portable input record, so a change to any file the target reads, or to a
@@ -21,23 +22,30 @@
 //! Unlike the real driver, which records the target's effective teardown
 //! settings at resolution, the fake reads the same shape from a
 //! `teardownSettings` that a scenario declares (`catalogPrunes`,
-//! `applicationDeletionPolicy`, `namespaceDeletePolicies`,
-//! `catalogOwnedByParent`). A document without it records no settings, so
-//! the fake reports readiness as unsupported (no requirements).
+//! `applicationDeletionPolicy`, `namespaceDeletePolicies`, `deletionConfirmations`,
+//! `catalogPruneHolds`, `catalogOwnedByParent`) and evaluates it with the real driver's readiness
+//! rules. A document without it records no settings, so the fake reports
+//! readiness as unsupported (no requirements).
 
 use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext,
-    Supported, TeardownSettings,
+    Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
+    RemovalContext, RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
 use serde_json::{json, Value};
 
-use super::{required_str, Script, ScriptedOutcome};
-use crate::kubernetes_publication::{plan, publish, resolution_inputs, teardown, validate_teardown_wait};
+use super::{Script, ScriptedOutcome};
+use nyl_render::gitops::publication::TeardownSettings;
+use nyl_render::gitops::units::PublicationTarget;
+
+use crate::kubernetes_publication::{
+    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unattended_teardown,
+    unit_target, validate_observe,
+};
 
 pub(super) const KIND: &str = "FakePublication";
 
@@ -60,14 +68,23 @@ impl FakePublication {
     /// The recorded `teardownSettings`, with absent fields at their
     /// defaults: an absent catalog setting is external (`None`).
     fn recorded_settings(value: &Value) -> Result<TeardownSettings, String> {
-        let mut settings = serde_json::to_value(TeardownSettings::default()).map_err(|error| error.to_string())?;
-        let (Value::Object(defaults), Value::Object(recorded)) = (&mut settings, value) else {
+        let Value::Object(recorded) = value else {
             return Err("spec.teardownSettings must be a mapping".to_owned());
         };
-        if let Some(key) = recorded.keys().find(|key| !defaults.contains_key(*key)) {
+        // The fields the settings have, whether or not their defaults serialize.
+        let schema =
+            serde_json::to_value(schemars::schema_for!(TeardownSettings)).map_err(|error| error.to_string())?;
+        let known = schema.get("properties").and_then(Value::as_object);
+        if let Some(key) = recorded
+            .keys()
+            .find(|key| !known.is_some_and(|known| known.contains_key(*key)))
+        {
             return Err(format!("spec.teardownSettings has unknown field {key:?}"));
         }
-        defaults.extend(recorded.clone());
+        let mut settings = serde_json::to_value(TeardownSettings::default()).map_err(|error| error.to_string())?;
+        if let Value::Object(defaults) = &mut settings {
+            defaults.extend(recorded.clone());
+        }
         serde_json::from_value(settings).map_err(|error| format!("spec.teardownSettings: {error}"))
     }
 }
@@ -89,13 +106,15 @@ impl Driver for FakePublication {
         nyl_core::orchestration::time::Duration::from_mins(10)
     }
 
-    fn capabilities(&self, _spec: &Value) -> Capabilities {
+    fn capabilities(&self, spec: &Value) -> Capabilities {
         Capabilities {
             requires_committed_source: true,
             plan: true,
             reconcile: true,
             detect_drift: true,
             teardown: true,
+            build: true,
+            observed_values: spec.get("observe").is_some(),
             ..Capabilities::default()
         }
     }
@@ -114,8 +133,8 @@ impl Driver for FakePublication {
             "type": "object",
             "required": ["target"],
             "properties": {
-                "target": {"type": "string"},
-                "mode": {"type": "string", "enum": ["publish", "observe"]},
+                "target": {"type": ["string", "object"]},
+                "observe": {"type": "object", "additionalProperties": false},
                 "teardownWait": {
                     "type": "object",
                     "required": ["strategy"],
@@ -134,6 +153,31 @@ impl Driver for FakePublication {
                             "type": "object",
                             "additionalProperties": {"type": "string", "enum": ["Automatic", "Retain", "Confirm"]}
                         },
+                        "deletionConfirmations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["application", "options"],
+                                "properties": {
+                                    "application": {"type": "string"},
+                                    "resource": {"type": "string"},
+                                    "options": {"type": "array", "items": {"type": "string", "enum": ["Delete", "Prune"]}}
+                                },
+                                "additionalProperties": false
+                            }
+                        },
+                        "catalogPruneHolds": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["prune"],
+                                "properties": {
+                                    "application": {"type": "string"},
+                                    "prune": {"type": "string", "enum": ["confirm", "false"]}
+                                },
+                                "additionalProperties": false
+                            }
+                        },
                         "catalogOwnedByParent": {"type": "boolean"}
                     },
                     "additionalProperties": false
@@ -150,17 +194,12 @@ impl Driver for FakePublication {
         if !spec.is_object() {
             return Err("spec must be a mapping".to_owned());
         }
-        if spec.get("target").and_then(Value::as_str).is_none() {
-            return Err("spec.target is required and must be a string".to_owned());
+        match PublicationTarget::from_spec(spec) {
+            Ok(PublicationTarget::Static(_)) => {}
+            Ok(PublicationTarget::Inline(inline)) => inline.validate().map_err(|error| error.to_string())?,
+            Err(message) => return Err(message),
         }
-        match spec.get("mode") {
-            None => {}
-            Some(Value::String(mode)) if mode == "publish" || mode == "observe" => {}
-            Some(other) => return Err(format!("spec.mode must be publish or observe, got {other}")),
-        }
-        if let Some(wait) = spec.get("teardownWait") {
-            validate_teardown_wait(wait)?;
-        }
+        validate_observe(spec.as_object().expect("a mapping"))?;
         if let Some(settings) = spec.get("teardownSettings") {
             Self::recorded_settings(settings)?;
         }
@@ -192,7 +231,7 @@ impl Driver for FakePublication {
     }
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
-        required_str(spec, "/target")?;
+        unit_target(spec)?;
         resolution_inputs(&self.resource_catalogue, ctx, spec).map(|(_, inputs)| inputs)
     }
 
@@ -227,32 +266,85 @@ impl Driver for FakePublication {
         Ok(Supported::Unsupported)
     }
 
+    /// What the scenario scripted the fake's observed values to be
+    /// ([`Script::observed`]); pending when nothing is.
+    fn observe(
+        &self,
+        _ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        _receipt: &Receipt,
+    ) -> DriverResult<Supported<ObservedValues>> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        let names: Vec<String> = spec
+            .get("observations")
+            .and_then(Value::as_object)
+            .map(|observations| observations.keys().cloned().collect())
+            .unwrap_or_default();
+        self.script.observed(&unit.unit.name, &names).map(Supported::Supported)
+    }
+
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
         if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Teardown) {
             return Ok(Supported::Supported(outcome));
         }
-        teardown(&self.resource_catalogue, ctx, unit).map(Supported::Supported)
+        teardown(
+            &self.resource_catalogue,
+            ctx,
+            unit,
+            &crate::kubernetes_publication::direct::ClusterAccess::Live,
+        )
+        .map(Supported::Supported)
     }
 
-    /// The `teardownSettings` the stored document records; unsupported
-    /// (no requirements) when it records none.
-    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+    /// The readiness of the `teardownSettings` the stored document records;
+    /// unsupported (no requirements) when it records none.
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
         match spec.get("teardownSettings") {
             None => Ok(Supported::Unsupported),
             Some(settings) => Self::recorded_settings(settings)
-                .map(Supported::Supported)
+                .map(|settings| {
+                    Supported::Supported(evaluate_teardown_readiness(
+                        &unit.unit.environment,
+                        &unit.unit.name,
+                        &settings,
+                    ))
+                })
                 .map_err(DriverError::before_effects),
         }
     }
 
+    fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
+        teardown_wait(spec)
+    }
+
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<nyl_core::orchestration::codes::Finding> {
+        unattended_teardown(unit)
+    }
+
+    /// What the scenario scripted the fake Argo CD to report for the unit's
+    /// target ([`super::FakeObserver`]); nothing remains by default.
+    fn observe_removal(
+        &self,
+        _ctx: &RemovalContext,
+        unit: &DesiredUnit,
+    ) -> DriverResult<Supported<RemovalObservation>> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        let target = unit_target(spec)?;
+        Ok(Supported::Supported(
+            self.script.observer().workload_applications(&target),
+        ))
+    }
+
+    /// A direct build is not scripted: it is the real driver's, so a scenario
+    /// that builds a publication sees what the built-in kind does.
     fn build(
         &self,
-        _ctx: &ExecutionContext<'_>,
-        _unit: &DesiredUnit,
-        _options: &[OsString],
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        options: &[OsString],
     ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-        Ok(Supported::Unsupported)
+        build(&self.resource_catalogue, ctx, unit, options).map(Supported::Supported)
     }
 
     fn exec(
@@ -274,12 +366,15 @@ mod tests {
     fn test_validate_spec_checks_field_types() {
         let driver = FakePublication::new(Script::new(), crate::fake::test_catalogue());
         assert!(driver
-            .validate_spec(&json!({"target": "dev", "mode": "publish", "releases": {"web/web": {"image": "x"}}}))
+            .validate_spec(&json!({"target": "dev", "observe": {}, "releases": {"web/web": {"image": "x"}}}))
             .is_ok());
-        assert!(driver.validate_spec(&json!({"mode": "publish"})).is_err());
+        assert!(driver.validate_spec(&json!({"observe": {}})).is_err());
         assert!(driver.validate_spec(&json!({"target": 1})).is_err());
         assert!(driver
-            .validate_spec(&json!({"target": "dev", "mode": "apply"}))
+            .validate_spec(&json!({"target": "dev", "observe": {"interval": "1m"}}))
+            .is_err());
+        assert!(driver
+            .validate_spec(&json!({"target": "dev", "teardownWait": {"strategy": "observe"}}))
             .is_err());
         assert!(driver.validate_spec(&json!({"target": "dev", "releases": []})).is_err());
         assert!(driver

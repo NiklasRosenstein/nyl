@@ -5,20 +5,20 @@
 //! item 2 (a teardown wait's deadline is the wait's end). Decisions come
 //! from [`crate::rules::teardown_wait`]; this module performs the waiting:
 //! it reads the run's signal ref about every 15 seconds through the
-//! injected clock, asks the run context's [`ArgoObserver`](nyl_core::orchestration::ports::ArgoObserver)
-//! for `observe`, shows the remaining time and accepts Enter through the
+//! injected clock, asks the unit's driver ([`Driver::observe_removal`]) for
+//! `observe`, shows the remaining time and accepts Enter through the
 //! [`OperatorPrompt`](nyl_core::orchestration::ports::OperatorPrompt) when
 //! there is one, and stops on cancellation. A `manual` wait returns at once.
 
-use nyl_core::orchestration::driver::WaitCompletion;
-use nyl_core::orchestration::ids::{EnvironmentName, RunId};
-use nyl_core::orchestration::ports::ApplicationsObservation;
+use nyl_core::orchestration::driver::{
+    Driver, RemovalContext, RemovalObservation, Supported, WaitCompletion, WaitStrategy,
+};
+use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitAddress};
 use nyl_core::orchestration::state::{DesiredUnit, StateLocation, TeardownWaiting};
 use nyl_core::orchestration::time::{Duration, Timestamp};
-use serde_json::Value;
 
-use super::{Cancellation, RunContext};
-use crate::rules::teardown_wait::{self, confirms, Strategy, WaitDecision, WaitInputs};
+use super::{execution_credentials, Cancellation, RunContext};
+use crate::rules::teardown_wait::{self, confirms, WaitDecision, WaitInputs};
 use crate::shell::signal::received;
 
 /// One wait of one unit.
@@ -57,16 +57,15 @@ pub(crate) enum WaitEnd {
 /// or the run is cancelled.
 ///
 /// Each round reads the run's signals (a `confirm-removed` for this unit),
-/// observes the target for `observe` (no observer reads as
-/// `observation-failed`), and asks [`teardown_wait::decide`]. While the rule
+/// asks the unit's driver what remains for `observe` (a driver that cannot
+/// observe reads as `observation-failed`), and asks [`teardown_wait::decide`]. While the rule
 /// says to poll, the run shows the remaining time and accepts Enter when it
 /// has a terminal ([`RunContext::prompt`]), and otherwise waits on the
 /// injected clock until the next poll, which is never past the deadline.
 /// Cancellation is checked before and after each wait.
 pub(crate) fn wait(context: &RunContext<'_>, request: &WaitRequest<'_>) -> WaitEnd {
     let base = context.base;
-    let spec = request.unit.resolved_spec.as_ref().unwrap_or(&request.unit.spec);
-    let strategy = teardown_wait::strategy(spec);
+    let strategy = strategy(context, request.unit);
     let unit = &request.unit.unit.name;
     loop {
         if request.cancellation.is_cancelled() {
@@ -83,7 +82,7 @@ pub(crate) fn wait(context: &RunContext<'_>, request: &WaitRequest<'_>) -> WaitE
         let confirmation = signals
             .iter()
             .find(|signal| &signal.unit == unit && confirms(signal, request.run, request.waiting));
-        let observation = (strategy == Strategy::Observe).then(|| observe(context, spec));
+        let observation = (strategy == WaitStrategy::Observe).then(|| observe(context, request, now));
         let decision = teardown_wait::decide(&WaitInputs {
             strategy,
             run: request.run,
@@ -129,14 +128,51 @@ pub(crate) fn wait(context: &RunContext<'_>, request: &WaitRequest<'_>) -> WaitE
     }
 }
 
-/// The observer's answer for the target a stored publication spec names.
-fn observe(context: &RunContext<'_>, spec: &Value) -> ApplicationsObservation {
-    let Some(observer) = context.observer else {
-        return ApplicationsObservation::Failed("no Argo CD observer is configured".to_owned());
+/// How `unit` waits after phase 1, as its driver reads it from the stored
+/// document; a kind without a driver waits for an operator.
+pub(crate) fn strategy(context: &RunContext<'_>, unit: &DesiredUnit) -> WaitStrategy {
+    let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+    context
+        .drivers
+        .get(&unit.unit.api_version, &unit.unit.kind)
+        .map_or(WaitStrategy::Manual, |driver| driver.teardown_wait(spec))
+}
+
+/// What the unit's driver reports remains of what phase 1 removes. A kind
+/// without a driver, a driver that cannot observe, missing credentials, and
+/// a failed reading are all `observation-failed`, with the reason unchanged.
+fn observe(context: &RunContext<'_>, request: &WaitRequest<'_>, now: Timestamp) -> RemovalObservation {
+    let unit = &request.unit.unit;
+    let Some(driver) = context.drivers.get(&unit.api_version, &unit.kind) else {
+        return RemovalObservation::Failed(format!("no driver serves kind {}", unit.kind));
     };
-    match spec.get("target").and_then(Value::as_str) {
-        Some(target) => observer.workload_applications(target),
-        None => ApplicationsObservation::Failed("the stored publication spec names no target".to_owned()),
+    observe_with(context, driver, request, now)
+}
+
+fn observe_with(
+    context: &RunContext<'_>,
+    driver: &dyn Driver,
+    request: &WaitRequest<'_>,
+    now: Timestamp,
+) -> RemovalObservation {
+    let (env, secrets) = match execution_credentials(context, driver, &request.unit.spec) {
+        Ok(credentials) => credentials,
+        Err(message) => return RemovalObservation::Failed(message),
+    };
+    let ctx = RemovalContext {
+        unit: UnitAddress::new(request.environment.clone(), request.unit.unit.name.clone()),
+        env,
+        secrets,
+        now,
+        deadline: request.deadline,
+    };
+    match driver.observe_removal(&ctx, request.unit) {
+        Ok(Supported::Supported(observation)) => observation,
+        Ok(Supported::Unsupported) => RemovalObservation::Failed(format!(
+            "kind {} cannot observe the removal of what it published",
+            request.unit.unit.kind
+        )),
+        Err(error) => RemovalObservation::Failed(error.to_string()),
     }
 }
 
@@ -156,8 +192,7 @@ mod tests {
     use nyl_core::orchestration::driver::{DriverResult, DriverSet, ToolExit, ToolInvocation, ToolRunner};
     use nyl_core::orchestration::ids::{CommitId, UnitName};
     use nyl_core::orchestration::ports::{
-        ArgoObserver, Clock, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository, SourceResolver,
-        SourceResult,
+        Clock, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository, SourceResolver, SourceResult,
     };
     use nyl_core::orchestration::state::{DesiredUnitKind, Lifecycle, Readiness, SignalAction, StateV1, UnitIdentity};
     use serde_json::json;
@@ -236,15 +271,6 @@ mod tests {
         }
     }
 
-    struct Applications(Vec<String>);
-
-    impl ArgoObserver for Applications {
-        fn workload_applications(&self, target: &str) -> ApplicationsObservation {
-            assert_eq!(target, "dev");
-            ApplicationsObservation::Remaining(self.0.clone())
-        }
-    }
-
     struct Enter(Mutex<Vec<(String, Duration)>>);
 
     impl OperatorPrompt for Enter {
@@ -263,7 +289,7 @@ mod tests {
     }
 
     fn unit(teardown_wait: &serde_json::Value) -> DesiredUnit {
-        let spec = json!({"target": "dev", "mode": "publish", "teardownWait": teardown_wait});
+        let spec = json!({"target": "dev", "teardownWait": teardown_wait});
         DesiredUnit {
             api_version: StateV1,
             kind: DesiredUnitKind,
@@ -303,14 +329,17 @@ mod tests {
         store: &SignalStore,
         clock: &HookedClock,
         unit: &DesiredUnit,
-        observer: Option<&dyn ArgoObserver>,
         prompt: Option<&dyn OperatorPrompt>,
         cancellation: &Cancellation,
     ) -> WaitEnd {
         let base = context(store, clock);
-        let drivers = DriverSet::new();
+        let mut drivers = DriverSet::new();
+        drivers.register(std::sync::Arc::new(crate::rules::fixtures::TestDriver {
+            kind: "KubernetesPublication",
+        }));
         let process_env = BTreeMap::new();
         let run_context = RunContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             base: &base,
             sources: &Unused,
             renderer: &Unused,
@@ -320,7 +349,6 @@ mod tests {
             process_env: &process_env,
             secrets: None,
             commit_identity: None,
-            observer,
             progress: None,
             prompt,
         };
@@ -373,7 +401,6 @@ mod tests {
             &clock,
             &unit(&json!({"strategy": "delay", "duration": "5m"})),
             None,
-            None,
             &Cancellation::new(),
         );
         assert_eq!(
@@ -397,7 +424,6 @@ mod tests {
             &clock,
             &unit(&json!({"strategy": "delay", "duration": "1m"})),
             None,
-            None,
             &Cancellation::new(),
         );
         assert_eq!(end, WaitEnd::Complete(WaitCompletion::Delayed));
@@ -416,7 +442,6 @@ mod tests {
             &clock,
             &unit(&json!({"strategy": "delay", "duration": "5m"})),
             None,
-            None,
             &cancellation,
         );
         assert_eq!(end, WaitEnd::Cancelled);
@@ -434,7 +459,6 @@ mod tests {
             &store,
             &clock,
             &unit(&json!({"strategy": "delay", "duration": "5m"})),
-            None,
             Some(&prompt),
             &Cancellation::new(),
         );
@@ -452,21 +476,23 @@ mod tests {
         assert_eq!(prompts[0].1, Duration::from_secs(15));
     }
 
+    /// A unit whose test driver reports `remaining` still existing.
+    fn observing(remaining: &[&str]) -> DesiredUnit {
+        let mut unit = unit(&json!({"strategy": "observe"}));
+        for spec in [&mut unit.spec, unit.resolved_spec.as_mut().unwrap()] {
+            spec["remaining"] = json!(remaining);
+        }
+        unit
+    }
+
     /// Catches an `observe` wait running past the unit's deadline, or
-    /// ending as anything but uncertain while Applications remain.
+    /// ending as anything but uncertain while the driver still reports
+    /// remnants.
     #[test]
     fn test_observe_never_waits_past_the_deadline() {
         let store = SignalStore::default();
         let clock = HookedClock::new(|_| {});
-        let observer = Applications(vec!["web".to_owned()]);
-        let end = wait_for(
-            &store,
-            &clock,
-            &unit(&json!({"strategy": "observe"})),
-            Some(&observer),
-            None,
-            &Cancellation::new(),
-        );
+        let end = wait_for(&store, &clock, &observing(&["web"]), None, &Cancellation::new());
         assert_eq!(
             end,
             WaitEnd::Uncertain {
@@ -476,27 +502,54 @@ mod tests {
         assert_eq!(clock.now(), time(600));
     }
 
-    /// Catches an `observe` wait without an observer waiting out its
-    /// timeout instead of reporting why removal cannot be observed.
+    /// Catches an `observe` wait that does not complete as observed once the
+    /// driver reports nothing remaining, which would hold the dependencies'
+    /// teardown for the whole timeout.
     #[test]
-    fn test_observe_without_an_observer_is_uncertain_at_once() {
+    fn test_observe_completes_when_the_driver_reports_nothing_remaining() {
         let store = SignalStore::default();
         let clock = HookedClock::new(|_| {});
-        let end = wait_for(
-            &store,
-            &clock,
-            &unit(&json!({"strategy": "observe"})),
-            None,
-            None,
-            &Cancellation::new(),
-        );
+        let end = wait_for(&store, &clock, &observing(&[]), None, &Cancellation::new());
+        assert_eq!(end, WaitEnd::Complete(WaitCompletion::Observed));
+        assert!(clock.waits().is_empty());
+    }
+
+    /// Catches a failed reading or an unsupported driver waiting out the
+    /// timeout instead of reporting at once why removal cannot be observed,
+    /// with the driver's reason unchanged.
+    #[test]
+    fn test_observe_that_cannot_read_is_uncertain_at_once() {
+        let store = SignalStore::default();
+        let reason = |end: WaitEnd| match end {
+            WaitEnd::Uncertain { reason } => reason,
+            other => panic!("{other:?}"),
+        };
+        let clock = HookedClock::new(|_| {});
+        let mut failing = observing(&[]);
+        failing.resolved_spec.as_mut().unwrap()["removalFails"] = json!("Argo CD rejected the token (401)");
         assert_eq!(
-            end,
-            WaitEnd::Uncertain {
-                reason: "observation-failed: no Argo CD observer is configured".to_owned()
-            }
+            reason(wait_for(&store, &clock, &failing, None, &Cancellation::new())),
+            "observation-failed: Argo CD rejected the token (401)"
+        );
+        let mut unsupported = observing(&[]);
+        unsupported.resolved_spec.as_mut().unwrap()["removalUnsupported"] = json!(true);
+        assert!(
+            reason(wait_for(&store, &clock, &unsupported, None, &Cancellation::new()))
+                .starts_with("observation-failed: kind KubernetesPublication cannot observe"),
         );
         assert!(clock.waits().is_empty());
+    }
+
+    /// Catches a kind without a driver ending a wait by itself: nothing can
+    /// say what it removed, so it waits for an operator.
+    #[test]
+    fn test_a_kind_without_a_driver_waits_for_an_operator() {
+        let store = SignalStore::default();
+        let clock = HookedClock::new(|_| {});
+        let mut other = observing(&[]);
+        other.unit.kind = "Elsewhere".to_owned();
+        let end = wait_for(&store, &clock, &other, None, &Cancellation::new());
+        assert!(matches!(end, WaitEnd::Stop { .. }), "{end:?}");
     }
 
     /// Catches a manual wait keeping the run waiting.
@@ -508,7 +561,6 @@ mod tests {
             &store,
             &clock,
             &unit(&json!({"strategy": "manual"})),
-            None,
             None,
             &Cancellation::new(),
         );
@@ -536,7 +588,6 @@ mod tests {
                 &store,
                 &clock,
                 &unit(&json!({"strategy": "delay", "duration": "15s"})),
-                None,
                 None,
                 &Cancellation::new()
             ),

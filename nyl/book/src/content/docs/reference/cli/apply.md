@@ -42,6 +42,7 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 - `--name <NAME>` - Release name (required if no Release in file)
 - `--namespace <NAMESPACE>` - Release namespace, and the namespace of resources that set none (required if no Release in file)
+- `--take-over` - Apply a release an environment owns anyway, recording no owner on the new revision. Without it, `nyl apply` refuses a release owned by a unit of a [direct target](/nyl/kubernetes-gitops/workflow/direct-reconciler/) (`NYL-RELEASE-OWNED-BY-UNIT`); the owner's next reconcile adopts the release again and reverts the change.
 - `--confirm-prune` - Also prune resources whose Argo CD sync option is `Prune=confirm`, such as managed Namespaces
 - `--append-release` - Merge current resources with the previous deployed revision and skip pruning removed resources
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
@@ -58,7 +59,7 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context. With a DeploymentTarget it only replaces `Cluster.spec.live.context`, and Nyl still checks it against the Cluster's server. Without GitOps configuration it selects the cluster; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`. When the Cluster declares a `live.context`, it is used and the current context never is. Without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it; an in-cluster or by-name destination needs `--context`. The context's server must match the declared destination either way. Without GitOps configuration, `--context` selects the cluster instead; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same time (default: 8; `1` applies serially)
 
 ## Apply order and progress

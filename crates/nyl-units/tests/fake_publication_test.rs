@@ -1,16 +1,15 @@
 //! `FakePublication`, the test stand-in for `KubernetesPublication`, against
 //! the shared publication world: the behaviors every publication kind has
 //! (`conformance`) and what only the fake adds, `teardownSettings` that a
-//! scenario declares and `mode: observe`.
+//! scenario declares and `observe: {}`.
 //!
 //! Contract: [Fake kinds](../../../design/reference-scenarios.md#fake-kinds)
 //! and the [Kubernetes publication unit](../../../design/orchestration-core.md#kubernetes-publication-unit).
 
 mod publication_world;
 
-use std::collections::BTreeMap;
-
-use nyl_core::orchestration::driver::{Driver, Supported, TeardownSettings};
+use nyl_core::orchestration::codes::Code;
+use nyl_core::orchestration::driver::{Driver, Supported};
 use nyl_core::orchestration::ids::ExecutionKey;
 use nyl_units::fake::{FakePublication, Script};
 use publication_world::{conformance, desired, spec};
@@ -46,42 +45,67 @@ fn test_fake_publication_plans_a_deleting_unit_as_destroy() {
 }
 
 /// Catches `status` or `plan` showing readiness from anything but the
-/// stored document, or claiming requirements for a document that records none.
+/// stored document, or claiming requirements for a document that records
+/// none: the fake evaluates the settings a scenario records with the real
+/// driver's readiness rules.
 #[test]
-fn test_fake_publication_teardown_settings_come_from_the_stored_document() {
+fn test_fake_publication_readiness_comes_from_the_stored_document() {
     let driver = fake();
     let mut recorded = spec();
     recorded["teardownSettings"] = json!({
         "catalogPrunes": false,
         "applicationDeletionPolicy": "Foreground",
         "namespaceDeletePolicies": {"web": "Confirm"},
+        "deletionConfirmations": [{"application": "web", "resource": "Namespace web", "options": ["Delete"]}],
         "catalogOwnedByParent": true,
     });
     let unit = desired(recorded, ExecutionKey::from_digest_of(b"key"));
-    assert_eq!(
-        driver.teardown_settings(&unit).unwrap(),
-        Supported::Supported(TeardownSettings {
-            catalog_prunes: Some(false),
-            application_deletion_policy: Some("Foreground".to_owned()),
-            namespace_delete_policies: BTreeMap::from([("web".to_owned(), "Confirm".to_owned())]),
-            catalog_owned_by_parent: true,
-        })
-    );
-
-    // A parent-owned catalog records its settings as external.
-    let mut external = spec();
-    external["teardownSettings"] = json!({"catalogOwnedByParent": true});
-    let unit = desired(external, ExecutionKey::from_digest_of(b"key"));
-    let Supported::Supported(settings) = driver.teardown_settings(&unit).unwrap() else {
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
         panic!("recorded settings are supported");
     };
     assert_eq!(
-        (settings.catalog_prunes, settings.application_deletion_policy),
-        (None, None)
+        readiness
+            .blocking
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownCatalogManualSync, Code::TeardownNamespaceConfirm]
     );
 
+    // A catalog that prunes automatically but waits for confirmation to prune is held on the catalog's code.
+    let mut waiting = spec();
+    waiting["teardownSettings"] = json!({
+        "catalogPrunes": true,
+        "applicationDeletionPolicy": "Foreground",
+        "catalogPruneHolds": [{"prune": "confirm"}],
+        "catalogOwnedByParent": true,
+    });
+    assert!(driver.validate_spec(&waiting).is_ok());
+    let unit = desired(waiting, ExecutionKey::from_digest_of(b"key"));
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
+        panic!("recorded settings are supported");
+    };
+    assert_eq!(
+        readiness
+            .blocking
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownCatalogManualSync]
+    );
+
+    // A parent-owned catalog records its settings as external: nothing blocks.
+    let mut external = spec();
+    external["teardownSettings"] = json!({"catalogOwnedByParent": true});
+    let unit = desired(external, ExecutionKey::from_digest_of(b"key"));
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
+        panic!("recorded settings are supported");
+    };
+    assert!(readiness.ready());
+    assert_eq!(readiness.not_checked.len(), 2);
+
     let unit = desired(spec(), ExecutionKey::from_digest_of(b"key"));
-    assert_eq!(driver.teardown_settings(&unit).unwrap(), Supported::Unsupported);
+    assert_eq!(driver.teardown_readiness(&unit).unwrap(), Supported::Unsupported);
 }
 
 /// Catches a stored `teardownWait` that the wait rule cannot read, such
@@ -94,8 +118,15 @@ fn test_fake_publication_validates_teardown_wait_and_settings() {
         spec[field] = value;
         driver.validate_spec(&spec)
     };
+    // The strategy that reads the reconciler needs the unit to opt into observing it.
+    assert!(with("teardownWait", json!({"strategy": "observe"})).is_err());
+    assert!(with("observe", json!({})).is_ok());
+    assert!(with("observe", json!({"interval": "1m"})).is_err());
+    let mut observing = spec();
+    observing["observe"] = json!({});
+    observing["teardownWait"] = json!({"strategy": "observe"});
+    assert!(driver.validate_spec(&observing).is_ok());
     for valid in [
-        json!({"strategy": "observe"}),
         json!({"strategy": "manual"}),
         json!({"strategy": "delay", "duration": "10m"}),
     ] {

@@ -1,0 +1,107 @@
+# Reference scenario 2, a preview closed with its pull request, with the YAML
+# preview project: dev runs first (scenario 1 up to step 6), two pull requests
+# get instances, one is updated, squash-merged, and removed by the close job
+# through its keep ref, and the other is still rendered at its own commit.
+contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request
+milestone: M5
+project: ../preview/project
+steps:
+  # Scenario 1, steps 3 to 5: dev's network has a current receipt.
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [network, web-image, seed, database, kubernetes]
+
+  # Steps 1 to 3: the pull request's job creates the instance, which keeps its
+  # source commit fetchable and publishes beside the shared catalog it creates.
+  - branch: {name: pr-123, from: main}
+  - commit: {branch: pr-123, message: "Change the page", apply: ../preview/patches/web}
+  - nyl: [reconcile, -e, pr-123, --template, preview, --param, pr=123]
+    at: pr-123
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+      deploy:
+        branch: previews
+        contains:
+          - 'pr-123/web/**'
+          - 'pr-123/_nyl/index.json'
+          - 'pr-123/_nyl/catalog/application.argoproj.io/argocd/pr-123-kubernetes-web.yaml'
+          - 'pr-123/_nyl/catalog/appproject.argoproj.io/argocd/pr-123-kubernetes-web.yaml'
+          - '_nyl/shared/previews/catalog.yaml'
+        # The instance has no catalog Application of its own: the shared one manages it.
+        absent: ['pr-123/_nyl/catalog/application.argoproj.io/*/*-catalog.yaml']
+      keep-refs: {count: 1, kept: [pr-123]}
+  - nyl: [get, environments, pr-123]
+    exit: 0
+    expect: {messages: ['2026-10-01T10:00:00Z']}        # T+7d
+
+  # Step 4: two instances share one state ref and one deploy branch.
+  - branch: {name: pr-124, from: main}
+  - commit: {branch: pr-124, message: "Change the page, differently", apply: ../preview/patches/another}
+  - nyl: [reconcile, -e, pr-124, --template, preview, --param, pr=124]
+    at: pr-124
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+      deploy:
+        branch: previews
+        # Argo CD names differ per instance: each is named after its target.
+        contains:
+          - 'pr-124/web/**'
+          - 'pr-124/_nyl/catalog/application.argoproj.io/argocd/pr-124-kubernetes-web.yaml'
+          - 'pr-124/_nyl/catalog/appproject.argoproj.io/argocd/pr-124-kubernetes-web.yaml'
+        absent: ['pr-124/_nyl/catalog/application.argoproj.io/*/*-catalog.yaml']
+        unchanged: ['pr-123/**', '_nyl/shared/previews/**']
+      keep-refs: {count: 2, kept: [pr-123, pr-124]}
+
+  # Step 5: a new commit extends pr-123's expiry and executes only what it
+  # changed; its keep ref moves to the new commit.
+  - clock: {advance: 1d}
+  - commit: {branch: pr-123, message: "Change the page again", apply: ../preview/patches/page}
+  - nyl: [reconcile, -e, pr-123, --template, preview, --param, pr=123]
+    at: pr-123
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+      current: [database]
+      keep-refs: {count: 2, kept: [pr-123, pr-124]}
+  - nyl: [get, environments, pr-123]
+    exit: 0
+    expect: {messages: ['2026-10-02T10:00:00Z']}        # T+1d+7d
+
+  # Step 6: the squash-merge leaves pr-123's recorded commit on no branch.
+  - squash-merge: {branch: pr-123, into: main}
+  - delete-branch: pr-123
+
+  # Step 7: the close job at main fetches the source through the keep ref,
+  # removes the preview in two phases, destroys its database, and drops its
+  # image unit, its state directory, and its keep ref.
+  - nyl: [state, delete, -e, pr-123, --teardown]
+    exit: 0
+    expect:
+      outcome: done
+      removed: [kubernetes, database]
+      released: [web-image]
+      deploy:
+        branch: previews
+        contains: ['pr-124/web/**', '_nyl/shared/previews/catalog.yaml']
+        absent: ['pr-123/**']
+        unchanged: ['pr-124/**', '_nyl/shared/previews/**']
+      keep-refs: {count: 1, kept: [pr-124]}
+
+  # Step 8: from main, pr-124 still renders at its recorded commit, not at
+  # main's: the run's source is pr-124's tip.
+  - nyl: [reconcile, -e, pr-124]
+    exit: 0
+    expect:
+      executed: []
+      source: pr-124
+      source-chosen-by: {by: recorded}
+
+  # Step 9: dev and pr-124 are listed; pr-123 is gone.
+  - {nyl: [get, environments, dev], exit: 0}
+  - {nyl: [get, environments, pr-124], exit: 0}
+  - {nyl: [get, environments, pr-123], exit: 1}

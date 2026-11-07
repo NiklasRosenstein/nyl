@@ -258,6 +258,8 @@ fn tool(
         interactive: false,
     })
 }
+// The error is the call's final `Outcome`, returned as it is.
+#[allow(clippy::result_large_err)]
 fn completed(exit: ToolExit, effects: bool) -> Result<Vec<u8>, Outcome> {
     match exit {
         ToolExit::Exited { code: 0, stdout, .. } => Ok(stdout),
@@ -653,6 +655,7 @@ impl Driver for OciImageDriver {
                 outputs: json!({}),
                 artifacts: vec![artifact],
                 attestations: Vec::new(),
+                warnings: Vec::new(),
             },
             Err(outcome) => outcome,
         }))
@@ -872,6 +875,8 @@ mod tests {
     fn context<'a>(root: &Path, temp: &Path, tools: &'a dyn ToolRunner) -> ExecutionContext<'a> {
         let now = "2026-10-28T12:00:00Z".parse().unwrap();
         ExecutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+            clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
             unit: UnitAddress::new(EnvironmentName::new("dev").unwrap(), UnitName::new("web").unwrap()),
             operation: DriverOperation::Reconcile,
             worktree: root.into(),
@@ -890,6 +895,8 @@ mod tests {
             commit_identity: None,
             cache_dir: temp.join("cache"),
             teardown_wait: None,
+            incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+            dirty_source: false,
         }
     }
     fn fixture() -> tempfile::TempDir {
@@ -988,6 +995,7 @@ mod tests {
         let docker = Docker::default();
         let now = "2026-10-28T12:00:00Z".parse().unwrap();
         let ctx = ResolutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             environment: EnvironmentName::new("dev").unwrap(),
             worktree: root.path().into(),
             project_dir: root.path().into(),
@@ -1045,6 +1053,7 @@ mod tests {
                 kind: "ContainerImage".into(),
                 digest: image.digest(),
             }],
+            warnings: Vec::new(),
         };
         *docker.inspection.lock().unwrap() = Some(ToolExit::Exited {
             code: 1,

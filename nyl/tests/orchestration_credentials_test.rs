@@ -35,6 +35,7 @@ fn reconcile_with_progress(
     let base = harness.context();
     let tools = ProcessRunner::new();
     let context = RunContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         base: &base,
         sources: &job.sources,
         renderer: &job.renderer,
@@ -44,7 +45,6 @@ fn reconcile_with_progress(
         process_env: &harness.process_env,
         secrets,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress,
         prompt: None,
     };

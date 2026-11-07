@@ -1,0 +1,43 @@
+# Block-style labels, because the publication's document is not valid YAML
+# before it renders.
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: database
+  labels:
+    stage: dev
+    preview: 'true'
+spec:
+  source: {path: ../infra/database}
+  backend: {path: '{{ values.stateDir }}/{{ environment.name }}-database.tfstate'}
+  variables: {name: '{{ environment.name }}'}
+  outputs:
+    connection: {type: object}
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: web-image
+  labels:
+    stage: dev
+    preview: 'true'
+spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
+  context: {path: ../services/web}
+  repository: '%REGISTRY%/web'
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels:
+    stage: dev
+    preview: 'true'
+spec:
+  target: {{ values.target | tojson }}      # dev, or the preview template's inline target
+  observe: {}
+  teardownWait: {{ values.teardownWait | tojson }}
+  env: {passthrough: [KUBECONFIG]}
+  timeout: 10m

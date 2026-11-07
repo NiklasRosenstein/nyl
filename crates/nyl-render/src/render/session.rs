@@ -1017,6 +1017,7 @@ mod tests {
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
                 "clusterRef": {"name": "prod-eu-1"},
+                "reconciler": {"argocd": {}},
                 "values": {"environment": "production", "nested": {"target": true}},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},

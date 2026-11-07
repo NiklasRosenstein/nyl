@@ -40,7 +40,7 @@ for the behavior `render`, `diff`, and `apply` share.
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context. With a DeploymentTarget it only replaces `Cluster.spec.live.context`, and Nyl still checks it against the Cluster's server. Without GitOps configuration it selects the cluster; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`. When the Cluster declares a `live.context`, it is used and the current context never is. Without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it; an in-cluster or by-name destination needs `--context`. The context's server must match the declared destination either way. Without GitOps configuration, `--context` selects the cluster instead; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 
 ### Diff Options
 

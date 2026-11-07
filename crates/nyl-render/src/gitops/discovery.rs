@@ -78,11 +78,64 @@ pub struct GitOpsInventory {
     pub worktree_data_files: BTreeSet<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.
     pub resources: BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
+    /// Instances of EnvironmentTemplates the caller knows from state, by
+    /// name. Discovery finds none: which instances exist is not source.
+    pub instances:
+        BTreeMap<nyl_core::orchestration::ids::EnvironmentName, nyl_core::orchestration::instance::InstanceDescriptor>,
 }
 
 impl GitOpsInventory {
     pub fn get(&self, kind: GitOpsResourceKind, name: &str) -> Option<&DiscoveredGitOpsResource> {
         self.resources.get(&GitOpsInventoryKey::new(kind, name))
+    }
+
+    /// The inventory with one more DeploymentTarget: the inline target a
+    /// publication unit declares in `spec.target.inline`, rendered per
+    /// environment. It is an ordinary static target from here on: strictly
+    /// parsed like a discovered one, with its `valuesFrom` files resolved
+    /// beside `source_file`, the project-relative file that declares the
+    /// unit, and subject to the same validation, name uniqueness, and
+    /// publication-prefix rules as every other target.
+    ///
+    /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+    /// inline targets.
+    pub fn with_inline_target(mut self, name: &str, source_file: &Path, spec: &serde_json::Value) -> Result<Self> {
+        let key = GitOpsInventoryKey::new(GitOpsResourceKind::DeploymentTarget, name);
+        if let Some(existing) = self.resources.get(&key) {
+            return Err(NylError::config(format!(
+                "The inline target {name:?} of the unit declared in {} has the name of the DeploymentTarget declared in {}; \
+                 target names are unique across static and inline targets, so set spec.target.name on the unit",
+                source_file.display(),
+                existing.source_path.display(),
+            )));
+        }
+        let document = serde_json::json!({
+            "apiVersion": API_VERSION_K8S_GITOPS,
+            "kind": GitOpsResourceKind::DeploymentTarget.as_str(),
+            "metadata": {"name": name},
+            "spec": spec,
+        });
+        let context = format!("{} (inline target {name:?})", source_file.display());
+        let resource = parse_gitops_resource(&document)
+            .map_err(|error| NylError::from_core_at(error, &context))?
+            .ok_or_else(|| NylError::config(format!("{context} is not a DeploymentTarget")))?;
+        let identity = GitOpsResourceIdentity {
+            kind: GitOpsResourceKind::DeploymentTarget,
+            name: name.to_owned(),
+        };
+        let mut discovered = DiscoveredGitOpsResource {
+            source_path: source_file.to_path_buf(),
+            document_index: 1,
+            raw_document: crate::yaml::serialize_yaml_document(&document)?,
+            identity,
+            static_labels: resource_metadata_labels(&resource),
+            resource: Some(resource),
+            values_inputs: BTreeSet::new(),
+        };
+        let paths = self.paths();
+        super::values::resolve_resource_values(&paths, &self.worktree_data_files, &mut discovered)?;
+        self.resources.insert(key, discovered);
+        Ok(self)
     }
 
     /// The roots that local paths resolve against.
@@ -362,6 +415,7 @@ fn discover_project_inventory(
         worktree_yaml_files,
         worktree_data_files,
         resources,
+        instances: BTreeMap::new(),
     })
 }
 
@@ -554,6 +608,7 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
         GitOpsResource::ApplicationGroup(resource) => resource.metadata.labels.clone(),
         GitOpsResource::Environment(resource) => resource.metadata.labels.clone(),
         GitOpsResource::EnvironmentGroup(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::EnvironmentTemplate(resource) => resource.metadata.labels.clone(),
     }
 }
 
@@ -993,6 +1048,7 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   publication:
@@ -1374,7 +1430,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("platform.yaml"),
-            "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod-eu-1\n  labels: {region: eu,\n    tier: prod}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: production\n  labels: &shared\n    environment: production\nspec:\n  clusterRef:\n    name: prod-eu-1\n  publication:\n    repository:\n      repoURL: ssh://git@example/deploy.git\n    revision: deploy/production\n---\napiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\n  labels: !!map {team: platform}\nspec:\n  repoURL: https://example.invalid/deploy.git\n",
+            "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod-eu-1\n  labels: {region: eu,\n    tier: prod}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: production\n  labels: &shared\n    environment: production\nspec:\n  reconciler: {argocd: {}}\n  clusterRef:\n    name: prod-eu-1\n  publication:\n    repository:\n      repoURL: ssh://git@example/deploy.git\n    revision: deploy/production\n---\napiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\n  labels: !!map {team: platform}\nspec:\n  repoURL: https://example.invalid/deploy.git\n",
         )
         .unwrap();
         let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();

@@ -2,13 +2,13 @@ use clap::{Args, ValueEnum};
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    cli::commands::apply::{prepare_desired_manifests, ObjectScopes},
-    cli::commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
+use crate::cli::commands::render::{
+    run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions,
 };
 use nyl_render::{
     kubernetes::{
         extract_name,
+        lifecycle::{prepare_desired_manifests, ObjectScopes},
         prune::{prune_decision, PruneDecision},
         DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseStatus,
         ReleaseStorage, ResourceKey,
@@ -1034,6 +1034,7 @@ mod tests {
             rendered_at: chrono::Utc::now(),
             applied_at: None,
             error: None,
+            meta: nyl_render::kubernetes::ReleaseMeta::default(),
         };
         let client = nyl_render::kubernetes::MockKubeClient::new();
 

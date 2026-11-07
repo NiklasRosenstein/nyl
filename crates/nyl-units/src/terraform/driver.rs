@@ -370,6 +370,7 @@ impl TerraformDriver {
             outputs,
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         })
     }
 }

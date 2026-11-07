@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::resources::units::Evidence;
 use crate::resources::{schema, validate_relative_path};
 use crate::resources::{DenyUnknownFields, GitSource};
 use crate::{CoreError, Result};
@@ -106,11 +107,11 @@ impl InputBinding {
             BindingKind::Value | BindingKind::FromPromotion => Ok(()),
             BindingKind::FromUnit => {
                 let source = self.from_unit.as_ref().expect("kind agrees with the set field");
-                match (&source.output, &source.artifact) {
-                    (Some(_), None) | (None, Some(_)) => {}
+                match (&source.output, &source.artifact, &source.observation) {
+                    (Some(_), None, None) | (None, Some(_), None) | (None, None, Some(_)) => {}
                     _ => {
                         return Err(CoreError::config(format!(
-                            "{field}.fromUnit must set exactly one of output and artifact"
+                            "{field}.fromUnit must set exactly one of output, artifact, and observation"
                         )))
                     }
                 }
@@ -236,22 +237,25 @@ pub struct UnitInputSource {
     pub environment: Option<String>,
     /// Producing unit name.
     pub unit: String,
-    /// Declared output name. Set exactly one of `output` and `artifact`.
+    /// Declared output name. Set exactly one of `output`, `artifact`, and `observation`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
-    /// Published artifact name. Set exactly one of `output` and `artifact`.
+    /// Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<String>,
+    /// Declared observed value name: a value the unit's driver reads from the system the unit manages. Set exactly one of `output`, `artifact`, and `observation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
     /// Expected artifact kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// JSON Pointer inside the output or artifact.
+    /// JSON Pointer inside the output, artifact, or observed value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
-    /// Required evidence level: `published` or `attested`.
+    /// Required evidence level: `published` (a current receipt, the default) or `attested` (every attestation the producer declares passes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<String>,
-    /// Required attestations.
+    pub evidence: Option<Evidence>,
+    /// The producer's attestations to require, instead of all it declares; each must pass for the producer's current receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
 }

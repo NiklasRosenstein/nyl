@@ -40,4 +40,4 @@ pub mod validation;
 pub mod yaml;
 
 // Re-export commonly used types
-pub use error::{NylError, Result};
+pub use error::{KubeErrorKind, NylError, Result};

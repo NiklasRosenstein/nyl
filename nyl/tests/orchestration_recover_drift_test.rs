@@ -85,7 +85,6 @@ impl Harness {
             process_env: self.process_env.clone(),
             cancellation: Cancellation::default(),
             prompt: None,
-            observer: None,
             progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -545,6 +544,8 @@ struct Recorder {
     /// Cancelled by the first `detect-drift` call, as a signal during it would.
     cancel: Mutex<Option<Cancellation>>,
     exec_failure: Mutex<Option<bool>>,
+    /// The artifact names each `teardown` call was given, by unit.
+    teardown_artifacts: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 /// A fake kind that records what its `detect-drift` calls see and lets time pass
@@ -627,6 +628,11 @@ impl Driver for Recording {
         self.inner.inspect(ctx, unit)
     }
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
+        self.recorder
+            .teardown_artifacts
+            .lock()
+            .unwrap()
+            .push((unit.unit.name.to_string(), ctx.artifacts.keys().cloned().collect()));
         self.inner.teardown(ctx, unit)
     }
     fn build(
@@ -665,6 +671,7 @@ impl Harness {
             seen: Mutex::new(Vec::new()),
             cancel: Mutex::new(None),
             exec_failure: Mutex::new(None),
+            teardown_artifacts: Mutex::new(Vec::new()),
         });
         let fakes: [(&str, Arc<dyn Driver>); 3] = [
             ("OpenTofu", Arc::new(FakeInfra::new(harness.script.clone()))),
@@ -1369,6 +1376,7 @@ fn exec_repair(harness: &Harness) -> nyl_orchestration::report::StateOperationRe
     let base = harness.context();
     let tools = ProcessRunner::new();
     let context = nyl_orchestration::shell::run::RunContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         base: &base,
         sources: &job.sources,
         renderer: &job.renderer,
@@ -1378,7 +1386,6 @@ fn exec_repair(harness: &Harness) -> nyl_orchestration::report::StateOperationRe
         process_env: &harness.process_env,
         secrets: None,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress: None,
         prompt: None,
     };
@@ -1409,4 +1416,28 @@ fn test_operator_fence_restores_prior_observation_only_before_effects() {
     let after = harness.show(OBSERVED, "observed/units/network.yaml");
     assert!(after.contains("operatorModified"));
     assert_ne!(after, prior);
+}
+
+/// Catches a teardown that runs without the artifacts its unit recorded: the
+/// driver of a unit that published something needs them to know what it
+/// published before (a publication's last tree commit), and the engine hands
+/// every driver the stored artifacts of the unit, whatever its kind.
+#[test]
+fn test_a_teardown_is_given_the_artifacts_the_unit_recorded() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+
+    let torn = harness.invoke(&["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]);
+    assert!(torn.exit <= 2, "{}", torn.stderr);
+
+    let calls = recorder.teardown_artifacts.lock().unwrap().clone();
+    let (_, artifacts) = calls
+        .iter()
+        .find(|(unit, _)| unit == "kubernetes")
+        .unwrap_or_else(|| panic!("the unit was torn down: {calls:?}"));
+    assert!(
+        artifacts.iter().any(|name| name == "tree"),
+        "the stored artifacts reach the driver: {artifacts:?}"
+    );
 }

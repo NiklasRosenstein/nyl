@@ -561,6 +561,8 @@ mod tests {
                 execution_key: key("current-old"),
                 observed_commit: Some(commit(COMMIT)),
                 run: None,
+                observation: None,
+                observed_at: None,
             }),
         );
         let (ready, skipped) = world.select(None);

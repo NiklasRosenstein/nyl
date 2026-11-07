@@ -164,6 +164,9 @@ pub struct RenderPreflightResult {
     pub duplicates: HashMap<ResourceKey, usize>,
     pub kube_client: Option<KubeRsClient>,
     pub raw_client: Option<Client>,
+    /// The publication destination of the selected target, which a release
+    /// revision applied for it records.
+    pub release_publication: Option<nyl_render::kubernetes::ReleasePublication>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -385,6 +388,11 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         (None, None)
     };
 
+    let release_publication = inventory
+        .as_ref()
+        .zip(resolved_target.as_ref())
+        .map(|(inventory, resolved)| nyl_render::gitops::publication::release_publication(inventory, &resolved.target))
+        .transpose()?;
     Ok(RenderPreflightResult {
         project_config,
         project_root,
@@ -398,6 +406,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         duplicates,
         kube_client,
         raw_client,
+        release_publication,
     })
 }
 

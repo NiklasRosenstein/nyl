@@ -10,49 +10,11 @@ use std::time::Duration;
 
 use colored::Colorize;
 
-use nyl_render::{
-    kubernetes::{prune::PruneDecision, ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey},
-    Result,
+use nyl_render::kubernetes::{
+    lifecycle::{ApplyEvent, ApplyExecutionResult, ReleaseRun},
+    prune::PruneDecision,
+    ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey,
 };
-
-/// Something that happened during an apply, reported as it happens.
-pub(crate) enum ApplyEvent<'a> {
-    /// One resource finished applying.
-    Applied {
-        key: &'a ResourceKey,
-        result: &'a Result<ApplyOutcome>,
-    },
-    /// After a resource applied, a handoff released the fields `manager` owned
-    /// of it, or failed to.
-    OwnershipReleased {
-        key: &'a ResourceKey,
-        manager: &'a str,
-        result: &'a Result<()>,
-    },
-    /// Pruning of `count` resources that are no longer desired begins.
-    PruneStarted { count: usize },
-    /// One pruned resource finished deleting.
-    Pruned {
-        key: &'a ResourceKey,
-        result: &'a Result<()>,
-    },
-    /// `count` deleted resources are still terminating (finalizers); the resources
-    /// they may depend on are deleted once they are gone.
-    PruneWaiting { count: usize },
-    /// Deleted resources still had not terminated when the wait timed out; pruning
-    /// continues without them.
-    PruneWaitTimedOut { keys: &'a [&'a ResourceKey] },
-    /// Pruning finished.
-    PruneFinished,
-    /// A resource no longer desired is kept by its Argo CD `Prune` sync option.
-    PruneKept {
-        key: &'a ResourceKey,
-        decision: PruneDecision,
-    },
-}
-
-/// Receiver of [`ApplyEvent`]s.
-pub(crate) type ApplyEventSink<'s> = dyn FnMut(ApplyEvent<'_>) + Send + 's;
 
 /// A phase of an apply whose duration is reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,15 +127,17 @@ impl<'a> ApplyRenderer<'a> {
             ApplyEvent::PruneKept {
                 key,
                 decision: PruneDecision::Retain,
+                option,
             } => println!(
-                "{} Kept {}: its sync option Prune=false retains it",
+                "{} Kept {}: its sync option {option}=false retains it",
                 "!".yellow().bold(),
                 key
             ),
-            ApplyEvent::PruneKept { key, .. } => println!(
-                "{} Kept {}: its sync option Prune=confirm needs --confirm-prune to delete it",
+            ApplyEvent::PruneKept { key, option, .. } => println!(
+                "{} Kept {}: its sync option {option}=confirm needs --confirm-{} to delete it",
                 "!".yellow().bold(),
-                key
+                key,
+                option.to_lowercase()
             ),
         }
     }
@@ -293,5 +257,26 @@ fn effective_outcome(outcome: &ApplyOutcome) -> &ApplyOutcome {
     match outcome {
         ApplyOutcome::DryRun { would_be } => effective_outcome(would_be),
         other => other,
+    }
+}
+
+/// What a handoff released, for the summary.
+pub(crate) fn ownership_report(apply: &ApplyExecutionResult) -> Option<OwnershipReport<'_>> {
+    apply.released_manager.as_deref().map(|manager| OwnershipReport {
+        released_manager: manager,
+        released_count: apply.released_count,
+        release_failed_count: apply.release_failed_count,
+    })
+}
+
+/// The summary of one applied and recorded release.
+pub(crate) fn report_of<'a>(run: &'a ReleaseRun, timings: &'a [PhaseTiming]) -> ApplyReport<'a> {
+    ApplyReport {
+        outcomes: &run.apply.outcomes,
+        failed_count: run.apply.failed_count,
+        ownership: ownership_report(&run.apply),
+        prune_failed_count: run.prune_failed_count,
+        release: Some(&run.release),
+        timings,
     }
 }

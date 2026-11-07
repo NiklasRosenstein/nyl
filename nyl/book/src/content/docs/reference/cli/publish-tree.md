@@ -33,6 +33,14 @@ working-tree render explicitly; the ownership index records `dirty: true` and
 the commit message includes `Nyl-Source-Dirty: true`. The two options are
 mutually exclusive.
 
+A prefix that an orchestrated `KubernetesPublication` unit owns (its index names the unit
+in an `owner` member) is refused with `NYL-TREE-OWNED-BY-UNIT`, as it
+is by [`render-tree`](/nyl/reference/cli/render-tree/), because Nyl cannot tell
+here whether the unit still exists. Publish through the environment that owns
+it, or release the prefix after `nyl state forget` by removing the `owner`
+member from `<prefix>/_nyl/index.json` in a commit to the publication branch; see
+[Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership).
+
 Nyl clones the destination branch into a clean checkout, reconciles indexed
 files, stages only the selected target prefix, commits the result, fetches the
 branch again, and refuses to push when its remote tip changed. A publication
@@ -48,6 +56,12 @@ files the commit adds, modifies, or removes. Changes to other catalog files,
 such as AppProjects, list the catalog Application. The paragraph is omitted
 when no Application changes, for example when only state files do.
 Orchestrated publications list the same paragraph.
+
+A target with [`catalogApplication.shared`](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance)
+generates no catalog Application, and `publish-tree` publishes only the
+target's own tree and warns about the catalog's manifest, which a
+`KubernetesPublication` unit of the target publishes
+(`nyl build <unit> -- --shared-catalog --push`).
 
 ```text
 Render deployment target production

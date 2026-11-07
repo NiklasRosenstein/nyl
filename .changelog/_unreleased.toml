@@ -17,6 +17,155 @@ description = "Orchestration can publish Kubernetes trees: the `KubernetesPublic
 author = "@NiklasRosenstein"
 
 [[entries]]
+id = "fe1f4df2-e59c-4637-a945-a3078b4e23c5"
+type = "feature"
+description = "A `KubernetesPublication` unit can declare its DeploymentTarget inline (`spec.target.inline`), named `<environment>-<unit>`, and publishes it through the same path as a named target; `nyl validate` compiles it with the other targets. The published ownership index records the owning unit, and a publication or teardown refuses a prefix another existing unit owns (`NYL-KUBERNETES-OWNER-FENCED`, or `NYL-KUBERNETES-OWNER-UNKNOWN` when the owner's state cannot be read). Renaming a publication's target fails with `NYL-KUBERNETES-TARGET-CHANGED` until the unit is replaced with `nyl teardown --unit`. `nyl plan` and `nyl reconcile` warn about unmet teardown requirements and leftovers of every publication that would be torn down. The `observe` teardown wait is rejected until Nyl can read Argo CD"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6d0a2c1b-4f3e-4b7a-9a52-0e8c5d7b1f34"
+type = "feature"
+description = "`nyl build` works for `KubernetesPublication` units: it renders the unit's tree as a run does, `nyl build <unit> -- --diff` compares it with the tree published at the destination (files added, modified, or removed, and the unit that owns it), and `-- --push` publishes it only for a target no environment owns, refusing with `NYL-KUBERNETES-BUILD-TARGET-OWNED` or `NYL-TREE-OWNED-BY-UNIT` and the fix otherwise. A unit with an inline target builds only with `-e`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b254a321-40dc-43ef-8ebe-c6b720f2c985"
+type = "feature"
+description = "A `KubernetesPublication` unit that declares `observe: {}` (an object, so options can be added later; only `{}` is accepted, and there is no `mode` field) attests `accepted` and `healthy` through `nyl attest`: it reads the reconciler that runs its target, Argo CD, through a reconciler-neutral reader, so one set of rules judges any reconciler. It reads the target's generated Argo CD Applications, matches each one's running revision (the newest full sync in `status.history`, never OutOfSync) to the publication by Application directory tree, and records each Application's running publication and health in the attestations' details (`deployments`, with the `reconciler` that was read). The `observe` teardown wait works too (the default for a unit that declares `observe`, and a validation error for one that does not), and `NYL-KUBERNETES-MODE-UNSUPPORTED` and `NYL-KUBERNETES-TEARDOWN-WAIT-UNSUPPORTED` are gone. An ArgoCDInstance declares how it is read in `spec.access`: the Kubernetes API of its control-plane Cluster (the default, through the Cluster's `spec.live.context` and the kubeconfig the unit admits as `KUBECONFIG`) or the Argo CD API server (`method: api`, with a token the unit admits as `ARGOCD_AUTH_TOKEN` or the declared `tokenEnv`). An Argo CD that cannot be read makes `nyl attest` report the unit unknown and record nothing, and the removal wait never concludes from Applications the credential could not see. An unchanged attestation is rewritten with its new time once it is 15 minutes old, so `maxAttestationAge` works for a re-verified system"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8f0cb9fb-4f2d-408d-b8b8-12b80215bf9c"
+type = "feature"
+description = "Let `dependsOn` entries and `fromUnit` references require a producer's attestations with `evidence: attested` or `attestations`: the consumer stays blocked (`attestation-pending` or `attestation-failing`, with `NYL-ATTESTATION-PENDING` or `NYL-ATTESTATION-FAILING`) until `nyl attest`, or the producer's own `reconcile`, records a pass for its current receipt; naming an attestation the producer does not declare is `NYL-ATTESTATION-UNDECLARED` (replacing `NYL-ATTESTATIONS-UNSUPPORTED`). Requiring an attestation that only an external source supplies (`from: external`), by name or through `evidence: attested`, is `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` until external attestations can be recorded. A new receipt drops the attestations of the one it replaces, and a report names the producer's environment when a consumer waits for another environment's unit"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "3b6e1d2a-5c7f-4e08-9d41-7a2f6c0b8e15"
+type = "feature"
+description = "Units can declare observed values (`observations`, with `type`, `maxAge`, and a driver-owned `from`) that their driver reads from the system the unit manages, and other units reference them with `fromUnit: {unit, observation}`. An observed value is an observation of the producer's current receipt, recorded in `observed/units/<unit>/observations.yaml` and dropped with the receipt it was read for. A pending value blocks its consumers (`NYL-OBSERVATION-PENDING`); a changed value makes them execute again without the producer executing. `nyl reconcile` reads every current unit before it resolves its consumers and waits up to `observationWait` after executing one, and the new `nyl observe` reads and records values without executing anything, for jobs that hold read credentials a reconcile lacks, naming the consumers it leaves ready (`NYL-OBSERVATION-CHANGED`); `nyl get observation` prints a recorded value. A `KubernetesPublication` that declares `observe: {}` reads a field of a resource its target renders (`NYL-KUBERNETES-OBSERVATION-UNOWNED` otherwise) from the workload Cluster, through that Cluster's own `spec.live.context` in the admitted `KUBECONFIG`, once the Application that owns the resource runs the receipt's publication. Kinds that read no observed values reject `observations` (`NYL-OBSERVATIONS-UNSUPPORTED`)"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "cced6584-cb1c-4838-b3fb-fdba2a18fd0b"
+type = "feature"
+description = "Add the `EnvironmentTemplate` resource for preview environments. An instance is created with `nyl state init -e <name> --template <template> --param <name>=<value>`, or by `nyl reconcile --template`, which then reconciles it from its own checkout; it exists only in state (`state.yaml` records the template, its parameters, the source commit, and `expiresAt`), shares one state ref with other instances through `state.path`, and behaves like a declared Environment for `plan`, `reconcile`, `status`, `get`, `attest`, `observe`, `teardown`, `state delete`, and `build`. A plain run renders an instance at its recorded source commit. A template's `deletionPolicy: Teardown` overrides every unit's policy for kinds that support teardown, and `allowTeardown` lets omission teardown proceed unattended. `nyl get environments` lists instances by listing their state; `nyl validate` checks each template through sample instances, so generated Argo CD names, publication prefixes, and state locations that would collide across instances are found early, and every publication render and direct `build --push` includes the instances state lists. New codes: `NYL-INSTANCE-TEMPLATE-UNKNOWN`, `NYL-INSTANCE-PARAMETER-INVALID`, `NYL-INSTANCE-NAME-TAKEN`, `NYL-INSTANCE-TEMPLATE-REQUIRED`, `NYL-INSTANCE-AMBIGUOUS`, and `NYL-TEMPLATE-INVALID`. Expiry removal, `maxInstances`, and the shared catalog are still to come"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "845a0f58-fa1a-4405-9fdb-27a07fb63e2e"
+type = "feature"
+description = "Add the `tojson` template filter, so a unit document can embed a structured value, such as an Environment's `values.target`, as `target: {{ values.target | tojson }}`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b9a5435b-ce4d-4839-b088-9d48112f8bb0"
+type = "feature"
+description = "Complete the lifecycle of preview instances. Activity extends an instance's `expiresAt` to now plus the template's `ttl`: `state init --template`, `reconcile --template`, and every other `reconcile -e <instance>` unless `--no-extend`; the next reconcile that finds an instance expired removes it (`teardown --all`, then `state delete`, never while a unit still has resources) unless `--renew` or the pull request job's `--template` keeps it, and `reconcile --template <name>` without `-e` is the scheduled fleet job that maintains every live instance at its recorded commit without extending it, removes the expired ones, and reports an instance whose lease is held as `busy`. The removal's teardown needs the template's `allowTeardown` or `--allow-teardown`, and repeats its decision under the lease (`NYL-INSTANCE-REMOVAL-PENDING`, `NYL-INSTANCE-RENEWED`). `maxInstances` is enforced at creation (`NYL-INSTANCE-LIMIT`, exit 2), and `--make-room` removes the oldest expired instances first, only as many as needed. `keepSource: true` is an opt-in (default `false`) for previews that may expire long after their branches are gone: it keeps each instance's recorded source commit fetchable through a ref of its own, `refs/nyl-keep/<keepId>/<commit>` (the id is recorded in `state.yaml`), until `state delete`, and the job then needs push access to `refs/nyl-keep/*` (`NYL-INSTANCE-KEEP-FAILED`); without it, nothing is pushed to the source repository and the pull request closed job tears the instance down. A renewal undoes a removal that was recorded as pending and has not started, and a pull request's `reconcile --template` creates an instance the fleet removed again. `nyl state move --template` moves every instance of a template after its `state` changed, and with `--from-template` records them under a renamed template. `state init --template` warns about unmet teardown requirements and a `manual` `teardownWait` that stops unattended removal (`NYL-TEARDOWN-WAIT-MANUAL`). `status`, `plan`, and `get environments` show expired instances (`NYL-INSTANCE-EXPIRED`); a new operation `state-renew` records the extension; `NYL-INSTANCE-OPTION-INVALID` and `NYL-INSTANCE-NOT-LISTABLE` report options and templates the lifecycle cannot serve"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "5af2a924-6a49-4274-abe0-be4c90afca35"
+type = "feature"
+description = "A recorded source commit that the entry clone lacks is fetched by its exact id from the clone's `origin`, after the retained snapshots and the instance's keep ref and with the same credentials, so a pull request closed job that checks out the default branch tears a preview down at its recorded commit without `keepSource` or `--source` wherever the host keeps `refs/pull/<n>/head` (GitHub) or `refs/merge-requests/<n>/head` (GitLab) after the branch is deleted. An explicit full commit id passed to `--source` that the clone lacks is fetched the same way. A failed fetch leaves the commit missing as before, and `--local` fetches nothing"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "bf735a33-1dbf-4c41-824f-846aecfdb57d"
+type = "feature"
+description = "`nyl reconcile -e <instance> --template` and `nyl state init --template` accept `--source-ref <ref>`, a full ref name under `refs/` such as `refs/pull/123/head`, recorded in the instance's `state.yaml` as `sourceRef` next to `sourceCommit` (a run without the flag keeps the recorded one). For a host that will not serve a commit by its id, a later run that lacks the recorded commit and cannot get it by its id or a keep ref fetches that ref by name from `origin` and looks for the recorded commit in it; the ref's tip is never used, and a commit still missing is `NYL-SOURCE-UNAVAILABLE` as before. The ref is checked by its syntax only, with no network access"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d1401c9a-c0a9-4b63-984d-3b0a7b2520de"
+type = "feature"
+description = "Add `catalogApplication.shared: {name}` to DeploymentTarget (and a template's inline target): many targets, such as every preview on a branch, share one self-managing catalog Application instead of one per target. Nyl renders it once, from the `shared` block and the ArgoCDInstance's catalog defaults, under the reserved prefix `_nyl/shared/<name>/` with its own ownership index whose owner is the string `catalog:<name>`; each target keeps its own tree and catalog directory without a catalog Application. A target's publication creates the manifest when the branch holds none and never overwrites it, recording `sharedCatalog.result` (`created`, `current`, or `differs`) in its `PublishedTree`; `nyl build <unit> -- --shared-catalog [--diff | --push]` renders, compares, and, as the one writer, replaces it (`NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG` for a target that shares none). Teardown readiness reads the shared Application, a unit never takes a catalog's prefix over, and the rules across targets (one description, one revision, no other catalog or target on that revision, no target prefix in `_nyl/shared`) fail with `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`. A template instance's units can read declared environments with `fromUnit` and `dependsOn` entries that name an `environment`, and a declared producer is protected against teardown, `state delete --teardown`, and omission while an instance reads it; an instance is a consumer only, so naming one as a producer fails with `NYL-REFERENCE-INSTANCE-PRODUCER`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "5b0f6c1e-2d94-4f0a-8a57-9c3e1b7a40d2"
+type = "feature"
+description = "Drivers can report coded warnings with a successful execution (`Outcome::Succeeded` `warnings`), which Nyl records with the receipt and shows in the run report, `plan`, and `status` until the unit executes again; a `KubernetesPublication` warns `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` when the shared catalog manifest on the branch differs from the one it renders. A shared catalog's teardown readiness follows the manifest on the branch, recorded without keying the unit and read again when a teardown starts. `render-tree`, `publish-tree`, and `diff-tree` now check the shared-catalog rules across targets like `nyl validate` when a project may declare one: a target shares a catalog, a target could not be parsed statically, the project has an EnvironmentTemplate, or a publication unit declares or may declare an inline target (a mapping, a templated name, or a document that is not YAML before rendering). They then render every environment's units, so an unrelated broken unit fails them; projects with only static targets and no templates or inline units are unaffected"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6efe7756-b86d-47a3-9bc4-258a8c9af4d2"
+type = "docs"
+description = "Add an end-to-end example to the Orchestration guide: one project with an OciImage, an OpenTofu configuration, a KubernetesPublication, and a preview template, reconciled locally and in GitHub Actions (reconcile on main, `nyl attest` and `nyl observe` with either Argo CD access method, a preview per pull request, its close job, and the scheduled fleet reconcile and shared-catalog writer), with the credentials the units admit and the token a preview job needs for keep refs. M5 is complete: its exit criterion is met by the reference scenarios, which now all run in both tiers with the built-in publication driver"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "1f9d2003-0882-458d-a02c-3d76a7717781"
+type = "fix"
+description = "`nyl teardown --all --source <revision>` and `nyl state delete --teardown --source <revision>` now take the files of a unit's Git source field from that revision when the stored spec pinned the field to the unit's recorded source commit (an OpenTofu or Terraform `source`, an image `context`), as they already did for the unit's own files, so a lost source commit no longer locks an instance out of removal. Explicit `revision` and `commit` locks and other repositories stay as declared, and the stored spec, its digests, and approvals are unchanged. A teardown that substitutes the recorded commit now warns with `NYL-SOURCE-OVERRIDE`, naming the unit, the recorded commit, and the commit used"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8549e5cb-c8c8-41ac-bea9-5cf6765ab316"
+type = "fix"
+description = "`nyl state delete --teardown` prints the warnings of the teardown it ran when the deletion completes, and of its units, such as `NYL-SOURCE-OVERRIDE` for a `--source` substitution or `NYL-UNIT-RELEASED` for an image left in a registry; they were only in the JSON report's `details.teardown`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "b193513c-6b23-4d55-bb99-f0fe0ee56759"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) now also blocks an owned Namespace that renders `Prune=confirm`, not only `Delete=confirm`: Argo CD holds an Application's cascade deletion for either, so a group declaring only `namespace: {deletePolicy: Automatic}` stalled a teardown with `applications-remain` while the default `prunePolicy: Confirm` kept the Namespace waiting for confirmation. The finding and its fix name both settings (set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`), and readiness reads the rendered sync options so templates and overrides count"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ace1e9b6-2f4f-4722-8b3c-cb82c9247c39"
+type = "feature"
+description = "Add a direct reconciler: a DeploymentTarget with `reconciler: {direct: {}}` is applied by Nyl itself through `KubernetesPublication` (publish the tree, then apply each Release with the mechanics of `nyl apply`), generating no Argo CD Application, AppProject, or catalog. Release state records its owning unit and publication, Releases are fenced by owner, `observe: {}` reads the release state and rollout status, and teardown deletes in two phases"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "12d1e950-dfe6-4ee2-89a0-3d1f9e07b489"
+type = "feature"
+description = "Add `observe: {waitHealthy: {timeout}}` to `KubernetesPublication`: after the publish, `nyl reconcile` polls the target's reconciler with backoff until it is healthy and records the `accepted` and `healthy` attestations, or fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment. An Argo CD catalog Application that is not visible yet, as on a first deploy before the operator applies the published tree, is waited for, and the timeout names it and says to apply it"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "45acea14-0e8e-482d-930f-d95e57734ee0"
+type = "feature"
+description = "Add `--take-over` to `nyl apply`, `nyl release rollback`, and `nyl release delete`; without it they refuse a release an orchestrated unit owns (`NYL-RELEASE-OWNED-BY-UNIT`)"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d26c5793-ee2d-4c9c-826e-bdd8dc2aa653"
+type = "breaking change"
+description = "Every command that connects through a Cluster (`nyl apply --target`, `nyl diff --target`, `nyl release list`, `show`, `history`, `rollback`, and `delete` with `--target`, and `nyl capture cluster`) uses the Cluster's declared `live.context` and never the current context once one is declared; without one, the current context is used only when the Cluster's destination server can be verified against it, and an in-cluster or by-name destination needs `--context`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "96c08d12-ae5e-4be4-97b9-1b04dfcbfd57"
+type = "fix"
+description = "`nyl release delete` deletes a release's resources in reverse apply order, waiting for each kind to terminate, as a prune does, instead of in one plain loop"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ef4cda57-f220-4b05-8902-7e16d46a3acd"
+type = "fix"
+description = "`NYL-KUBERNETES-TARGET-CHANGED` also compares the Cluster a `KubernetesPublication` published for, and the unit's published tree records its reconciler and Cluster"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "a6c115c5-7b48-43d8-adae-ad6f33485a0d"
+type = "breaking change"
+description = "A DeploymentTarget declares its reconciler explicitly: `spec.reconciler` is required and has exactly one member, `argocd` or `direct`, and a target that omits it fails with `NYL-TARGET-RECONCILER-MISSING`. The top-level `spec.argocdRef` is removed (`NYL-TARGET-ARGOCD-REF-REMOVED`); name the ArgoCDInstance in `reconciler: {argocd: {instanceRef: {name: <instance>}}}`, which stays mandatory once any explicit ArgoCDInstance exists (`NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED`), and write `reconciler: {argocd: {}}` for the implicit target-local instance a target without `argocdRef` used to get (naming an instance with none declared is `NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED`; naming both members is `NYL-TARGET-RECONCILER-AMBIGUOUS`). `reconciler: {direct: {}}` is unchanged. The same applies to inline targets (`spec.target.inline`), `nyl init` scaffolds `reconciler: {argocd: {}}`, and `nyl create target` names the project's ArgoCDInstance (`--argocd-instance <name>` is required when several are declared) or takes `--reconciler direct`. Migrate each target: `argocdRef: {name: dev}` becomes `reconciler: {argocd: {instanceRef: {name: dev}}}`, and a target with neither field gains `reconciler: {argocd: {}}`. Published trees and their ownership indexes are unchanged"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "083f441d-6b33-4407-9c01-cb10fe49e34b"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) resolves `Delete` and `Prune` as Argo CD does: a resource without the option itself takes its Application's `spec.syncPolicy.syncOptions`, so a `Prune=confirm` or `Delete=confirm` that an ApplicationGroup's `syncPolicy.syncOptions` (or a Release's allowed `+syncOptions`) puts on its workload Applications is no longer reported ready while Argo CD holds the deletion, and a resource's own value still wins one option at a time. The finding now covers every rendered resource of a workload Application, not only Namespaces (a resource with `Delete=false`, a CustomResourceDefinition, or `helm.sh/resource-policy: keep` does not hold the deletion), and names the resource or the Application option. The recorded `teardownSettings` list them as `deletionConfirmations` instead of `namespacePrunePolicies`, and `namespaceDeletePolicies` holds each Namespace's effective `Delete`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "de12f4af-673a-4e7a-a4df-67aa0076f9f4"
+type = "fix"
+description = "Teardown readiness (`NYL-TEARDOWN-CATALOG-MANUAL-SYNC`) no longer reports a catalog ready that syncs with `prune: true` but cannot prune a removed workload Application: Argo CD's automated sync resolves `Prune` for each pruned Application as its own `argocd.argoproj.io/sync-options` annotation (an ApplicationGroup's `annotations` reach every workload Application), else the catalog's `spec.syncPolicy.syncOptions`, and `Prune=confirm` keeps the whole prune waiting for a confirmation while `Prune=false` skips the Application, so the teardown stalled with the Applications still in the cluster. The finding names the catalog option or the Application, and a shared catalog's pre-teardown check on the branch's manifest holds on it too. `Delete=confirm` on the catalog is not read, because it only applies when the catalog Application itself is deleted, which a teardown does not do. The recorded `teardownSettings` list the holds as `catalogPruneHolds`, and `deletionConfirmations`, only when there are any. An Application's own `Prune` annotation is read even when a parent Application the project writes owns the catalog, because it holds whichever catalog syncs the Application"
+
+[[entries]]
 id = "74debda0-d402-4763-9044-75c474a813da"
 type = "feature"
 description = "`nyl render`, `diff`, `apply`, and `release` work without GitOps configuration: in a project that declares no DeploymentTarget, `--context` selects the kube context, and the Kubernetes version and API versions come from the live cluster. With a declared target, `--context` still only selects how to reach its Cluster. `nyl render --context` is no longer deprecated, and `release` subcommands infer the sole target like `diff` and `apply`"

@@ -24,6 +24,8 @@ deadlines match the walkthroughs' prose. The
 | [`held-uncertain`](held-uncertain/scenario.yaml) | Holds on uncertain units: a consumer reconciles against the held producer's last receipt; a held marker for a unit never reconciled | M3 |
 | [`drift`](drift/scenario.yaml) | Drift: `verify` finds drift, `reconcile` repairs the idempotent unit, the other awaits approval, and `driftRepair: manual` waits for `--reapply` | M3 |
 | [`observed-value`](observed-value/scenario.yaml) | Observed value: a value that arrives after the publication, a run that waits for it, a change that reaches its consumer without the producer executing, a run that cannot read, and `nyl observe` leaving the consumer ready | M5 |
+| [`attested-evidence`](attested-evidence/scenario.yaml) | Attested evidence for dependents: consumers wait for `pending` and `failing` attestations, a pass unblocks them without executing the producer, and a new receipt starts pending again | M5 |
+| [`health-wait`](health-wait/scenario.yaml) | A publication that waits for health and times out: a retryable `timeout` failure with no receipt, converged by the next reconcile | M5 |
 | [`stale-promotion-evidence`](stale-promotion-evidence/scenario.yaml) | Promotion with stale source evidence | M6 |
 
 These files are the contract's acceptance tests.

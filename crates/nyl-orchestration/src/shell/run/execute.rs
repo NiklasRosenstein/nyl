@@ -23,8 +23,8 @@
 #[allow(clippy::wildcard_imports)] // The run module's private helpers and imports.
 use super::*;
 use crate::rules::transitions::{self, Applied, Event};
-use nyl_core::orchestration::driver::{Inspection, RecoveryPolicy};
-use nyl_core::orchestration::state::{ApprovalRecord, FailureCategory};
+use nyl_core::orchestration::driver::{IncarnationDirectory, Inspection, RecoveryPolicy};
+use nyl_core::orchestration::state::{ApprovalRecord, Attestation, FailureCategory};
 
 /// One finished execution.
 pub(super) struct Execution {
@@ -41,6 +41,10 @@ pub(super) struct Execution {
     pub(super) checkpoint: Option<Checkpoint>,
     /// The new artifact set of a success.
     pub(super) artifacts: Option<BTreeMap<String, ArtifactDocument>>,
+    /// The attestations the driver reported with a success, for the new
+    /// receipt (`source: {driver: reconcile}`); the receipt's earlier
+    /// attestations are replaced by them.
+    pub(super) attestations: Option<BTreeMap<String, Attestation>>,
     /// A fault killed the run after the effect.
     pub(super) killed: bool,
 }
@@ -102,6 +106,7 @@ pub(super) fn execute_batch(
         read_desired: snapshot.tips.desired.as_ref(),
         cancellation: &session.request.cancellation,
         lease_deadline: session.lease_deadline.get(),
+        incarnations: &session.incarnations,
     };
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -133,6 +138,7 @@ struct Shared<'s> {
     read_desired: Option<&'s CommitId>,
     cancellation: &'s super::Cancellation,
     lease_deadline: Option<Timestamp>,
+    incarnations: &'s dyn IncarnationDirectory,
 }
 
 /// The condition reason of a unit that was running when the run was cancelled.
@@ -174,6 +180,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         errors: Vec::new(),
         checkpoint: None,
         artifacts: None,
+        attestations: None,
         killed: false,
     };
     let before_effects = |execution: &mut Execution, message: String| {
@@ -199,6 +206,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 context.sources,
                 job.slot,
                 job.commit,
+                unit.source_revision.as_ref(),
                 driver,
                 unit.resolved_spec.as_ref().unwrap_or(&unit.spec),
                 shared.project_dir,
@@ -277,6 +285,8 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         deadline,
     };
     let call = |operation: DriverOperation, now: Timestamp| ExecutionContext {
+        instances: shared.context.instances,
+        clock: context.base.clock,
         secrets: secrets.clone(),
         interactive: false,
         artifacts: job.previous_artifacts.clone(),
@@ -295,6 +305,8 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         commit_identity: context.commit_identity,
         cache_dir: shared.cache_dir.clone(),
         teardown_wait: None,
+        incarnations: shared.incarnations,
+        dirty_source: false,
     };
 
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
@@ -324,6 +336,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             outputs,
             artifacts,
             attestations: Vec::new(),
+            warnings: Vec::new(),
         })),
         Inspected::NotApplied => driver.reconcile(&call(DriverOperation::Reconcile, started), unit),
     };
@@ -358,14 +371,16 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             outputs,
             artifacts,
             mut versions,
-            ..
+            attestations,
+            warnings: driver_warnings,
         } => {
             let key = unit
                 .execution_key
                 .clone()
                 .expect("an executed unit has an execution key");
             let (outputs, warnings) = recorded_outputs(unit, outputs);
-            execution.warnings = warnings;
+            // The driver's own coded warnings are recorded with the receipt, unchanged.
+            execution.warnings = warnings.into_iter().chain(driver_warnings.iter().cloned()).collect();
             let (set, digests) = recorded_artifacts(shared.environment, unit, &key, artifacts);
             execution.result = if uncertain {
                 UnitResult::Recovered {
@@ -377,24 +392,39 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                 }
             };
             execution.artifacts = Some(set);
-            Event::Succeeded {
-                receipt: Receipt {
-                    execution_key: key,
-                    behavior_version: driver.behavior_version(),
-                    run: shared.run.clone(),
-                    read_desired: shared.read_desired.cloned(),
-                    started_at: started,
-                    finished_at: finished,
-                    versions: {
-                        versions.insert("nyl".to_owned(), context.base.version.clone());
-                        versions
-                    },
-                    approval: job.approval.clone(),
-                    provenance: unit.provenance.clone(),
-                    outputs,
-                    artifacts: digests,
+            let receipt = Receipt {
+                execution_key: key,
+                behavior_version: driver.behavior_version(),
+                run: shared.run.clone(),
+                read_desired: shared.read_desired.cloned(),
+                started_at: started,
+                finished_at: finished,
+                versions: {
+                    versions.insert("nyl".to_owned(), context.base.version.clone());
+                    versions
                 },
-            }
+                approval: job.approval.clone(),
+                provenance: unit.provenance.clone(),
+                outputs,
+                artifacts: digests,
+                warnings: driver_warnings,
+            };
+            // Only names the unit declares are recorded; a declared name the
+            // driver left out stays pending for `nyl attest` or a later run.
+            let declared = crate::rules::evidence::declared(unit);
+            let outcomes: Vec<_> = attestations
+                .into_iter()
+                .filter(|outcome| declared.contains(&outcome.name))
+                .collect();
+            execution.attestations = Some(crate::rules::checks::attestations(
+                shared.environment,
+                unit,
+                &receipt,
+                &outcomes,
+                "reconcile",
+                finished,
+            ));
+            Event::Succeeded { receipt }
         }
         Outcome::AwaitingApproval { digest } => {
             execution.change_digest = Some(digest);

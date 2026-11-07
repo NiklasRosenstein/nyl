@@ -1,4 +1,4 @@
-// The orchestration roadmap, milestones M1 to M9, rendered on the Orchestration
+// The orchestration roadmap, milestones M1 to M10, rendered on the Orchestration
 // roadmap page. ROADMAP.md records the direction; progress lives here. Tick an
 // item in the change that ships it, and set `done` on a milestone only when
 // its exit criterion is met.
@@ -9,13 +9,14 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M4 is complete, and M5 has begun: the `KubernetesPublication` unit publishes trees with image digests and infrastructure outputs. Continue with M5: observing Argo CD, attestations, and preview environments.',
+    intro: 'M5 is complete: one `reconcile` builds an image, applies OpenTofu, and publishes Kubernetes manifests that consume the image digest and the infrastructure output; the same Releases render with static inputs in a target that does not use orchestration; the `KubernetesPublication` unit declares its target inline, tears down in two phases behind an owner fence, builds and diffs from `nyl build`, observes Argo CD to attest `accepted` and `healthy`, and reads observed values; EnvironmentTemplates create preview environments that expire, share one catalog, and are removed with their pull request; and all three reference scenarios pass in both tiers with the real publication driver. The Orchestration guide ends with an end-to-end example that runs locally and in GitHub Actions. Continue with M6: promotion paths.',
     steps: [
-      { text: 'Implement KubernetesPublication with pinned image digests and infrastructure outputs over render-tree and publish-tree.', done: true },
-      { text: 'Add publication observation, attestations, direct builds, and teardown ownership fences.', done: false },
-      { text: 'Add preview environment templates, expiry, limits, and end-to-end reference scenarios.', done: false },
+      { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks and an optional pull-request change gate.', done: false },
+      { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: false },
+      { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: false },
+      { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: false },
     ],
-    outro: 'Promotion paths follow in M6.',
+    outro: 'Value-only promotion, promotion from and into non-orchestrated targets, and attestation-gated paths follow in the rest of M6.',
   },
   stages: [
     {
@@ -102,17 +103,18 @@ export const orchestrationRoadmap = {
       title: 'Images and Terraform outputs into Kubernetes releases',
       summary: 'Kubernetes publications that consume image digests and Terraform outputs.',
       needs: ['M2', 'M4'],
-      exitCriterion: 'One reconcile builds an image, applies Terraform, and publishes Kubernetes manifests consuming both; the same Releases still render with static inputs in a target that does not use orchestration; all three reference scenarios, including preview closure and expiry, pass in both tiers.',
+      done: true,
+      exitCriterion: 'One reconcile builds an image, applies Terraform, and publishes Kubernetes manifests consuming both; the same Releases still render with static inputs in a target that does not use orchestration; all three reference scenarios, including preview closure and expiry, pass in both tiers. Met by the [reference scenarios](https://github.com/NiklasRosenstein/nyl/blob/develop/design/reference-scenarios.md) `reference/platform`, `reference/preview-closed`, and `reference/preview`, which run in both tiers with the real publication driver, and demonstrated by the [end-to-end example](/nyl/orchestration/end-to-end-example/).',
       items: [
         { text: 'Add the Kubernetes publication unit over `render-tree`/`publish-tree`.', done: true },
         { text: 'Resolve `fromUnit` Release input bindings into an explicit pinned input snapshot for rendering.', done: true },
-        { text: 'Distinguish `published` from `attested` evidence and named attestations for dependents.', done: false },
-        { text: 'Add the publication unit\'s observe mode: read generated Argo CD Applications\' last successful sync and health, match them to publication commits by Application directory tree, and attest `accepted` and `healthy` through `nyl attest`, with each Application\'s running publication and health in the attestations\' details.', done: false },
-        { text: 'Add observed values: the generic `observe` driver capability, `fromUnit: {unit, observation}`, re-observation in `reconcile` and a `nyl observe` command for jobs that hold the read credentials, `observationWait`, and the publication unit\'s reads of rendered resource fields once their Application runs the current publication (the `observed-value` walkthrough).', done: false },
-        { text: 'Document an end-to-end local/CI example.', done: false },
-        { text: 'Declare the `build` capability for `KubernetesPublication`: `nyl build` renders the tree, `--diff` compares it with the published tree, and `--push` publishes only targets no environment owns.', done: false },
-        { text: 'Support inline DeploymentTargets on `KubernetesPublication`, its two-phase teardown with the `teardownWait` strategies, ownership-index owner fencing, and the teardown readiness check with its warnings.', done: false },
-        { text: 'Add EnvironmentTemplates for preview environments: instances through `nyl state init --template`, `teardown --all`, `state delete`, shared state refs through `state.path`, cross-environment references to declared environments, sliding expiry, and `maxInstances`.', done: false },
+        { text: 'Distinguish `published` from `attested` evidence and named attestations for dependents.', done: true },
+        { text: 'Add the publication unit\'s opt-in observation (`observe: {}`): read generated Argo CD Applications\' last successful sync and health through a reconciler-neutral reader, match them to publication commits by Application directory tree, and attest `accepted` and `healthy` through `nyl attest`, with each Application\'s running publication and health in the attestations\' details; the `observe` `teardownWait` strategy waits on the same reading. Argo CD is read through the Kubernetes API of the instance\'s control-plane Cluster or through its API server, declared on the ArgoCDInstance (`spec.access`), with credentials only from the unit\'s admitted environment.', done: true },
+        { text: 'Add observed values: the generic `observe` driver capability, `fromUnit: {unit, observation}`, re-observation in `reconcile` and a `nyl observe` command for jobs that hold the read credentials, `observationWait`, and the publication unit\'s reads of rendered resource fields once their Application runs the current publication (the `observed-value` walkthrough).', done: true },
+        { text: 'Document an end-to-end local/CI example.', done: true },
+        { text: 'Declare the `build` capability for `KubernetesPublication`: `nyl build` renders the tree, `--diff` compares it with the published tree, and `--push` publishes only targets no environment owns.', done: true },
+        { text: 'Support inline DeploymentTargets on `KubernetesPublication`, its two-phase teardown with the `delay` and `manual` `teardownWait` strategies, ownership-index owner fencing, and the teardown readiness check with its warnings.', done: true },
+        { text: 'Add EnvironmentTemplates for preview environments: instances through `nyl state init --template`, `teardown --all`, `state delete`, shared state refs through `state.path`, cross-environment references to declared environments, sliding expiry, and `maxInstances`.', done: true },
       ],
     },
     {
@@ -168,6 +170,23 @@ export const orchestrationRoadmap = {
       id: 'M9',
       summary: 'Team-owned, typed declarations that units implement and Releases read, the fourth layer of Nyl.',
       delegate: 'domain-modeling',
+    },
+    {
+      id: 'M10',
+      title: 'Direct reconciler for Kubernetes publications',
+      summary: 'A DeploymentTarget that Nyl applies itself, with no Argo CD, through the same publication unit.',
+      needs: ['M5'],
+      done: true,
+      exitCriterion: 'The platform scenario\'s Kubernetes publication runs three ways against Kind with a local registry, changing only the target\'s reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server. Each publishes the same Release directories with equivalent receipts, attests `accepted` and `healthy`, reads the same observed value, and tears down to an empty cluster with `teardownWait: observe`; a second unit, environment, or manual `nyl apply` cannot take over a Release an environment owns.',
+      items: [
+        { text: 'Specify the direct reconciler in the design contracts: the target-level declaration, publication before apply, fencing in the cluster, the direct reader, and teardown ([contract](https://github.com/NiklasRosenstein/nyl/blob/develop/design/orchestration-core.md#direct-reconciler)).', done: true },
+        { text: 'Add `reconciler: {direct: {}}` to DeploymentTarget with its exclusivity validation, a tree without Applications, AppProjects, or a catalog, and the reconciler in the ownership index\'s identity, so a target never switches reconciler by an edit.', done: true },
+        { text: 'Move `nyl apply`\'s apply, prune, purge, and release-state mechanics from the command into `nyl-render`, called by both the command and the publication driver, with the owner and the publication commit recorded in the release state.', done: true },
+        { text: 'Apply a direct target from `KubernetesPublication`: publish, then apply each Release in waves, fence Releases by owner, purge Releases that left the tree, and tear down in two phases behind `teardownWait` with the direct readiness rows.', done: true },
+        { text: 'Read a direct target for `nyl attest`, the `observe` teardown wait, and observed values: a `DirectReader` over the release state and rollout status, with the release-state anchor, behind the unchanged shared evaluation.', done: true },
+        { text: 'Add an opt-in health wait to `KubernetesPublication` (`observe: {waitHealthy: {timeout}}`): a reconcile polls the target\'s reader with backoff on the injected clock until `healthy` passes, records the attestations, and fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` on the timeout, for the direct reconciler and both Argo CD access methods.', done: true },
+        { text: 'Add the `nyl-e2e` crate: one scenario run direct, through Argo CD read by the Kubernetes API, and through Argo CD read by its API server, against Kind with a local registry and a local Argo CD install.', done: true },
+      ],
     },
   ],
 };

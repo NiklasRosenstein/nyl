@@ -34,6 +34,7 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   values:
@@ -309,7 +310,7 @@ fn delete_refuses_to_break_remaining_resource_references() {
     let temp = TempDir::new().unwrap();
     git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
-    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
+    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  reconciler: {argocd: {}}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
     let path = temp.path().join("gitops.yaml");
     fs::write(&path, resources).unwrap();
 

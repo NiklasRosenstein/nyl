@@ -1,0 +1,39 @@
+# Scenario 3's tier-1 variant "manual wait": kubernetes keeps the manual
+# teardownWait default, so `state init --template` warns from the declaration,
+# before anything ran, that instances cannot expire unattended, and the
+# scheduled job's removal of an expired instance stops after phase 1.
+contract: design/reference-scenarios.md#scenario-3-preview-expiry
+milestone: M5
+tiers: [1]
+project: ../preview/project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+  - commit: {branch: main, message: "Leave the teardown wait at its default", apply: patches/manual}
+  - nyl: [state, init, -e, pr-1, --template, preview, --param, pr=1]
+    exit: 0
+    expect:
+      codes: [NYL-TEARDOWN-WAIT-MANUAL]
+  - nyl: [reconcile, -e, pr-1]
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+
+  # The removal publishes phase 1 and waits for an operator.
+  - clock: {advance: 8d}
+  - nyl: [reconcile, --template, preview]
+    exit: 2
+    expect:
+      tearing-down: [kubernetes]
+  - {nyl: [get, environments, pr-1], exit: 0}
+
+  # The operator confirms, and the next fleet run finishes it.
+  - nyl: [teardown, -e, pr-1, --unit, kubernetes, --confirm-removed, --reason, "checked in Argo CD"]
+    exit: 0
+  - nyl: [reconcile, --template, preview]
+    exit: 0
+    expect:
+      deploy: {branch: previews, absent: ['pr-1/**']}
+  - {nyl: [get, environments, pr-1], exit: 1}
