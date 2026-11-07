@@ -352,19 +352,3 @@ spec:
         "{record}"
     );
 }
-
-/// The `attested-evidence` walkthrough, which `scenario_harness_test` runs
-/// once the harness reaches M5, runs here already: its steps are the contract
-/// of the rules above, in the scenario format.
-#[test]
-fn test_the_attested_evidence_walkthrough_passes() {
-    let (loaded, problems) = scenario::load_all();
-    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let walkthrough = loaded
-        .iter()
-        .find(|loaded| loaded.name == "walkthroughs/attested-evidence")
-        .expect("the walkthrough exists");
-    if let Err(failure) = scenario::runner::run(walkthrough) {
-        panic!("{failure}");
-    }
-}

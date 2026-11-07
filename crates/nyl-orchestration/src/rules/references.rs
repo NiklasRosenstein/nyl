@@ -390,7 +390,7 @@ pub fn check_spec_declaration(
             }
             Ok(Some(declaration.clone()))
         }
-        // Artifact names are checked once kinds declare them (M5).
+        // Kinds declare no artifact names, so none is checked here: resolution fails on a missing artifact.
         (None, Some(_), None) => Ok(None),
         (None, None, Some(observation)) => {
             if let Some(kind) = &source.kind {

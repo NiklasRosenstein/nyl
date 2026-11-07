@@ -71,7 +71,7 @@ fn observing_project(teardown_wait: &str) -> TempDir {
         &group,
         text.replace(
             "  applicationNamespace: argocd\n",
-            "  applicationNamespace: argocd\n  namespace: {deletePolicy: Automatic}\n",
+            "  applicationNamespace: argocd\n  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}\n",
         ),
     )
     .unwrap();

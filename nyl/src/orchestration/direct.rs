@@ -265,6 +265,7 @@ pub fn prepare(
         driver,
         &spec,
         &commit,
+        None,
         &project_record,
         &workspace.path().join("contexts"),
         None,
@@ -309,7 +310,7 @@ pub fn prepare(
     .map_err(config)?;
     let local_inputs_in_worktree = source.is_none() && fields.first().is_none_or(|field| unpinned.contains(field));
     if !local_inputs_in_worktree {
-        nyl_orchestration::shell::sources::validate_local_inputs(&resolver, driver, &validation_spec, &commit)
+        nyl_orchestration::shell::sources::validate_local_inputs(&resolver, driver, &validation_spec, &commit, None)
             .map_err(config)?;
     }
     snapshot_entry(&mut prepared, driver, &validation_spec, local_inputs_in_worktree)?;

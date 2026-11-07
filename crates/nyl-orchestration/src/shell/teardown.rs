@@ -187,6 +187,10 @@ fn incarnations(environment: &EnvironmentName, units: &[UnitName]) -> Finding {
 pub fn state_delete(context: &RunContext<'_>, request: &RunRequest, teardown: bool) -> StateOperationReport {
     let Deletion { mut report, teardown } = state_delete_detailed(context, request, teardown);
     if let Some(teardown) = teardown {
+        // A teardown that completed still has warnings for the person running the command,
+        // such as a `--source` substitution or a released unit; the stopped case copied
+        // them already, and the helper adds each once.
+        copy_warnings(&mut report, &teardown);
         report.details.insert(
             "teardown".to_owned(),
             serde_json::to_value(&teardown).expect("reports serialize"),
@@ -279,6 +283,28 @@ pub fn state_delete_detailed(context: &RunContext<'_>, request: &RunRequest, tea
     }
 }
 
+/// The warnings of `teardown` for the person running `state delete`: each
+/// environment's own, and each unit's prefixed with the unit. A warning already
+/// in `report` is not added again, so both outcomes can use this.
+fn copy_warnings(report: &mut StateOperationReport, teardown: &RunReport) {
+    let mut add = |finding: Finding| {
+        if !report.warnings.contains(&finding) {
+            report.warnings.push(finding);
+        }
+    };
+    for run in &teardown.environments {
+        run.warnings.iter().cloned().for_each(&mut add);
+        for (unit, result) in &run.units {
+            for finding in &result.warnings {
+                add(Finding {
+                    message: format!("{unit}: {}", finding.message),
+                    ..finding.clone()
+                });
+            }
+        }
+    }
+}
+
 /// `state delete --teardown` stopped after its teardown: units remain. Exit 1
 /// when a teardown failed or is uncertain (or the teardown hit an error),
 /// exit 2 when every remaining unit waits (Q54).
@@ -296,14 +322,8 @@ fn stopped(
     };
     for run in &teardown.environments {
         report.errors.extend(run.errors.iter().cloned());
-        report.warnings.extend(run.warnings.iter().cloned());
-        for (unit, result) in &run.units {
-            report.warnings.extend(result.warnings.iter().map(|finding| Finding {
-                message: format!("{unit}: {}", finding.message),
-                ..finding.clone()
-            }));
-        }
     }
+    copy_warnings(&mut report, teardown);
     if !left.is_empty() {
         report.errors.push(incarnations(environment, left));
     }

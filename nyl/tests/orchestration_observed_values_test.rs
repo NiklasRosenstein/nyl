@@ -310,39 +310,6 @@ spec:
     }
 }
 
-/// The `observed-value` walkthrough, which `scenario_harness_test` runs once
-/// the harness reaches M5, runs here already with the publication fake: its
-/// steps are the contract of the rules below, in the scenario format.
-#[test]
-fn test_the_observed_value_walkthrough_passes_with_the_fake_publication() {
-    let (loaded, problems) = scenario::load_all();
-    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let walkthrough = loaded
-        .iter()
-        .find(|loaded| loaded.name == "walkthroughs/observed-value")
-        .expect("the walkthrough exists");
-    if let Err(failure) = scenario::runner::run(walkthrough) {
-        panic!("{failure}");
-    }
-}
-
-/// The same walkthrough against the built-in `KubernetesPublication` driver:
-/// its declaration is validated, its resolution renders the target and
-/// checks the observed Service is one it renders, and only the live system
-/// it reads is the script.
-#[test]
-fn test_the_observed_value_walkthrough_passes_with_the_real_publication_driver() {
-    let (loaded, problems) = scenario::load_all();
-    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let walkthrough = loaded
-        .iter()
-        .find(|loaded| loaded.name == "walkthroughs/observed-value")
-        .expect("the walkthrough exists");
-    if let Err(failure) = scenario::runner::run_real_publication(walkthrough) {
-        panic!("{failure}");
-    }
-}
-
 fn blocked_by(report: &Value, name: &str) -> Vec<(String, String, String)> {
     unit(report, name)["blockedBy"]
         .as_array()

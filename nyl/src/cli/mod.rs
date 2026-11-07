@@ -223,6 +223,46 @@ impl Cli {
         }
     }
 
+    /// Whether the command is one of the orchestration commands, which
+    /// [`Self::execute_in_process`] runs with injected dependencies. The match
+    /// is exhaustive, so a new command must say which kind it is; the
+    /// scenario harness reads this to decide what runs in-process.
+    pub fn is_orchestration(&self) -> bool {
+        match self.command {
+            Commands::Exec(_)
+            | Commands::Build(_)
+            | Commands::Get(_)
+            | Commands::State(_)
+            | Commands::Lease(_)
+            | Commands::Plan(_)
+            | Commands::Reconcile(_)
+            | Commands::Status(_)
+            | Commands::DetectDrift(_)
+            | Commands::Attest(_)
+            | Commands::Observe(_)
+            | Commands::Recover(_)
+            | Commands::Teardown(_)
+            | Commands::Hold(_)
+            | Commands::Resume(_) => true,
+            Commands::Comment(_)
+            | Commands::Render(_)
+            | Commands::RenderTree(_)
+            | Commands::PublishTree(_)
+            | Commands::Create(_)
+            | Commands::Capture(_)
+            | Commands::Update(_)
+            | Commands::Delete(_)
+            | Commands::Diff(_)
+            | Commands::DiffTree(_)
+            | Commands::Apply(_)
+            | Commands::Schema(_)
+            | Commands::Init(_)
+            | Commands::Validate(_)
+            | Commands::Release(_)
+            | Commands::Vendor(_) => false,
+        }
+    }
+
     /// Whether the command cancels on SIGINT and SIGTERM ("Runs and leases"
     /// item 7): the commands that take the lease to execute, check, or
     /// recover units, and the state operations, whose `--wait-lease` a

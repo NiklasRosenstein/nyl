@@ -45,7 +45,22 @@ pub struct Scenario {
     /// The project directory, relative to the scenario directory.
     #[serde(default = "default_project")]
     pub project: String,
+    /// The publication drivers tier 1 runs it with; default both.
+    #[serde(default)]
+    pub publication: PublicationDrivers,
     pub steps: Vec<Step>,
+}
+
+/// Which `KubernetesPublication` drivers tier 1 runs a scenario with: the
+/// test kind that stands in for it and the built-in driver, or the built-in
+/// driver only, for a scenario that depends on what that driver derives from
+/// its render, which the test kind states in its declaration instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PublicationDrivers {
+    #[default]
+    Both,
+    Real,
 }
 
 fn default_tiers() -> Vec<u8> {
@@ -268,7 +283,12 @@ pub struct PauseAt {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefStep {
-    pub delete: String,
+    /// Delete this ref in the state repository.
+    pub delete: Option<String>,
+    /// Point this ref of `project.git` at the tip of the branch `to`, as a host
+    /// that keeps a pull request's head under `refs/pull/<n>/head` does.
+    pub set: Option<String>,
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,6 +362,16 @@ pub struct Expect {
     pub messages: Option<Vec<String>>,
     pub get: Option<GetExpectation>,
     pub deploy: Option<DeployExpectation>,
+    /// The commit a reconcile ran its first environment at, as a Git revision
+    /// of `project.git`, such as `pr-124`.
+    pub source: Option<String>,
+    /// How the run's environment record says its source was chosen
+    /// (`sourceChosenBy`), compared on the fields given, such as `{by: recorded}`.
+    #[serde(rename = "source-chosen-by")]
+    pub source_chosen_by: Option<Value>,
+    /// The keep refs of preview instances' source commits in `project.git`.
+    #[serde(rename = "keep-refs")]
+    pub keep_refs: Option<KeepRefsExpectation>,
     pub promotion: Option<PromotionExpectation>,
     pub ci: Option<CiExpectation>,
 }
@@ -456,6 +486,32 @@ pub struct DeployExpectation {
     /// Patterns that match no file on the branch after the step.
     #[serde(default)]
     pub absent: Vec<String>,
+    /// Per file pattern, what the files it matches mention: a literal text,
+    /// or the arguments of a `nyl get` invocation whose value they carry. A
+    /// value must appear in at least one matching file.
+    #[serde(default)]
+    pub mentions: BTreeMap<String, Vec<Mention>>,
+}
+
+/// Something deployed files mention.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Mention {
+    /// A literal text.
+    Text(String),
+    /// The arguments of a `nyl get` invocation, such as `[get, output, database/connection, -e, dev, --pointer, /host]`.
+    Get(Vec<String>),
+}
+
+/// The keep refs (`refs/nyl-keep/<id>/<commit>`) in `project.git` after a step.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeepRefsExpectation {
+    /// How many keep refs exist.
+    pub count: usize,
+    /// Revisions of `project.git`, such as `pr-124`, whose commit has a keep ref.
+    #[serde(default)]
+    pub kept: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -716,6 +772,17 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
                     return Err("fault before-push concerns the whole run; it takes no unit".to_owned());
                 }
                 _ => {}
+            }
+        }
+        StepKind::Ref => {
+            let reference = step.reference.as_ref().expect("kind");
+            let set = match (&reference.set, &reference.to) {
+                (Some(_), Some(_)) => true,
+                (None, None) => false,
+                _ => return Err("ref takes set and to together".to_owned()),
+            };
+            if reference.delete.is_some() == set {
+                return Err("ref takes exactly one of delete and set with to".to_owned());
             }
         }
         StepKind::File => {

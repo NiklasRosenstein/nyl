@@ -36,8 +36,8 @@ use nyl_units::process::ProcessRunner;
 use serde_json::Value;
 
 use super::format::{
-    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, PointName, ReceiptExpectation, Step,
-    StepKind, UidExpectation, UnitExpectation,
+    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, KeepRefsExpectation, Mention,
+    PointName, ReceiptExpectation, Step, StepKind, UidExpectation, UnitExpectation,
 };
 use super::world::{git_output, World};
 use super::Loaded;
@@ -216,6 +216,13 @@ fn run_tier(loaded: &Loaded, tier: u8, publication: Publication) -> Result<(), S
     // the files `file` steps change outside Nyl.
     let mut process_env = super::shell::process_env();
     process_env.insert("SCENARIO_TMP".to_owned(), world.scenario_tmp_for_scripts());
+    // A unit that declares `observe: {}` admits `KUBECONFIG` for `nyl attest`, and an
+    // admitted variable must exist wherever the unit runs. No scenario reads
+    // Argo CD, so the file it names does not.
+    process_env.insert(
+        "KUBECONFIG".to_owned(),
+        format!("{}/no-kubeconfig", world.scenario_tmp_for_scripts()),
+    );
     let shared = Shared {
         world,
         clock: Arc::new(FakeClock::new(start)),
@@ -304,7 +311,14 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             StepKind::Branch => self.world.branch(step.branch.as_ref().expect("kind")),
             StepKind::SquashMerge => self.world.squash_merge(step.squash_merge.as_ref().expect("kind")),
             StepKind::DeleteBranch => self.world.delete_branch(step.delete_branch.as_ref().expect("kind")),
-            StepKind::Ref => self.world.delete_ref(&step.reference.as_ref().expect("kind").delete),
+            StepKind::Ref => {
+                let step = step.reference.as_ref().expect("kind");
+                match (&step.delete, &step.set, &step.to) {
+                    (Some(reference), _, _) => self.world.delete_ref(reference),
+                    (_, Some(reference), Some(branch)) => self.world.set_ref(reference, branch),
+                    _ => unreachable!("validated: delete, or set with to"),
+                }
+            }
             StepKind::File => self.world.file(step.file.as_ref().expect("kind"))?,
             StepKind::Clock => {
                 let step = step.clock.as_ref().expect("kind");
@@ -590,7 +604,32 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 .deploy
                 .as_ref()
                 .ok_or("no deploy tree was taken before the step")?;
-            self.check_deploy(deploy, before)?;
+            self.check_deploy(deploy, before, branch)?;
+        }
+        if let Some(revision) = &expect.source {
+            let commit = self.world.rev_parse(revision);
+            let ran = outcome
+                .report
+                .pointer("/environments/0/sourceCommit")
+                .and_then(Value::as_str);
+            if ran != Some(commit.as_str()) {
+                return Err(format!(
+                    "the run's source is {ran:?} instead of {revision} ({commit}); {}",
+                    describe()
+                ));
+            }
+        }
+        if let Some(expected) = &expect.source_chosen_by {
+            let chosen = self.source_choice(environment)?;
+            if !subset(expected, &chosen) {
+                return Err(format!(
+                    "sourceChosenBy is {chosen} instead of {expected}; {}",
+                    describe()
+                ));
+            }
+        }
+        if let Some(keep) = &expect.keep_refs {
+            self.check_keep_refs(keep)?;
         }
         if let Some(get) = &expect.get {
             let outcome = self.invoke(&get.args, branch)?;
@@ -629,7 +668,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
 
     /// One sequential in-process invocation, without faults beyond the slot.
     fn invoke(&self, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
-        if self.shared.tier == 2 {
+        // Commands outside orchestration, such as `publish-tree`, have no
+        // in-process entry: they run as the binary in both tiers.
+        if self.shared.tier == 2 || !is_orchestration_command(args) {
             return invoke_binary(self.shared, args, branch);
         }
         let wiring = self.shared.wiring(&self.shared.faults);
@@ -779,7 +820,12 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         Ok(())
     }
 
-    fn check_deploy(&self, deploy: &DeployExpectation, before: &BTreeMap<String, String>) -> Result<(), String> {
+    fn check_deploy(
+        &self,
+        deploy: &DeployExpectation,
+        before: &BTreeMap<String, String>,
+        branch: &str,
+    ) -> Result<(), String> {
         let after = self.tree(&deploy.branch);
         for pattern in &deploy.contains {
             if !after.keys().any(|path| glob_matches(pattern, path)) {
@@ -804,6 +850,104 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             };
             if select(before) != select(&after) {
                 return Err(format!("{} changed files matching {pattern}", deploy.branch));
+            }
+        }
+        for (pattern, mentions) in &deploy.mentions {
+            let files = after
+                .keys()
+                .filter(|path| glob_matches(pattern, path))
+                .map(|path| {
+                    (
+                        path.clone(),
+                        git_output(
+                            &self.world.bare(),
+                            &["show", &format!("refs/heads/{}:{path}", deploy.branch)],
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if files.is_empty() {
+                return Err(format!("{} has no file matching {pattern} to read", deploy.branch));
+            }
+            for mention in mentions {
+                let text = match mention {
+                    Mention::Text(text) => text.clone(),
+                    Mention::Get(args) => {
+                        let outcome = self.invoke(args, branch)?;
+                        match &outcome.report {
+                            Value::String(value) => value.clone(),
+                            Value::Null => outcome.stdout.trim().to_owned(),
+                            other => other.to_string(),
+                        }
+                    }
+                };
+                if text.is_empty() || !files.iter().any(|(_, content)| content.contains(&text)) {
+                    return Err(format!(
+                        "no file of {} matching {pattern} mentions {text:?} ({mention:?}); files: {:?}",
+                        deploy.branch,
+                        files.iter().map(|(path, _)| path).collect::<Vec<_>>()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The `sourceChosenBy` of `environment`'s record in the state repository:
+    /// beside its own refs, or under its name in a shared one.
+    fn source_choice(&self, environment: &str) -> Result<Value, String> {
+        let bare = self.world.bare();
+        let refs = git_output(&bare, &["for-each-ref", "--format=%(refname)", "refs/heads/nyl/"]);
+        let candidates = std::iter::once(format!("refs/heads/nyl/{environment}/desired:desired/environment.yaml"))
+            .chain(
+                refs.lines()
+                    .map(|reference| format!("{reference}:{environment}/desired/environment.yaml")),
+            );
+        for candidate in candidates {
+            let shown = std::process::Command::new("git")
+                .current_dir(&bare)
+                .args(["show", &candidate])
+                .output()
+                .map_err(|error| error.to_string())?;
+            if shown.status.success() {
+                let record: Value = serde_saphyr::from_str(&String::from_utf8_lossy(&shown.stdout))
+                    .map_err(|error| format!("{candidate}: {error}"))?;
+                return record
+                    .get("sourceChosenBy")
+                    .cloned()
+                    .ok_or_else(|| format!("{candidate} has no sourceChosenBy"));
+            }
+        }
+        Err(format!(
+            "no environment record of {environment} in the state repository"
+        ))
+    }
+
+    /// The keep refs of `project.git` against `expected`.
+    fn check_keep_refs(&self, expected: &KeepRefsExpectation) -> Result<(), String> {
+        let listed = git_output(
+            &self.world.bare(),
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs/nyl-keep/"],
+        );
+        let refs = listed
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .collect::<Vec<_>>();
+        if refs.len() != expected.count {
+            return Err(format!(
+                "{} keep refs instead of {}: {refs:?}",
+                refs.len(),
+                expected.count
+            ));
+        }
+        for revision in &expected.kept {
+            let commit = self.world.rev_parse(revision);
+            // A keep ref is named for the commit it keeps, and points at it.
+            if !refs
+                .iter()
+                .any(|(name, target)| *target == commit && name.ends_with(&format!("/{commit}")))
+            {
+                return Err(format!("no keep ref for {revision} ({commit}): {refs:?}"));
             }
         }
         Ok(())
@@ -1130,6 +1274,35 @@ fn names(list: Option<&Value>) -> BTreeSet<String> {
         .collect()
 }
 
+/// Whether `nyl <args>` is an orchestration command, which runs in-process in
+/// tier 1 and prints its report as JSON when asked: the command line's own
+/// answer, [`Cli::is_orchestration`]. Arguments that do not parse run
+/// in-process, where the parse error is reported.
+fn is_orchestration_command(args: &[String]) -> bool {
+    let argv = std::iter::once("nyl")
+        .chain(args.iter().map(String::as_str))
+        .chain(std::iter::once("."));
+    match Cli::try_parse_from(argv) {
+        Ok(cli) => cli.is_orchestration(),
+        Err(_) => true,
+    }
+}
+
+/// Whether `nyl <args>`, an orchestration command, takes `--output json`:
+/// not `build` and `exec`, which pass what follows `--` to the unit driver,
+/// and not the listings of declarations (`get environments`), which print
+/// a table only.
+fn takes_json_output(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("build" | "exec") => false,
+        Some("get") => matches!(
+            args.get(1).map(String::as_str),
+            Some("unit" | "units" | "output" | "artifact" | "observation" | "artifacts")
+        ),
+        _ => true,
+    }
+}
+
 /// A fresh CI checkout, isolated process environment, and the same injected
 /// time as tier 1. Image, infrastructure, and publication drivers are the
 /// built-in ones, as in a release build.
@@ -1139,6 +1312,7 @@ fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<Comma
     super::world::git(&checkout, &["config", "user.email", "scenario@example.invalid"]);
     let home = checkout.with_extension("home");
     std::fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+    let orchestration = is_orchestration_command(args);
     let mut command = super::nyl_binary(&checkout, &home, &[]);
     command
         .env_clear()
@@ -1149,18 +1323,35 @@ fn invoke_binary(shared: &Shared, args: &[String], branch: &str) -> Result<Comma
         .env("NO_COLOR", "1")
         .env("NYL_TEST_NOW", shared.clock.now().to_rfc3339())
         .args(args);
-    if !args.iter().any(|arg| arg == "-o" || arg == "--output") {
+    // Winsock needs SystemRoot to load its service providers, and the binary
+    // makes scratch directories in the temporary one; the rest of the
+    // environment stays cleared.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let prints_json = orchestration && takes_json_output(args);
+    if prints_json && !args.iter().any(|arg| arg == "-o" || arg == "--output") {
         command.args(["--output", "json"]);
     }
     let output = command.output().map_err(|error| format!("run nyl: {error}"))?;
     let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
     let stderr = String::from_utf8(output.stderr).map_err(|error| error.to_string())?;
-    let report = serde_json::from_str(&stdout).map_err(|error| {
-        format!(
-            "nyl {} did not print JSON: {error}; stdout:\n{stdout}\nstderr:\n{stderr}",
-            args.join(" ")
-        )
-    })?;
+    // `build`, `exec`, and the commands outside orchestration print what
+    // their unit driver or their own format says, so a report is read only
+    // where `--output json` asked for one.
+    let report = if prints_json {
+        serde_json::from_str(&stdout).map_err(|error| {
+            format!(
+                "nyl {} did not print JSON: {error}; stdout:\n{stdout}\nstderr:\n{stderr}",
+                args.join(" ")
+            )
+        })?
+    } else {
+        serde_json::from_str(&stdout).unwrap_or(Value::Null)
+    };
     Ok(CommandOutcome {
         exit: output.status.code().unwrap_or(1).try_into().unwrap_or(1),
         report,

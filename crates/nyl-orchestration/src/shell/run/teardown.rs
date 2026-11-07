@@ -539,6 +539,19 @@ impl Reconcile<'_, '_, '_> {
                 self.source_missing(life, name, &unit, "it records no sourceRevision");
                 continue;
             };
+            if let (Some(source), Some(recorded)) = (inputs.source, &unit.source_revision) {
+                if source != recorded {
+                    self.report.warnings.push(Finding::new(
+                        Code::SourceOverride,
+                        format!(
+                            "unit {name} of {environment} tears down with the files of {source}, not its recorded \
+                             source commit {recorded}"
+                        ),
+                        "check that the revision still holds what the unit needs to be destroyed; the substitution \
+                         is recorded in the transition commit",
+                    ));
+                }
+            }
             runnable.push((name.clone(), unit, commit));
         }
         if runnable.is_empty() {
@@ -1173,6 +1186,7 @@ fn run_jobs(
 }
 
 /// One driver teardown call.
+#[allow(clippy::too_many_lines)] // Checkout, credentials, the driver call, and its progress, in order.
 fn call(
     context: &RunContext<'_>,
     slots: &Slots,
@@ -1211,6 +1225,7 @@ fn call(
                 context.sources,
                 job.slot,
                 &job.commit,
+                job.unit.source_revision.as_ref(),
                 driver,
                 job.unit.resolved_spec.as_ref().unwrap_or(&job.unit.spec),
                 project_dir,

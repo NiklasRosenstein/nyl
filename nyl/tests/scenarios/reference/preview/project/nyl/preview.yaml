@@ -26,6 +26,7 @@ spec:
             namespace: {value: '{{ environment.name }}-web'}
   state: {repositoryRef: {name: platform}, path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true
+  keepSource: true                       # opt in: scenario 2 asserts the keep refs
   deletionPolicy: Teardown
   allowTeardown: true
   ttl: 7d
