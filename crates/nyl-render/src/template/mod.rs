@@ -20,6 +20,10 @@ impl TemplateEngine {
     /// Create a new template engine with custom filters
     pub fn new() -> Self {
         let mut env = Environment::new();
+        // Manifests are YAML, not markup: MiniJinja's default would JSON-escape
+        // every value in `.yaml` and `.json` templates. Values are printed as
+        // written, and `tojson` serializes explicitly where JSON is wanted.
+        env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
         env.set_formatter(|out, state, value| {
             if value.kind() == minijinja::value::ValueKind::Bool {
                 out.write_str(if value.is_true() { "true" } else { "false" })?;
@@ -265,6 +269,56 @@ mod tests {
         let context = serde_json::json!({"enabled": true, "disabled": false});
         let result = engine.render("{{ enabled }} {{ disabled }}", &context).unwrap();
         assert_eq!(result, "true false");
+    }
+
+    #[test]
+    fn test_tojson_serializes_nested_values_as_json() {
+        // Implicit list and object formatting is not JSON, so embedded
+        // configuration must serialize explicitly.
+        let engine = TemplateEngine::new();
+        let config = serde_json::json!({
+            "name": "say \"hi\"\n\\ <b>&'",
+            "ports": [80, 443],
+            "tls": {"enabled": true, "issuer": null},
+            "ratio": 0.5,
+        });
+        let context = serde_json::json!({"config": config});
+        let result = engine.render("{{ config | tojson }}", &context).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed, config, "{result}");
+        // Quotes and markup characters become `\u` escapes, which keeps the
+        // output valid inside a single-quoted YAML string.
+        assert!(!result.contains(['\'', '<', '>', '&']), "{result}");
+        let manifest = engine
+            .render_named("cm.yaml", "data:\n  config.json: '{{ config | tojson }}'\n", &context)
+            .unwrap();
+        let embedded = crate::yaml::parse_yaml_value_k8s_compatible(&manifest).unwrap();
+        let embedded = embedded["data"]["config.json"].as_str().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(embedded).unwrap(), config);
+        let block = engine
+            .render_named(
+                "cm.yaml",
+                "data:\n  config.json: |\n    {{ config | tojson(indent=2) | indent(4) }}\n",
+                &context,
+            )
+            .unwrap();
+        let embedded = crate::yaml::parse_yaml_value_k8s_compatible(&block).unwrap();
+        let embedded = embedded["data"]["config.json"].as_str().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(embedded).unwrap(), config);
+    }
+
+    #[test]
+    fn test_manifest_templates_print_values_unescaped() {
+        // Template names carry the manifest's file extension; YAML and JSON
+        // manifests interpolate values verbatim, never as JSON.
+        let engine = TemplateEngine::new();
+        let context = serde_json::json!({"name": "foo", "tag": "1.2"});
+        for name in ["app.yaml", "app.yml", "app.json"] {
+            let result = engine
+                .render_named(name, "{{ name }}-web repo:{{ tag }}", &context)
+                .unwrap();
+            assert_eq!(result, "foo-web repo:1.2", "{name}");
+        }
     }
 
     #[test]
