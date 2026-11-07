@@ -255,7 +255,8 @@ resource lists alone. A resource rendered without `metadata.namespace` is checke
 its Application's destination namespace, so moving the destination retires it from
 the old one. The Cluster's [recorded capabilities](/nyl/kubernetes-gitops/resource-guides/cluster/),
 CRDs in either publication, and the fixed scopes of built-in Kubernetes kinds tell namespaced kinds from cluster-scoped ones; any other kind of unknown scope is
-checked both ways. The diagnostic names the retention entries
+checked both ways. Every document of a multi-document file counts, so baselines that
+store a Release's stream in one `resources.yaml` are compared resource by resource. The diagnostic names the retention entries
 that restore each permission and anything they cannot restore. Equivalent wildcard
 permission is sufficient. Resources Argo CD intentionally leaves in place need no
 cleanup permission: `Delete=false` in their `argocd.argoproj.io/sync-options` when
