@@ -17,3 +17,9 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+
+# Runners for the build matrix dist computes. dist 0.30.3 defaults Apple
+# targets to retired macOS images, which GitHub rejects.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+x86_64-apple-darwin = "macos-15-intel"
