@@ -16,7 +16,8 @@
 //! - A provider may report a reference as [`Provision::Blocked`], such as a
 //!   producer without a current receipt; blocked values are listed with their
 //!   location instead of failing resolution.
-//! - Every problem is collected, so a caller reports them together.
+//! - Every problem is collected as a [`BindingIssue`], so a caller reports
+//!   them together; a provider's code and fix reach the caller unchanged.
 //!
 //! Each binding kind is one [`Providers`] method. The resolver itself performs
 //! no effects: providers read what their caller gathered, whether files and
@@ -24,6 +25,7 @@
 
 mod binding;
 mod declaration;
+mod issue;
 mod references;
 
 use std::collections::BTreeMap;
@@ -36,6 +38,7 @@ pub use binding::{
     UnitInputSource,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
+pub use issue::BindingIssue;
 pub use references::{unit_references, UnitReference};
 
 /// An effective value and where it came from.
@@ -57,8 +60,10 @@ pub enum Provision<O> {
     Blocked(String),
 }
 
-/// A provider's answer, or the reason the binding is invalid.
-pub type Provided<O> = std::result::Result<Provision<O>, String>;
+/// A provider's answer, or the issue that makes the binding invalid. The issue
+/// carries the provider's own stable code and fix, which resolution passes on
+/// unchanged.
+pub type Provided<O> = std::result::Result<Provision<O>, BindingIssue>;
 
 /// A value that could not be read yet, and where it is needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,14 +122,17 @@ pub trait Providers {
     }
 }
 
-fn unsupported(field: &str, kind: BindingKind) -> String {
-    format!("{field}.{} is not supported here", kind.field())
+fn unsupported(field: &str, kind: BindingKind) -> BindingIssue {
+    BindingIssue::new(format!("{field}.{} is not supported here", kind.field()))
 }
 
 /// Resolve one binding through the provider for its kind.
 pub fn resolve_binding<P: Providers>(field: &str, binding: &InputBinding, providers: &P) -> Provided<P::Origin> {
     let set = "kind agrees with the set field";
-    match binding.kind(field).map_err(|error| error.to_string())? {
+    match binding
+        .kind(field)
+        .map_err(|error| BindingIssue::new(error.to_string()))?
+    {
         BindingKind::Value => Ok(Provision::Value(Resolved {
             value: binding.value.clone().expect(set),
             origin: P::Origin::from_value(),
@@ -165,7 +173,7 @@ pub fn resolve<P: Providers>(
     bindings: Option<&BTreeMap<String, InputBinding>>,
     overrides: &BTreeMap<String, Value>,
     providers: &P,
-    issues: &mut Vec<String>,
+    issues: &mut Vec<BindingIssue>,
 ) -> Slots<P::Origin> {
     let mut slots = Slots::default();
     for (name, declaration) in declarations {
@@ -196,7 +204,7 @@ pub fn resolve<P: Providers>(
                         .map(|description| format!(" ({description})"))
                         .unwrap_or_default();
                     let requirement = format!("{subject} requires input {name:?}{description}");
-                    issues.push(
+                    issues.push(BindingIssue::new(
                         binding
                             .and_then(|binding| providers.unbound(&field, binding, &requirement))
                             .unwrap_or_else(|| {
@@ -204,7 +212,7 @@ pub fn resolve<P: Providers>(
                                     "{requirement}, but it has no binding and no default; bind it in {field_prefix}"
                                 )
                             }),
-                    );
+                    ));
                     continue;
                 }
             }
@@ -216,8 +224,8 @@ pub fn resolve<P: Providers>(
                 });
                 continue;
             }
-            Err(error) => {
-                issues.push(error);
+            Err(issue) => {
+                issues.push(issue);
                 continue;
             }
         };
@@ -225,10 +233,10 @@ pub fn resolve<P: Providers>(
             Ok(()) => {
                 slots.values.insert(name.clone(), input);
             }
-            Err(reason) => issues.push(format!(
+            Err(reason) => issues.push(BindingIssue::new(format!(
                 "{} for input {name:?} of {subject} is invalid: {reason}",
                 input.origin.describe(&field)
-            )),
+            ))),
         }
     }
     slots
@@ -277,7 +285,7 @@ pub fn resolve_document<P: Providers>(
     pointer: &str,
     document: &Value,
     providers: &P,
-    issues: &mut Vec<String>,
+    issues: &mut Vec<BindingIssue>,
 ) -> ResolvedDocument<P::Origin> {
     let mut value = document.clone();
     let mut found = Found {
@@ -329,7 +337,7 @@ fn walk<P: Providers>(
     value: &mut Value,
     providers: &P,
     found: &mut Found<P::Origin>,
-    issues: &mut Vec<String>,
+    issues: &mut Vec<BindingIssue>,
 ) {
     match value {
         Value::Object(fields) => {
@@ -353,10 +361,10 @@ fn walk<P: Providers>(
                         *value = input;
                     }
                 }
-                _ => issues.push(format!(
+                _ => issues.push(BindingIssue::new(format!(
                     "{field} mixes {} with other fields; a reference object holds only its reference, and replaces the whole value",
                     references.join(" and ")
-                )),
+                ))),
             }
         }
         Value::Array(items) => {
@@ -383,12 +391,12 @@ fn resolve_reference<P: Providers>(
     reference: &Value,
     providers: &P,
     found: &mut Found<P::Origin>,
-    issues: &mut Vec<String>,
+    issues: &mut Vec<BindingIssue>,
 ) -> Option<Value> {
     let binding = match parse_reference(field, &format!("{field}.{kind}"), kind, reference) {
         Ok(binding) => binding,
         Err(issue) => {
-            issues.push(issue);
+            issues.push(BindingIssue::new(issue));
             return None;
         }
     };
@@ -399,11 +407,11 @@ fn resolve_reference<P: Providers>(
         }
         Ok(Provision::Unbound) => {
             let requirement = format!("{field} needs a value");
-            issues.push(
+            issues.push(BindingIssue::new(
                 providers
                     .unbound(field, &binding, &requirement)
                     .unwrap_or_else(|| format!("{requirement}, but its {kind} reference has none yet")),
-            );
+            ));
             None
         }
         Ok(Provision::Blocked(reason)) => {
@@ -414,8 +422,8 @@ fn resolve_reference<P: Providers>(
             });
             None
         }
-        Err(error) => {
-            issues.push(error);
+        Err(issue) => {
+            issues.push(issue);
             None
         }
     }
@@ -438,6 +446,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::orchestration::codes::Code;
 
     #[derive(Debug, Clone, PartialEq)]
     enum TestOrigin {
@@ -469,6 +478,8 @@ mod tests {
     struct TestProviders {
         files: BTreeMap<&'static str, Value>,
         units: BTreeMap<&'static str, Value>,
+        /// Units whose reference the provider rejects with its own code and fix.
+        rejected: BTreeMap<&'static str, BindingIssue>,
     }
 
     impl Providers for TestProviders {
@@ -485,6 +496,9 @@ mod tests {
         }
 
         fn unit(&self, _field: &str, source: &UnitInputSource) -> Provided<TestOrigin> {
+            if let Some(issue) = self.rejected.get(source.unit.as_str()) {
+                return Err(issue.clone());
+            }
             Ok(match self.units.get(source.unit.as_str()) {
                 Some(output) => Provision::Value(Resolved {
                     value: output.clone(),
@@ -526,7 +540,11 @@ mod tests {
             providers,
             &mut issues,
         );
-        (slots, issues)
+        (slots, messages(&issues))
+    }
+
+    fn messages(issues: &[BindingIssue]) -> Vec<String> {
+        issues.iter().map(|issue| issue.message.clone()).collect()
     }
 
     #[test]
@@ -658,6 +676,7 @@ mod tests {
         });
         let mut issues = Vec::new();
         resolve_document("values", "", &document, &TestProviders::default(), &mut issues);
+        let issues = messages(&issues);
         assert_eq!(issues.len(), 5, "{issues:?}");
         assert_eq!(
             issues[0],
@@ -670,5 +689,56 @@ mod tests {
         assert!(issues[2].starts_with("values.c is not a valid reference"), "{issues:?}");
         assert_eq!(issues[3], "values.d.fromUnit must be an object");
         assert_eq!(issues[4], "values.e.fromPromotion is not supported here");
+    }
+
+    /// Catches a provider's stable code and fix being dropped on the way to
+    /// the caller, which would force callers to recover them from the message
+    /// text: both resolution entry points hand each issue over unchanged, in
+    /// the order found, beside issues the resolver raises itself, which carry
+    /// neither.
+    #[test]
+    fn test_a_providers_code_and_fix_reach_the_caller_unchanged() {
+        let rejected = BindingIssue::coded(
+            Code::AttestationUndeclared,
+            "bindings.vpc requires attestation \"smoke\" of unit network",
+            "require an attestation the producer declares",
+        );
+        let providers = TestProviders {
+            rejected: BTreeMap::from([("network", rejected.clone())]),
+            ..TestProviders::default()
+        };
+
+        let declared = declarations(json!({"vpc": {"type": "string"}, "port": {"type": "integer"}}));
+        let bound = bindings(json!({
+            "vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}},
+            "port": {"fromGit": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
+        }));
+        let mut issues = Vec::new();
+        resolve(
+            "bindings",
+            "Subject s",
+            &declared,
+            Some(&bound),
+            &BTreeMap::new(),
+            &providers,
+            &mut issues,
+        );
+        assert_eq!(
+            issues,
+            [
+                BindingIssue::new("bindings.port.fromGit is not supported here"),
+                rejected.clone()
+            ]
+        );
+
+        let document = json!({
+            "a": {"fromUnit": {"unit": "network", "output": "vpcId"}},
+            "b": {"fromUnit": {"unit": "other", "output": "x"}, "pointer": "/id"},
+        });
+        let mut issues = Vec::new();
+        resolve_document("spec", "", &document, &providers, &mut issues);
+        assert_eq!(issues[0], rejected);
+        assert_eq!(issues[1].code, None);
+        assert_eq!(issues[1].fix, None);
     }
 }

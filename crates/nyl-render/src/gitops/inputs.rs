@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use nyl_core::bindings::{Provided, Providers, Provision, Resolved};
+use nyl_core::bindings::{BindingIssue, Provided, Providers, Provision, Resolved};
 
 use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::DeploymentTarget;
@@ -729,6 +729,8 @@ pub fn resolve_release_inputs(
     sources: &InputSources<'_>,
     issues: &mut Vec<String>,
 ) -> ResolvedReleaseInputs {
+    // Rendering reports messages only: its providers state no stable codes.
+    let mut found = Vec::new();
     let slots = nyl_core::bindings::resolve(
         field_prefix,
         &format!("Release {release}"),
@@ -736,8 +738,9 @@ pub fn resolve_release_inputs(
         bindings,
         overrides,
         sources,
-        issues,
+        &mut found,
     );
+    issues.extend(found.into_iter().map(|issue| issue.message));
     // Rendering has no later wave to wait for, so a blocked input fails.
     issues.extend(
         slots
@@ -782,23 +785,29 @@ impl Providers for InputSources<'_> {
     type Origin = InputOrigin;
 
     fn file(&self, field: &str, source: &FileInputSource) -> Provided<InputOrigin> {
-        resolve_file(field, source, self).map(Provision::Value)
+        resolve_file(field, source, self)
+            .map(Provision::Value)
+            .map_err(BindingIssue::from)
     }
 
     fn git(&self, field: &str, source: &GitInputSource) -> Provided<InputOrigin> {
-        resolve_git(field, source, self).map(Provision::Value)
+        resolve_git(field, source, self)
+            .map(Provision::Value)
+            .map_err(BindingIssue::from)
     }
 
     fn publication(&self, field: &str, source: &PublicationInputSource) -> Provided<InputOrigin> {
-        resolve_publication(field, source, self).map(|input| input.map_or(Provision::Unbound, Provision::Value))
+        resolve_publication(field, source, self)
+            .map(|input| input.map_or(Provision::Unbound, Provision::Value))
+            .map_err(BindingIssue::from)
     }
 
     fn unit(&self, field: &str, _source: &UnitInputSource) -> Provided<InputOrigin> {
-        Err(needs_orchestration(field, "fromUnit"))
+        Err(needs_orchestration(field, "fromUnit").into())
     }
 
     fn promotion(&self, field: &str, _source: &PromotionInputSource) -> Provided<InputOrigin> {
-        Err(needs_orchestration(field, "fromPromotion"))
+        Err(needs_orchestration(field, "fromPromotion").into())
     }
 
     /// Only `fromPublication` leaves an input unbound: before its state file
