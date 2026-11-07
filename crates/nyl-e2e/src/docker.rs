@@ -81,10 +81,22 @@ pub fn wait_for_http(what: &str, url: &str, timeout: Duration) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The OS may hand a port out again right after it is released, so the
+    /// probe is only checked against ports that are held right now: a port
+    /// that is in use is never the answer.
     #[test]
-    fn test_a_free_port_can_be_bound_right_after() {
-        let port = free_port().unwrap();
-        assert!(port > 0);
-        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    fn test_a_free_port_is_never_one_that_is_in_use() {
+        let held = (0..8)
+            .map(|_| TcpListener::bind(("127.0.0.1", 0)).unwrap())
+            .collect::<Vec<_>>();
+        let in_use = held
+            .iter()
+            .map(|listener| listener.local_addr().unwrap().port())
+            .collect::<Vec<_>>();
+        for _ in 0..16 {
+            let port = free_port().unwrap();
+            assert!(port > 0);
+            assert!(!in_use.contains(&port), "{port} is held by a listener");
+        }
     }
 }

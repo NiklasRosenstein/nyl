@@ -14,6 +14,10 @@ use serde_json::Value;
 use crate::cmd::{Cmd, Output};
 use crate::error::{Context, Error, Result};
 
+/// How long a `nyl` command may run unless the caller says otherwise: a
+/// reconcile builds an image and applies OpenTofu.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(25 * 60);
+
 /// The Docker client variables a unit may admit, as the tier-2 harness
 /// passes them.
 const DOCKER_SELECTORS: [&str; 5] = [
@@ -99,7 +103,7 @@ impl Nyl {
             .cwd(&self.checkout)
             .env_clear()
             .envs(self.environment())
-            .timeout(Duration::from_secs(25 * 60))
+            .timeout(DEFAULT_TIMEOUT)
             .echo()
             .secrets_from(self.admitted_secret_values())
     }
@@ -116,9 +120,15 @@ impl Nyl {
     /// Run `nyl <args> -o json`, requiring one of the exit codes, and parse the
     /// report on stdout. Stderr, where Nyl prints progress, is echoed.
     pub fn report(&self, args: &[&str], exits: &[i32]) -> Result<Report> {
+        self.report_within(args, exits, DEFAULT_TIMEOUT)
+    }
+
+    /// [`report`](Self::report) with a timeout of the caller's choosing, so a
+    /// command that waits for the cluster fails soon after its own bound.
+    pub fn report_within(&self, args: &[&str], exits: &[i32], timeout: Duration) -> Result<Report> {
         let mut arguments = args.to_vec();
         arguments.extend(["-o", "json"]);
-        let output = self.command(&arguments).run_expect(exits)?;
+        let output = self.command(&arguments).timeout(timeout).run_expect(exits)?;
         Report::parse(output)
     }
 

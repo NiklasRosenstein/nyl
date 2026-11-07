@@ -53,4 +53,5 @@ spec:
   teardownWait: {strategy: observe}
   # What the unit admits to read the reconciler and the cluster.
   env: {passthrough: %PUBLICATION_ENV%}
-  timeout: 10m
+  # Bounds the teardown wait too: a healthy teardown takes a couple of minutes.
+  timeout: 6m

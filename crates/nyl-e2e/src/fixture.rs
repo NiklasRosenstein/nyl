@@ -128,7 +128,9 @@ pub fn render(params: &Params, declarations: &Declarations) -> Result<Vec<Render
     let mut used = BTreeSet::new();
     let mut files = Vec::new();
     for (path, template) in FILES {
-        let content = substitute(template, &values, &mut used)
+        // A checkout with CRLF endings (Windows without the repository's
+        // .gitattributes) must render the same project.
+        let content = substitute(&normalize_newlines(template), &values, &mut used)
             .map_err(|error| error.context(format!("render fixture file {path}")))?;
         files.push(RenderedFile { path, content });
     }
@@ -139,6 +141,11 @@ pub fn render(params: &Params, declarations: &Declarations) -> Result<Vec<Render
         )));
     }
     Ok(files)
+}
+
+/// The template with LF line endings.
+fn normalize_newlines(template: &str) -> String {
+    template.replace("\r\n", "\n")
 }
 
 fn values(params: &Params, declarations: &Declarations) -> Result<BTreeMap<&'static str, String>> {
@@ -387,6 +394,22 @@ mod tests {
         for path in ["nyl/platform.yaml", "nyl/units.yaml", "applications/web/release.yaml"] {
             assert_eq!(file(&first, path), file(&second, path), "{path}");
         }
+    }
+
+    #[test]
+    fn test_crlf_templates_render_like_lf_ones() {
+        let values = BTreeMap::from([("DOCS", "a: 1\n".to_owned())]);
+        let render = |template: &str| substitute(&normalize_newlines(template), &values, &mut BTreeSet::new()).unwrap();
+        assert_eq!(render("x: 1\r\n  %DOCS%\r\ny: 2\r\n"), render("x: 1\n  %DOCS%\ny: 2\n"));
+    }
+
+    /// Argo CD waits for confirmation to delete a resource with either
+    /// `Prune=confirm` or `Delete=confirm` when its Application is deleted, so
+    /// a teardown that nobody confirms needs both policies to be Automatic.
+    #[test]
+    fn test_the_workload_namespace_never_asks_for_confirmation() {
+        let group = FILES.iter().find(|(path, _)| *path == "nyl/web.yaml").unwrap().1;
+        assert!(group.contains("namespace: {prunePolicy: Automatic, deletePolicy: Automatic}"));
     }
 
     #[test]

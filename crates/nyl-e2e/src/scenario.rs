@@ -332,9 +332,12 @@ impl Scenario<'_> {
     /// Tear the whole environment down; the publication waits, reading the
     /// reconciler, until the workloads are gone.
     fn teardown(&self) -> Result<()> {
-        let report = self.env.nyl.report(
+        // The publication's own timeout (6m) bounds the wait; this bounds
+        // anything that hangs beyond it.
+        let report = self.env.nyl.report_within(
             &["teardown", "-e", ENVIRONMENT, "--all", "--reason", "nyl-e2e teardown"],
             &[0],
+            Duration::from_secs(9 * 60),
         )?;
         for (unit, accepted) in [
             (UNIT_PUBLICATION, &["removed"][..]),
