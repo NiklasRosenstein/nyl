@@ -1,4 +1,10 @@
 [[entries]]
+id = "d4bb7395-67a0-4e23-a3e3-82c33f07df98"
+type = "fix"
+description = "`diff-tree` and `publish-tree` read every document of a multi-document file in the comparison baseline, including CRDs, so the AppProject cleanup check can migrate publications that store a Release in one `resources.yaml`"
+author = "@NiklasRosenstein"
+
+[[entries]]
 id = "40c0ae0d-91ca-4194-8aa9-b31c6cbade51"
 type = "feature"
 description = "Templates can serialize values as JSON with the `tojson` filter, for embedding configuration that Python-like list and mapping formatting would break"
