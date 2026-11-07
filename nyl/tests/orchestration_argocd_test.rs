@@ -393,8 +393,8 @@ fn test_attest_reads_the_argocd_api_server_with_the_admitted_token() {
     let platform = project.path().join("nyl/platform.yaml");
     let mut text = std::fs::read_to_string(&platform).unwrap();
     text = text.replace(
-        "  clusterRef: {name: dev}\n  applicationGroupSelector",
-        "  clusterRef: {name: dev}\n  argocdRef: {name: control}\n  applicationGroupSelector",
+        "  reconciler: {argocd: {}}\n",
+        "  reconciler: {argocd: {instanceRef: {name: control}}}\n",
     );
     text.push_str(&format!(
         "---\napiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata: {{name: control}}\nspec:\n  clusterRef: {{name: dev}}\n  namespace: argocd\n  access: {{method: api, api: {{server: '{}'}}}}\n",

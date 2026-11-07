@@ -968,6 +968,7 @@ kind: DeploymentTarget
 metadata:
   name: dev
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: dev}
   publication:
     repository: {repoURL: 'https://example.invalid/deploy.git'}
@@ -1412,6 +1413,7 @@ metadata:
 spec:
   target:
     inline:
+      reconciler: {argocd: {}}
       clusterRef: {name: dev}
       publication:
         repository: {repoURL: 'https://example.invalid/deploy.git'}
@@ -1563,6 +1565,7 @@ metadata:
 spec:
   target:
     inline:
+      reconciler: {argocd: {}}
       clusterRef: {name: dev}
       publication:
         repository: {repoURL: 'https://example.invalid/deploy.git'}
@@ -1746,7 +1749,7 @@ spec:
     fn test_templated_values_inside_a_target_object_render_for_the_instance() {
         let template = PREVIEW_TEMPLATE.replace(
             "    prefix: '{{ environment.name }}'\n",
-            "    target:\n      inline:\n        clusterRef: {name: dev}\n        publication:\n          repository: {repoURL: 'https://example.invalid/deploy.git'}\n          revision: previews\n          pathPrefix: '{{ environment.name }}'\n        values: {hostname: 'pr-{{ params.pr }}.example.com'}\n",
+            "    target:\n      inline:\n        reconciler: {argocd: {}}\n        clusterRef: {name: dev}\n        publication:\n          repository: {repoURL: 'https://example.invalid/deploy.git'}\n          revision: previews\n          pathPrefix: '{{ environment.name }}'\n        values: {hostname: 'pr-{{ params.pr }}.example.com'}\n",
         );
         let unit = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels:\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}\n";
         let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();

@@ -12,7 +12,7 @@ spec:
     target:
       inline:
         clusterRef: {name: dev}
-        argocdRef: {name: dev}
+        reconciler: {argocd: {instanceRef: {name: dev}}}
         catalogApplication:
           shared: {name: previews}      # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}

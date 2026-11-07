@@ -595,6 +595,7 @@ spec:
   spec:
     target:
       inline:
+        reconciler: {argocd: {}}
         clusterRef: {name: preview-cluster}
         applicationGroupSelector: {matchLabels: {preview: 'true'}}
         publication:
@@ -1344,8 +1345,9 @@ Nyl reports unmet requirements where they matter:
 
 ### Direct reconciler
 
-A DeploymentTarget is delivered one of two ways. By default an external
-reconciler, Argo CD, runs the published tree. With `reconciler: {direct: {}}`
+A DeploymentTarget is delivered one of two ways, and declares which: it has no
+default reconciler. With `reconciler: {argocd: {}}` an external reconciler,
+Argo CD, runs the published tree. With `reconciler: {direct: {}}`
 Nyl itself applies the target's Releases to the target's Cluster with the
 mechanics of `nyl apply` (server-side apply, pruning by release state, the
 `Prune` and `Delete` sync options), and still publishes the tree. The choice is
@@ -1366,26 +1368,30 @@ metadata: {name: dev}
 spec:
   clusterRef: {name: kind-dev}     # the Cluster declares destination and live.context
   reconciler:
-    direct: {}                     # absent: Argo CD, as today
+    direct: {}                     # or argocd: {instanceRef: {name: <instance>}}, or argocd: {}
   publication: {repositoryRef: {name: deploy}, revision: deploy, pathPrefix: targets/dev}
   applicationGroupSelector: {matchLabels: {tier: platform}}
 ```
 
-- `spec.reconciler` is optional, an object with exactly one member, and today
-  the member is `direct`, written `direct: {}`. A tagged one-member object,
-  not a bare keyword or an alternative to `argocdRef`, because a reconciler
-  kind may need options (`direct` takes none yet) and a kind that is not Argo
-  CD must not borrow Argo CD's reference field. Absence selects Argo CD, so
-  every released declaration keeps its meaning.
+- `spec.reconciler` is required, an object with exactly one member: `argocd`
+  or `direct`. A tagged one-member object, not a bare keyword, because a
+  reconciler kind may need options and a kind that is not Argo CD must not
+  borrow Argo CD's reference field. `argocd` takes the optional `instanceRef`
+  naming an ArgoCDInstance (see below); `direct` takes no options yet and is
+  written `direct: {}`. There is no implied reconciler: a target that omits
+  `reconciler` fails with `NYL-TARGET-RECONCILER-MISSING`, whose fix names both
+  forms, and one that names two fails with `NYL-TARGET-RECONCILER-AMBIGUOUS`.
+  The former top-level `argocdRef` no longer exists; using it fails with
+  `NYL-TARGET-ARGOCD-REF-REMOVED`, whose fix shows
+  `reconciler: {argocd: {instanceRef: {name: <instance>}}}`.
 - **Exclusive and validated.** `DeploymentTarget::validate` rejects
-  `reconciler.direct` together with `argocdRef` and with any
-  `catalogApplication` field other than its defaults (`enabled`, `shared`,
-  `name`, `project`, `syncPolicy`, `applicationDeletionPolicy`,
-  `selfPrunePolicy`, `labels`, `annotations`): a direct target generates no
-  Application, catalog, or AppProject, so each would be a setting that does
-  nothing. An empty `reconciler` object, or one with an unknown member, is
-  rejected. The same declaration is valid in an inline target
-  (`spec.target.inline`).
+  `reconciler.direct` together with any `catalogApplication` field other than
+  its defaults (`enabled`, `shared`, `name`, `project`, `syncPolicy`,
+  `applicationDeletionPolicy`, `selfPrunePolicy`, `labels`, `annotations`): a
+  direct target generates no Application, catalog, or AppProject, so each would
+  be a setting that does nothing. `direct` takes no Argo CD option, so the
+  reference field cannot be written beside it. The same declaration is valid
+  in an inline target (`spec.target.inline`).
 - **What a direct target still needs.** The Cluster, with its destination and
   committed Kubernetes capabilities exactly as for Argo CD (rendering is
   unchanged), and a publication, because the tree is still published (see
@@ -1402,11 +1408,14 @@ spec:
   are ignored for a direct target, because one group may be selected by
   targets of both kinds; `destinationNamespace`, `outputPath`, `namespace`,
   and `sharedNamespaces` apply to both.
-- **ArgoCDInstance rules.** "An explicit ArgoCDInstance makes `argocdRef`
-  mandatory for every target" becomes "...for every Argo CD target", and the
-  implicit target-local instance exists only for an Argo CD target. A project
-  of direct targets declares no ArgoCDInstance, and a project with explicit
-  instances sets `argocdRef` on its Argo CD targets alone. The seam is
+- **ArgoCDInstance rules.** An explicit ArgoCDInstance makes
+  `reconciler.argocd.instanceRef` mandatory for every Argo CD target
+  (`NYL-TARGET-ARGOCD-INSTANCE-REF-REQUIRED`), `argocd: {}` selects the implicit
+  target-local instance (the workload Cluster, namespace `argocd`) and is valid
+  only while no ArgoCDInstance is declared, and `instanceRef` with none declared
+  fails with `NYL-TARGET-ARGOCD-INSTANCE-UNDECLARED`. A project of direct
+  targets declares no ArgoCDInstance, and a project with explicit instances
+  sets `instanceRef` on its Argo CD targets alone. The seam is
   `resolve_argocd_instance` in the target compiler: a direct target resolves a
   `Delivery::Direct` value instead, so the compiler, the cache key, and
   `RenderedTarget` carry `delivery: Delivery` (`ArgoCd(ArgoCdLocation)` or

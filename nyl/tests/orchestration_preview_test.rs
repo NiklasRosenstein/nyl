@@ -84,6 +84,7 @@ spec:
     backendDir: '%SCENARIO_TMP%/tofu'
     target:
       inline:
+        reconciler: {argocd: {}}
         clusterRef: {name: dev}
         applicationGroupSelector: {matchLabels: {app: web}}
         catalogApplication: {syncPolicy: {automated: {prune: true}}}

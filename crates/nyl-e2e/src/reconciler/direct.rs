@@ -2,7 +2,7 @@
 //! through the mechanics of `nyl apply`, with no Argo CD in the cluster.
 //!
 //! The DeploymentTarget declares `reconciler: {direct: {}}`, with no
-//! `argocdRef` and no catalog fields, and deploys to a Cluster of its own whose
+//! Argo CD options and no catalog fields, and deploys to a Cluster of its own whose
 //! `destination.server` is the kind API server the kubeconfig names (Nyl
 //! verifies that the context's server is the declared one) and whose
 //! `live.context` is the kubeconfig context `e2e-admin`. The fixture's `dev`
@@ -118,7 +118,7 @@ mod tests {
             ),
             "{platform}"
         );
-        assert!(!platform.contains("argocdRef"), "{platform}");
+        assert!(!platform.contains("argocd:"), "{platform}");
         assert!(!platform.contains("ArgoCDInstance"), "{platform}");
         assert!(!platform.contains("catalogApplication"), "{platform}");
     }

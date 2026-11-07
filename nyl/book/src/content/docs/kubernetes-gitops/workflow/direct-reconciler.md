@@ -3,8 +3,9 @@ title: 'Apply Directly Without Argo CD'
 description: 'Declare a DeploymentTarget that Nyl applies itself, what it publishes, how releases are fenced, and how it is read and torn down.'
 ---
 
-A DeploymentTarget is delivered one of two ways. By default Argo CD syncs the
-published tree. With `reconciler: {direct: {}}`, Nyl applies the target's
+A DeploymentTarget is delivered one of two ways, and says which in
+`spec.reconciler`. With `reconciler: {argocd: …}`, Argo CD syncs the published
+tree. With `reconciler: {direct: {}}`, Nyl applies the target's
 Releases to its Cluster itself, with the mechanics of
 [`nyl apply`](/nyl/reference/cli/apply/): server-side apply as the field manager
 `nyl`, pruning by release state, and the Argo CD `Prune` and `Delete` sync
@@ -24,15 +25,16 @@ metadata: {name: dev}
 spec:
   clusterRef: {name: kind-dev}
   reconciler:
-    direct: {}                     # absent: Argo CD
+    direct: {}                     # or argocd: {instanceRef: {name: <instance>}}
   publication: {repositoryRef: {name: deploy}, revision: deploy, pathPrefix: targets/dev}
 ```
 
-`reconciler` and `argocdRef` are mutually exclusive, and so are `reconciler.direct`
-and any `catalogApplication` setting: a direct target generates no Application,
+`reconciler` is required and names exactly one member, `argocd` or `direct`: a
+target never has an implied reconciler. `reconciler.direct` is exclusive with any
+`catalogApplication` setting, because a direct target generates no Application,
 AppProject, or catalog, so a project of direct targets declares no ArgoCDInstance,
-and a project with explicit instances sets `argocdRef` on its Argo CD targets
-alone. `ApplicationGroup` fields that describe Argo CD (`applicationNamespace`,
+and a project with explicit instances sets `reconciler.argocd.instanceRef` on its
+Argo CD targets alone. `ApplicationGroup` fields that describe Argo CD (`applicationNamespace`,
 `projectRef`, `projectTemplate`, `syncPolicy`, and the like) are ignored for a
 direct target, because one group may be selected by targets of both kinds. A
 Namespace with a `Dedicated` shared owner is rejected, because it has no Release to

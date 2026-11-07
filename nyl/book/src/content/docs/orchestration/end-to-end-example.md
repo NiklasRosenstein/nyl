@@ -86,8 +86,8 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: dev}
 spec:
+  reconciler: {argocd: {instanceRef: {name: dev}}}
   clusterRef: {name: dev}
-  argocdRef: {name: dev}
   applicationGroupSelector: {matchLabels: {app: web}}
   publication:
     repositoryRef: {name: shop}
@@ -182,7 +182,7 @@ spec:
     target:
       inline:
         clusterRef: {name: dev}
-        argocdRef: {name: dev}
+        reconciler: {argocd: {instanceRef: {name: dev}}}
         catalogApplication:
           shared: {name: previews}      # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}

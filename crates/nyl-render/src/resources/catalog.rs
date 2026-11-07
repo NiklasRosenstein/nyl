@@ -177,7 +177,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
         }
         ResourceKind::ArgoCDInstance => json!({"clusterRef": {"name": "primary"}, "namespace": "argocd"}),
         ResourceKind::DeploymentTarget => {
-            json!({"clusterRef": {"name": "primary"}, "argocdRef": {"name": "primary"}, "publication": {"repositoryRef": {"name": "deploy"}, "revision": "deploy", "pathPrefix": "targets/production"}})
+            json!({"clusterRef": {"name": "primary"}, "reconciler": {"argocd": {"instanceRef": {"name": "primary"}}}, "publication": {"repositoryRef": {"name": "deploy"}, "revision": "deploy", "pathPrefix": "targets/production"}})
         }
         ResourceKind::AppProjectDefinition => {
             json!({"management": "External", "manifest": {"apiVersion": "argoproj.io/v1alpha1", "kind": "AppProject", "metadata": {"name": "workloads", "namespace": "argocd"}, "spec": {}}})
@@ -231,6 +231,30 @@ pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
     schema.insert(
         "else".into(),
         json!({"required":["kubernetes"],"properties":{"kubernetes":{"not":{"type":"null"}}}}),
+    );
+}
+
+/// `reconciler` is required, though its absence is reported with a stable code
+/// by validation rather than as a missing field.
+pub(crate) fn deployment_target_constraints(schema: &mut schemars::Schema) {
+    let required = schema.ensure_object().entry("required").or_insert_with(|| json!([]));
+    if let Some(required) = required.as_array_mut() {
+        required.push(json!("reconciler"));
+        required.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+}
+
+pub(crate) fn reconciler_constraints(schema: &mut schemars::Schema) {
+    exclusive_fields(
+        schema,
+        &[
+            (
+                "argocd",
+                "Argo CD syncs the published tree; `instanceRef` names the ArgoCDInstance when any is declared.",
+            ),
+            ("direct", "Nyl applies the Releases to the target's Cluster itself."),
+        ],
+        None,
     );
 }
 

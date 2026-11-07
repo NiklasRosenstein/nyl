@@ -24,7 +24,7 @@ prefixes may overlap only when the repository or revision differs.
 An ArgoCDInstance models the control plane separately. Several targets can
 deploy to separate workload Clusters while their generated catalogs are owned
 by the same Argo CD installation. Explicit instances require explicit
-`DeploymentTarget.spec.argocdRef` bindings.
+`DeploymentTarget.spec.reconciler.argocd.instanceRef` bindings.
 
 ## Value overlays
 
@@ -56,6 +56,7 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: primary}
   valuesFrom:
     - file: ../../../shared/platform.yaml

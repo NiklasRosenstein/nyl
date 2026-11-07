@@ -940,6 +940,7 @@ mod tests {
             "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
+                "reconciler": {"argocd": {}},
                 "clusterRef": {"name": "prod-eu-1"},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},

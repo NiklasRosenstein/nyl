@@ -1048,6 +1048,7 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   publication:
@@ -1429,7 +1430,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("platform.yaml"),
-            "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod-eu-1\n  labels: {region: eu,\n    tier: prod}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: production\n  labels: &shared\n    environment: production\nspec:\n  clusterRef:\n    name: prod-eu-1\n  publication:\n    repository:\n      repoURL: ssh://git@example/deploy.git\n    revision: deploy/production\n---\napiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\n  labels: !!map {team: platform}\nspec:\n  repoURL: https://example.invalid/deploy.git\n",
+            "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod-eu-1\n  labels: {region: eu,\n    tier: prod}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: production\n  labels: &shared\n    environment: production\nspec:\n  reconciler: {argocd: {}}\n  clusterRef:\n    name: prod-eu-1\n  publication:\n    repository:\n      repoURL: ssh://git@example/deploy.git\n    revision: deploy/production\n---\napiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\n  labels: !!map {team: platform}\nspec:\n  repoURL: https://example.invalid/deploy.git\n",
         )
         .unwrap();
         let inventory = discover_gitops_inventory(temporary.path(), None, crate::config::test_catalogue()).unwrap();

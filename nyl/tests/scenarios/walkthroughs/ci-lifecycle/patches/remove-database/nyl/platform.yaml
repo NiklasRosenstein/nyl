@@ -24,6 +24,7 @@ kind: DeploymentTarget
 metadata:
   name: dev
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: dev}
   applicationGroupSelector:
     matchLabels: {app: web}

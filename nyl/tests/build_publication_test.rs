@@ -244,7 +244,7 @@ fn inline_project() -> tempfile::TempDir {
     edit(
         "nyl/units.yaml",
         "target: dev\n",
-        "target:\n    inline:\n      clusterRef: {name: dev}\n      applicationGroupSelector: {matchLabels: {app: web}}\n      \
+        "target:\n    inline:\n      reconciler: {argocd: {}}\n      clusterRef: {name: dev}\n      applicationGroupSelector: {matchLabels: {app: web}}\n      \
          publication: {repositoryRef: {name: platform}, revision: deploy, pathPrefix: preview}\n      \
          releaseInputs:\n        web/web:\n          image: {value: 'registry.invalid:5000/web:direct'}\n          databaseHost: {value: db.internal}\n",
     );

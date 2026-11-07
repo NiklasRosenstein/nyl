@@ -1216,6 +1216,7 @@ mod tests {
             "kind": "DeploymentTarget",
             "metadata": {"name": "dev"},
             "spec": {
+                "reconciler": {"argocd": {}},
                 "publication": {"repository": {"repoURL": "https://example.invalid/deploy.git"}, "revision": "deploy", "pathPrefix": "dev"},
                 "releaseInputs": release_inputs,
             }

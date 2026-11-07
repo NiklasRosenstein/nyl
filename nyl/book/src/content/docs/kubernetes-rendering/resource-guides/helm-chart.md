@@ -256,6 +256,7 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: primary
   values:
