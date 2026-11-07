@@ -218,22 +218,47 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
 }
 
 /// A stored blocked reason in the report's form: `no-current-receipt` with
-/// the producer when the reason says the producer has no current receipt.
-fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
-    let producer = reason
-        .strip_suffix(" has no current receipt")
-        .and_then(|unit| UnitName::new(unit).ok());
-    match producer {
-        Some(unit) => BlockedBy {
+/// the producer when the reason says the producer has no current receipt,
+/// and `attestation-pending` or `attestation-failing` with the producer and
+/// the attestation when it waits for one (see [`super::evidence`]).
+pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
+    if let Some(waiting) = super::evidence::parse_reason(reason) {
+        let (environment, unit) = producer(&waiting.producer);
+        return BlockedBy {
             pointer: pointer.to_owned(),
-            unit: Some(unit),
-            reason: NO_CURRENT_RECEIPT.to_owned(),
-        },
-        None => BlockedBy {
+            environment,
+            unit,
+            reason: waiting.waiting.stable().to_owned(),
+            attestation: Some(waiting.name),
+        };
+    }
+    match reason.strip_suffix(" has no current receipt") {
+        Some(text) if producer(text).1.is_some() => {
+            let (environment, unit) = producer(text);
+            BlockedBy {
+                pointer: pointer.to_owned(),
+                environment,
+                unit,
+                reason: NO_CURRENT_RECEIPT.to_owned(),
+                attestation: None,
+            }
+        }
+        _ => BlockedBy {
             pointer: pointer.to_owned(),
+            environment: None,
             unit: None,
             reason: reason.to_owned(),
+            attestation: None,
         },
+    }
+}
+
+/// A producer as a reason writes it: `<unit>`, or `<environment>/<unit>` for
+/// a unit of another environment.
+fn producer(text: &str) -> (Option<EnvironmentName>, Option<UnitName>) {
+    match text.split_once('/') {
+        Some((environment, unit)) => (EnvironmentName::new(environment).ok(), UnitName::new(unit).ok()),
+        None => (None, UnitName::new(text).ok()),
     }
 }
 
@@ -486,6 +511,8 @@ pub fn status_with_readiness(
                 .iter()
                 .map(|reason| blocked_by(&reason.pointer, &reason.reason))
                 .collect();
+            unit.warnings
+                .extend(super::evidence::warnings(name, environment.as_str(), reasons));
         }
         if let Some(condition) = condition {
             unit.message = Some(condition.message().to_owned());
@@ -717,8 +744,10 @@ mod tests {
             unit("database").blocked_by,
             [BlockedBy {
                 pointer: "/values/vpc".to_owned(),
+                environment: None,
                 unit: Some(name("network")),
                 reason: NO_CURRENT_RECEIPT.to_owned(),
+                attestation: None,
             }]
         );
         let web = unit("web");
@@ -1053,6 +1082,42 @@ mod tests {
 
     fn codes(findings: &[Finding]) -> Vec<Code> {
         findings.iter().map(|finding| finding.code).collect()
+    }
+
+    /// Catches a consumer of another environment's unit losing its producer
+    /// in the report: the producer's environment and unit are separate
+    /// fields for every reason that names one, as for a unit of the same
+    /// environment, and a reason that names no producer keeps its text.
+    #[test]
+    fn test_blocked_by_keeps_the_producer_of_another_environment() {
+        let pending = blocked_by("/dependsOn/0", "attestation healthy of infra/network is pending");
+        assert_eq!(
+            pending,
+            BlockedBy {
+                pointer: "/dependsOn/0".to_owned(),
+                environment: Some(EnvironmentName::new("infra").unwrap()),
+                unit: Some(name("network")),
+                reason: "attestation-pending".to_owned(),
+                attestation: Some("healthy".to_owned()),
+            }
+        );
+        let local = blocked_by("/dependsOn/0", "attestation healthy of network is failing");
+        assert_eq!((local.environment, local.unit), (None, Some(name("network"))));
+        let missing = blocked_by("/values/x", "infra/network has no current receipt");
+        assert_eq!(
+            (missing.environment, missing.unit, missing.reason.as_str()),
+            (
+                Some(EnvironmentName::new("infra").unwrap()),
+                Some(name("network")),
+                NO_CURRENT_RECEIPT
+            )
+        );
+        let other = blocked_by(
+            "/values/x",
+            "infra waits because its producer environment failed or is waiting",
+        );
+        assert_eq!((other.environment, other.unit), (None, None));
+        assert!(other.reason.starts_with("infra waits"));
     }
 }
 

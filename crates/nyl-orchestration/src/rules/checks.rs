@@ -167,12 +167,15 @@ pub fn settle_drift(new: DriftRecord, stored: Option<&DriftRecord>) -> DriftReco
 }
 
 /// The attestation documents of `outcomes` for `unit`'s current `receipt`
-/// at `now`, each with `source: {driver: attest}` and the driver's details.
+/// at `now`, each with `source: {driver: <source>}` (`attest` for `nyl
+/// attest`, `reconcile` for the outcome of an execution) and the driver's
+/// details.
 pub fn attestations(
     environment: &EnvironmentName,
     unit: &DesiredUnit,
     receipt: &Receipt,
     outcomes: &[AttestationOutcome],
+    source: &str,
     now: Timestamp,
 ) -> BTreeMap<String, Attestation> {
     let subject = unit.unit.uid.clone().map(|uid| ArtifactUnit {
@@ -193,7 +196,7 @@ pub fn attestations(
                     execution_key: receipt.execution_key.to_string(),
                     result: outcome.result,
                     at: now,
-                    source: json!({"driver": "attest"}),
+                    source: json!({"driver": source}),
                     reason: outcome.reason.clone(),
                     details: outcome.details.clone(),
                 },
@@ -469,11 +472,25 @@ mod tests {
             reason: None,
             details: json!({"applications": 1}),
         };
-        let attested = attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], at(1));
+        let attested = attestations(
+            &env(),
+            &unit,
+            receipt,
+            &[outcome(AttestationResult::Pass)],
+            "attest",
+            at(1),
+        );
         assert_eq!(attested["healthy"].source, json!({"driver": "attest"}));
         assert_eq!(attested["healthy"].details, json!({"applications": 1}));
         let again = settle_attestations(
-            attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], at(2)),
+            attestations(
+                &env(),
+                &unit,
+                receipt,
+                &[outcome(AttestationResult::Pass)],
+                "attest",
+                at(2),
+            ),
             Some(&attested),
             receipt,
             at(2),
@@ -485,7 +502,14 @@ mod tests {
         // unchanged result is written again with its new time.
         let later = at(1) + chrono::Duration::minutes(16);
         let refreshed = settle_attestations(
-            attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], later),
+            attestations(
+                &env(),
+                &unit,
+                receipt,
+                &[outcome(AttestationResult::Pass)],
+                "attest",
+                later,
+            ),
             Some(&attested),
             receipt,
             later,
@@ -507,7 +531,14 @@ mod tests {
             reason: None,
             details: Value::Null,
         };
-        let earlier = attestations(&env(), &unit, old.receipt.as_ref().unwrap(), &[outcome], at(1));
+        let earlier = attestations(
+            &env(),
+            &unit,
+            old.receipt.as_ref().unwrap(),
+            &[outcome],
+            "attest",
+            at(1),
+        );
         let current = observed_numbered("network", 1, Some(hex_key('a')));
         let settled = settle_attestations(
             BTreeMap::new(),

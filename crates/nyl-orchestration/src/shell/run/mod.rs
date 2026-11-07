@@ -59,6 +59,7 @@ use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
     SourceResolver, StateError, TransitionChanges,
 };
+use nyl_core::orchestration::state::Attestation;
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
     Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
@@ -86,7 +87,7 @@ use crate::rules::sources::{
 };
 use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::teardown::TeardownOptions;
-use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
+use crate::rules::unit_state::{receipt_state, unit_state};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitState};
 use crate::transition::Trailers;
 pub use cancel::{Cancellation, SIGINT, SIGTERM};
@@ -422,6 +423,7 @@ struct Resolved {
 struct Evidence<'e> {
     observed: &'e BTreeMap<UnitName, ObservedUnit>,
     artifacts: &'e BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    attestations: &'e BTreeMap<UnitName, BTreeMap<String, Attestation>>,
     observed_commit: Option<&'e CommitId>,
     run: Option<&'e RunId>,
     produced_in_run: &'e BTreeSet<UnitName>,
@@ -918,6 +920,7 @@ impl<'r, 'a> Session<'r, 'a> {
                     desired: &units,
                     observed: evidence.observed,
                     artifacts: evidence.artifacts,
+                    attestations: evidence.attestations,
                     observed_commit: evidence.observed_commit,
                     run: evidence.run,
                     produced_in_run: evidence.produced_in_run,
@@ -950,11 +953,7 @@ impl<'r, 'a> Session<'r, 'a> {
                         .errors
                         .iter()
                         .map(|error| {
-                            Finding::new(
-                                Code::ReferenceInvalid,
-                                format!("unit {name}: {error}"),
-                                "correct the reference so that it names a declared, non-sensitive output or a listed artifact of a unit in the ownership set",
-                            )
+                            Finding::new(error.code, format!("unit {name}: {}", error.message), error.fix.clone())
                         })
                         .collect(),
                 );
@@ -1307,32 +1306,19 @@ fn declared_outputs(spec: &Value) -> BTreeMap<String, OutputDeclaration> {
         .unwrap_or_default()
 }
 
-/// A stored blocked reason in the report's form.
-fn blocked_by(unit: &DesiredUnit) -> Vec<BlockedBy> {
+/// A unit's stored blocked reasons in the report's form, and the warnings
+/// of those that wait for attestations.
+fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<BlockedBy>, Vec<Finding>) {
     let Readiness::Blocked { reasons } = &unit.readiness else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    reasons
-        .iter()
-        .map(|reason| {
-            let producer = reason
-                .reason
-                .strip_suffix(" has no current receipt")
-                .and_then(|producer| UnitName::new(producer).ok());
-            match producer {
-                Some(producer) => BlockedBy {
-                    pointer: reason.pointer.clone(),
-                    unit: Some(producer),
-                    reason: NO_CURRENT_RECEIPT.to_owned(),
-                },
-                None => BlockedBy {
-                    pointer: reason.pointer.clone(),
-                    unit: None,
-                    reason: reason.reason.clone(),
-                },
-            }
-        })
-        .collect()
+    (
+        reasons
+            .iter()
+            .map(|reason| crate::rules::unit_state::blocked_by(&reason.pointer, &reason.reason))
+            .collect(),
+        crate::rules::evidence::warnings(&unit.unit.name, environment.as_str(), reasons),
+    )
 }
 
 /// The failure or uncertainty message of the unit's current incarnation.
@@ -1420,6 +1406,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             &Evidence {
                 observed: &observed,
                 artifacts: &snapshot.artifacts,
+                attestations: &snapshot.attestations,
                 observed_commit: snapshot.tips.observed.as_ref(),
                 run: None,
                 produced_in_run: &produced,
@@ -1472,7 +1459,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         entry.receipt = Some(receipt_state(Some(unit), current));
         entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
         entry.message = condition_message(unit, current);
-        entry.blocked_by = blocked_by(unit);
+        (entry.blocked_by, entry.warnings) = blocked_report(environment, unit);
         entry.state = Some(if skipped.get(name) == Some(&Skipped::ManualApproval) {
             UnitState::AwaitingApproval
         } else if drifted.contains(name) {
@@ -1878,8 +1865,10 @@ fn plan_unit(
                 .blocked_by
                 .extend(plan.blocked_by.into_iter().map(|pointer| BlockedBy {
                     pointer,
+                    environment: None,
                     unit: None,
                     reason: "needed-to-plan".to_owned(),
+                    attestation: None,
                 }));
         }
         Ok(Supported::Unsupported) => {
@@ -2315,6 +2304,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
 
         let mut observed = snapshot.observed.clone();
         let mut artifacts = snapshot.artifacts.clone();
+        // The attestations of the receipts as this run changes them.
+        let mut attestations = snapshot.attestations.clone();
         let mut life = teardown::Life::new(&overlay.desired);
         if lifecycle_work {
             for (name, write) in &prepared.desired.lifecycle {
@@ -2385,6 +2376,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 &Evidence {
                     observed: &observed,
                     artifacts: &artifacts,
+                    attestations: &attestations,
                     observed_commit: snapshot.tips.observed.as_ref(),
                     run: Some(&self.run),
                     produced_in_run: &produced,
@@ -2537,6 +2529,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                             produced.insert(name.clone());
                         }
                         observed.insert(name.clone(), checkpoint.observed.clone());
+                        // A new receipt starts with the attestations its own execution reported.
+                        if let Some(set) = &execution.attestations {
+                            if set.is_empty() {
+                                attestations.remove(&name);
+                            } else {
+                                attestations.insert(name.clone(), set.clone());
+                            }
+                        }
                         self.checkpointed = true;
                         if let Err(error) = self.write_run(Some(checkpoint)) {
                             let finding = store_error(&environment, &error);
@@ -2747,7 +2747,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let mut entry = UnitReport::new(unit.unit.kind.clone());
             entry.receipt = Some(receipt_state(Some(unit), current));
             entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
-            entry.blocked_by = blocked_by(unit);
+            let (blocked, blocked_warnings) = blocked_report(&environment, unit);
+            entry.blocked_by = blocked;
             entry.receipt_nyl_version =
                 crate::rules::unit_state::receipt_nyl_version(unit, current, &context.base.version);
             if let Some(execution) = executions.get(name) {
@@ -2777,6 +2778,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     ));
                 }
             }
+            entry.warnings.extend(blocked_warnings);
             self.report.units.insert(name.clone(), entry);
         }
         for (name, held) in &prepared.desired.held {
@@ -2844,7 +2846,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.desired.insert(name.clone(), write.clone());
             }
         }
-        Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
+        Self::observed_changes(snapshot, &observed, &artifacts, &attestations, &life, &mut changes);
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
@@ -3020,7 +3022,14 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.desired.insert(name.clone(), write.clone());
             }
         }
-        Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
+        Self::observed_changes(
+            snapshot,
+            &observed,
+            &artifacts,
+            &snapshot.attestations,
+            &life,
+            &mut changes,
+        );
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
@@ -3116,6 +3125,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         snapshot: &EnvironmentSnapshot,
         observed: &BTreeMap<UnitName, ObservedUnit>,
         artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        attestations: &BTreeMap<UnitName, BTreeMap<String, Attestation>>,
         life: &teardown::Life,
         changes: &mut TransitionChanges,
     ) {
@@ -3136,6 +3146,22 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
         // A new receipt replaces the one a drift record was about.
         changes.drift.extend(drift::drift_changes(snapshot, observed));
+        // Attestations name the receipt they are for: a replaced receipt's go
+        // in the same commit, and the new receipt's own are written with it.
+        let mut standing = attestations.clone();
+        for (name, kept) in crate::rules::evidence::attestation_changes(&standing, observed) {
+            match kept {
+                Some(kept) => standing.insert(name, kept),
+                None => standing.remove(&name),
+            };
+        }
+        let names: BTreeSet<&UnitName> = standing.keys().chain(snapshot.attestations.keys()).collect();
+        for name in names {
+            let after = standing.get(name);
+            if snapshot.attestations.get(name) != after {
+                changes.attestations.insert(name.clone(), after.cloned());
+            }
+        }
         for name in &life.cleared {
             if snapshot.drift.contains_key(name) {
                 changes.drift.insert(name.clone(), None);

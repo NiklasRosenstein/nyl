@@ -458,7 +458,10 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
             provenance: BTreeMap::new(),
             execution_key: None,
             fingerprint: None,
-            attestations: Vec::new(),
+            // What the unit can be attested for is known from its rendered
+            // spec, so consumers' requirements are checked, and wait,
+            // before the unit is resolved (resolution records the same set).
+            attestations: driver.attestations(spec),
             readiness: Readiness::Ready,
         };
         let Some(stored) = inputs.snapshot.desired.get(name) else {

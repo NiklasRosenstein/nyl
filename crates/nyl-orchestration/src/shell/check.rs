@@ -533,7 +533,7 @@ fn check_unit(
         },
         Ok(Supported::Supported(Found::Attestations(AttestationCheck::Attested { outcomes }))) => {
             let set = settle_attestations(
-                attestations(environment, unit, receipt, &outcomes, now),
+                attestations(environment, unit, receipt, &outcomes, "attest", now),
                 snapshot.attestations.get(name),
                 receipt,
                 now,
