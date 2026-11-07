@@ -1053,7 +1053,8 @@ impl GitPublicationHistory {
     /// `PublishedTree`), at most `limit` publications. Without a receipt, nothing
     /// bounds the walk but `limit`: no execution of the unit completed, so every
     /// publication on the branch may be its own. A history that holds more
-    /// publications than `limit` before reaching the receipt's is an error, never a guess. Direct
+    /// publications than `limit` before reaching the receipt's, or than `limit` with no
+    /// receipt to reach, is an error (`NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP`), never a guess. Direct
     /// targets use it to find the Releases that left the tree.
     pub fn direct_releases_since(&self, receipt: Option<&str>, limit: usize) -> Result<Vec<PublishedDirectRelease>> {
         let Some(head) = self.head()? else {
@@ -1065,7 +1066,7 @@ impl GitPublicationHistory {
             None => None,
         };
         let mut releases = BTreeMap::new();
-        let mut reached = stop.is_none();
+        let mut reached = false;
         for commit in &publications {
             let Some(commit) = self.commit(commit)? else {
                 continue;
@@ -1085,9 +1086,17 @@ impl GitPublicationHistory {
             }
         }
         if !reached && truncated {
+            // Fails closed in every case where the walk could not reach what bounds it: a
+            // receipt too far back, a receipt the branch no longer holds, or none at all.
+            let since = if stop.is_some() {
+                "since the last receipt's"
+            } else {
+                "and the last receipt's cannot be found, or there is none, so the walk has no start in the branch's"
+            };
             return Err(NylError::config(format!(
-                "the publication branch holds more than {limit} publications since the last receipt's, so the Releases \
-                 that left the tree cannot be told; publish fewer commits between executions, or release the leftovers by hand"
+                "NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP: the publication branch holds more than {limit} publications \
+                 {since}, so the Releases that left the tree cannot be told; publish fewer commits between executions, or \
+                 release the leftovers by hand with `nyl release delete --target <target> --take-over`"
             )));
         }
         Ok(releases.into_values().collect())
@@ -1788,7 +1797,20 @@ mod tests {
             "the walk stops at the receipt's publication"
         );
         let too_deep = history.direct_releases_since(Some(&second), 1).unwrap_err().to_string();
-        assert!(too_deep.contains("more than 1 publications"), "{too_deep}");
+        assert!(
+            too_deep.contains("NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP"),
+            "{too_deep}"
+        );
+        let no_start = history.direct_releases_since(None, 2).unwrap_err().to_string();
+        assert!(
+            no_start.contains("NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP"),
+            "{no_start}"
+        );
+        let unknown = history
+            .direct_releases_since(Some(&"0".repeat(40)), 2)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP"), "{unknown}");
     }
 
     /// Catches the Releases of an ownership index being read by anything but
