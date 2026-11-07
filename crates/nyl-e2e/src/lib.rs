@@ -1,7 +1,7 @@
 //! The cluster end-to-end suite of Nyl.
 //!
 //! One scenario runs against a kind cluster with each reconciler (the
-//! variants): Nyl's direct reconciler (pending), and Argo CD read through the
+//! variants): Nyl's direct reconciler, and Argo CD read through the
 //! Kubernetes API or through its API server. The suite drives the real `nyl`
 //! binary as a subprocess, the way a CI job does, so it depends on no Nyl crate.
 //!

@@ -101,8 +101,7 @@ The tiers are:
   scenario against a kind cluster, a local registry, and a Git server that both
   the host and the cluster reach, with each reconciler: Argo CD read through the
   Kubernetes API (`argocd-kubernetes`), Argo CD read through its API server with
-  a token (`argocd-api`), and Nyl's direct reconciler (`direct`, pending until it
-  lands). The real binary builds an image, applies OpenTofu, and publishes a
+  a token (`argocd-api`), and Nyl's direct reconciler (`direct`). The real binary builds an image, applies OpenTofu, and publishes a
   Release that consumes both; the suite then makes the reconciler run it, checks
   `attest` and `observe`, changes an input, reconciles again, and tears down
   with the `observe` wait. Argo CD is therefore read for real here, which tiers 1

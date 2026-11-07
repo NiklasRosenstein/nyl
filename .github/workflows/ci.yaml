@@ -400,10 +400,6 @@ jobs:
     needs: [build-linux-musl]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # The direct reconciler lands in the m5/10 branch; until the suite wires it,
-    # the direct variant reports "pending" and fails fast, which must not fail
-    # the workflow. Drop this line when it is wired.
-    continue-on-error: ${{ matrix.variant == 'direct' }}
     strategy:
       fail-fast: false
       matrix:

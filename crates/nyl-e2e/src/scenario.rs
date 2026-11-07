@@ -4,12 +4,12 @@
 //! from outside: the registry, the published branch, the cluster, `nyl`'s
 //! reports, and the state refs.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::checks::{attestation_ready, deployment_ready, observations_ready, Observed};
-use crate::ensure;
+use crate::checks::{attestation_ready, deployment_ready, observations_ready, parse_attestation_record, Observed};
 use crate::env::Env;
-use crate::error::{Context, Result};
+use crate::error::{Context, Error, Result};
 use crate::fixture::{
     self, expected_database_host, Declarations, Params, ENVIRONMENT, NAMESPACE, PUBLICATION_BRANCH, PUBLICATION_PREFIX,
     UNIT_DATABASE, UNIT_IMAGE, UNIT_PUBLICATION,
@@ -17,8 +17,10 @@ use crate::fixture::{
 use crate::infra::kind::KUBE_VERSION;
 use crate::infra::{registry, KUBE_CONTEXT};
 use crate::log;
+use crate::nyl::Report;
 use crate::reconciler::Reconciler;
 use crate::wait::{Poll, Waiter};
+use crate::{bail, ensure};
 
 /// What one revision of the project produced, as `nyl get` reports it.
 #[derive(Clone, Debug)]
@@ -70,26 +72,26 @@ impl Scenario<'_> {
         })?;
 
         let first = step(
-            "nyl reconcile builds the image, applies OpenTofu, and publishes",
-            || self.reconcile("executed", 1),
+            &format!("nyl reconcile builds, applies, publishes, and waits for {name} to report healthy"),
+            || self.reconcile_and_deploy("executed", 1),
         )?;
         step("the image is in the registry and the tree is on the branch", || {
             self.check_published(&first)
         })?;
-        step(&format!("{name}: run the published tree"), || {
-            self.reconciler.deploy(self.env)
-        })?;
         step("the workload runs revision 1", || self.await_workload(&first))?;
-        step("nyl attest records accepted and healthy", || self.attest())?;
+        step("reconcile recorded accepted and healthy, and nyl attest agrees", || {
+            self.attest()
+        })?;
         step("nyl observe reads the live values", || self.observe(&first))?;
 
         step(
             "commit revision 2: another page in the image and another OpenTofu output",
             || self.publish_revision(2),
         )?;
-        let second = step("nyl reconcile executes all three units again", || {
-            self.reconcile("executed", 2)
-        })?;
+        let second = step(
+            &format!("nyl reconcile executes all three units again and waits for {name}"),
+            || self.reconcile_and_deploy("executed", 2),
+        )?;
         ensure!(
             second.image != first.image,
             "revision 2 built the same image as revision 1: {}",
@@ -103,19 +105,18 @@ impl Scenario<'_> {
         step("the image is in the registry and the tree is on the branch", || {
             self.check_published(&second)
         })?;
-        step(&format!("{name}: run the new tree"), || {
-            self.reconciler.deploy(self.env)
-        })?;
         step("the workload runs revision 2", || self.await_workload(&second))?;
-        step("nyl attest records accepted and healthy for revision 2", || {
-            self.attest()
-        })?;
+        step(
+            "reconcile recorded accepted and healthy for revision 2, and nyl attest agrees",
+            || self.attest(),
+        )?;
         step("nyl observe reads the live values of revision 2", || {
             self.observe(&second)
         })?;
 
         step("a repeated reconcile executes nothing", || {
-            self.reconcile("current", 2).map(|_| ())
+            self.reconcile_report("current")?;
+            Ok(())
         })?;
 
         step("nyl teardown removes everything, waiting for the reconciler", || {
@@ -155,9 +156,62 @@ impl Scenario<'_> {
         Ok(())
     }
 
-    /// `nyl reconcile` and check that all three units have `result`; returns
-    /// what the revision produced.
-    fn reconcile(&self, result: &str, number: u32) -> Result<Revision> {
+    /// `nyl reconcile`, which with `observe.waitHealthy` returns once the
+    /// reconciler reports the workload healthy. When an operator has to make
+    /// the cluster run the tree meanwhile (Argo CD's workload sync is manual),
+    /// the reconcile runs on a thread of its own while this one waits for the
+    /// publication to land and then deploys it. Returns what the revision
+    /// produced.
+    fn reconcile_and_deploy(&self, result: &str, number: u32) -> Result<Revision> {
+        if !self.reconciler.needs_operator() {
+            self.reconcile_report(result)?;
+            return self.read_revision(number);
+        }
+        let before = self.env.project.remote_head(PUBLICATION_BRANCH)?;
+        let stop = AtomicBool::new(false);
+        let (reconciled, deployed) = std::thread::scope(|scope| {
+            let reconcile = scope.spawn(|| {
+                let reconciled = self.reconcile_report(result);
+                if reconciled.is_err() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                reconciled
+            });
+            let deployed = self
+                .await_publication(before.as_deref(), &stop)
+                .and_then(|()| self.reconciler.deploy(self.env, &stop));
+            let reconciled = reconcile
+                .join()
+                .unwrap_or_else(|_| Err(Error::new("the reconcile thread panicked")));
+            (reconciled, deployed)
+        });
+        // The reconcile's own failure explains more than a deploy that gave up.
+        reconciled?;
+        deployed?;
+        self.read_revision(number)
+    }
+
+    /// Wait until the publication branch moves past `before`: the reconcile
+    /// has pushed the tree.
+    fn await_publication(&self, before: Option<&str>, stop: &AtomicBool) -> Result<()> {
+        Waiter::new(
+            format!("nyl reconcile to publish to the {PUBLICATION_BRANCH} branch"),
+            Duration::from_secs(10 * 60),
+        )
+        .backoff(Duration::from_secs(2), Duration::from_secs(5))
+        .until(|| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(Error::new("the reconcile failed before it published"));
+            }
+            Ok(match self.env.project.remote_head(PUBLICATION_BRANCH)? {
+                Some(head) if Some(head.as_str()) != before => Poll::Ready(()),
+                _ => Poll::pending("the branch has not moved yet"),
+            })
+        })
+    }
+
+    /// `nyl reconcile` and check that all three units have `result`.
+    fn reconcile_report(&self, result: &str) -> Result<Report> {
         let report = self.env.nyl.report(&["reconcile", "-e", ENVIRONMENT], &[0])?;
         for unit in [UNIT_DATABASE, UNIT_IMAGE, UNIT_PUBLICATION] {
             let actual = report.result(unit)?;
@@ -167,7 +221,7 @@ impl Scenario<'_> {
                 serde_json::to_string_pretty(&report.json).unwrap_or_default()
             );
         }
-        self.read_revision(number)
+        Ok(report)
     }
 
     fn read_revision(&self, number: u32) -> Result<Revision> {
@@ -224,10 +278,9 @@ impl Scenario<'_> {
         );
         self.env.project.fetch()?;
         let tree = self.env.project.tree(PUBLICATION_BRANCH)?;
-        for required in [
-            format!("{PUBLICATION_PREFIX}/_nyl/index.json"),
-            fixture::CATALOG_MANIFEST.to_owned(),
-        ] {
+        let mut required_files = vec![format!("{PUBLICATION_PREFIX}/_nyl/index.json")];
+        required_files.extend(self.reconciler.published_files());
+        for required in required_files {
             ensure!(
                 tree.contains(&required),
                 "the {PUBLICATION_BRANCH} branch lacks {required}; it holds {tree:?}"
@@ -263,18 +316,37 @@ impl Scenario<'_> {
         })
     }
 
-    /// Poll `nyl attest` until `accepted` and `healthy` pass: a reconcile
-    /// attests nothing, and the reconciler may need a moment to report health.
+    /// The reconcile's wait recorded `accepted` and `healthy` as passing, and a
+    /// single `nyl attest` agrees. The recorded attestations are read from the
+    /// observed state before `nyl attest` runs, because both write the record.
     fn attest(&self) -> Result<()> {
-        Waiter::new("nyl attest to record accepted and healthy", Duration::from_secs(6 * 60))
-            .backoff(Duration::from_secs(5), Duration::from_secs(15))
-            .until(|| {
-                let report = self.env.nyl.report(&["attest", "-e", ENVIRONMENT], &[0, 2, 3])?;
-                Ok(match attestation_ready(&report.json, UNIT_PUBLICATION) {
-                    Poll::Ready(()) => Poll::Ready(()),
-                    Poll::Pending(reason) => Poll::Pending(format!("exit {}: {reason}", report.exit)),
-                })
-            })
+        self.env.project.fetch()?;
+        let record = self
+            .env
+            .project
+            .show(
+                &format!("nyl/{ENVIRONMENT}/observed"),
+                &format!("observed/units/{UNIT_PUBLICATION}/attestations.yaml"),
+            )
+            .map_err(|error| error.context("the reconcile recorded no attestations"))?;
+        let recorded = parse_attestation_record(&record);
+        for name in ["accepted", "healthy"] {
+            let attestation = recorded.get(name);
+            ensure!(
+                attestation.is_some_and(|attestation| attestation.result == "pass"),
+                "attestation {name} recorded by the reconcile is {attestation:?}; the record is\n{record}"
+            );
+            ensure!(
+                attestation.is_some_and(|attestation| attestation.driver == "reconcile"),
+                "attestation {name} was recorded by {:?}, not by the reconcile's wait; the record is\n{record}",
+                attestation.map(|attestation| attestation.driver.as_str())
+            );
+        }
+        let report = self.env.nyl.report(&["attest", "-e", ENVIRONMENT], &[0])?;
+        match attestation_ready(&report.json, UNIT_PUBLICATION) {
+            Poll::Ready(()) => Ok(()),
+            Poll::Pending(reason) => bail!("nyl attest disagrees with the reconcile: {reason}"),
+        }
     }
 
     /// Poll `nyl observe` until both live values arrive, then check them

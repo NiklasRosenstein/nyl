@@ -143,6 +143,26 @@ pub fn render(params: &Params, declarations: &Declarations) -> Result<Vec<Render
     Ok(files)
 }
 
+/// The `kubernetes:` capabilities of every Cluster the fixture declares: what
+/// the Release renders against, since rendering never asks the cluster.
+pub fn cluster_capabilities(kube_version: &str) -> String {
+    format!(
+        "kubernetes:\n  kubeVersion: {kube_version}\n  apiVersions: [v1, apps/v1, v1/Namespace, v1/Service, apps/v1/Deployment]\n  clusterScopedKinds: [core/Namespace]\n"
+    )
+}
+
+/// A Cluster document, starting with `---`, for a destination reached through
+/// the kubeconfig context `context`.
+pub fn cluster_document(name: &str, server: &str, context: &str, kube_version: &str) -> String {
+    let capabilities = cluster_capabilities(kube_version)
+        .lines()
+        .map(|line| format!("  {line}\n"))
+        .collect::<String>();
+    format!(
+        "---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: {server}\n  live: {{context: {context}}}\n{capabilities}"
+    )
+}
+
 /// The template with LF line endings.
 fn normalize_newlines(template: &str) -> String {
     template.replace("\r\n", "\n")
@@ -154,7 +174,7 @@ fn values(params: &Params, declarations: &Declarations) -> Result<BTreeMap<&'sta
         ("REPO_URL", params.repo_url.clone()),
         ("PUBLISH_URL", params.publish_url.clone()),
         ("KUBE_CONTEXT", params.kube_context.clone()),
-        ("KUBE_VERSION", params.kube_version.clone()),
+        ("CLUSTER_CAPABILITIES", cluster_capabilities(&params.kube_version)),
         ("REGISTRY_HOST", params.registry_host.clone()),
         ("STATE_DIR", params.state_dir.clone()),
         ("REVISION", params.revision.to_string()),
@@ -393,6 +413,28 @@ mod tests {
         // Nothing else changes, so a revision is exactly an input change.
         for path in ["nyl/platform.yaml", "nyl/units.yaml", "applications/web/release.yaml"] {
             assert_eq!(file(&first, path), file(&second, path), "{path}");
+        }
+    }
+
+    /// The scenario reads the attestations a reconcile recorded, which only
+    /// `waitHealthy` makes it record.
+    #[test]
+    fn test_the_publication_waits_for_health_in_every_variant() {
+        let files = render(&params(), &Declarations::default()).unwrap();
+        assert!(file(&files, "nyl/units.yaml").contains("  observe: {waitHealthy: {timeout: 5m}}\n"));
+    }
+
+    #[test]
+    fn test_a_cluster_document_declares_the_destination_context_and_capabilities() {
+        let document = cluster_document("kind-dev", "https://127.0.0.1:6443", "e2e-admin", "1.36.4");
+        assert!(
+            document.starts_with("---\napiVersion: k8s.nyl/v1\nkind: Cluster\n"),
+            "{document}"
+        );
+        assert!(document.contains("  destination:\n    server: https://127.0.0.1:6443\n  live: {context: e2e-admin}\n"));
+        // The same capabilities the template's Cluster gets.
+        for line in cluster_capabilities("1.36.4").lines() {
+            assert!(document.contains(&format!("  {line}\n")), "{line}");
         }
     }
 

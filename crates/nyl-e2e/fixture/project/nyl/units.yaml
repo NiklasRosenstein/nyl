@@ -33,7 +33,9 @@ metadata:
     stage: dev
 spec:
   target: dev
-  observe: {}
+  # Reconcile waits (at most five minutes) until the reconciler reports the
+  # workload healthy, and records the accepted and healthy attestations.
+  observe: {waitHealthy: {timeout: 5m}}
   # Two live fields of what the publication deploys. The Service's cluster IP
   # appears when Argo CD has applied it; the ready replicas when the pods run
   # the image from the local registry.

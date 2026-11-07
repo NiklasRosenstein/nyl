@@ -1,100 +1,147 @@
 //! The `direct` variant: Nyl's own reconciler applies the published tree
 //! through the mechanics of `nyl apply`, with no Argo CD in the cluster.
 //!
-//! PENDING. The reconciler is designed and implemented on the
-//! `m5/10-direct-reconciler` branch, and its declaration syntax is not fixed
-//! yet, so this variant fails at once with a pending error instead of guessing.
-//! Wiring it takes these changes, all in this file (the scenario, the fixture,
-//! and the infrastructure need none):
+//! The DeploymentTarget declares `reconciler: {direct: {}}`, with no
+//! `argocdRef` and no catalog fields, and deploys to a Cluster of its own whose
+//! `destination.server` is the kind API server the kubeconfig names (Nyl
+//! verifies that the context's server is the declared one) and whose
+//! `live.context` is the kubeconfig context `e2e-admin`. The fixture's `dev`
+//! Cluster, which the Argo CD variants use with the in-cluster alias, stays
+//! unused. The publication unit admits only `KUBECONFIG`.
 //!
-//! 1. [`Direct::declarations`]: return what the target and its Cluster declare
-//!    in m5/10's syntax:
-//!    - `instance_documents`: a Cluster resource of its own for the direct
-//!      target (not the fixture's `dev` Cluster, which Argo CD's targets use
-//!      with the in-cluster alias `https://kubernetes.default.svc`). It names
-//!      the same kind cluster by a server URL Nyl verifies against the
-//!      kubeconfig context: `spec.destination.server: <infra.api_server>` and
-//!      `spec.live.context: e2e-admin` ([`crate::infra::KUBE_CONTEXT`]). Any
-//!      resource the reconciler needs besides, such as an instance, goes here too.
-//!    - `target_cluster`: that Cluster's name.
-//!    - `target_fields`: the DeploymentTarget lines that choose the direct
-//!      reconciler instead of `argocdRef`.
-//!    - `publication_env`: what the publication unit admits to apply and read:
-//!      `["KUBECONFIG"]` unless m5/10 reads something else.
-//! 2. [`Direct::credentials`]: none, unless the declaration names a variable.
-//! 3. [`Direct::deploy`]: nothing to do if the reconcile itself applies the
-//!    tree; otherwise run what m5/10 requires after a publication.
-//! 4. [`Direct::after_teardown`]: the teardown's removal is the reconciler's
-//!    own; check what m5/10 promises (the generic checks already assert that
-//!    the Namespace, the Deployment, and the Service are gone, and that the
-//!    Namespace's `deletePolicy: Automatic` let the teardown remove it).
-//!
-//! The behaviours the scenario then asserts for it, as for Argo CD: one
-//! `nyl reconcile` publishes and applies; the workload becomes ready with the
-//! image digest and the OpenTofu output; `nyl attest` reports `accepted` and
-//! `healthy` (the scenario polls it, because a reconcile attests nothing);
-//! `nyl observe` reads the live values; a changed input rolls out; and a
-//! teardown leaves the cluster empty of the workload and the state held.
-//! If m5/10's reconciler attests differently, the one place to adapt is
-//! `scenario::attest`.
+//! `nyl reconcile` publishes the tree, applies every Release from the pushed
+//! bytes, and, with `observe.waitHealthy`, reads the release state and the
+//! rollout status until the workloads are healthy, so no operator is needed. A
+//! teardown deletes the Releases' objects, waits (`observe`) until none remain,
+//! and then deletes the release state and the Namespace (`deletePolicy:
+//! Automatic`, which the fixture sets with `prunePolicy`).
 
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 
 use super::Reconciler;
 use crate::cmd::Cmd;
 use crate::env::Env;
-use crate::error::{Error, Result};
-use crate::fixture::Declarations;
-use crate::infra::Infra;
+use crate::error::Result;
+use crate::fixture::{cluster_document, Declarations};
+use crate::infra::kind::KUBE_VERSION;
+use crate::infra::{Infra, KUBE_CONTEXT};
 use crate::variant::Variant;
 
-pub struct Direct;
+/// The Cluster resource the direct target deploys to.
+pub const CLUSTER: &str = "dev-direct";
 
-fn pending() -> Error {
-    Error::pending(
-        "the direct variant is pending: it waits for the direct reconciler of m5/10-direct-reconciler; \
-         see crates/nyl-e2e/src/reconciler/direct.rs for what wiring it takes",
-    )
-}
+pub struct Direct;
 
 impl Reconciler for Direct {
     fn variant(&self) -> Variant {
         Variant::Direct
     }
 
-    fn availability(&self) -> Result<()> {
-        Err(pending())
-    }
-
-    fn declarations(&self, _infra: &Infra) -> Result<Declarations> {
-        Err(pending())
+    fn declarations(&self, infra: &Infra) -> Result<Declarations> {
+        Ok(declarations(&infra.api_server))
     }
 
     fn credentials(&self, _infra: &Infra) -> Result<BTreeMap<String, String>> {
-        Err(pending())
+        Ok(BTreeMap::new())
     }
 
-    fn deploy(&self, _env: &Env) -> Result<()> {
-        Err(pending())
+    fn needs_operator(&self) -> bool {
+        false
+    }
+
+    fn published_files(&self) -> Vec<String> {
+        // A direct target generates no Application, AppProject, or catalog.
+        Vec::new()
+    }
+
+    fn deploy(&self, _env: &Env, _stop: &AtomicBool) -> Result<()> {
+        Ok(())
     }
 
     fn after_teardown(&self, _env: &Env) -> Result<()> {
-        Err(pending())
+        Ok(())
     }
 
-    fn diagnostics(&self, _infra: &Infra) -> Vec<Cmd> {
-        Vec::new()
+    fn diagnostics(&self, infra: &Infra) -> Vec<Cmd> {
+        // The release state Nyl keeps in the cluster, with the workload's Namespace.
+        vec![infra.kubectl().cmd(&[
+            "get",
+            "secrets",
+            "--all-namespaces",
+            "--selector",
+            "nyl.niklasrosenstein.github.com/release",
+        ])]
+    }
+}
+
+/// The direct reconciler's part of the project, for the kind API server `api_server`.
+fn declarations(api_server: &str) -> Declarations {
+    Declarations {
+        instance_documents: cluster_document(CLUSTER, api_server, KUBE_CONTEXT, KUBE_VERSION),
+        target_cluster: CLUSTER.to_owned(),
+        target_fields: "reconciler:\n  direct: {}".to_owned(),
+        publication_env: vec!["KUBECONFIG".to_owned()],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::{render, Params};
+
+    fn platform() -> String {
+        let params = Params {
+            registry_host: "localhost:5001".to_owned(),
+            repo_url: "http://172.18.0.4:8080/git/shop.git".to_owned(),
+            publish_url: "http://127.0.0.1:40123/git/shop.git".to_owned(),
+            state_dir: "/work/tofu".to_owned(),
+            kube_context: KUBE_CONTEXT.to_owned(),
+            kube_version: KUBE_VERSION.to_owned(),
+            revision: 1,
+            docker_env: Vec::new(),
+        };
+        let files = render(&params, &declarations("https://127.0.0.1:43210")).unwrap();
+        files
+            .into_iter()
+            .find(|file| file.path == "nyl/platform.yaml")
+            .unwrap()
+            .content
+    }
 
     #[test]
-    fn test_the_direct_variant_is_reported_as_pending_not_as_a_failure() {
-        let error = pending();
-        assert!(error.is_pending());
-        assert!(error.to_string().contains("m5/10-direct-reconciler"));
+    fn test_the_target_chooses_the_direct_reconciler_with_no_argocd_fields() {
+        let platform = platform();
+        assert!(
+            platform.contains(
+                "\nspec:\n  clusterRef: {name: dev-direct}\n  reconciler:\n    direct: {}\n  applicationGroupSelector:"
+            ),
+            "{platform}"
+        );
+        assert!(!platform.contains("argocdRef"), "{platform}");
+        assert!(!platform.contains("ArgoCDInstance"), "{platform}");
+        assert!(!platform.contains("catalogApplication"), "{platform}");
+    }
+
+    #[test]
+    fn test_the_direct_cluster_names_the_kind_api_server_and_the_suites_context() {
+        let platform = platform();
+        assert!(
+            platform.contains(
+                "kind: Cluster\nmetadata:\n  name: dev-direct\nspec:\n  destination:\n    server: https://127.0.0.1:43210\n  live: {context: e2e-admin}\n  kubernetes:\n    kubeVersion: 1.36.4\n"
+            ),
+            "{platform}"
+        );
+        // The documents stay separate: the Cluster ends before the target starts.
+        assert!(platform.contains(
+            "  clusterScopedKinds: [core/Namespace]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget"
+        ));
+    }
+
+    #[test]
+    fn test_the_publication_unit_admits_only_the_kubeconfig() {
+        assert_eq!(declarations("https://127.0.0.1:1").publication_env, vec!["KUBECONFIG"]);
+        assert!(!Direct.needs_operator());
+        assert!(Direct.published_files().is_empty());
     }
 }

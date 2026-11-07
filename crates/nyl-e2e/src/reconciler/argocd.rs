@@ -6,17 +6,20 @@
 //! Argo CD does not run a published tree by itself here: the catalog
 //! Application is applied once by an operator (the guide's "apply the
 //! catalogs once"), which then creates the workload Application, whose sync is
-//! manual by default. [`ArgoCd::deploy`] does both and waits for the
-//! Application to be Synced to the published commit and Healthy.
+//! manual by default. The publication unit waits for health inside
+//! `nyl reconcile` (`observe.waitHealthy`), so [`ArgoCd::deploy`] does both
+//! while the reconcile runs, and returns once the Application is Synced to the
+//! published commit and Healthy.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::Reconciler;
 use crate::checks::{application_converged, needs_sync};
 use crate::cmd::Cmd;
 use crate::env::Env;
-use crate::error::{Context, Result};
+use crate::error::{Context, Error, Result};
 use crate::fixture::{
     Declarations, ARGOCD_NAMESPACE, CATALOG_APPLICATION, CATALOG_MANIFEST, PUBLICATION_BRANCH, WORKLOAD_APPLICATION,
 };
@@ -97,7 +100,15 @@ impl Reconciler for ArgoCd {
         }
     }
 
-    fn deploy(&self, env: &Env) -> Result<()> {
+    fn needs_operator(&self) -> bool {
+        true
+    }
+
+    fn published_files(&self) -> Vec<String> {
+        vec![CATALOG_MANIFEST.to_owned()]
+    }
+
+    fn deploy(&self, env: &Env, stop: &AtomicBool) -> Result<()> {
         env.project.fetch()?;
         let catalog = env
             .project
@@ -112,7 +123,7 @@ impl Reconciler for ArgoCd {
             .project
             .remote_head(PUBLICATION_BRANCH)?
             .context(format!("the {PUBLICATION_BRANCH} branch does not exist on the server"))?;
-        converge(&env.kubectl, WORKLOAD_APPLICATION, &head)
+        converge(&env.kubectl, WORKLOAD_APPLICATION, &head, stop)
     }
 
     fn after_teardown(&self, env: &Env) -> Result<()> {
@@ -223,13 +234,16 @@ fn start_sync(kubectl: &Kubectl, application: &str, revision: &str) -> Result<()
 
 /// Wait until the Application exists (the catalog creates it), is Synced to
 /// `head`, and is Healthy, starting a sync whenever none is under way.
-fn converge(kubectl: &Kubectl, application: &str, head: &str) -> Result<()> {
+fn converge(kubectl: &Kubectl, application: &str, head: &str, stop: &AtomicBool) -> Result<()> {
     Waiter::new(
         format!("Application {application} to be Synced to {head} and Healthy"),
         Duration::from_secs(10 * 60),
     )
     .backoff(Duration::from_secs(2), Duration::from_secs(10))
     .until(|| {
+        if stop.load(Ordering::SeqCst) {
+            return Err(Error::new("the reconcile failed, so nothing waits for the Application"));
+        }
         refresh(kubectl, CATALOG_APPLICATION);
         let Some(found) =
             kubectl.get_optional(&["applications.argoproj.io", application, "--namespace", ARGOCD_NAMESPACE])?
