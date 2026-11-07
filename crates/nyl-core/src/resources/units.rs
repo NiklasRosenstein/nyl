@@ -52,9 +52,11 @@ impl UnitEnvelope {
 
 /// The members of a unit's `spec` that [`CommonUnitFields`] defines, which
 /// the engine reads and no driver may overwrite.
-pub const COMMON_UNIT_FIELDS: [&str; 8] = [
+pub const COMMON_UNIT_FIELDS: [&str; 10] = [
     "enabled",
     "outputs",
+    "observations",
+    "observationWait",
     "dependsOn",
     "approval",
     "deletionPolicy",
@@ -75,6 +77,12 @@ pub struct CommonUnitFields {
     /// Declared outputs, for kinds that let units declare them. Only declared outputs are recorded.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outputs: BTreeMap<String, OutputDeclaration>,
+    /// Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `fromUnit: {unit, observation}`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub observations: BTreeMap<String, ObservationDeclaration>,
+    /// How long a run that executed the unit waits for its `pending` observations, within `timeout`. Default `0s`: one attempt, then later runs.
+    #[serde(rename = "observationWait", default, skip_serializing_if = "Option::is_none")]
+    pub observation_wait: Option<Duration>,
     /// Units that must have a current receipt first, for ordering without a data reference.
     #[serde(rename = "dependsOn", default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<DependsOn>,
@@ -123,6 +131,20 @@ impl CommonUnitFields {
         for name in self.outputs.keys() {
             validate_input_name("spec.outputs", name)?;
         }
+        for (name, observation) in &self.observations {
+            validate_input_name("spec.observations", name)?;
+            if self.outputs.contains_key(name) {
+                return Err(CoreError::config(format!(
+                    "spec.observations.{name} is also a declared output; name them differently, so a reference names one"
+                )));
+            }
+            observation.validate(&format!("spec.observations.{name}"))?;
+        }
+        if self.observation_wait.is_some_and(|wait| wait > MAX_UNIT_TIMEOUT) {
+            return Err(CoreError::config(format!(
+                "spec.observationWait may be at most {MAX_UNIT_TIMEOUT}: a run holds its lease while it waits"
+            )));
+        }
         for (index, entry) in self.depends_on.iter().enumerate() {
             entry.validate(&format!("spec.dependsOn[{index}]"))?;
         }
@@ -166,6 +188,42 @@ pub struct OutputDeclaration {
     /// Validated but never persisted, and never referenceable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sensitive: bool,
+}
+
+// Contract: design/orchestration-core.md, "Observed values".
+/// One observed value a unit declares: Nyl owns the type and age limit, and
+/// the kind's driver owns where the value is read from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationDeclaration {
+    /// Value type: `string`, `integer`, `number`, `boolean`, `object`, or `array`. Nyl checks every read value against it.
+    #[serde(rename = "type")]
+    pub observation_type: InputType,
+    /// How old the last successful read may be before the value stops resolving and is `pending` for its consumers.
+    #[serde(rename = "maxAge", default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<Duration>,
+    /// The kind's source for the value: its schema and validation belong to the driver, which Nyl never reads.
+    pub from: serde_json::Value,
+    /// Rejected: an observed value is recorded in state and referenced by other units, so it is never sensitive.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub sensitive: bool,
+}
+
+impl ObservationDeclaration {
+    fn validate(&self, field: &str) -> Result<()> {
+        if self.sensitive {
+            return Err(CoreError::config(format!(
+                "{field} is declared sensitive, but an observed value is recorded in state so that other units can reference it: remove `sensitive`, and observe something that is not a secret"
+            )));
+        }
+        if self.max_age.is_some_and(|age| age == Duration::default()) {
+            return Err(CoreError::config(format!(
+                "{field}.maxAge must be positive; omit it for a value that never goes stale"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// A unit that must have a current receipt before this one runs: a name, or

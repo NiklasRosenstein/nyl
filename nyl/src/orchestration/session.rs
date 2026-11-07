@@ -464,6 +464,7 @@ fn table(report: &RunReport) -> String {
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
             ReportKind::DetectDriftReport => &["UNIT", "KIND", "DRIFT", "DETAIL"],
             ReportKind::AttestReport => &["UNIT", "KIND", "ATTESTATIONS", "DETAIL"],
+            ReportKind::ObserveReport => &["UNIT", "KIND", "OBSERVATIONS", "DETAIL"],
         };
         if rows.is_empty() {
             // A refused operation reaches no units; its error says why.
@@ -542,6 +543,14 @@ pub fn state_cell(unit: &UnitReport) -> String {
         };
         details.push(format!("{name}: {result}"));
     }
+    // `observe` shows each observation's value next to `observed`.
+    for (name, status) in unit.check.iter().flat_map(|check| &check.observations) {
+        details.push(match status {
+            nyl_orchestration::run_report::ObservationStatus::Value { value } => format!("{name}: {value}"),
+            nyl_orchestration::run_report::ObservationStatus::Pending { .. } => format!("{name}: pending"),
+            nyl_orchestration::run_report::ObservationStatus::Failed { .. } => format!("{name}: failed"),
+        });
+    }
     if details.is_empty() {
         outcome.to_owned()
     } else {
@@ -578,7 +587,14 @@ pub(crate) fn styled_state_cell(unit: &UnitReport) -> Cell {
                     | CheckResult::Unknown { .. }
                     | CheckResult::NoReceipt
                     | CheckResult::Unsupported => Some(Style::Attention),
-                    CheckResult::Clean | CheckResult::Attested => None,
+                    CheckResult::Observed
+                        if check.observations.values().any(|status| {
+                            !matches!(status, nyl_orchestration::run_report::ObservationStatus::Value { .. })
+                        }) =>
+                    {
+                        Some(Style::Attention)
+                    }
+                    CheckResult::Clean | CheckResult::Attested | CheckResult::Observed => None,
                 },
                 None => None,
             },
@@ -613,7 +629,8 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
         ReportKind::ReconcileReport
         | ReportKind::TeardownReport
         | ReportKind::DetectDriftReport
-        | ReportKind::AttestReport => {
+        | ReportKind::AttestReport
+        | ReportKind::ObserveReport => {
             vec![name.to_string(), kind_cell(unit), outcome, detail]
         }
         ReportKind::StatusReport => {
@@ -641,15 +658,19 @@ pub fn detail(unit: &UnitReport) -> String {
                         Some(environment) => format!("{environment}/{unit}"),
                         None => unit.to_string(),
                     });
-                    match (producer, &blocked.attestation) {
-                        (Some(producer), Some(attestation)) => format!(
+                    match (producer, &blocked.attestation, &blocked.observation) {
+                        (Some(producer), Some(attestation), _) => format!(
                             "{} waits for attestation {attestation} of {producer} ({})",
                             blocked.pointer, blocked.reason
                         ),
-                        (Some(producer), None) => {
+                        (Some(producer), None, Some(observation)) => format!(
+                            "{} waits for observed value {observation} of {producer} ({})",
+                            blocked.pointer, blocked.reason
+                        ),
+                        (Some(producer), None, None) => {
                             format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason)
                         }
-                        (None, _) => format!("{}: {}", blocked.pointer, blocked.reason),
+                        (None, _, _) => format!("{}: {}", blocked.pointer, blocked.reason),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -847,6 +868,7 @@ mod tests {
                 unit: Some(nyl_core::orchestration::ids::UnitName::new("network").unwrap()),
                 reason: reason.to_owned(),
                 attestation: Some("healthy".to_owned()),
+                observation: None,
             });
         }
         assert_eq!(

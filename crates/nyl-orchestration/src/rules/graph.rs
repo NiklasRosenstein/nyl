@@ -157,7 +157,7 @@ fn reference_edges(
                 findings.push(Finding::new(
                     Code::ReferenceInvalid,
                     format!("unit {consumer}: {issue}"),
-                    "write a reference as {fromUnit: {unit, output | artifact, kind?, pointer?}} alone in its object",
+                    "write a reference as {fromUnit: {unit, output | artifact | observation, kind?, pointer?}} alone in its object",
                 ));
             }
             return;
@@ -190,7 +190,7 @@ fn reference_edges(
             findings.push(Finding::new(
                 Code::ReferenceInvalid,
                 format!("unit {consumer}: the reference at {:?} {error}", reference.pointer),
-                "reference an output the producer declares and does not mark sensitive",
+                "reference an output or observation the producer declares (an output may not be sensitive)",
             ));
             continue;
         }
@@ -225,6 +225,7 @@ fn reference_edges(
                 pointer,
                 output: source.output,
                 artifact: source.artifact,
+                observation: source.observation,
             },
         });
     }
@@ -442,14 +443,46 @@ mod tests {
                     pointer: JsonPointer::new("/releases/platform~1web/dbHost").unwrap(),
                     output: Some("host".to_owned()),
                     artifact: None,
+                    observation: None,
                 },
                 EdgeSource::Reference {
                     pointer: JsonPointer::new("/releases/platform~1web/image").unwrap(),
                     output: None,
                     artifact: Some("image".to_owned()),
+                    observation: None,
                 },
             ]
         );
+    }
+
+    /// Catches a reference to an observed value adding no edge, or one the
+    /// producer never declares passing validation and waiting forever.
+    #[test]
+    fn test_extract_adds_an_edge_for_an_observation_and_checks_its_declaration() {
+        let producer = json!({"observations": {"ip": {"type": "string", "from": {}}}});
+        let consumer = |observation: &str| json!({"values": {"address": {"fromUnit": {"unit": "lb", "observation": observation}}}});
+        let graph = graph(&[("lb", "Command", producer.clone()), ("dns", "Command", consumer("ip"))]).unwrap();
+        assert_eq!(
+            graph.edges.iter().map(|edge| edge.source.clone()).collect::<Vec<_>>(),
+            [EdgeSource::Reference {
+                pointer: JsonPointer::new("/values/address").unwrap(),
+                output: None,
+                artifact: None,
+                observation: Some("ip".to_owned()),
+            }]
+        );
+        let findings = graph_errors(&[("lb", "Command", producer), ("dns", "Command", consumer("host"))]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].code, Code::ReferenceInvalid);
+        assert!(
+            findings[0].message.contains("declared observations: ip"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    fn graph_errors(specs: &[(&str, &str, Value)]) -> Vec<Finding> {
+        graph(specs).expect_err("the references are invalid")
     }
 
     #[test]

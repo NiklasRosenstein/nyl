@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(issues.len(), 5, "{issues:?}");
         assert_eq!(
             issues[0],
-            "values.a.fromUnit must set exactly one of output and artifact"
+            "values.a.fromUnit must set exactly one of output, artifact, and observation"
         );
         assert!(
             issues[1].starts_with("values.b mixes fromUnit with other fields"),

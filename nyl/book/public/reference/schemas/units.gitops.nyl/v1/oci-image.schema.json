@@ -354,6 +354,35 @@
       ],
       "type": "object"
     },
+    "ObservationDeclaration": {
+      "additionalProperties": false,
+      "description": "One observed value a unit declares: Nyl owns the type and age limit, and\nthe kind's driver owns where the value is read from.",
+      "properties": {
+        "from": {
+          "description": "The kind's source for the value: its schema and validation belong to the driver, which Nyl never reads."
+        },
+        "maxAge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How old the last successful read may be before the value stops resolving and is `pending` for its consumers."
+        },
+        "type": {
+          "$ref": "#/$defs/InputType",
+          "description": "Value type: `string`, `integer`, `number`, `boolean`, `object`, or `array`. Nyl checks every read value against it."
+        }
+      },
+      "required": [
+        "type",
+        "from"
+      ],
+      "type": "object"
+    },
     "OciImageSpec": {
       "additionalProperties": false,
       "description": "Docker Buildx inputs. Every directory context is a separately pinned Git source.",
@@ -433,6 +462,24 @@
         "env": {
           "$ref": "#/$defs/EnvAdmission",
           "description": "Variables and secrets admitted into the unit's otherwise empty tool environment."
+        },
+        "observationWait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How long a run that executed the unit waits for its `pending` observations, within `timeout`. Default `0s`: one attempt, then later runs."
+        },
+        "observations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ObservationDeclaration"
+          },
+          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `fromUnit: {unit, observation}`.",
+          "type": "object"
         },
         "outputs": {
           "additionalProperties": {

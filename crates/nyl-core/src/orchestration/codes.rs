@@ -141,6 +141,18 @@ codes! {
     AttestNoReceipt => "NYL-ATTEST-NO-RECEIPT",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
+    /// A unit declares `observations`, but its kind cannot read observed values.
+    ObservationsUnsupported => "NYL-OBSERVATIONS-UNSUPPORTED",
+    /// A consumer waits for an observed value of its producer's current receipt that has none yet.
+    ObservationPending => "NYL-OBSERVATION-PENDING",
+    /// An observed value could not be read; the last recorded value for the current receipt stays usable.
+    ObservationFailed => "NYL-OBSERVATION-FAILED",
+    /// An observed value changed, so the consumers that read it are ready for the next reconcile.
+    ObservationChanged => "NYL-OBSERVATION-CHANGED",
+    /// `nyl observe` found no current receipt to observe for a unit.
+    ObserveNoReceipt => "NYL-OBSERVE-NO-RECEIPT",
+    /// `nyl observe --unit` named a unit whose kind reads no observed values for its spec.
+    ObserveUnsupported => "NYL-OBSERVE-UNSUPPORTED",
     /// `nyl attest --unit` named a unit whose kind produces no attestations for its spec.
     AttestUnsupported => "NYL-ATTEST-UNSUPPORTED",
     /// A driver attestation of a unit's current receipt failed.

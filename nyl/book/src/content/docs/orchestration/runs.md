@@ -58,6 +58,8 @@ Common fields every kind shares:
 | --- | --- |
 | `enabled` | `false` leaves the environment's ownership set. Default `true`. |
 | `outputs` | The outputs the unit declares, each with a `type` and optionally `sensitive: true`. |
+| `observations` | The [observed values](#observed-values) the unit declares, for kinds that read them, each with a `type`, an optional `maxAge`, and the kind's own `from`. |
+| `observationWait` | How long a run that executed the unit [waits](#observed-values) for its pending observed values, within `timeout`. Default `0s`. |
 | `dependsOn` | Units that must have a current receipt first, for ordering without a data reference. |
 | `timeout` | The deadline of one execution, at most `7d`. |
 | `env` | `passthrough`, the names of runner variables the unit may read, and `secrets`, mapping variable names to project secret keys. Missing credentials stop the unit before execution. |
@@ -65,8 +67,10 @@ Common fields every kind shares:
 ## References between units
 
 `{fromUnit: {unit: <name>, output: <output>}}` stands for an output of
-another unit's current receipt, and `{fromUnit: {unit: <name>, artifact: <name>,
-pointer: /…}}` for a value inside one of its artifacts. A reference replaces
+another unit's current receipt, `{fromUnit: {unit: <name>, artifact: <name>,
+pointer: /…}}` for a value inside one of its artifacts, and
+`{fromUnit: {unit: <name>, observation: <name>}}` for one of its
+[observed values](#observed-values). A reference replaces
 the whole value it stands for, at any depth of the fields a kind accepts
 references in, such as a Command's `values`. References add a dependency on
 their producer, as `dependsOn` does. A cycle is rejected with
@@ -149,6 +153,94 @@ values:
   version: {fromUnit: {unit: service, output: version, attestations: [healthy]}}
 ``` The attestation `maxAttestationAge` limit belongs to
 promotion paths.
+
+### Observed values
+
+An output is produced by executing a unit. Some facts only appear after, such
+as the address a cloud load balancer assigns to a published Service, and can
+change while the unit's execution key stays the same. A unit whose kind reads
+such facts declares them under `observations`, and its driver reads them from
+the system the unit manages:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata: {name: kubernetes}
+spec:
+  target: '{{ values.target }}'
+  observe: {}
+  observations:
+    ingressIp:
+      type: string
+      from:                 # the kind's own source; here a published resource's field
+        resource: {apiVersion: v1, kind: Service, namespace: ingress, name: ingress-nginx}
+        pointer: /status/loadBalancer/ingress/0/ip
+  observationWait: 10m
+  env: {passthrough: [KUBECONFIG]}
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata: {name: dns}
+spec:
+  command: ['./dns.sh']
+  values:
+    address: {fromUnit: {unit: kubernetes, observation: ingressIp}}
+```
+
+`type` is one of the output types, checked on every read; `maxAge` is how old
+the last successful read may get before the value stops resolving. What `from`
+means belongs to the kind: its driver validates it and Nyl never reads it. A
+kind that reads no observed values rejects `observations`
+(`NYL-OBSERVATIONS-UNSUPPORTED`), and an observation is never sensitive.
+
+Observed values are committed in plain text to the state repository, where
+everyone who can read it can read them: observe only non-secret fields. A kind
+may reject some sources (a publication never reads Secrets or a whole
+resource), but cannot tell what a ConfigMap or a custom resource holds.
+
+An observed value is an observation of the producer's *current receipt*, never
+part of it. It is recorded in the observed state
+(`observed/units/<unit>/observations.yaml`), and the commit that records a new
+receipt, a re-execution with the same key included, removes the previous receipt's values, so a value read from what ran
+before never satisfies a reference.
+
+- **When Nyl reads.** `reconcile` reads every unit with a current receipt that
+  declares observations once, before it resolves the unit's consumers,
+  including a unit it does not execute: this is how an address that changed by
+  itself reaches its consumers in one run. A run that executes a unit with an
+  `observationWait` then reads again about every 15 seconds, until every value
+  has a value or the wait has passed since the execution finished (within the
+  unit's `timeout`). It waits only when no other unit is ready, so units that do
+  not depend on the value are not held back. With the default `0s` a run reads
+  once, and a value that is not there stays `pending` for a later run.
+  [`nyl observe`](/nyl/reference/cli/observe/) reads and records without
+  executing anything, for jobs that hold read credentials a reconcile may
+  lack.
+- **Pending, failed, stale.** A read finds a value, `pending` (the system has
+  not caught up, with the driver's reason), or `failed` (it could not read, such
+  as for missing credentials). A consumer of a pending value is **blocked**,
+  exit 2, with `NYL-OBSERVATION-PENDING` and the reason. A failed read keeps the
+  last recorded value for the receipt and warns with `NYL-OBSERVATION-FAILED`; a
+  value older than its `maxAge` is pending for its consumers.
+- **A changed value is work for the next reconcile.** It is neither drift nor
+  evidence: the producer's receipt still holds, and `driftRepair` does not
+  apply. The value enters its consumers' execution keys, so each of them runs
+  again like for any changed input, under its own
+  [`approval`](#approvals), while the producer does not execute. `nyl status`
+  and `nyl plan` show such a consumer as `ready`, and `nyl observe` names it
+  with `NYL-OBSERVATION-CHANGED`. They find consumers of the same environment
+  from its stored documents: a consumer in another environment (a reference with
+  `environment`) is not named, and stays `current` in its own `status` until its
+  next `reconcile` resolves the producer environment's recorded value and runs it.
+- **What is written.** The record changes only when a value arrives, changes,
+  or becomes pending again, or when the last successful read is older than an
+  hour (half the `maxAge` when that is shorter), so an unchanged read writes
+  nothing. The transition commit lists the observations that changed under
+  `observationsChanged`.
+
+`nyl get observation <unit>/<name> -e <env>` prints the recorded value, resolved
+like the reference would. References to another declared environment read the
+other environment's recorded values.
 
 ## Source commit
 

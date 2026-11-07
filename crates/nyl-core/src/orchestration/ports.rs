@@ -13,8 +13,8 @@ use serde_json::Value;
 
 use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
 use super::state::{
-    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
-    StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 use super::time::{Duration, Timestamp};
 use crate::resources::environment::Environment;
@@ -128,6 +128,11 @@ pub struct EnvironmentSnapshot {
     /// The latest drift detection per unit (`observed/units/<unit>/drift.yaml`),
     /// as `nyl detect-drift` writes it. Contract: [Drift](../../../../design/orchestration-core.md#drift).
     pub drift: BTreeMap<UnitName, DriftRecord>,
+    /// The latest observed values per unit
+    /// (`observed/units/<unit>/observations.yaml`), as the driver's `observe`
+    /// read them for the unit's current receipt. Contract:
+    /// [Observed values](../../../../design/orchestration-core.md#observed-values).
+    pub observations: BTreeMap<UnitName, ObservationRecord>,
     /// Driver attestations by unit and name
     /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
@@ -147,6 +152,9 @@ pub struct TransitionChanges {
     /// A unit's latest drift detection; `None` removes it. Written by
     /// `nyl detect-drift`, and removed with a new receipt.
     pub drift: BTreeMap<UnitName, Option<DriftRecord>>,
+    /// A unit's observed values; `None` removes them. Written by reconcile
+    /// and `nyl observe`, and removed with a new receipt.
+    pub observations: BTreeMap<UnitName, Option<ObservationRecord>>,
     /// The complete set of a unit's driver attestations by name; `None`
     /// removes all. Written by `nyl attest`, and by reconcile with a receipt.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
@@ -175,6 +183,7 @@ impl TransitionChanges {
             && self.observed.is_empty()
             && self.artifacts.is_empty()
             && self.drift.is_empty()
+            && self.observations.is_empty()
             && self.attestations.is_empty()
     }
 }

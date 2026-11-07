@@ -18,6 +18,10 @@
 //!   Kubernetes API of the control-plane Cluster, or the Argo CD API
 //!   server). [`observe`] is the driver's use of them, for `nyl attest` and
 //!   the `observe` teardown wait.
+//! - [`observed_values`] reads a field of a rendered resource from the
+//!   workload Cluster for the unit's observed values, once the Application
+//!   that owns the resource runs the current publication ([`workload`] reads
+//!   the resource).
 //! - [`readiness`] evaluates the recorded teardown settings against the
 //!   contract's readiness table.
 //! - [`driver`] implements the [`Driver`](nyl_core::orchestration::driver::Driver)
@@ -28,12 +32,16 @@ pub mod argocd;
 mod build;
 mod driver;
 mod observe;
+mod observed_values;
 mod readiness;
 pub mod reconciler;
 mod run;
 mod spec;
+mod workload;
 
 pub use driver::KubernetesPublicationDriver;
+pub use observed_values::{ClusterReader, LiveReader, LiveRequest, ObservedSource};
+pub use workload::{KubeResourceReader, ResourceReader};
 
 pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]

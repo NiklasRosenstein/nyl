@@ -46,7 +46,7 @@ mod kube_api;
 pub mod live;
 
 pub use api_server::ApiServerReader;
-pub use kube_api::KubeApiReader;
+pub use kube_api::{Connection, KubeApiReader};
 
 /// The namespace Argo CD runs in unless the instance says otherwise.
 const DEFAULT_NAMESPACE: &str = "argocd";
@@ -382,6 +382,7 @@ mod tests {
             } else {
                 format!("{namespace}/{name}")
             },
+            display: format!("{namespace}/{name}"),
             role,
             path: format!("dev/{name}"),
             release: None,

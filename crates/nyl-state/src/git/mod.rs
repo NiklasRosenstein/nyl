@@ -500,6 +500,8 @@ fn put_unit_file<T: Serialize>(
 
 /// The file name of a unit's drift record beneath `observed/units/<unit>`.
 const DRIFT_FILE: &str = "/drift.yaml";
+/// The file name of a unit's observed values beneath `observed/units/<unit>`.
+const OBSERVATIONS_FILE: &str = "/observations.yaml";
 /// The file name of a unit's attestations beneath `observed/units/<unit>`.
 const ATTESTATIONS_FILE: &str = "/attestations.yaml";
 
@@ -537,6 +539,9 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         }
         for (unit, record) in &changes.drift {
             put_unit_file(files, unit, DRIFT_FILE, record.as_ref())?;
+        }
+        for (unit, record) in &changes.observations {
+            put_unit_file(files, unit, OBSERVATIONS_FILE, record.as_ref())?;
         }
         for (unit, set) in &changes.attestations {
             let record = set.as_ref().and_then(AttestationRecord::from_set);
@@ -594,6 +599,7 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         observed: units(observed, "observed/units/")?,
         artifacts: per_unit(observed, "artifacts")?,
         drift: unit_files(observed, DRIFT_FILE)?,
+        observations: unit_files(observed, OBSERVATIONS_FILE)?,
         attestations: attestations(observed)?,
     })
 }

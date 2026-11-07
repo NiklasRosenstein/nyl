@@ -39,7 +39,7 @@ Everything lives in one per-test temporary directory, as the existing
 | Container registry | Tier 1: fake. Tier 2: a `registry:2` container on an ephemeral port |
 | Terraform backend | OpenTofu's `local` backend with a path inside the temporary directory |
 | Cloud resources | Only the built-in `terraform_data` resource and outputs, so no provider is downloaded |
-| Argo CD | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait; the real driver's readings are tested against local fakes of the Kubernetes API and the Argo CD API server. A publication that does not declare `observe` needs none |
+| Argo CD and the workload Cluster | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait, and scripted observed values for it; the real driver reads its observed values through the same script in tier 1 (its readings of Argo CD and of the workload Cluster are tested against local fakes of the Kubernetes API and the Argo CD API server). A publication that does not declare `observe` needs none |
 | Time | An injected clock (see [Clock](#clock)) |
 
 ### Tiers
@@ -107,11 +107,11 @@ scenario scripts them. Tier 1 keeps the fakes for images and OpenTofu even
 after the real drivers exist, so it never needs the tools. `FakePublication`
 stays because a scenario can script a publication's outcome and answer
 `observe` with the fake Argo CD observer, which the real driver reads from Argo CD instead (its readings and attestations are tested against local fakes, not scripted per scenario); every
-other reached scenario also runs in tier 1 against the real
+reached scenario also runs in tier 1 against the real
 `KubernetesPublication` driver (fake images and infrastructure around it), so
 the walkthroughs and the reference scenarios hold the real driver to the same
-checks. A scenario that needs the fake is listed with its reason in the
-harness (`FAKE_PUBLICATION`). The reference project's target is
+checks. The real driver's observed values are the one live read it cannot
+make in tier 1: they go through the scenario's `observe` script, like the fake's. The reference project's target is
 teardown-ready (its catalog prunes and its Namespaces are deleted with their
 Application), because the real driver reads readiness from the rendered
 target.

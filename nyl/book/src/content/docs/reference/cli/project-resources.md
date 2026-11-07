@@ -57,6 +57,7 @@ nyl get units -e dev -o wide                  # ... and TEARDOWN READINESS
 nyl get unit migrate -e dev -o yaml           # the persisted desired and observed documents
 nyl get unit migrate -e dev -o json --observed
 nyl get output database/host -e dev           # resolves like {fromUnit: {unit: database, output: host}}
+nyl get observation kubernetes/ingressIp -e dev  # an observed value, as {fromUnit: {unit: kubernetes, observation: ingressIp}}
 nyl get artifacts -e dev                      # UNIT NAME KIND SUMMARY
 nyl get artifact web/image -e dev --pointer /reference
 nyl get units -e dev --state-revision 41f0c2e
@@ -75,10 +76,11 @@ nyl get units -e dev --local                  # this clone's local view
 - `get unit <name> -e <env> -o yaml|json` prints exactly the persisted
   `{desired, observed}` documents, never a synthesized merge. `--desired` or
   `--observed` prints only one of them.
-- `get output <unit>/<output>` and `get artifact <unit>/<name> --pointer …`
-  print one value for scripts and resolve exactly like the matching
-  `fromUnit` reference: the pointer is relative to the artifact's `spec`, and
-  only a current receipt counts. When the reference would not resolve, they
+- `get output <unit>/<output>`, `get artifact <unit>/<name> --pointer …`, and
+  `get observation <unit>/<name>` print one value for scripts and resolve
+  exactly like the matching `fromUnit` reference: the pointer is relative to
+  the artifact's `spec`, and only a current receipt counts. An observed value
+  must also be recorded for that receipt and not older than its `maxAge`. When the reference would not resolve, they
   print nothing and exit 1. `--allow-stale` prints the latest receipt's value
   with the warning `NYL-REFERENCE-STALE` instead.
 - `--state-revision <commit>` reads state as of an earlier state commit.

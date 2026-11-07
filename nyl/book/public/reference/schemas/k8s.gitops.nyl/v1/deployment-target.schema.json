@@ -1143,7 +1143,7 @@
       "description": "Reserved orchestration reference to a unit output or artifact field.",
       "properties": {
         "artifact": {
-          "description": "Published artifact name. Set exactly one of `output` and `artifact`.",
+          "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
           "type": [
             "string",
             "null"
@@ -1181,15 +1181,22 @@
             "null"
           ]
         },
+        "observation": {
+          "description": "Declared observed value name: a value the unit's driver reads from the system the unit manages. Set exactly one of `output`, `artifact`, and `observation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "output": {
-          "description": "Declared output name. Set exactly one of `output` and `artifact`.",
+          "description": "Declared output name. Set exactly one of `output`, `artifact`, and `observation`.",
           "type": [
             "string",
             "null"
           ]
         },
         "pointer": {
-          "description": "JSON Pointer inside the output or artifact.",
+          "description": "JSON Pointer inside the output, artifact, or observed value.",
           "type": [
             "string",
             "null"
