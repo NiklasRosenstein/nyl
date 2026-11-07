@@ -1871,6 +1871,7 @@ fn plan_unit(
         cache_dir: session.context.cache_dir(),
         teardown_wait: None,
         incarnations: &session.incarnations,
+        dirty_source: false,
     };
     match driver.plan(&execution, unit) {
         Ok(Supported::Supported(plan)) => {

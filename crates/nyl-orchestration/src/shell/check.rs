@@ -476,6 +476,7 @@ fn check_unit(
         cache_dir: context.cache_dir(),
         teardown_wait: None,
         incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+        dirty_source: false,
     };
     let outcome = match check {
         Check::DetectDrift => driver

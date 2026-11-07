@@ -32,6 +32,11 @@ pushes only the spec's tags and `--tag` values; it requires at least one tag and
 never creates the execution tag reserved for recorded reconciliations. Each driver enforces its own publishing policy; a kind that cannot safely
 publish outside orchestration refuses such arguments and names `reconcile` instead.
 
+For `KubernetesPublication`, a build renders the unit's DeploymentTarget as a
+run does. `-- --diff` compares the tree with the published one, and `-- --push`
+publishes it when no environment owns the target. See
+[Direct builds](/nyl/orchestration/resource-guides/kubernetes-publication/#direct-builds).
+
 Artifacts are printed as JSON: one document for a single artifact, or an array
 for several. This output is local build information, not evidence of a recorded
 execution.
@@ -48,8 +53,13 @@ execution.
 
 The `OciImage` driver accepts `--load` (the default), `--push`, and repeatable
 `--tag <tag>` arguments after `--`. It rejects conflicting load/push options
-and unsupported arguments. Other kinds may define different arguments.
+and unsupported arguments. The `KubernetesPublication` driver accepts `--diff`
+or `--push`. Other kinds may define different arguments.
 
-Exit 0 means the build completed. Exit 1 means preparation, capability checks,
-execution, or artifact admission failed. An interrupted push may already have
+Exit 0 means the build completed; a `--diff` that finds differences is a
+completed build, so a pipeline reads the document's `changes`. Exit 1 means
+preparation or a capability check failed, such as an unknown unit, an
+environment-dependent value without `-e`, or a kind that cannot build. Exit 3
+means the build failed: the driver's execution, argument validation, or
+refusal, with its code, such as `NYL-KUBERNETES-BUILD-TARGET-OWNED`. An interrupted push may already have
 published an image; a direct build records no receipt to adopt afterwards.

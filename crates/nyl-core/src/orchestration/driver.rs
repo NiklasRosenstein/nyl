@@ -483,6 +483,12 @@ pub struct ExecutionContext<'a> {
     /// Whether other unit incarnations still exist in their environments'
     /// state, for a driver that fences resources by owner.
     pub incarnations: &'a dyn IncarnationDirectory,
+    /// Whether the files the call reads differ from the commit the unit's
+    /// source names: `nyl build` from a worktree with uncommitted changes.
+    /// Runs read committed sources and pass `false`. A driver that publishes
+    /// from a direct build uses it to refuse attributing the output to a
+    /// commit that does not hold it.
+    pub dirty_source: bool,
 }
 
 /// How a teardown's wait after phase 1 ended, decided by the orchestration

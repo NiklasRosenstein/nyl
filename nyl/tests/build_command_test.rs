@@ -43,6 +43,8 @@ fn test_direct_build_uses_dirty_snapshot_and_source_override_without_state() {
     );
     let prepared = direct::prepare(&clone, "image", None, None, &wiring).unwrap();
     assert!(prepared.dirty);
+    // The snapshot is a Git worktree, so tools that discover through Git work on it.
+    assert!(prepared.worktree.join(".git").exists());
     assert_eq!(
         std::fs::read_to_string(prepared.worktree.join("app/input")).unwrap(),
         "uncommitted"
@@ -169,4 +171,44 @@ fn test_build_preserves_driver_argument_contents() {
         parsed.args.arguments,
         ["--driver-specific", "value with spaces", "--tag=literal"].map(std::ffi::OsString::from)
     );
+}
+
+/// Catches a driver's failed or refused build exiting as a preparation error:
+/// the contract gives `build` exit 3 for "the build failed", while an error
+/// before the driver runs, such as an unknown unit or a missing capability, is
+/// exit 1.
+#[test]
+fn test_a_driver_that_refuses_the_build_exits_3_and_preparation_errors_exit_1() {
+    let project = project(&[
+        NYL_TOML,
+        ("nyl/image.yaml", IMAGE),
+        ("app/Dockerfile", "FROM scratch\n"),
+    ]);
+    let harness = Harness::new(project.path(), true);
+    let clone = harness.world.fresh_clone("main");
+    let tools = ProcessRunner::new();
+    let wiring = Wiring {
+        clock: harness.clock.clone(),
+        ids: &harness.ids,
+        drivers: &harness.drivers,
+        tools: &tools,
+        faults: &NoFaults,
+        runner: "test".into(),
+        author: None,
+        process_env: harness.process_env.clone(),
+        cancellation: Cancellation::default(),
+        prompt: None,
+        observer: None,
+        progress: None,
+    };
+    let run = |unit: &str, driver: &[&str]| {
+        let path = clone.display().to_string();
+        let mut args = vec!["nyl", "build", unit, &path];
+        args.extend_from_slice(driver);
+        Cli::try_parse_from(args).unwrap().execute_in_process(&wiring).unwrap()
+    };
+    let refused = run("image", &["--", "--push", "--load"]);
+    assert_eq!(refused.exit, 3, "{}", refused.stderr);
+    assert!(refused.stderr.contains("image driver"), "{}", refused.stderr);
+    assert_eq!(run("missing", &[]).exit, 1);
 }

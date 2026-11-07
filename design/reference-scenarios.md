@@ -100,7 +100,7 @@ in for:
 | --- | --- | --- |
 | `FakeImage` | `OciImage` | Returns a digest derived from the execution key; publishes a `ContainerImage` artifact; declares `build` |
 | `FakeInfra` | `OpenTofu` | Keeps resources and outputs in a JSON file per backend key; reports plan and destroy digests for `bind: plan`; tears down |
-| `FakePublication` | `KubernetesPublication` | Publishes through the same code as the real driver, and adds scripted outcomes, `mode: observe`, and scenario-declared teardown settings; runs both teardown phases against the fake observer |
+| `FakePublication` | `KubernetesPublication` | Publishes through the same code as the real driver, and adds scripted outcomes, `mode: observe`, and scenario-declared teardown settings; runs both teardown phases against the fake observer; its `nyl build` is the real driver's |
 
 The scenario files name the real kinds; the harness maps them to fakes where a
 scenario scripts them. Tier 1 keeps the fakes for images and OpenTofu even
