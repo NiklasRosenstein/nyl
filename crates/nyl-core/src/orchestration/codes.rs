@@ -206,7 +206,8 @@ codes! {
     /// an unmet readiness requirement or an unconfirmed removal.
     TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
     /// Teardown readiness: the catalog does not prune removed workload
-    /// Applications on its own (blocking).
+    /// Applications on its own, because it does not sync with pruning or its
+    /// `Prune` sync option waits for confirmation or skips them (blocking).
     TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
     /// Teardown readiness: deleting an Application orphans its workloads (blocking).
     TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",

@@ -1091,6 +1091,25 @@ fn test_the_writer_never_rekeys_previews_and_a_teardown_reads_the_catalog_again(
         "nothing was published"
     );
 
+    // A catalog that syncs with pruning but waits for confirmation to prune
+    // holds it the same way: Argo CD's sync stays pending until confirmed.
+    let confirming = json!({
+        "name": "previews",
+        "syncPolicy": {"automated": {"prune": true}, "syncOptions": ["Prune=confirm"]},
+    });
+    writer(&confirming);
+    let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
+    let Outcome::Failed { message, .. } = teardown(&stale) else {
+        panic!("a teardown over a catalog whose pruning waits for confirmation is held");
+    };
+    assert!(message.starts_with("NYL-TEARDOWN-CATALOG-MANUAL-SYNC:"), "{message}");
+    assert!(message.contains("Prune=confirm"), "{message}");
+    assert_eq!(
+        git(&world.bare(), &["rev-parse", "refs/heads/deploy"]),
+        head,
+        "nothing was published"
+    );
+
     // Pruning again, the same stored document starts its teardown.
     writer(&pruning);
     assert!(matches!(teardown(&stale), Outcome::Waiting { .. }));

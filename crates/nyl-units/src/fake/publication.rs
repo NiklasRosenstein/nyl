@@ -23,7 +23,7 @@
 //! settings at resolution, the fake reads the same shape from a
 //! `teardownSettings` that a scenario declares (`catalogPrunes`,
 //! `applicationDeletionPolicy`, `namespaceDeletePolicies`, `deletionConfirmations`,
-//! `catalogOwnedByParent`) and evaluates it with the real driver's readiness
+//! `catalogPruneHolds`, `catalogOwnedByParent`) and evaluates it with the real driver's readiness
 //! rules. A document without it records no settings, so the fake reports
 //! readiness as unsupported (no requirements).
 
@@ -72,6 +72,8 @@ impl FakePublication {
         let (Value::Object(defaults), Value::Object(recorded)) = (&mut settings, value) else {
             return Err("spec.teardownSettings must be a mapping".to_owned());
         };
+        // Recorded only when there is something to record, so the defaults omit it.
+        defaults.entry("catalogPruneHolds").or_insert_with(|| json!([]));
         if let Some(key) = recorded.keys().find(|key| !defaults.contains_key(*key)) {
             return Err(format!("spec.teardownSettings has unknown field {key:?}"));
         }
@@ -153,6 +155,18 @@ impl Driver for FakePublication {
                                     "application": {"type": "string"},
                                     "resource": {"type": "string"},
                                     "options": {"type": "array", "items": {"type": "string", "enum": ["Delete", "Prune"]}}
+                                },
+                                "additionalProperties": false
+                            }
+                        },
+                        "catalogPruneHolds": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["prune"],
+                                "properties": {
+                                    "application": {"type": "string"},
+                                    "prune": {"type": "string", "enum": ["confirm", "false"]}
                                 },
                                 "additionalProperties": false
                             }

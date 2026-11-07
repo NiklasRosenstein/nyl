@@ -1265,6 +1265,24 @@ pub struct DeletionConfirmation {
     pub options: Vec<String>,
 }
 
+/// A workload Application the catalog cannot prune on its own, because Argo CD
+/// resolves its `Prune` sync option to `confirm` (the whole prune waits for a
+/// confirmation) or `false` (the Application is skipped).
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPruneHold {
+    /// The workload Application whose own `argocd.argoproj.io/sync-options`
+    /// annotation sets `Prune`; `None` when the catalog's
+    /// `spec.syncPolicy.syncOptions` do, for every Application without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<String>,
+    /// The resolved `Prune` value, `confirm` or `false`.
+    pub prune: String,
+}
+
 /// A target's settings that decide whether its teardown can complete, read
 /// from the rendered tree ([`teardown_settings`]). A publication driver
 /// records them in the unit's resolved spec, a persisted format whose
@@ -1291,6 +1309,13 @@ pub struct TeardownSettings {
     /// resource require confirmation. Empty when nothing does.
     #[serde(default)]
     pub deletion_confirmations: Vec<DeletionConfirmation>,
+    /// What keeps the catalog from pruning removed workload Applications
+    /// although it syncs automatically with pruning: a `Prune` sync option of
+    /// `confirm` or `false`, from the catalog's `spec.syncPolicy.syncOptions`
+    /// or an Application's own annotation. Empty when nothing does, and when
+    /// the catalog is external.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catalog_prune_holds: Vec<CatalogPruneHold>,
     /// Whether a parent owns the target's catalog, so phase 2 removes the
     /// catalog Application and AppProjects too.
     pub catalog_owned_by_parent: bool,
@@ -1310,6 +1335,15 @@ pub struct TeardownSettings {
 ///   that Application then leaves its workloads running. A tree without a
 ///   catalog Application leaves a parent to sync it, which cannot be seen:
 ///   both settings are `None`, and `catalog_owned_by_parent` is true.
+/// - The catalog's own `Prune` sync option decides whether it prunes the
+///   workload Applications it was told to: Argo CD's automated sync passes
+///   `spec.syncPolicy.syncOptions` to the sync, which resolves `Prune` for
+///   each pruned Application as its own annotation, else that option.
+///   `confirm` holds the whole prune until someone confirms it and `false`
+///   skips the Application, so either is listed in `catalog_prune_holds`.
+///   `Delete` on the catalog is not read: it only applies when the catalog
+///   Application itself is deleted, which a teardown never does (see the
+///   remnant of the self-managing catalog).
 /// - Each resource of a workload Application resolves its `Delete` and
 ///   `Prune` sync options as Argo CD does: its own
 ///   `argocd.argoproj.io/sync-options` annotation, else the Application's
@@ -1351,6 +1385,8 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
     let mut catalog: Option<Value> = None;
     let mut workload_orphaned = false;
     let mut applications = Vec::new();
+    // Each workload Application the catalog prunes, with its own `Prune` option.
+    let mut pruned: Vec<(String, OptionValue)> = Vec::new();
     // The Applications first: a resource's options depend on the Application
     // whose directory holds it, whichever file sorts first.
     for (path, bytes) in &rendered.files {
@@ -1368,6 +1404,11 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
             }
             if application_deletion_policy(&manifest) == "Orphan" {
                 workload_orphaned = true;
+            }
+            if let Some(name) = manifest.pointer("/metadata/name").and_then(Value::as_str) {
+                // The live Application's own annotation is what the catalog's
+                // sync reads when it prunes the Application.
+                pruned.push((name.to_owned(), Resource::of(&manifest, "Application").prune));
             }
             if let Some(application) = WorkloadApplication::of(&manifest, &rendered.destination.path_prefix) {
                 applications.push(application);
@@ -1397,6 +1438,10 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
             })
     });
     let catalog_policy = catalog.as_ref().map(application_deletion_policy);
+    let catalog_prune_holds = catalog
+        .as_ref()
+        .map(|application| catalog_prune_holds(application, &pruned))
+        .unwrap_or_default();
     Ok(TeardownSettings {
         catalog_prunes,
         application_deletion_policy: if workload_orphaned {
@@ -1413,8 +1458,52 @@ pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogVie
                 options: options.into_iter().map(str::to_owned).collect(),
             })
             .collect(),
+        catalog_prune_holds,
         catalog_owned_by_parent: owned_by_parent,
     })
+}
+
+/// What keeps `catalog` from pruning the Applications in `pruned`. Argo CD's
+/// automated sync takes the Application's `spec.syncPolicy.syncOptions` as the
+/// operation's options and resolves `Prune` for each pruned live object: its
+/// own annotation, else that default. `confirm` makes the sync wait before it
+/// prunes anything, and `false` skips the object.
+fn catalog_prune_holds(catalog: &serde_json::Value, pruned: &[(String, OptionValue)]) -> Vec<CatalogPruneHold> {
+    let holds = |value: &str| matches!(value, "confirm" | "false");
+    let default = application_sync_option(catalog, "Prune").filter(|value| holds(value));
+    let mut holding = Vec::new();
+    let mut inherits = false;
+    for (name, own) in pruned {
+        match own {
+            Some((value, _)) if holds(value) => holding.push(CatalogPruneHold {
+                application: Some(name.clone()),
+                prune: value.clone(),
+            }),
+            Some(_) => {}
+            None => inherits = true,
+        }
+    }
+    if let Some(prune) = default.filter(|_| inherits) {
+        holding.insert(
+            0,
+            CatalogPruneHold {
+                application: None,
+                prune,
+            },
+        );
+    }
+    holding
+}
+
+/// The first `key=value` entry of an Application's `spec.syncPolicy.syncOptions`, as Argo CD reads it.
+fn application_sync_option(application: &serde_json::Value, key: &str) -> Option<String> {
+    application
+        .pointer("/spec/syncPolicy/syncOptions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|option| option.strip_prefix(key)?.strip_prefix('=').map(str::to_owned))
 }
 
 /// Each owned Namespace's effective `Delete` policy and what holds the
@@ -1567,15 +1656,7 @@ impl WorkloadApplication {
     fn of(manifest: &serde_json::Value, path_prefix: &str) -> Option<Self> {
         let name = manifest.pointer("/metadata/name")?.as_str()?;
         let source = manifest.pointer("/spec/source/path")?.as_str()?;
-        let option = |key: &str| {
-            manifest
-                .pointer("/spec/syncPolicy/syncOptions")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .find_map(|option| option.strip_prefix(key)?.strip_prefix('=').map(str::to_owned))
-        };
+        let option = |key: &str| application_sync_option(manifest, key);
         Some(Self {
             name: name.to_owned(),
             directory: Path::new(source)
@@ -2999,6 +3080,16 @@ spec:
                     options: vec!["Prune".to_owned()],
                 },
             ],
+            catalog_prune_holds: vec![
+                CatalogPruneHold {
+                    application: None,
+                    prune: "confirm".to_owned(),
+                },
+                CatalogPruneHold {
+                    application: Some("web".to_owned()),
+                    prune: "false".to_owned(),
+                },
+            ],
             catalog_owned_by_parent: false,
         };
         let stored = serde_json::json!({
@@ -3009,6 +3100,7 @@ spec:
                 {"application": "web", "resource": "Namespace web", "options": ["Delete", "Prune"]},
                 {"application": "api", "options": ["Prune"]},
             ],
+            "catalogPruneHolds": [{"prune": "confirm"}, {"application": "web", "prune": "false"}],
             "catalogOwnedByParent": false,
         });
         assert_eq!(serde_json::to_value(&settings).unwrap(), stored);
@@ -3068,6 +3160,9 @@ spec:
     }
 
     type Held = Vec<(String, Option<String>, String)>;
+
+    /// The catalog's options, the Application's annotation, and the expected holds.
+    type Case<'a> = (&'a [&'a str], &'a str, Vec<(Option<&'a str>, &'a str)>);
 
     /// `(application, resource, options)` of each recorded confirmation, options comma-joined.
     fn confirmations_of(settings: &TeardownSettings) -> Held {
@@ -3433,6 +3528,138 @@ metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-opt
             Some("Orphan"),
             "the catalog's own Foreground finalizer does not make orphaned workloads safe"
         );
+    }
+
+    /// `(application, prune)` of each hold on the catalog's pruning.
+    fn holds_of(settings: &TeardownSettings) -> Vec<(Option<String>, String)> {
+        settings
+            .catalog_prune_holds
+            .iter()
+            .map(|hold| (hold.application.clone(), hold.prune.clone()))
+            .collect()
+    }
+
+    /// Append `options` to the catalog Application's `syncOptions`.
+    fn set_catalog_options(rendered: &mut RenderedTarget, options: &[&str]) {
+        edit_catalog(rendered, |manifest| {
+            if manifest["spec"]["source"]["path"] != "dev/_nyl/catalog" {
+                return false;
+            }
+            let existing = manifest["spec"]["syncPolicy"]["syncOptions"].as_array_mut().unwrap();
+            existing.extend(options.iter().map(|option| json!(option)));
+            true
+        });
+    }
+
+    /// Set the workload Application object's own sync-options annotation.
+    fn annotate_application(rendered: &mut RenderedTarget, options: &str) {
+        edit_catalog(rendered, |manifest| {
+            if manifest["spec"]["source"]["path"] == "dev/_nyl/catalog" {
+                return false;
+            }
+            set_sync_options(manifest, options);
+            true
+        });
+    }
+
+    /// Catches readiness trusting `automated.prune` alone: Argo CD's
+    /// automated sync resolves `Prune` for each pruned Application as the
+    /// Application object's own annotation, else the catalog's
+    /// `spec.syncPolicy.syncOptions` (the first `Prune=` entry), and either
+    /// `confirm` (the whole prune waits) or `false` (the Application is
+    /// skipped) keeps a removed workload Application in the cluster.
+    #[test]
+    fn test_teardown_settings_read_the_prune_option_of_the_catalog_and_its_applications() {
+        let (_publication, url) = publication_repository();
+        let worktree = project(&url);
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+        assert_eq!(holds_of(&settings_of(&rendered)), Vec::new());
+
+        let cases: [Case; 9] = [
+            (&["Prune=confirm"], "", vec![(None, "confirm")]),
+            (&["Prune=false"], "", vec![(None, "false")]),
+            (&["Prune=true"], "", vec![]),
+            (&["Prune=true", "Prune=confirm"], "", vec![]),
+            (&["Prune=confirm", "Prune=true"], "", vec![(None, "confirm")]),
+            // Delete only applies when the catalog Application itself is deleted.
+            (&["Delete=confirm"], "", vec![]),
+            (&["Prune=confirm"], "Delete=confirm", vec![(None, "confirm")]),
+            (&["Prune=confirm"], "Prune=true", vec![]),
+            (&["Prune=confirm"], "Prune=false", vec![(Some("web"), "false")]),
+        ];
+        for (catalog, annotation, expected) in cases {
+            let mut edited = rendered.clone();
+            set_catalog_options(&mut edited, catalog);
+            if !annotation.is_empty() {
+                annotate_application(&mut edited, annotation);
+            }
+            let expected = expected
+                .into_iter()
+                .map(|(application, prune)| (application.map(str::to_owned), prune.to_owned()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                holds_of(&settings_of(&edited)),
+                expected,
+                "catalog {catalog:?}, Application annotation {annotation:?}"
+            );
+        }
+
+        let mut annotated = rendered.clone();
+        annotate_application(&mut annotated, "Prune=confirm");
+        assert_eq!(
+            holds_of(&settings_of(&annotated)),
+            vec![(Some("web".to_owned()), "confirm".to_owned())],
+            "an Application's own annotation holds the prune with no catalog option"
+        );
+    }
+
+    /// Catches the catalog's option being unreachable by readiness in a real
+    /// render: a target's `catalogApplication.syncPolicy.syncOptions` lands on
+    /// the catalog Application next to the generated defaults, and an
+    /// ApplicationGroup's `annotations` land on each workload Application.
+    #[test]
+    fn test_a_catalog_or_group_prune_option_holds_the_pruning_in_a_real_render() {
+        let (_publication, url) = publication_repository();
+        let worktree = inline_project(&url);
+        let mut inline = inline_dev();
+        inline.spec["catalogApplication"] =
+            json!({"syncPolicy": {"automated": {"prune": true}, "syncOptions": ["Prune=confirm"]}});
+        let settings = teardown_settings(&render_inline(worktree.path(), &inline, None).unwrap()).unwrap();
+        assert_eq!(settings.catalog_prunes, Some(true), "{settings:?}");
+        assert_eq!(holds_of(&settings), vec![(None, "confirm".to_owned())]);
+
+        let group = format!("{GROUP}  annotations: {{argocd.argoproj.io/sync-options: Prune=confirm}}\n");
+        let annotated = project_with_group(&url, &group);
+        let settings = settings_of(&render(annotated.path(), &snapshot("registry.test/web:1"), None).unwrap());
+        assert_eq!(
+            holds_of(&settings),
+            vec![(Some("web".to_owned()), "confirm".to_owned())],
+            "{settings:?}"
+        );
+    }
+
+    /// Catches a shared catalog being judged by the target's tree instead of
+    /// by its own Application: the option is read from the manifest the
+    /// target renders, and from the one the branch holds when a driver read it.
+    #[test]
+    fn test_a_shared_catalogs_prune_option_holds_the_pruning() {
+        let (_repository, url) = publication_repository();
+        let worktree = inline_project(&url);
+        let confirming = json!({
+            "name": "previews",
+            "syncPolicy": {"automated": {"prune": true}, "syncOptions": ["Prune=confirm"]},
+        });
+        let rendered = render_inline(worktree.path(), &shared_inline("pr-1", confirming), None).unwrap();
+        assert_eq!(
+            holds_of(&teardown_settings(&rendered).unwrap()),
+            vec![(None, "confirm".to_owned())]
+        );
+
+        let plain = render_inline(worktree.path(), &shared_inline("pr-1", pruning_shared()), None).unwrap();
+        assert_eq!(holds_of(&teardown_settings(&plain).unwrap()), Vec::new());
+        let published = json!({"spec": {"syncPolicy": {"automated": {"prune": true}, "syncOptions": ["Prune=false"]}}});
+        let settings = teardown_settings_with(&plain, &SharedCatalogView::Published(published)).unwrap();
+        assert_eq!(holds_of(&settings), vec![(None, "false".to_owned())]);
     }
 
     /// Catches a target whose catalog a parent owns being judged on settings

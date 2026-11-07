@@ -72,6 +72,28 @@ fn test_fake_publication_readiness_comes_from_the_stored_document() {
         vec![Code::TeardownCatalogManualSync, Code::TeardownNamespaceConfirm]
     );
 
+    // A catalog that prunes automatically but waits for confirmation to prune is held on the catalog's code.
+    let mut waiting = spec();
+    waiting["teardownSettings"] = json!({
+        "catalogPrunes": true,
+        "applicationDeletionPolicy": "Foreground",
+        "catalogPruneHolds": [{"prune": "confirm"}],
+        "catalogOwnedByParent": true,
+    });
+    assert!(driver.validate_spec(&waiting).is_ok());
+    let unit = desired(waiting, ExecutionKey::from_digest_of(b"key"));
+    let Supported::Supported(readiness) = driver.teardown_readiness(&unit).unwrap() else {
+        panic!("recorded settings are supported");
+    };
+    assert_eq!(
+        readiness
+            .blocking
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>(),
+        vec![Code::TeardownCatalogManualSync]
+    );
+
     // A parent-owned catalog records its settings as external: nothing blocks.
     let mut external = spec();
     external["teardownSettings"] = json!({"catalogOwnedByParent": true});
