@@ -103,6 +103,9 @@ enum Commands {
     /// Manage releases
     Release(commands::release::ReleaseArgs),
 
+    /// Inspect and purge Argo CD Applications' live resources
+    Argocd(commands::argocd::ArgocdArgs),
+
     /// Manage project-global vendored renderer inputs
     Vendor(commands::vendor::VendorArgs),
 
@@ -146,22 +149,25 @@ enum Commands {
 impl Cli {
     /// Execute the CLI command
     pub async fn execute(self) -> Result<()> {
+        // Command futures are boxed so this frame stays small: Windows debug
+        // builds run it on a 1 MiB main stack.
         match self.command {
-            Commands::Comment(args) => commands::comment::execute(args).await,
-            Commands::Render(args) => commands::render::execute(args).await,
+            Commands::Comment(args) => Box::pin(commands::comment::execute(args)).await,
+            Commands::Render(args) => Box::pin(commands::render::execute(args)).await,
             Commands::RenderTree(args) => Box::pin(commands::render_tree::execute(args)).await,
             Commands::PublishTree(args) => Box::pin(commands::publish_tree::execute(args)).await,
             Commands::Create(args) => commands::create::execute(args),
-            Commands::Capture(args) => commands::capture::execute(args).await,
+            Commands::Capture(args) => Box::pin(commands::capture::execute(args)).await,
             Commands::Update(args) => commands::update::execute(args),
             Commands::Delete(args) => commands::delete::execute(args),
-            Commands::Diff(args) => commands::diff::execute(args).await,
+            Commands::Diff(args) => Box::pin(commands::diff::execute(args)).await,
             Commands::DiffTree(args) => Box::pin(commands::diff_tree::execute_with_color(args, self.color)).await,
-            Commands::Apply(args) => commands::apply::execute(args).await,
-            Commands::Schema(args) => commands::schema::execute(args).await,
-            Commands::Init(args) => commands::init::execute(*args).await,
-            Commands::Validate(args) => commands::validate::execute(args).await,
-            Commands::Release(args) => commands::release::execute(args).await,
+            Commands::Apply(args) => Box::pin(commands::apply::execute(args)).await,
+            Commands::Schema(args) => Box::pin(commands::schema::execute(args)).await,
+            Commands::Init(args) => Box::pin(commands::init::execute(*args)).await,
+            Commands::Validate(args) => Box::pin(commands::validate::execute(args)).await,
+            Commands::Release(args) => Box::pin(commands::release::execute(args)).await,
+            Commands::Argocd(args) => Box::pin(commands::argocd::execute(args)).await,
             Commands::Vendor(args) => Box::pin(commands::vendor::execute(args)).await,
             Commands::Exec(_)
             | Commands::Build(_)
@@ -258,6 +264,7 @@ impl Cli {
             | Commands::Init(_)
             | Commands::Validate(_)
             | Commands::Release(_)
+            | Commands::Argocd(_)
             | Commands::Vendor(_) => false,
         }
     }

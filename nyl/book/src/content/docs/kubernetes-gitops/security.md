@@ -86,6 +86,13 @@ metadata policy.
 See the [ApplicationGroup reference](/nyl/kubernetes-gitops/resource-guides/application-group/#sync-and-lifecycle-policy)
 for the exact controls and defaults.
 
+Argo CD cascades a deletion only while it can generate the Application's
+manifests. When an Application's source path is removed from Git first, it
+fails with `app path does not exist` and keeps its resources.
+[`nyl argocd purge`](/nyl/reference/cli/argocd/) deletes them from the
+inventory the Application records, under the same `Delete` sync options, and
+can then remove the Application.
+
 ## Remote source isolation
 
 Remote rendering exposes neither a secrets provider nor process environment

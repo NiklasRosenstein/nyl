@@ -911,18 +911,19 @@ impl KubeClient for StrictClient {
         self.inner.default_namespace()
     }
 
-    async fn delete_resource(
+    async fn delete_resource_with(
         &self,
         gvk: &GroupVersionKind,
         namespace: Option<&str>,
         name: &str,
+        options: &nyl_render::kubernetes::DeleteOptions,
     ) -> nyl_render::Result<()> {
         if gvk.kind == "Namespace" && self.failing_deletes.lock().unwrap().contains(name) {
             return Err(nyl_render::NylError::Kubernetes(
                 "the API server is unavailable".to_owned(),
             ));
         }
-        self.inner.delete_resource(gvk, namespace, name).await
+        self.inner.delete_resource_with(gvk, namespace, name, options).await
     }
 
     async fn get_normalized_resource(

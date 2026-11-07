@@ -577,6 +577,35 @@ metadata:
 }
 
 #[test]
+fn test_diff_command_uses_named_context_without_gitops_configuration() {
+    let temp = TempDir::new().unwrap();
+
+    git2::Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(
+        temp.path().join("test-resource.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-config\n  namespace: default\n",
+    )
+    .unwrap();
+    let kubeconfig = temp.path().join("kubeconfig");
+    fs::write(
+        &kubeconfig,
+        "apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n",
+    )
+    .unwrap();
+
+    // Without GitOps configuration, --context selects the cluster: the command
+    // gets as far as loading that context instead of asking for a target.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.current_dir(temp.path()).env("KUBECONFIG", &kubeconfig);
+    cmd.args(["diff", "test-resource.yaml", "--context", "missing-context"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("missing-context"))
+        .stderr(predicate::str::contains("DeploymentTarget").not());
+}
+
+#[test]
 fn test_init_minimal_project_command() {
     let temp = TempDir::new().unwrap();
 

@@ -24,6 +24,7 @@ closely related pair.
   - [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
   - [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
   - [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
+  - [`argocd`](/nyl/reference/cli/argocd/) - List and purge an Argo CD Application's live resources when its source is gone
 - **CI integration**: report results where reviewers look.
   - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 - **Orchestration** (in development): manage environments' state in Git.

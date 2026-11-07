@@ -55,8 +55,22 @@ pub trait KubeClient: Send + Sync {
         Ok(false)
     }
 
-    /// Delete a resource from the cluster
-    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()>;
+    /// Delete a resource from the cluster with the server's default deletion
+    /// options. A resource that does not exist counts as deleted.
+    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+        self.delete_resource_with(gvk, namespace, name, &DeleteOptions::default())
+            .await
+    }
+
+    /// Delete a resource from the cluster with explicit deletion options. A
+    /// resource that does not exist counts as deleted.
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &DeleteOptions,
+    ) -> Result<()>;
 
     /// Get server-normalized version of a resource using dry-run apply
     ///
@@ -83,6 +97,41 @@ pub trait KubeClient: Send + Sync {
     /// the default.
     async fn refresh_discovery_until_available(&self, _required: &[GroupVersionKind]) -> Result<()> {
         Ok(())
+    }
+}
+
+/// How dependents of a deleted object are handled, as Kubernetes'
+/// `propagationPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DeletePropagation {
+    /// Dependents are deleted before the object.
+    Foreground,
+    /// The object is deleted at once and dependents in the background.
+    Background,
+    /// Dependents are left in place.
+    Orphan,
+}
+
+/// Native Kubernetes deletion options. The defaults leave both to the server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteOptions {
+    pub propagation: Option<DeletePropagation>,
+    pub grace_period_seconds: Option<u32>,
+}
+
+impl DeleteOptions {
+    /// The equivalent kube-rs delete parameters.
+    pub fn to_params(&self) -> kube::api::DeleteParams {
+        kube::api::DeleteParams {
+            propagation_policy: self.propagation.map(|propagation| match propagation {
+                DeletePropagation::Foreground => kube::api::PropagationPolicy::Foreground,
+                DeletePropagation::Background => kube::api::PropagationPolicy::Background,
+                DeletePropagation::Orphan => kube::api::PropagationPolicy::Orphan,
+            }),
+            grace_period_seconds: self.grace_period_seconds,
+            ..kube::api::DeleteParams::default()
+        }
     }
 }
 
@@ -550,7 +599,13 @@ impl KubeClient for KubeRsClient {
         self.client.default_namespace()
     }
 
-    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &DeleteOptions,
+    ) -> Result<()> {
         let (ar, caps) = self.discover_object_api(gvk)?;
 
         // Create API client
@@ -563,7 +618,7 @@ impl KubeClient for KubeRsClient {
         };
 
         // Delete the resource
-        match api.delete(name, &kube::api::DeleteParams::default()).await {
+        match api.delete(name, &options.to_params()).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => {
                 // Resource already deleted or doesn't exist - not an error
@@ -778,6 +833,8 @@ pub struct MockKubeClient {
     /// Field managers that applied each object since it was added.
     applied_managers: Arc<Mutex<HashMap<ResourceKey, std::collections::BTreeSet<String>>>>,
     kind_scope_overrides: Arc<Mutex<HashMap<String, bool>>>,
+    /// The options of every deletion, in order.
+    deletions: Arc<Mutex<Vec<DeleteOptions>>>,
     default_namespace: String,
 }
 
@@ -793,8 +850,14 @@ impl MockKubeClient {
             resources: Arc::new(Mutex::new(HashMap::new())),
             applied_managers: Arc::new(Mutex::new(HashMap::new())),
             kind_scope_overrides: Arc::new(Mutex::new(HashMap::new())),
+            deletions: Arc::new(Mutex::new(Vec::new())),
             default_namespace: default_namespace.into(),
         }
+    }
+
+    /// The options each deletion was requested with, in order.
+    pub fn deletion_options(&self) -> Vec<DeleteOptions> {
+        self.deletions.lock().unwrap().clone()
     }
 
     /// Add a resource to the mock store
@@ -1105,7 +1168,14 @@ impl KubeClient for MockKubeClient {
         &self.default_namespace
     }
 
-    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &DeleteOptions,
+    ) -> Result<()> {
+        self.deletions.lock().unwrap().push(*options);
         let key = ResourceKey {
             gvk: gvk.clone(),
             namespace: namespace.map(|s| s.to_string()),

@@ -1,5 +1,6 @@
 //! Project discovery and compilation support for Kubernetes GitOps workflows.
 
+pub mod application_purge;
 pub mod applications;
 pub mod argocd;
 pub mod direct;

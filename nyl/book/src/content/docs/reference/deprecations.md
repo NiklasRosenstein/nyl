@@ -10,7 +10,6 @@ the removal release; nothing else changes when you do.
 | --- | --- | --- | --- |
 | `Cluster` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | 0.6.0 | a future release |
 | `Release` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | 0.6.0 | a future release |
-| `nyl render --context` | nothing: `render` never connects to Kubernetes | 0.6.0 | a future release |
 
 ## Cluster and Release in `k8s.nyl/v1`
 

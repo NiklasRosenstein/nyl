@@ -2349,6 +2349,26 @@ pub(super) fn workload_cluster(
     })
 }
 
+/// The Cluster running a target's effective ArgoCDInstance and the namespace
+/// its Applications live in: the referenced instance, or the implicit one on
+/// the target's own Cluster in `argocd` when no instance is declared. A target
+/// with the direct reconciler has no Argo CD Applications.
+pub fn target_argocd_location(inventory: &GitOpsInventory, target: &DeploymentTarget) -> Result<(Cluster, String)> {
+    if target.is_direct() {
+        return Err(NylError::config(format!(
+            "DeploymentTarget {:?} uses the direct reconciler and has no Argo CD Applications",
+            target.metadata.name
+        )));
+    }
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let instance = resolve_argocd_instance(inventory, target, instance_count)?;
+    Ok((instance.cluster, instance.resource.spec.namespace))
+}
+
 fn resolve_argocd_instance(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,

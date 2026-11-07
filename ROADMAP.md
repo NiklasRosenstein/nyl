@@ -288,6 +288,10 @@ spec:
 - Direct `nyl render`, `diff`, and `apply` apply the selected target's bindings
   and take the Release from the compiled target, so they match `render-tree`,
   and accept `--input`/`--inputs` overrides that tree commands never accept.
+  In a project without DeploymentTargets they render against the live
+  capabilities of the kube context `--context` names, an explicit opt-in that
+  tree and publication commands never accept, so plain-Argo CD and
+  non-GitOps users can use them.
 - Remote ApplicationGroups receive inputs exactly like local groups, as they
   already receive target `values`; the platform's binding key is the admission.
 - Resolved inputs participate in the dependency recorder and render-cache key.

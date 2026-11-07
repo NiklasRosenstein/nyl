@@ -20,6 +20,11 @@ revision. Configure `[release] history_limit` in
 `nyl apply --history-limit` to change how many revisions are kept (five by
 default; `0` keeps all). A successful rollback applies the `nyl.toml` limit too.
 
+Every subcommand takes `--target <TARGET>`, optional when exactly one
+DeploymentTarget is configured, and `--context <CONTEXT>`. Without GitOps
+configuration, `--context` alone selects the cluster that stores the releases;
+see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
+
 ## Subcommands
 
 - [`list`](#list) - List all releases
@@ -78,7 +83,7 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
   immediately before the latest one (i.e. undo the most recent deployment).
 - `-y, --yes` - Skip the confirmation prompt
 - `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`, as for
-  [`nyl apply`](/nyl/reference/cli/apply/): the target's declared `live.context` is used and the current context never is, and without either the current context is used only when the Cluster's destination server can be checked against it
+  [`nyl apply`](/nyl/reference/cli/apply/): the target's declared `live.context` is used and the current context never is, and without either the current context is used only when the Cluster's destination server can be checked against it. Without GitOps configuration, it selects the cluster instead
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same
   time (default: 8; `1` applies serially). See [`nyl apply`](/nyl/reference/cli/apply/#apply-order-and-progress).
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest

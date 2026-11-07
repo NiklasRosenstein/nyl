@@ -42,7 +42,7 @@ pub struct DiffArgs {
     #[arg(long)]
     pub namespace: Option<String>,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 
@@ -73,7 +73,8 @@ pub struct DiffArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: DiffArgs) -> Result<()> {
     args.common.validation.check_complete(args.append_release)?;
-    let preflight = run_render_preflight(RenderPreflightOptions {
+    // Boxed: the render future is large, and Windows debug builds run on a 1 MiB main stack.
+    let preflight = Box::pin(run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
         kube_version: None,
@@ -81,7 +82,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
         discovery_progress: crate::cli::commands::render::DiscoveryProgress::Quiet,
-    })
+    }))
     .await?;
 
     let desired_manifests = preflight.manifests;
@@ -155,7 +156,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
             .resolved_target
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
-        None,
+        preflight.live_kube_version.as_deref(),
         nyl_render::validation::ManifestValidationInput {
             manifests: &desired_manifests,
             source: &args.common.path,
@@ -881,7 +882,13 @@ mod tests {
         fn default_namespace(&self) -> &'static str {
             "default"
         }
-        async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {
+        async fn delete_resource_with(
+            &self,
+            _gvk: &GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+            _options: &nyl_render::kubernetes::DeleteOptions,
+        ) -> Result<()> {
             Ok(())
         }
         async fn get_normalized_resource(

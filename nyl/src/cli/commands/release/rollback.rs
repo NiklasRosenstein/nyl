@@ -5,7 +5,7 @@ use dialoguer::Confirm;
 use crate::{
     cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
     cli::commands::apply::{HandoffArgs, DEFAULT_APPLY_CONCURRENCY},
-    cli::commands::cluster::load_target_kube_config,
+    cli::commands::cluster::resolve_command_cluster,
 };
 use nyl_render::{
     config::ProjectConfig,
@@ -22,9 +22,9 @@ use nyl_render::{
 /// Roll back a release to a previously stored revision
 #[derive(Args, Debug)]
 pub struct RollbackArgs {
-    /// deployment target whose cluster stores the release
+    /// Deployment target whose cluster stores the release. Optional when exactly one target is configured.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 
     /// Release name
     pub name: String,
@@ -41,7 +41,7 @@ pub struct RollbackArgs {
     #[arg(short, long)]
     pub yes: bool,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 
@@ -77,8 +77,8 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     };
 
     // Create Kubernetes clients
-    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
-    let client = kube::Client::try_from(config)?;
+    let cluster = resolve_command_cluster(args.target.as_deref(), args.context.as_deref()).await?;
+    let client = kube::Client::try_from(cluster.config)?;
     let kube_client = KubeRsClient::from_client(client.clone()).await?;
     let storage = KubernetesReleaseStorage::new(client);
 
@@ -133,7 +133,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         requester: Requester::Manual {
             take_over: args.take_over,
         },
-        publication: Some(crate::cli::commands::cluster::target_release_publication(&args.target)?),
+        publication: cluster.publication,
     };
     let recorder = ReleaseRecorder::reserve(
         &storage,

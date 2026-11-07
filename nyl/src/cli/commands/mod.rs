@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod argocd;
 pub mod cluster;
 pub mod comment;
 pub mod create;
