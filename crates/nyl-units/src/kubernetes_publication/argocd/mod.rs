@@ -255,6 +255,7 @@ fn observe_each(
                 health: Health::Unknown,
                 reported: None,
                 deleting: false,
+                terminal: false,
                 source: None,
                 synced_source: None,
             });

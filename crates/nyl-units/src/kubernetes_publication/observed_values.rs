@@ -41,8 +41,8 @@ use nyl_core::orchestration::driver::{DriverError, DriverResult, ObservedValue};
 use nyl_core::orchestration::state::DesiredUnit;
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::observation::{
-    generated_applications, owning_application, DeploymentRole, GitPublicationHistory, ReconcilerFacts, ResourceRef,
-    WorkloadCluster,
+    direct_deployments, generated_applications, owning_application, owning_direct_release, Delivery, DeploymentRole,
+    GitPublicationHistory, ReconcilerFacts, ResourceRef, WorkloadCluster,
 };
 use nyl_render::gitops::publication::RenderedTarget;
 use serde_json::{json, Value};
@@ -110,32 +110,50 @@ pub(super) fn recorded(spec: &Value, rendered: &RenderedTarget, target: &str) ->
     if declared.is_empty() {
         return Ok(None);
     }
-    let applications = generated_applications(rendered).map_err(|error| {
-        DriverError::before_effects(format!("cannot read the Applications of target {target}: {error}"))
-    })?;
     let mut sources = serde_json::Map::new();
     for (name, source) in &declared {
-        let owner = owning_application(rendered, &source.resource).map_err(|error| {
-            DriverError::before_effects(format!("cannot read what target {target} renders: {error}"))
-        })?;
+        let (owner, rendered_here) = match &rendered.delivery {
+            Delivery::ArgoCd(location) => {
+                let applications = generated_applications(rendered).map_err(|error| {
+                    DriverError::before_effects(format!("cannot read the Applications of target {target}: {error}"))
+                })?;
+                let owner = owning_application(rendered, &source.resource).map_err(|error| {
+                    DriverError::before_effects(format!("cannot read what target {target} renders: {error}"))
+                })?;
+                let rendered_here = applications
+                    .iter()
+                    .filter(|application| application.role == DeploymentRole::Workload)
+                    .map(|application| application.name.clone())
+                    .collect::<Vec<_>>();
+                (owner.map(|owner| owner.id(&location.namespace)), rendered_here)
+            }
+            Delivery::Direct(_) => {
+                let releases = direct_deployments(rendered).map_err(|error| {
+                    DriverError::before_effects(format!("cannot read the Releases of target {target}: {error}"))
+                })?;
+                let owner = owning_direct_release(rendered, &source.resource).map_err(|error| {
+                    DriverError::before_effects(format!("cannot read what target {target} renders: {error}"))
+                })?;
+                (
+                    owner.map(|owner| owner.key),
+                    releases.into_iter().map(|release| release.key).collect::<Vec<_>>(),
+                )
+            }
+        };
         let Some(owner) = owner else {
-            let rendered_here = applications
-                .iter()
-                .filter(|application| application.role == DeploymentRole::Workload)
-                .map(|application| application.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let rendered_here = rendered_here.join(", ");
             return Err(DriverError::before_effects(format!(
-                "{UNOWNED}: observation {name} reads {}, which target {target} does not render (its Applications: {}); \
+                "{UNOWNED}: observation {name} reads {}, which target {target} does not render (its deployments: {}); \
                  observe a resource one of its Releases renders, so that the cluster read stays the target's",
                 source.resource,
-                if rendered_here.is_empty() { "none".to_owned() } else { rendered_here }
+                if rendered_here.is_empty() {
+                    "none".to_owned()
+                } else {
+                    rendered_here
+                }
             )));
         };
-        sources.insert(
-            name.clone(),
-            json!({"deployment": owner.id(&rendered.argocd.namespace)}),
-        );
+        sources.insert(name.clone(), json!({"deployment": owner}));
     }
     let workload = serde_json::to_value(&rendered.workload)
         .map_err(|error| DriverError::before_effects(format!("cannot record the workload Cluster: {error}")))?;
@@ -260,6 +278,7 @@ impl ClusterReader {
             .restricted_to(|deployment| owners.contains(deployment.id.as_str()));
         let reader = reader(
             &request.reconciler.location,
+            &request.reconciler.expected.publication,
             request.env,
             budget(request.now, request.deadline),
         )

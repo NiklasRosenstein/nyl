@@ -178,6 +178,11 @@ pub struct RenderIndex {
     /// The owning orchestration unit; only a version 3 index can name one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<RenderIndexOwner>,
+    /// How the tree is delivered when it is not by Argo CD (`direct`); absent
+    /// means Argo CD. Part of the tree's identity, so a target never changes
+    /// reconciler by a publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciler: Option<String>,
 }
 
 impl RenderIndex {
@@ -200,7 +205,15 @@ impl RenderIndex {
             files: BTreeMap::new(),
             compilation: None,
             owner: None,
+            reconciler: None,
         }
+    }
+
+    /// Record that the tree is delivered by Nyl's direct reconciler, not Argo CD.
+    #[must_use]
+    pub fn delivered_directly(mut self, direct: bool) -> Self {
+        self.reconciler = direct.then(|| "direct".to_owned());
+        self
     }
 
     /// Record the orchestration unit that owns this index.
@@ -211,7 +224,10 @@ impl RenderIndex {
     }
 
     fn same_owner(&self, other: &Self) -> bool {
-        self.target == other.target && self.cluster == other.cluster && self.publication == other.publication
+        self.target == other.target
+            && self.cluster == other.cluster
+            && self.publication == other.publication
+            && self.reconciler == other.reconciler
     }
 
     fn same_compilation_policy(&self, other: &Self) -> bool {
@@ -461,6 +477,21 @@ fn ensure_same_owner(
     expected: &RenderIndex,
     options: &ReconcileOptions,
 ) -> Result<()> {
+    if actual.reconciler != expected.reconciler
+        && actual.target == expected.target
+        && actual.cluster == expected.cluster
+        && actual.publication == expected.publication
+    {
+        let name = |index: &RenderIndex| index.reconciler.clone().unwrap_or_else(|| "argocd".to_owned());
+        return Err(NylError::config(format!(
+            "{RECONCILER_CHANGED_CODE}: rendered ownership index {} was published for the {} reconciler, and this publication is for \
+             {}; a target does not change reconciler by an edit, because removing the files of one would let it delete what \
+             the other runs. Restore the declaration, or tear the target down first",
+            path.display(),
+            name(actual),
+            name(expected)
+        )));
+    }
     if !actual.same_owner(expected) {
         return Err(NylError::config(format!(
             "Rendered ownership index {} belongs to target {:?}, cluster {:?}, publication {:?}@{} path {:?}; expected target {:?}, cluster {:?}, publication {:?}@{} path {:?}",
@@ -503,6 +534,9 @@ fn ensure_same_owner(
 /// The stable code of a refusal by a publication that records no owner, such
 /// as `publish-tree` and `render-tree`, of a prefix an orchestrated unit owns.
 pub const OWNED_PREFIX_CODE: &str = "NYL-TREE-OWNED-BY-UNIT";
+
+/// The stable code of a refusal because the target's reconciler changed.
+pub const RECONCILER_CHANGED_CODE: &str = "NYL-TREE-RECONCILER-CHANGED";
 
 /// How to release a prefix deliberately: the way out when its owner can no
 /// longer release it, such as an environment that was renamed or removed, or

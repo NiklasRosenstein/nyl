@@ -409,6 +409,7 @@ fn read(shared: &Shared<'_>, job: &Job<'_>) -> Result<ObservedValues, String> {
             };
             let ctx = ExecutionContext {
                 instances: shared.context.instances,
+                clock: context.base.clock,
                 secrets,
                 interactive: false,
                 artifacts: job.artifacts.clone(),

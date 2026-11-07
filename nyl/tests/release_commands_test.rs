@@ -209,6 +209,7 @@ fn create_test_release(
         rendered_at: Utc::now(),
         applied_at: if is_deployed { Some(Utc::now()) } else { None },
         error: None,
+        meta: nyl_render::kubernetes::ReleaseMeta::default(),
     }
 }
 

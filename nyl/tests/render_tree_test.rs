@@ -7857,3 +7857,117 @@ fn partial_publication_reports_unselected_new_releases() {
         .keys()
         .any(|path| path.starts_with("production/workloads/worker")));
 }
+
+/// Catches a direct target generating Argo CD objects, needing an ArgoCDInstance,
+/// or losing its ownership identity: with explicit instances declared, a target
+/// that declares `reconciler: {direct: {}}` needs no `argocdRef`, renders its
+/// Release directories and index, and no catalog, Application, or AppProject.
+#[test]
+fn direct_targets_render_a_tree_without_argocd_objects_and_need_no_instance() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();
+    fs::write(
+        fixture.path().join("config/argocd-instances/central.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: central\nspec:\n  clusterRef:\n    name: prod-eu-1\n",
+    )
+    .unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path)
+        .unwrap()
+        .replace("spec:\n", "spec:\n  reconciler:\n    direct: {}\n");
+    fs::write(&target_path, target).unwrap();
+    // The cluster is declared with the context a direct target is applied through.
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
+    let cluster = fs::read_to_string(&cluster_path).unwrap();
+    fs::write(cluster_path, format!("{cluster}  live:\n    context: prod\n")).unwrap();
+
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let tree = read_tree(&output);
+    let paths = tree
+        .keys()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        paths.iter().any(|path| path.starts_with("production/workloads/api/")),
+        "{paths:?}"
+    );
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.contains("_nyl/catalog") || path.contains("appproject")),
+        "{paths:?}"
+    );
+    let index = String::from_utf8(tree[&PathBuf::from("production/_nyl/index.json")].clone()).unwrap();
+    assert!(index.contains("\"reconciler\": \"direct\""), "{index}");
+}
+
+/// Catches the exclusivity of the declaration going unvalidated: a direct
+/// target that also names an ArgoCDInstance, or customizes a catalog it does
+/// not generate, is refused with what to remove.
+#[test]
+fn a_direct_target_rejects_argocd_settings() {
+    for (extra, message) in [
+        ("  argocdRef:\n    name: central\n", "mutually exclusive"),
+        (
+            "  catalogApplication:\n    enabled: false\n",
+            "generates no catalog Application",
+        ),
+    ] {
+        let fixture = fixture();
+        let target_path = fixture.path().join("config/targets/production.yaml");
+        let target = fs::read_to_string(&target_path)
+            .unwrap()
+            .replace("spec:\n", &format!("spec:\n  reconciler:\n    direct: {{}}\n{extra}"));
+        fs::write(&target_path, target).unwrap();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args(["validate"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(message));
+    }
+}
+
+/// Catches a target changing reconciler by a publication: removing an Argo CD
+/// target's catalog could make its self-managing catalog delete the workloads, so
+/// the index refuses the other reconciler's tree with a stable code.
+#[test]
+fn a_target_does_not_change_reconciler_by_a_publication() {
+    let fixture = fixture();
+    let output = fixture.path().join("deploy");
+    let render = |fixture: &TempDir| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args([
+                "render-tree",
+                "--target",
+                "production",
+                "--output-dir",
+                output.to_str().unwrap(),
+            ])
+            .assert()
+    };
+    render(&fixture).success();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path)
+        .unwrap()
+        .replace("spec:\n", "spec:\n  reconciler:\n    direct: {}\n");
+    fs::write(&target_path, target).unwrap();
+    render(&fixture)
+        .failure()
+        .stderr(predicate::str::contains("NYL-TREE-RECONCILER-CHANGED"));
+}

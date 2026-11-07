@@ -44,7 +44,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use nyl_render::gitops::observation::{Anchor, ExpectedDeployment, ReconcilerLocation, Source};
+use nyl_render::gitops::observation::{Anchor, ExpectedDeployment, ObservedPublication, ReconcilerLocation, Source};
 
 pub mod evaluate;
 
@@ -138,6 +138,11 @@ pub struct Observed {
     pub reported: Option<String>,
     /// The reconciler is removing it.
     pub deleting: bool,
+    /// A `Degraded` health that will not recover without a change to what
+    /// runs, such as a rollout past its progress deadline, so a wait for
+    /// health may stop at once instead of waiting out its timeout. Set by a
+    /// reader that can tell; `false` otherwise, which never fails a wait early.
+    pub terminal: bool,
     /// The source it is configured with now.
     pub source: Option<Source>,
     /// The source its last full sync took, when the reconciler records one.
@@ -205,11 +210,27 @@ pub trait ReconcilerReader {
 /// environment, finishing each reading within `budget`.
 pub fn reader(
     location: &ReconcilerLocation,
+    publication: &ObservedPublication,
     env: &BTreeMap<String, String>,
     budget: Duration,
 ) -> Result<Box<dyn ReconcilerReader>, ReadError> {
+    reader_with(location, publication, env, budget, &super::direct::ClusterAccess::Live)
+}
+
+/// [`reader`] reaching a direct target's cluster through `access`, which the
+/// driver holds so that tests can run without a cluster.
+pub fn reader_with(
+    location: &ReconcilerLocation,
+    publication: &ObservedPublication,
+    env: &BTreeMap<String, String>,
+    budget: Duration,
+    access: &super::direct::ClusterAccess,
+) -> Result<Box<dyn ReconcilerReader>, ReadError> {
     match location {
         ReconcilerLocation::ArgoCd(location) => super::argocd::reader(location, env, budget),
+        ReconcilerLocation::Direct(location) => {
+            super::direct::reader_with(location, publication, env, budget, access.clone())
+        }
     }
 }
 
@@ -235,6 +256,32 @@ pub(crate) fn block_on<T: Send>(future: impl std::future::Future<Output = T> + S
                         ReadError::new(
                             ReadErrorKind::Unreachable,
                             format!("cannot start a runtime to read the reconciler: {error}"),
+                        )
+                    })
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// [`block_on`] for a future that is built on the thread that runs it, so it
+/// need not be `Send`: only what builds it is. A driver calls the lifecycle,
+/// whose futures borrow across awaits in ways the compiler cannot prove `Send`.
+pub(crate) fn block_on_with<T: Send, F: std::future::Future<Output = T>>(
+    make: impl FnOnce() -> F + Send,
+) -> Result<T, ReadError> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map(|runtime| runtime.block_on(make()))
+                    .map_err(|error| {
+                        ReadError::new(
+                            ReadErrorKind::Unreachable,
+                            format!("cannot start a runtime to reach the cluster: {error}"),
                         )
                     })
             })

@@ -518,7 +518,8 @@ async fn compile_target_tree_recording(
         .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
         .count();
     let argocd = resolve_argocd_instance(inventory, &target, instance_count)?;
-    if argocd.source_path.is_none() {
+    let direct = target.is_direct();
+    if argocd.source_path.is_none() && !direct {
         // The implicit instance is the documented default, so it is not news on
         // every compile; `--verbose` still shows which instance a target uses.
         tracing::debug!(
@@ -867,7 +868,8 @@ async fn compile_target_tree_recording(
         });
         match project.manifest {
             ProjectManifest::Fixed(manifest) => {
-                if emitted_projects.insert(project.catalog_id.clone()) {
+                // A direct target generates no AppProject, whatever its group names.
+                if !direct && emitted_projects.insert(project.catalog_id.clone()) {
                     catalog_manifests.push(manifest);
                 }
             }
@@ -992,7 +994,7 @@ async fn compile_target_tree_recording(
                 &release,
                 &destination_namespace,
             ));
-            if let Some(patterns) = &project.destination_namespaces {
+            if let Some(patterns) = project.destination_namespaces.as_ref().filter(|_| !direct) {
                 validate_project_namespace_scope(&group, &release, &destination_namespace, patterns)?;
             }
 
@@ -1065,7 +1067,7 @@ async fn compile_target_tree_recording(
         pending_workloads.iter().flat_map(|workload| workload.manifests.iter()),
     );
     let empty_usage = ProjectUsage::default();
-    for (name, (catalog_id, generated)) in &generated_projects {
+    for (name, (catalog_id, generated)) in generated_projects.iter().filter(|_| !direct) {
         if emitted_projects.insert(catalog_id.clone()) {
             catalog_manifests.push(generated.finish(project_usage.get(name).unwrap_or(&empty_usage), &scopes)?);
         }
@@ -1097,6 +1099,9 @@ async fn compile_target_tree_recording(
             insert_file(&mut files, path, bytes)?;
         }
 
+        if direct {
+            continue;
+        }
         let rendered_path = join_posix(target.publication_path_prefix(), &workload.release_directory)?;
         let mut application = build_directory_application(&DirectoryApplicationInput {
             name: workload.application_name.clone(),
@@ -1134,6 +1139,15 @@ async fn compile_target_tree_recording(
         catalog_manifests.push(application);
     }
 
+    if direct {
+        if let Some(((_, namespace), _)) = namespace_owners.iter().next() {
+            return Err(NylError::config(format!(
+                "Namespace {namespace:?} has a Dedicated owner, which generates an Application of its own; a direct \
+                 target has none and no Release to hold release state for it. Own the Namespace by a Release \
+                 (sharedNamespaces owner kind Release) or declare it External"
+            )));
+        }
+    }
     for ((cluster, namespace), owner) in namespace_owners {
         let digest = nyl_core::digest::sha256_hex(format!("{cluster}\0{namespace}").as_bytes());
         let suffix = &digest[..20];
@@ -1185,7 +1199,7 @@ async fn compile_target_tree_recording(
         }
         None => None,
     };
-    if target.spec.catalog_application.generates_application() {
+    if target.spec.catalog_application.generates_application() && !direct {
         let application = build_catalog_application(&target, &repository, &argocd)?;
         let parent_name = application
             .pointer("/metadata/name")
@@ -2279,7 +2293,28 @@ pub(super) fn target_selects_group(target: &DeploymentTarget, group_labels: &BTr
 /// says otherwise).
 ///
 /// Contract: [Kubernetes publications](../../../../design/promotion.md#kubernetes-publications), observer.
-pub(super) fn argocd_location(
+pub(super) fn delivery_of(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<super::observation::Delivery> {
+    if target.is_direct() {
+        let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
+        return Ok(super::observation::Delivery::Direct(
+            super::observation::DirectLocation {
+                cluster: cluster.metadata.name,
+                context: cluster.spec.live.map(|live| live.context),
+                server: cluster
+                    .spec
+                    .destination
+                    .server
+                    .filter(|server| crate::kubernetes::verifiable_cluster_server(server)),
+            },
+        ));
+    }
+    argocd_location(inventory, target).map(super::observation::Delivery::ArgoCd)
+}
+
+fn argocd_location(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
 ) -> Result<super::observation::ArgoCdLocation> {
@@ -2318,7 +2353,10 @@ fn resolve_argocd_instance(
     target: &DeploymentTarget,
     instance_count: usize,
 ) -> Result<EffectiveArgoCDInstance> {
-    if instance_count == 0 {
+    // A direct target generates no Argo CD object, so it needs no instance and
+    // never joins the explicit-instance rule; the compile still carries an
+    // implicit one for the settings it shares with every target.
+    if instance_count == 0 || target.is_direct() {
         if let Some(reference) = &target.spec.argocd_ref {
             return Err(NylError::config(format!(
                 "DeploymentTarget {:?} references ArgoCDInstance {:?}, but no ArgoCDInstance resources are defined",
@@ -2327,7 +2365,11 @@ fn resolve_argocd_instance(
         }
         let (cluster, cluster_path) = resolve_cluster(inventory, target.cluster_name())?;
         return Ok(EffectiveArgoCDInstance {
-            identity: format!("implicit:{}", target.metadata.name),
+            identity: format!(
+                "{}:{}",
+                if target.is_direct() { "direct" } else { "implicit" },
+                target.metadata.name
+            ),
             resource: ArgoCDInstance {
                 api_version: nyl_core::constants::API_VERSION_K8S_GITOPS.to_owned(),
                 kind: crate::resources::KIND_ARGOCD_INSTANCE.to_owned(),
@@ -2479,7 +2521,7 @@ fn validate_argocd_name_collisions(
     let mut project_owners = BTreeMap::<(String, String, String), (String, String, bool, String)>::new();
     let mut default_application_owners = BTreeMap::<(String, String, String), String>::new();
 
-    for target in targets {
+    for target in targets.into_iter().filter(|target| !target.is_direct()) {
         let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
         // Argo CD names live in one namespace of one control-plane cluster,
         // whichever instance or Cluster resource, explicit or implicit, put them
@@ -2625,7 +2667,7 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
         .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
         .count();
     let mut owners = BTreeMap::<(String, String, String, String), (String, PathBuf)>::new();
-    for tree in trees {
+    for tree in trees.iter().filter(|tree| !tree.target.is_direct()) {
         let argocd = resolve_argocd_instance(inventory, &tree.target, instance_count)?;
         let control_plane = control_plane_identity(&argocd.cluster);
         for (path, bytes) in tree.files.range(PathBuf::from(CATALOG_DIRECTORY)..) {
@@ -2664,6 +2706,125 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
         }
     }
     Ok(())
+}
+
+/// An object a direct target renders, for the cross-target check, as (the
+/// Release key or the destination, group, kind, namespace, name).
+type DirectObject = (String, String, String, Option<String>, String);
+
+/// What the cross-target check of direct targets needs of one compiled tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectFacts {
+    pub target: String,
+    /// The cluster the target is applied to, by its declared destination
+    /// (server or name), so two Cluster resources for one cluster are one.
+    pub destination: String,
+    /// The Releases: state identity and group.
+    pub releases: Vec<super::observation::PublishedDirectRelease>,
+    /// Every object the Releases render: (Release key, group, kind, namespace, name).
+    pub objects: Vec<DirectObject>,
+}
+
+/// Fail when two Releases of direct targets that reach one cluster share a
+/// state identity (namespace and name), or two of them render one object:
+/// release state is stored under the Release's name in its namespace, and one
+/// object has one owner. Argo CD's generated-name rule does not apply to
+/// direct targets.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#declaration), collisions.
+pub fn check_direct_collisions(facts: &[DirectFacts]) -> Result<()> {
+    let mut identities: BTreeMap<(String, String, String), (String, String)> = BTreeMap::new();
+    let mut objects: BTreeMap<DirectObject, (String, String)> = BTreeMap::new();
+    for fact in facts {
+        for release in &fact.releases {
+            let (namespace, name) = release.identity();
+            let key = (fact.destination.clone(), namespace.to_owned(), name.to_owned());
+            if let Some(previous) = identities.insert(key, (fact.target.clone(), release.key.clone())) {
+                let message = if previous.0 == fact.target {
+                    format!(
+                        "NYL-KUBERNETES-DIRECT-RELEASE-COLLISION: Releases {} and {} of DeploymentTarget {:?} are both named {name:?} in namespace {namespace:?}, so they would share one release state; rename one or give it another namespace",
+                        previous.1, release.key, fact.target
+                    )
+                } else {
+                    format!(
+                        "NYL-KUBERNETES-DIRECT-RELEASE-COLLISION: Release {} of DeploymentTarget {:?} and Release {} of {:?} are applied to the same cluster ({}) as {name:?} in namespace {namespace:?}, so they would share one release state; give each target its own Release namespace or name, for example from `${{ target.metadata.name }}`",
+                        release.key, fact.target, previous.1, previous.0, fact.destination
+                    )
+                };
+                return Err(NylError::config(message));
+            }
+        }
+        for (release, group, kind, namespace, name) in &fact.objects {
+            let key = (
+                fact.destination.clone(),
+                group.clone(),
+                kind.clone(),
+                namespace.clone(),
+                name.clone(),
+            );
+            if let Some(previous) = objects.insert(key, (fact.target.clone(), release.clone())) {
+                if previous != (fact.target.clone(), release.clone()) {
+                    return Err(NylError::config(format!(
+                        "{kind} {}{name} is rendered by Release {release} of DeploymentTarget {:?} and by Release {} of {:?}, which are applied to the same cluster ({}); one object has one owner",
+                        namespace.as_deref().map(|namespace| format!("{namespace}/")).unwrap_or_default(),
+                        fact.target,
+                        previous.1,
+                        previous.0,
+                        fact.destination
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_direct_collisions`] over compiled trees: the direct ones among `trees`.
+pub fn validate_compiled_direct_targets(trees: &[CompiledTargetTree]) -> Result<()> {
+    let mut facts = Vec::new();
+    for tree in trees.iter().filter(|tree| tree.target.is_direct()) {
+        let compilation = tree
+            .publication_snapshot
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let releases = super::observation::direct_releases_of(compilation.as_ref());
+        let destination = {
+            let destination = &tree.cluster.spec.destination;
+            destination
+                .server
+                .clone()
+                .or_else(|| destination.name.clone())
+                .unwrap_or_default()
+        };
+        let mut objects = Vec::new();
+        for release in &releases {
+            for (path, bytes) in tree.files.range(PathBuf::from(&release.directory)..) {
+                if !path.starts_with(&release.directory) {
+                    break;
+                }
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| NylError::config(format!("rendered file {} is not UTF-8", path.display())))?;
+                for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+                    let key = crate::kubernetes::ResourceKey::from_json_value(&manifest)?;
+                    let namespace = if crate::kubernetes::is_known_cluster_scoped_gvk(&key.gvk) {
+                        None
+                    } else {
+                        key.namespace
+                            .or_else(|| Some(release.release.destination_namespace.clone()))
+                    };
+                    objects.push((release.key.clone(), key.gvk.group, key.gvk.kind, namespace, key.name));
+                }
+            }
+        }
+        facts.push(DirectFacts {
+            target: tree.target.metadata.name.clone(),
+            destination,
+            releases,
+            objects,
+        });
+    }
+    check_direct_collisions(&facts)
 }
 
 pub(super) fn resolve_git_publication(
@@ -3926,6 +4087,74 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::observation::{DirectRelease, PublishedDirectRelease};
+
+    fn release(group: &str, name: &str, namespace: &str) -> PublishedDirectRelease {
+        PublishedDirectRelease {
+            key: format!("{group}/{name}"),
+            group: group.to_owned(),
+            release: DirectRelease {
+                name: name.to_owned(),
+                namespace: namespace.to_owned(),
+                destination_namespace: namespace.to_owned(),
+            },
+            directory: format!("{group}/{name}"),
+        }
+    }
+
+    fn facts(target: &str, destination: &str, releases: Vec<PublishedDirectRelease>) -> DirectFacts {
+        DirectFacts {
+            target: target.to_owned(),
+            destination: destination.to_owned(),
+            releases,
+            objects: Vec::new(),
+        }
+    }
+
+    /// Catches two Releases sharing one release state: within a target, and
+    /// across two targets that reach one cluster, however their Cluster
+    /// resources are named; targets on other clusters never collide.
+    #[test]
+    fn test_direct_releases_collide_by_state_identity_on_one_destination() {
+        let one = facts("a", "https://kind:6443", vec![release("web", "api", "api")]);
+        let same_cluster = facts("b", "https://kind:6443", vec![release("web", "api", "api")]);
+        let error = check_direct_collisions(&[one.clone(), same_cluster])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-KUBERNETES-DIRECT-RELEASE-COLLISION"), "{error}");
+        let other_cluster = facts("b", "https://other:6443", vec![release("web", "api", "api")]);
+        assert!(check_direct_collisions(&[one.clone(), other_cluster]).is_ok());
+        let twice = facts(
+            "a",
+            "https://kind:6443",
+            vec![release("web", "api", "api"), release("jobs", "api", "api")],
+        );
+        assert!(check_direct_collisions(&[twice]).is_err());
+        let other_namespace = facts("b", "https://kind:6443", vec![release("web", "api", "b-api")]);
+        assert!(check_direct_collisions(&[one, other_namespace]).is_ok());
+    }
+
+    /// Catches one object being rendered by Releases of two direct targets
+    /// on one cluster, where the last writer would win silently.
+    #[test]
+    fn test_one_object_has_one_owner_across_direct_targets_on_a_cluster() {
+        let object = |release: &str| {
+            (
+                release.to_owned(),
+                String::new(),
+                "ConfigMap".to_owned(),
+                Some("shared".to_owned()),
+                "settings".to_owned(),
+            )
+        };
+        let mut a = facts("a", "https://kind:6443", vec![release("web", "a", "a")]);
+        a.objects.push(object("web/a"));
+        let mut b = facts("b", "https://kind:6443", vec![release("web", "b", "b")]);
+        b.objects.push(object("web/b"));
+        let error = check_direct_collisions(&[a, b]).unwrap_err().to_string();
+        assert!(error.contains("ConfigMap shared/settings"), "{error}");
+    }
+
     use super::*;
 
     #[test]

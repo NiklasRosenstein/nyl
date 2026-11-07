@@ -47,18 +47,77 @@ use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, FailureCategory};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
+use nyl_render::gitops::observation::{direct_deployments, Delivery, ReconcilerLocation};
 use nyl_render::gitops::publication::{
     inspect_shared_catalog, prepare_target_publication_fenced, prepare_target_removal_fenced, render_target,
-    without_workload_applications, PublicationAuthor, RenderedTarget, SharedCatalogState, TargetRender,
+    without_workload_applications, without_workloads, PublicationAuthor, RenderedTarget, SharedCatalogState,
+    TargetRender,
 };
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::gitops::units::PublicationTarget;
 use serde_json::{json, Value};
 
+use super::direct::apply::{Direct, Step};
+use super::direct::ClusterAccess;
+use super::health_wait::{self, Waited};
 use crate::command::{is_deleting, resolved_spec};
 
 /// The phase a teardown waits in after publishing phase 1.
 pub(crate) const PHASE_APPLICATIONS_REMOVED: &str = "applications-removed";
+
+/// The phase a direct target's teardown waits in after phase 1.
+pub(crate) const PHASE_RESOURCES_DELETED: &str = "resources-deleted";
+
+/// The recorded reconciler kind of a stored unit: what it was resolved for, which
+/// a teardown follows rather than the declaration as it reads now.
+fn recorded_kind(unit: &DesiredUnit) -> Option<&str> {
+    unit.resolved_spec
+        .as_ref()
+        .unwrap_or(&unit.spec)
+        .pointer("/reconciler/kind")
+        .and_then(Value::as_str)
+}
+
+/// The refusal of a teardown whose declaration now renders another reconciler
+/// than the one the unit recorded.
+fn reconciler_mismatch(unit: &DesiredUnit, rendered: &RenderedTarget) -> Option<Outcome> {
+    let recorded = recorded_kind(unit).unwrap_or("argocd");
+    (recorded != rendered.delivery.kind()).then(|| Outcome::Failed {
+        category: FailureCategory::Ownership,
+        retryable: true,
+        message: reconciler_changed(unit, recorded, rendered.delivery.kind()),
+    })
+}
+
+/// The cluster side of a direct unit's teardown, when the unit recorded one.
+fn direct_of<'a, 'c>(
+    ctx: &'a ExecutionContext<'c>,
+    unit: &DesiredUnit,
+    rendered: &RenderedTarget,
+    access: &'a ClusterAccess,
+) -> DriverResult<Option<Direct<'a, 'c>>> {
+    let Delivery::Direct(declared) = &rendered.delivery else {
+        return Ok(None);
+    };
+    // A teardown acts on what the stored document recorded, never on the
+    // declaration as it reads now: the recorded Cluster, context, and server
+    // decide where it deletes. A document without them (resolved before a
+    // direct unit recorded its facts) falls back to the declaration.
+    let recorded = super::observe::facts_of(unit)
+        .ok()
+        .and_then(|facts| match facts.location {
+            ReconcilerLocation::Direct(location) => Some(location),
+            ReconcilerLocation::ArgoCd(_) => None,
+        });
+    let owner = unit_owner(unit)?;
+    Ok(Some(Direct::new(
+        ctx,
+        access,
+        recorded.as_ref().unwrap_or(declared),
+        owner,
+        rendered,
+    )))
+}
 
 /// How often a publication is built again on a branch head that moved.
 const PUBLISH_ATTEMPTS: usize = 3;
@@ -423,6 +482,7 @@ fn target_changed(
         ("repository", Some(now.repository.as_str()), recorded("repository")),
         ("branch", Some(now.branch.as_str()), recorded("branch")),
         ("pathPrefix", Some(now.path_prefix.as_str()), recorded("pathPrefix")),
+        ("cluster", Some(rendered.workload.cluster.as_str()), recorded("cluster")),
     ]
     .into_iter()
     .filter_map(|(field, now, before)| match (now, before) {
@@ -430,6 +490,15 @@ fn target_changed(
         _ => None,
     })
     .collect::<Vec<_>>();
+    if let (kind, Some(before)) = (rendered.delivery.kind(), recorded("reconciler")) {
+        if kind != before {
+            return Some(Outcome::Failed {
+                category: FailureCategory::Ownership,
+                retryable: true,
+                message: reconciler_changed(unit, before, kind),
+            });
+        }
+    }
     if changes.is_empty() {
         return None;
     }
@@ -445,6 +514,18 @@ fn target_changed(
             name = unit.unit.name,
         ),
     })
+}
+
+/// The refusal of a unit whose target changed reconciler.
+fn reconciler_changed(unit: &DesiredUnit, before: &str, now: &str) -> String {
+    format!(
+        "NYL-KUBERNETES-RECONCILER-CHANGED: the unit published for the {before} reconciler and its target now declares {now}; \
+         nothing was changed, because removing one reconciler's files lets it delete what the other runs. Restore the \
+         declaration, or replace the unit: run `nyl teardown -e {env} --unit {name}`, which tears down what it published, \
+         then reconcile",
+        env = unit.unit.environment,
+        name = unit.unit.name,
+    )
 }
 
 /// What `plan` reports: the destroy a deleting unit's two phases amount to,
@@ -482,11 +563,23 @@ pub(crate) fn plan(ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> PlanReport
 
 /// Publish the unit's tree and record the `PublishedTree` artifact `tree`,
 /// with `outputs` as the outputs the call reports.
+#[cfg(any(test, feature = "test-kinds"))]
 pub(crate) fn publish(
     catalogue: &nyl_render::config::ResourceCatalogue,
     ctx: &ExecutionContext<'_>,
     unit: &DesiredUnit,
     outputs: Value,
+) -> DriverResult<Outcome> {
+    publish_via(catalogue, ctx, unit, outputs, &ClusterAccess::Live)
+}
+
+/// [`publish`] reaching a direct target's cluster through `access`.
+pub(crate) fn publish_via(
+    catalogue: &nyl_render::config::ResourceCatalogue,
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    outputs: Value,
+    access: &ClusterAccess,
 ) -> DriverResult<Outcome> {
     let spec = resolved_spec(unit)?;
     let owner = unit_owner(unit)?;
@@ -505,6 +598,7 @@ pub(crate) fn publish(
         ctx,
         unit,
         outputs,
+        access,
     )
 }
 
@@ -514,6 +608,7 @@ fn publish_with(
     ctx: &ExecutionContext<'_>,
     unit: &DesiredUnit,
     outputs: Value,
+    access: &ClusterAccess,
 ) -> DriverResult<Outcome> {
     author(ctx, unit)?;
     let rendered = render()?;
@@ -522,7 +617,48 @@ fn publish_with(
         return Ok(outcome);
     }
     let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
-    publish_rendered(render, rendered, &message, ctx, unit, outputs)
+    // A direct target is applied after its tree is published: the cluster is
+    // checked first (connection, server, and the fence of every Release),
+    // because that is cheap and undoes nothing, and the Releases are applied
+    // from the bytes the push consumed, once it landed.
+    let direct = match rendered.delivery.clone() {
+        Delivery::Direct(location) => {
+            let owner = unit_owner(unit)?;
+            let direct = Direct::new(ctx, access, &location, owner, &rendered);
+            let releases = direct_deployments(&rendered).map_err(|error| {
+                DriverError::before_effects(format!("cannot read the Releases of the target: {error}"))
+            })?;
+            if let Some(outcome) = direct.preflight(&releases)? {
+                return Ok(outcome);
+            }
+            Some(direct)
+        }
+        Delivery::ArgoCd(_) => None,
+    };
+    // After the push (and, for a direct target, the apply), a unit that asks
+    // to wait polls its reconciler until it is healthy, and attests what it found.
+    let wait = health_wait::timeout_of(resolved_spec(unit)?);
+    publish_rendered_with(render, rendered, &message, ctx, unit, outputs, &mut |pushed, commit| {
+        let mut step = match &direct {
+            Some(direct) => {
+                let releases = direct_deployments(pushed).map_err(|error| {
+                    DriverError::after_effects(format!("cannot read the Releases of the pushed tree: {error}"))
+                })?;
+                direct.apply(pushed, commit, &releases)?
+            }
+            None => Step::Continue {
+                warnings: Vec::new(),
+                attestations: Vec::new(),
+            },
+        };
+        if let (Step::Continue { attestations, .. }, Some(timeout)) = (&mut step, wait) {
+            match health_wait::wait_for_target(ctx, unit, commit, timeout, access) {
+                Waited::Healthy(found) => *attestations = found,
+                Waited::Failed(outcome) => return Ok(Step::Stop(outcome)),
+            }
+        }
+        Ok(step)
+    })
 }
 
 /// What publishing a target did about the shared catalog it names.
@@ -785,11 +921,31 @@ pub(crate) fn publish_shared_catalog(
 /// and in the checks before the publication.
 pub(crate) fn publish_rendered(
     render: &dyn Fn() -> DriverResult<RenderedTarget>,
+    rendered: RenderedTarget,
+    message: &str,
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    outputs: Value,
+) -> DriverResult<Outcome> {
+    publish_rendered_with(render, rendered, message, ctx, unit, outputs, &mut |_, _| {
+        Ok(Step::Continue {
+            warnings: Vec::new(),
+            attestations: Vec::new(),
+        })
+    })
+}
+
+/// [`publish_rendered`] that, once the tree is pushed, hands the pushed tree
+/// and its commit to `then`, which may end the call with an outcome (a direct
+/// target's apply) or add warnings to the receipt.
+pub(crate) fn publish_rendered_with(
+    render: &dyn Fn() -> DriverResult<RenderedTarget>,
     mut rendered: RenderedTarget,
     message: &str,
     ctx: &ExecutionContext<'_>,
     unit: &DesiredUnit,
     outputs: Value,
+    then: &mut dyn FnMut(&RenderedTarget, &str) -> DriverResult<Step>,
 ) -> DriverResult<Outcome> {
     let author = author(ctx, unit)?;
     let key = unit
@@ -831,12 +987,17 @@ pub(crate) fn publish_rendered(
         Attempted::StateChanged(message) => return Ok(state_changed(&message)),
         Attempted::Fenced(message) => return Ok(fenced(&message)),
     };
+    let (mut extra, attestations) = match then(&rendered, &published.commit)? {
+        Step::Continue { warnings, attestations } => (warnings, attestations),
+        Step::Stop(outcome) => return Ok(outcome),
+    };
     // A manifest that is not the one this target renders is the writer's to replace, and worth a warning.
-    let warnings = shared
+    let mut warnings = shared
         .iter()
         .filter(|(_, result)| *result == SharedCatalogResult::Differs)
         .map(|(prefix, _)| shared_catalog_differs(unit, prefix))
         .collect::<Vec<_>>();
+    warnings.append(&mut extra);
     Ok(Outcome::Succeeded {
         versions: std::collections::BTreeMap::new(),
         outputs,
@@ -858,6 +1019,8 @@ pub(crate) fn publish_rendered(
                     "branch": published.branch,
                     "pathPrefix": published.path_prefix,
                     "target": target,
+                    "reconciler": rendered.delivery.kind(),
+                    "cluster": rendered.workload.cluster,
                     "commit": published.commit,
                     "indexDigest": published.index_digest,
                 });
@@ -867,17 +1030,19 @@ pub(crate) fn publish_rendered(
                 spec
             },
         }],
-        attestations: Vec::new(),
+        attestations,
         warnings,
     })
 }
 
 /// One call of the unit's two-phase teardown, as the contract's Teardown
 /// section describes.
+#[allow(clippy::too_many_lines)] // Two phases and their effects stay in one visible order.
 pub(crate) fn teardown(
     catalogue: &nyl_render::config::ResourceCatalogue,
     ctx: &ExecutionContext<'_>,
     unit: &DesiredUnit,
+    access: &ClusterAccess,
 ) -> DriverResult<Outcome> {
     let author = author(ctx, unit)?;
     let spec = resolved_spec(unit)?;
@@ -900,6 +1065,16 @@ pub(crate) fn teardown(
         // render only identifies the owner and the destination, so a moved
         // head needs nothing rebuilt.
         let mut rendered = render()?;
+        if let Some(outcome) = reconciler_mismatch(unit, &rendered) {
+            return Ok(outcome);
+        }
+        // A direct target's release state and the Namespaces that held it go
+        // first, so the index's owner keeps fencing until the cluster is done.
+        if let Some(direct) = direct_of(ctx, unit, &rendered, access)? {
+            if let Some(outcome) = direct.teardown_remove_state(&rendered)? {
+                return Ok(outcome);
+            }
+        }
         let message = format!(
             "nyl: teardown {}/{}: remove the owned files",
             unit.unit.environment, unit.unit.name
@@ -933,15 +1108,26 @@ pub(crate) fn teardown(
         });
     }
     let rendered = render()?;
+    if let Some(outcome) = reconciler_mismatch(unit, &rendered) {
+        return Ok(outcome);
+    }
     if let Some(held) = shared_catalog_hold(ctx, unit, &rendered)? {
         return Ok(held);
     }
     let before = state_inputs(&rendered)?;
     let stateful = rendered.publication_base.is_some();
+    let direct_target = rendered.delivery.kind() == "direct";
     let phase1_of = |rendered: RenderedTarget| {
+        if rendered.delivery.kind() == "direct" {
+            // A direct target's first phase publishes the tree without its
+            // Releases, so Git never lags the cluster, and then purges.
+            return Ok(without_workloads(&rendered));
+        }
         without_workload_applications(&rendered)
             .map_err(|error| DriverError::before_effects(format!("cannot prepare phase 1 of the teardown: {error}")))
     };
+    let direct = direct_of(ctx, unit, &rendered, access)?;
+    let rendered_for_cluster = direct_target.then(|| rendered.clone());
     let mut phase1 = phase1_of(rendered)?;
     let message = format!(
         "nyl: teardown {}/{}: remove the workload Applications",
@@ -962,6 +1148,20 @@ pub(crate) fn teardown(
     };
     let commit = CommitId::new(published.commit)
         .map_err(|error| DriverError::after_effects(format!("phase 1 commit: {error}")))?;
+    if let (Some(direct), Some(rendered)) = (&direct, &rendered_for_cluster) {
+        if let Some(outcome) = direct.teardown_delete(rendered)? {
+            return Ok(outcome);
+        }
+        return Ok(Outcome::Waiting {
+            phase: PHASE_RESOURCES_DELETED.to_owned(),
+            reason: format!(
+                "phase 1 published {} without its Releases and deleted their resources from Cluster {}",
+                published.path_prefix, rendered.workload.cluster
+            ),
+            until: None,
+            published: Some(commit),
+        });
+    }
     Ok(Outcome::Waiting {
         phase: PHASE_APPLICATIONS_REMOVED.to_owned(),
         reason: format!(
@@ -1309,7 +1509,7 @@ mod tests {
             }
             rendered
         };
-        let outcome = publish_with(&render, &ctx, &unit, json!({})).unwrap();
+        let outcome = publish_with(&render, &ctx, &unit, json!({}), &ClusterAccess::Live).unwrap();
         (outcome, renders.get())
     }
 

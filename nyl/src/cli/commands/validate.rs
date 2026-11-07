@@ -297,7 +297,8 @@ async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory) -> Res
             .await?,
         );
     }
-    nyl_render::gitops::validate_compiled_argocd_names(inventory, &compiled)
+    nyl_render::gitops::validate_compiled_argocd_names(inventory, &compiled)?;
+    nyl_render::gitops::validate_compiled_direct_targets(&compiled)
 }
 
 #[cfg(test)]
