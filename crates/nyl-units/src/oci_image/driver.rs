@@ -438,15 +438,14 @@ impl OciImageDriver {
                     format!("{}@{digest}", spec.repository),
                 ]
             } else {
+                // Buildx 0.38 no longer records the configuration digest for a
+                // load. The image digest names the loaded image as well, as
+                // the image ID of the containerd image store.
                 let config = metadata
                     .get("containerimage.config.digest")
                     .and_then(Value::as_str)
                     .filter(|digest| sha256(digest))
-                    .ok_or_else(|| {
-                        DriverError::after_effects(
-                            "loaded image metadata has no configuration digest for platform inspection",
-                        )
-                    })?;
+                    .unwrap_or(digest);
                 vec![
                     "image".into(),
                     "inspect".into(),

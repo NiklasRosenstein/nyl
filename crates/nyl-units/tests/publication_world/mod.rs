@@ -82,7 +82,7 @@ impl World {
     /// reports its repository through URL normalization, which turns a
     /// Windows path into `file:///D:/...`, so the URL is built the same way.
     pub fn project_url(&self) -> String {
-        reqwest::Url::from_file_path(self.bare())
+        url::Url::from_file_path(self.bare())
             .expect("the test repository has an absolute path")
             .to_string()
     }
