@@ -201,8 +201,9 @@ and to the harness's validation, together with the first scenario using them.
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
 | `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit, or `none` for a held marker or a unit held without an incarnation); from `nyl status`, `condition-state` (the condition shown next to the unit's state, or `null`) and `drift: {result}` (the latest drift record shown) |
 | `codes` | Stable error and warning codes the invocation reported |
+| `messages` | Text the invocation printed on stdout or stderr: each entry is a substring, such as a name a message must give |
 | `get` | `{args, value}` or `{args, json: {<pointer>: <value>}}` for a `nyl get` invocation after the step |
-| `deploy` | Files and commits on a deploy branch |
+| `deploy` | Files on a deploy branch after the step: `contains` (patterns that match a file), `unchanged` (the files that match are the ones the step started with), and `absent` (patterns that match no file) |
 | `promotion` | The PromotionRecord a `promote` step wrote: `path`, `sourceCommit` as a Git revision of `project.git` such as `main~1`, and `from.run` as the `id` of the `nyl` step whose run recorded the promoted state |
 
 Tier 2 also checks the registry's manifests and `tofu output`. Both tiers read
@@ -296,7 +297,7 @@ examples/platform/
     plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
     reconcile.yaml           # push to main: reconcile dev; promote dev-to-prod and reconcile prod behind an approval gate
     preview.yaml             # pull request opened/updated: reconcile -e pr-<n> --template preview --param pr=<n>; closed: state delete --teardown
-    previews-maintenance.yaml   # nightly: nyl reconcile --template preview
+    previews-maintenance.yaml   # nightly: nyl reconcile --template preview, then the shared catalog's writer: nyl build kubernetes -e <a live instance> -- --shared-catalog --push
 ```
 
 | Unit | dev | prod | preview |
@@ -521,7 +522,7 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | `pr-<n>` | People | Nyl: each preview instance runs from its pull request job's worktree, recorded in state (`allowUnprotectedSource`) |
 | `refs/nyl-keep/<keepId>/<commit>` | Nyl, when an instance records a new source commit (the previous commit's ref is removed after the record lands); removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
-| `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the fleet reconcile publishes the shared catalog under `_nyl/shared/previews/` | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
+| `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the first instance's publication creates the shared catalog under `_nyl/shared/previews/`, and the nightly job's `nyl build -- --shared-catalog --push` replaces it when it differs | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
 | `nyl/previews` | Nyl: every instance's state under its `state.path` | Nyl |
 | `refs/nyl/<env>/lease`, `refs/nyl/<env>/runs/<run-id>`, `refs/nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
@@ -624,7 +625,7 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
-| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep refs are removed |
+| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files beneath `pr-123/` (the shared catalog prunes its objects, and its manifest stays); then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep refs are removed |
 | 8 | From the `main` checkout: `nyl reconcile -e pr-124` → 0 | The run renders `pr-124` at its recorded commit, not at `main`, and says so; nothing executes |
 | 9 | `nyl get environments` | Lists `dev`, `prod`, and `pr-124`; `pr-123` is gone |
 
@@ -657,16 +658,30 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 Tier 1 variants:
 
 - **Not teardown-ready.** With the default namespace `deletePolicy: Confirm`,
-  step 2 reports `pr-124` as pending teardown with the reason and exits 2,
-  until a run passes `--allow-incomplete`. `state init --template` warns about
-  it at once when the publication states its settings in its declaration (the
-  fake publication's `teardownSettings`); the real publication records them
-  when its unit resolves, which waits for the outputs it reads, so its
-  readiness warning comes with the first `plan`.
+  step 2 reports `pr-124` as pending teardown with the reason
+  (`NYL-TEARDOWN-INCOMPLETE`) and exits 2, until a run passes
+  `--allow-incomplete`. `state init --template` warns about it at once when
+  the publication states its settings in its declaration (the fake
+  publication's `teardownSettings`); the real publication records them when
+  its unit resolves, which waits for the outputs it reads, so its readiness
+  warning (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) comes with an explicit
+  `reconcile` or `plan` of the instance, and the scenario asserts it there.
+  Scenario `reference/preview-not-ready` runs it with the real driver.
 - **Manual wait.** With `kubernetes` on the `manual` default, `state init
   --template` warns (`NYL-TEARDOWN-WAIT-MANUAL`, from the declaration, before
   anything ran) that instances cannot expire unattended, and step 2 stops
-  after phase 1 with exit 2.
+  after phase 1 with exit 2 until `--confirm-removed`. Scenario
+  `reference/preview-manual-wait` runs it with both publication drivers.
+
+The preview project of these scenarios is `reference/preview`. It repeats the
+platform project with the `preview` template, one explicit ArgoCDInstance, and
+an ApplicationGroup whose Application and AppProject names come from the
+target's name. Its group declares its labels in block style, a workaround for
+[#228](https://github.com/NiklasRosenstein/nyl/pull/228) (a templated
+`projectTemplate` drops a group whose labels are not block style), to remove
+when that fix lands. A step asks whether
+an instance is live with `nyl get environments <name>`, which exits 0 for an
+environment that exists and 1 for one that does not.
 
 ## Coverage by milestone
 

@@ -46,6 +46,7 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
+use super::run::{read_shared_catalog, SHARED_CATALOG_READING};
 use nyl_core::orchestration::driver::{
     AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext,
     Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
@@ -259,6 +260,12 @@ impl Driver for KubernetesPublicationDriver {
         let settings = serde_json::to_value(settings)
             .map_err(|error| DriverError::before_effects(format!("cannot record the teardown settings: {error}")))?;
         inputs.recorded.insert(TEARDOWN_SETTINGS.to_owned(), settings);
+        // What the branch holds of a shared catalog follows the writer, not the
+        // target: recorded for readiness, never keyed.
+        if let Some(reading) = read_shared_catalog(&ctx.env, &ctx.project_dir, &rendered)? {
+            inputs.recorded.insert(SHARED_CATALOG_READING.to_owned(), reading);
+            inputs.excluded_fields.push(SHARED_CATALOG_READING.to_owned());
+        }
         if observe::observes(spec) {
             let (facts, unkeyed) = observe::recorded(&rendered)?;
             inputs.recorded.insert(RECONCILER.to_owned(), facts);
@@ -395,6 +402,12 @@ impl Driver for KubernetesPublicationDriver {
     /// requirements) for a document resolved without them.
     fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        // A shared catalog's rows follow the manifest the branch holds, recorded unkeyed.
+        if let Some(reading) = spec.pointer(SHARED_CATALOG_READING) {
+            return super::readiness::evaluate_reading(&unit.unit.environment, &unit.unit.name, reading)
+                .map(Supported::Supported)
+                .map_err(DriverError::before_effects);
+        }
         match spec.pointer(TEARDOWN_SETTINGS) {
             None => Ok(Supported::Unsupported),
             Some(settings) => {

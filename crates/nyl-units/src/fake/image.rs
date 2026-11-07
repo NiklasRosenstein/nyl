@@ -197,6 +197,7 @@ impl Driver for FakeImage {
             outputs: json!({}),
             artifacts: vec![artifact],
             attestations: Vec::new(),
+            warnings: Vec::new(),
         }))
     }
 

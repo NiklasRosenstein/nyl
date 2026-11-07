@@ -567,6 +567,11 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 }
             }
         }
+        for message in expect.messages.iter().flatten() {
+            if !outcome.stdout.contains(message) && !outcome.stderr.contains(message) {
+                return Err(format!("the output does not contain {message:?}; {}", describe()));
+            }
+        }
         if let Some(units) = &expect.units {
             let status = units
                 .values()
@@ -783,6 +788,11 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     deploy.branch,
                     after.keys().collect::<Vec<_>>()
                 ));
+            }
+        }
+        for pattern in &deploy.absent {
+            if let Some(path) = after.keys().find(|path| glob_matches(pattern, path)) {
+                return Err(format!("{} still has {path}, which matches {pattern}", deploy.branch));
             }
         }
         for pattern in &deploy.unchanged {
@@ -1077,9 +1087,13 @@ pub fn invoke_in(
     if !directory.is_empty() {
         path.push(directory);
     }
+    // The project path goes before `--`, so arguments a unit driver takes
+    // after it (`nyl build <unit> -- --diff`) stay the driver's own.
+    let split = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
     let argv = std::iter::once("nyl".to_owned())
-        .chain(args.iter().cloned())
-        .chain(std::iter::once(path.display().to_string()));
+        .chain(args[..split].iter().cloned())
+        .chain(std::iter::once(path.display().to_string()))
+        .chain(args[split..].iter().cloned());
     let cli = Cli::try_parse_from(argv).map_err(|error| format!("nyl {}: {error}", args.join(" ")))?;
     cli.execute_in_process(wiring)
         .map_err(|error| format!("nyl {}: {error}", args.join(" ")))

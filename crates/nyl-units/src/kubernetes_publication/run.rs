@@ -48,8 +48,8 @@ use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, Artifac
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
-    prepare_target_publication_fenced, prepare_target_removal_fenced, render_target, without_workload_applications,
-    PublicationAuthor, RenderedTarget, TargetRender,
+    inspect_shared_catalog, prepare_target_publication_fenced, prepare_target_removal_fenced, render_target,
+    without_workload_applications, PublicationAuthor, RenderedTarget, SharedCatalogState, TargetRender,
 };
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::gitops::units::PublicationTarget;
@@ -80,11 +80,11 @@ pub(crate) fn unit_owner(unit: &DesiredUnit) -> DriverResult<RenderIndexOwner> {
         .uid
         .as_ref()
         .ok_or_else(|| DriverError::before_effects("an executing unit has a uid"))?;
-    Ok(RenderIndexOwner {
-        environment: unit.unit.environment.to_string(),
-        unit: unit.unit.name.to_string(),
-        uid: uid.to_string(),
-    })
+    Ok(RenderIndexOwner::unit(
+        unit.unit.environment.to_string(),
+        unit.unit.name.to_string(),
+        uid.to_string(),
+    ))
 }
 
 /// Owner fencing: whether `own` may publish to, or remove, a prefix whose
@@ -97,11 +97,19 @@ pub(crate) fn fence<'a>(
     ctx: &'a ExecutionContext<'_>,
 ) -> impl Fn(&RenderIndexOwner) -> std::result::Result<(), String> + 'a {
     move |owner| {
-        let (Ok(environment), Ok(unit), Ok(uid)) = (
-            EnvironmentName::new(&owner.environment),
-            UnitName::new(&owner.unit),
-            Uid::new(&owner.uid),
-        ) else {
+        let RenderIndexOwner::Unit { environment, unit, uid } = owner else {
+            // A shared catalog is no unit incarnation and never ceases to exist
+            // by itself: its prefix is released only by removing the files or
+            // the index's `owner` member by hand.
+            return Err(format!(
+                "NYL-KUBERNETES-OWNER-FENCED: the prefix is owned by {owner}, which no unit's teardown releases; a target's \
+                 publication prefix must not be the shared catalog's (_nyl/shared/<name>/). {}",
+                nyl_render::gitops::reconcile::OWNED_PREFIX_FIX
+            ));
+        };
+        let (Ok(environment), Ok(unit), Ok(uid)) =
+            (EnvironmentName::new(environment), UnitName::new(unit), Uid::new(uid))
+        else {
             return Err(format!(
                 "the ownership index names {owner}, which is not a valid unit identity"
             ));
@@ -517,6 +525,259 @@ fn publish_with(
     publish_rendered(render, rendered, &message, ctx, unit, outputs)
 }
 
+/// What publishing a target did about the shared catalog it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedCatalogResult {
+    /// The branch held no shared catalog, so the publication created it.
+    Created,
+    /// The branch holds the manifest this render would write.
+    Current,
+    /// The branch holds another manifest, left as it is: the manifest has one
+    /// writer, `nyl build -- --shared-catalog --push`.
+    Differs,
+}
+
+impl SharedCatalogResult {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Current => "current",
+            Self::Differs => "differs",
+        }
+    }
+}
+
+/// The recorded, unkeyed member that holds what the branch holds of the shared catalog.
+pub(crate) const SHARED_CATALOG_READING: &str = "/sharedCatalogReading";
+
+/// What the branch holds of the shared catalog a target names, as the teardown
+/// readiness reads it: `{result, settings, problem?}`. Argo CD runs what the
+/// branch holds, not what one target renders, so the settings are those of the
+/// published Application (the render's when the branch holds it, none checked
+/// while the manifest is missing). A branch that cannot be read, or a manifest
+/// that is no Application, is recorded as `problem`, which blocks a teardown.
+/// A prefix another owner holds, or another shared catalog on the branch, is
+/// an error of its own. `None` for a target that shares no catalog.
+///
+/// The reading is recorded but never keyed: it follows the branch, which the
+/// writer changes, and a change there must not re-execute every preview.
+///
+/// Contract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).
+pub(crate) fn read_shared_catalog(
+    env: &std::collections::BTreeMap<String, String>,
+    project_dir: &std::path::Path,
+    rendered: &RenderedTarget,
+) -> DriverResult<Option<Value>> {
+    use nyl_render::gitops::publication::SharedCatalogView;
+    let Some(shared) = rendered.shared_catalog.as_deref() else {
+        return Ok(None);
+    };
+    let variable = |name: &str| env.get(name).cloned();
+    let (result, view, problem) = match inspect_shared_catalog(shared, project_dir, &variable) {
+        Ok(inspection) => match (inspection.state, inspection.published) {
+            (SharedCatalogState::Current, _) => ("current", SharedCatalogView::Rendered, None),
+            (SharedCatalogState::Differs(_), Some(application)) => {
+                ("differs", SharedCatalogView::Published(application), None)
+            }
+            (SharedCatalogState::Differs(_), None) => (
+                "unparseable",
+                SharedCatalogView::NotChecked,
+                Some("the manifest on the branch is not a readable Application".to_owned()),
+            ),
+            (SharedCatalogState::Missing, _) => ("missing", SharedCatalogView::NotChecked, None),
+        },
+        Err(error)
+            if error.is_owner_fenced()
+                || error
+                    .to_string()
+                    .contains(nyl_render::gitops::shared_catalog::SHARED_CATALOG_CONFLICT_CODE) =>
+        {
+            return Err(DriverError::before_effects(format!(
+                "the shared catalog {}: {error}",
+                shared.destination.path_prefix
+            )))
+        }
+        Err(error) => (
+            "unreadable",
+            SharedCatalogView::NotChecked,
+            Some(format!("cannot read the publication branch: {error}")),
+        ),
+    };
+    let settings = nyl_render::gitops::publication::teardown_settings_with(rendered, &view).map_err(|error| {
+        DriverError::before_effects(format!("cannot read the shared catalog's teardown settings: {error}"))
+    })?;
+    let mut reading = json!({"result": result, "settings": settings});
+    if let Some(problem) = problem {
+        reading["problem"] = Value::String(problem);
+    }
+    Ok(Some(reading))
+}
+
+/// Before a teardown starts, read the shared catalog again: the settings
+/// recorded at the last resolution may be older than the writer's last push,
+/// and an instance that expired is removed from its stored document without
+/// resolving. Held, with the readiness code, when the catalog no longer prunes
+/// or deletes with its Applications' finalizers, or cannot be read. Only the
+/// catalog's own rows hold it here; the Namespace rows and `--allow-incomplete`
+/// are the shell's preflight.
+fn shared_catalog_hold(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    rendered: &RenderedTarget,
+) -> DriverResult<Option<Outcome>> {
+    use nyl_core::orchestration::codes::Code;
+    let Some(reading) = read_shared_catalog(&ctx.env, &ctx.project_dir, rendered)? else {
+        return Ok(None);
+    };
+    let readiness = super::readiness::evaluate_reading(&unit.unit.environment, &unit.unit.name, &reading)
+        .map_err(DriverError::before_effects)?;
+    let held = readiness.blocking.iter().find(|finding| {
+        matches!(
+            finding.code,
+            Code::TeardownCatalogManualSync | Code::TeardownApplicationsOrphaned
+        )
+    });
+    Ok(held.map(|finding| Outcome::Failed {
+        category: FailureCategory::Ownership,
+        retryable: true,
+        message: format!("{}: {} ({})", finding.code, finding.message, finding.fix),
+    }))
+}
+
+/// The warning of a publication that found another manifest at the shared catalog's prefix.
+fn shared_catalog_differs(unit: &DesiredUnit, prefix: &str) -> nyl_core::orchestration::codes::Finding {
+    nyl_core::orchestration::codes::Finding::new(
+        nyl_core::orchestration::codes::Code::KubernetesSharedCatalogDiffers,
+        format!(
+            "{}/{}: the branch holds another manifest at the shared catalog {prefix} than this target renders (another Nyl version or declaration wrote it); the publication left it alone",
+            unit.unit.environment, unit.unit.name
+        ),
+        "replace it from the revision that should win with `nyl build <unit> -e <environment> -- --shared-catalog --push`",
+    )
+}
+
+/// Create the shared catalog `shared` renders when the branch holds none, and
+/// otherwise leave it alone: a target's publication never overwrites a
+/// manifest, so pull requests running different Nyl versions never overwrite
+/// each other. The creation is a compare-and-swap: a publication that loses the
+/// race for the branch head reads the new head again, and stops as `Current` or
+/// `Differs` once another has created the manifest. A manifest that differs from
+/// this render is reported in the result, which the published tree's artifact
+/// records. The inner `Err` is the outcome of a call that ended without
+/// publishing, such as a prefix another owner holds.
+///
+/// Contract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).
+fn ensure_shared_catalog(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    shared: &RenderedTarget,
+) -> DriverResult<std::result::Result<SharedCatalogResult, Outcome>> {
+    ensure_shared_catalog_between(ctx, unit, shared, &|| {})
+}
+
+/// [`ensure_shared_catalog`], calling `between` after a creation is prepared
+/// and before it is pushed, which is where a test lets another publication win.
+fn ensure_shared_catalog_between(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    shared: &RenderedTarget,
+    between: &dyn Fn(),
+) -> DriverResult<std::result::Result<SharedCatalogResult, Outcome>> {
+    let author = author(ctx, unit)?;
+    let variable = |name: &str| ctx.env.get(name).cloned();
+    let message = format!(
+        "nyl: create the shared catalog {} for {}/{}",
+        shared.destination.path_prefix, unit.unit.environment, unit.unit.name
+    );
+    let budget = Budget::new(ctx);
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match inspect_shared_catalog(shared, &ctx.project_dir, &variable) {
+            Ok(inspection) => match inspection.state {
+                SharedCatalogState::Current => return Ok(Ok(SharedCatalogResult::Current)),
+                SharedCatalogState::Differs(_) => return Ok(Ok(SharedCatalogResult::Differs)),
+                SharedCatalogState::Missing => {}
+            },
+            Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
+            Err(error) => {
+                return Err(DriverError::before_effects(format!(
+                    "cannot read the shared catalog {}: {error}",
+                    shared.destination.path_prefix
+                )))
+            }
+        }
+        let prepared =
+            match prepare_target_publication_fenced(shared, &ctx.project_dir, &message, &author, &variable, None) {
+                Ok(prepared) => prepared,
+                Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
+                Err(error) if error.is_stale_publication() => {
+                    if attempts < PUBLISH_ATTEMPTS && !budget.spent() {
+                        continue;
+                    }
+                    return Err(DriverError::before_effects(format!(
+                        "cannot create the shared catalog: the publication branch kept moving: {error}"
+                    )));
+                }
+                Err(error) => {
+                    return Err(DriverError::before_effects(format!(
+                        "cannot prepare the shared catalog: {error}"
+                    )))
+                }
+            };
+        between();
+        match prepared.push() {
+            Ok(_) => return Ok(Ok(SharedCatalogResult::Created)),
+            // Another publication moved the branch: it may have created the manifest.
+            Err(error) if error.is_stale_publication() && attempts < PUBLISH_ATTEMPTS && !budget.spent() => {}
+            Err(error) => {
+                return Err(DriverError::after_effects(format!(
+                    "cannot create the shared catalog: {error}"
+                )))
+            }
+        }
+    }
+}
+
+/// Publish the shared catalog tree `shared` as one commit, creating or
+/// replacing its manifest: what `nyl build -- --shared-catalog --push` does,
+/// and what a target's publication does when the branch holds none. A prefix
+/// another owner holds is fenced, and nothing takes it over.
+pub(crate) fn publish_shared_catalog(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    shared: &RenderedTarget,
+    message: &str,
+) -> DriverResult<std::result::Result<nyl_render::gitops::publication::PublishedTree, Outcome>> {
+    let author = author(ctx, unit)?;
+    let variable = |name: &str| ctx.env.get(name).cloned();
+    // Another shared catalog on the branch, or a prefix another owner holds, refuses the writer too.
+    match inspect_shared_catalog(shared, &ctx.project_dir, &variable) {
+        Ok(_) => {}
+        Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
+        Err(error) => {
+            return Err(DriverError::before_effects(format!(
+                "cannot publish the shared catalog {}: {error}",
+                shared.destination.path_prefix
+            )))
+        }
+    }
+    let mut tree = shared.clone();
+    let published = with_retries(
+        &Budget::new(ctx),
+        &mut tree,
+        ("the shared catalog", "publish the shared catalog"),
+        |tree| prepare_target_publication_fenced(tree, &ctx.project_dir, message, &author, &variable, None),
+        nyl_render::gitops::publication::PreparedTarget::push,
+        |_| Ok(Rebuilt::Ready),
+    )?;
+    Ok(match published {
+        Attempted::Done(published) => Ok(published),
+        Attempted::StateChanged(message) => Err(state_changed(&message)),
+        Attempted::Fenced(message) => Err(fenced(&message)),
+    })
+}
+
 /// Publish `rendered`, which `render` produces again when the branch head
 /// moves, as one commit with `message`, and record the `PublishedTree`
 /// artifact `tree`. Shared by an orchestrated publication and `nyl build
@@ -548,6 +809,15 @@ pub(crate) fn publish_rendered(
     // environment.
     let variable = |name: &str| ctx.env.get(name).cloned();
     let takeover = fence(ctx);
+    // The shared catalog the target names comes first, so the manifest exists
+    // when Argo CD syncs the target's catalog directory.
+    let shared = match rendered.shared_catalog.clone() {
+        Some(shared) => match ensure_shared_catalog(ctx, unit, &shared)? {
+            Ok(result) => Some((shared.destination.path_prefix.clone(), result)),
+            Err(outcome) => return Ok(outcome),
+        },
+        None => None,
+    };
     let published = with_retries(
         &Budget::new(ctx),
         &mut rendered,
@@ -561,6 +831,12 @@ pub(crate) fn publish_rendered(
         Attempted::StateChanged(message) => return Ok(state_changed(&message)),
         Attempted::Fenced(message) => return Ok(fenced(&message)),
     };
+    // A manifest that is not the one this target renders is the writer's to replace, and worth a warning.
+    let warnings = shared
+        .iter()
+        .filter(|(_, result)| *result == SharedCatalogResult::Differs)
+        .map(|(prefix, _)| shared_catalog_differs(unit, prefix))
+        .collect::<Vec<_>>();
     Ok(Outcome::Succeeded {
         versions: std::collections::BTreeMap::new(),
         outputs,
@@ -576,16 +852,23 @@ pub(crate) fn publish_rendered(
                 },
             },
             execution_key: key.clone(),
-            spec: json!({
-                "repository": published.repository,
-                "branch": published.branch,
-                "pathPrefix": published.path_prefix,
-                "target": target,
-                "commit": published.commit,
-                "indexDigest": published.index_digest,
-            }),
+            spec: {
+                let mut spec = json!({
+                    "repository": published.repository,
+                    "branch": published.branch,
+                    "pathPrefix": published.path_prefix,
+                    "target": target,
+                    "commit": published.commit,
+                    "indexDigest": published.index_digest,
+                });
+                if let Some((prefix, result)) = shared {
+                    spec["sharedCatalog"] = json!({"pathPrefix": prefix, "result": result.as_str()});
+                }
+                spec
+            },
         }],
         attestations: Vec::new(),
+        warnings,
     })
 }
 
@@ -637,6 +920,7 @@ pub(crate) fn teardown(
             outputs: json!({}),
             artifacts: Vec::new(),
             attestations: Vec::new(),
+            warnings: Vec::new(),
         });
     }
     if let Some(waiting) = ctx.observed.and_then(|observed| observed.waiting.as_ref()) {
@@ -649,6 +933,9 @@ pub(crate) fn teardown(
         });
     }
     let rendered = render()?;
+    if let Some(held) = shared_catalog_hold(ctx, unit, &rendered)? {
+        return Ok(held);
+    }
     let before = state_inputs(&rendered)?;
     let stateful = rendered.publication_base.is_some();
     let phase1_of = |rendered: RenderedTarget| {
@@ -697,6 +984,91 @@ mod tests {
 
     use super::*;
     use crate::kubernetes_publication::run::world;
+
+    /// Catches "create only when absent" being a blind push: a publication
+    /// that loses the race for the branch head, after another created the
+    /// manifest, reads the new head again and stops as `Differs` (or `Current`),
+    /// leaving the winner's manifest in place.
+    #[test]
+    fn test_the_loser_of_the_race_to_create_the_shared_catalog_leaves_the_winners_manifest() {
+        let world = world::World::new();
+        let platform = world.work().join("nyl/platform.yaml");
+        let text = std::fs::read_to_string(&platform).unwrap();
+        let anchor = "  publication:\n    repositoryRef: {name: platform}\n";
+        assert!(text.contains(anchor));
+        let render_with = |shared: &str| {
+            std::fs::write(
+                &platform,
+                text.replace(anchor, &format!("  catalogApplication: {{shared: {shared}}}\n{anchor}")),
+            )
+            .unwrap();
+            let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+            descriptors.extend_from_slice(crate::catalog::RESOURCES);
+            render(
+                &nyl_render::config::ResourceCatalogue(descriptors),
+                &world.work(),
+                &world.work().join("nyl"),
+                &world.root.path().join("cache"),
+                &nyl_core::orchestration::instance::NO_INSTANCES,
+                &world::spec(),
+                None,
+            )
+            .unwrap()
+        };
+        let loser = render_with("{name: previews}");
+        let winner = render_with("{name: previews, syncPolicy: {automated: {prune: true}}}");
+        let identity: CommitIdentity = "Nyl Orchestration <nyl@example.invalid>".parse().unwrap();
+        let mut ctx = world::context(
+            &world,
+            nyl_core::orchestration::driver::DriverOperation::Reconcile,
+            Some(&identity),
+        );
+        ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+        let unit = world::desired(
+            world::spec(),
+            nyl_core::orchestration::ids::ExecutionKey::from_digest_of(b"k"),
+        );
+        let won = std::cell::Cell::new(false);
+        let between = || {
+            if !won.replace(true) {
+                let winner = winner.shared_catalog.as_deref().unwrap();
+                nyl_render::gitops::publication::publish_target(
+                    winner,
+                    &world.work().join("nyl"),
+                    "nyl: the winner creates it",
+                    &PublicationAuthor {
+                        identity: identity.clone(),
+                        time: ctx.now,
+                    },
+                    &|_| None,
+                )
+                .unwrap();
+            }
+        };
+        let result = ensure_shared_catalog_between(&ctx, &unit, loser.shared_catalog.as_deref().unwrap(), &between)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, SharedCatalogResult::Differs);
+        assert!(won.get(), "the race was staged");
+        let published = world::git(&world.bare(), &["show", "deploy:_nyl/shared/previews/catalog.yaml"]);
+        assert!(published.contains("prune: true"), "{published}");
+    }
+
+    /// Catches a shared catalog's prefix being taken over by a unit: its owner
+    /// is no unit incarnation, so no state can report it gone, and the fence
+    /// holds with the stable code, whatever the incarnation directory answers.
+    #[test]
+    fn test_a_shared_catalog_owner_is_never_taken_over() {
+        let world = world::World::new();
+        let ctx = world::context(
+            &world,
+            nyl_core::orchestration::driver::DriverOperation::Reconcile,
+            None,
+        );
+        let message = fence(&ctx)(&RenderIndexOwner::catalog("previews")).unwrap_err();
+        assert!(message.starts_with("NYL-KUBERNETES-OWNER-FENCED:"), "{message}");
+        assert!(message.contains("shared catalog previews"), "{message}");
+    }
 
     /// Catches an uncacheable render keeping one key across resolutions,
     /// which would skip a publication whose inputs it cannot see.

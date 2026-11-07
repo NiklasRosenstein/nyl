@@ -155,6 +155,7 @@ impl TreeRenderObserver for SilentTreeRenderObserver {}
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+    nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target_name)?;
     let nyl_render::gitops::provenance::WorktreeSourceState {
@@ -231,6 +232,15 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     };
     nyl_render::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
     print_partial_summary(&compiled.publication_report);
+    if let Some(shared) = &compiled.shared_catalog {
+        // The manifest is published by a KubernetesPublication unit, which has a build for it.
+        tracing::warn!(
+            target = target_name,
+            catalog = shared.name,
+            "The target shares catalog {}, whose manifest publish-tree does not publish; a KubernetesPublication unit of the target publishes it (nyl build <unit> -- --shared-catalog --push)",
+            shared.name
+        );
+    }
     publish_compiled(
         &args,
         publication_inventory,

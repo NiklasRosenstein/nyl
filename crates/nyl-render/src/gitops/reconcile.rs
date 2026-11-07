@@ -65,26 +65,97 @@ pub struct RenderIndexPublication {
     pub path_prefix: String,
 }
 
-/// The orchestration unit incarnation that owns a published prefix, as a
-/// version 3 index records it: the environment, the unit, and the
-/// incarnation's uid.
+/// Who owns a published prefix, as a version 3 index records it: an
+/// orchestration unit incarnation (the environment, the unit, and the
+/// incarnation's uid), or a shared catalog (`catalog:<name>`), which no unit
+/// incarnation owns and which therefore never ceases to exist on its own.
 ///
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
-/// ownership index. Owner fencing: [`ensure_same_owner`] refuses to
-/// overwrite or remove a prefix whose index names another owner, unless the
-/// caller established that the other incarnation is gone
-/// ([`ReconcileOptions::take_over_from`]).
+/// ownership index, and Catalog ownership. Owner fencing: [`ensure_same_owner`]
+/// refuses to overwrite or remove a prefix whose index names another owner,
+/// unless the caller established that the other incarnation is gone
+/// ([`ReconcileOptions::take_over_from`]); a shared catalog is never gone.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(try_from = "RawIndexOwner", into = "RawIndexOwner")]
+#[schemars(with = "RawIndexOwner")]
+pub enum RenderIndexOwner {
+    /// A unit incarnation of an environment.
+    Unit {
+        environment: String,
+        unit: String,
+        uid: String,
+    },
+    /// The shared catalog of that name.
+    Catalog { name: String },
+}
+
+impl RenderIndexOwner {
+    /// The unit incarnation `environment`/`unit` with `uid`.
+    pub fn unit(environment: impl Into<String>, unit: impl Into<String>, uid: impl Into<String>) -> Self {
+        Self::Unit {
+            environment: environment.into(),
+            unit: unit.into(),
+            uid: uid.into(),
+        }
+    }
+
+    /// The shared catalog `name`.
+    pub fn catalog(name: impl Into<String>) -> Self {
+        Self::Catalog { name: name.into() }
+    }
+}
+
+/// The prefix of a shared catalog's owner string.
+const CATALOG_OWNER_PREFIX: &str = "catalog:";
+
+/// The stored form of [`RenderIndexOwner`]: an object for a unit incarnation,
+/// the string `catalog:<name>` for a shared catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+enum RawIndexOwner {
+    Unit(UnitOwner),
+    Catalog(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RenderIndexOwner {
-    pub environment: String,
-    pub unit: String,
-    pub uid: String,
+struct UnitOwner {
+    environment: String,
+    unit: String,
+    uid: String,
+}
+
+impl From<RenderIndexOwner> for RawIndexOwner {
+    fn from(owner: RenderIndexOwner) -> Self {
+        match owner {
+            RenderIndexOwner::Unit { environment, unit, uid } => Self::Unit(UnitOwner { environment, unit, uid }),
+            RenderIndexOwner::Catalog { name } => Self::Catalog(format!("{CATALOG_OWNER_PREFIX}{name}")),
+        }
+    }
+}
+
+impl TryFrom<RawIndexOwner> for RenderIndexOwner {
+    type Error = String;
+
+    fn try_from(raw: RawIndexOwner) -> std::result::Result<Self, String> {
+        match raw {
+            RawIndexOwner::Unit(UnitOwner { environment, unit, uid }) => Ok(Self::Unit { environment, unit, uid }),
+            RawIndexOwner::Catalog(text) => match text.strip_prefix(CATALOG_OWNER_PREFIX) {
+                Some(name) if !name.is_empty() => Ok(Self::Catalog { name: name.to_owned() }),
+                _ => Err(format!(
+                    "an index owner is an object naming a unit incarnation or the string `catalog:<name>`, not {text:?}"
+                )),
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for RenderIndexOwner {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "unit {}/{} (uid {})", self.environment, self.unit, self.uid)
+        match self {
+            Self::Unit { environment, unit, uid } => write!(formatter, "unit {environment}/{unit} (uid {uid})"),
+            Self::Catalog { name } => write!(formatter, "shared catalog {name}"),
+        }
     }
 }
 
@@ -909,11 +980,7 @@ mod tests {
     }
 
     fn owner(unit: &str, uid: &str) -> RenderIndexOwner {
-        RenderIndexOwner {
-            environment: "dev".to_owned(),
-            unit: unit.to_owned(),
-            uid: uid.to_owned(),
-        }
+        RenderIndexOwner::unit("dev", unit, uid)
     }
 
     /// An index as an orchestrated publication writes it: version 3

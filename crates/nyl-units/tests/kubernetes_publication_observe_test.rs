@@ -72,6 +72,12 @@ impl Observed {
     /// `catalog: false` is a target that generates no catalog Application
     /// (`catalogApplication.enabled: false`, as a shared catalog does).
     fn with_catalog(method: Method, catalog: bool) -> Self {
+        Self::with_catalog_setting(method, (!catalog).then_some("enabled: false"))
+    }
+
+    /// A target whose `catalogApplication` is `setting`, with no catalog
+    /// Application of its own: `enabled: false`, or a shared catalog.
+    fn with_catalog_setting(method: Method, setting: Option<&str>) -> Self {
         let world = World::new();
         let served = applications(Vec::new());
         let projects = applications(Vec::new());
@@ -99,10 +105,12 @@ impl Observed {
             "  kubernetes:\n    kubeVersion: 1.31.4",
             "  live: {context: argocd-admin}\n  kubernetes:\n    kubeVersion: 1.31.4",
         );
-        if !catalog {
+        if let Some(setting) = setting {
             text = text.replace(
                 "  publication:\n    repositoryRef: {name: platform}\n",
-                "  catalogApplication:\n    enabled: false\n  publication:\n    repositoryRef: {name: platform}\n",
+                &format!(
+                    "  catalogApplication: {{{setting}}}\n  publication:\n    repositoryRef: {{name: platform}}\n"
+                ),
             );
         }
         if method == Method::Api {
@@ -290,6 +298,7 @@ fn receipt(unit: &DesiredUnit) -> Receipt {
         provenance: BTreeMap::new(),
         outputs: json!({}),
         artifacts: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -884,8 +893,15 @@ impl Observed {
 #[test]
 fn test_removal_without_a_catalog_application_is_anchored_by_the_projects() {
     let driver = real();
-    for method in [Method::Kubernetes, Method::Api] {
-        let observed = Observed::with_catalog(method, false);
+    // `enabled: false` leaves the catalog to a parent the project writes; a
+    // shared catalog is rendered by Nyl but is no Application of the target:
+    // its Application sources the whole branch, so it anchors nothing here and
+    // the target's own AppProjects, which phase 1 keeps, do.
+    for (method, setting) in [Method::Kubernetes, Method::Api]
+        .into_iter()
+        .flat_map(|method| ["enabled: false", "shared: {name: previews}"].map(|setting| (method, setting)))
+    {
+        let observed = Observed::with_catalog_setting(method, Some(setting));
         let unit = observed.resolve(&driver, {
             let mut spec = Observed::driver_spec(json!({}));
             spec["teardownWait"] = json!({"strategy": "observe"});

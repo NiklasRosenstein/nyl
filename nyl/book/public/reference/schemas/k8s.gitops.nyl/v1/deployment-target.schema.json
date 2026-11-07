@@ -42,7 +42,7 @@
         },
         "enabled": {
           "default": true,
-          "description": "Whether to generate a catalog Application recursively sourcing `_nyl/catalog`.",
+          "description": "Whether to generate a catalog Application recursively sourcing `_nyl/catalog`. A target with `shared` generates none, whatever this says.",
           "type": "boolean"
         },
         "labels": {
@@ -76,6 +76,17 @@
             }
           ],
           "description": "Self-pruning override; inherits the instance default when omitted."
+        },
+        "shared": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SharedCatalogApplication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sync this target's catalog directory through a catalog Application shared by many targets, such as every preview on a branch. Nyl renders that Application once, under `_nyl/shared/<name>/`, and the target generates no catalog Application of its own. The other `catalogApplication` fields then belong in this block, because they describe the shared Application."
         },
         "syncPolicy": {
           "anyOf": [
@@ -1135,6 +1146,74 @@
       },
       "required": [
         "repoURL"
+      ],
+      "type": "object"
+    },
+    "SharedCatalogApplication": {
+      "additionalProperties": false,
+      "description": "The shared catalog Application of `catalogApplication.shared`: its name and the policy it overrides.\n\nContract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).\nEvery target that names the same catalog must describe it identically,\nbecause one manifest is rendered for all of them.",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations added to the shared Application.",
+          "type": "object"
+        },
+        "applicationDeletionPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Application deletion override; inherits the instance default when omitted."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels added to the shared Application.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Name of the shared catalog and of its Argo CD Application. It also names the reserved publication prefix `_nyl/shared/<name>/` that holds the manifest.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Argo CD project override; inherits the instance catalog default when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selfPrunePolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedResourceDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Self-pruning override; inherits the instance default when omitted."
+        },
+        "syncPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Catalog synchronization override; inherits the instance default when omitted. Previews tear down only when this prunes."
+        }
+      },
+      "required": [
+        "name"
       ],
       "type": "object"
     },

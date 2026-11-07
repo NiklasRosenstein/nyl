@@ -284,6 +284,12 @@ pub enum Outcome {
         /// Artifact documents without `metadata.unit` and `executionKey`, which Nyl fills in.
         artifacts: Vec<ArtifactDocument>,
         attestations: Vec<AttestationOutcome>,
+        /// Coded warnings about the execution that succeeded, such as a
+        /// condition the driver found and cannot fix. The shell records them
+        /// with the receipt and shows them in the run report, `plan`, and
+        /// `status` like any coded finding, without interpreting them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<Finding>,
     },
     /// The plan changed since its approval; nothing was applied.
     AwaitingApproval { digest: ChangeDigest },

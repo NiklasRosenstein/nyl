@@ -63,8 +63,17 @@ fn resolved_unit(driver: &dyn Driver, world: &World, authored: Value) -> nyl_cor
     let inputs = resolve(driver, world, &authored).unwrap();
     let mut resolved = authored;
     inputs.record_into(&mut resolved).unwrap();
+    // The key leaves out the fields the driver records but does not key.
+    let mut keyed = resolved.clone();
+    for pointer in &inputs.excluded_fields {
+        if let Some((parent, name)) = pointer.rsplit_once('/') {
+            if let Some(Value::Object(map)) = keyed.pointer_mut(parent) {
+                map.remove(name);
+            }
+        }
+    }
     let key = ExecutionKey::from_digest_of(
-        serde_json::to_string(&json!({"spec": resolved, "files": inputs.files}))
+        serde_json::to_string(&json!({"spec": keyed, "files": inputs.files}))
             .unwrap()
             .as_bytes(),
     );
@@ -294,6 +303,7 @@ fn receipt(key: &ExecutionKey) -> Receipt {
         provenance: BTreeMap::new(),
         outputs: json!({}),
         artifacts: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -754,6 +764,389 @@ fn test_inline_target_publishes_and_tears_down_like_a_declared_one() {
     let [first] = driver.ownership_scopes(&dev, &inline_spec()).try_into().unwrap();
     let [second] = driver.ownership_scopes(&dev, &inline_spec()).try_into().unwrap();
     assert!(first.overlaps(&second));
+}
+
+/// [`inline_spec`] for the preview `name`: its own prefix and name, and its
+/// catalog shared as `previews` with `shared`.
+fn preview_spec(name: &str, shared: Value) -> Value {
+    let mut spec = inline_spec();
+    spec["target"]["name"] = json!(name);
+    spec["target"]["inline"]["publication"]["pathPrefix"] = json!(name);
+    spec["target"]["inline"]["catalogApplication"] = json!({"shared": shared});
+    spec
+}
+
+/// The artifact `tree` a publication recorded.
+fn tree_artifact(outcome: &Outcome) -> Value {
+    let Outcome::Succeeded { artifacts, .. } = outcome else {
+        panic!("the publication succeeds: {outcome:?}");
+    };
+    artifacts
+        .iter()
+        .find(|artifact| artifact.metadata.name == "tree")
+        .expect("a PublishedTree")
+        .spec
+        .clone()
+}
+
+/// A shared catalog end to end through the driver: the first target's
+/// publication creates the manifest under its reserved prefix with the owner
+/// `catalog:<name>` (the target's own tree holds no catalog Application),
+/// later targets find it current and leave it alone, a target that renders
+/// another manifest reports `differs` without overwriting it, teardown reads
+/// the shared Application's settings and leaves the catalog standing, and
+/// `nyl build -- --shared-catalog` is the one writer that replaces it. Catches
+/// pull requests overwriting each other's manifest, a catalog removed with its
+/// last target, and readiness read from a catalog that is not in the tree.
+#[test]
+fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_build() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let publish = |name: &str, shared: Value| {
+        let unit = resolved_unit(&driver, &world, preview_spec(name, shared));
+        let Supported::Supported(outcome) = driver
+            .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+            .unwrap()
+        else {
+            panic!("the driver reconciles");
+        };
+        (unit, outcome)
+    };
+
+    // Before the manifest exists nothing prunes yet, so the catalog rows are not checked.
+    let before = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    assert_eq!(
+        before.resolved_spec.as_ref().unwrap()["sharedCatalogReading"]["result"],
+        "missing"
+    );
+    assert_eq!(
+        before.resolved_spec.as_ref().unwrap()["sharedCatalogReading"]["settings"]["catalogPrunes"],
+        Value::Null
+    );
+
+    let (_, outcome) = publish("pr-1", pruning.clone());
+    assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "created");
+    let files = world.files("deploy");
+    for path in [
+        "_nyl/shared/previews/catalog.yaml",
+        "_nyl/shared/previews/_nyl/index.json",
+        "pr-1/_nyl/index.json",
+    ] {
+        assert!(files.contains(&path.to_owned()), "{path} in {files:?}");
+    }
+    let manifest = git(&world.bare(), &["show", "deploy:_nyl/shared/previews/catalog.yaml"]);
+    assert!(
+        manifest.contains("name: previews") && manifest.contains("prune: true"),
+        "{manifest}"
+    );
+    let shared_index: Value = serde_json::from_str(&git(
+        &world.bare(),
+        &["show", "deploy:_nyl/shared/previews/_nyl/index.json"],
+    ))
+    .unwrap();
+    assert_eq!(shared_index["owner"], "catalog:previews");
+    assert!(
+        !files
+            .iter()
+            .filter(|path| path.starts_with("pr-1/_nyl/catalog/"))
+            .any(|path| git(&world.bare(), &["show", &format!("deploy:{path}")]).contains("path: pr-1/_nyl/catalog")),
+        "the target's tree holds no catalog Application of its own"
+    );
+    // Readiness is read from the shared Application the branch holds, which the project does not own.
+    let first = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    let reading = first.resolved_spec.as_ref().unwrap()["sharedCatalogReading"].clone();
+    assert_eq!(reading["result"], "current", "{reading}");
+    assert_eq!(reading["settings"]["catalogPrunes"], true, "{reading}");
+    assert_eq!(reading["settings"]["catalogOwnedByParent"], true, "{reading}");
+    // The branch's state is not part of the key: creating the manifest did not re-key the unit.
+    assert_eq!(before.execution_key, first.execution_key);
+    // A target that declares another manifest is read as published: this one prunes,
+    // whatever the declaration says.
+    let declared = resolved_unit(&driver, &world, preview_spec("pr-3", json!({"name": "previews"})));
+    assert_eq!(
+        declared.resolved_spec.as_ref().unwrap()["sharedCatalogReading"]["settings"]["catalogPrunes"],
+        true
+    );
+
+    // A second target finds the same manifest and writes nothing outside its prefix.
+    let head = git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]);
+    let (_, outcome) = publish("pr-2", pruning.clone());
+    assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "current");
+    assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+
+    // A target that renders another manifest leaves the published one alone.
+    let (_, outcome) = publish("pr-3", json!({"name": "previews"}));
+    assert_eq!(tree_artifact(&outcome)["sharedCatalog"]["result"], "differs");
+    let Outcome::Succeeded { warnings, .. } = &outcome else {
+        panic!("the publication succeeds");
+    };
+    assert_eq!(
+        warnings.iter().map(|finding| finding.code).collect::<Vec<_>>(),
+        vec![Code::KubernetesSharedCatalogDiffers]
+    );
+    assert!(
+        warnings[0].fix.contains("--shared-catalog --push"),
+        "{}",
+        warnings[0].fix
+    );
+    assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+
+    // The build is the writer: --diff reads, --push replaces.
+    let build_unit = resolved_unit(&driver, &world, preview_spec("pr-3", json!({"name": "previews"})));
+    let build = |arguments: &[&str]| {
+        let arguments = arguments.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let mut ctx = context(&world, DriverOperation::Build, Some(&id));
+        ctx.dirty_source = false;
+        driver.build(&ctx, &build_unit, &arguments).unwrap()
+    };
+    let Supported::Supported(diff) = build(&["--shared-catalog", "--diff"]) else {
+        panic!("the driver builds");
+    };
+    assert_eq!(diff[0].spec["changes"], "update");
+    assert_eq!(diff[0].spec["owner"], "catalog:previews");
+    assert_eq!(diff[0].spec["pathPrefix"], "_nyl/shared/previews");
+    assert_eq!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+    let Supported::Supported(pushed) = build(&["--shared-catalog", "--push"]) else {
+        panic!("the driver builds");
+    };
+    assert_eq!(pushed[0].spec["target"], "catalog:previews");
+    assert_ne!(git(&world.bare(), &["rev-parse", "deploy:_nyl/shared/previews"]), head);
+    let replaced = git(&world.bare(), &["show", "deploy:_nyl/shared/previews/catalog.yaml"]);
+    assert!(!replaced.contains("prune: true"), "{replaced}");
+
+    // Teardown of the last target removes its own files; the catalog stays.
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&id));
+    let deleting = publication_world::deleting(first);
+    driver.teardown(&ctx, &deleting).unwrap();
+    ctx.teardown_wait = Some(nyl_core::orchestration::driver::WaitCompletion::Delayed);
+    driver.teardown(&ctx, &deleting).unwrap();
+    let files = world.files("deploy");
+    assert!(!files.iter().any(|path| path.starts_with("pr-1/")), "{files:?}");
+    assert!(
+        files.contains(&"_nyl/shared/previews/catalog.yaml".to_owned()),
+        "{files:?}"
+    );
+
+    // --shared-catalog of a target that shares none is refused with its code.
+    let plain = resolved_unit(&driver, &world, inline_spec());
+    let error = driver
+        .build(
+            &context(&world, DriverOperation::Build, Some(&id)),
+            &plain,
+            &[std::ffi::OsString::from("--shared-catalog")],
+        )
+        .expect_err("a target without a shared catalog has none to build");
+    assert!(
+        error.to_string().contains("NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG"),
+        "{error}"
+    );
+}
+
+/// Catches teardown readiness trusting the instance's own declaration over
+/// what Argo CD runs: the branch's manifest does not prune, a pull request
+/// declares a pruning one, and the unit must still report that the catalog
+/// does not prune, so its teardown is held instead of orphaning workloads.
+/// Another shared catalog on the branch refuses with the conflict code.
+#[test]
+fn test_readiness_reads_the_published_shared_catalog_and_another_catalog_conflicts() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let unit = resolved_unit(&driver, &world, preview_spec("pr-1", json!({"name": "previews"})));
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &unit)
+        .unwrap();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let declared = resolved_unit(&driver, &world, preview_spec("pr-2", pruning));
+    let reading = &declared.resolved_spec.as_ref().unwrap()["sharedCatalogReading"];
+    assert_eq!(reading["result"], "differs", "{reading}");
+    assert_eq!(reading["settings"]["catalogPrunes"], false, "{reading}");
+    let readiness = driver.teardown_readiness(&declared).unwrap();
+    let Supported::Supported(readiness) = readiness else {
+        panic!("the driver checks readiness");
+    };
+    assert!(
+        readiness
+            .blocking
+            .iter()
+            .any(|finding| finding.code == Code::TeardownCatalogManualSync),
+        "{:?}",
+        readiness.blocking
+    );
+
+    // A renamed catalog leaves the old one on the branch.
+    let error = driver
+        .execution_key_inputs(
+            &ResolutionContext {
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+                source_roots: BTreeMap::default(),
+                environment: EnvironmentName::new("dev").unwrap(),
+                worktree: world.work(),
+                project_dir: world.work().join("nyl"),
+                env: BTreeMap::new(),
+                deadline: chrono::Utc::now(),
+                now: chrono::Utc::now(),
+                tools: &NoTools,
+                cache_dir: world.root.path().join("cache"),
+            },
+            &preview_spec("pr-2", json!({"name": "renamed"})),
+        )
+        .expect_err("two shared catalogs on one branch conflict");
+    assert!(
+        error.to_string().contains("NYL-KUBERNETES-SHARED-CATALOG-CONFLICT"),
+        "{error}"
+    );
+    let outcome = driver.reconcile(
+        &context(&world, DriverOperation::Reconcile, Some(&id)),
+        &unit_with_renamed(&unit),
+    );
+    assert!(outcome.is_err(), "a publication refuses to add a second catalog");
+}
+
+/// `unit` published to a catalog named `renamed`.
+fn unit_with_renamed(
+    unit: &nyl_core::orchestration::state::DesiredUnit,
+) -> nyl_core::orchestration::state::DesiredUnit {
+    let mut renamed = unit.clone();
+    let spec = renamed.resolved_spec.as_mut().unwrap();
+    spec["target"]["inline"]["catalogApplication"]["shared"]["name"] = json!("renamed");
+    renamed.spec = spec.clone();
+    renamed
+}
+
+/// Catches the shared catalog's writer re-keying every preview, and a teardown
+/// that trusts settings older than the writer's last push. The key follows what
+/// the target renders, never the branch: a writer push that changes the
+/// policy leaves every key alone. The stored settings of an instance that
+/// expired are stale, so its teardown reads the branch again and is held, with
+/// the readiness code and nothing published, while the catalog no longer
+/// prunes; once it prunes again the teardown proceeds.
+#[test]
+fn test_the_writer_never_rekeys_previews_and_a_teardown_reads_the_catalog_again() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let plain = json!({"name": "previews"});
+    let first = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &first)
+        .unwrap();
+    let writer = |shared: &Value| {
+        let unit = resolved_unit(&driver, &world, preview_spec("pr-9", shared.clone()));
+        let arguments = ["--shared-catalog", "--push"].map(std::ffi::OsString::from);
+        driver
+            .build(&context(&world, DriverOperation::Build, Some(&id)), &unit, &arguments)
+            .unwrap();
+    };
+    // Resolved while the catalog prunes, as the fleet's last run left it.
+    let stored = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    assert_eq!(
+        stored.execution_key, first.execution_key,
+        "the manifest's creation re-keys nothing"
+    );
+    // A writer push that stops pruning does not re-key the instance, but its readiness follows.
+    writer(&plain);
+    let again = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    assert_eq!(again.execution_key, first.execution_key);
+    assert_eq!(
+        again.resolved_spec.as_ref().unwrap()["sharedCatalogReading"]["settings"]["catalogPrunes"],
+        false
+    );
+
+    // The stored document is the one resolved while the catalog pruned.
+    let stale = publication_world::deleting(stored);
+    assert_eq!(
+        stale.resolved_spec.as_ref().unwrap()["sharedCatalogReading"]["settings"]["catalogPrunes"],
+        true
+    );
+    let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
+    let teardown = |unit: &nyl_core::orchestration::state::DesiredUnit| {
+        let Supported::Supported(outcome) = driver
+            .teardown(&context(&world, DriverOperation::Teardown, Some(&id)), unit)
+            .unwrap()
+        else {
+            panic!("the driver tears down");
+        };
+        outcome
+    };
+    let Outcome::Failed { message, retryable, .. } = teardown(&stale) else {
+        panic!("a teardown over a catalog that no longer prunes is held");
+    };
+    assert!(retryable);
+    assert!(message.starts_with("NYL-TEARDOWN-CATALOG-MANUAL-SYNC:"), "{message}");
+    assert_eq!(
+        git(&world.bare(), &["rev-parse", "refs/heads/deploy"]),
+        head,
+        "nothing was published"
+    );
+
+    // Pruning again, the same stored document starts its teardown.
+    writer(&pruning);
+    assert!(matches!(teardown(&stale), Outcome::Waiting { .. }));
+}
+
+/// A branch that cannot be read, and a manifest that is no Application, are
+/// recorded as readings of their own and block teardown readiness, rather than
+/// failing the resolution or passing as "not checked": a catalog that cannot be
+/// shown to prune is not trusted to. Catches both reading as harmless.
+#[test]
+fn test_an_unreadable_branch_and_an_unparseable_manifest_are_recorded_and_block_readiness() {
+    let world = inline_only();
+    let driver = real();
+    let id = identity();
+    let pruning = json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}});
+    let first = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    driver
+        .reconcile(&context(&world, DriverOperation::Reconcile, Some(&id)), &first)
+        .unwrap();
+    let blocked = |unit: &nyl_core::orchestration::state::DesiredUnit| {
+        let Supported::Supported(readiness) = driver.teardown_readiness(unit).unwrap() else {
+            panic!("the driver checks readiness");
+        };
+        readiness.blocking.into_iter().find(|finding| {
+            finding.code == Code::TeardownCatalogManualSync && finding.message.contains("cannot be shown to prune")
+        })
+    };
+    assert!(blocked(&resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()))).is_none());
+
+    // A manifest on the branch that is no YAML at all.
+    let checkout = world.root.path().join("edit");
+    git(
+        world.root.path(),
+        &["clone", "--quiet", "--branch", "deploy", &world.project_url(), "edit"],
+    );
+    std::fs::write(checkout.join("_nyl/shared/previews/catalog.yaml"), "a: [unclosed\n").unwrap();
+    git(
+        &checkout,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-am",
+            "break",
+        ],
+    );
+    git(&checkout, &["push", "--quiet", "origin", "deploy"]);
+    let unparseable = resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()));
+    let reading = &unparseable.resolved_spec.as_ref().unwrap()["sharedCatalogReading"];
+    assert_eq!(reading["result"], "unparseable", "{reading}");
+    assert!(reading["problem"].is_string(), "{reading}");
+    assert!(blocked(&unparseable).is_some());
+
+    // A branch that cannot be fetched.
+    let moved = world.root.path().join("moved.git");
+    std::fs::rename(world.bare(), &moved).unwrap();
+    let unreadable = resolved_unit(&driver, &world, preview_spec("pr-1", pruning));
+    let reading = &unreadable.resolved_spec.as_ref().unwrap()["sharedCatalogReading"];
+    assert_eq!(reading["result"], "unreadable", "{reading}");
+    assert!(blocked(&unreadable).is_some());
+    std::fs::rename(moved, world.bare()).unwrap();
 }
 
 /// Catches a renamed target publishing a second tree and orphaning the first,

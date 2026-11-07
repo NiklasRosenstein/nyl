@@ -628,6 +628,7 @@ impl Driver for CommandDriver {
                         outputs,
                         artifacts: Vec::new(),
                         attestations: read_attestations(&spec, ran.prepared.attestations.as_deref()),
+                        warnings: Vec::new(),
                     },
                     Err(message) => Outcome::Failed {
                         category: FailureCategory::OutputRejected,
@@ -724,6 +725,7 @@ impl Driver for CommandDriver {
                 outputs: Value::Object(Map::new()),
                 artifacts: Vec::new(),
                 attestations: Vec::new(),
+                warnings: Vec::new(),
             },
             exit => unsuccessful(&spec, "teardown", exit),
         };

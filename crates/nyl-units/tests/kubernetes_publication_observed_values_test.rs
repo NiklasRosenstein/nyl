@@ -274,6 +274,7 @@ fn receipt(unit: &DesiredUnit) -> Receipt {
         provenance: BTreeMap::new(),
         outputs: json!({}),
         artifacts: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
