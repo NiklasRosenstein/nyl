@@ -250,6 +250,12 @@ pub struct RunRequest {
     pub planned: BTreeMap<EnvironmentName, BTreeSet<UnitName>>,
     /// Declared environments and their state locations; producer snapshots are read lazily once.
     pub environments: BTreeMap<EnvironmentName, StateLocation>,
+    /// The entries of `environments` that are instances of EnvironmentTemplates
+    /// and no declared Environment. Instances are consumers only: they are
+    /// found by the checks across environments (fencing, `exec`, the
+    /// protection of producers) but never read as a producer, so a reference
+    /// to one is refused (`NYL-REFERENCE-INSTANCE-PRODUCER`).
+    pub instances: BTreeSet<EnvironmentName>,
     pub environment: EnvironmentName,
     /// The Environment as the entry worktree declares it, with group
     /// defaults applied: the source of `source`, `state`, `protectedRefs`,
@@ -912,6 +918,13 @@ impl<'r, 'a> Session<'r, 'a> {
                 if environment == *self.environment() || self.environments.borrow().contains_key(&environment) {
                     continue;
                 }
+                if self.request.instances.contains(&environment) {
+                    errors.push(crate::rules::multi_environment::instance_producer_finding(
+                        &format!("unit {}", unit.unit.name),
+                        &environment,
+                    ));
+                    continue;
+                }
                 if self.request.unavailable.contains(&environment) {
                     self.environments
                         .borrow_mut()
@@ -1394,6 +1407,15 @@ fn declared_outputs(spec: &Value) -> BTreeMap<String, OutputDeclaration> {
         .unwrap_or_default()
 }
 
+/// The coded warnings the unit's driver reported with its current receipt:
+/// what its last execution found, which stays until it executes again.
+fn receipt_warnings(observed: Option<&ObservedUnit>) -> Vec<Finding> {
+    observed
+        .and_then(|observed| observed.receipt.as_ref())
+        .map(|receipt| receipt.warnings.clone())
+        .unwrap_or_default()
+}
+
 /// A unit's stored blocked reasons in the report's form, and the warnings
 /// of those that wait for attestations or observed values.
 fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<BlockedBy>, Vec<Finding>) {
@@ -1556,6 +1578,8 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
         entry.message = condition_message(unit, current);
         (entry.blocked_by, entry.warnings) = blocked_report(environment, unit);
+        // What the driver warned about when it executed, until it executes again.
+        entry.warnings.extend(receipt_warnings(current));
         entry.state = Some(if skipped.get(name) == Some(&Skipped::ManualApproval) {
             UnitState::AwaitingApproval
         } else if drifted.contains(name) {

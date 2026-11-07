@@ -17,6 +17,12 @@
 //!   ([`refuse_owned`]), from a committed source. It prints the
 //!   `PublishedTree` document a run records.
 //!
+//! `--shared-catalog` selects the shared catalog Application of a target with
+//! `catalogApplication.shared` instead of the target's own tree: it composes
+//! with `--diff` and `--push`, and is the one writer that replaces the shared
+//! manifest (a target's publication only creates it). No environment owns the
+//! shared catalog, so `--push` is never refused as `NYL-KUBERNETES-BUILD-TARGET-OWNED`.
+//!
 //! The documents are local build information, never recorded or referenced.
 
 use std::ffi::OsString;
@@ -28,7 +34,7 @@ use nyl_render::gitops::publication::{diff_target_publication, index_digest, Fil
 use nyl_render::gitops::reconcile::{parse_index, DEFAULT_INDEX_PATH};
 use serde_json::{json, Value};
 
-use super::run::{publish_rendered, render_at, unit_target};
+use super::run::{publish_rendered, publish_shared_catalog, render_at, unit_target};
 use crate::command::resolved_spec;
 
 /// The code of a build argument the driver does not accept.
@@ -39,6 +45,8 @@ const TARGET_OWNED: &str = "NYL-KUBERNETES-BUILD-TARGET-OWNED";
 const DIRTY_SOURCE: &str = "NYL-KUBERNETES-BUILD-DIRTY-SOURCE";
 /// The code of a `--push` without an identity to author the commit with.
 const IDENTITY: &str = "NYL-KUBERNETES-BUILD-IDENTITY";
+/// The code of `--shared-catalog` for a target that names none.
+const NO_SHARED_CATALOG: &str = "NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG";
 
 /// What a build does, from the arguments after `--`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,18 +56,31 @@ enum Mode {
     Push,
 }
 
-impl Mode {
+/// The arguments after `--`: the mode, and whether the build is of the shared
+/// catalog the target names instead of the target's tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Arguments {
+    mode: Mode,
+    shared_catalog: bool,
+}
+
+impl Arguments {
     fn parse(args: &[OsString]) -> DriverResult<Self> {
         let mut mode = None;
+        let mut shared_catalog = false;
         for arg in args {
             let next = match arg.to_str() {
-                Some("--diff") => Self::Diff,
-                Some("--push") => Self::Push,
+                Some("--diff") => Mode::Diff,
+                Some("--push") => Mode::Push,
+                Some("--shared-catalog") => {
+                    shared_catalog = true;
+                    continue;
+                }
                 _ => {
                     return Err(DriverError::before_effects(format!(
-                        "{ARGUMENT}: the publication driver accepts --diff or --push after `--`, not {}",
-                        arg.to_string_lossy()
-                    )))
+                    "{ARGUMENT}: the publication driver accepts --diff, --push, or --shared-catalog after `--`, not {}",
+                    arg.to_string_lossy()
+                )))
                 }
             };
             if mode.is_some_and(|mode| mode != next) {
@@ -69,7 +90,10 @@ impl Mode {
             }
             mode = Some(next);
         }
-        Ok(mode.unwrap_or(Self::Render))
+        Ok(Self {
+            mode: mode.unwrap_or(Mode::Render),
+            shared_catalog,
+        })
     }
 }
 
@@ -80,10 +104,10 @@ pub(crate) fn build(
     unit: &DesiredUnit,
     args: &[OsString],
 ) -> DriverResult<Vec<ArtifactDocument>> {
-    let mode = Mode::parse(args)?;
+    let Arguments { mode, shared_catalog } = Arguments::parse(args)?;
     let spec = resolved_spec(unit)?;
     let target = unit_target(spec)?;
-    if mode == Mode::Push {
+    if mode == Mode::Push && !shared_catalog {
         refuse_owned(catalogue, ctx, unit, &target)?;
     }
     // The ownership index names the commit the files stand for, never the
@@ -105,6 +129,9 @@ pub(crate) fn build(
         )
     };
     let rendered = render()?;
+    if shared_catalog {
+        return build_shared_catalog(ctx, unit, mode, &rendered);
+    }
     match mode {
         Mode::Render => Ok(vec![rendered_tree(unit, &target, &rendered)?]),
         Mode::Diff => Ok(vec![tree_diff(ctx, unit, &target, &rendered)?]),
@@ -119,6 +146,74 @@ pub(crate) fn build(
             }
         }
     }
+}
+
+/// `--shared-catalog`: render, compare, or publish the shared catalog the
+/// target names. Publishing needs a committed source and an identity like any
+/// build's `--push`, and replaces the manifest, which a target's publication
+/// never does.
+fn build_shared_catalog(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    mode: Mode,
+    rendered: &RenderedTarget,
+) -> DriverResult<Vec<ArtifactDocument>> {
+    let Some(shared) = rendered.shared_catalog.as_deref() else {
+        return Err(DriverError::before_effects(format!(
+            "{NO_SHARED_CATALOG}: the target of unit {} declares no catalogApplication.shared, so there is no shared catalog to build",
+            unit.unit.name
+        )));
+    };
+    let label = shared_label(shared);
+    match mode {
+        Mode::Render => Ok(vec![rendered_tree(unit, &label, shared)?]),
+        Mode::Diff => Ok(vec![tree_diff(ctx, unit, &label, shared)?]),
+        Mode::Push => {
+            if ctx.dirty_source {
+                return Err(DriverError::before_effects(format!(
+                    "{DIRTY_SOURCE}: the worktree has uncommitted changes, so the shared catalog cannot be attributed to reviewed source; \
+                     commit them, or build a committed revision with `nyl build {name} --source <revision> -- --shared-catalog --push`",
+                    name = unit.unit.name,
+                )));
+            }
+            if ctx.commit_identity.is_none() {
+                return Err(DriverError::before_effects(format!(
+                    "{IDENTITY}: --push commits to the publication branch and needs an identity to author the commit; \
+                     set user.name and user.email in the repository's Git configuration"
+                )));
+            }
+            let message = format!("nyl: build --shared-catalog --push {}", shared.destination.path_prefix);
+            match publish_shared_catalog(ctx, unit, shared, &message)? {
+                Ok(published) => Ok(vec![document(
+                    unit,
+                    "PublishedTree",
+                    "tree",
+                    json!({
+                        "repository": published.repository,
+                        "branch": published.branch,
+                        "pathPrefix": published.path_prefix,
+                        "target": label,
+                        "commit": published.commit,
+                        "indexDigest": published.index_digest,
+                    }),
+                )?]),
+                Err(Outcome::Failed { message, .. }) => Err(DriverError::before_effects(message)),
+                Err(other) => Err(DriverError::after_effects(format!(
+                    "the publication ended without a result: {other:?}"
+                ))),
+            }
+        }
+    }
+}
+
+/// What a shared catalog's documents name as their `target`: its owner, `catalog:<name>`.
+fn shared_label(shared: &RenderedTarget) -> String {
+    shared
+        .destination
+        .path_prefix
+        .rsplit('/')
+        .next()
+        .map_or_else(String::new, |name| format!("catalog:{name}"))
 }
 
 /// Refuse `--push` unless publishing from this call is the only claim on the
@@ -286,11 +381,8 @@ fn tree_diff(
             "target": target,
             "base": diff.base,
             "changes": changes,
-            "owner": diff.published_owner.as_ref().map(|owner| json!({
-                "environment": owner.environment,
-                "unit": owner.unit,
-                "uid": owner.uid,
-            })),
+            // A unit incarnation as an object, a shared catalog as `catalog:<name>`.
+            "owner": diff.published_owner.as_ref().map(|owner| json!(owner)),
             "files": files,
         }),
     )

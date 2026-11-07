@@ -378,11 +378,126 @@ $ nyl state move --template preview --state-path 'previews/{{ environment.name }
 $ nyl state move --template previews --from-template preview
 ```
 
-## Not yet implemented
+## One catalog for every instance
 
-- `catalogApplication.shared`, one catalog for every instance: each instance
-  publishes a catalog Application of its own.
-- Cross-environment references to declared environments.
+By default each target generates a catalog Application of its own, which an
+operator applies once and which stays after the target is removed. Previews come
+and go, so give them one catalog instead, in the template's inline target:
+
+```yaml
+values:
+  target:
+    inline:
+      clusterRef: {name: dev}
+      argocdRef: {name: dev}
+      catalogApplication:
+        shared: {name: previews}
+      publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
+```
+
+The shared catalog Application sources the branch root with the include pattern
+`{_nyl/shared/previews/*.yaml,*/_nyl/catalog/*}`: its own manifest, and the
+catalog directory of every instance. Each instance's tree stays an ordinary tree
+in its own prefix, without a catalog Application. The manifest lives under the
+reserved prefix `_nyl/shared/<name>/`, with its own ownership index whose owner
+is `catalog:<name>`, so no instance writes outside its prefix.
+
+- The `shared` block carries the settings that `catalogApplication` would
+  otherwise carry for the target's own catalog (`project`, `syncPolicy`,
+  `applicationDeletionPolicy`, `selfPrunePolicy`, `labels`, `annotations`),
+  defaulting to the ArgoCDInstance's `catalogApplicationDefaults`. Declaring
+  both is invalid.
+- The first publication of an instance creates the manifest when the branch has
+  none. An operator then applies the shared catalog Application once, from the
+  published `_nyl/shared/previews/catalog.yaml` or from
+  `nyl build <unit> -e <instance> -- --shared-catalog`, and it manages itself.
+- A publication never overwrites the manifest, so pull requests running
+  different Nyl versions do not fight over it. Creating it is a
+  compare-and-swap: a publication that loses the race reads the new head and
+  leaves the winner's manifest. It records the result in the `PublishedTree`
+  artifact (`nyl get artifact kubernetes/tree -e <instance>`):
+  `sharedCatalog.result` is `created`, `current`, or `differs`, and for `differs`
+  it warns with `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` in the run, and in
+  `plan` and `status` until the unit executes again. To replace the manifest,
+  for example after a Nyl upgrade or a change of the `shared` block, run the
+  build from the revision that should win, in the scheduled job on the default
+  branch, after the fleet reconcile:
+
+  ```yaml
+  # .github/workflows/previews-maintenance.yaml (nightly)
+  - run: nyl reconcile --template preview
+  # Any live instance names the unit's inline target, such as the newest open pull request.
+  - run: nyl build kubernetes -e pr-123 -- --shared-catalog --push
+  ```
+
+  The build renders the unit's whole target, so it needs a live instance (or a
+  declared environment) whose references resolve, and a committed source and a
+  commit identity for `--push`. With no live instance nothing uses the catalog,
+  and the first instance's publication creates it.
+- Rename or decommission a catalog as a procedure: a branch carries one shared
+  catalog, and a second `_nyl/shared/<other>/` tree refuses every publication
+  and build (`NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`), because each
+  self-managing catalog syncs every target's catalog directory. Delete the old
+  Argo CD Application with its resources kept (a non-cascading delete, so the
+  previews' Applications stay), remove `_nyl/shared/<old>/` from the branch in
+  one commit, and only then publish the new catalog. Deleting it with its
+  resources would cascade through every preview.
+- Dedicate the branch to the one catalog and one project: its include pattern
+  and sync are the same for everything on it. One shared Application is also
+  one sync for every preview: a manifest Argo CD rejects blocks all of them,
+  and the `observe` teardown wait fails closed for all of them.
+- Teardown readiness reads the shared Application the branch holds (at
+  resolution and again when a teardown starts, never the instance's own
+  declaration; the reading is recorded but not part of the unit's key, so a
+  writer's push does not re-execute any preview) for its `syncPolicy` and
+  deletion policy: it must prune for an instance's Applications to disappear.
+  Until the manifest exists, the rows are not checked; a branch that cannot be
+  read (including offline: resolution has no cached fallback) or a manifest that
+  is no Application is a blocking row. A teardown whose catalog no longer prunes
+  is held by the driver even when the instance's stored settings said it did, so
+  run the writer before instances expire. The
+  `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` warning is what the unit's last
+  execution found and stays until it executes again; `nyl build <unit> -e <env> --
+  --shared-catalog --diff` shows the branch's state now. An instance
+  leaves nothing of its catalog behind, because the shared catalog prunes its
+  objects; the catalog itself stays until it is decommissioned.
+- The targets that name one catalog publish to one repository and revision,
+  describe it identically, and nothing else is published to that revision.
+  `nyl validate` and every render check this and fail with
+  `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`, naming the targets. A target prefix
+  may not lie at, beneath, or around `_nyl/shared`.
+- The target's own AppProjects keep anchoring the `observe` teardown wait
+  (see [Observing Argo CD](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)),
+  as for any target without a catalog Application; a target whose only project is
+  `default` fails closed.
+
+## Reading declared environments
+
+An instance's units read units of a declared environment, such as dev's network,
+with the cross-environment references that
+[`fromUnit` and `dependsOn`](/nyl/orchestration/runs/#multi-environment-runs)
+define:
+
+```yaml
+variables:
+  vpc_id: {fromUnit: {environment: dev, unit: network, output: vpcId}}
+```
+
+The instance's unit waits, exit 2, until dev's `network` has a current receipt,
+and a later run reads it; provenance records dev's observed commit. Instances
+are consumers only: a reference or `dependsOn` entry that names an instance,
+from a declared environment or from another instance, fails with
+`NYL-REFERENCE-INSTANCE-PRODUCER` and the fix.
+
+A declared unit that an instance reads is protected like one that a declared
+environment reads: tearing it down, `nyl state delete --teardown` of its
+environment, and its replacement refuse with `NYL-TEARDOWN-HAS-DEPENDENTS`,
+naming the instance's units, until `--allow-dependents`, and so does dropping it
+from its environment's source. The instance then fails its own next run with
+`NYL-REFERENCE-INVALID`, naming the unit its producer no longer selects, while
+dev and every other environment run on: a preview's bad reference, including one
+that names an instance, stops that preview alone. An expired instance that is
+being removed does not hold its producers back.
 
 ## See also
 

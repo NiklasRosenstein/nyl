@@ -164,6 +164,12 @@ pub struct RenderedTarget {
     /// enters no rendered byte, and a driver that reads resources from the
     /// cluster records it at resolution.
     pub workload: super::observation::WorkloadCluster,
+    /// The tree of the shared catalog Application this target's
+    /// `catalogApplication.shared` names: its manifest and an index owned by
+    /// `catalog:<name>`, at the reserved prefix `_nyl/shared/<name>` of the
+    /// same publication branch. It is a tree of its own, never part of
+    /// `files`, and published by [`prepare_shared_catalog`] under a rule of its own.
+    pub shared_catalog: Option<Box<RenderedTarget>>,
 }
 
 impl RenderedTarget {
@@ -289,7 +295,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     files.insert(PathBuf::from(DEFAULT_INDEX_PATH), index_bytes);
 
     let revision = &compiled.target.spec.publication.revision;
-    Ok(RenderedTarget {
+    let mut rendered = RenderedTarget {
         report: compiled.publication_report.clone(),
         destination: PublicationDestination {
             repository: nyl_git::sanitize_url(&compiled.repository.repo_url),
@@ -309,7 +315,12 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         cluster_kubernetes: compiled.cluster.spec.kubernetes.clone(),
         argocd: super::tree::argocd_location(&inventory, &compiled.target)?,
         workload: super::tree::workload_cluster(&inventory, &compiled.target)?,
-    })
+        shared_catalog: None,
+    };
+    if let Some(shared) = &compiled.shared_catalog {
+        rendered.shared_catalog = Some(Box::new(shared.tree(&rendered)?));
+    }
+    Ok(rendered)
 }
 
 /// An inline target's spec without the Release input bindings the pinned
@@ -665,6 +676,133 @@ pub fn diff_target_publication(
         diff.published_owner = index.owner;
     }
     Ok(diff)
+}
+
+/// What the publication branch holds of a shared catalog, compared with the
+/// tree a target renders for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedCatalogState {
+    /// The branch holds no tree at the catalog's prefix, so a target's
+    /// publication creates it.
+    Missing,
+    /// The branch holds exactly the manifest this render would write.
+    Current,
+    /// The branch holds another manifest, which another Nyl version or
+    /// another declaration of the catalog wrote. A target's publication never
+    /// overwrites it: the manifest has one writer, `nyl build -- --shared-catalog --push`.
+    Differs(Vec<PathBuf>),
+}
+
+/// What the publication branch holds of a shared catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedCatalogInspection {
+    pub state: SharedCatalogState,
+    /// The Application of the manifest the branch holds at the catalog's prefix.
+    pub published: Option<serde_json::Value>,
+}
+
+/// Compare `shared`, a target's shared catalog tree ([`RenderedTarget::shared_catalog`]),
+/// with the publication branch, reading it and writing nothing.
+///
+/// - A prefix whose index names another owner than the catalog refuses with
+///   [`NylError::OwnerFenced`], so nothing mistakes a unit's tree for the catalog's.
+/// - Another shared catalog's tree on the branch refuses with
+///   `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`: a catalog that was renamed
+///   leaves the old self-managing Application, whose include pattern still
+///   syncs every target's catalog directory and gives the Applications two owners.
+///
+/// Contract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).
+pub fn inspect_shared_catalog(
+    shared: &RenderedTarget,
+    project_dir: &Path,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<SharedCatalogInspection> {
+    let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
+    let branch = writable_branch_name(&shared.destination.branch)?;
+    let push_url = &shared.destination.push_url;
+    let prefix = shared.destination.path_prefix.as_str();
+    let index_bytes = shared
+        .files
+        .get(Path::new(DEFAULT_INDEX_PATH))
+        .ok_or_else(|| NylError::config("the shared catalog tree has no ownership index"))?;
+    let expected = parse_index(index_bytes, DEFAULT_INDEX_PATH)?.owner;
+    let scratch = tempfile::TempDir::new()?;
+    let repository = Repository::init(scratch.path())
+        .and_then(|repository| {
+            repository.remote("origin", push_url)?;
+            Ok(repository)
+        })
+        .map_err(|error| NylError::config(format!("Failed to read {}: {error}", nyl_git::sanitize_url(push_url))))?;
+    fetch_branch(&repository, push_url, branch, &auth)?;
+    let Some(base) = remote_branch_oid(&repository, branch) else {
+        return Ok(SharedCatalogInspection {
+            state: SharedCatalogState::Missing,
+            published: None,
+        });
+    };
+    let tree = repository
+        .find_commit(base)
+        .and_then(|commit| commit.tree())
+        .map_err(crate::git::GitError::from)?;
+    let own = prefix.rsplit('/').next().unwrap_or_default();
+    if let Ok(entry) = tree.get_path(Path::new(super::shared_catalog::SHARED_ROOT)) {
+        if let Ok(root) = entry.to_object(&repository).and_then(|object| object.peel_to_tree()) {
+            let others = root
+                .iter()
+                .map(|entry| String::from_utf8_lossy(entry.name_bytes()).into_owned())
+                .filter(|name| name != own)
+                .collect::<Vec<_>>();
+            if !others.is_empty() {
+                return Err(NylError::config(format!(
+                    "{}: the branch {} holds the shared catalog {} besides {own:?}; each self-managing shared catalog syncs every target's catalog directory, which gives the Applications two owners. {}",
+                    super::shared_catalog::SHARED_CATALOG_CONFLICT_CODE,
+                    shared.destination.branch,
+                    others.join(", "),
+                    super::shared_catalog::DECOMMISSION_FIX
+                )));
+            }
+        }
+    }
+    let Some(index) = read_tree_file(&repository, &tree, prefix, DEFAULT_INDEX_PATH)? else {
+        return Ok(SharedCatalogInspection {
+            state: SharedCatalogState::Missing,
+            published: None,
+        });
+    };
+    let owner = parse_index(&index, DEFAULT_INDEX_PATH)?.owner;
+    if let Some(owner) = owner.as_ref().filter(|owner| Some(*owner) != expected.as_ref()) {
+        return Err(NylError::OwnerFenced(format!(
+            "NYL-KUBERNETES-OWNER-FENCED: the shared catalog prefix {prefix} is owned by {owner}, not by {}; {}",
+            expected.map_or_else(String::new, |owner| owner.to_string()),
+            super::reconcile::OWNED_PREFIX_FIX
+        )));
+    }
+    let manifest = read_tree_file(&repository, &tree, prefix, super::shared_catalog::SHARED_MANIFEST)?;
+    let published = manifest
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|text| serde_saphyr::from_multiple::<serde_json::Value>(text).ok())
+        .and_then(|documents| documents.into_iter().next());
+    let state = if manifest.as_deref()
+        == shared
+            .files
+            .get(Path::new(super::shared_catalog::SHARED_MANIFEST))
+            .map(Vec::as_slice)
+    {
+        SharedCatalogState::Current
+    } else {
+        SharedCatalogState::Differs(vec![PathBuf::from(super::shared_catalog::SHARED_MANIFEST)])
+    };
+    Ok(SharedCatalogInspection { state, published })
+}
+
+/// [`inspect_shared_catalog`]'s state alone.
+pub fn shared_catalog_state(
+    shared: &RenderedTarget,
+    project_dir: &Path,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<SharedCatalogState> {
+    inspect_shared_catalog(shared, project_dir, variable).map(|inspection| inspection.state)
 }
 
 /// Make `worktree`, a plain copy of a project's Git-visible files, a Git
@@ -1109,6 +1247,25 @@ pub struct TeardownSettings {
 /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 /// teardown readiness.
 pub fn teardown_settings(rendered: &RenderedTarget) -> Result<TeardownSettings> {
+    teardown_settings_with(rendered, &SharedCatalogView::Rendered)
+}
+
+/// Which manifest of a shared catalog the teardown readiness reads. Argo CD
+/// runs what the branch holds, not what one target renders, so a driver that
+/// can read the branch passes what it found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SharedCatalogView {
+    /// The manifest the target renders: the branch holds it, or nothing reads the branch.
+    Rendered,
+    /// The branch holds no manifest yet, so no Application prunes or deletes
+    /// anything: the catalog rows are not checked.
+    NotChecked,
+    /// The Application the branch holds, which another declaration or Nyl version wrote.
+    Published(serde_json::Value),
+}
+
+/// [`teardown_settings`], reading the shared catalog's Application as `view` says.
+pub fn teardown_settings_with(rendered: &RenderedTarget, view: &SharedCatalogView) -> Result<TeardownSettings> {
     use serde_json::Value;
 
     let catalog_source = catalog_source(&rendered.destination.path_prefix);
@@ -1146,6 +1303,18 @@ pub fn teardown_settings(rendered: &RenderedTarget) -> Result<TeardownSettings> 
             }
         }
     }
+    // A shared catalog is rendered by Nyl, so its settings are read like a
+    // per-target catalog's. It is no parent the project writes: it prunes this
+    // target's objects as phase 1 and phase 2 remove them, and itself stays
+    // until it is decommissioned, so no remnant of the target's catalog remains.
+    let owned_by_parent = catalog.is_none();
+    if let Some(shared) = &rendered.shared_catalog {
+        catalog = match view {
+            SharedCatalogView::Rendered => shared_application(shared)?,
+            SharedCatalogView::NotChecked => None,
+            SharedCatalogView::Published(application) => Some(application.clone()),
+        };
+    }
     let catalog_prunes = catalog.as_ref().map(|application| {
         application
             .pointer("/spec/syncPolicy/automated")
@@ -1163,8 +1332,20 @@ pub fn teardown_settings(rendered: &RenderedTarget) -> Result<TeardownSettings> 
             catalog_policy.map(str::to_owned)
         },
         namespace_delete_policies: namespaces,
-        catalog_owned_by_parent: catalog.is_none(),
+        catalog_owned_by_parent: owned_by_parent,
     })
+}
+
+/// The Application a shared catalog's tree holds.
+fn shared_application(shared: &RenderedTarget) -> Result<Option<serde_json::Value>> {
+    let Some(bytes) = shared.files.get(Path::new(super::shared_catalog::SHARED_MANIFEST)) else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| NylError::config("the shared catalog manifest is not UTF-8"))?;
+    Ok(serde_saphyr::from_multiple::<serde_json::Value>(text)
+        .map_err(NylError::Yaml)?
+        .into_iter()
+        .next())
 }
 
 /// The `Foreground`, `Background`, or `Orphan` policy an Application's
@@ -1894,11 +2075,7 @@ spec:
     fn test_render_target_records_its_owner_in_the_index() {
         let (_repository, url) = publication_repository();
         let worktree = inline_project(&url);
-        let owner = RenderIndexOwner {
-            environment: "dev".to_owned(),
-            unit: "kubernetes".to_owned(),
-            uid: "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90".to_owned(),
-        };
+        let owner = RenderIndexOwner::unit("dev", "kubernetes", "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90");
         let index = |rendered: &RenderedTarget| {
             parse_index(&rendered.files[Path::new(DEFAULT_INDEX_PATH)], DEFAULT_INDEX_PATH).unwrap()
         };
@@ -2699,5 +2876,190 @@ spec:
         commit_unowned(&url, "deploy", "elsewhere/state.json", "{}\n");
         let error = prepared.push().expect_err("the push loses the compare-and-swap");
         assert!(error.is_stale_publication(), "{error}");
+    }
+
+    /// An inline target of the preview kind: prefix `pr-1`, its catalog shared
+    /// as `previews` with `sync_policy` (a YAML-ish JSON value).
+    fn shared_inline(prefix: &str, shared: serde_json::Value) -> InlineTarget {
+        let mut inline = inline_dev();
+        inline.name = format!("{prefix}-kubernetes");
+        inline.spec["publication"]["pathPrefix"] = json!(prefix);
+        inline.spec["catalogApplication"] = json!({"shared": shared});
+        inline
+    }
+
+    fn pruning_shared() -> serde_json::Value {
+        json!({"name": "previews", "syncPolicy": {"automated": {"prune": true}}})
+    }
+
+    /// Catches a shared catalog leaving a catalog Application in the target's
+    /// own tree (two owners for its Applications), a manifest that does not
+    /// source the branch root with the contract's include pattern, an index
+    /// whose owner is not `catalog:<name>`, and a teardown readiness read from
+    /// a catalog that no longer exists in the tree.
+    #[test]
+    fn test_a_shared_catalog_replaces_the_targets_catalog_application() {
+        let (_repository, url) = publication_repository();
+        let worktree = inline_project(&url);
+        let rendered = render_inline(worktree.path(), &shared_inline("pr-1", pruning_shared()), None).unwrap();
+
+        let documents = catalog(&rendered.files);
+        assert!(
+            documents.iter().any(|(kind, _, _)| kind == "AppProject"),
+            "the target keeps its AppProjects: {documents:?}"
+        );
+        assert!(
+            documents
+                .iter()
+                .all(|(kind, _, path)| kind != "Application" || path.as_deref() != Some("pr-1/_nyl/catalog")),
+            "the target's tree holds no catalog Application: {documents:?}"
+        );
+
+        let shared = rendered
+            .shared_catalog
+            .as_deref()
+            .expect("the target names a shared catalog");
+        assert_eq!(shared.destination.path_prefix, "_nyl/shared/previews");
+        assert_eq!(shared.destination.branch, rendered.destination.branch);
+        let manifest: serde_json::Value =
+            serde_saphyr::from_str(std::str::from_utf8(&shared.files[Path::new("catalog.yaml")]).unwrap()).unwrap();
+        assert_eq!(manifest["metadata"]["name"], "previews");
+        assert_eq!(manifest["spec"]["source"]["path"], ".");
+        assert_eq!(
+            manifest["spec"]["source"]["directory"]["include"],
+            "{_nyl/shared/previews/*.yaml,*/_nyl/catalog/*}"
+        );
+        assert_eq!(manifest["spec"]["source"]["directory"]["recurse"], true);
+        let index = parse_index(&shared.files[Path::new(DEFAULT_INDEX_PATH)], DEFAULT_INDEX_PATH).unwrap();
+        assert_eq!(index.version, 3);
+        assert_eq!(index.owner, Some(RenderIndexOwner::catalog("previews")));
+        let stored: serde_json::Value = serde_json::from_slice(&shared.files[Path::new(DEFAULT_INDEX_PATH)]).unwrap();
+        assert_eq!(stored["owner"], "catalog:previews");
+
+        // Readiness reads the shared Application: it prunes, and the target's
+        // catalog directory is removed by it rather than left behind.
+        let settings = teardown_settings(&rendered).unwrap();
+        assert_eq!(settings.catalog_prunes, Some(true));
+        assert_eq!(settings.application_deletion_policy.as_deref(), Some("Foreground"));
+        assert!(settings.catalog_owned_by_parent);
+        let unshared = render_inline(
+            worktree.path(),
+            &shared_inline("pr-1", json!({"name": "previews"})),
+            None,
+        )
+        .unwrap();
+        assert_eq!(teardown_settings(&unshared).unwrap().catalog_prunes, Some(false));
+    }
+
+    /// Catches the shared manifest depending on which target rendered it, or
+    /// on the commit: two targets that share a catalog render byte-identical
+    /// trees, so either may create it and neither can overwrite the other.
+    #[test]
+    fn test_targets_sharing_a_catalog_render_the_same_manifest() {
+        let (_repository, url) = publication_repository();
+        let worktree = inline_project(&url);
+        let first = render_inline(worktree.path(), &shared_inline("pr-1", pruning_shared()), None).unwrap();
+        let second = render_inline(worktree.path(), &shared_inline("pr-2", pruning_shared()), None).unwrap();
+        let tree = |rendered: &RenderedTarget| {
+            let shared = rendered
+                .shared_catalog
+                .as_deref()
+                .expect("the target names a shared catalog");
+            (shared.destination.clone(), shared.files.clone())
+        };
+        assert_eq!(tree(&first), tree(&second));
+        assert_ne!(first.files, second.files);
+    }
+
+    /// Catches a target's publication overwriting or ignoring the shared
+    /// manifest: it is created when the branch has none, reported `Current`
+    /// when equal, `Differs` (and left alone) when another Nyl version or
+    /// declaration wrote it, and a prefix owned by something else is fenced.
+    #[test]
+    fn test_the_shared_catalog_is_created_once_and_never_overwritten_by_a_target() {
+        let (publication, url) = publication_repository();
+        let bare = publication.path().join("deploy.git");
+        let worktree = inline_project(&url);
+        let project_dir = worktree.path().join("nyl");
+        let rendered = render_inline(worktree.path(), &shared_inline("pr-1", pruning_shared()), None).unwrap();
+        let shared = rendered.shared_catalog.as_deref().unwrap();
+        assert_eq!(
+            shared_catalog_state(shared, &project_dir, &|_| None).unwrap(),
+            SharedCatalogState::Missing
+        );
+
+        publish_target(
+            shared,
+            &project_dir,
+            "nyl: create the shared catalog",
+            &author(10),
+            &|_| None,
+        )
+        .unwrap();
+        let files = branch_files(&bare, "deploy");
+        assert!(
+            files.contains(&"_nyl/shared/previews/catalog.yaml".to_owned()),
+            "{files:?}"
+        );
+        assert!(
+            files.contains(&"_nyl/shared/previews/_nyl/index.json".to_owned()),
+            "{files:?}"
+        );
+        assert_eq!(
+            shared_catalog_state(shared, &project_dir, &|_| None).unwrap(),
+            SharedCatalogState::Current
+        );
+        // Publishing it again is no commit.
+        let again = prepare_target_publication(shared, &project_dir, "nyl: again", &author(20), &|_| None).unwrap();
+        assert!(again.is_unchanged());
+
+        let other = render_inline(
+            worktree.path(),
+            &shared_inline(
+                "pr-2",
+                json!({"name": "previews", "syncPolicy": {"automated": {"prune": false}}}),
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            shared_catalog_state(other.shared_catalog.as_deref().unwrap(), &project_dir, &|_| None).unwrap(),
+            SharedCatalogState::Differs(vec![PathBuf::from("catalog.yaml")])
+        );
+
+        // Another owner at the catalog's prefix fences it.
+        let mut foreign = shared.clone();
+        let mut index = parse_index(&foreign.files[Path::new(DEFAULT_INDEX_PATH)], DEFAULT_INDEX_PATH).unwrap();
+        index.owner = Some(RenderIndexOwner::unit(
+            "dev",
+            "kubernetes",
+            "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90",
+        ));
+        foreign.files.insert(
+            PathBuf::from(DEFAULT_INDEX_PATH),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        );
+        let error = shared_catalog_state(&foreign, &project_dir, &|_| None).unwrap_err();
+        assert!(error.is_owner_fenced(), "{error}");
+        let error = prepare_target_publication(&foreign, &project_dir, "nyl: take over", &author(30), &|_| None)
+            .err()
+            .expect("another owner is refused");
+        assert!(error.is_owner_fenced(), "{error}");
+    }
+
+    /// Catches a target publishing into the reserved prefix of shared
+    /// catalogs: its render is refused with the stable code, so no unit
+    /// reconciles `_nyl/shared/<name>/` as its own tree.
+    #[test]
+    fn test_a_target_cannot_publish_into_the_reserved_shared_prefix() {
+        let (_publication, url) = publication_repository();
+        let worktree = inline_project(&url);
+        let mut inline = inline_dev();
+        inline.spec["publication"]["pathPrefix"] = json!("_nyl/shared/previews");
+        let error = render_inline(worktree.path(), &inline, None).unwrap_err().to_string();
+        assert!(
+            error.contains("NYL-KUBERNETES-SHARED-CATALOG-CONFLICT") && error.contains("_nyl/shared"),
+            "{error}"
+        );
     }
 }

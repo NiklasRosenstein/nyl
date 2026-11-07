@@ -515,6 +515,10 @@ pub fn status_with_readiness(
             unit_state(desired, observed, running.contains(name))
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
+        // What the driver warned about when it executed, until it executes again.
+        if let Some(receipt) = observed.and_then(|observed| observed.receipt.as_ref()) {
+            unit.warnings.extend(receipt.warnings.iter().cloned());
+        }
         if matches!(unit.state, Some(UnitState::Current | UnitState::Blocked)) {
             let reasons = changed
                 .iter()

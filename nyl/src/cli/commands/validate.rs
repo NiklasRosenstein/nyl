@@ -227,7 +227,8 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     for finding in nyl_orchestration::rules::desired::check_ownership(&rendered_sources, &wiring.drivers) {
         issues.push(finding.to_string());
     }
-    if let Err(finding) = nyl_orchestration::rules::multi_environment::validate_sources(&rendered_sources) {
+    let instances = nyl_render::gitops::instances::instance_only_names(inventory)?;
+    if let Err(finding) = nyl_orchestration::rules::multi_environment::validate_sources(&rendered_sources, &instances) {
         issues.push(finding.to_string());
     }
     if issues.is_empty() {

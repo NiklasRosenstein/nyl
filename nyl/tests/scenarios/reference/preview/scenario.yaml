@@ -1,0 +1,197 @@
+# Reference scenario 3, preview expiry, with the YAML preview project: dev runs
+# first (scenario 1 up to step 6), two pull requests get instances (scenario 2
+# up to step 4), then time passes. Runs from M5 in tier 1, with the fake kinds
+# and with the real KubernetesPublication driver.
+#
+# `get environments <name>` exits 0 for an environment that exists and 1 for
+# one that does not, so it is how a step asks whether an instance is live.
+contract: design/reference-scenarios.md#scenario-3-preview-expiry
+milestone: M5
+tiers: [1]
+steps:
+  # Scenario 1, steps 3 to 5: dev's network has a current receipt.
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [network, web-image, seed, database, kubernetes]
+      deploy: {branch: deploy, contains: ['dev/web/**', 'dev/_nyl/index.json']}
+
+  # Scenario 2, steps 1 to 4: two pull requests, one shared state ref and one
+  # deploy branch, each preview reading dev's network.
+  - branch: {name: pr-123, from: main}
+  - commit: {branch: pr-123, message: "Change the page", apply: patches/web}
+  - nyl: [reconcile, -e, pr-123, --template, preview, --param, pr=123]
+    at: pr-123
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+      deploy:
+        branch: previews
+        contains:
+          - 'pr-123/web/**'
+          - 'pr-123/_nyl/catalog/**'
+          - 'pr-123/_nyl/index.json'
+          # The first instance's publication creates the shared catalog.
+          - '_nyl/shared/previews/catalog.yaml'
+          - '_nyl/shared/previews/_nyl/index.json'
+  - branch: {name: pr-124, from: main}
+  - commit: {branch: pr-124, message: "Change the page, differently", apply: patches/another}
+  - nyl: [reconcile, -e, pr-124, --template, preview, --param, pr=124]
+    at: pr-124
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+      deploy:
+        branch: previews
+        contains: ['pr-124/web/**', 'pr-124/_nyl/index.json']
+        # Neither the other instance nor the shared catalog is touched.
+        unchanged: ['pr-123/**', '_nyl/shared/previews/**']
+  - nyl: [get, environments, pr-123]
+    exit: 0
+    expect: {messages: ['2026-10-01T10:00:00Z']}        # T+7d
+  - nyl: [get, environments, pr-124]
+    exit: 0
+    expect: {messages: ['2026-10-01T10:00:00Z']}
+
+  # Creating the shared catalog did not re-key anything: a repeated run executes nothing.
+  - nyl: [reconcile, -e, pr-123]
+    exit: 0
+    expect:
+      executed: []
+
+  # The shared catalog's one writer, the build of an instance's unit: the
+  # manifest the instances created is the one it renders, so pushing it
+  # changes nothing.
+  - nyl: [build, kubernetes, -e, pr-124, --, --shared-catalog, --diff]
+    exit: 0
+  - nyl: [build, kubernetes, -e, pr-124, --, --shared-catalog, --push]
+    exit: 0
+    expect:
+      deploy: {branch: previews, unchanged: ['_nyl/shared/previews/**', 'pr-123/**', 'pr-124/**']}
+
+  # Scenario 3, step 1: activity extends pr-123 to T+10d; pr-124 keeps T+7d.
+  - clock: {advance: 3d}
+  - commit: {branch: pr-123, message: "Change the page again", apply: patches/page}
+  - nyl: [reconcile, -e, pr-123, --template, preview, --param, pr=123]
+    at: pr-123
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+      current: [database]
+  # pr-123 moved to T+10d, and pr-124 kept T+7d.
+  - nyl: [get, environments, pr-123]
+    exit: 0
+    expect: {messages: ['2026-10-04T10:00:00Z']}
+  - nyl: [get, environments, pr-124]
+    exit: 0
+    expect: {messages: ['2026-10-01T10:00:00Z']}
+
+  # Step 2: the scheduled job at T+8d removes the expired pr-124, with
+  # kubernetes's delay wait, and maintains pr-123 without extending it.
+  - clock: {advance: 5d}
+  - nyl: [reconcile, --template, preview]
+    exit: 0
+    expect:
+      deploy:
+        branch: previews
+        contains: ['pr-123/web/**', '_nyl/shared/previews/catalog.yaml']
+        absent: ['pr-124/**']
+
+  # Step 3: pr-124 is gone.
+  - {nyl: [get, environments, pr-123], exit: 0}
+  - {nyl: [get, environments, pr-124], exit: 1}
+
+  # Step 4: at T+9d the limit counts every instance until it is removed.
+  - clock: {advance: 1d}
+  - nyl: [state, init, -e, pr-125, --template, preview, --param, pr=125]
+    exit: 0
+  - nyl: [state, init, -e, pr-126, --template, preview, --param, pr=126]
+    exit: 2
+    expect:
+      codes: [NYL-INSTANCE-LIMIT]
+      messages: ['maxInstances']
+
+  # Step 5: at T+11d pr-123 has expired, but a job for another instance does
+  # not remove it unasked.
+  - clock: {advance: 2d}
+  - nyl: [state, init, -e, pr-126, --template, preview, --param, pr=126]
+    exit: 2
+    expect:
+      codes: [NYL-INSTANCE-LIMIT]
+      messages: [pr-123, --make-room]
+  - {nyl: [get, environments, pr-123], exit: 0}
+
+  # Step 6: with the opt-in, the expired pr-123 is removed first.
+  - nyl: [state, init, -e, pr-126, --template, preview, --param, pr=126, --make-room]
+    exit: 0
+    expect:
+      deploy:
+        branch: previews
+        contains: ['_nyl/shared/previews/catalog.yaml']
+        absent: ['pr-123/**']
+  - {nyl: [get, environments, pr-123], exit: 1}
+  - {nyl: [get, environments, pr-125], exit: 0}
+  - {nyl: [get, environments, pr-126], exit: 0}
+
+  # Step 7: at T+19d any reconcile that finds an instance expired removes it.
+  - clock: {advance: 8d}
+  - nyl: [reconcile, -e, pr-125, --no-extend]
+    exit: 0
+  - {nyl: [get, environments, pr-125], exit: 1}
+
+  # Step 8: --renew keeps an expired instance, which runs at the commit
+  # `state init --template` recorded.
+  - nyl: [reconcile, -e, pr-126, --renew]
+    exit: 0
+    expect:
+      executed: [web-image, database, kubernetes]
+  # Renewed to T+26d from the clock, which the two removals' 2 minute waits
+  # (pr-123 and pr-125) moved 4 minutes past T+19d.
+  - nyl: [get, environments, pr-126]
+    exit: 0
+    expect: {messages: ['2026-10-20T10:04:00Z']}
+
+  # A stale shared catalog: a branch changes the catalog defaults, so pr-126
+  # renders another manifest than the one on the branch. Its publication leaves
+  # the manifest alone and warns, in the run and afterwards in plan and status.
+  - branch: {name: shared-labels, from: main}
+  - commit: {branch: shared-labels, message: "Label the shared catalog", apply: patches/shared-labels}
+  - nyl: [reconcile, -e, pr-126, --template, preview, --param, pr=126]
+    at: shared-labels
+    exit: 0
+    expect:
+      executed: [kubernetes]
+      codes: [NYL-KUBERNETES-SHARED-CATALOG-DIFFERS]
+      deploy: {branch: previews, unchanged: ['_nyl/shared/previews/**']}
+  - nyl: [status, -e, pr-126]
+    exit: 0
+    expect:
+      codes: [NYL-KUBERNETES-SHARED-CATALOG-DIFFERS]
+  - nyl: [get, artifact, kubernetes/tree, -e, pr-126]
+    exit: 0
+    expect:
+      get:
+        args: [get, artifact, kubernetes/tree, -e, pr-126, --pointer, /sharedCatalog/result]
+        value: differs
+
+  # The one writer replaces it, from the revision that should win; the next
+  # publication of pr-126 then finds it current.
+  - nyl: [build, kubernetes, -e, pr-126, --, --shared-catalog, --push]
+    at: shared-labels
+    exit: 0
+  # The writer's push re-keyed nothing: the instance has nothing to execute.
+  - nyl: [reconcile, -e, pr-126, --no-extend]
+    exit: 0
+    expect:
+      executed: []
+  - commit: {branch: shared-labels, message: "Change pr-126's page", apply: patches/touch}
+  - nyl: [reconcile, -e, pr-126, --template, preview, --param, pr=126]
+    at: shared-labels
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+      get:
+        args: [get, artifact, kubernetes/tree, -e, pr-126, --pointer, /sharedCatalog/result]
+        value: current

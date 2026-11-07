@@ -97,6 +97,11 @@ pub struct CompiledTargetTree {
     /// when the target has none. Never cached: it is re-resolved every run.
     #[serde(skip)]
     pub publication_base: Option<super::inputs::PublicationBase>,
+    /// The catalog Application this target shares with other targets, when
+    /// `catalogApplication.shared` is declared. It is published beside the
+    /// targets, never in this tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_catalog: Option<super::shared_catalog::SharedCatalogManifest>,
 }
 
 impl CompiledTargetTree {
@@ -263,15 +268,15 @@ struct PreparedGroup {
     source: ResolvedGroupSource,
 }
 
-struct EffectiveArgoCDInstance {
+pub(super) struct EffectiveArgoCDInstance {
     identity: String,
     /// The instance as rendering sees it: without `spec.access`, which never
     /// affects rendered bytes and so stays out of every render input.
-    resource: ArgoCDInstance,
+    pub(super) resource: ArgoCDInstance,
     /// How Nyl reads the instance's Applications; see [`argocd_observation`].
     access: ArgoCDAccess,
     source_path: Option<PathBuf>,
-    cluster: Cluster,
+    pub(super) cluster: Cluster,
     cluster_path: PathBuf,
 }
 
@@ -333,8 +338,29 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
             }
         }
     }
+    super::shared_catalog::validate_shared_catalogs(inventory)?;
     validate_argocd_name_collisions(inventory, instance_count, options)?;
     Ok(())
+}
+
+/// The shared catalog Application `target` declares, rendered from the
+/// ArgoCDInstance and publication repository it resolves to, or `None` for a
+/// target that shares none. Targets that name one catalog must render equal ones.
+pub(super) fn shared_manifest_of(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<Option<super::shared_catalog::SharedCatalogManifest>> {
+    let Some(shared) = target.spec.catalog_application.shared.as_deref() else {
+        return Ok(None);
+    };
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+    let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
+    super::shared_catalog::manifest(shared, target, &repository, &argocd).map(Some)
 }
 
 pub(super) fn normalize_branch_revision(revision: &str) -> &str {
@@ -1145,7 +1171,21 @@ async fn compile_target_tree_recording(
         catalog_manifests.push(application);
     }
 
-    if target.spec.catalog_application.enabled {
+    let shared_catalog = match &target.spec.catalog_application.shared {
+        Some(shared) => {
+            let manifest = super::shared_catalog::manifest(shared, &target, &repository, &argocd)?;
+            claim_application(
+                &mut application_owners,
+                &target.metadata.name,
+                &argocd.resource.spec.namespace,
+                &shared.name,
+                ApplicationOwner::SharedCatalog,
+            )?;
+            Some(manifest)
+        }
+        None => None,
+    };
+    if target.spec.catalog_application.generates_application() {
         let application = build_catalog_application(&target, &repository, &argocd)?;
         let parent_name = application
             .pointer("/metadata/name")
@@ -1313,6 +1353,7 @@ async fn compile_target_tree_recording(
         state_files,
         committed_state_paths,
         publication_base,
+        shared_catalog,
     };
     let dependencies = cache_probe.as_ref().filter(|_| record).map(|probe| TargetDependencies {
         dependencies: probe.recorder.dependencies().clone(),
@@ -1645,6 +1686,7 @@ enum ApplicationOwner {
     Release { group: String, release: String },
     Namespace(String),
     Catalog,
+    SharedCatalog,
 }
 
 impl std::fmt::Display for ApplicationOwner {
@@ -1653,6 +1695,7 @@ impl std::fmt::Display for ApplicationOwner {
             Self::Release { group, release } => write!(formatter, "Release {group}/{release}"),
             Self::Namespace(namespace) => write!(formatter, "the owner Application of namespace {namespace:?}"),
             Self::Catalog => formatter.write_str("the catalog Application"),
+            Self::SharedCatalog => formatter.write_str("the shared catalog Application"),
         }
     }
 }
@@ -2379,7 +2422,10 @@ fn build_catalog_application(
     Ok(application)
 }
 
-fn set_catalog_prune_option(annotations: &mut BTreeMap<String, String>, policy: ManagedResourceDeletionPolicy) {
+pub(super) fn set_catalog_prune_option(
+    annotations: &mut BTreeMap<String, String>,
+    policy: ManagedResourceDeletionPolicy,
+) {
     const KEY: &str = "argocd.argoproj.io/sync-options";
     let mut options = annotations
         .get(KEY)
@@ -2429,6 +2475,7 @@ fn validate_argocd_name_collisions(
         .filter(|resource| resource.identity.kind == GitOpsResourceKind::ApplicationGroup)
         .collect::<Vec<_>>();
     let mut parent_owners = BTreeMap::<(String, String, String), String>::new();
+    let mut shared_owners = BTreeMap::<(String, String, String), String>::new();
     let mut project_owners = BTreeMap::<(String, String, String), (String, String, bool, String)>::new();
     let mut default_application_owners = BTreeMap::<(String, String, String), String>::new();
 
@@ -2440,7 +2487,19 @@ fn validate_argocd_name_collisions(
         let control_plane = control_plane_identity(&argocd.cluster);
         let control_cluster = argocd.cluster.metadata.name.clone();
         let control_namespace = argocd.resource.spec.namespace.clone();
-        if target.spec.catalog_application.enabled {
+        if let Some(shared) = &target.spec.catalog_application.shared {
+            let key = (control_plane.clone(), control_namespace.clone(), shared.name.clone());
+            if let Some(previous) = parent_owners.get(&key) {
+                return Err(NylError::config(format!(
+                    "DeploymentTarget {previous:?} generates a catalog Application named {control_namespace}/{} in Argo CD on Cluster {control_cluster:?}, which is also the name of the shared catalog of DeploymentTarget {:?}; rename one of them",
+                    shared.name, target.metadata.name
+                )));
+            }
+            // Targets that share a catalog must render the same manifest, which
+            // `validate_shared_catalogs` checks across them.
+            shared_owners.entry(key).or_insert_with(|| target.metadata.name.clone());
+        }
+        if target.spec.catalog_application.generates_application() {
             let parent_name = target
                 .spec
                 .catalog_application
@@ -2448,6 +2507,12 @@ fn validate_argocd_name_collisions(
                 .clone()
                 .unwrap_or_else(|| format!("{}-catalog", target.metadata.name));
             let key = (control_plane.clone(), control_namespace.clone(), parent_name.clone());
+            if let Some(shared) = shared_owners.get(&key) {
+                return Err(NylError::config(format!(
+                    "DeploymentTarget {:?} generates a catalog Application named {control_namespace}/{parent_name} in Argo CD on Cluster {control_cluster:?}, which is also the name of the shared catalog of DeploymentTarget {shared:?}; customize spec.catalogApplication.name",
+                    target.metadata.name
+                )));
+            }
             if let Some(previous) = parent_owners.insert(key, target.metadata.name.clone()) {
                 return Err(NylError::config(format!(
                     "DeploymentTargets {previous:?} and {:?} generate the same catalog Application {control_namespace}/{parent_name} in Argo CD on Cluster {control_cluster:?}; customize spec.catalogApplication.name",

@@ -54,7 +54,9 @@ execution.
 The `OciImage` driver accepts `--load` (the default), `--push`, and repeatable
 `--tag <tag>` arguments after `--`. It rejects conflicting load/push options
 and unsupported arguments. The `KubernetesPublication` driver accepts `--diff`
-or `--push`. Other kinds may define different arguments.
+or `--push`, and `--shared-catalog` with either, to build the shared catalog
+Application of a target with `catalogApplication.shared`. Other kinds may
+define different arguments.
 
 Exit 0 means the build completed; a `--diff` that finds differences is a
 completed build, so a pipeline reads the document's `changes`. Exit 1 means

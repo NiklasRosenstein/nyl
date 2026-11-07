@@ -57,6 +57,12 @@ such as AppProjects, list the catalog Application. The paragraph is omitted
 when no Application changes, for example when only state files do.
 Orchestrated publications list the same paragraph.
 
+A target with [`catalogApplication.shared`](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance)
+generates no catalog Application, and `publish-tree` publishes only the
+target's own tree and warns about the catalog's manifest, which a
+`KubernetesPublication` unit of the target publishes
+(`nyl build <unit> -- --shared-catalog --push`).
+
 ```text
 Render deployment target production
 

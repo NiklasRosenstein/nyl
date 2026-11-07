@@ -215,6 +215,22 @@ pub fn environment_names(inventory: &GitOpsInventory) -> Result<Vec<EnvironmentN
     Ok(names)
 }
 
+/// The names that are instances of EnvironmentTemplates and nothing else: a
+/// declared Environment of the same name takes precedence over an instance.
+/// Instances are consumers only, so no reference names one as its producer.
+pub fn instance_only_names(inventory: &GitOpsInventory) -> Result<std::collections::BTreeSet<EnvironmentName>> {
+    let mut declared_names = std::collections::BTreeSet::new();
+    for environment in declared(inventory).0 {
+        declared_names.insert(environment.name()?);
+    }
+    Ok(inventory
+        .instances
+        .keys()
+        .filter(|name| !declared_names.contains(*name))
+        .cloned()
+        .collect())
+}
+
 /// The environment `name` with its group defaults applied, through the one
 /// group rule of nyl-core: a declared Environment, else an instance the
 /// inventory knows.
