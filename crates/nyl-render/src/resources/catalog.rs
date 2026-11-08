@@ -445,8 +445,8 @@ mod tests {
     fn test_moved_envelopes_require_the_canonical_api() {
         for kind in ResourceKind::ALL {
             let old_api = match kind {
-                ResourceKind::HelmChart | ResourceKind::RemoteManifest => "nyl.niklasrosenstein.github.com/v1",
-                ResourceKind::Component => "components.nyl.niklasrosenstein.github.com/v1",
+                ResourceKind::HelmChart | ResourceKind::RemoteManifest => nyl_core::constants::legacy::API_VERSION,
+                ResourceKind::Component => nyl_core::constants::legacy::API_VERSION_COMPONENTS,
                 _ => API_VERSION_GITOPS,
             };
             let mut example = resource_example(kind);

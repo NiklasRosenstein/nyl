@@ -429,6 +429,11 @@ src/
 - Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
   (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
   `k8s.gitops.nyl/v1`; shared GitRepository resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
+- Nyl's labels, annotations, and Secret types use the `.nyl` API group of the
+  layer that owns them (`k8s.nyl/`, `k8s.gitops.nyl/`), never another domain;
+  the reserved `.nyl` suffix is deliberate. Keys are defined in
+  `nyl_core::constants`; identifiers from before the `.nyl` groups live only in
+  `constants::legacy`, for reading and migration diagnostics.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
   A DeploymentTarget binds exactly one Cluster to one publication destination.

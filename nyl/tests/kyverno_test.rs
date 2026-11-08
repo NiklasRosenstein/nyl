@@ -37,7 +37,7 @@ kind: MutatingPolicy
 metadata:
   name: add-managed-by-label
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -102,7 +102,7 @@ kind: ClusterPolicy
 metadata:
   name: add-labels
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   rules:
     - name: add-team-label
@@ -173,7 +173,7 @@ kind: ValidatingPolicy
 metadata:
   name: check-environment-label
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -235,7 +235,7 @@ kind: ValidatingPolicy
 metadata:
   name: require-environment-label
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -358,7 +358,7 @@ kind: MutatingPolicy
 metadata:
   name: policy-to-mutate
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -377,7 +377,7 @@ kind: ValidatingPolicy
 metadata:
   name: another-policy
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -455,7 +455,7 @@ kind: MutatingPolicy
 metadata:
   name: immediate-scope-policy
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Immediate
+    k8s.nyl/apply-policy-scope: Immediate
 spec:
   matchConstraints:
     resourceRules:
