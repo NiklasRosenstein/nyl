@@ -17,7 +17,8 @@ const SOURCE_CACHE_VERSION: &str = "v1";
 /// such as `git-blob`: existing entries keep their meaning. A Nyl that does
 /// not know a kind rejects the lock with a parse error, so a project using
 /// one needs a Nyl that supports it. A change to the shape or meaning of
-/// existing entries adds a version and a migration.
+/// existing entries either bumps the version with a migration or changes it
+/// in place; which one is decided per change (AGENTS.md, state-file formats).
 const VENDOR_LOCK_VERSION: u32 = 1;
 
 /// The complete user-controlled selector for one remote renderer input.

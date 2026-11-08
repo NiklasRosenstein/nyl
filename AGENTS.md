@@ -91,8 +91,14 @@ These rules keep it maintainable:
 - Render every output (tables, JSON/YAML, transition commit summaries, status,
   exit categories) from the operation's single typed report; give errors and
   warnings stable codes with the fix attached.
-- State-file formats are versioned with golden files; a format change adds a
-  version and a migration.
+- State-file formats are versioned with golden files. Before changing one,
+  ask the user whether to bump or break, and do neither on your own: a bump
+  adds a version and a migration, and a break changes the format in place.
+  Say what the change is, whether a release has shipped the format, and what
+  each choice costs: a bump means a migration and readers that refuse the new
+  version, a break means every Nyl sharing the state must upgrade together.
+  Agents and reviewers working on a change ask; they do not assume either
+  answer from an earlier change.
 
 ### Driver boundary
 
