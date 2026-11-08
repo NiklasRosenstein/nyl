@@ -2599,7 +2599,7 @@ files cover every version, and a reader rejects a version it does not know.
 | `ObservationRecord` | `observed/units/<unit>/observations.yaml` | `unit`, `executionKey`, `run` (that produced the receipt), `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
 | `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml` | The latest attestation per name of one scope; see [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
-| `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
+| `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition, with a receipt's artifacts, attestations, and observed values (a unit's checkpoint is written again when the run reads its observed values) |
 | `Signal` | the signal ref | `run`, `unit`, `action` (`confirm-removed` or `hold`), `phase1Commit` (for `confirm-removed`), `by`, `identity`, `reason`, `at`, `from` |
 
 Each unit has one desired file and at most one observed file, holding only the
@@ -2816,9 +2816,10 @@ attestations:
   the unit declares are recorded with `source: {driver: reconcile}` in the
   run's transition commit, for the receipt the execution wrote, and are
   visible to the consumers of a later wave of that run. A declared name it
-  leaves out stays pending. Run checkpoints do not carry them: a receipt that a
-  later run imports from a dead run, or that `nyl recover --accept` adopts, has
-  its attestations pending until `nyl attest` or a new execution records them.
+  leaves out stays pending. The unit's checkpoint carries them next to the
+  receipt, so a receipt that a later run imports from a dead run, or that
+  `nyl recover --accept` adopts, has them with it and keeps their times; see
+  [Runs and leases](#runs-and-leases), item 3.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -2934,6 +2935,12 @@ spec:
   `NYL-OBSERVATION-FAILED`, naming the driver's reason. An observation
   declared with `maxAge` stops resolving once its last successful read is
   older than that; it is then `pending` for its consumers.
+- **Run checkpoints.** A run that reads the observed values of a receipt it
+  executed checkpoints the unit again with the record it holds, next to the
+  receipt, so a run that dies afterwards does not lose them; the run or `nyl
+  recover` that imports the receipt imports the record with it, and a
+  dependent proceeds on it without a read. See [Runs and leases](#runs-and-leases),
+  item 3.
 - **Recording.** A run or `nyl observe` writes the unit's observation record
   (`observed/units/<unit>/observations.yaml`, see
   [State layout](#state-layout)) only when a value or its `pending` state
@@ -3302,7 +3309,7 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 | Ref | Content | Lifetime |
 | --- | --- | --- |
 | `refs/nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
-| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record, carrying the same deadline and units executing as the lease; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before the unit starts; and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit; after a takeover, deleted or retired to an evidence ref by the run that imported it |
+| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record, carrying the same deadline and units executing as the lease; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before the unit starts; and a checkpoint commit per finished unit: its receipt or failure, and the receipt's artifacts, attestations, and observed values | Deleted after its results reach a transition commit; after a takeover, deleted or retired to an evidence ref by the run that imported it |
 | `refs/nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run: teardown confirmations (see [Teardown](#kubernetes-publication-unit)) and holds (see [Deletion](#deletion)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 | `refs/nyl/<env>/evidence/<run-id>` | A retired run ref: the `Run` record and checkpoints of a dead run that are still evidence for a unit with an `uncertain` condition, such as a late checkpoint `nyl recover --accept` may adopt | Created by a takeover in place of the run ref; deleted by a later takeover or by `nyl recover` once no `uncertain` unit needs it |
 
@@ -3347,6 +3354,26 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    its desired document and new uid are recorded under `created/` on the run
    ref, so a crash during its execution leaves the uid behind. A crash loses
    no evidence.
+   - A success's checkpoint carries, next to its receipt, the attestations the
+     driver reported with it (`source: {driver: reconcile}`) and, once the run
+     has read the unit's observed values for that receipt, the observation
+     record. The run checkpoints the unit again with the record after each
+     read that changes it, and the latest checkpoint of a unit on a run ref is
+     its result. Only a receipt this run wrote carries them: a failure or an
+     `uncertain` outcome carries none.
+   - They import only together with that exact receipt. An attestation must
+     name the receipt's execution key and the incarnation (environment, unit,
+     and uid) that executed it; an observation record must name the receipt's
+     execution key and run and that incarnation. A record that names anything
+     else is dropped, as is every record of a checkpoint that is not imported
+     (superseded, late, or of another incarnation). They replace the
+     attestations and observed values of the receipt the import replaces, as
+     a unit's own execution's do.
+   - An imported record keeps its own times (`at`, `observedAt`): the import
+     never makes evidence younger. Age is judged where evidence is consumed,
+     by the same rules as for any record: an observation's `maxAge`, the
+     refresh interval of a later read, and `maxAttestationAge` on promotion
+     paths.
 4. **Takeover.** A run that finds an expired lease replaces it with
    compare-and-swap. After resolving, it imports every leftover run ref. A
    checkpointed result becomes a receipt when the new resolution of that unit
@@ -3516,8 +3543,8 @@ without a condition with `NYL-RECOVER-NOTHING`. Accepting an
 uncertain execution as applied requires outputs, so it is possible only through
 `inspect`, or through a checkpoint that recorded the execution's result:
 `nyl recover -e <env> --unit <u> --accept <run> --reason <text>` adopts the
-receipt, outputs, and artifacts that run checkpointed, typically after a
-runner that lost its lease finished late. It is allowed only when the
+receipt, outputs, artifacts, attestations, and observed values that run
+checkpointed, typically after a runner that lost its lease finished late. It is allowed only when the
 checkpoint's execution key and uid equal the unit's current desired
 document's (`NYL-RECOVER-KEY-MISMATCH` otherwise), refuses a run without a
 checkpointed receipt of the unit (`NYL-RECOVER-CHECKPOINT-MISSING`), and

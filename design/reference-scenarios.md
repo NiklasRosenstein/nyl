@@ -271,6 +271,13 @@ A run resolves again before each wave, and that resolution phase renews the
 lease for `resolutionTimeout`, so a kill after a resolution leaves its
 deadline rather than the previous wave's.
 
+`observed-value-before-dependent` runs the `observed-value` walkthrough's
+project instead: the run is killed before the lease update that starts `dns`,
+after `kubernetes` executed and its address was read. The next run imports
+`kubernetes` with that value (its own read fails) and executes `dns` on it,
+exiting 0 with `NYL-OBSERVATION-FAILED` listed and the value still readable
+with `nyl get observation`.
+
 ### M8 CI conformance steps
 
 The [CI execution contract](ci-execution.md) adds these step kinds, exercised

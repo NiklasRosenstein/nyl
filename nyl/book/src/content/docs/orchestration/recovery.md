@@ -24,7 +24,8 @@ for resolution, the longest `timeout` of the units starting for a wave, plus a
 10-minute grace period either way. Before a unit the run creates starts, the
 run records its desired document and new uid on the run ref; when a unit
 finishes, the run checkpoints its receipt or failure there before the next
-wave. [Git storage](/nyl/reference/git-storage/#coordination-refs) lists every
+wave, with the receipt's artifacts, the attestations the unit reported, and,
+once the run has read them, its observed values. [Git storage](/nyl/reference/git-storage/#coordination-refs) lists every
 file on these refs.
 
 While a run is alive, its lease and its run ref both hold the environment:
@@ -54,6 +55,12 @@ executing.
   selected.
 - A checkpoint whose execution key equals the unit's key in the new
   resolution becomes the unit's receipt. The unit is listed under `imported`.
+  The attestations and observed values the checkpoint carries become the
+  receipt's too, with the times they were recorded at, so a dependent that
+  [requires them](/nyl/orchestration/runs/#requiring-attestations) or reads an
+  observed value proceeds without `nyl attest` or `nyl observe`. A record that
+  names another execution key, run, or incarnation than the receipt is
+  dropped.
 - A unit the dead run was executing without a checkpoint gets an `uncertain`
   condition naming the dead run. The unit is listed under `recovered`.
 - A checkpoint with another key is superseded (`NYL-RUN-SUPERSEDED`). When it
@@ -152,7 +159,7 @@ migrate   Command  executed
 ```
 
 `--accept <run>` adopts what a run checkpointed for the unit, its receipt,
-outputs, and artifacts, as the unit's receipt, when the checkpoint's execution
+outputs, artifacts, attestations, and observed values, as the unit's receipt, when the checkpoint's execution
 key and uid equal the unit's current desired document's. Accepting an
 execution as applied needs its outputs, so a checkpoint is the only evidence
 `recover` accepts. The `evidence` that `recover` prints lists every checkpoint
