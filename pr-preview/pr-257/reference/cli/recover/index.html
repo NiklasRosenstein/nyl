@@ -91,7 +91,8 @@ execution switched off:</p>
 <ul>
 <li>It resolves the environment’s units at the source, adopts the uids of
 units the dead run created, turns checkpoints whose execution key matches
-into <code dir="auto">imported</code> receipts, and gives units the run left without a
+into <code dir="auto">imported</code> receipts (with the attestations and observed values the
+checkpoint carries for them), and gives units the run left without a
 checkpoint an <code dir="auto">uncertain</code> condition. The next <code dir="auto">nyl reconcile</code> runs those
 again under their recovery policy.</li>
 <li>The commit uses the operation <code dir="auto">recover</code>, lists the import under
@@ -152,8 +153,8 @@ An operator can decide locally while CI executes. A retryable failure
 needs no recover, because the next reconcile retries it, but <code dir="auto">--retry</code>
 clears it too. On a unit held with <code dir="auto">nyl hold</code> it clears only
 the condition; the unit stays held.</li>
-<li><code dir="auto">--accept &#x3C;run></code> adopts the receipt, outputs, and artifacts that run
-checkpointed for the unit, typically after a runner that lost its lease
+<li><code dir="auto">--accept &#x3C;run></code> adopts the receipt, outputs, artifacts, attestations, and
+observed values that run checkpointed for the unit, typically after a runner that lost its lease
 finished the unit late. It is allowed only when the checkpoint’s execution
 key and uid equal the unit’s current desired document’s, so a checkpoint
 is accepted only for what the unit runs now. A held unit runs nothing, so
