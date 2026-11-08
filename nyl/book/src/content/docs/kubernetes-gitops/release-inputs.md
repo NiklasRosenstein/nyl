@@ -70,6 +70,7 @@ kind: DeploymentTarget
 metadata:
   name: staging
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: shared}
   publication: {repositoryRef: {name: deploy}, revision: deploy, pathPrefix: staging}
   releaseInputs:
@@ -90,7 +91,7 @@ Each binding sets exactly one source:
 | `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/reference/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
 | `fromGit` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
 | `fromPublication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carryFileFromWorktree`, a working-tree file of this run is rendered from and written into the publication. |
-| `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. |
+| `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. An environment's [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/) resolves `fromUnit` and renders the target with the values pinned. |
 
 The effective value is the target binding if there is one, otherwise the
 Release default. A binding replaces the value whole; unlike `values`, inputs
@@ -104,8 +105,9 @@ and reports all problems together:
 - a required input without a binding, named with its description;
 - a value that does not match the declared type or `enum`.
 
-Keys of a selected ApplicationGroup whose `spec.enabled` is false are ignored,
-so `enabled` can still toggle the group. Remote ApplicationGroups receive
+Keys of a selected ApplicationGroup whose `spec.enabled` is false, or whose
+document renders to no document for the target, are ignored, so `enabled` can
+still toggle the group. Remote ApplicationGroups receive
 resolved values like local groups; the binding key on the platform's own target
 is the admission, and the remote session never sees binding definitions or
 file paths.

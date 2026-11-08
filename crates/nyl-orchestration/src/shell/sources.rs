@@ -81,9 +81,10 @@ pub fn validate_local_inputs(
     driver: &dyn Driver,
     spec: &Value,
     commit: &CommitId,
+    recorded: Option<&CommitId>,
 ) -> Result<(), String> {
     let fields = driver.source_fields(spec);
-    let checkouts = source_checkouts(spec, &fields, commit)?;
+    let checkouts = source_checkouts(spec, &fields, commit, recorded)?;
     let (repository, input_commit) = primary_input_source(&fields, &checkouts, commit);
     for field in driver.local_path_fields(spec) {
         let Some(value) = spec.pointer(&field.pointer) else {
@@ -121,11 +122,12 @@ pub fn main_checkout_paths(
     driver: &dyn Driver,
     spec: &Value,
     source_commit: &CommitId,
+    recorded: Option<&CommitId>,
     main_commit: &CommitId,
     project_dir: &str,
 ) -> Result<Option<Vec<String>>, String> {
     let mut paths = checkout_paths(driver, spec, project_dir, &SourceRepository::This);
-    for (field, (repository, commit)) in source_checkouts(spec, &driver.source_fields(spec), source_commit)? {
+    for (field, (repository, commit)) in source_checkouts(spec, &driver.source_fields(spec), source_commit, recorded)? {
         if repository == SourceRepository::This && &commit == main_commit {
             if let (Some(paths), Some(source)) = (&mut paths, git_source(spec, &field)?) {
                 paths.push(source.path.unwrap_or_else(|| {
@@ -146,11 +148,15 @@ pub fn main_checkout_paths(
 }
 
 /// Prepare resolved source fields, sharing a checkout when repository and commit match.
+/// `recorded` is the unit's recorded source commit, which a field pinned to it
+/// follows to `source_commit` (see [`source_checkouts`]).
+#[allow(clippy::too_many_arguments)] // The checkout inputs, with the recorded commit beside the job's.
 pub fn prepare_source_roots(
     sources: &dyn SourceResolver,
     driver: &dyn Driver,
     spec: &Value,
     source_commit: &CommitId,
+    recorded: Option<&CommitId>,
     project_dir: &str,
     directory: &Path,
     main: Option<(&Path, &CommitId)>,
@@ -160,6 +166,7 @@ pub fn prepare_source_roots(
         driver,
         spec,
         source_commit,
+        recorded,
         project_dir,
         directory,
         main,
@@ -174,12 +181,13 @@ pub fn prepare_source_roots_for_fields(
     driver: &dyn Driver,
     spec: &Value,
     source_commit: &CommitId,
+    recorded: Option<&CommitId>,
     project_dir: &str,
     directory: &Path,
     main: Option<(&Path, &CommitId)>,
     selected_fields: &[String],
 ) -> Result<BTreeMap<String, SourceRoot>, String> {
-    let checkouts = source_checkouts(spec, selected_fields, source_commit)?;
+    let checkouts = source_checkouts(spec, selected_fields, source_commit, recorded)?;
     let mut groups: BTreeMap<(SourceRepository, CommitId), Vec<String>> = BTreeMap::new();
     for (field, key) in checkouts {
         groups.entry(key).or_default().push(field);

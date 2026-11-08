@@ -14,7 +14,7 @@
     "config/clusters/prod-eu-1.yaml": "c003373475e9556fe00010e3f0b97535d94fba05025a8e6b7f8370cc34bf09c5",
     "config/projects/workloads.yaml": "6ef0804c4a5648241ce26f31ea98012bc2284030a52d4e89bff624824bdb2717",
     "config/repositories/deploy.yaml": "7beb6bb8df1b5e565c5231ee85b341555890a30914fa9b8c62c0af71d9ef6d4d",
-    "config/targets/production.yaml": "21e0e199271f6a3512aedef01268ff631543dc5ab3c6fd686186aadad11eaa3c"
+    "config/targets/production.yaml": "64db8506d09d3be95970813889ec71e0e184613d25b031516d0b7754f85fe86c"
   },
   "publication": {
     "pathPrefix": "production",

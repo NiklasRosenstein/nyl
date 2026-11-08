@@ -1,6 +1,7 @@
-//! `FakeObserver`, standing in for Argo CD in M3: reports which workload
-//! Applications of a target still exist, as a test scripts them, for a
-//! publication's `observe` teardown wait.
+//! `FakeObserver`, standing in for Argo CD in tier-1 scenarios: reports which
+//! workload Applications of a target still exist, as a test scripts them, for
+//! `FakePublication`'s `observe` teardown wait. The real driver reads Argo CD
+//! itself ([`crate::kubernetes_publication::argocd`]).
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 //! Teardown (`teardownWait: {strategy: observe}`), and
@@ -9,12 +10,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use nyl_core::orchestration::ports::{ApplicationsObservation, ArgoObserver};
+use nyl_core::orchestration::driver::RemovalObservation;
 
 /// Scripted Argo CD observations by target name, shared by every clone.
 #[derive(Debug, Clone, Default)]
 pub struct FakeObserver {
-    targets: Arc<Mutex<BTreeMap<String, ApplicationsObservation>>>,
+    targets: Arc<Mutex<BTreeMap<String, RemovalObservation>>>,
 }
 
 impl FakeObserver {
@@ -23,7 +24,7 @@ impl FakeObserver {
     }
 
     /// What the observer reports for `target` from now on.
-    pub fn set(&self, target: &str, observation: ApplicationsObservation) {
+    pub fn set(&self, target: &str, observation: RemovalObservation) {
         self.targets
             .lock()
             .expect("observer lock")
@@ -31,16 +32,16 @@ impl FakeObserver {
     }
 }
 
-impl ArgoObserver for FakeObserver {
+impl FakeObserver {
     /// What a test set for `target`; a target nothing was set for has no
     /// workload Applications left.
-    fn workload_applications(&self, target: &str) -> ApplicationsObservation {
+    pub fn workload_applications(&self, target: &str) -> RemovalObservation {
         self.targets
             .lock()
             .expect("observer lock")
             .get(target)
             .cloned()
-            .unwrap_or(ApplicationsObservation::Remaining(Vec::new()))
+            .unwrap_or(RemovalObservation::Remaining(Vec::new()))
     }
 }
 
@@ -56,16 +57,16 @@ mod tests {
         let run_side = observer.clone();
         assert_eq!(
             run_side.workload_applications("dev"),
-            ApplicationsObservation::Remaining(Vec::new())
+            RemovalObservation::Remaining(Vec::new())
         );
-        observer.set("dev", ApplicationsObservation::Remaining(vec!["web".to_owned()]));
+        observer.set("dev", RemovalObservation::Remaining(vec!["web".to_owned()]));
         assert_eq!(
             run_side.workload_applications("dev"),
-            ApplicationsObservation::Remaining(vec!["web".to_owned()])
+            RemovalObservation::Remaining(vec!["web".to_owned()])
         );
         assert_eq!(
             run_side.workload_applications("prod"),
-            ApplicationsObservation::Remaining(Vec::new())
+            RemovalObservation::Remaining(Vec::new())
         );
     }
 }

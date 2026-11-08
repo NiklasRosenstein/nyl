@@ -24,6 +24,7 @@ closely related pair.
   - [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
   - [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
   - [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
+  - [`argocd`](/nyl/reference/cli/argocd/) - List and purge an Argo CD Application's live resources when its source is gone
 - **CI integration**: report results where reviewers look.
   - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 - **Orchestration** (in development): manage environments' state in Git.
@@ -32,6 +33,7 @@ closely related pair.
   - [`reconcile`](/nyl/reference/cli/reconcile/) - Execute an environment's ready units and record the results
   - [`status`](/nyl/reference/cli/status/) - Report each unit's state from one snapshot of an environment's state
   - [`detect-drift and attest`](/nyl/reference/cli/detect-drift/) - Check current receipts for drift, or have their drivers attest them
+  - [`observe`](/nyl/reference/cli/observe/) - Read and record the observed values of current receipts, for jobs that hold the read credentials
   - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
   - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result

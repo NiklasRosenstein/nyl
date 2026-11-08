@@ -1974,6 +1974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyl-e2e"
+version = "0.6.1"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "nyl-git"
 version = "0.6.1"
 dependencies = [
@@ -2009,6 +2019,7 @@ dependencies = [
  "clap",
  "colored",
  "flate2",
+ "futures",
  "getrandom 0.4.3",
  "git2",
  "glob",
@@ -2060,19 +2071,25 @@ dependencies = [
 name = "nyl-units"
 version = "0.6.1"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "chrono",
  "glob",
  "hex",
+ "kube",
  "libc",
  "nyl-core",
  "nyl-render",
  "regex",
+ "reqwest",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
+ "url",
  "walkdir",
 ]
 

@@ -181,9 +181,21 @@ impl World {
         self.commit_and_push(&step.into, &format!("Squash-merge {}", step.branch));
     }
 
-    /// A `delete-branch` step.
+    /// A `delete-branch` step. The host forgets what no ref names anymore, as
+    /// it does once a pull request's branch is gone: a commit that only the
+    /// deleted branch carried cannot be fetched afterwards, unless another ref
+    /// (a keep ref, a `ref: {set}` pull request ref) still names it.
     pub fn delete_branch(&self, name: &str) {
         git(&self.bare(), &["branch", "--quiet", "--delete", "--force", name]);
+        git(&self.bare(), &["gc", "--quiet", "--prune=now"]);
+    }
+
+    /// A `ref: {set, to}` step: `reference` names the tip of `branch` in `project.git`.
+    pub fn set_ref(&self, reference: &str, branch: &str) {
+        git(
+            &self.bare(),
+            &["update-ref", reference, &format!("refs/heads/{branch}")],
+        );
     }
 
     /// A `ref: {delete}` step: delete any ref in the state repository.
@@ -224,6 +236,11 @@ impl World {
             ],
         );
         path
+    }
+
+    /// `project.git`, for reads that need no `git` process.
+    pub fn repository(&self) -> git2::Repository {
+        git2::Repository::open_bare(self.bare()).expect("project.git opens")
     }
 
     /// The commit a revision of `project.git` names, such as `main~1`.

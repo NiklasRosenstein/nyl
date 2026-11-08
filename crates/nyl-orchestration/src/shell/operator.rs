@@ -187,12 +187,14 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                     .renderer
                     .render(&worktree, &request.environment, revision)
                     .map_err(|error| invalid(error.to_string()))?;
-                super::sources::validate_local_inputs(context.sources, driver, spec, revision).map_err(invalid)?;
+                super::sources::validate_local_inputs(context.sources, driver, spec, revision, None)
+                    .map_err(invalid)?;
                 let roots = super::sources::prepare_source_roots(
                     context.sources,
                     driver,
                     spec,
                     revision,
+                    None,
                     &rendered.project_dir,
                     &directory.join("contexts"),
                     Some((&worktree, revision)),
@@ -275,6 +277,8 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 deadline: timeout.after(now),
             };
             let execution = ExecutionContext {
+                instances: context.instances,
+                clock: base.clock,
                 unit: nyl_core::orchestration::ids::UnitAddress::new(request.environment.clone(), options.unit.clone()),
                 operation: DriverOperation::Exec,
                 worktree,
@@ -294,6 +298,8 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 commit_identity: context.commit_identity,
                 cache_dir: context.cache_dir(),
                 teardown_wait: None,
+                incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+                dirty_source: false,
             };
             let status = match driver.exec(&execution, &unit, &options.arguments) {
                 Ok(Supported::Supported(status)) => status,

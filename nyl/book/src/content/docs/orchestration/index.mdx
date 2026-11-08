@@ -8,16 +8,20 @@ import LinkCards from '../../../components/LinkCards.astro';
 Orchestration is in development. Environments, their state in Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
 [Command](/nyl/orchestration/resource-guides/command/),
 [OciImage](/nyl/orchestration/resource-guides/oci-image/), and
-[Terraform and OpenTofu](/nyl/orchestration/resource-guides/terraform/) units, one
+[Terraform and OpenTofu](/nyl/orchestration/resource-guides/terraform/) units,
+[KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/) units, one
 environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
 [`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs,
 drift repair, and lifecycle work), and [`nyl status`](/nyl/reference/cli/status/),
-recovery with [`nyl recover`](/nyl/reference/cli/recover/) and
-[`nyl detect-drift`](/nyl/reference/cli/detect-drift/), and deletion with
+recovery with [`nyl recover`](/nyl/reference/cli/recover/),
+[`nyl detect-drift`, `nyl attest`](/nyl/reference/cli/detect-drift/), and
+[`nyl observe`](/nyl/reference/cli/observe/), and deletion with
 [`nyl teardown`](/nyl/reference/cli/teardown/),
 [`nyl hold` and `nyl resume`](/nyl/reference/cli/hold/), `nyl state
 delete`, runs over several environments, and approvals are available.
-Kubernetes publication units are planned for M5. The [roadmap](/nyl/orchestration/roadmap/)
+Publication units may declare their target inline, observe Argo CD, and read observed values of the cluster; units can require attestations and
+observed values of other units. Preview environments, with their expiry and shared catalog, and the
+[end-to-end example](/nyl/orchestration/end-to-end-example/) are available. Promotion paths follow in M6. The [roadmap](/nyl/orchestration/roadmap/)
 tracks the milestones.
 :::
 
@@ -39,6 +43,7 @@ whether it starts on a workstation or in CI.
     { title: 'OciImage', text: 'Builds a container image and records its digest.', href: '/reference/resources/units.gitops.nyl/v1/oci-image/' },
     { title: 'Terraform', text: 'Manages infrastructure with Terraform.', href: '/reference/resources/units.gitops.nyl/v1/terraform/' },
     { title: 'OpenTofu', text: 'Manages infrastructure with OpenTofu.', href: '/reference/resources/units.gitops.nyl/v1/open-tofu/' },
+    { title: 'KubernetesPublication', text: 'Publishes a DeploymentTarget\'s tree with the image digests and infrastructure outputs of other units.', href: '/orchestration/resource-guides/kubernetes-publication/' },
   ]}
 />
 
@@ -50,6 +55,7 @@ whether it starts on a workstation or in CI.
     { title: 'Runs', text: 'How a run chooses its source commit, resolves references between units, decides what executes, and records the result.', href: '/orchestration/runs/' },
     { title: 'Recovery', text: 'How a run takes over from one that died, what an uncertain unit is, how to recover it, and how drift is repaired.', href: '/orchestration/recovery/' },
     { title: 'Deletion and holds', text: 'How units leave an environment, how they are torn down, and how a hold freezes one.', href: '/orchestration/deletion/' },
+    { title: 'End-to-end example', text: 'An image, an OpenTofu configuration, and a publication reconciled locally and in GitHub Actions, with a preview for every pull request.', href: '/orchestration/end-to-end-example/' },
     { title: 'Git storage', text: 'Every repository and ref orchestration reads and writes.', href: '/reference/git-storage/' },
   ]}
 />

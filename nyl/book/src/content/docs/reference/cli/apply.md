@@ -7,7 +7,7 @@ Apply rendered manifests to the Kubernetes cluster with release tracking.
 ## Synopsis
 
 ```bash
-nyl apply [--target <TARGET>] [OPTIONS] <FILE>
+nyl apply [--target <TARGET> | --context <CONTEXT>] [OPTIONS] <FILE>
 ```
 
 ## Description
@@ -29,7 +29,7 @@ for the behavior `render`, `diff`, and `apply` share.
 - `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
+- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available. A project without DeploymentTargets uses `--context` instead.
 - `--release-only` - Settle the Release alone instead of taking it from the compiled target; see [`render`](/nyl/reference/cli/render/#common-options).
 - `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the applied manifests.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
@@ -42,6 +42,7 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 - `--name <NAME>` - Release name (required if no Release in file)
 - `--namespace <NAMESPACE>` - Release namespace, and the namespace of resources that set none (required if no Release in file)
+- `--take-over` - Apply a release an environment owns anyway, recording no owner on the new revision. Without it, `nyl apply` refuses a release owned by a unit of a [direct target](/nyl/kubernetes-gitops/workflow/direct-reconciler/) (`NYL-RELEASE-OWNED-BY-UNIT`); the owner's next reconcile adopts the release again and reverts the change.
 - `--confirm-prune` - Also prune resources whose Argo CD sync option is `Prune=confirm`, such as managed Namespaces
 - `--append-release` - Merge current resources with the previous deployed revision and skip pruning removed resources
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
@@ -58,7 +59,7 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`. When the Cluster declares a `live.context`, it is used and the current context never is. Without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it; an in-cluster or by-name destination needs `--context`. The context's server must match the declared destination either way. Without GitOps configuration, `--context` selects the cluster instead; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same time (default: 8; `1` applies serially)
 
 ## Apply order and progress
@@ -148,6 +149,9 @@ nyl apply --target production --name my-release --namespace default manifest.yam
 
 # Use different Kubernetes context
 nyl apply --target production --context admin@production manifest.yaml
+
+# Apply to a kube context in a project without GitOps configuration
+nyl apply --context kind-kind manifest.yaml
 
 # Keep only the ten most recent release revisions
 nyl apply --target production --history-limit 10 manifest.yaml

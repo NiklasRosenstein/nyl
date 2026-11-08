@@ -17,7 +17,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ids::{ChangeDigest, CommitId, EnvironmentName, UnitAddress};
+use super::codes::Finding;
+use super::ids::{ChangeDigest, CommitId, EnvironmentName, Uid, UnitAddress, UnitName};
 use super::ports::CommitIdentity;
 use super::state::{ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, ObservedUnit, Receipt};
 use super::time::Timestamp;
@@ -84,6 +85,11 @@ pub struct Capabilities {
     pub attest: bool,
     /// Whether the kind supports `nyl build`.
     pub build: bool,
+    /// The kind reads observed values for a spec that declares
+    /// `observations`: `reconcile` and `nyl observe` ask the driver's
+    /// [`Driver::observe`]. A kind without it rejects `observations`.
+    #[serde(default, rename = "observedValues")]
+    pub observed_values: bool,
     /// `plan` reports a change digest, so `bind: plan` is allowed.
     #[serde(rename = "changeDigest")]
     pub change_digest: bool,
@@ -153,6 +159,57 @@ pub struct KeyInputs {
     /// Output of a fingerprint step, digested into the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Facts the driver learned while reading its inputs that the resolved
+    /// spec records, by JSON Pointer to the member that receives each value,
+    /// such as a publication's effective teardown settings. Resolution writes
+    /// them into the resolved spec before it computes the key, so the stored
+    /// desired document carries them and commands that never render source
+    /// can read them back. The engine stores each value without
+    /// interpreting it; see [`KeyInputs::record_into`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recorded: BTreeMap<String, Value>,
+}
+
+/// Why a recorded field cannot join the resolved spec.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RecordError {
+    /// The pointer is not `/<member>`: recorded facts are new top-level members.
+    #[error("recorded field {pointer:?} is not a JSON Pointer to one top-level member of the spec")]
+    NotAMember { pointer: String },
+    /// The member is a common unit field, or is already in the spec the engine
+    /// resolved, and the engine has used it.
+    #[error("recorded field {pointer:?} would replace a member the unit declares or the engine reads; a driver records only new members")]
+    Occupied { pointer: String },
+}
+
+impl KeyInputs {
+    /// Write each [`recorded`](Self::recorded) value into the resolved `spec`
+    /// as a new top-level member. A recorded fact never replaces a member the
+    /// spec already has, nor a common unit field, because the engine reads
+    /// those; such a pointer is an error, never skipped.
+    pub fn record_into(&self, spec: &mut Value) -> std::result::Result<(), RecordError> {
+        for (pointer, value) in &self.recorded {
+            let member = pointer
+                .strip_prefix('/')
+                .filter(|member| !member.is_empty() && !member.contains('/'))
+                .ok_or_else(|| RecordError::NotAMember {
+                    pointer: pointer.clone(),
+                })?
+                .replace("~1", "/")
+                .replace("~0", "~");
+            let occupied = || RecordError::Occupied {
+                pointer: pointer.clone(),
+            };
+            let Value::Object(members) = spec else {
+                return Err(occupied());
+            };
+            if members.contains_key(&member) || crate::resources::units::COMMON_UNIT_FIELDS.contains(&member.as_str()) {
+                return Err(occupied());
+            }
+            members.insert(member, value.clone());
+        }
+        Ok(())
+    }
 }
 
 /// The planned change kind.
@@ -191,6 +248,27 @@ pub struct AttestationOutcome {
     pub details: Value,
 }
 
+/// One observed value as the driver read it. The engine checks a value
+/// against the declared type and records it; it never interprets a reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "observation", rename_all = "kebab-case")]
+pub enum ObservedValue {
+    /// The system holds the value for the current receipt.
+    Value { value: Value },
+    /// The system has not caught up with the receipt, or the field is not
+    /// set yet; a later read may find a value.
+    Pending { reason: String },
+    /// The driver could not read it, such as for missing credentials; the
+    /// last recorded value for the current receipt stays usable.
+    Failed { reason: String },
+}
+
+/// What [`Driver::observe`] read: each declared observation by name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ObservedValues {
+    pub values: BTreeMap<String, ObservedValue>,
+}
+
 /// How a reconcile or teardown call ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", rename_all = "kebab-case")]
@@ -206,6 +284,12 @@ pub enum Outcome {
         /// Artifact documents without `metadata.unit` and `executionKey`, which Nyl fills in.
         artifacts: Vec<ArtifactDocument>,
         attestations: Vec<AttestationOutcome>,
+        /// Coded warnings about the execution that succeeded, such as a
+        /// condition the driver found and cannot fix. The shell records them
+        /// with the receipt and shows them in the run report, `plan`, and
+        /// `status` like any coded finding, without interpreting them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<Finding>,
     },
     /// The plan changed since its approval; nothing was applied.
     AwaitingApproval { digest: ChangeDigest },
@@ -294,6 +378,7 @@ pub enum DriverOperation {
     Reconcile,
     DetectDrift,
     Attest,
+    Observe,
     Inspect,
     Teardown,
     Fingerprint,
@@ -308,6 +393,7 @@ impl DriverOperation {
             Self::Reconcile => "reconcile",
             Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
+            Self::Observe => "observe",
             Self::Inspect => "inspect",
             Self::Teardown => "teardown",
             Self::Fingerprint => "fingerprint",
@@ -428,6 +514,74 @@ pub struct ExecutionContext<'a> {
     /// the driver runs phase 2; `None` while the wait has not ended, and for
     /// every other call. Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit), Teardown.
     pub teardown_wait: Option<WaitCompletion>,
+    /// Whether other unit incarnations still exist in their environments'
+    /// state, for a driver that fences resources by owner.
+    pub incarnations: &'a dyn IncarnationDirectory,
+    /// Whether the files the call reads differ from the commit the unit's
+    /// source names: `nyl build` from a worktree with uncommitted changes.
+    /// Runs read committed sources and pass `false`. A driver that publishes
+    /// from a direct build uses it to refuse attributing the output to a
+    /// commit that does not hold it.
+    pub dirty_source: bool,
+    /// The instances of EnvironmentTemplates the run knows, which a render
+    /// across environments (placements, inline targets) includes like
+    /// declared environments.
+    pub instances: &'a super::instance::Instances,
+    /// The injected clock, for a driver that waits inside a call, such as a
+    /// publication that polls its reconciler until it is healthy. A driver
+    /// never reads the system clock: `now` is when the call started, and this
+    /// is what has passed since, and how to wait.
+    pub clock: &'a dyn super::ports::Clock,
+}
+
+/// How a driver's teardown wait after phase 1 ends
+/// ([`Driver::teardown_wait`]); the decisions are `rules::teardown_wait`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitStrategy {
+    /// The driver reports nothing remaining ([`Driver::observe_removal`]).
+    Observe,
+    /// `duration` after the phase 1 commit; the teardown is recorded as not observed.
+    Delay { duration: super::time::Duration },
+    /// An operator confirms; the wait never keeps a run waiting.
+    Manual,
+}
+
+/// What [`Driver::observe_removal`] receives: the unit's admitted
+/// credentials and the time its reading must finish by.
+#[derive(Clone)]
+pub struct RemovalContext {
+    pub unit: UnitAddress,
+    /// Admitted variables and secrets, by name; masking of secret values is the runner's.
+    pub env: BTreeMap<String, String>,
+    /// Explicit credential-helper keys, resolved only for this driver call.
+    pub secrets: BTreeMap<String, String>,
+    /// The injected clock's time when the reading starts.
+    pub now: Timestamp,
+    /// The end of the wait: a reading takes no longer than this allows.
+    pub deadline: Timestamp,
+}
+
+/// `env` and `secrets` can hold credentials, so only their names are shown.
+impl std::fmt::Debug for RemovalContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemovalContext")
+            .field("unit", &self.unit)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("secrets", &self.secrets.keys().collect::<Vec<_>>())
+            .field("now", &self.now)
+            .field("deadline", &self.deadline)
+            .finish()
+    }
+}
+
+/// What a driver observed of the effects a teardown's first phase removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalObservation {
+    /// What still exists, named for display; empty when everything is gone.
+    Remaining(Vec<String>),
+    /// The driver could not read it, such as for missing credentials.
+    Failed(String),
 }
 
 /// How a teardown's wait after phase 1 ended, decided by the orchestration
@@ -451,24 +605,71 @@ pub enum WaitCompletion {
     Incomplete,
 }
 
-/// A target's settings that decide whether its teardown can complete,
-/// read statically by its driver. Contract: [Kubernetes publication
-/// unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
-/// teardown readiness; `rules::teardown_readiness` evaluates it.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TeardownSettings {
-    /// Whether the catalog prunes removed workload Applications on its own
-    /// (`syncPolicy.automated` with `prune: true`); `None` when a parent the
-    /// project writes syncs it, which Nyl cannot see (`external: not checked`).
-    pub catalog_prunes: Option<bool>,
-    /// The catalog's `applicationDeletionPolicy`, such as `Foreground` or `Orphan`; `None` when external.
-    pub application_deletion_policy: Option<String>,
-    /// Each owned Namespace's `deletePolicy` (`Automatic`, `Retain`, or `Confirm`), by name.
-    pub namespace_delete_policies: BTreeMap<String, String>,
-    /// Whether a parent owns the target's catalog, so phase 2 removes the
-    /// catalog Application and AppProjects too.
-    pub catalog_owned_by_parent: bool,
+/// What a driver's static check of its unit's teardown found: the preflight
+/// every teardown runs, and the readiness `status`, `plan`, and `get units
+/// -o wide` show. The driver evaluates its own requirements; shared code
+/// only coordinates and displays the findings, which carry stable codes and
+/// the setting that fixes each.
+///
+/// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeardownReadiness {
+    /// Unmet requirements that decide whether the teardown can succeed. They
+    /// keep the unit pending teardown unless the invocation passes
+    /// `--allow-incomplete`.
+    pub blocking: Vec<Finding>,
+    /// What a teardown that succeeds leaves behind.
+    pub remnants: Vec<Finding>,
+    /// Requirements the driver cannot see, which never block.
+    pub not_checked: Vec<String>,
+}
+
+impl TeardownReadiness {
+    /// Whether no blocking requirement is unmet.
+    pub fn ready(&self) -> bool {
+        self.blocking.is_empty()
+    }
+}
+
+/// Whether a unit incarnation still exists in its environment's state.
+///
+/// A driver that fences a native resource by owner asks this about the
+/// incarnation it finds recorded as the owner, so a unit takes a resource
+/// over only once the previous owner is gone from state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncarnationStatus {
+    /// The environment's state holds the incarnation, active, held,
+    /// deleting, or retained.
+    Exists,
+    /// The environment's state holds no such incarnation: its teardown
+    /// completed, or it was released with `nyl state forget`.
+    Gone,
+    /// State could not tell, such as an environment that is not declared or
+    /// a state location that cannot be read. A driver fails closed.
+    Unknown(String),
+}
+
+/// The lookup of [`IncarnationStatus`] for one invocation. Contract:
+/// [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// ownership index.
+pub trait IncarnationDirectory: Send + Sync {
+    /// Whether incarnation `uid` of unit `unit` still exists in `environment`.
+    fn status(&self, environment: &EnvironmentName, unit: &UnitName, uid: &Uid) -> IncarnationStatus;
+}
+
+/// A directory that knows nothing: every incarnation is
+/// [`IncarnationStatus::Unknown`]. For calls that never take an owned
+/// resource over.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnknownIncarnations;
+
+impl IncarnationDirectory for UnknownIncarnations {
+    fn status(&self, environment: &EnvironmentName, unit: &UnitName, _uid: &Uid) -> IncarnationStatus {
+        IncarnationStatus::Unknown(format!(
+            "this call has no access to the state of environment {environment} for unit {unit}"
+        ))
+    }
 }
 
 /// What resolution provides to compute execution-key inputs.
@@ -488,6 +689,8 @@ pub struct ResolutionContext<'a> {
     pub tools: &'a dyn ToolRunner,
     /// A cache directory of this invocation's workspace, as for executions.
     pub cache_dir: PathBuf,
+    /// The instances of EnvironmentTemplates the run knows, as for executions.
+    pub instances: &'a super::instance::Instances,
 }
 
 /// A spec field holding a local path, or an array of local path globs, by
@@ -593,6 +796,23 @@ pub trait Driver: Send + Sync {
         let _ = (ctx, unit, receipt);
         Ok(Supported::Unsupported)
     }
+    /// The observed values the spec declares, read for the current
+    /// `receipt`: `reconcile` (after an execution, and for units it did not
+    /// execute) and `nyl observe`. The driver reads each declared name from
+    /// its `from` source and decides when a value belongs to the current
+    /// receipt; Nyl checks it against the declared type. Unsupported by
+    /// default, which rejects `observations` for the kind.
+    ///
+    /// Contract: [Observed values](../../../../design/orchestration-core.md#observed-values).
+    fn observe(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        receipt: &Receipt,
+    ) -> DriverResult<Supported<ObservedValues>> {
+        let _ = (ctx, unit, receipt);
+        Ok(Supported::Unsupported)
+    }
     /// The `inspect` recovery policy's check; unsupported by default.
     fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
         let _ = (ctx, unit);
@@ -603,16 +823,46 @@ pub trait Driver: Send + Sync {
         let _ = (ctx, unit);
         Ok(Supported::Unsupported)
     }
-    /// The settings that decide whether the unit's teardown can complete,
-    /// for the teardown preflight and the readiness `status`, `get units -e
-    /// -o wide`, `plan`, and `reconcile` report; unsupported by default (no
-    /// requirements). Read statically from the stored desired document
-    /// alone (resolution records the target's effective settings in the
-    /// resolved spec), so commands that never render source, such as
-    /// `status`, can ask it, and the answer matches what a teardown of that
-    /// document would do.
-    fn teardown_settings(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownSettings>> {
+    /// What the driver finds, from the stored desired document alone, about
+    /// whether the unit's teardown can complete: the readiness the teardown
+    /// preflight, `status`, `get units -e -o wide`, `plan`, and `reconcile`
+    /// report. Unsupported by default (no requirements). Read statically, so
+    /// commands that never render source, such as `status`, can ask it, and
+    /// the answer matches what a teardown of that document would do; a
+    /// driver records what it needs at resolution
+    /// ([`KeyInputs::recorded`]).
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
         let _ = unit;
+        Ok(Supported::Unsupported)
+    }
+    /// What a teardown nobody attends, such as the removal of an expired
+    /// template instance, would wait for because only an operator can answer
+    /// it. Read from the unit's declaration alone, resolved or not, so
+    /// `nyl state init --template` can warn before any producer ran. Never
+    /// blocking; none by default.
+    fn unattended_teardown(&self, unit: &DesiredUnit) -> Vec<Finding> {
+        let _ = unit;
+        Vec::new()
+    }
+    /// How a teardown of this spec waits after phase 1 (`teardownWait`), read
+    /// from the stored document with the kind's defaults; the shell never
+    /// reads the spec itself. `Manual` by default, the only strategy that
+    /// never ends a wait without an operator, so a document the driver cannot
+    /// read waits for one.
+    fn teardown_wait(&self, spec: &Value) -> WaitStrategy {
+        let _ = spec;
+        WaitStrategy::Manual
+    }
+    /// Whether what a teardown's first phase removes is gone, for the
+    /// `observe` `teardownWait` strategy: the shell asks again until the
+    /// driver reports nothing remaining, the wait's deadline passes, or the
+    /// reading fails. `ctx` carries the unit's admitted credentials and no
+    /// checkout, because the unit may be torn down from its stored document
+    /// alone. Unsupported by default (the wait is then `observation-failed`).
+    ///
+    /// Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit), Teardown.
+    fn observe_removal(&self, ctx: &RemovalContext, unit: &DesiredUnit) -> DriverResult<Supported<RemovalObservation>> {
+        let _ = (ctx, unit);
         Ok(Supported::Unsupported)
     }
     /// `nyl build`; unsupported by default.
@@ -702,5 +952,86 @@ mod ownership_tests {
         child.namespace = parent.namespace.clone();
         child.path.clear();
         assert!(parent.overlaps(&child));
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn recording(pointer: &str, value: Value) -> KeyInputs {
+        KeyInputs {
+            recorded: BTreeMap::from([(pointer.to_owned(), value)]),
+            ..KeyInputs::default()
+        }
+    }
+
+    /// Catches a driver's recorded fact missing from the stored resolved
+    /// document, where commands that never render source read it.
+    #[test]
+    fn test_recorded_fields_join_the_resolved_spec_as_new_members() {
+        let mut spec = json!({"target": "dev"});
+        let mut inputs = recording("/teardownSettings", json!({"catalogPrunes": true}));
+        inputs.recorded.insert("/a~1b".to_owned(), json!(2));
+        inputs.record_into(&mut spec).unwrap();
+        assert_eq!(
+            spec,
+            json!({"target": "dev", "teardownSettings": {"catalogPrunes": true}, "a/b": 2})
+        );
+    }
+
+    /// Catches a driver overwriting what the engine already used (the
+    /// authored target, `dependsOn`, `approval`) after resolution, or a
+    /// recorded fact with no place to go being skipped.
+    #[test]
+    fn test_recorded_field_may_not_replace_or_miss() {
+        let mut spec = json!({"target": "dev", "nested": {"keep": 1}});
+        for pointer in ["/target", "/nested", "/dependsOn", "/approval", "/timeout"] {
+            assert_eq!(
+                recording(pointer, json!(1)).record_into(&mut spec),
+                Err(RecordError::Occupied {
+                    pointer: pointer.to_owned()
+                }),
+                "{pointer}"
+            );
+        }
+        for pointer in ["/nested/new", "", "/"] {
+            assert!(
+                matches!(
+                    recording(pointer, json!(1)).record_into(&mut spec),
+                    Err(RecordError::NotAMember { .. })
+                ),
+                "{pointer:?}"
+            );
+        }
+        assert_eq!(spec, json!({"target": "dev", "nested": {"keep": 1}}));
+    }
+}
+
+#[cfg(test)]
+mod removal_context_tests {
+    use super::*;
+
+    /// Catches a credential reaching a log or a panic message through the
+    /// derived `Debug` of the context a driver's reading receives.
+    #[test]
+    fn test_removal_context_debug_names_credentials_without_their_values() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let context = RemovalContext {
+            unit: "dev/kubernetes".parse().unwrap(),
+            env: BTreeMap::from([("ARGOCD_AUTH_TOKEN".to_owned(), "s3cret-token".to_owned())]),
+            secrets: BTreeMap::from([("registry".to_owned(), "hunter2".to_owned())]),
+            now,
+            deadline: now,
+        };
+        let shown = format!("{context:?}");
+        assert!(
+            shown.contains("ARGOCD_AUTH_TOKEN") && shown.contains("registry"),
+            "{shown}"
+        );
+        assert!(!shown.contains("s3cret-token") && !shown.contains("hunter2"), "{shown}");
     }
 }

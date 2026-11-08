@@ -60,6 +60,8 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             None,
             args.local,
             wiring.drivers,
+            &crate::orchestration::project::InstanceRequest::default(),
+            None,
         ),
         |environment, _selected, _planned, _unavailable| {
             let mut args = args.clone();
@@ -74,7 +76,7 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 }
 
 fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
-    let session = Session::open(&args.path, &args.environment[0])?;
+    let session = Session::open_offline(&args.path, &args.environment[0], args.local)?;
     let store = if args.local {
         session.offline_store(None)?
     } else {
@@ -92,7 +94,7 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         environment.state_repository = Some(session.resolved.location.repository.clone());
         environment.state_local_path = Some(store.repository_path(&session.resolved.location).display().to_string());
     }
-    session.annotate_report(&mut report);
+    session.annotate_report(&mut report, wiring.clock.now());
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }

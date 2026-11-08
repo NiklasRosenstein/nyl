@@ -1,6 +1,7 @@
 # Reference scenarios
 
-**Status:** acceptance scenarios for M3–M5. See [ROADMAP.md](../ROADMAP.md),
+**Status:** acceptance scenarios for M3–M5, all three running in both tiers
+since M5. See [ROADMAP.md](../ROADMAP.md),
 the [orchestration core contract](orchestration-core.md), the
 [infrastructure units contract](infrastructure-units.md), and the
 [implementation architecture](implementation-architecture.md).
@@ -39,7 +40,7 @@ Everything lives in one per-test temporary directory, as the existing
 | Container registry | Tier 1: fake. Tier 2: a `registry:2` container on an ephemeral port |
 | Terraform backend | OpenTofu's `local` backend with a path inside the temporary directory |
 | Cloud resources | Only the built-in `terraform_data` resource and outputs, so no provider is downloaded |
-| Argo CD | Tier 1: a scripted fake observer. Publish mode needs none |
+| Argo CD and the workload Cluster | Tier 1: a scripted fake observer for `FakePublication`'s `observe` wait, and scripted observed values for it; the real driver reads its observed values through the same script in tier 1 (its readings of Argo CD and of the workload Cluster are tested against local fakes of the Kubernetes API and the Argo CD API server). A publication that does not declare `observe` needs none |
 | Time | An injected clock (see [Clock](#clock)) |
 
 ### Tiers
@@ -49,8 +50,10 @@ The same scenario files run in two tiers. M3's executable platform slice is
 output inspection, no-op repetition, isolated source changes, selector mistakes
 and restoration, and decommissioning through a manually confirmed publication
 teardown that preserves an operator-owned file. M4 runs its image and
-infrastructure units with the real tools in tier 2. Preview templates and
-promotion references join it in their owning milestones.
+infrastructure units with the real tools in tier 2. M5 adds the preview
+scenarios (`reference/preview-closed` and `reference/preview`) and runs them,
+with the platform scenario, in both tiers with the real
+`KubernetesPublication`. Promotion references join in M6.
 
 Run the harness from the repository root:
 
@@ -59,13 +62,15 @@ cargo test -p nyl --test scenario_harness_test
 cargo test -p nyl --features tier2 --test scenario_harness_test
 ```
 
-Tier 2 enables `test-clock` and the test publication driver. Image and
-infrastructure units use the real native drivers; tier 1 keeps its scripted
+Tier 2 enables `test-clock` and registers no fake kinds: image, infrastructure,
+and publication units use the real built-in drivers; tier 1 keeps its scripted
 fakes. Tier 2 runs each command as a separate binary process in a fresh checkout with its own
 home and explicit Git identity, passes time and admitted variables to that
 child only, and checks the same reports, state commits, and publication trees
 as tier 1. Scripted drivers, fault injection, pauses, and steps marked
-`tier: 1` remain exclusive to tier 1.
+`tier: 1` remain exclusive to tier 1. Tier 2 runs no `attest`, `observe`, or
+observe-wait step, because there is no Argo CD or workload Cluster to read: the
+scenarios that do are tier 1 only.
 
 The tiers are:
 
@@ -77,16 +82,32 @@ The tiers are:
 - **Tier 2, the real tools.** The same steps run the real `nyl` binary as
   separate processes. The real `tofu` and `docker buildx` run against each
   scenario's own `registry:2` container on an ephemeral loopback port. The
-  publication driver remains fake until M5. Tier 2 scenarios compile only with
+  publication driver is the built-in `KubernetesPublication`, pushing to the
+  scenario's Git repository. Tier 2 scenarios compile only with
   the `tier2` Cargo feature; a missing `tofu`, `docker buildx`, or registry
   fails the test instead of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
   tools installed (OpenTofu 1.13.2, Terraform 1.9.8, Docker with Buildx, and
   `registry:2` pulled before the tests) runs the native driver tests and
   `cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test`, and is required
-  for merging from M4 on. The normal operating-system matrix runs
+  for merging from M4 on. The two-tier scenarios need nothing else: Argo CD is
+  never read in tier 2, because the scenarios that observe it script their
+  observer and run in tier 1 only, and a publication in `publish` mode reads
+  nothing from a cluster. The normal operating-system matrix runs
   `--features nyl/test-clock,nyl/test-kinds` without native tools, while lint
   still compiles all features. Tests never read environment variables to decide
   whether to run.
+
+- **Tier 3, a real cluster.** The `nyl-e2e` suite (`crates/nyl-e2e`) runs one
+  scenario against a kind cluster, a local registry, and a Git server that both
+  the host and the cluster reach, with each reconciler: Argo CD read through the
+  Kubernetes API (`argocd-kubernetes`), Argo CD read through its API server with
+  a token (`argocd-api`), and Nyl's direct reconciler (`direct`). The real binary builds an image, applies OpenTofu, and publishes a
+  Release that consumes both; the suite then makes the reconciler run it, checks
+  `attest` and `observe`, changes an input, reconciles again, and tears down
+  with the `observe` wait. Argo CD is therefore read for real here, which tiers 1
+  and 2 never do. The `e2e` job of `ci.yaml` runs it per variant; it is not part
+  of `cargo test --workspace`, which runs only the suite's own unit tests.
+  Running it locally: [`crates/nyl-e2e/README.md`](../crates/nyl-e2e/README.md).
 
 ### Fake kinds
 
@@ -99,14 +120,26 @@ in for:
 | --- | --- | --- |
 | `FakeImage` | `OciImage` | Returns a digest derived from the execution key; publishes a `ContainerImage` artifact; declares `build` |
 | `FakeInfra` | `OpenTofu` | Keeps resources and outputs in a JSON file per backend key; reports plan and destroy digests for `bind: plan`; tears down |
-| `FakePublication` | `KubernetesPublication` | Writes a tree with an ownership index to the deploy branch and runs both teardown phases against the fake observer |
+| `FakePublication` | `KubernetesPublication` | Publishes through the same code as the real driver, and adds scripted outcomes, `observe: {}`, and scenario-declared teardown settings; runs both teardown phases against the fake observer; its `nyl build` is the real driver's |
 
-The scenario files name the real kinds; the harness maps them to fakes for the
-milestones that need it. Tier 1 keeps the fakes for images and OpenTofu even
-after the real drivers exist, so it never needs the tools.
+The scenario files name the real kinds; the harness maps them to fakes where a
+scenario scripts them. Tier 1 keeps the fakes for images and OpenTofu even
+after the real drivers exist, so it never needs the tools. `FakePublication`
+stays because a scenario can script a publication's outcome and answer
+`observe` with the fake Argo CD observer, which the real driver reads from Argo CD instead (its readings and attestations are tested against local fakes, not scripted per scenario); every
+reached scenario also runs in tier 1 against the real
+`KubernetesPublication` driver (fake images and infrastructure around it), so
+the walkthroughs and the reference scenarios hold the real driver to the same
+checks. The real driver's observed values are the one live read it cannot
+make in tier 1: they go through the scenario's `observe` script, like the fake's. The reference project's target is
+teardown-ready (its catalog prunes and its Namespaces are deleted with their
+Application), because the real driver reads readiness from the rendered
+target.
 
-Observe mode against a real Argo CD needs a cluster and stays a manual check;
-tier 1's fake observer covers its decisions.
+Observing a real Argo CD (`observe: {}`) needs a cluster and stays a manual check.
+The real driver's two ways of reading it (the Kubernetes API and the Argo CD
+API server) run against local HTTP fakes on an ephemeral port in the driver's
+and the command's tests; tier 1's fake observer covers the wait's decisions.
 
 ### Clock
 
@@ -118,15 +151,20 @@ global clock.
 - Tier 2 builds `nyl` with a `test-clock` Cargo feature. Only with that feature,
   `nyl-cli` reads the current time from `NYL_TEST_NOW` and turns waits into
   clock advances. Tests set the variable per child process, so they stay
-  parallel-safe. Release builds have no clock override.
+  parallel-safe. Release builds have no clock override. A wait advances the
+  clock of its own process only, so a scenario that asserts a time after a
+  wait sets the clock first (`clock: {set: ...}`), which both tiers share.
 
 ### Scenario files
 
 Scenarios live under `nyl/tests/scenarios/`, one directory each:
 `reference/<name>/` for the whole workflows below, `walkthroughs/<name>/`
 for the [orchestration core walkthroughs](orchestration-core.md#walkthroughs)
-and the other contract walkthroughs, and `recovery/<name>/` for the
-[crash-injection scenarios](#crash-injection).
+and the other contract walkthroughs, `recovery/<name>/` for the
+[crash-injection scenarios](#crash-injection), and `examples/<name>/` for the
+projects the documentation's guides present, such as the
+[end-to-end example](../nyl/book/src/content/docs/orchestration/end-to-end-example.md),
+whose commands run here in both tiers so the guide cannot drift from the product.
 
 ```text
 platform/
@@ -151,10 +189,21 @@ steps:
 
 Top-level fields are `contract`, `milestone`, optional `tiers` (default
 `[1, 2]`), optional `project` (default `project/`, a path relative to the
-scenario directory, so scenarios can share one project), and `steps`. Before
+scenario directory, so scenarios can share one project), optional
+`publication` (`real` to run in tier 1 with the built-in publication driver
+only, for a scenario that depends on the settings that driver derives from its
+render, which the test kind states in its declaration instead; `fake` to run
+it with the test kind only, for a scenario that scripts the publication's
+reconcile outcome, which the built-in driver, running for real, cannot be made
+to give; default both),
+and `steps`. Before
 the first commit, the harness replaces `%SCENARIO_TMP%` in project and patch
 files with a per-scenario temporary directory, `%PROJECT_URL%` with the URL
-of `project.git`, and `%REGISTRY%` with the registry's host and port. The
+of `project.git`, and `%REGISTRY%` with the registry's host and port. Besides
+`PATH` and the Docker selectors, the harness admits `KUBECONFIG`, naming a file
+that does not exist: a unit that declares `observe: {}` admits it for `nyl attest`, and an
+admitted variable must be set wherever the unit runs, while no scenario reads
+Argo CD. The
 harness knows every step kind and field this format documents, including those
 of later milestones, and validates every scenario against them at every
 milestone. It runs only the scenarios whose `milestone` it has reached and
@@ -167,15 +216,16 @@ and to the harness's validation, together with the first scenario using them.
 | `commit: {branch, message, apply, delete}` | Copies the files under `apply` over the working clone, removes the paths in `delete`, commits, and pushes |
 | `branch: {name, from}` | Creates and pushes a branch |
 | `squash-merge: {branch, into}` | Squash-merges and pushes, keeping the branch |
-| `delete-branch: <name>` | Deletes a branch in `project.git` |
+| `delete-branch: <name>` | Deletes a branch in `project.git` and prunes what no ref names anymore, as a host does, so a commit only that branch carried can no longer be fetched |
 | `clock: {advance: <duration>}` or `{set: <timestamp>}` | Moves the injected clock |
-| `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result |
+| `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result. The orchestration commands run in-process in tier 1; any other command, such as `publish-tree`, runs as the binary in both tiers, and `expect` then reads its files and output, not a report |
 | `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `detect-drift`, `teardown`, and from M5 `observe`), returning `outcome` (`succeeded`, `failed`, `uncertain`, and for `detect-drift` also `drifted`); `observe` returns `succeeded` with the observed values in `outputs`, `pending`, or `failed` without a category |
 | `file: {path, content}` | Changes a file beneath the scenario's temporary directory, standing in for a change made outside Nyl, such as drift; Command units reach that directory through `env.passthrough: [SCENARIO_TMP]` |
 | `fault: {point, unit}` | Tier 1: the next `nyl` step dies at `point`, as a forced kill would: `after-effect` or `before-checkpoint` of `unit` (required); `before-lease-update`, where `unit` is optional and names the phase that starts that unit's batch, and without it the first phase; or `before-push` (no `unit`). That step has `killed: true` instead of `exit`, and fails when its fault never fired |
 | `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease` before a `--wait-lease` poll, or a fault point), leaving it running; the commits other steps write meanwhile do not count toward its `commits` |
 | `resume: <id>` | Lets a paused invocation continue and waits for it; `exit` and `expect` check its result |
 | `ref: {delete: <ref>}` | Deletes a ref in the state repository, as someone with push access could |
+| `ref: {set: <ref>, to: <branch>}` | Points a ref of `project.git` at the tip of a branch, such as the `refs/pull/<n>/head` a host keeps for a pull request after its branch is deleted |
 
 `expect` holds only user-visible results:
 
@@ -188,8 +238,11 @@ and to the harness's validation, together with the first scenario using them.
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
 | `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit, or `none` for a held marker or a unit held without an incarnation); from `nyl status`, `condition-state` (the condition shown next to the unit's state, or `null`) and `drift: {result}` (the latest drift record shown) |
 | `codes` | Stable error and warning codes the invocation reported |
+| `messages` | Text the invocation printed on stdout or stderr: each entry is a substring, such as a name a message must give |
 | `get` | `{args, value}` or `{args, json: {<pointer>: <value>}}` for a `nyl get` invocation after the step |
-| `deploy` | Files and commits on a deploy branch |
+| `deploy` | Files on a deploy branch after the step: `contains` (patterns that match a file), `unchanged` (the files that match are the ones the step started with), `absent` (patterns that match no file), and `mentions` (per file pattern, texts that appear in at least one matching file: a literal, or the arguments of a `nyl get` invocation, whose value must appear) |
+| `keep-refs` | The keep refs of preview instances in `project.git` (`refs/nyl-keep/`): `count`, how many exist, and `kept`, revisions such as `pr-124` whose commit has one |
+| `source` | The commit a reconcile ran its environment at, as a Git revision of `project.git` |
 | `promotion` | The PromotionRecord a `promote` step wrote: `path`, `sourceCommit` as a Git revision of `project.git` such as `main~1`, and `from.run` as the `id` of the `nyl` step whose run recorded the promoted state |
 
 Tier 2 also checks the registry's manifests and `tofu output`. Both tiers read
@@ -283,7 +336,7 @@ examples/platform/
     plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
     reconcile.yaml           # push to main: reconcile dev; promote dev-to-prod and reconcile prod behind an approval gate
     preview.yaml             # pull request opened/updated: reconcile -e pr-<n> --template preview --param pr=<n>; closed: state delete --teardown
-    previews-maintenance.yaml   # nightly: nyl reconcile --template preview
+    previews-maintenance.yaml   # nightly: nyl reconcile --template preview, then the shared catalog's writer: nyl build kubernetes -e <a live instance> -- --shared-catalog --push
 ```
 
 | Unit | dev | prod | preview |
@@ -342,7 +395,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: prod}
 spec:
-  argocdRef: {name: prod}
+  reconciler: {argocd: {instanceRef: {name: prod}}}
   releaseInputs:
     web/web:
       image: {fromPromotion: {value: webImage}}   # from the record that supplied prod's source
@@ -412,7 +465,7 @@ metadata:
     preview: 'true'
 spec:
   target: {{ values.target | tojson }}    # dev, prod, or the preview template's inline target
-  mode: publish                           # teardownWait defaults to manual
+  # no `observe`, so teardownWait defaults to manual
   {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% endif %}
 ---
 # dev.yaml: DeploymentTarget dev (excerpt)
@@ -437,7 +490,7 @@ spec:
     target:
       inline:
         clusterRef: {name: dev}
-        argocdRef: {name: dev}
+        reconciler: {argocd: {instanceRef: {name: dev}}}
         catalogApplication:
           shared: {name: previews}   # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}
@@ -475,7 +528,7 @@ spec:
   its name; the Release reads the secret by name.
 - The Cluster, ApplicationGroup, and catalog settings are teardown-ready:
   catalog `syncPolicy.automated` with `prune: true`, `Foreground` deletion,
-  and namespace `deletePolicy: Automatic`. The ApplicationGroup derives
+  and namespace `prunePolicy` and `deletePolicy` both `Automatic`. The ApplicationGroup derives
   Application and AppProject names from the target's name, and each preview
   sets its own namespace, so no preview can collide with dev or delete its
   namespace.
@@ -506,9 +559,9 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | --- | --- | --- |
 | `main` | People, through pull requests | Nyl: dev runs from its worktree; `protectedRefs` default |
 | `pr-<n>` | People | Nyl: each preview instance runs from its pull request job's worktree, recorded in state (`allowUnprotectedSource`) |
-| `refs/nyl/<instance>/keep` | Nyl, on every instance reconcile; removed by `state delete` | Nyl: teardown after the branch is gone |
+| `refs/nyl-keep/<keepId>/<commit>` | Nyl, when an instance records a new source commit (the previous commit's ref is removed after the record lands); removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
-| `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the fleet reconcile publishes the shared catalog under `_nyl/shared/previews/` | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
+| `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the first instance's publication creates the shared catalog under `_nyl/shared/previews/`, and the nightly job's `nyl build -- --shared-catalog --push` replaces it when it differs | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
 | `nyl/previews` | Nyl: every instance's state under its `state.path` | Nyl |
 | `refs/nyl/<env>/lease`, `refs/nyl/<env>/runs/<run-id>`, `refs/nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
@@ -532,7 +585,7 @@ through the fenced push.
 | 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
 | 5 | `nyl reconcile -e dev` → 0 | Wave 1 runs `network`, `web-image`, `seed`; wave 2 runs `database` with `network`'s `vpcId`; wave 3 runs `kubernetes`, which publishes `dev/` with the image's digest reference and the database connection. One desired and one observed commit |
 | 6 | `nyl status -e dev` → 0 | Every unit is current; the status names the publication commit and the image reference |
-| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference` | Value forms resolve like `fromUnit` |
+| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference`; then `nyl publish-tree --target static` → 0 | Value forms resolve like `fromUnit`, and the published `dev/web/` files carry those two values (step 5's `mentions`). The same Release renders with static inputs in the target `static`, which no environment uses, so without orchestration: its tree carries the written image and host |
 | 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no transition or publication commit; only its lease and run refs come and go |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
@@ -550,7 +603,7 @@ through the fenced push.
 
 Tier 1 variants:
 
-- **Observe mode.** With `mode: observe`, step 16 waits on the fake observer.
+- **Observing the reconciler.** With `observe: {}`, step 16 waits on the fake observer.
   The observer first reports `observation-failed`: the teardown is uncertain
   with that reason, and `status` suggests fixing the observer or confirming.
   `--confirm-removed` then completes it as in step 18.
@@ -607,22 +660,32 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | The instance is created: its `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, recording `pr-123`'s commit as its source and `expiresAt` now plus 7 days |
-| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; keep ref `refs/nyl/pr-123/keep` points at `pr-123`'s tip |
+| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; the template sets `keepSource: true`, so the keep ref of `pr-123`'s tip commit exists in the source repository |
 | 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
-| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep ref are removed |
-| 8 | From the `main` checkout: `nyl reconcile -e pr-124` → 0 | The run renders `pr-124` at its recorded commit, not at `main`, and says so; nothing executes |
-| 9 | `nyl get environments` | Lists `dev`, `prod`, and `pr-124`; `pr-123` is gone |
+| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files beneath `pr-123/` (the shared catalog prunes its objects, and its manifest stays); then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep refs are removed |
+| 8 | From the `main` checkout: `nyl reconcile -e pr-124` → 0 | The run renders `pr-124` at its recorded commit, not at `main`, and reports that commit as its source; nothing executes |
+| 9 | `nyl get environments` | Lists `dev`, `prod`, and `pr-124`; `pr-123` is gone. The scenario file asks for each name in turn (`get environments pr-124` exits 0, `get environments pr-123` exits 1), because its steps pass the checkout as the last argument, which `get environments` reads as a name when none is given |
 
 Tier 1 variants:
 
-- **No keep ref.** With `keepSource: false`, step 7 fails and suggests
-  `--source`; `nyl state delete -e pr-123 --teardown --source main` warns about
-  the substituted source, records it, and succeeds.
+- **No keep ref.** The template omits `keepSource`, as is the default, so
+  nothing keeps the commit but its branch: step 3 pushes no keep ref. With the
+  branch gone and no ref of the host naming the commit, step 7 fails and
+  suggests `--source`; `nyl state delete -e pr-123 --teardown --source main`
+  takes the units' files, an OpenTofu unit's pinned `source` included, from
+  `main`, warns (`NYL-SOURCE-OVERRIDE`), records the substitution, and
+  succeeds. Scenario `reference/preview-no-keep-ref` runs it.
+- **Pull request ref.** The same template, on a host that keeps the pull
+  request's head under `refs/pull/123/head` after the branch is deleted, as
+  GitHub does: step 7 succeeds with no keep ref and no `--source`, because the
+  close job at `main` fetches the recorded commit by its id from the origin.
+  Scenario `reference/preview-pull-request-ref` runs it.
 - **Name collision.** With an `applicationNameTemplate` that ignores the
   target's name, `nyl validate` rejects the template because two instances
-  would generate the same Argo CD names.
+  would generate the same Argo CD names. Scenario
+  `reference/preview-name-collision` runs it.
 
 ## Scenario 3: preview expiry
 
@@ -641,13 +704,33 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 
 Tier 1 variants:
 
-- **Not teardown-ready.** With the default namespace `deletePolicy: Confirm`,
-  `state init --template` warns, and step 2 reports `pr-124` as pending
-  teardown with the reason and exits 2, until a run passes
-  `--allow-incomplete`.
+- **Not teardown-ready.** With the default namespace `prunePolicy` and `deletePolicy: Confirm`,
+  step 2 reports `pr-124` as pending teardown with the reason
+  (`NYL-TEARDOWN-INCOMPLETE`) and exits 2, until a run passes
+  `--allow-incomplete`. `state init --template` warns about it at once when
+  the publication states its settings in its declaration (the fake
+  publication's `teardownSettings`); the real publication records them when
+  its unit resolves, which waits for the outputs it reads, so its readiness
+  warning (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) comes with an explicit
+  `reconcile` or `plan` of the instance, and the scenario asserts it there.
+  Scenario `reference/preview-not-ready` runs it with the real driver.
 - **Manual wait.** With `kubernetes` on the `manual` default, `state init
-  --template` warns that instances cannot expire unattended, and step 2 stops
-  after phase 1 with exit 2.
+  --template` warns (`NYL-TEARDOWN-WAIT-MANUAL`, from the declaration, before
+  anything ran) that instances cannot expire unattended, and step 2 stops
+  after phase 1 with exit 2 until `--confirm-removed`. Scenario
+  `reference/preview-manual-wait` runs it with both publication drivers.
+
+Scenario 2 runs as `reference/preview-closed` and scenario 3 as
+`reference/preview`, both in two tiers. The preview project of these scenarios
+is `reference/preview`. It repeats the
+platform project with the `preview` template, one explicit ArgoCDInstance, and
+an ApplicationGroup whose Application and AppProject names come from the
+target's name. Its group declares its labels in block style, a workaround for
+[#228](https://github.com/NiklasRosenstein/nyl/pull/228) (a templated
+`projectTemplate` drops a group whose labels are not block style), to remove
+when that fix lands. A step asks whether
+an instance is live with `nyl get environments <name>`, which exits 0 for an
+environment that exists and 1 for one that does not.
 
 ## Coverage by milestone
 
@@ -655,15 +738,18 @@ Tier 1 variants:
 | --- | --- |
 | M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants; the [crash-injection scenarios](#crash-injection) at every killable fault point |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
-| M5 | All three scenarios in both tiers, with the real `KubernetesPublication` |
+| M5 | All three scenarios in both tiers, with the real `KubernetesPublication`: `reference/platform` (scenario 1, with the exit criterion's published values and static render), `reference/preview-closed` (scenario 2), and `reference/preview` (scenario 3), plus the tier-1 variants `preview-manual-wait`, `preview-not-ready`, `preview-no-keep-ref`, and `preview-name-collision`; the `attested-evidence` and `observed-value` walkthroughs also run with the real driver |
 | M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path; a fifth adds `prod-hotfix` and `hotfix-to-prod`, promotes a fix from `release/prod`, has the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, and covers `--supersede` with a range |
+| M10 | The `nyl-e2e` crate runs the platform scenario's Kubernetes publication three ways against Kind with a local registry, changing only the target's reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server ([direct reconciler](orchestration-core.md#end-to-end-harness)); tier 1 gains a `FakePublication` mode that mimics a direct target's attestation and teardown wait |
 
 The reference project grows with the milestones. A milestone's fixture omits
-resources whose kinds it does not have yet: M3 and M4 run scenario 1 without
-the preview template, the PromotionPath, and prod's promoted source, so step
-1's per-instance name check and step 21 join in M5 and M6. In tier 2, the
-`test-kinds` Cargo feature registers the fake kinds in the `nyl` binary, which
-is how M4 runs `FakePublication` through the real binary.
+resources whose kinds it does not have yet: M3 and M4 ran scenario 1 without
+the preview template, the PromotionPath, and prod's promoted source. The
+preview template joined in M5, in its own project (`reference/preview`), where
+`reference/preview-name-collision` checks step 1's per-instance names; step 21
+joins in M6 with the PromotionPath. The `test-kinds` Cargo feature alone
+registers the fake kinds in the `nyl` binary, which is how M4 ran
+`FakePublication` through it; with `tier2` the binary uses the real drivers.
 
 A scenario's steps change together with the contract rules they prove, as the
 implementation architecture requires for walkthroughs.

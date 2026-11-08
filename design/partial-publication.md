@@ -48,6 +48,14 @@ input, Git, publication, and carried-state digests the index records for them. A
 has no target-wide `sourceCommit`; commit trailers identify the operation's
 source revision, baseline, and selection.
 
+A version 3 index written by an orchestrated publication also records the
+owning unit incarnation (`owner`: environment, unit, uid), as the
+[Kubernetes publication unit](orchestration-core.md#kubernetes-publication-unit)
+describes; only version 3 can name an owner. An index without one, version 2 or
+version 3 as `publish-tree` writes it, remains readable; the first orchestrated
+publication over one records its owner. A publication that records no owner
+refuses a prefix whose index names one.
+
 Version 2 indexes remain readable and reconcilable. One full publication seeds
 the metadata before partial publication is possible. Missing files, hash
 mismatches, incompatible ownership, and unsupported metadata fail closed. A full

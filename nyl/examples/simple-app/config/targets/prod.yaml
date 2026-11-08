@@ -3,6 +3,7 @@ kind: DeploymentTarget
 metadata:
   name: prod
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: local
   values:

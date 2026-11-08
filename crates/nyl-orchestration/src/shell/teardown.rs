@@ -185,10 +185,35 @@ fn incarnations(environment: &EnvironmentName, units: &[UnitName]) -> Finding {
 /// the lifecycle options, `--source`, `--reason`, `--wait-lease`, and the
 /// cancellation.
 pub fn state_delete(context: &RunContext<'_>, request: &RunRequest, teardown: bool) -> StateOperationReport {
+    let Deletion { mut report, teardown } = state_delete_detailed(context, request, teardown);
+    if let Some(teardown) = teardown {
+        // A teardown that completed still has warnings for the person running the command,
+        // such as a `--source` substitution or a released unit; the stopped case copied
+        // them already, and the helper adds each once.
+        copy_warnings(&mut report, &teardown);
+        report.details.insert(
+            "teardown".to_owned(),
+            serde_json::to_value(&teardown).expect("reports serialize"),
+        );
+    }
+    report
+}
+
+/// What [`state_delete_detailed`] did: the deletion's report and the
+/// teardown that ran first, when `--teardown` ran one.
+pub struct Deletion {
+    pub report: StateOperationReport,
+    pub teardown: Option<RunReport>,
+}
+
+/// [`state_delete`] with the teardown's own typed report, for a caller that
+/// renders the removal of an instance itself, such as an expired one.
+pub fn state_delete_detailed(context: &RunContext<'_>, request: &RunRequest, teardown: bool) -> Deletion {
     let base = context.base;
     let environment = &request.environment;
     let location = &request.location;
     let new_report = || StateOperationReport::new(environment.clone(), Operation::StateDelete.as_str());
+    let refuse = |report: StateOperationReport| Deletion { report, teardown: None };
     let mut torn_down = None;
     if teardown {
         // Q23: a broken lease whose run is not imported refuses before the
@@ -197,17 +222,17 @@ pub fn state_delete(context: &RunContext<'_>, request: &RunRequest, teardown: bo
         match base.store.coordination(location, environment) {
             Ok(coordination) => {
                 if let Some(broken) = lease_rule::unimported_break(&coordination) {
-                    return new_report().refused(Finding::new(
+                    return refuse(new_report().refused(Finding::new(
                         Code::LeaseBroken,
                         format!(
                             "the lease of {environment} was broken and run {} by {} is not imported yet",
                             broken.run, broken.runner
                         ),
                         format!("import it with `nyl recover -e {environment}`, then run `nyl state delete` again"),
-                    ));
+                    )));
                 }
             }
-            Err(error) => return new_report().refused(store_error(environment, &error)),
+            Err(error) => return refuse(new_report().refused(store_error(environment, &error))),
         }
         let mut teardown_request = request.clone();
         teardown_request.mode = RunMode::Teardown {
@@ -217,11 +242,14 @@ pub fn state_delete(context: &RunContext<'_>, request: &RunRequest, teardown: bo
         // The gate is state, not the report's exit.
         let snapshot = match read(base, location, environment) {
             Ok(snapshot) => snapshot,
-            Err(finding) => return new_report().refused(finding),
+            Err(finding) => return refuse(new_report().refused(finding)),
         };
         let left = remaining(&snapshot);
         if !left.is_empty() {
-            return stopped(new_report(), environment, &report, &left);
+            return Deletion {
+                report: stopped(new_report(), environment, &report, &left),
+                teardown: Some(report),
+            };
         }
         torn_down = Some(report);
     }
@@ -230,21 +258,51 @@ pub fn state_delete(context: &RunContext<'_>, request: &RunRequest, teardown: bo
         wait: request.wait,
         cancellation: request.cancellation.clone(),
     };
-    let mut report = with_lease(
+    let report = with_lease(
         base,
         environment,
         Operation::StateDelete,
         location,
         &requested,
-        |held, report| delete_holding(base, environment, location, held, &requested, report),
+        |held, report| {
+            delete_holding(
+                base,
+                environment,
+                location,
+                held,
+                &requested,
+                request.keep_prefix.as_deref().map(|prefix| (context.sources, prefix)),
+                request.lifecycle.expired,
+                report,
+            )
+        },
     );
-    if let Some(teardown) = torn_down {
-        report.details.insert(
-            "teardown".to_owned(),
-            serde_json::to_value(&teardown).expect("reports serialize"),
-        );
+    Deletion {
+        report,
+        teardown: torn_down,
     }
-    report
+}
+
+/// The warnings of `teardown` for the person running `state delete`: each
+/// environment's own, and each unit's prefixed with the unit. A warning already
+/// in `report` is not added again, so both outcomes can use this.
+fn copy_warnings(report: &mut StateOperationReport, teardown: &RunReport) {
+    let mut add = |finding: Finding| {
+        if !report.warnings.contains(&finding) {
+            report.warnings.push(finding);
+        }
+    };
+    for run in &teardown.environments {
+        run.warnings.iter().cloned().for_each(&mut add);
+        for (unit, result) in &run.units {
+            for finding in &result.warnings {
+                add(Finding {
+                    message: format!("{unit}: {}", finding.message),
+                    ..finding.clone()
+                });
+            }
+        }
+    }
 }
 
 /// `state delete --teardown` stopped after its teardown: units remain. Exit 1
@@ -264,36 +322,33 @@ fn stopped(
     };
     for run in &teardown.environments {
         report.errors.extend(run.errors.iter().cloned());
-        report.warnings.extend(run.warnings.iter().cloned());
-        for (unit, result) in &run.units {
-            report.warnings.extend(result.warnings.iter().map(|finding| Finding {
-                message: format!("{unit}: {}", finding.message),
-                ..finding.clone()
-            }));
-        }
     }
+    copy_warnings(&mut report, teardown);
     if !left.is_empty() {
         report.errors.push(incarnations(environment, left));
     }
-    report.details.insert(
-        "teardown".to_owned(),
-        serde_json::to_value(teardown).expect("reports serialize"),
-    );
     report
 }
 
 /// The deletion itself, holding the lease.
+#[allow(clippy::too_many_arguments)] // The state operation's context, its lease and request, and the instance's keep ref and expiry.
 fn delete_holding(
     context: &Context<'_>,
     environment: &EnvironmentName,
     location: &nyl_core::orchestration::state::StateLocation,
     held: &mut super::lease::HeldLease,
     requested: &Requested,
+    keep: Option<(&dyn nyl_core::orchestration::ports::SourceResolver, &str)>,
+    expired: Option<nyl_core::orchestration::time::Timestamp>,
     report: &mut StateOperationReport,
 ) -> Result<(), Finding> {
     let snapshot = read(context, location, environment)?;
     check_record(context.store, snapshot.record.as_ref(), environment, location)?;
     check_remote_tips(context.store, location, environment)?;
+    // The removal of an expired instance repeats its decision under this lease too.
+    if let Some(decided_on) = expired {
+        crate::rules::expiry::guard_removal(environment, decided_on, snapshot.record.as_ref())?;
+    }
     let left = remaining(&snapshot);
     if !left.is_empty() {
         return Err(incarnations(environment, &left));
@@ -339,6 +394,20 @@ fn delete_holding(
     }
     commit(context, location, held, &snapshot, summary, changes, requested, report)?;
     report.details.insert("removed".to_owned(), json!(removed));
+    // The instance's source no longer matters once nothing of it remains, and
+    // a keep ref that cannot be removed is no reason to keep the state.
+    if let Some((sources, prefix)) = keep {
+        match sources.release(prefix, None) {
+            Ok(foreign) => report.warnings.extend(
+                foreign
+                    .iter()
+                    .map(|reference| super::state::foreign_keep_ref(reference)),
+            ),
+            Err(error) => report
+                .warnings
+                .push(super::state::keep_release_warning(prefix, &error.to_string())),
+        }
+    }
     // The leftover records: evidence refs and every signal ref; the state
     // refs and their history stay (Q14).
     for state in &coordination.evidence {

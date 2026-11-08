@@ -10,7 +10,6 @@ the removal release; nothing else changes when you do.
 | --- | --- | --- | --- |
 | `Cluster` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | 0.6.0 | a future release |
 | `Release` under `apiVersion: k8s.gitops.nyl/v1` | `apiVersion: k8s.nyl/v1` | 0.6.0 | a future release |
-| `nyl render --context` | nothing: `render` never connects to Kubernetes | 0.6.0 | a future release |
 | `nyl.niklasrosenstein.github.com/apply-policy-scope` annotation on Kyverno policies | `k8s.nyl/apply-policy-scope` | 0.7.0 | a future release |
 | Release state Secrets labelled `nyl.niklasrosenstein.github.com/release` and `nyl.niklasrosenstein.github.com/revision` | `k8s.nyl/release` and `k8s.nyl/revision`, which `nyl apply` records | 0.7.0 | a future release |
 | Published baselines whose catalog carries `nyl.niklasrosenstein.github.com/publication-context` | `k8s.gitops.nyl/publication-context`, which publishing the target again records | 0.7.0 | a future release |

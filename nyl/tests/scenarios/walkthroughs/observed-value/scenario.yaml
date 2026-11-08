@@ -28,7 +28,7 @@ steps:
       current: [kubernetes]
       observationsChanged: [kubernetes]
       get:
-        args: [observation, kubernetes/ingressIp, -e, dev]
+        args: [get, observation, kubernetes/ingressIp, -e, dev]
         value: 203.0.113.10
 
   # The load balancer changes its address by itself: the publication's
@@ -51,7 +51,7 @@ steps:
       codes: [NYL-OBSERVATION-FAILED]
       commits: {desired: 0, observed: 0}
       get:
-        args: [observation, kubernetes/ingressIp, -e, dev]
+        args: [get, observation, kubernetes/ingressIp, -e, dev]
         value: 203.0.113.20
 
   # A scheduled `nyl observe`, in a job that holds the read credentials,
@@ -88,5 +88,5 @@ steps:
       executed: [kubernetes]
       current: [dns]
       get:
-        args: [observation, kubernetes/ingressIp, -e, dev]
+        args: [get, observation, kubernetes/ingressIp, -e, dev]
         value: 203.0.113.30

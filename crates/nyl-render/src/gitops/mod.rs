@@ -1,16 +1,20 @@
 //! Project discovery and compilation support for Kubernetes GitOps workflows.
 
+pub mod application_purge;
 pub mod applications;
 pub mod argocd;
 pub mod direct;
 pub mod direct_inputs;
 pub mod discovery;
 pub mod inputs;
+pub mod instances;
 pub mod layout;
+pub mod observation;
 pub mod project_scope;
 pub mod provenance;
 pub mod publication;
 pub mod reconcile;
+pub mod shared_catalog;
 pub mod source_locks;
 pub mod tree;
 pub mod units;
@@ -32,14 +36,14 @@ pub use layout::{
 };
 pub use reconcile::{
     reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, DesiredFiles,
-    ReconcileOptions, RenderIndex, RenderIndexPublication,
+    ReconcileOptions, RenderIndex, RenderIndexOwner, RenderIndexPublication,
 };
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,
     compile_target_tree_cached_with_observer_and_options, compile_target_tree_cached_with_options,
     compile_target_tree_recorded, compile_target_tree_with_options, validate_compiled_argocd_names,
-    validate_gitops_inventory, CompiledTargetTree, ReleaseProgress, TargetDependencies, TreeRenderObserver,
-    TreeRenderOptions,
+    validate_compiled_direct_targets, validate_gitops_inventory, CompiledTargetTree, ReleaseProgress,
+    TargetDependencies, TreeRenderObserver, TreeRenderOptions,
 };
 pub use tree::{namespace_matches_any, source_matches};
 mod cluster;

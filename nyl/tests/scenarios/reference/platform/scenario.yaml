@@ -1,5 +1,8 @@
-# The M3 slice of reference scenario 1. Native drivers, templates, and
-# promotion references are added by their owning M4-M6 milestones.
+# Reference scenario 1, the platform environment: dependency waves, output
+# inspection, repeated runs, isolated source changes, a selector mistake and
+# its repair, and decommissioning. Runs in tier 1 with fake images and
+# OpenTofu, with the fake and the built-in publication driver, and in tier 2
+# with every real tool. Promotion references join in M6.
 contract: design/reference-scenarios.md#scenario-1-platform-environment
 milestone: M3
 steps:
@@ -21,7 +24,16 @@ steps:
     expect:
       executed: [network, web-image, seed, database, kubernetes]
       commits: {desired: 1, observed: 1}
-      deploy: {branch: deploy, contains: ['dev/web/**', 'dev/_nyl/index.json', 'dev/state/notes.txt']}
+      deploy:
+        branch: deploy
+        contains: ['dev/web/**', 'dev/_nyl/index.json', 'dev/state/notes.txt']
+        # One reconcile built the image, applied OpenTofu, and published
+        # manifests that carry the image's digest reference and the
+        # database's connection host.
+        mentions:
+          'dev/web/**':
+            - [get, artifact, web-image/image, -e, dev, --pointer, /reference]
+            - [get, output, database/connection, -e, dev, --pointer, /host]
       units:
         network: {uid: new, receipt: current}
         database: {uid: new, receipt: current}
@@ -35,6 +47,18 @@ steps:
       get:
         args: [get, output, database/connection, -e, dev, --pointer, /port]
         value: 5432
+  # The same Releases render with static inputs in a target no environment
+  # uses, so without orchestration: the digest and the host are written values.
+  - nyl: [publish-tree, --target, static]
+    exit: 0
+    expect:
+      deploy:
+        branch: static
+        contains: ['static/web/**', 'static/_nyl/index.json']
+        mentions:
+          'static/web/**':
+            - 'registry.example.invalid/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+            - db.static.example.invalid
   - nyl: [reconcile, -e, dev]
     exit: 0
     expect:

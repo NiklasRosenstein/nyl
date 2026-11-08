@@ -61,7 +61,7 @@ fn test_dependency_wave_runs_once_then_changes_nothing() {
     let host: UnitInputSource =
         serde_json::from_value(serde_json::json!({"unit": "database", "output": "host"})).unwrap();
     assert!(matches!(
-        inspect::get_value(&dev(), &snapshot, &host, false).unwrap(),
+        inspect::get_value(&dev(), &snapshot, &host, false, chrono::Utc::now()).unwrap(),
         GetValue::Value(serde_json::Value::String(_))
     ));
     let before = inspect::snapshot(harness.store.as_ref(), &harness.location, Some(&initial)).unwrap();

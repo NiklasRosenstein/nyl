@@ -6,12 +6,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::cli::commands::cluster::{
-    load_cluster_kube_config, resolve_target_cluster_from_inventory, ResolvedTargetCluster,
+    load_cluster_kube_config, resolve_cluster_source, resolve_target_cluster_from_inventory, ClusterSource,
+    ResolvedTargetCluster,
 };
 use nyl_render::{
     config::ProjectConfig,
-    gitops::{discover_gitops_inventory, resolve_deployment_target_name},
-    kubernetes::{KubeRsClient, ResourceKey},
+    kubernetes::{KubeClient, KubeRsClient, ResourceKey},
     render::{cache, prepare_manifests_for_output, RenderPathMode, RenderRequest, RenderSession},
     resources::Release,
     NylError, Result,
@@ -105,8 +105,9 @@ pub struct RenderArgs {
     #[arg(long, value_delimiter = ',')]
     pub kube_api_versions: Vec<String>,
 
-    /// Deprecated and ignored: `nyl render` never connects to Kubernetes
-    #[arg(long, hide = true)]
+    /// Kubernetes context whose live capabilities render the manifests when no GitOps
+    /// configuration is declared. With a target, `nyl render` never connects and ignores it.
+    #[arg(long)]
     pub context: Option<String>,
 }
 
@@ -157,9 +158,15 @@ pub struct RenderPreflightResult {
     pub destination_namespace: Option<String>,
     pub strip_empty_metadata_labels: bool,
     pub resolved_target: Option<ResolvedTargetCluster>,
+    /// The server version of a cluster reached by `--context` without GitOps
+    /// configuration; validation uses it in place of a Cluster's.
+    pub live_kube_version: Option<String>,
     pub duplicates: HashMap<ResourceKey, usize>,
     pub kube_client: Option<KubeRsClient>,
     pub raw_client: Option<Client>,
+    /// The publication destination of the selected target, which a release
+    /// revision applied for it records.
+    pub release_publication: Option<nyl_render::kubernetes::ReleasePublication>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -175,11 +182,20 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .validate_outputs(false, &[PathBuf::from(&options.common.path)], &[])?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
+    let selects_cluster = options.common.target.is_some() || target_required || options.context_override.is_some();
+    let (source, discovered) = if selects_cluster {
+        resolve_cluster_source(
+            &current_dir,
+            options.common.target.as_deref(),
+            options.context_override,
+            target_required,
+        )?
+    } else {
+        (ClusterSource::None, None)
+    };
     let (project_config, project_root, resolved_target, inventory) =
-        if options.common.target.is_some() || target_required {
-            let inventory = discover_gitops_inventory(&current_dir, None, crate::resource_catalogue())?;
-            let target_name = resolve_deployment_target_name(&inventory, options.common.target.as_deref())?;
-            let resolved_target = resolve_target_cluster_from_inventory(&inventory, &target_name)?;
+        if let (ClusterSource::Target(name), Some(inventory)) = (&source, discovered) {
+            let resolved_target = resolve_target_cluster_from_inventory(&inventory, name)?;
             (
                 inventory.project_config.clone(),
                 inventory.project_root.clone(),
@@ -196,6 +212,17 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 .to_path_buf();
             (project_config, project_root, None, None)
         };
+    let live = match &source {
+        ClusterSource::LiveContext(context) => {
+            if options.kube_version.is_some() || !options.kube_api_versions.is_empty() {
+                return Err(NylError::config(
+                    "--kube-version and --kube-api-versions cannot be used with --context; the live cluster is authoritative",
+                ));
+            }
+            Some(Box::pin(LiveCluster::connect(context, options.discovery_progress)).await?)
+        }
+        _ => None,
+    };
     if resolved_target.is_none() && (options.common.application_group.is_some() || options.common.defaults_only) {
         return Err(NylError::config(
             "--application-group and --defaults-only choose among a target's bindings; pass --target",
@@ -208,14 +235,15 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         ));
     }
     options.common.validation.enabled(&project_config.config.validation)?;
-    let explicit_capabilities = match (options.kube_version, options.kube_api_versions.is_empty()) {
-        (Some(version), false) if !version.trim().is_empty() => {
+    let explicit_capabilities = match (&live, options.kube_version, options.kube_api_versions.is_empty()) {
+        (Some(live), _, _) => Some((live.kube_version.clone(), live.api_versions.clone())),
+        (None, Some(version), false) if !version.trim().is_empty() => {
             Some((version.to_owned(), options.kube_api_versions.to_vec()))
         }
         _ => None,
     };
     let missing_capabilities_error = Some(
-        "Rendering Helm resources requires --target, or --kube-version and --kube-api-versions without one".to_string(),
+        "Rendering Helm resources requires --target, --context, or --kube-version and --kube-api-versions".to_string(),
     );
     let mut session = RenderSession::for_cli(
         &project_root,
@@ -274,7 +302,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.max_depth = options.common.max_depth;
     request.track_parent = options.common.track_parent;
     request.strip_empty_metadata_labels_default = false;
-    let rendered = session.render(request).await?;
+    let rendered = Box::pin(session.render(request)).await?;
     if let (Some(inputs), Some(release)) = (&direct_inputs, &rendered.release) {
         nyl_render::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
     }
@@ -298,7 +326,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
     let release = rendered.release.clone();
     let duplicates = rendered.duplicates;
-    let workload = nyl_render::gitops::direct::resolve_direct_workload(
+    let workload = Box::pin(nyl_render::gitops::direct::resolve_direct_workload(
         nyl_render::gitops::direct::DirectWorkloadRequest {
             target: inventory
                 .as_ref()
@@ -333,7 +361,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             release: rendered.release,
             release_provenance: rendered.release_provenance,
         },
-    )
+    ))
     .await?;
     let mut manifests = workload.manifests;
     let provenance = workload.manifest_provenance;
@@ -345,22 +373,26 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         &options.common.exclude_kind,
     )?;
 
-    let (kube_client, raw_client) = if options.cluster_client_requirement == ClusterClientRequirement::Required {
-        let resolved = resolved_target
-            .as_ref()
-            .ok_or_else(|| NylError::config("This operation requires --target so Nyl can select a trusted cluster"))?;
+    let live_kube_version = live.as_ref().map(|live| live.kube_version.clone());
+    let (kube_client, raw_client) = if let Some(live) = live {
+        (Some(live.client), Some(live.raw))
+    } else if options.cluster_client_requirement == ClusterClientRequirement::Required {
+        let resolved = resolved_target.as_ref().ok_or_else(|| {
+            NylError::config("This operation requires --target or --context so Nyl can select a cluster")
+        })?;
         let config = load_cluster_kube_config(&resolved.cluster, options.context_override).await?;
         let client = Client::try_from(config)?;
-        if options.discovery_progress == DiscoveryProgress::Announce {
-            tracing::info!("Discovering Kubernetes API resources");
-        } else {
-            tracing::debug!("Discovering Kubernetes API resources");
-        }
+        announce_discovery(options.discovery_progress);
         (Some(KubeRsClient::from_client(client.clone()).await?), Some(client))
     } else {
         (None, None)
     };
 
+    let release_publication = inventory
+        .as_ref()
+        .zip(resolved_target.as_ref())
+        .map(|(inventory, resolved)| nyl_render::gitops::publication::release_publication(inventory, &resolved.target))
+        .transpose()?;
     Ok(RenderPreflightResult {
         project_config,
         project_root,
@@ -370,29 +402,65 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         destination_namespace,
         strip_empty_metadata_labels,
         resolved_target,
+        live_kube_version,
         duplicates,
         kube_client,
         raw_client,
+        release_publication,
     })
 }
 
-pub async fn execute(args: RenderArgs) -> Result<()> {
-    if args.context.is_some() {
-        nyl_render::util::deprecation::warn_deprecated_flag(
-            "nyl render --context",
-            "nyl render never connects to Kubernetes; remove the flag",
-        );
+fn announce_discovery(progress: DiscoveryProgress) {
+    if progress == DiscoveryProgress::Announce {
+        tracing::info!("Discovering Kubernetes API resources");
+    } else {
+        tracing::debug!("Discovering Kubernetes API resources");
     }
-    let preflight = run_render_preflight(RenderPreflightOptions {
+}
+
+/// A cluster reached through a kube context without GitOps configuration:
+/// the capabilities a Cluster resource would declare are read from it.
+struct LiveCluster {
+    client: KubeRsClient,
+    raw: Client,
+    kube_version: String,
+    api_versions: Vec<String>,
+}
+
+impl LiveCluster {
+    async fn connect(context: &str, progress: DiscoveryProgress) -> Result<Self> {
+        let config = KubeRsClient::load_kube_config(None, Some(context)).await?;
+        let raw = Client::try_from(config)?;
+        announce_discovery(progress);
+        let client = KubeRsClient::from_client(raw.clone()).await?;
+        let kube_version = client.get_server_version().await?;
+        let mut api_versions = client.get_api_versions().await?;
+        api_versions.sort();
+        api_versions.dedup();
+        Ok(Self {
+            client,
+            raw,
+            kube_version,
+            api_versions,
+        })
+    }
+}
+
+pub async fn execute(args: RenderArgs) -> Result<()> {
+    // Boxed: the render future is large, and Windows debug builds run on a 1 MiB main stack.
+    let preflight = Box::pin(run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: args.offline,
         kube_version: args.kube_version.as_deref(),
         kube_api_versions: &args.kube_api_versions,
-        context_override: None,
+        context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Never,
         discovery_progress: DiscoveryProgress::Quiet,
-    })
+    }))
     .await?;
+    if args.context.is_some() && preflight.resolved_target.is_some() {
+        tracing::warn!("--context is ignored: rendering for a DeploymentTarget never connects to Kubernetes");
+    }
 
     // Print duplicate warning summary if any
     if !preflight.duplicates.is_empty() {
@@ -414,7 +482,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
             .resolved_target
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
-        args.kube_version.as_deref(),
+        preflight.live_kube_version.as_deref().or(args.kube_version.as_deref()),
         nyl_render::validation::ManifestValidationInput {
             manifests: &output,
             source: &args.common.path,

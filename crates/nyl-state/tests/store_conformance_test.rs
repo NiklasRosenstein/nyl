@@ -10,8 +10,8 @@ use nyl_core::orchestration::ports::{
     Checkpoint, Committed, StateError, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservedUnit, Operation, Run, RunKind,
-    Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
+    ApprovalIdentity, Attestation, DesiredUnit, DriftRecord, Lease, LeaseKind, ObservationRecord, ObservedUnit,
+    Operation, Run, RunKind, Signal, SignalAction, SignalKind, StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
 use nyl_state::git::{CommitAuthor, GitStateStore};
@@ -246,6 +246,9 @@ fn record(location: &StateLocation, name: &str) -> StateRecord {
         template: None,
         params: BTreeMap::new(),
         expires_at: None,
+        source_commit: None,
+        source_ref: None,
+        keep_id: None,
         location: location.clone(),
         events: Vec::new(),
     }
@@ -552,6 +555,43 @@ fn test_environments_sharing_a_ref_through_path_keep_their_own_directories() {
     }
 }
 
+/// Instances are found by listing the directories of the ref they share: both
+/// stores list exactly the `state.yaml` of each directory directly beneath the
+/// parent path, in name order, and nothing for a parent without any.
+#[test]
+fn test_listing_a_shared_ref_returns_the_record_of_each_environment_directory() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let parent = location(&subject.repository, "nyl/previews", "nyl/previews", "");
+        assert!(store.list_records(&parent).unwrap().is_empty(), "{}", subject.name);
+        for (name, run) in [("pr-2", RUN_B), ("pr-1", RUN_A)] {
+            let at = location(&subject.repository, "nyl/previews", "nyl/previews", name);
+            let environment = environment(name);
+            let version = store.take_lease(&at, &environment, &lease(run), None).unwrap();
+            let base = store.snapshot(&at).unwrap().tips;
+            let committed = store
+                .commit(&at, &environment, &base, &init(&at, name), &version)
+                .unwrap();
+            store
+                .release_lease(&at, &environment, &committed.lease_version)
+                .unwrap();
+        }
+        let listed = store
+            .list_records(&parent)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.environment.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(listed, ["pr-1", "pr-2"], "{}", subject.name);
+        let beneath = location(&subject.repository, "nyl/previews", "nyl/previews", "pr-1");
+        assert!(
+            store.list_records(&beneath).unwrap().is_empty(),
+            "{}: a directory of one environment lists no children",
+            subject.name
+        );
+    }
+}
+
 #[test]
 fn test_concurrent_writers_sharing_a_ref_rebase_unless_their_directory_changed() {
     for subject in subjects() {
@@ -734,7 +774,7 @@ fn test_remote_state_fast_forwards_local_branches_and_refuses_rewrites() {
 }
 
 #[test]
-fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
+fn test_drift_records_observations_and_attestations_round_trip_on_the_observed_ref_only() {
     for subject in subjects() {
         let store = subject.store.as_ref();
         let location = separate(&subject);
@@ -754,9 +794,17 @@ fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
             "at": "2026-09-24T10:00:00Z", "source": {"driver": "Command"}
         }))
         .unwrap();
+        let observations: ObservationRecord = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord", "unit": identity,
+            "executionKey": KEY, "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "at": "2026-09-24T10:00:00Z",
+            "values": {"ip": {"value": "203.0.113.10", "observedAt": "2026-09-24T10:00:00Z"},
+                       "port": {"pending": "no port yet"}}
+        }))
+        .unwrap();
         let before = store.snapshot(&location).unwrap().tips;
         let changes = TransitionChanges {
             drift: BTreeMap::from([(name.clone(), Some(drift.clone()))]),
+            observations: BTreeMap::from([(name.clone(), Some(observations.clone()))]),
             attestations: BTreeMap::from([(
                 name.clone(),
                 Some(BTreeMap::from([("smoke".to_owned(), attestation.clone())])),
@@ -771,10 +819,12 @@ fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
         let snapshot = store.snapshot(&location).unwrap();
         assert_eq!(snapshot.tips.desired, before.desired, "{}", subject.name);
         assert_eq!(snapshot.drift[&name], drift, "{}", subject.name);
+        assert_eq!(snapshot.observations[&name], observations, "{}", subject.name);
         assert_eq!(snapshot.attestations[&name]["smoke"], attestation, "{}", subject.name);
 
         let removal = TransitionChanges {
             drift: BTreeMap::from([(name.clone(), None)]),
+            observations: BTreeMap::from([(name.clone(), None)]),
             attestations: BTreeMap::from([(name.clone(), None)]),
             ..TransitionChanges::default()
         };
@@ -789,6 +839,7 @@ fn test_drift_records_and_attestations_round_trip_on_the_observed_ref_only() {
             .unwrap();
         let snapshot = store.snapshot(&location).unwrap();
         assert!(snapshot.drift.is_empty(), "{}", subject.name);
+        assert!(snapshot.observations.is_empty(), "{}", subject.name);
         assert!(snapshot.attestations.is_empty(), "{}", subject.name);
     }
 }

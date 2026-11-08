@@ -34,6 +34,7 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {}}
   clusterRef:
     name: prod-eu-1
   values:
@@ -309,7 +310,7 @@ fn delete_refuses_to_break_remaining_resource_references() {
     let temp = TempDir::new().unwrap();
     git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
-    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
+    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  reconciler: {argocd: {}}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
     let path = temp.path().join("gitops.yaml");
     fs::write(&path, resources).unwrap();
 
@@ -573,6 +574,35 @@ metadata:
     cmd.assert().failure().stderr(predicate::str::contains(
         "requires a DeploymentTarget, but none are configured",
     ));
+}
+
+#[test]
+fn test_diff_command_uses_named_context_without_gitops_configuration() {
+    let temp = TempDir::new().unwrap();
+
+    git2::Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(
+        temp.path().join("test-resource.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-config\n  namespace: default\n",
+    )
+    .unwrap();
+    let kubeconfig = temp.path().join("kubeconfig");
+    fs::write(
+        &kubeconfig,
+        "apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n",
+    )
+    .unwrap();
+
+    // Without GitOps configuration, --context selects the cluster: the command
+    // gets as far as loading that context instead of asking for a target.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.current_dir(temp.path()).env("KUBECONFIG", &kubeconfig);
+    cmd.args(["diff", "test-resource.yaml", "--context", "missing-context"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("missing-context"))
+        .stderr(predicate::str::contains("DeploymentTarget").not());
 }
 
 #[test]

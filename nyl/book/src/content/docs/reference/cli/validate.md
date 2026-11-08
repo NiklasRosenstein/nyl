@@ -81,11 +81,21 @@ before reading state, with the same codes: `NYL-UNIT-INVALID`,
 `NYL-UNIT-KIND-UNKNOWN`, `NYL-UNIT-SECRETS-UNSUPPORTED`,
 `NYL-UNIT-OWNERSHIP-OVERLAP`, `NYL-DEPENDENCY-UNKNOWN`, `NYL-DEPENDENCY-CYCLE`,
 `NYL-REFERENCE-INVALID` for a reference to an output its producer does not
-declare or marks `sensitive`, and `NYL-ATTESTATIONS-UNSUPPORTED`. An `artifact`
+declare or marks `sensitive`, and `NYL-ATTESTATION-UNDECLARED` for a `dependsOn` entry or
+reference that requires an attestation its producer does not declare, and
+`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for one that requires an attestation only an external source supplies. An `artifact`
 reference between units is checked only for the producer's existence. A
 `KubernetesPublication` unit places the DeploymentTarget its `spec.target`
 names into that Environment. A target placed by publication units of two
 Environments fails with `NYL-TARGET-ENVIRONMENT-CONFLICT`.
+
+A unit that declares its target inline (`spec.target.inline`) places the
+inline target, named `<environment>-<unit>` or by `spec.target.name`. Validation
+parses it as strictly as a discovered target, compiles it with every other
+target, and checks the Argo CD Application and AppProject names it generates
+against theirs. A name that a declared target already uses fails, and so does a
+spec that is no DeploymentTarget spec, naming the unit's file. A disabled unit
+contributes no inline target.
 
 A placed target compiles with a placeholder of the declared type for each
 `fromUnit` and `fromPromotion` binding, because only a run resolves their

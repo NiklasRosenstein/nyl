@@ -319,6 +319,29 @@ fn fenced_readiness(name: &UnitName, stored: &DesiredUnit) -> Readiness {
     }
 }
 
+/// An instance's EnvironmentTemplate `deletionPolicy: Teardown` overrides the
+/// policy of every selected unit whose kind supports teardown, an explicit
+/// `Retain` included, by writing it into the rendered spec, so the stored
+/// document and every later decision (omission, `teardown --all`, expiry)
+/// read one policy. Units of other kinds keep their own, which for a kind
+/// without teardown means they are left in place and dropped from state.
+///
+/// Contract: [Environment templates and previews](../../../../design/orchestration-core.md#environment-templates-and-previews).
+pub fn apply_instance_policy(source: &mut RenderedSource, drivers: &DriverSet) {
+    let Some(DeletionPolicy::Teardown) = source.instance.as_ref().and_then(|instance| instance.deletion_policy) else {
+        return;
+    };
+    for unit in source.units.values_mut().filter(|unit| unit.selected) {
+        let Some(spec) = unit.spec.as_mut() else { continue };
+        let supports_teardown = drivers
+            .get(&unit.envelope.api_version, &unit.envelope.kind)
+            .is_some_and(|driver| driver.capabilities(spec).teardown);
+        if let (true, Some(spec)) = (supports_teardown, spec.as_object_mut()) {
+            spec.insert("deletionPolicy".to_owned(), Value::String("Teardown".to_owned()));
+        }
+    }
+}
+
 /// The selected, enabled units: those rendered to a spec whose `enabled`
 /// is not `false`.
 pub fn ownership_set(source: &RenderedSource) -> BTreeMap<&UnitName, &RenderedUnit> {
@@ -458,7 +481,10 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
             provenance: BTreeMap::new(),
             execution_key: None,
             fingerprint: None,
-            attestations: Vec::new(),
+            // What the unit can be attested for is known from its rendered
+            // spec, so consumers' requirements are checked, and wait,
+            // before the unit is resolved (resolution records the same set).
+            attestations: driver.attestations(spec),
             readiness: Readiness::Ready,
         };
         let Some(stored) = inputs.snapshot.desired.get(name) else {
@@ -698,6 +724,8 @@ fn leaving_units(inputs: &DesireInputs<'_>, set: &BTreeMap<&UnitName, &RenderedU
 /// Why a unit's spec is not accepted.
 enum UnitError {
     Invalid(String),
+    /// The unit declares `observations`, which its kind cannot read.
+    ObservationsUnsupported(String),
 }
 
 impl UnitError {
@@ -708,6 +736,13 @@ impl UnitError {
                 format!("unit {name} ({source_path}): {message}"),
                 "correct the unit's spec so that it matches its kind's schema",
             ),
+            Self::ObservationsUnsupported(kind) => Finding::new(
+                Code::ObservationsUnsupported,
+                format!(
+                    "unit {name} ({source_path}) declares observations, but kind {kind} reads no observed values for its spec"
+                ),
+                "remove `observations`, or use a kind that reads observed values for its spec",
+            ),
         }
     }
 }
@@ -715,6 +750,16 @@ impl UnitError {
 /// The driver's validation and the common fields' validation.
 fn validate_unit(driver: &dyn Driver, spec: &Value) -> Result<(), UnitError> {
     let invalid = |error: &dyn std::fmt::Display| UnitError::Invalid(error.to_string());
+    // A kind without the capability rejects `observations` before it
+    // validates anything of its own: its schema has no place for them.
+    if spec
+        .get("observations")
+        .and_then(Value::as_object)
+        .is_some_and(|observations| !observations.is_empty())
+        && !driver.capabilities(spec).observed_values
+    {
+        return Err(UnitError::ObservationsUnsupported(driver.kind().to_owned()));
+    }
     driver.validate_spec(spec).map_err(UnitError::Invalid)?;
     let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
     if common.approval.bind == nyl_core::resources::units::ApprovalBind::Plan
@@ -827,6 +872,46 @@ mod tests {
         drivers
     }
 
+    /// Catches an instance's template policy that does not reach the units
+    /// it must: `Teardown` overrides an explicit `Retain` for a kind that tears
+    /// down, leaves a kind that cannot (it would be rejected) and unselected
+    /// units alone, and an environment that is not an instance is untouched.
+    #[test]
+    fn test_instance_policy_overrides_only_units_whose_kind_tears_down() {
+        let spec = || Some(json!({"deletionPolicy": "Retain"}));
+        let mut instance = source(vec![
+            ("publication", rendered("Publication", true, spec())),
+            ("worker", rendered(TEST_KIND, true, spec())),
+            ("other", rendered("Publication", false, spec())),
+        ]);
+        let plain = instance.clone();
+        apply_instance_policy(&mut instance, &drivers());
+        assert_eq!(instance, plain, "an environment without a template keeps every policy");
+
+        instance.instance = Some(nyl_core::orchestration::instance::InstanceTerms {
+            template: "preview".to_owned(),
+            params: BTreeMap::new(),
+            deletion_policy: Some(DeletionPolicy::Teardown),
+            allow_teardown: true,
+            keep_source: true,
+            ttl: None,
+            max_instances: None,
+        });
+        apply_instance_policy(&mut instance, &drivers());
+        let policy = |unit: &str| instance.units[&name(unit)].spec.as_ref().unwrap()["deletionPolicy"].clone();
+        assert_eq!(policy("publication"), json!("Teardown"));
+        assert_eq!(
+            policy("worker"),
+            json!("Retain"),
+            "a kind that cannot tear down keeps its policy"
+        );
+        assert_eq!(
+            policy("other"),
+            json!("Retain"),
+            "an unselected unit is not the instance's"
+        );
+    }
+
     fn commit(digit: char) -> CommitId {
         CommitId::new(digit.to_string().repeat(40)).unwrap()
     }
@@ -858,6 +943,7 @@ mod tests {
                 "metadata": {"name": "dev"}
             }))
             .unwrap(),
+            instance: None,
             units: units
                 .into_iter()
                 .map(|(unit, rendered)| (name(unit), rendered))
@@ -1472,5 +1558,52 @@ mod tests {
             .iter()
             .any(|error| error.message.contains("/nyl/units.yaml")));
         assert!(desired.units.is_empty());
+    }
+
+    /// Catches observations accepted for a kind that reads none (the
+    /// declaration would never be read, and a consumer would wait forever),
+    /// and rejected for one that does; the code names the kind.
+    #[test]
+    fn test_observations_need_a_kind_that_reads_observed_values() {
+        let observations = json!({"ip": {"type": "string", "from": {"any": "thing"}}});
+        let units = source(vec![
+            (
+                "plain",
+                rendered(TEST_KIND, true, Some(json!({"observations": observations}))),
+            ),
+            (
+                "reads",
+                rendered(
+                    TEST_KIND,
+                    true,
+                    Some(json!({"observes": true, "observations": observations})),
+                ),
+            ),
+            ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
+        ]);
+        let desired = run_desire(&units, &EnvironmentSnapshot::default());
+        assert_eq!(desired.errors.len(), 1, "{:?}", desired.errors);
+        assert_eq!(desired.errors[0].code, Code::ObservationsUnsupported);
+        assert!(
+            desired.errors[0].message.contains("unit plain") && desired.errors[0].message.contains("kind Test"),
+            "{}",
+            desired.errors[0].message
+        );
+        // An empty declaration declares nothing, so every kind accepts it.
+        let accepted = run_desire(
+            &source(vec![
+                (
+                    "reads",
+                    rendered(
+                        TEST_KIND,
+                        true,
+                        Some(json!({"observes": true, "observations": observations})),
+                    ),
+                ),
+                ("none", rendered(TEST_KIND, true, Some(json!({"observations": {}})))),
+            ]),
+            &EnvironmentSnapshot::default(),
+        );
+        assert!(accepted.errors.is_empty(), "{:?}", accepted.errors);
     }
 }

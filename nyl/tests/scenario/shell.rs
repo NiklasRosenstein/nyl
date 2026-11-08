@@ -211,7 +211,6 @@ impl Harness {
             process_env: self.process_env.clone(),
             cancellation,
             prompt: None,
-            observer: None,
             progress: None,
         };
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -277,11 +276,13 @@ impl Harness {
                 environment_errors: BTreeMap::new(),
                 planned: BTreeMap::new(),
                 environments: BTreeMap::new(),
+                instances: BTreeSet::new(),
                 approvals: Default::default(),
                 environment: dev(),
                 entry,
                 location: self.location.clone(),
                 entry_commit,
+                source_recorded: false,
                 entry_project_dir: "/nyl".to_owned(),
                 units: (!units.is_empty()).then(|| units.iter().map(|name| unit(name)).collect()),
                 concurrency: run::DEFAULT_CONCURRENCY,
@@ -294,6 +295,7 @@ impl Harness {
                 reapply: false,
                 fail_fast: false,
                 reason: None,
+                keep_prefix: None,
             },
             workspace: TempDir::new().unwrap(),
         }
@@ -312,6 +314,7 @@ impl Harness {
         // Running tools receive the run's cancelling signal.
         let tools = ProcessRunner::new().cancelled_by(job.request.cancellation.shared());
         let context = RunContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
             base: &base,
             sources: &job.sources,
             renderer: &job.renderer,
@@ -321,7 +324,6 @@ impl Harness {
             process_env: &self.process_env,
             secrets: None,
             commit_identity: identity.then_some(&self.identity),
-            observer: None,
             progress: None,
             prompt: None,
         };

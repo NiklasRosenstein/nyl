@@ -223,7 +223,7 @@ pub fn verify_publication_base(
     if base.commit.as_deref() == head {
         return Ok(());
     }
-    Err(NylError::config(format!(
+    Err(NylError::PublicationMoved(format!(
         "Publication {}@{branch} is at {} but fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
         nyl_git::sanitize_url(publication_url),
         head.unwrap_or("no commit"),
@@ -1216,6 +1216,7 @@ mod tests {
             "kind": "DeploymentTarget",
             "metadata": {"name": "dev"},
             "spec": {
+                "reconciler": {"argocd": {}},
                 "publication": {"repository": {"repoURL": "https://example.invalid/deploy.git"}, "revision": "deploy", "pathPrefix": "dev"},
                 "releaseInputs": release_inputs,
             }

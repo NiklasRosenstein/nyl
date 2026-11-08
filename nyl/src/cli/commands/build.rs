@@ -59,7 +59,15 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         clock: wiring.clock.as_ref(),
         deadline,
     };
+    // A driver that publishes from a direct build authors its commit with the
+    // identity the repository's Git configuration names; a build that writes
+    // nothing needs none, so a missing identity is only the driver's to report.
+    let identity = git2::Repository::discover(&args.path)
+        .ok()
+        .and_then(|repository| wiring.commit_identity(repository.path(), None).ok());
     let context = ExecutionContext {
+        instances: &prepared.inventory.instances,
+        clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
         unit: nyl_core::orchestration::ids::UnitAddress::new(
             prepared.unit.unit.environment.clone(),
             prepared.unit.unit.name.clone(),
@@ -82,15 +90,28 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         now,
         observed: prepared.snapshot.observed.get(&prepared.unit.unit.name),
         tools: &tools,
-        commit_identity: None,
+        commit_identity: identity.as_ref(),
         cache_dir: prepared.workspace.path().join("cache"),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+        dirty_source: prepared.dirty,
         interactive: false,
     };
-    let artifacts = match driver
-        .build(&context, &prepared.unit, &args.arguments)
-        .map_err(|error| NylError::config(error.to_string()))?
-    {
+    // A driver that fails or refuses the build ends it with exit 3, the
+    // contract's "the build failed"; preparation and capability errors above
+    // are errors (exit 1).
+    let built = match driver.build(&context, &prepared.unit, &args.arguments) {
+        Ok(built) => built,
+        Err(error) => {
+            return Ok(CommandOutcome {
+                exit: 3,
+                report: serde_json::json!({ "error": error.to_string() }),
+                stdout: String::new(),
+                stderr: format!("error: {error}\n"),
+            })
+        }
+    };
+    let artifacts = match built {
         Supported::Supported(artifacts) => artifacts,
         Supported::Unsupported => {
             return Err(NylError::config(

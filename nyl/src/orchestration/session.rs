@@ -9,10 +9,12 @@ use std::path::Path;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
+use nyl_core::orchestration::state::StateLocation;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
 use nyl_orchestration::run_report::{
-    EnvironmentRunReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport, UnitReport,
+    EnvironmentRunReport, InstanceAction, InstanceReport, LeavingConsequence, LeavingUnit, ReportKind, RunReport,
+    UnitReport,
 };
 use nyl_orchestration::shell::run::{RunContext, RunRequest};
 use nyl_orchestration::shell::{Context, Settings};
@@ -23,7 +25,8 @@ use crate::cli::commands::reconcile::RunOutput;
 use crate::cli::presentation::{result_style, styled, Style};
 use crate::cli::table::{render as render_table, Cell};
 use crate::orchestration::project::{
-    declared, open_store, requested_by as requested_by_default, resolve_environment, ResolvedEnvironment,
+    declared, instance_location, list_instances, open_store, requested_by as requested_by_default, resolve_environment,
+    resolve_environment_with, InstanceRequest, ResolvedEnvironment,
 };
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use nyl_render::gitops::discover_gitops_inventory;
@@ -54,16 +57,122 @@ impl From<NylError> for Stop {
 
 /// The project and the environment a command works on.
 pub struct Session {
+    /// The project, with the instance this session works on as a known instance.
     pub inventory: GitOpsInventory,
     pub resolved: ResolvedEnvironment,
+    /// Whether the command was entered from the instance's own source: it
+    /// named `--template`, so the entry checkout is the instance's source.
+    entered: bool,
+    /// `--local`: no network access, so no keep refs are fetched or moved and no
+    /// recorded commit is fetched from the origin.
+    offline: bool,
+    /// Where every known instance keeps its state, the session's own included.
+    instance_locations: BTreeMap<EnvironmentName, StateLocation>,
+    /// Instances whose location cannot be computed, and templates whose
+    /// instances could not be listed: checks across environments refuse.
+    instance_errors: BTreeMap<EnvironmentName, Finding>,
 }
 
 impl Session {
     /// Discover the project at `path` and resolve `environment` in it.
     pub fn open(path: &Path, environment: &str) -> Result<Self, Stop> {
+        Self::open_with(path, environment, &InstanceRequest::default())
+    }
+
+    /// [`Self::open`] for a command with `--local`: instances are found without network access.
+    pub fn open_offline(path: &Path, environment: &str, offline: bool) -> Result<Self, Stop> {
+        Self::open_with(
+            path,
+            environment,
+            &InstanceRequest {
+                offline,
+                ..InstanceRequest::default()
+            },
+        )
+    }
+
+    /// [`Self::open`] for a command that may create or update an instance
+    /// (`--template`, `--param`), or reads state offline.
+    pub fn open_with(path: &Path, environment: &str, request: &InstanceRequest) -> Result<Self, Stop> {
         let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
-        let resolved = resolve_environment(&inventory, environment)?;
-        Ok(Self { inventory, resolved })
+        let mut resolved = resolve_environment_with(&inventory, environment, request)?;
+        // Every environment-wide function sees every instance like a declared
+        // environment: the ones state lists, and this one with the parameters
+        // this command resolved for it.
+        let listing = list_instances(&inventory, request.offline);
+        resolved.warnings.extend(listing.warnings);
+        let mut instance_errors = BTreeMap::new();
+        for template in &listing.unavailable {
+            // A synthetic name stands for instances nobody could list.
+            if let Ok(name) = EnvironmentName::new(format!("{template}-instances")) {
+                instance_errors.insert(
+                    name,
+                    Finding::new(
+                        Code::StateUnavailable,
+                        format!("the instances of EnvironmentTemplate {template} could not be listed, so their state is unknown"),
+                        "check access to the template's state repository, or run without network access with --local",
+                    ),
+                );
+            }
+        }
+        let mut instance_locations = BTreeMap::new();
+        for gone in &listing.deleted {
+            if let Ok(location) = instance_location(&inventory, &gone.name, &gone.descriptor.template) {
+                instance_locations.insert(gone.name.clone(), location);
+            }
+        }
+        let mut instances = BTreeMap::new();
+        for instance in listing.instances {
+            match instance_location(&inventory, &instance.name, &instance.descriptor.template) {
+                Ok(location) => {
+                    instance_locations.insert(instance.name.clone(), location);
+                }
+                Err(finding) => {
+                    instance_errors.insert(instance.name.clone(), finding);
+                }
+            }
+            // An instance whose template no longer renders for its parameters
+            // is reported, and left out of checks across environments, so one
+            // stale preview never stops the other environments' runs.
+            let rendered = nyl_render::gitops::instances::find_template(&inventory, &instance.descriptor.template)
+                .map_or(Ok(()), |template| {
+                    nyl_render::gitops::instances::instantiate(template, &instance.name, &instance.descriptor.params)
+                        .map(|_| ())
+                });
+            match rendered {
+                Ok(()) => {
+                    instances.insert(instance.name, instance.descriptor);
+                }
+                Err(finding) => resolved.warnings.push(finding),
+            }
+        }
+        if let Some(instance) = &resolved.instance {
+            instances.insert(resolved.name.clone(), instance.descriptor());
+            instance_locations.insert(resolved.name.clone(), resolved.location.clone());
+        }
+        let inventory = inventory.with_instances(instances);
+        Ok(Self {
+            inventory,
+            resolved,
+            entered: request.template.is_some(),
+            offline: request.offline,
+            instance_locations,
+            instance_errors,
+        })
+    }
+
+    /// Whether the command was entered from the instance's own checkout.
+    pub fn entered(&self) -> bool {
+        self.entered
+    }
+
+    /// The instance's recorded source commit, which a run not entered from
+    /// the instance's own source renders at.
+    pub fn recorded_source(&self) -> Option<CommitId> {
+        if self.entered {
+            return None;
+        }
+        self.resolved.instance.as_ref()?.record.as_ref()?.source_commit.clone()
     }
 
     /// The Environment as the entry worktree declares it, with its group's
@@ -117,9 +226,59 @@ impl Session {
     pub fn sources(&self) -> Result<GitSourceResolver, NylError> {
         let auth = crate::cli::git_auth::project_git_auth(&self.inventory.project_config.config)?;
         let state = self.store(None)?;
-        Ok(GitSourceResolver::new(&self.resolved.git_dir, auth)
+        let mut sources = GitSourceResolver::new(&self.resolved.git_dir, auth)
             .with_snapshot_repository(state.repository_path(&self.resolved.location))
-            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root()))
+            .with_worktree_cache(nyl_render::git::CacheLayout::for_project(&self.inventory.project_root).root());
+        // A recorded commit the clone lacks is fetched first through the instance's keep ref,
+        // then by its id from the clone's origin.
+        if !self.offline {
+            sources = sources.with_origin_fetch();
+        }
+        if let Some(prefix) = self.keep_prefix() {
+            sources = sources.with_kept_source(prefix);
+        }
+        if let Some(reference) = self.source_ref() {
+            sources = sources.with_source_ref(reference);
+        }
+        Ok(sources)
+    }
+
+    /// The prefix of the keep refs the instance this session works on
+    /// recorded, read from its `keepId`: `None` for a declared environment, an
+    /// instance that kept nothing, and a run without network access. Contract:
+    /// [Instances](../../../design/orchestration-core.md#instances), `keepSource`.
+    pub fn keep_prefix(&self) -> Option<String> {
+        let id = self.resolved.instance.as_ref()?.record.as_ref()?.keep_id.as_ref()?;
+        (!self.offline).then(|| nyl_orchestration::rules::keep::keep_prefix(id))
+    }
+
+    /// The `--source-ref` hint of the instance this session works on, as data
+    /// from the command line or the instance's record: the ref to fetch by name
+    /// from `origin` when the host will not serve the recorded commit by its
+    /// id. `None` for a declared environment, an instance that recorded none,
+    /// and a run without network access. Contract:
+    /// [Instances](../../../design/orchestration-core.md#instances).
+    pub fn source_ref(&self) -> Option<String> {
+        let instance = self.resolved.instance.as_ref()?;
+        (!self.offline)
+            .then(|| {
+                instance
+                    .source_ref
+                    .clone()
+                    .or_else(|| instance.record.as_ref()?.source_ref.clone())
+            })
+            .flatten()
+    }
+
+    /// Whether a write of the instance's record keeps its source commit: the
+    /// template says `keepSource` and the run has network access.
+    pub fn keeps_source(&self) -> bool {
+        !self.offline
+            && self
+                .resolved
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.terms.keep_source)
     }
 
     /// Wire explicit working-file capture through the shared source shell.
@@ -159,6 +318,7 @@ impl Session {
     pub fn renderer(&self) -> UnitSourceRenderer {
         UnitSourceRenderer::new(self.entry_project_dir(), crate::resource_catalogue())
             .with_previous_paths(self.previous_paths())
+            .with_instances(self.inventory.instances.clone())
     }
 
     /// The shell context of one command, working through `store`: the
@@ -193,7 +353,7 @@ impl Session {
         operation: fn(&RunContext<'_>, &RunRequest) -> RunReport,
     ) -> Result<RunReport, Stop> {
         let mut report = self.run_with(wiring, store, identity, request, operation)?;
-        self.annotate_report(&mut report);
+        self.annotate_report(&mut report, wiring.clock.now());
         Ok(report)
     }
 
@@ -215,6 +375,7 @@ impl Session {
         let base = self.context(store, wiring, identity.map(ToString::to_string));
         let secrets = crate::orchestration::secrets::ProjectSecrets::new(&self.inventory.project_root);
         let context = RunContext {
+            instances: &self.inventory.instances,
             base: &base,
             sources: &sources,
             renderer: &renderer,
@@ -224,16 +385,48 @@ impl Session {
             process_env: &wiring.process_env,
             secrets: Some(&secrets),
             commit_identity: identity,
-            observer: wiring.observer,
             progress: wiring.progress,
             prompt: wiring.prompt,
         };
         Ok(operation(&context, request))
     }
 
-    /// Add source repository context and environment-resolution warnings to the report.
-    pub fn annotate_report(&self, report: &mut RunReport) {
+    /// The instance's lifecycle as its record says at `now`, for a report.
+    pub fn instance_report(&self, now: nyl_core::orchestration::time::Timestamp) -> Option<InstanceReport> {
+        let instance = self.resolved.instance.as_ref()?;
+        let expires_at = instance.record.as_ref().and_then(|record| record.expires_at);
+        Some(InstanceReport {
+            template: instance.template.clone(),
+            expires_at,
+            expired: nyl_orchestration::rules::expiry::expired(expires_at, instance.terms.ttl, now),
+            action: None,
+        })
+    }
+
+    /// Add source repository context, environment-resolution warnings, and
+    /// an instance's lifecycle to the report; an expired instance warns that
+    /// its next reconcile removes it.
+    pub fn annotate_report(&self, report: &mut RunReport, now: nyl_core::orchestration::time::Timestamp) {
         for environment in &mut report.environments {
+            if environment.instance.is_none() {
+                environment.instance = self.instance_report(now);
+            }
+            if let Some(instance) = environment.instance.as_ref().filter(|instance| instance.expired) {
+                if instance.action.is_none() && report.kind != ReportKind::ReconcileReport {
+                    environment.warnings.push(Finding::new(
+                        Code::InstanceExpired,
+                        format!(
+                            "{} expired at {}; the next reconcile removes it",
+                            environment.name,
+                            instance.expires_at.map_or_else(String::new, |at| at.to_rfc3339())
+                        ),
+                        format!(
+                            "keep it with `nyl reconcile -e {} --renew`, or remove it now with `nyl state delete -e {0} --teardown`",
+                            environment.name
+                        ),
+                    ));
+                }
+            }
             if environment.source_commit.is_some() {
                 environment.source_repository = Some(self.resolved.source_repository.clone());
             }
@@ -264,16 +457,29 @@ impl Session {
                 }
             }
         }
+        // Instances are environments too: their stored claims fence resources
+        // by owner, protect producers they read, and are checked by `exec`.
+        // They are consumers only, never a producer another unit reads.
+        let mut instances = BTreeSet::new();
+        for (name, location) in &self.instance_locations {
+            if !environments.contains_key(name) && !environment_errors.contains_key(name) {
+                instances.insert(name.clone());
+            }
+            environments.entry(name.clone()).or_insert_with(|| location.clone());
+        }
+        environment_errors.extend(self.instance_errors.clone());
         Ok(RunRequest {
             planned: BTreeMap::new(),
             approvals: nyl_orchestration::rules::approval::Approvals::default(),
             environments,
+            instances,
             environment_errors,
             unavailable: BTreeSet::new(),
             environment: self.resolved.name.clone(),
             entry: self.entry()?,
             location: self.resolved.location.clone(),
-            entry_commit: self.entry_commit()?,
+            entry_commit: self.recorded_source().map_or_else(|| self.entry_commit(), Ok)?,
+            source_recorded: self.recorded_source().is_some(),
             entry_project_dir: self.entry_project_dir(),
             units,
             concurrency: options.concurrency.max(1),
@@ -287,6 +493,7 @@ impl Session {
             reapply: options.reapply,
             fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
+            keep_prefix: self.keep_prefix(),
         })
     }
 }
@@ -465,6 +672,7 @@ fn table(report: &RunReport) -> String {
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
             ReportKind::DetectDriftReport => &["UNIT", "KIND", "DRIFT", "DETAIL"],
             ReportKind::AttestReport => &["UNIT", "KIND", "ATTESTATIONS", "DETAIL"],
+            ReportKind::ObserveReport => &["UNIT", "KIND", "OBSERVATIONS", "DETAIL"],
         };
         if rows.is_empty() {
             // A refused operation reaches no units; its error says why.
@@ -511,8 +719,41 @@ fn table(report: &RunReport) -> String {
                 styled(commit.as_ref(), Style::Dim)
             );
         }
+        if let Some(instance) = &environment.instance {
+            let _ = writeln!(
+                text,
+                "  {} {}",
+                styled("instance:", Style::Dim),
+                instance_line(instance)
+            );
+        }
     }
     text
+}
+
+/// The instance line of the table form: its template, expiry, and what the command did about it.
+fn instance_line(instance: &InstanceReport) -> String {
+    let mut line = format!("template {}", instance.template);
+    match instance.expires_at {
+        Some(at) if instance.expired => {
+            let _ = write!(line, ", expired at {}", at.to_rfc3339());
+        }
+        Some(at) => {
+            let _ = write!(line, ", expires at {}", at.to_rfc3339());
+        }
+        None => line.push_str(", never expires"),
+    }
+    if let Some(action) = instance.action {
+        let text = match action {
+            InstanceAction::Extended => "expiry extended",
+            InstanceAction::Removed => "removed",
+            InstanceAction::RemovalPending => "removal waits for --allow-teardown",
+            InstanceAction::RemovalIncomplete => "removal incomplete",
+            InstanceAction::Busy => "busy: another run holds its lease",
+        };
+        let _ = write!(line, "; {text}");
+    }
+    line
 }
 
 /// A table cell for a value that serializes as a string, such as a receipt
@@ -542,6 +783,14 @@ pub fn state_cell(unit: &UnitReport) -> String {
             nyl_core::orchestration::state::AttestationResult::Fail => "fail",
         };
         details.push(format!("{name}: {result}"));
+    }
+    // `observe` shows each observation's value next to `observed`.
+    for (name, status) in unit.check.iter().flat_map(|check| &check.observations) {
+        details.push(match status {
+            nyl_orchestration::run_report::ObservationStatus::Value { value } => format!("{name}: {value}"),
+            nyl_orchestration::run_report::ObservationStatus::Pending { .. } => format!("{name}: pending"),
+            nyl_orchestration::run_report::ObservationStatus::Failed { .. } => format!("{name}: failed"),
+        });
     }
     if details.is_empty() {
         outcome.to_owned()
@@ -579,7 +828,14 @@ pub(crate) fn styled_state_cell(unit: &UnitReport) -> Cell {
                     | CheckResult::Unknown { .. }
                     | CheckResult::NoReceipt
                     | CheckResult::Unsupported => Some(Style::Attention),
-                    CheckResult::Clean | CheckResult::Attested => None,
+                    CheckResult::Observed
+                        if check.observations.values().any(|status| {
+                            !matches!(status, nyl_orchestration::run_report::ObservationStatus::Value { .. })
+                        }) =>
+                    {
+                        Some(Style::Attention)
+                    }
+                    CheckResult::Clean | CheckResult::Attested | CheckResult::Observed => None,
                 },
                 None => None,
             },
@@ -614,7 +870,8 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
         ReportKind::ReconcileReport
         | ReportKind::TeardownReport
         | ReportKind::DetectDriftReport
-        | ReportKind::AttestReport => {
+        | ReportKind::AttestReport
+        | ReportKind::ObserveReport => {
             vec![name.to_string(), kind_cell(unit), outcome, detail]
         }
         ReportKind::StatusReport => {
@@ -637,9 +894,25 @@ pub fn detail(unit: &UnitReport) -> String {
         Some(
             unit.blocked_by
                 .iter()
-                .map(|blocked| match &blocked.unit {
-                    Some(producer) => format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason),
-                    None => format!("{}: {}", blocked.pointer, blocked.reason),
+                .map(|blocked| {
+                    let producer = blocked.unit.as_ref().map(|unit| match &blocked.environment {
+                        Some(environment) => format!("{environment}/{unit}"),
+                        None => unit.to_string(),
+                    });
+                    match (producer, &blocked.attestation, &blocked.observation) {
+                        (Some(producer), Some(attestation), _) => format!(
+                            "{} waits for attestation {attestation} of {producer} ({})",
+                            blocked.pointer, blocked.reason
+                        ),
+                        (Some(producer), None, Some(observation)) => format!(
+                            "{} waits for observed value {observation} of {producer} ({})",
+                            blocked.pointer, blocked.reason
+                        ),
+                        (Some(producer), None, None) => {
+                            format!("{} waits for {producer} ({})", blocked.pointer, blocked.reason)
+                        }
+                        (None, _, _) => format!("{}: {}", blocked.pointer, blocked.reason),
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("; "),
@@ -821,6 +1094,29 @@ mod tests {
         });
         unit.receipt_nyl_version = Some("1.0".to_owned());
         assert_eq!(detail(&unit), "waiting; receipt Nyl version: 1.0");
+    }
+
+    /// Catches the table dropping what a consumer waits for when the
+    /// producer lives in another environment: it names the attestation and
+    /// the qualified producer, as the JSON does.
+    #[test]
+    fn test_blocked_detail_names_the_attestation_and_the_producer_across_environments() {
+        let mut unit = UnitReport::new("Command");
+        for (reason, environment) in [("attestation-pending", Some("infra")), ("attestation-failing", None)] {
+            unit.blocked_by.push(nyl_orchestration::run_report::BlockedBy {
+                pointer: "/dependsOn/0".to_owned(),
+                environment: environment.map(|name| nyl_core::orchestration::ids::EnvironmentName::new(name).unwrap()),
+                unit: Some(nyl_core::orchestration::ids::UnitName::new("network").unwrap()),
+                reason: reason.to_owned(),
+                attestation: Some("healthy".to_owned()),
+                observation: None,
+            });
+        }
+        assert_eq!(
+            detail(&unit),
+            "/dependsOn/0 waits for attestation healthy of infra/network (attestation-pending); \
+             /dependsOn/0 waits for attestation healthy of network (attestation-failing)"
+        );
     }
 
     /// Catches the table and the JSON telling different stories: both come

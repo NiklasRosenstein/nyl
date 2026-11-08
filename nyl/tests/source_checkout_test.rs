@@ -52,10 +52,10 @@ fn matching_sources_share_checkouts_and_union_sparse_paths() {
         "remote-a": {"path": "/three", "commit": other, "repository": {"repoURL": "https://example.org/repo.git"}},
         "remote-b": {"path": "/four", "commit": other, "repository": {"repoURL": "https://example.org/repo.git"}}
     }});
-    let paths = main_checkout_paths(&driver, &spec, &first, &first, "/nyl").unwrap();
+    let paths = main_checkout_paths(&driver, &spec, &first, None, &first, "/nyl").unwrap();
     assert_eq!(paths.unwrap(), vec!["/nyl", "/one", "/two"]);
     assert_eq!(
-        main_checkout_paths(&driver, &spec, &first, &other, "/nyl")
+        main_checkout_paths(&driver, &spec, &first, None, &other, "/nyl")
             .unwrap()
             .unwrap(),
         vec!["/nyl"]
@@ -68,6 +68,7 @@ fn matching_sources_share_checkouts_and_union_sparse_paths() {
         &driver,
         &spec,
         &first,
+        None,
         "/nyl",
         temp.path(),
         Some((&main, &first)),

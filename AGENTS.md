@@ -142,7 +142,8 @@ Reviewers must check the boundary explicitly:
 │   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
-│   └── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
+│   ├── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
+│   └── nyl-e2e/       # Cluster E2E suite (`nyl-e2e` binary); drives the real `nyl`, depends on no Nyl crate
 ├── nyl/               # The `nyl` command line (plays the nyl-cli role)
 │   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests
@@ -188,6 +189,9 @@ mise run build            # or: cargo build --release -p nyl
 
 # Run benchmarks
 mise run bench            # or: cargo bench -p nyl
+
+# Cluster E2E suite (docker, kind, kubectl, OpenTofu); see crates/nyl-e2e/README.md
+mise run e2e              # or: cargo build -p nyl -p nyl-e2e && target/debug/nyl-e2e run --variant all
 
 # Documentation
 mise run docs-serve       # Serve the documentation site
@@ -371,9 +375,13 @@ fn test_operation() -> Result<()> {
 - `DeploymentTarget.spec.applicationGroupSelector` matches literal
   `ApplicationGroup.metadata.labels` before target rendering. Effective
   `ApplicationGroup.spec.enabled` is evaluated after selection.
-- An explicit `ArgoCDInstance` makes `DeploymentTarget.spec.argocdRef` mandatory for
-  every target. With no explicit instances, each target receives an implicit
-  target-local instance using its workload Cluster and the `argocd` namespace.
+- `DeploymentTarget.spec.reconciler` is required and names exactly one of
+  `argocd` and `direct`; no reconciler is implied. An explicit `ArgoCDInstance`
+  makes `reconciler.argocd.instanceRef` mandatory for every Argo CD target.
+  With no explicit instances, `reconciler: {argocd: {}}` selects an implicit
+  target-local instance using the target's workload Cluster and the `argocd`
+  namespace, and `instanceRef` is refused. The former top-level `argocdRef` is
+  rejected with its fix.
 - Every enabled catalog Application recursively sources `_nyl/catalog`. Its
   defaults require manual sync with apply-only-out-of-sync and server-side
   apply options, cascade deletion in the foreground, and require confirmation
@@ -473,9 +481,14 @@ src/
 - Direct commands (`render`, `diff`, `apply`) take a target's Release from the
   compiled target (`gitops::direct`), so they work on what its Application
   deploys; `--release-only` and standalone renders share the per-Release rules
-  of `settle_standalone_release`. `render` never connects to Kubernetes, and no
-  command takes a namespace from the kube context. Pruning and purging follow
-  each live resource's Argo CD `Prune`/`Delete` sync option.
+  of `settle_standalone_release`. A declared DeploymentTarget always supplies
+  the cluster, and `render` with a target never connects to Kubernetes.
+  Without GitOps configuration, `--context` is the explicit opt-in to a kube
+  context whose live capabilities replace the Cluster's; one decision,
+  `select_cluster_source`, chooses for every direct command, and tree and
+  publication commands accept no such mode. No command takes a namespace from
+  the kube context. Pruning and purging follow each live resource's Argo CD
+  `Prune`/`Delete` sync option.
 - Generated Argo CD Applications use ordinary recursive directory sources.
 
 ## Common Tasks

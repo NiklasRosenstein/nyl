@@ -6,3 +6,4 @@ metadata:
 spec:
   applicationNamespace: argocd
   source: {path: ../applications/web}   # beside nyl/
+  namespace: {prunePolicy: Automatic, deletePolicy: Automatic}

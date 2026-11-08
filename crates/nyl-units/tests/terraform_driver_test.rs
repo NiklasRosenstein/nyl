@@ -129,6 +129,8 @@ impl World {
     fn context<'a>(&self, tool: &'a dyn ToolRunner) -> ExecutionContext<'a> {
         let now = "2026-10-28T12:00:00Z".parse().unwrap();
         ExecutionContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+            clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
             source_roots: BTreeMap::new(),
             unit: "dev/test".parse().unwrap(),
             operation: DriverOperation::Reconcile,
@@ -147,6 +149,8 @@ impl World {
             commit_identity: None,
             cache_dir: self.0.path().join("cache"),
             teardown_wait: None,
+            incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+            dirty_source: false,
         }
     }
 }
@@ -347,6 +351,7 @@ fn test_key_inputs_ignore_native_data_but_include_varfiles_and_require_module_co
     std::fs::write(world.0.path().join("worktree/nyl/vars.tfvars"), "id = 1").unwrap();
     let context = world.context(&tool);
     let resolution = ResolutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         source_roots: BTreeMap::new(),
         environment: EnvironmentName::new("dev").unwrap(),
         worktree: context.worktree.clone(),

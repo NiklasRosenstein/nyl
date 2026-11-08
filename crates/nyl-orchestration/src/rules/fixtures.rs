@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use nyl_core::constants::API_VERSION_UNITS;
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverResult, ExecutionContext, KeyInputs, Outcome, OwnershipScope,
-    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
+    PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, TeardownReadiness,
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitName};
 use nyl_core::orchestration::ports::RunState;
@@ -105,6 +105,7 @@ pub fn receipt(seed: &str, outputs: Value, artifacts: Vec<ArtifactDigest>) -> Re
         provenance: BTreeMap::new(),
         outputs,
         artifacts,
+        warnings: Vec::new(),
     }
 }
 
@@ -226,7 +227,8 @@ pub fn lease_record(id: &str, deadline: Timestamp) -> Lease {
 
 /// A driver of `units.gitops.nyl/v1` kind `kind`. Its execution recovery
 /// policy is `converge` when the spec sets `idempotent: true`, `inspect`
-/// when it sets `inspect: true`, else `manual`; it attests with `attests: true`. The `Publication` kind tears
+/// when it sets `inspect: true`, else `manual`; it attests with `attests: true`
+/// and reads observed values with `observes: true`. The `Publication` kind tears
 /// down and claims `spec.prefix` in one repository; `spec.broken` fails
 /// validation.
 pub struct TestDriver {
@@ -250,6 +252,7 @@ impl Driver for TestDriver {
         Capabilities {
             teardown: self.kind == "Publication",
             attest: spec["attests"] == json!(true),
+            observed_values: spec["observes"] == json!(true),
             ..Capabilities::default()
         }
     }
@@ -324,5 +327,65 @@ impl Driver for TestDriver {
         _: &Receipt,
     ) -> DriverResult<Supported<DriftDetection>> {
         Ok(Supported::Unsupported)
+    }
+    /// `teardownWait: {strategy: observe | delay, duration}`, else manual.
+    fn teardown_wait(&self, spec: &Value) -> nyl_core::orchestration::driver::WaitStrategy {
+        use nyl_core::orchestration::driver::WaitStrategy;
+        match spec.pointer("/teardownWait/strategy").and_then(Value::as_str) {
+            Some("observe") => WaitStrategy::Observe,
+            Some("delay") => spec
+                .pointer("/teardownWait/duration")
+                .and_then(Value::as_str)
+                .and_then(|duration| duration.parse().ok())
+                .map_or(WaitStrategy::Manual, |duration| WaitStrategy::Delay { duration }),
+            _ => WaitStrategy::Manual,
+        }
+    }
+    /// Reports the spec's `remaining` names as still existing, `removalFails`
+    /// as a failed reading, and `removalUnsupported: true` as unsupported.
+    fn observe_removal(
+        &self,
+        _: &nyl_core::orchestration::driver::RemovalContext,
+        unit: &DesiredUnit,
+    ) -> DriverResult<Supported<nyl_core::orchestration::driver::RemovalObservation>> {
+        use nyl_core::orchestration::driver::RemovalObservation;
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        if spec["removalUnsupported"] == json!(true) {
+            return Ok(Supported::Unsupported);
+        }
+        if let Some(reason) = spec["removalFails"].as_str() {
+            return Ok(Supported::Supported(RemovalObservation::Failed(reason.to_owned())));
+        }
+        let remaining = spec["remaining"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        Ok(Supported::Supported(RemovalObservation::Remaining(remaining)))
+    }
+    /// A `Publication` whose spec sets `unreadyTeardown: true` has one
+    /// unmet requirement and one remnant; with `unreadyTeardown: false`, it
+    /// is ready.
+    fn teardown_readiness(&self, unit: &DesiredUnit) -> DriverResult<Supported<TeardownReadiness>> {
+        use nyl_core::orchestration::codes::{Code, Finding};
+        let Some(unready) = unit.spec["unreadyTeardown"].as_bool() else {
+            return Ok(Supported::Unsupported);
+        };
+        let mut readiness = TeardownReadiness::default();
+        if unready {
+            readiness.blocking.push(Finding::new(
+                Code::TeardownCatalogManualSync,
+                format!("{}/{}: needs a manual sync", unit.unit.environment, unit.unit.name),
+                "enable pruning",
+            ));
+            readiness.remnants.push(Finding::new(
+                Code::TeardownCatalogRemains,
+                format!("{}/{}: leaves its catalog", unit.unit.environment, unit.unit.name),
+                "let a parent own the catalog",
+            ));
+        }
+        Ok(Supported::Supported(readiness))
     }
 }

@@ -83,50 +83,170 @@ pub fn resolved_cluster_context<'a>(cluster: &'a Cluster, override_context: Opti
     override_context.or_else(|| cluster.spec.live.as_ref().map(|live| live.context.as_str()))
 }
 
-pub async fn load_target_kube_config(target_name: &str, context_override: Option<&str>) -> Result<kube::Config> {
-    let cwd = std::env::current_dir()?;
-    let resolved = resolve_target_cluster(&cwd, target_name)?;
-    load_cluster_kube_config(&resolved.cluster, context_override).await
+/// Where a command that talks to Kubernetes takes its cluster from.
+///
+/// A declared DeploymentTarget always wins: `--context` then only selects how
+/// to reach its Cluster. Without GitOps configuration, `--context` is the
+/// explicit opt-in to a kube context, and what the declaration would supply
+/// (capabilities, the cluster identity) is read from the live cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClusterSource {
+    /// The named DeploymentTarget and its Cluster.
+    Target(String),
+    /// A kube context, with no GitOps configuration to describe it.
+    LiveContext(String),
+    /// Neither: only valid for commands that need no cluster.
+    None,
 }
 
+/// Choose a [`ClusterSource`] from the declared DeploymentTarget names (`None`
+/// when the project has no GitOps configuration at all) and the command line.
+///
+/// `needs_cluster` is true for commands that connect to Kubernetes.
+pub fn select_cluster_source(
+    declared_targets: Option<&[String]>,
+    target: Option<&str>,
+    context: Option<&str>,
+    needs_cluster: bool,
+) -> Result<ClusterSource> {
+    let declared = declared_targets.unwrap_or_default();
+    if let Some(target) = target {
+        if declared.iter().any(|name| name == target) {
+            return Ok(ClusterSource::Target(target.to_owned()));
+        }
+        return Err(NylError::config(format!("DeploymentTarget {target:?} was not found")));
+    }
+    let selects = needs_cluster || context.is_some();
+    match declared {
+        [name] if selects => Ok(ClusterSource::Target(name.clone())),
+        [] => match context {
+            Some(context) => Ok(ClusterSource::LiveContext(context.to_owned())),
+            None if needs_cluster => Err(NylError::config(
+                "This operation requires a DeploymentTarget, but none are configured; \
+                 pass --context to use a kube context without GitOps configuration",
+            )),
+            None => Ok(ClusterSource::None),
+        },
+        names if selects => Err(NylError::config(format!(
+            "--target is required because multiple DeploymentTargets are configured: {}",
+            names.join(", ")
+        ))),
+        _ => Ok(ClusterSource::None),
+    }
+}
+
+/// The names of the declared DeploymentTargets.
+pub fn declared_target_names(inventory: &GitOpsInventory) -> Vec<String> {
+    inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::DeploymentTarget)
+        .map(|resource| resource.identity.name.clone())
+        .collect()
+}
+
+/// Discover the project's GitOps inventory when it can have one: a project
+/// without `nyl.toml`, or outside a Git worktree, has no GitOps configuration.
+/// An explicit `--target` always requires discovery to succeed.
+pub fn discover_optional_inventory(start_dir: &Path, target: Option<&str>) -> Result<Option<GitOpsInventory>> {
+    if target.is_some() {
+        return inventory(start_dir).map(Some);
+    }
+    let Some(config_file) = nyl_render::config::ProjectConfig::find(Some(start_dir))? else {
+        return Ok(None);
+    };
+    let project_dir = config_file.parent().unwrap_or(start_dir);
+    if git2::Repository::discover(project_dir).is_err() {
+        return Ok(None);
+    }
+    inventory(start_dir).map(Some)
+}
+
+/// Resolve the cluster source for a command run from `start_dir`.
+pub fn resolve_cluster_source(
+    start_dir: &Path,
+    target: Option<&str>,
+    context: Option<&str>,
+    needs_cluster: bool,
+) -> Result<(ClusterSource, Option<GitOpsInventory>)> {
+    let inventory = discover_optional_inventory(start_dir, target)?;
+    let names = inventory.as_ref().map(declared_target_names);
+    let source = select_cluster_source(names.as_deref(), target, context, needs_cluster)?;
+    Ok((source, inventory))
+}
+
+/// Load the kube config for a resolved cluster source. A target's Cluster is
+/// verified against its declared server; a live context is used as named.
+pub async fn load_source_kube_config(
+    source: &ClusterSource,
+    inventory: Option<&GitOpsInventory>,
+    context: Option<&str>,
+) -> Result<kube::Config> {
+    match source {
+        ClusterSource::Target(name) => {
+            let inventory = inventory.ok_or_else(|| NylError::config("GitOps configuration was not discovered"))?;
+            let resolved = resolve_target_cluster_from_inventory(inventory, name)?;
+            load_cluster_kube_config(&resolved.cluster, context).await
+        }
+        ClusterSource::LiveContext(context) => KubeRsClient::load_kube_config(None, Some(context)).await,
+        ClusterSource::None => Err(NylError::config(
+            "This operation requires --target or --context to select a cluster",
+        )),
+    }
+}
+
+/// Load the kube config for a command that takes `--target` and `--context`.
+pub async fn load_command_kube_config(target: Option<&str>, context: Option<&str>) -> Result<kube::Config> {
+    Ok(resolve_command_cluster(target, context).await?.config)
+}
+
+/// A command's cluster: its kube config and, for a DeploymentTarget, the
+/// publication releases recorded through it belong to.
+pub struct CommandCluster {
+    pub config: kube::Config,
+    pub publication: Option<nyl_render::kubernetes::ReleasePublication>,
+}
+
+/// Resolve the cluster of a command that takes `--target` and `--context`.
+pub async fn resolve_command_cluster(target: Option<&str>, context: Option<&str>) -> Result<CommandCluster> {
+    let cwd = std::env::current_dir()?;
+    let (source, inventory) = resolve_cluster_source(&cwd, target, context, true)?;
+    let config = load_source_kube_config(&source, inventory.as_ref(), context).await?;
+    let publication = match (&source, &inventory) {
+        (ClusterSource::Target(name), Some(inventory)) => Some(nyl_render::gitops::publication::release_publication(
+            inventory,
+            get_target(inventory, name)?,
+        )?),
+        _ => None,
+    };
+    Ok(CommandCluster { config, publication })
+}
+
+/// The kube config for `cluster`: `context_override`, else the Cluster's
+/// declared `live.context`, never the current context once the Cluster
+/// declares one. With neither, the current context is used only when the
+/// Cluster's destination server can be verified against it; an in-cluster or
+/// by-name destination needs `--context`. The context's server must match the
+/// declared destination either way.
 pub async fn load_cluster_kube_config(cluster: &Cluster, context_override: Option<&str>) -> Result<kube::Config> {
     let context = resolved_cluster_context(cluster, context_override);
-    let config = KubeRsClient::load_kube_config(None, context).await?;
-    verify_cluster_server(cluster, &config)?;
-    Ok(config)
-}
-
-fn verify_cluster_server(cluster: &Cluster, config: &kube::Config) -> Result<()> {
-    let Some(expected) = cluster.spec.destination.server.as_deref() else {
-        return Ok(());
-    };
-    let actual = config.cluster_url.to_string();
-    if normalize_cluster_url(expected) == "https://kubernetes.default.svc" {
-        tracing::debug!(
-            cluster = %cluster.metadata.name,
-            "Cannot verify an in-cluster Argo CD destination against a local kubeconfig endpoint"
-        );
-    } else if normalize_cluster_url(expected) != normalize_cluster_url(&actual) {
+    if context.is_none()
+        && !cluster
+            .spec
+            .destination
+            .server
+            .as_deref()
+            .is_some_and(nyl_render::kubernetes::verifiable_cluster_server)
+    {
         return Err(NylError::config(format!(
-            "Selected kube context points to {actual}, but Cluster '{}' expects {}",
-            cluster.metadata.name, expected
+            "Cluster '{}' declares no live.context, and its destination cannot be checked against the current kube context \
+             (an in-cluster address or a registered name); pass --context or set spec.live.context",
+            cluster.metadata.name
         )));
     }
-    Ok(())
-}
-
-fn normalize_cluster_url(value: &str) -> String {
-    let value = value.trim().trim_end_matches('/');
-    let Some((scheme, remainder)) = value.split_once("://") else {
-        return value.to_owned();
-    };
-    let boundary = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let (authority, suffix) = remainder.split_at(boundary);
-    format!(
-        "{}://{}{suffix}",
-        scheme.to_ascii_lowercase(),
-        authority.to_ascii_lowercase()
-    )
+    let config = KubeRsClient::load_kube_config(None, context).await?;
+    nyl_render::kubernetes::verify_cluster_server(cluster, &config)?;
+    Ok(config)
 }
 
 pub(crate) async fn capture(args: ClusterCaptureArgs) -> Result<()> {
@@ -456,6 +576,75 @@ mod tests {
 
     use nyl_render::resources::GitOpsResourceIdentity;
     use nyl_render::validation::store;
+
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn test_select_cluster_source_uses_declared_target_whatever_the_context() {
+        let declared = names(&["prod"]);
+        for context in [None, Some("other")] {
+            assert_eq!(
+                select_cluster_source(Some(&declared), None, context, true).unwrap(),
+                ClusterSource::Target("prod".to_owned())
+            );
+            assert_eq!(
+                select_cluster_source(Some(&declared), Some("prod"), context, false).unwrap(),
+                ClusterSource::Target("prod".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn test_select_cluster_source_infers_sole_target_only_when_selecting_a_cluster() {
+        let declared = names(&["prod"]);
+        assert_eq!(
+            select_cluster_source(Some(&declared), None, None, false).unwrap(),
+            ClusterSource::None
+        );
+        assert_eq!(
+            select_cluster_source(Some(&declared), None, Some("ctx"), false).unwrap(),
+            ClusterSource::Target("prod".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_select_cluster_source_requires_target_among_several() {
+        let declared = names(&["dev", "prod"]);
+        let error = select_cluster_source(Some(&declared), None, Some("ctx"), true).unwrap_err();
+        assert!(error.to_string().contains("--target is required"), "{error}");
+        assert_eq!(
+            select_cluster_source(Some(&declared), None, None, false).unwrap(),
+            ClusterSource::None
+        );
+    }
+
+    #[test]
+    fn test_select_cluster_source_uses_live_context_without_gitops_configuration() {
+        for declared in [None, Some(Vec::new())] {
+            assert_eq!(
+                select_cluster_source(declared.as_deref(), None, Some("kind"), true).unwrap(),
+                ClusterSource::LiveContext("kind".to_owned())
+            );
+            assert_eq!(
+                select_cluster_source(declared.as_deref(), None, Some("kind"), false).unwrap(),
+                ClusterSource::LiveContext("kind".to_owned())
+            );
+            assert_eq!(
+                select_cluster_source(declared.as_deref(), None, None, false).unwrap(),
+                ClusterSource::None
+            );
+            let error = select_cluster_source(declared.as_deref(), None, None, true).unwrap_err();
+            assert!(error.to_string().contains("pass --context"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_select_cluster_source_rejects_unknown_target() {
+        let error = select_cluster_source(None, Some("prod"), Some("ctx"), true).unwrap_err();
+        assert!(error.to_string().contains("\"prod\" was not found"), "{error}");
+    }
 
     struct StubCapture {
         version: String,
@@ -803,15 +992,30 @@ mod tests {
         assert!(output.contains("  kubernetes:\n    kubeVersion: 1.31.2"));
     }
 
-    #[test]
-    fn cluster_url_normalization_preserves_case_sensitive_paths() {
-        assert_eq!(
-            normalize_cluster_url("HTTPS://EXAMPLE.invalid/clusters/Prod/"),
-            "https://example.invalid/clusters/Prod"
-        );
-        assert_ne!(
-            normalize_cluster_url("https://example.invalid/clusters/Prod"),
-            normalize_cluster_url("https://example.invalid/clusters/prod")
-        );
+    fn cluster(spec: serde_json::Value) -> Cluster {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "k8s.nyl/v1", "kind": "Cluster", "metadata": {"name": "dev"}, "spec": spec
+        }))
+        .unwrap()
+    }
+
+    /// Catches a command applying to whichever cluster the current kube context
+    /// names when the Cluster's destination cannot be checked against it: an
+    /// in-cluster or by-name destination without a declared or explicit context
+    /// is refused, with the fix.
+    #[tokio::test]
+    async fn test_a_destination_that_cannot_be_verified_needs_a_context() {
+        for destination in [
+            serde_json::json!({"server": "https://kubernetes.default.svc"}),
+            serde_json::json!({"name": "in-cluster"}),
+        ] {
+            let error = load_cluster_kube_config(&cluster(serde_json::json!({"destination": destination})), None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("pass --context or set spec.live.context"),
+                "{error}"
+            );
+        }
     }
 }

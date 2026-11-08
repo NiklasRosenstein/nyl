@@ -241,6 +241,7 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
 async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
         let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+        nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
         let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target)?;
         let nyl_render::gitops::provenance::WorktreeSourceState { commit, dirty } =
@@ -939,6 +940,7 @@ mod tests {
             "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
+                "reconciler": {"argocd": {}},
                 "clusterRef": {"name": "prod-eu-1"},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
@@ -975,6 +977,7 @@ mod tests {
             state_files: BTreeMap::new(),
             committed_state_paths: BTreeSet::new(),
             publication_base: None,
+            shared_catalog: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;

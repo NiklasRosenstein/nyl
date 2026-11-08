@@ -2,9 +2,12 @@ use clap::Args;
 use colored::Colorize;
 use dialoguer::Confirm;
 
-use crate::cli::commands::cluster::load_target_kube_config;
+use crate::cli::commands::cluster::load_command_kube_config;
 use nyl_render::{
-    kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
+    kubernetes::{
+        fence::{admit, ReleaseClaim, Requester},
+        KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
+    },
     NylError, Result,
 };
 
@@ -12,9 +15,9 @@ use nyl_render::{
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DeleteArgs {
-    /// deployment target whose cluster stores the release
+    /// Deployment target whose cluster stores the release. Optional when exactly one target is configured.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 
     /// Release name(s) to delete
     pub names: Vec<String>,
@@ -43,7 +46,11 @@ pub struct DeleteArgs {
     #[arg(long, conflicts_with = "no_purge")]
     pub confirm_delete: bool,
 
-    /// Kubernetes context to use
+    /// Delete a release an environment owns anyway (see `nyl apply --take-over`).
+    #[arg(long)]
+    pub take_over: bool,
+
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 }
@@ -54,7 +61,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
     }
 
     // Create Kubernetes client
-    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
+    let config = load_command_kube_config(args.target.as_deref(), args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client.clone());
@@ -70,6 +77,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
             args.yes,
             args.dry_run,
             (!args.no_purge).then_some(args.confirm_delete),
+            args.take_over,
         )
         .await?;
     }
@@ -77,7 +85,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn delete_release(
     storage: &KubernetesReleaseStorage,
     client: kube::Client,
@@ -88,7 +96,19 @@ async fn delete_release(
     dry_run: bool,
     // `Some(confirm_delete)` purges the release's resources.
     purge: Option<bool>,
+    take_over: bool,
 ) -> Result<()> {
+    // A release an environment owns is that unit's to remove.
+    admit(
+        storage,
+        namespace,
+        name,
+        &ReleaseClaim {
+            requester: Requester::Manual { take_over },
+            publication: None,
+        },
+    )
+    .await?;
     // Get revisions to delete and the relevant release state
     let (revisions, relevant_release): (Vec<u32>, Option<nyl_render::kubernetes::ReleaseState>) =
         if let Some(rev) = revision {
@@ -211,72 +231,58 @@ async fn delete_release(
 }
 
 /// Delete the release's resources, keeping those whose Argo CD `Delete` sync
-/// option retains them or awaits `--confirm-delete`.
+/// option retains them or awaits `--confirm-delete`, in reverse apply order
+/// with waits for termination.
 async fn purge_resources(
     client: kube::Client,
     release: &nyl_render::kubernetes::ReleaseState,
     confirm_delete: bool,
 ) -> Result<()> {
-    use nyl_render::kubernetes::prune::{delete_decision, PruneDecision};
-    use nyl_render::kubernetes::{KubeClient, KubeRsClient};
+    use nyl_render::kubernetes::lifecycle::{purge_resources, ApplyEvent};
+    use nyl_render::kubernetes::KubeRsClient;
 
     println!("Purging resources from cluster...");
 
-    // Create KubeRsClient from the provided client
     let kube_client = KubeRsClient::from_client(client).await?;
-
-    let mut deleted = 0;
-    let mut failed = 0;
-
-    for key in &release.resource_keys {
-        let namespace = key.namespace.as_deref();
-        let display_ns = namespace.unwrap_or("default");
-        let live = kube_client
-            .get_resource(&key.gvk, namespace, &key.name)
-            .await
-            .ok()
-            .flatten();
-        match delete_decision(
-            live.as_ref().and_then(|object| object.metadata.annotations.as_ref()),
-            confirm_delete,
-        ) {
-            PruneDecision::Prune => {}
-            PruneDecision::Retain => {
-                println!("  {} Kept {key}: its sync option Delete=false retains it", "!".yellow());
-                continue;
+    let purged = purge_resources(
+        &kube_client,
+        &release.resource_keys,
+        &|_| false,
+        crate::cli::commands::apply::DEFAULT_APPLY_CONCURRENCY.into(),
+        confirm_delete,
+        &mut |event| match event {
+            ApplyEvent::Pruned { key, result: Ok(()) } => println!("  {} Deleted {key}", "✓".green()),
+            ApplyEvent::Pruned { key, result: Err(e) } => println!("  {} Failed to delete {key}: {e}", "✗".red()),
+            ApplyEvent::PruneKept { key, decision, option } => {
+                let why = if decision == nyl_render::kubernetes::prune::PruneDecision::Retain {
+                    format!("its sync option {option}=false retains it")
+                } else {
+                    format!("its sync option {option}=confirm needs --confirm-delete to delete it")
+                };
+                println!("  {} Kept {key}: {why}", "!".yellow());
             }
-            PruneDecision::AwaitConfirmation => {
-                println!(
-                    "  {} Kept {key}: its sync option Delete=confirm needs --confirm-delete to delete it",
-                    "!".yellow()
-                );
-                continue;
+            ApplyEvent::PruneWaiting { count } => {
+                println!("  … waiting for {count} deleted resource(s) to terminate");
             }
-        }
+            ApplyEvent::PruneWaitTimedOut { keys } => {
+                for key in keys {
+                    println!("  {} {key} is still terminating; continuing", "!".yellow());
+                }
+            }
+            _ => {}
+        },
+    )
+    .await;
 
-        match kube_client.delete_resource(&key.gvk, namespace, &key.name).await {
-            Ok(()) => {
-                println!("  {} Deleted {} {}/{}", "✓".green(), key.gvk.kind, display_ns, key.name);
-                deleted += 1;
-            }
-            Err(e) => {
-                println!(
-                    "  {} Failed to delete {} {}/{}: {}",
-                    "✗".red(),
-                    key.gvk.kind,
-                    display_ns,
-                    key.name,
-                    e
-                );
-                failed += 1;
-            }
-        }
-    }
-
-    if failed > 0 {
-        println!("{} Purged {} resource(s), {} failed", "⚠".yellow(), deleted, failed);
+    if purged.failed.is_empty() {
+        println!("{} Purged {} resource(s)", "✓".green(), purged.deleted.len());
     } else {
-        println!("{} Purged {} resource(s)", "✓".green(), deleted);
+        println!(
+            "{} Purged {} resource(s), {} failed",
+            "⚠".yellow(),
+            purged.deleted.len(),
+            purged.failed.len()
+        );
     }
 
     Ok(())

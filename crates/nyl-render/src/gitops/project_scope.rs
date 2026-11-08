@@ -1245,6 +1245,7 @@ mod tests {
             index,
             options: ReconcileOptions::default(),
             publication_base: None,
+            takeover: None,
             auth: &auth,
             ignore_project_scope_contraction: false,
             cluster_kubernetes: None,

@@ -70,5 +70,7 @@ pub enum EdgeSource {
         output: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
     },
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 
-use nyl_render::{
+use crate::{
     kubernetes::{GroupVersionKind, KubeClient, ResourceKey},
     NylError, Result,
 };
@@ -161,9 +161,9 @@ fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kubernetes::{ApplyOutcome, GroupVersionKind, MockKubeClient};
     use async_trait::async_trait;
     use kube::api::DynamicObject;
-    use nyl_render::kubernetes::{ApplyOutcome, GroupVersionKind, MockKubeClient};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -243,8 +243,14 @@ mod tests {
             self.inner.default_namespace()
         }
 
-        async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
-            self.inner.delete_resource(gvk, namespace, name).await
+        async fn delete_resource_with(
+            &self,
+            gvk: &GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+            options: &crate::kubernetes::DeleteOptions,
+        ) -> Result<()> {
+            self.inner.delete_resource_with(gvk, namespace, name, options).await
         }
 
         async fn get_normalized_resource(
@@ -308,7 +314,13 @@ mod tests {
             &self.default_namespace
         }
 
-        async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {
+        async fn delete_resource_with(
+            &self,
+            _gvk: &GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+            _options: &crate::kubernetes::DeleteOptions,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -416,7 +428,7 @@ mod tests {
         let mut duplicates = HashMap::new();
         duplicates.insert(
             ResourceKey {
-                gvk: nyl_render::kubernetes::GroupVersionKind {
+                gvk: crate::kubernetes::GroupVersionKind {
                     group: String::new(),
                     version: "v1".to_string(),
                     kind: "ServiceAccount".to_string(),
@@ -431,7 +443,7 @@ mod tests {
             .await
             .unwrap();
         assert!(adjusted.contains_key(&ResourceKey {
-            gvk: nyl_render::kubernetes::GroupVersionKind {
+            gvk: crate::kubernetes::GroupVersionKind {
                 group: String::new(),
                 version: "v1".to_string(),
                 kind: "ServiceAccount".to_string(),
