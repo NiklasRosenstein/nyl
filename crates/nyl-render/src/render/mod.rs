@@ -7,6 +7,7 @@ mod expand;
 mod postprocess;
 mod provenance;
 mod session;
+mod sync_order;
 
 #[cfg(test)]
 pub(crate) use bundle::load_release_bundle;
