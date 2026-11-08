@@ -81,6 +81,7 @@
 <li>Content is parsed as YAML multi-document stream.</li>
 <li>When <code dir="auto">spec.urls</code> is used, documents from all URLs are concatenated in order.</li>
 <li>Parsed resources are processed recursively like local resources.</li>
+<li>Fetched resources inherit the RemoteManifest’s Argo CD sync wave and phase; see <a href="/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases">Argo CD sync waves and phases</a>.</li>
 <li>Remote content is not rendered as a Jinja template.</li>
 <li>When <code dir="auto">spec.overrideNamespace: true</code>, remote manifests with <code dir="auto">metadata.namespace</code> are rewritten to <code dir="auto">RemoteManifest.metadata.namespace</code> (applied after all URLs are fetched).</li>
 <li>Special case: for <code dir="auto">RoleBinding</code> and <code dir="auto">ClusterRoleBinding</code> (<code dir="auto">rbac.authorization.k8s.io/*</code>), <code dir="auto">subjects[*].namespace</code> is also rewritten (ServiceAccount subjects are forced to the override namespace).</li>
