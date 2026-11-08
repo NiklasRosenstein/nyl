@@ -14,7 +14,7 @@ use nyl_render::{
         field_manager::{FieldOwnership, ARGOCD_FIELD_MANAGER},
         lifecycle::{
             apply_sorted_manifests, ensure_namespace_exists, prepare_desired_manifests, ApplySettings, Interruption,
-            ReleaseRecorder,
+            ReleaseRecorder, RevisionPolicy,
         },
         KubernetesReleaseStorage, ResourceKey, ResourceOrdering,
     },
@@ -246,6 +246,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             ownership: crate::cli::apply_output::ownership_report(&apply_result),
             prune_failed_count: 0,
             release: None,
+            release_unchanged: false,
             timings: &timings,
         });
         return apply_result.error("Apply").map_or(Ok(()), Err);
@@ -262,6 +263,9 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             ApplySettings {
                 concurrency,
                 history_limit,
+                revisions: RevisionPolicy::KeepUnchanged {
+                    publication_stands: None,
+                },
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
                 protected: None,

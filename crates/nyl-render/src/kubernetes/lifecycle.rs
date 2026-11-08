@@ -15,7 +15,8 @@
 //!   duplicate objects, [`apply_sorted_manifests`] applies in Argo CD's kind
 //!   order, and [`ReleaseRecorder`] reserves a revision before the cluster is
 //!   touched, completes it, prunes by release state, and supersedes the
-//!   previous revision.
+//!   previous revision. An apply that changed nothing keeps the latest revision
+//!   instead ([`RevisionPolicy`]).
 //! - [`purge_release`] deletes a release's resources by their `Delete` sync
 //!   option, in reverse apply order with waits for termination.
 //! - [`ApplyEvent`] reports progress as it happens; the caller renders it.
@@ -502,12 +503,17 @@ impl<'s> ReleaseRecorder<'s> {
             let apply_elapsed = apply_started.elapsed();
 
             let release_started = Instant::now();
-            let (release, prune_failed_count) = self
+            let Completed {
+                release,
+                prune_failed_count,
+                unchanged,
+            } = self
                 .complete(client, &apply, scopes, settings, &mut track, &completed)
                 .await?;
             Ok(ReleaseRun {
                 apply,
                 release,
+                unchanged,
                 prune_failed_count,
                 apply_elapsed,
                 release_elapsed: release_started.elapsed(),
@@ -542,6 +548,21 @@ impl<'s> ReleaseRecorder<'s> {
 
     async fn record_failed(storage: &dyn ReleaseStorage, failed: &ReleaseState) {
         if let Err(err) = storage.complete_release(failed).await {
+            // An apply that completed unchanged has released its reservation already,
+            // so there is no revision left to mark.
+            if matches!(
+                storage
+                    .get_release(&failed.release_name, &failed.release_namespace, failed.revision)
+                    .await,
+                Ok(None)
+            ) {
+                tracing::info!(
+                    "Release {} revision {} was released before it could be marked failed",
+                    failed.release_name,
+                    failed.revision
+                );
+                return;
+            }
             tracing::warn!(
                 "Failed to mark release {} revision {} failed: {}",
                 failed.release_name,
@@ -557,6 +578,10 @@ impl<'s> ReleaseRecorder<'s> {
     /// Keys that fail to prune stay in the new revision, so the next apply retries
     /// deleting them. Once the revision deployed, revisions beyond the history limit
     /// are deleted. `completed` is set once the revision is recorded.
+    ///
+    /// Under [`RevisionPolicy::KeepUnchanged`], a deployed apply that would record
+    /// what the latest revision records releases its reservation instead and
+    /// settles on the latest revision, which the history limit still applies to.
     async fn complete(
         self,
         client: &dyn KubeClient,
@@ -565,7 +590,7 @@ impl<'s> ReleaseRecorder<'s> {
         settings: ApplySettings<'_>,
         on_event: &mut ApplyEventSink<'_>,
         completed: &AtomicBool,
-    ) -> Result<(ReleaseState, usize)> {
+    ) -> Result<Completed> {
         let Self {
             storage,
             mut release,
@@ -637,13 +662,190 @@ impl<'s> ReleaseRecorder<'s> {
             }
         }
 
+        if let RevisionPolicy::KeepUnchanged { publication_stands } = settings.revisions {
+            // A pruned object leaves the key set, so it always differs from the latest
+            // revision's; a failed prune or release keeps the keys but is not settled.
+            let settled = release.status == ReleaseStatus::Deployed
+                && prune_failed_count == 0
+                && apply_result.release_failed_count == 0;
+            if settled {
+                if let Some(latest) = keep_latest(storage, &release, &revisions, publication_stands).await {
+                    completed.store(true, AtomicOrdering::SeqCst);
+                    // The limit may have been lowered since the latest revision deployed.
+                    prune_release_history(storage, &latest, settings.history_limit).await;
+                    return Ok(Completed {
+                        release: latest,
+                        prune_failed_count,
+                        unchanged: true,
+                    });
+                }
+            }
+        }
+
         storage.complete_release(&release).await?;
         completed.store(true, AtomicOrdering::SeqCst);
         if let Some(previous) = &superseded {
             mark_superseded(storage, previous).await;
         }
         prune_release_history(storage, &release, settings.history_limit).await;
-        Ok((release, prune_failed_count))
+        Ok(Completed {
+            release,
+            prune_failed_count,
+            unchanged: false,
+        })
+    }
+}
+
+/// What [`ReleaseRecorder::complete`] settled.
+struct Completed {
+    release: ReleaseState,
+    prune_failed_count: usize,
+    unchanged: bool,
+}
+
+/// Whether the publication commit a revision recorded, which differs from the
+/// one an apply would record, still stands for it.
+pub type PublicationStands<'a> = &'a (dyn Fn(&str) -> bool + Sync);
+
+/// Whether an apply records a revision when it changed nothing.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler),
+/// applying. The apply itself always runs, because server-side apply is
+/// idempotent and repairs drift; the policy decides only whether the
+/// revision it would record is written.
+#[derive(Clone, Copy)]
+pub enum RevisionPolicy<'a> {
+    /// Every apply records a revision, as `helm upgrade` does; `release
+    /// rollback` records the rollback this way.
+    Always,
+    /// An apply that changed nothing keeps the latest revision as the current
+    /// one. It changed nothing when the latest revision is `Deployed`, records the
+    /// same manifest, resource keys, owner, and publication destination, and the
+    /// apply pruned nothing and failed nothing.
+    ///
+    /// The publication commit changes whenever any other part of the target's
+    /// tree does, so the recorded one is accepted when it is the same, or when
+    /// `publication_stands` says it still stands for the new one. Without it,
+    /// only the same commit (none, for `nyl apply`) is accepted.
+    KeepUnchanged {
+        publication_stands: Option<PublicationStands<'a>>,
+    },
+}
+
+impl std::fmt::Debug for RevisionPolicy<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Always => formatter.write_str("Always"),
+            Self::KeepUnchanged { .. } => formatter.write_str("KeepUnchanged"),
+        }
+    }
+}
+
+/// Release the reservation of `release` and return the latest revision, when
+/// `release` records nothing that differs from it ([`unchanged_latest`]).
+///
+/// The reservation was only the fence of the apply; releasing it makes the
+/// latest revision the current one again. If it cannot be released, the
+/// revision is recorded like any other (`None`).
+async fn keep_latest(
+    storage: &dyn ReleaseStorage,
+    release: &ReleaseState,
+    revisions: &[u32],
+    publication_stands: Option<PublicationStands<'_>>,
+) -> Option<ReleaseState> {
+    let latest = unchanged_latest(storage, release, revisions, publication_stands).await?;
+    if let Err(error) = storage
+        .delete_release(&release.release_name, &release.release_namespace, release.revision)
+        .await
+    {
+        // A failed request may still have deleted it: read what is stored. The
+        // reservation gone, or a revision another claimant recorded since, means
+        // ours is released; only our own reservation still there is recorded.
+        let reserved = match storage
+            .get_release(&release.release_name, &release.release_namespace, release.revision)
+            .await
+        {
+            Ok(stored) => stored.is_some_and(|stored| is_reservation(&stored, release)),
+            Err(_) => true,
+        };
+        if reserved {
+            tracing::warn!(
+                "Failed to release the reservation of release {} revision {}; recording it instead: {}",
+                release.release_name,
+                release.revision,
+                error
+            );
+            return None;
+        }
+    }
+    tracing::info!(
+        "Release {}/{} is unchanged at revision {}; no new revision recorded",
+        latest.release_namespace,
+        latest.release_name,
+        latest.revision
+    );
+    Some(latest)
+}
+
+/// Whether `stored` is the reservation `release` made: still `Rendered`, from the
+/// same moment. The storage API has no precondition on the object's identity, so
+/// this tells our reservation from one another claimant created in its place.
+fn is_reservation(stored: &ReleaseState, release: &ReleaseState) -> bool {
+    stored.status == ReleaseStatus::Rendered && stored.rendered_at == release.rendered_at
+}
+
+/// The latest revision stored before `release`, when `release` records nothing
+/// that differs from it. A revision that cannot be read counts as changed.
+async fn unchanged_latest(
+    storage: &dyn ReleaseStorage,
+    release: &ReleaseState,
+    revisions: &[u32],
+    publication_stands: Option<PublicationStands<'_>>,
+) -> Option<ReleaseState> {
+    let latest_revision = *revisions.iter().max()?;
+    let latest = match storage
+        .get_release(&release.release_name, &release.release_namespace, latest_revision)
+        .await
+    {
+        Ok(latest) => latest?,
+        Err(error) => {
+            tracing::warn!(
+                "Cannot read release {} revision {} to compare it: {}",
+                release.release_name,
+                latest_revision,
+                error
+            );
+            return None;
+        }
+    };
+    records_same(&latest, release, publication_stands).then_some(latest)
+}
+
+/// Whether `new` would record what `latest` records. Timestamps are not
+/// compared: they say when, not what.
+fn records_same(latest: &ReleaseState, new: &ReleaseState, publication_stands: Option<PublicationStands<'_>>) -> bool {
+    if latest.status != ReleaseStatus::Deployed
+        || latest.manifest != new.manifest
+        || latest.meta.owner != new.meta.owner
+        || latest.resource_keys.len() != new.resource_keys.len()
+    {
+        return false;
+    }
+    let recorded: HashSet<&ResourceKey> = latest.resource_keys.iter().collect();
+    if !new.resource_keys.iter().all(|key| recorded.contains(key)) {
+        return false;
+    }
+    match (&latest.meta.publication, &new.meta.publication) {
+        (None, None) => true,
+        (Some(old), Some(new)) if old.same_destination(new) => {
+            old.commit == new.commit
+                || old
+                    .commit
+                    .as_deref()
+                    .zip(publication_stands)
+                    .is_some_and(|(commit, stands)| stands(commit))
+        }
+        _ => false,
     }
 }
 
@@ -654,6 +856,8 @@ pub struct ApplySettings<'a> {
     pub concurrency: usize,
     /// Revisions to keep after a successful apply; 0 keeps every revision.
     pub history_limit: u32,
+    /// Whether an apply that changed nothing records a revision.
+    pub revisions: RevisionPolicy<'a>,
     /// `--confirm-prune`: prune resources whose sync option is `Prune=confirm`.
     pub confirm_prune: bool,
     /// The field manager resources are applied as, and the one a handoff releases.
@@ -807,7 +1011,12 @@ async fn prune_release_history(storage: &dyn ReleaseStorage, release: &ReleaseSt
 /// What applying and recording a release produced.
 pub struct ReleaseRun {
     pub apply: ApplyExecutionResult,
+    /// The current revision: the one this apply recorded, or, when
+    /// `unchanged`, the latest one it kept.
     pub release: ReleaseState,
+    /// The apply changed nothing ([`RevisionPolicy::KeepUnchanged`]), so it
+    /// recorded no revision and `release` is the latest one.
+    pub unchanged: bool,
     /// Resources that failed to prune; they stay recorded for the next apply.
     pub prune_failed_count: usize,
     /// How long applying took.
@@ -2310,6 +2519,7 @@ mod tests {
         ApplySettings {
             concurrency: 8,
             history_limit,
+            revisions: RevisionPolicy::Always,
             confirm_prune: false,
             ownership: &NYL_OWNERSHIP,
             protected: None,
@@ -2441,5 +2651,426 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    fn keep_unchanged() -> ApplySettings<'static> {
+        ApplySettings {
+            revisions: RevisionPolicy::KeepUnchanged {
+                publication_stands: None,
+            },
+            ..settings(0)
+        }
+    }
+
+    fn config_map(name: &str) -> serde_json::Value {
+        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name, "namespace": "app"}})
+    }
+
+    /// Reserves, applies, and completes one apply of `manifests` as `nyl apply` would.
+    async fn apply_with(
+        storage: &dyn ReleaseStorage,
+        client: &LatencyClient,
+        manifests: &[serde_json::Value],
+        settings: ApplySettings<'_>,
+    ) -> ReleaseRun {
+        let mut scopes = ObjectScopes::default();
+        let recorder = ReleaseRecorder::reserve(
+            storage,
+            "app",
+            "app",
+            manifests,
+            false,
+            client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+        recorder
+            .run(
+                client,
+                manifests,
+                &mut scopes,
+                settings,
+                Interruption::never(),
+                &mut |_| {},
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Applying again what the latest deployed revision records still applies every
+    /// resource, which repairs drift, but records no revision: the history keeps its
+    /// useful revisions and the latest one stays current.
+    #[tokio::test(start_paused = true)]
+    async fn test_unchanged_apply_applies_again_and_keeps_the_latest_revision() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let manifests = vec![config_map("a"), config_map("b")];
+
+        let first = apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+        assert!(!first.unchanged);
+        assert_eq!(first.release.revision, 1);
+
+        let second = apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+        assert!(second.unchanged);
+        assert_eq!(second.release.revision, 1);
+        assert_eq!(second.release.status, ReleaseStatus::Deployed);
+        // The server-side apply ran for every resource both times.
+        assert_eq!(second.apply.outcomes.len(), 2);
+        assert_eq!(
+            client
+                .events()
+                .iter()
+                .filter(|event| event.starts_with("start "))
+                .count(),
+            4
+        );
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1]);
+        assert!(second.error("Apply").is_none());
+    }
+
+    /// The same applies record every time under [`RevisionPolicy::Always`], as
+    /// `release rollback` needs.
+    #[tokio::test(start_paused = true)]
+    async fn test_always_policy_records_an_unchanged_apply() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let manifests = vec![config_map("a")];
+
+        apply_with(&storage, &client, &manifests, settings(0)).await;
+        let second = apply_with(&storage, &client, &manifests, settings(0)).await;
+
+        assert!(!second.unchanged);
+        assert_eq!(second.release.revision, 2);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1, 2]);
+    }
+
+    /// A different manifest is a new revision and supersedes the one before it.
+    #[tokio::test(start_paused = true)]
+    async fn test_changed_manifest_records_a_new_revision() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        apply_with(&storage, &client, &[config_map("a")], keep_unchanged()).await;
+
+        let mut changed = config_map("a");
+        changed["data"] = json!({"key": "value"});
+        let second = apply_with(&storage, &client, &[changed], keep_unchanged()).await;
+
+        assert!(!second.unchanged);
+        assert_eq!(second.release.revision, 2);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1, 2]);
+        let first = storage.get_release("app", "app", 1).await.unwrap().unwrap();
+        assert_eq!(first.status, ReleaseStatus::Superseded);
+    }
+
+    /// A latest revision that failed is never kept, even when the retry records the
+    /// same manifest: the retry is what makes the release `Deployed`.
+    #[tokio::test(start_paused = true)]
+    async fn test_apply_after_a_failed_revision_records_a_new_one() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let manifests = vec![config_map("a"), config_map("broken")];
+
+        let failed = apply_with(&storage, &LatencyClient::new("broken"), &manifests, keep_unchanged()).await;
+        assert_eq!(failed.release.status, ReleaseStatus::Failed);
+
+        let retry = apply_with(&storage, &LatencyClient::new(""), &manifests, keep_unchanged()).await;
+
+        assert!(!retry.unchanged);
+        assert_eq!(retry.release.revision, 2);
+        assert_eq!(retry.release.status, ReleaseStatus::Deployed);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1, 2]);
+    }
+
+    /// An apply that pruned something, or failed to prune, records a revision even
+    /// though its manifest equals the latest one: the revision records the pruning
+    /// and what stays tracked for a retry.
+    #[tokio::test(start_paused = true)]
+    async fn test_apply_that_prunes_records_a_new_revision() {
+        let manifests = vec![config_map("kept")];
+        for (stuck, pruned_name, failed) in [("", "removed", 0), ("stuck", "stuck", 1)] {
+            let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+            let client = LatencyClient::new(stuck);
+            let mut recorded = release_with_keys(
+                1,
+                ReleaseStatus::Deployed,
+                vec![
+                    key("v1", "ConfigMap", Some("app"), "kept"),
+                    key("v1", "ConfigMap", Some("app"), pruned_name),
+                ],
+            );
+            recorded.manifest = manifests_to_yaml(&manifests).unwrap();
+            storage.save_release(&recorded).await.unwrap();
+
+            let run = apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+
+            assert!(!run.unchanged, "pruning {pruned_name} is a change");
+            assert_eq!(run.release.revision, 2);
+            assert_eq!(run.prune_failed_count, failed);
+            assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1, 2]);
+        }
+    }
+
+    /// What may differ between the latest revision and a new apply without making
+    /// it a change, and what may not.
+    #[test]
+    fn test_records_same_compares_what_a_revision_records() {
+        use crate::gitops::reconcile::RenderIndexOwner;
+        use crate::kubernetes::{ReleaseMeta, ReleasePublication};
+
+        let owner = |uid: &str| RenderIndexOwner::unit("env", "unit", uid);
+        let publication = |prefix: &str, commit: Option<&str>| ReleasePublication {
+            repository: "repo".into(),
+            branch: "main".into(),
+            path_prefix: prefix.into(),
+            commit: commit.map(str::to_owned),
+        };
+        let revision = |owner: Option<RenderIndexOwner>, publication: Option<ReleasePublication>| {
+            let mut release = release_with_keys(
+                1,
+                ReleaseStatus::Deployed,
+                vec![
+                    key("v1", "ConfigMap", Some("app"), "a"),
+                    key("v1", "ConfigMap", Some("app"), "b"),
+                ],
+            );
+            release.meta = ReleaseMeta { owner, publication };
+            release
+        };
+        let latest = revision(Some(owner("1")), Some(publication("p", Some("old"))));
+        let same_as = |new: &ReleaseState, stands: Option<PublicationStands<'_>>| records_same(&latest, new, stands);
+
+        // Timestamps and the order of keys are not what a revision records.
+        let mut reordered = revision(Some(owner("1")), Some(publication("p", Some("old"))));
+        reordered.resource_keys.reverse();
+        reordered.rendered_at += chrono::Duration::hours(1);
+        reordered.applied_at = None;
+        assert!(same_as(&reordered, None));
+
+        // Another owner, destination, manifest, or key set is a change.
+        assert!(!same_as(
+            &revision(Some(owner("2")), Some(publication("p", Some("old")))),
+            None
+        ));
+        assert!(!same_as(&revision(None, Some(publication("p", Some("old")))), None));
+        assert!(!same_as(
+            &revision(Some(owner("1")), Some(publication("q", Some("old")))),
+            None
+        ));
+        assert!(!same_as(&revision(Some(owner("1")), None), None));
+        let mut other_manifest = revision(Some(owner("1")), Some(publication("p", Some("old"))));
+        other_manifest.manifest.push_str("# changed");
+        assert!(!same_as(&other_manifest, None));
+        let mut other_keys = revision(Some(owner("1")), Some(publication("p", Some("old"))));
+        other_keys.resource_keys.pop();
+        assert!(!same_as(&other_keys, None));
+        let mut failed = latest.clone();
+        failed.status = ReleaseStatus::Failed;
+        assert!(!records_same(&failed, &latest, None));
+
+        // A newer publication commit is a change unless the old one still stands for it.
+        let newer = revision(Some(owner("1")), Some(publication("p", Some("new"))));
+        assert!(!same_as(&newer, None));
+        assert!(!same_as(&newer, Some(&|_| false)));
+        assert!(same_as(&newer, Some(&|old| old == "old")));
+        // A revision that recorded no commit has nothing that can stand for one.
+        let uncommitted = revision(Some(owner("1")), Some(publication("p", None)));
+        assert!(!records_same(&uncommitted, &newer, Some(&|_| true)));
+    }
+
+    /// Storage whose revision deletes fail, as a flaky API server does: with
+    /// `deletes_first`, the revision is gone although the request reports failure.
+    struct FailingDeletes {
+        inner: crate::kubernetes::memory::InMemoryReleaseStorage,
+        deletes_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ReleaseStorage for FailingDeletes {
+        async fn save_release(&self, release: &ReleaseState) -> Result<()> {
+            self.inner.save_release(release).await
+        }
+        async fn complete_release(&self, release: &ReleaseState) -> Result<()> {
+            self.inner.complete_release(release).await
+        }
+        async fn get_latest_release(&self, name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
+            self.inner.get_latest_release(name, namespace).await
+        }
+        async fn get_release(&self, name: &str, namespace: &str, revision: u32) -> Result<Option<ReleaseState>> {
+            self.inner.get_release(name, namespace, revision).await
+        }
+        async fn list_revisions(&self, name: &str, namespace: &str) -> Result<Vec<u32>> {
+            self.inner.list_revisions(name, namespace).await
+        }
+        async fn update_release_status(
+            &self,
+            name: &str,
+            namespace: &str,
+            revision: u32,
+            status: ReleaseStatus,
+            error: Option<String>,
+        ) -> Result<()> {
+            self.inner
+                .update_release_status(name, namespace, revision, status, error)
+                .await
+        }
+        async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<crate::kubernetes::ReleaseInfo>> {
+            self.inner.list_releases(namespace).await
+        }
+        async fn delete_release(&self, name: &str, namespace: &str, revision: u32) -> Result<()> {
+            if self.deletes_first {
+                self.inner.delete_release(name, namespace, revision).await?;
+            }
+            Err(NylError::Kubernetes("the API server timed out".to_string()))
+        }
+        async fn delete_all_revisions(&self, name: &str, namespace: &str) -> Result<u32> {
+            self.inner.delete_all_revisions(name, namespace).await
+        }
+    }
+
+    /// A reservation that cannot be released is recorded like any other revision;
+    /// one a failed request deleted anyway is released, and the apply stays a
+    /// success that changed nothing.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_release_of_the_reservation_is_settled_by_what_is_stored() {
+        for (deletes_first, unchanged, revisions) in [(false, false, vec![1, 2]), (true, true, vec![1])] {
+            let storage = FailingDeletes {
+                inner: crate::kubernetes::memory::InMemoryReleaseStorage::new(),
+                deletes_first,
+            };
+            let client = LatencyClient::new("");
+            let manifests = vec![config_map("a")];
+            apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+
+            let run = apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+
+            assert_eq!(run.unchanged, unchanged, "deletes_first: {deletes_first}");
+            assert!(run.error("Apply").is_none());
+            assert_eq!(storage.list_revisions("app", "app").await.unwrap(), revisions);
+            let latest = storage.get_latest_release("app", "app").await.unwrap().unwrap();
+            assert_eq!(latest.status, ReleaseStatus::Deployed);
+        }
+    }
+
+    /// A kept apply still enforces the history limit, which may have been lowered
+    /// since the latest revision deployed.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_kept_apply_enforces_the_history_limit() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let manifests = vec![config_map("a")];
+        for revision in 1..=3 {
+            let mut recorded = release_with_keys(
+                revision,
+                if revision == 3 {
+                    ReleaseStatus::Deployed
+                } else {
+                    ReleaseStatus::Superseded
+                },
+                vec![key("v1", "ConfigMap", Some("app"), "a")],
+            );
+            recorded.manifest = manifests_to_yaml(&manifests).unwrap();
+            storage.save_release(&recorded).await.unwrap();
+        }
+
+        let limited = ApplySettings {
+            history_limit: 2,
+            ..keep_unchanged()
+        };
+        let run = apply_with(&storage, &client, &manifests, limited).await;
+
+        assert!(run.unchanged);
+        assert_eq!(run.release.revision, 3);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![2, 3]);
+    }
+
+    /// `--append-release` compares the merged manifest: appending what the latest
+    /// revision already holds changes nothing, appending something new does.
+    #[tokio::test(start_paused = true)]
+    async fn test_append_release_keeps_an_unchanged_revision_and_records_a_change() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let append = |manifests: Vec<serde_json::Value>| {
+            let (storage, client) = (&storage, &client);
+            async move {
+                let mut scopes = ObjectScopes::default();
+                let recorder = ReleaseRecorder::reserve(
+                    storage,
+                    "app",
+                    "app",
+                    &manifests,
+                    true,
+                    client,
+                    &mut scopes,
+                    &ReleaseClaim::manual(),
+                )
+                .await
+                .unwrap();
+                recorder
+                    .run(
+                        client,
+                        &manifests,
+                        &mut scopes,
+                        keep_unchanged(),
+                        Interruption::never(),
+                        &mut |_| {},
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        assert!(!append(vec![config_map("a")]).await.unchanged);
+        let again = append(vec![config_map("a")]).await;
+        assert!(again.unchanged);
+        assert_eq!(again.release.revision, 1);
+
+        let grown = append(vec![config_map("b")]).await;
+        assert!(!grown.unchanged);
+        assert_eq!(grown.release.revision, 2);
+        assert_eq!(grown.release.resource_keys.len(), 2);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1, 2]);
+    }
+
+    /// A failure to release field ownership is not a settled apply, even though
+    /// every key is tracked as before.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_release_of_field_ownership_is_never_kept() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let manifests = vec![config_map("a")];
+        apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+        let mut scopes = ObjectScopes::default();
+        let recorder = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &manifests,
+            false,
+            &client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+        let mut stored_apply = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 1, &mut |_| {})
+            .await
+            .unwrap();
+        stored_apply.release_failed_count = 1;
+        let completed = AtomicBool::new(false);
+        let done = recorder
+            .complete(
+                &client,
+                &stored_apply,
+                &mut scopes,
+                keep_unchanged(),
+                &mut |_| {},
+                &completed,
+            )
+            .await
+            .unwrap();
+
+        assert!(!done.unchanged);
+        assert_eq!(done.release.revision, 2);
     }
 }

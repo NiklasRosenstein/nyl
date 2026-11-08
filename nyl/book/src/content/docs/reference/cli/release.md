@@ -12,7 +12,8 @@ nyl release <SUBCOMMAND> [OPTIONS]
 
 ## Description
 
-Every `nyl apply` records a release revision, storing the full rendered manifest
+Every `nyl apply` that changes the release records a release revision (one that
+changes nothing keeps the latest, see [`apply`](/nyl/reference/cli/apply/#apply-order-and-progress)), storing the full rendered manifest
 and the set of applied resources in a Kubernetes Secret in the release namespace.
 The Secret has type `k8s.nyl/release.v1` and the labels `k8s.nyl/release` (the
 release name) and `k8s.nyl/revision`; revisions recorded under the
@@ -62,7 +63,8 @@ nyl release history <NAME> --namespace <NAMESPACE> [OPTIONS]
 ```
 
 Show the revision history of a release, including each revision's status and
-timestamps.
+timestamps. A revision's timestamps are those of the apply that recorded it: later
+applies that changed nothing do not add a revision or move them.
 
 ### rollback
 

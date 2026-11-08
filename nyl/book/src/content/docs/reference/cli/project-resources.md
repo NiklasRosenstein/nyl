@@ -83,6 +83,10 @@ nyl get units -e dev --local                  # this clone's local view
   `-o wide` adds the teardown readiness of units whose kind reports
   teardown settings, such as a `KubernetesPublication`: `ready`, or
   `incomplete:` with the unmet requirements, and `-` for other kinds.
+  The state is the one [`nyl status`](/nyl/reference/cli/status/) shows,
+  including `ready` for a unit that reads an observed value of another
+  environment that changed since it resolved. With `--state-revision`, no
+  other environment is read, so that readiness is not evaluated.
 - `get unit <name> -e <env> -o yaml|json` prints exactly the persisted
   `{desired, observed}` documents, never a synthesized merge. `--desired` or
   `--observed` prints only one of them.

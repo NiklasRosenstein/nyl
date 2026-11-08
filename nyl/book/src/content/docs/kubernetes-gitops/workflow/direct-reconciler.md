@@ -76,6 +76,26 @@ publication branch back to the last receipt; a history deeper than the walk limi
 that never reaches it (or with no receipt at all) fails with
 `NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP` instead of guessing.
 
+## Unchanged Releases
+
+Every reconcile applies every Release, which repairs anything changed in the
+cluster by hand. A Release that changed nothing does not record a new release
+revision, so the history keeps its useful revisions instead of filling with
+copies of one. A Release is unchanged when its latest revision is `Deployed`
+and records the same manifest, resource keys, owner, and publication
+destination (repository, branch, and prefix), and the apply pruned nothing and
+failed nothing. The latest revision then stays the current one, with its
+original timestamps, and `nyl release history` shows no new line.
+
+A publication commit changes whenever any part of the target's tree changes, so
+it is not compared. The kept revision records the older commit, which
+`nyl attest` accepts as long as that commit is still on the publication branch
+and its Release directory and recorded inputs equal the new publication's, the
+same rule that matches an Argo CD revision. When they do not, for instance after
+the branch was rewritten, the apply records a new revision with the new commit.
+A `Failed` or interrupted latest revision always gets a new one, and so does a
+Release that pruned something.
+
 ## Fencing and manual changes
 
 The release state in the cluster records the owning unit and the publication it was

@@ -41,7 +41,12 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   whose recorded value no longer equals the one it resolved, or that was
   blocked on a value that has arrived since, is `ready` and says which
   observed value changed or arrived (`NYL-OBSERVATION-CHANGED`): work for the
-  next reconcile. A consumer still waiting for a value shows the blocker,
+  next reconcile. That holds for a value of another environment that the unit
+  reads with `environment`: status reads the producer environment's state, without
+  a lease, and names it as `dev/kubernetes`; an environment whose state cannot be
+  read is a `NYL-STATE-UNAVAILABLE` warning. [`nyl get units`](/nyl/reference/cli/project-resources/)
+  shows the same states for the current state, and none from other environments
+  with `--state-revision`. A consumer still waiting for a value shows the blocker,
   `observation-pending`, with the driver's reason (`NYL-OBSERVATION-PENDING`).
   Status reads only recorded values.
 - **Teardowns.** A unit pending teardown warns with `NYL-TEARDOWN-PENDING`,

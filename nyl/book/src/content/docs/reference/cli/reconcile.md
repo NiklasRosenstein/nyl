@@ -308,7 +308,7 @@ Besides the codes above, a reconcile reports:
 | `NYL-OBSERVATIONS-UNSUPPORTED` | A unit declares `observations`, but its kind cannot read observed values for its spec, such as a Command, or a publication that does not declare `observe: {}`. |
 | `NYL-OBSERVATION-PENDING` | A consumer waits for an observed value that its producer's current receipt has none of yet. Run `nyl observe` or `nyl reconcile` once the system holds it, or give the producer an `observationWait`. |
 | `NYL-OBSERVATION-FAILED` | An observed value could not be read; the last recorded value stays usable. Fix the cause, such as missing credentials. |
-| `NYL-OBSERVATION-CHANGED` | Reported by `nyl status` and `nyl observe`: an observed value changed or arrived, so its consumers are ready for the next reconcile. |
+| `NYL-OBSERVATION-CHANGED` | Reported by `nyl status` and `nyl observe`: an observed value changed or arrived, so its consumers, in this or another environment, are ready for the next reconcile. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting first. |
 | `NYL-STATE-DELETED` | The environment's state was deleted with `nyl state delete`. Remove the Environment, or start over with `nyl state init --fresh`. |

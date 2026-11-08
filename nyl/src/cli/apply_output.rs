@@ -59,6 +59,8 @@ pub(crate) struct ApplyReport<'a> {
     pub(crate) prune_failed_count: usize,
     /// The recorded revision, unless the apply ran without release tracking.
     pub(crate) release: Option<&'a ReleaseState>,
+    /// The apply changed nothing, so it recorded no revision and `release` is the latest one.
+    pub(crate) release_unchanged: bool,
     /// Phase durations, in the order the phases ran.
     pub(crate) timings: &'a [PhaseTiming],
 }
@@ -214,7 +216,12 @@ impl<'a> ApplyRenderer<'a> {
 
         if let Some(release) = report.release {
             println!();
-            if release.status == ReleaseStatus::Deployed && report.prune_failed_count > 0 {
+            if release.status == ReleaseStatus::Deployed && report.release_unchanged {
+                println!(
+                    "Release: {} revision {} unchanged in namespace {}; no new revision recorded",
+                    release.release_name, release.revision, release.release_namespace
+                );
+            } else if release.status == ReleaseStatus::Deployed && report.prune_failed_count > 0 {
                 println!(
                     "Release: {} revision {} deployed to namespace {}; {} resource(s) failed to prune and will be retried by the next apply",
                     release.release_name, release.revision, release.release_namespace, report.prune_failed_count
@@ -277,6 +284,7 @@ pub(crate) fn report_of<'a>(run: &'a ReleaseRun, timings: &'a [PhaseTiming]) -> 
         ownership: ownership_report(&run.apply),
         prune_failed_count: run.prune_failed_count,
         release: Some(&run.release),
+        release_unchanged: run.unchanged,
         timings,
     }
 }
