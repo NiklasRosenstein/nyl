@@ -5,7 +5,7 @@ use crate::orchestration::run::Wiring;
 use nyl_core::orchestration::driver::{ResolutionContext, SourceRoot};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, SourceRepository, SourceResolver, StateStore};
-use nyl_core::orchestration::state::{DesiredUnit, DesiredUnitKind, Lifecycle, Readiness, StateV1, UnitIdentity};
+use nyl_core::orchestration::state::{DesiredUnit, DesiredUnitKind, Lifecycle, Readiness, StateV2, UnitIdentity};
 use nyl_orchestration::rules::{
     execution_key::{execution_key, KeyMaterial},
     references::{resolve_unit, ReferenceView},
@@ -152,7 +152,7 @@ pub fn prepare(
     }
     let environment = selected.unwrap_or(EnvironmentName::new("local").expect("local name"));
     let mut unit = DesiredUnit {
-        api_version: StateV1,
+        api_version: StateV2,
         kind: DesiredUnitKind,
         unit: UnitIdentity {
             environment: environment.clone(),

@@ -35,15 +35,18 @@
 //!   the current receipt passes. Age plays no part: a dependent is satisfied
 //!   by a recorded pass for the current receipt, and `maxAttestationAge`
 //!   belongs to promotion paths.
-//! - **Reasons.** A consumer's blocked reason reads `attestation <name> of
-//!   <producer> is pending` or `… is failing`. [`parse_reason`] reads one back
-//!   for reports, which show the stable reasons
-//!   [`ATTESTATION_PENDING`] and [`ATTESTATION_FAILING`] with the producer, and
-//!   for the warnings [`warnings`] gives them
-//!   ([`Code::AttestationPending`], [`Code::AttestationFailing`]).
+//! - **Reasons.** A consumer's blocker is [`Blocker::Attestation`], which
+//!   names the producer (with its environment across environments), the
+//!   attestation, and whether it is pending or failing; its text reads
+//!   `attestation <name> of <producer> is pending` or `… is failing`. Reports
+//!   show the stable reasons [`ATTESTATION_PENDING`] and
+//!   [`ATTESTATION_FAILING`] with the producer, and [`warnings`] gives the
+//!   warnings ([`Code::AttestationPending`], [`Code::AttestationFailing`]),
+//!   all from the typed fields.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nyl_core::orchestration::blocked::{AttestationWait, Blocker};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::state::{
@@ -59,28 +62,11 @@ pub const ATTESTATION_PENDING: &str = "attestation-pending";
 /// that is recorded as failing for its producer's current receipt.
 pub const ATTESTATION_FAILING: &str = "attestation-failing";
 
-/// Whether a required attestation that does not pass has not been recorded
-/// for the current receipt, or has been recorded as failing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Waiting {
-    Pending,
-    Failing,
-}
-
-impl Waiting {
-    fn word(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Failing => "failing",
-        }
-    }
-
-    /// The stable reason reports show.
-    pub fn stable(self) -> &'static str {
-        match self {
-            Self::Pending => ATTESTATION_PENDING,
-            Self::Failing => ATTESTATION_FAILING,
-        }
+/// The stable reason reports show for an attestation that does not pass.
+pub fn stable(wait: AttestationWait) -> &'static str {
+    match wait {
+        AttestationWait::Pending => ATTESTATION_PENDING,
+        AttestationWait::Failing => ATTESTATION_FAILING,
     }
 }
 
@@ -242,7 +228,7 @@ fn waiting(
     producer: &DesiredUnit,
     receipt: &Receipt,
     recorded: Option<&BTreeMap<String, Attestation>>,
-) -> Option<Waiting> {
+) -> Option<AttestationWait> {
     let attestation = recorded
         .and_then(|recorded| recorded.get(name))
         .filter(|attestation| attestation.execution_key == receipt.execution_key.as_str())
@@ -254,8 +240,8 @@ fn waiting(
         });
     match attestation.map(|attestation| attestation.result) {
         Some(AttestationResult::Pass) => None,
-        Some(AttestationResult::Fail) => Some(Waiting::Failing),
-        None => Some(Waiting::Pending),
+        Some(AttestationResult::Fail) => Some(AttestationWait::Failing),
+        None => Some(AttestationWait::Pending),
     }
 }
 
@@ -266,7 +252,7 @@ pub fn unmet(
     producer: &DesiredUnit,
     observed: &ObservedUnit,
     recorded: Option<&BTreeMap<String, Attestation>>,
-) -> Vec<(String, Waiting)> {
+) -> Vec<(String, AttestationWait)> {
     let Some(receipt) = &observed.receipt else {
         return Vec::new();
     };
@@ -276,48 +262,19 @@ pub fn unmet(
         .collect()
 }
 
-/// The blocked reason for an unmet attestation of `producer`, which a
-/// cross-environment consumer writes as `<environment>/<unit>`.
-pub fn reason(name: &str, producer: &str, waiting: Waiting) -> String {
-    format!("attestation {name} of {producer} is {}", waiting.word())
-}
-
-/// An attestation reason, read back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaitingFor {
-    pub name: String,
-    /// The producer, `<environment>/<unit>` across environments.
-    pub producer: String,
-    pub waiting: Waiting,
-}
-
-/// Read a stored blocked reason that [`reason`] wrote.
-pub fn parse_reason(text: &str) -> Option<WaitingFor> {
-    let rest = text.strip_prefix("attestation ")?;
-    let (rest, waiting) = if let Some(rest) = rest.strip_suffix(" is pending") {
-        (rest, Waiting::Pending)
-    } else {
-        (rest.strip_suffix(" is failing")?, Waiting::Failing)
-    };
-    let (name, producer) = rest.rsplit_once(" of ")?;
-    Some(WaitingFor {
-        name: name.to_owned(),
-        producer: producer.to_owned(),
-        waiting,
-    })
-}
-
 /// The warnings of a blocked unit that waits for attestations: each names
-/// the attestation and what to do about it.
+/// the attestation and what to do about it. The producer reads
+/// `<environment>/<unit>` across environments.
 pub fn warnings(unit: &UnitName, environment: &str, reasons: &[BlockedReason]) -> Vec<Finding> {
     reasons
         .iter()
-        .filter_map(|blocked| parse_reason(&blocked.reason))
-        .map(|waiting| {
-            let producer = &waiting.producer;
-            let name = &waiting.name;
-            match waiting.waiting {
-                Waiting::Pending => Finding::new(
+        .filter_map(|blocked| match &blocked.blocker {
+            Blocker::Attestation { producer, name, state } => Some((producer, name, *state)),
+            _ => None,
+        })
+        .map(|(producer, name, state)| {
+            match state {
+                AttestationWait::Pending => Finding::new(
                     Code::AttestationPending,
                     format!(
                         "unit {unit} waits for attestation {name} of {producer}: none is recorded for its current receipt"
@@ -326,7 +283,7 @@ pub fn warnings(unit: &UnitName, environment: &str, reasons: &[BlockedReason]) -
                         "record it, such as with `nyl attest -e {environment}` for a kind that attests itself, then run nyl reconcile again"
                     ),
                 ),
-                Waiting::Failing => Finding::new(
+                AttestationWait::Failing => Finding::new(
                     Code::AttestationFailing,
                     format!(
                         "unit {unit} waits for attestation {name} of {producer}, which is recorded as failing for its current receipt"
@@ -372,6 +329,7 @@ mod tests {
 
     use super::*;
     use crate::rules::fixtures::{desired, key, name, observed, receipt};
+    use nyl_core::orchestration::blocked::ProducerRef;
     use nyl_core::orchestration::state::{AttestationKind, StateV1};
 
     fn producer(attestations: &[&str], spec: Value) -> DesiredUnit {
@@ -496,8 +454,8 @@ mod tests {
         assert_eq!(
             unmet(&required, &unit, &current, None),
             [
-                ("accepted".to_owned(), Waiting::Pending),
-                ("healthy".to_owned(), Waiting::Pending)
+                ("accepted".to_owned(), AttestationWait::Pending),
+                ("healthy".to_owned(), AttestationWait::Pending)
             ]
         );
         assert_eq!(
@@ -505,14 +463,14 @@ mod tests {
                 ("accepted", "k", AttestationResult::Pass),
                 ("healthy", "k", AttestationResult::Fail)
             ])),
-            [("healthy".to_owned(), Waiting::Failing)]
+            [("healthy".to_owned(), AttestationWait::Failing)]
         );
         assert_eq!(
             standing(&recorded(&[
                 ("accepted", "k", AttestationResult::Pass),
                 ("healthy", "older", AttestationResult::Pass)
             ])),
-            [("healthy".to_owned(), Waiting::Pending)],
+            [("healthy".to_owned(), AttestationWait::Pending)],
             "a pass for a replaced receipt is not evidence for the new one"
         );
         assert!(standing(&recorded(&[
@@ -537,39 +495,32 @@ mod tests {
         set.get_mut("healthy").unwrap().unit = Some(subject);
         assert_eq!(
             unmet(&["healthy".to_owned()], &unit, &current, Some(&set)),
-            [("healthy".to_owned(), Waiting::Pending)]
+            [("healthy".to_owned(), AttestationWait::Pending)]
         );
     }
 
-    /// Catches reports and warnings losing what the consumer waits for: the
-    /// reason text round-trips, and each warning carries its stable code.
+    /// Catches warnings losing what the consumer waits for: each carries its
+    /// stable code from the typed blocker, names the producer as its text
+    /// does (with the environment across environments), and ignores other
+    /// blockers.
     #[test]
-    fn test_reasons_round_trip_and_carry_stable_codes() {
-        for waiting in [Waiting::Pending, Waiting::Failing] {
-            let text = reason("healthy", "infra/kubernetes", waiting);
-            assert_eq!(
-                parse_reason(&text),
-                Some(WaitingFor {
-                    name: "healthy".to_owned(),
-                    producer: "infra/kubernetes".to_owned(),
-                    waiting
-                })
-            );
-        }
-        assert_eq!(parse_reason("kubernetes has no current receipt"), None);
+    fn test_warnings_carry_stable_codes_and_name_the_producer() {
+        let at = |label: &str| ProducerRef::parse(label).unwrap();
+        let attestation = |label: &str, name: &str, state| Blocker::Attestation {
+            producer: at(label),
+            name: name.to_owned(),
+            state,
+        };
         let reasons = [
-            BlockedReason {
-                pointer: "/dependsOn/0".to_owned(),
-                reason: reason("healthy", "kubernetes", Waiting::Pending),
-            },
-            BlockedReason {
-                pointer: "/dependsOn/0".to_owned(),
-                reason: reason("accepted", "kubernetes", Waiting::Failing),
-            },
-            BlockedReason {
-                pointer: "/dependsOn/1".to_owned(),
-                reason: "network has no current receipt".to_owned(),
-            },
+            BlockedReason::new(
+                "/dependsOn/0",
+                attestation("kubernetes", "healthy", AttestationWait::Pending),
+            ),
+            BlockedReason::new(
+                "/dependsOn/1",
+                attestation("infra/kubernetes", "accepted", AttestationWait::Failing),
+            ),
+            BlockedReason::new("/dependsOn/2", Blocker::no_current_receipt(at("network"))),
         ];
         let findings = warnings(&name("smoke"), "dev", &reasons);
         assert_eq!(
@@ -577,6 +528,13 @@ mod tests {
             [Code::AttestationPending, Code::AttestationFailing]
         );
         assert!(findings[0].fix.contains("nyl attest -e dev"), "{}", findings[0].fix);
+        assert!(
+            findings[1].message.contains("attestation accepted of infra/kubernetes"),
+            "{}",
+            findings[1].message
+        );
+        assert_eq!(stable(AttestationWait::Pending), ATTESTATION_PENDING);
+        assert_eq!(stable(AttestationWait::Failing), ATTESTATION_FAILING);
     }
 
     /// Catches stale attestations surviving a new receipt, or a unit's

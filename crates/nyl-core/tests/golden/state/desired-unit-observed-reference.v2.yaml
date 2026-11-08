@@ -1,0 +1,32 @@
+apiVersion: gitops.nyl/v2
+kind: DesiredUnit
+unit:
+  environment: dev
+  name: dns
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+  apiVersion: units.gitops.nyl/v1
+  kind: Command
+lifecycle:
+  state: active
+sourceCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+sourceRevision: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+spec:
+  values:
+    address:
+      fromUnit:
+        observation: ingressIp
+        unit: kubernetes
+resolvedSpec:
+  values:
+    address: "203.0.113.10"
+provenance:
+  /values/address:
+    unit: kubernetes
+    uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+    executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+    observedCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+    observation: ingressIp
+    observedAt: "2026-09-25T16:40:00Z"
+executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+readiness:
+  state: ready

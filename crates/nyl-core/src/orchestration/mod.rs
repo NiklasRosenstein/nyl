@@ -37,11 +37,13 @@ macro_rules! string_serde {
     };
 }
 
+pub mod blocked;
 pub mod codes;
 pub mod driver;
 pub mod graph;
 pub mod ids;
 pub mod instance;
+pub mod migration;
 pub mod ports;
 pub mod progress;
 pub mod state;

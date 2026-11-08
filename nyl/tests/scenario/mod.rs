@@ -11,6 +11,7 @@
 pub mod format;
 #[cfg(feature = "tier2")]
 pub mod native;
+pub mod observing;
 pub mod runner;
 pub mod shell;
 pub mod world;

@@ -33,17 +33,21 @@
 //!   for the next reconcile, which `plan` and `status` show and `nyl observe`
 //!   names with `NYL-OBSERVATION-CHANGED`. It is neither drift nor evidence:
 //!   the producer's receipt still holds.
-//! - **Reasons.** A consumer's blocked reason reads `observation <name> of
-//!   <producer> is pending: <why>`; [`parse_reason`] reads one back for
-//!   reports, which show the stable reason [`OBSERVATION_PENDING`] and the
-//!   warnings [`warnings`] gives ([`Code::ObservationPending`]).
+//! - **Reasons.** A consumer's blocker is [`Blocker::Observation`], which
+//!   names the producer (with its environment across environments), the
+//!   observed value, and the driver's reason; its text reads `observation
+//!   <name> of <producer> is pending: <why>`. Reports show the stable reason
+//!   [`OBSERVATION_PENDING`], and [`warnings`] gives the warnings
+//!   ([`Code::ObservationPending`]), all from the typed fields.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::unit_references;
+use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
-use nyl_core::orchestration::ids::UnitName;
+use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
     BlockedReason, DesiredUnit, Lifecycle, ObservationRecord, ObservationRecordKind, ObservedUnit, Readiness, Receipt,
     RecordedObservation, StateV1,
@@ -295,50 +299,22 @@ pub fn changes(
         .collect()
 }
 
-/// The blocked reason of a consumer waiting for `observation` of `producer`,
-/// which a cross-environment consumer writes as `<environment>/<unit>`.
-pub fn reason(observation: &str, producer: &str, why: &str) -> String {
-    format!("observation {observation} of {producer} is pending: {why}")
-}
-
-/// An observation reason, read back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaitingFor {
-    pub observation: String,
-    /// The producer, `<environment>/<unit>` across environments.
-    pub producer: String,
-    /// The driver's reason.
-    pub why: String,
-}
-
-/// Read a stored blocked reason that [`reason`] wrote.
-pub fn parse_reason(text: &str) -> Option<WaitingFor> {
-    let rest = text.strip_prefix("observation ")?;
-    let (observation, rest) = rest.split_once(" of ")?;
-    let (producer, why) = rest.split_once(" is pending: ")?;
-    (!observation.contains(' ') && !producer.contains(' ')).then(|| WaitingFor {
-        observation: observation.to_owned(),
-        producer: producer.to_owned(),
-        why: why.to_owned(),
-    })
-}
-
 /// The warnings of a blocked unit that waits for observed values: each names
-/// the observation, the driver's reason, and what to do about it.
+/// the observation, the driver's reason, and what to do about it. The
+/// producer reads `<environment>/<unit>` across environments.
 pub fn warnings(unit: &UnitName, environment: &str, reasons: &[BlockedReason]) -> Vec<Finding> {
     reasons
         .iter()
-        .filter_map(|blocked| parse_reason(&blocked.reason))
-        .map(|waiting| {
+        .filter_map(|blocked| match &blocked.blocker {
+            Blocker::Observation { producer, name, why } => Some((producer, name, why)),
+            _ => None,
+        })
+        .map(|(producer, name, why)| {
             Finding::new(
                 Code::ObservationPending,
+                format!("unit {unit} waits for observed value {name} of {producer}: {why}"),
                 format!(
-                    "unit {unit} waits for observed value {} of {}: {}",
-                    waiting.observation, waiting.producer, waiting.why
-                ),
-                format!(
-                    "once the system holds it, `nyl observe -e {environment}` records it and the next `nyl reconcile -e {environment}` resolves {unit}; `observationWait` on {} makes a run that executes it wait for the value",
-                    waiting.producer
+                    "once the system holds it, `nyl observe -e {environment}` records it and the next `nyl reconcile -e {environment}` resolves {unit}; `observationWait` on {producer} makes a run that executes it wait for the value"
                 ),
             )
         })
@@ -349,7 +325,7 @@ pub fn warnings(unit: &UnitName, environment: &str, reasons: &[BlockedReason]) -
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChangedConsumer {
     pub consumer: UnitName,
-    pub producer: UnitName,
+    pub producer: ProducerRef,
     pub observation: String,
     /// The value was not there when the consumer last resolved (it blocked
     /// on it); otherwise it resolved another value.
@@ -364,18 +340,33 @@ pub struct ChangedConsumer {
 ///   current receipt and a usable value that is not the value the consumer
 ///   resolved;
 /// - each active consumer that is blocked only on observations (see
-///   [`reason`]) that now all have a usable value: `arrived`.
+///   [`Blocker::Observation`]) that now all have a usable value: `arrived`.
+///   A blocker names its producer with its environment ([`ProducerRef`]); a
+///   producer of another environment is read from `foreign`, the snapshots of
+///   the environments the caller loaded, and never from `desired`, so a
+///   same-named unit of this environment cannot stand in for it.
 ///
-/// A producer without a usable value leaves its consumer to resolution,
-/// which blocks it.
+/// A producer without a usable value, or of an environment not in
+/// `foreign`, leaves its consumer to resolution, which blocks it. A consumer
+/// that resolved a value of another environment's producer is not compared
+/// here.
 pub fn changed_consumers(
     desired: &BTreeMap<UnitName, DesiredUnit>,
     observed: &BTreeMap<UnitName, ObservedUnit>,
     records: &BTreeMap<UnitName, ObservationRecord>,
+    foreign: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
     now: Timestamp,
 ) -> Vec<ChangedConsumer> {
     // What a producer's observation holds now: its value, if usable.
-    let usable = |producer: &UnitName, observation: &str| -> Option<Value> {
+    let usable = |producer: &ProducerRef, observation: &str| -> Option<Value> {
+        let (desired, observed, records) = match &producer.environment {
+            None => (desired, observed, records),
+            Some(environment) => {
+                let snapshot = foreign.get(environment)?;
+                (&snapshot.desired, &snapshot.observed, &snapshot.observations)
+            }
+        };
+        let producer = &producer.unit;
         let producer_document = desired.get(producer)?;
         if !receipt_is_current(producer_document, observed.get(producer)) {
             return None;
@@ -402,19 +393,19 @@ pub fn changed_consumers(
         let Some(resolved) = document.resolved_spec.as_ref() else {
             // Blocked only on observations that now have values.
             if let Readiness::Blocked { reasons } = &document.readiness {
-                let waits: Vec<_> = reasons.iter().map(|reason| parse_reason(&reason.reason)).collect();
-                let arrived: Vec<ChangedConsumer> = waits
+                let arrived: Vec<ChangedConsumer> = reasons
                     .iter()
-                    .flatten()
-                    .filter_map(|waiting| {
-                        let producer = UnitName::new(&waiting.producer).ok()?;
-                        usable(&producer, &waiting.observation)?;
-                        Some(ChangedConsumer {
-                            consumer: consumer.clone(),
-                            producer,
-                            observation: waiting.observation.clone(),
-                            arrived: true,
-                        })
+                    .filter_map(|reason| match &reason.blocker {
+                        Blocker::Observation { producer, name, .. } => {
+                            usable(producer, name)?;
+                            Some(ChangedConsumer {
+                                consumer: consumer.clone(),
+                                producer: producer.clone(),
+                                observation: name.clone(),
+                                arrived: true,
+                            })
+                        }
+                        _ => None,
                     })
                     .collect();
                 if !reasons.is_empty() && arrived.len() == reasons.len() {
@@ -434,6 +425,7 @@ pub fn changed_consumers(
             let Ok(producer) = UnitName::new(&source.unit) else {
                 continue;
             };
+            let producer = ProducerRef::local(producer);
             let Some(value) = usable(&producer, observation) else {
                 continue;
             };
@@ -817,36 +809,50 @@ mod tests {
         );
     }
 
-    /// Catches a reason that does not survive storage in a desired
-    /// document, where status and the reports read it back.
+    fn waiting_for(producer: &str, observation: &str, why: &str) -> Blocker {
+        Blocker::Observation {
+            producer: ProducerRef::parse(producer).unwrap(),
+            name: observation.to_owned(),
+            why: why.to_owned(),
+        }
+    }
+
+    /// Catches warnings losing what the consumer waits for: the observation,
+    /// the driver's words (colons and all), the producer as its text names it
+    /// (with the environment across environments), and the stable code; other
+    /// blockers give none.
     #[test]
-    fn test_reasons_round_trip_with_the_drivers_words() {
-        let text = reason(
-            "ip",
-            "kubernetes",
-            "field-not-set: /status/loadBalancer: of the Service",
-        );
-        assert_eq!(
-            parse_reason(&text),
-            Some(WaitingFor {
-                observation: "ip".to_owned(),
-                producer: "kubernetes".to_owned(),
-                why: "field-not-set: /status/loadBalancer: of the Service".to_owned()
-            })
-        );
-        assert_eq!(parse_reason("kubernetes has no current receipt"), None);
-        assert_eq!(parse_reason("attestation healthy of kubernetes is pending"), None);
+    fn test_warnings_name_the_observation_the_producer_and_the_drivers_words() {
+        let why = "field-not-set: /status/loadBalancer: of the Service";
         let warnings = warnings(
             &name("dns"),
             "dev",
-            &[BlockedReason {
-                pointer: "/values/address".to_owned(),
-                reason: text,
-            }],
+            &[
+                BlockedReason::new("/values/address", waiting_for("kubernetes", "ip", why)),
+                BlockedReason::new("/values/other", waiting_for("infra/kubernetes", "port", "none yet")),
+                BlockedReason::new(
+                    "/dependsOn/0",
+                    Blocker::no_current_receipt(ProducerRef::parse("network").unwrap()),
+                ),
+            ],
         );
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, Code::ObservationPending);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings.iter().all(|finding| finding.code == Code::ObservationPending));
+        assert_eq!(
+            warnings[0].message,
+            format!("unit dns waits for observed value ip of kubernetes: {why}")
+        );
         assert!(warnings[0].fix.contains("nyl observe -e dev"), "{}", warnings[0].fix);
+        assert!(
+            warnings[1].message.contains("port of infra/kubernetes"),
+            "{}",
+            warnings[1].message
+        );
+        assert!(
+            warnings[1].fix.contains("`observationWait` on infra/kubernetes"),
+            "{}",
+            warnings[1].fix
+        );
     }
 
     fn consumer(resolved: Value) -> DesiredUnit {
@@ -890,54 +896,127 @@ mod tests {
 
         let stale = desired(consumer(json!({"values": {"address": "203.0.113.10"}})));
         assert_eq!(
-            changed_consumers(&stale, &observed, &records, at(1)),
+            changed_consumers(&stale, &observed, &records, &BTreeMap::new(), at(1)),
             [ChangedConsumer {
                 consumer: name("dns"),
-                producer: name("kubernetes"),
+                producer: ProducerRef::local(name("kubernetes")),
                 observation: "ip".to_owned(),
                 arrived: false
             }]
         );
         let same = desired(consumer(json!({"values": {"address": "203.0.113.20"}})));
-        assert!(changed_consumers(&same, &observed, &records, at(1)).is_empty());
+        assert!(changed_consumers(&same, &observed, &records, &BTreeMap::new(), at(1)).is_empty());
         // A producer whose receipt is not current has no value to compare.
         let replaced = BTreeMap::from([(
             name("kubernetes"),
             observed_numbered("kubernetes", 1, Some(hex_key('b'))),
         )]);
-        assert!(changed_consumers(&stale, &replaced, &records, at(1)).is_empty());
+        assert!(changed_consumers(&stale, &replaced, &records, &BTreeMap::new(), at(1)).is_empty());
         // Without a record there is nothing recorded to differ from.
-        assert!(changed_consumers(&stale, &observed, &BTreeMap::new(), at(1)).is_empty());
+        assert!(changed_consumers(&stale, &observed, &BTreeMap::new(), &BTreeMap::new(), at(1)).is_empty());
 
         // A consumer blocked only on the value, which now has one, can resolve.
         let mut waiting = consumer(json!({}));
         waiting.resolved_spec = None;
         waiting.execution_key = None;
         waiting.readiness = Readiness::Blocked {
-            reasons: vec![BlockedReason {
-                pointer: "/values/address".to_owned(),
-                reason: reason("ip", "kubernetes", "no address yet"),
-            }],
+            reasons: vec![BlockedReason::new(
+                "/values/address",
+                waiting_for("kubernetes", "ip", "no address yet"),
+            )],
         };
         let arrived = desired(waiting.clone());
         assert_eq!(
-            changed_consumers(&arrived, &observed, &records, at(1)),
+            changed_consumers(&arrived, &observed, &records, &BTreeMap::new(), at(1)),
             [ChangedConsumer {
                 consumer: name("dns"),
-                producer: name("kubernetes"),
+                producer: ProducerRef::local(name("kubernetes")),
                 observation: "ip".to_owned(),
                 arrived: true
             }]
         );
         // Still blocked when the value is not there, or when something else blocks it too.
-        assert!(changed_consumers(&arrived, &observed, &BTreeMap::new(), at(1)).is_empty());
+        assert!(changed_consumers(&arrived, &observed, &BTreeMap::new(), &BTreeMap::new(), at(1)).is_empty());
         let mut also = waiting;
         if let Readiness::Blocked { reasons } = &mut also.readiness {
-            reasons.push(BlockedReason {
-                pointer: "/dependsOn/0".to_owned(),
-                reason: "network has no current receipt".to_owned(),
-            });
+            reasons.push(BlockedReason::new(
+                "/dependsOn/0",
+                Blocker::no_current_receipt(ProducerRef::local(name("network"))),
+            ));
         }
-        assert!(changed_consumers(&desired(also), &observed, &records, at(1)).is_empty());
+        assert!(changed_consumers(&desired(also), &observed, &records, &BTreeMap::new(), at(1)).is_empty());
+    }
+
+    /// Catches a consumer that waits for an observed value of another
+    /// environment's unit never being recognized as able to resolve when the
+    /// value arrives (the producer was once read back from text that
+    /// `UnitName` rejects), and a same-named unit of the consumer's own
+    /// environment standing in for the other environment's producer.
+    #[test]
+    fn test_a_consumer_waiting_for_another_environments_value_resolves_when_it_arrives() {
+        let infra = EnvironmentName::new("infra").unwrap();
+        let mut declared_object = producer();
+        declared_object.spec = json!({"observations": {"ip": {"type": "object", "from": {}}}});
+        declared_object.resolved_spec = Some(declared_object.spec.clone());
+        let receipt = receipt_a();
+        let record = settle(&SettleInputs {
+            unit: &declared_object,
+            receipt: &receipt,
+            declared: &declarations(&declared_object.spec).unwrap(),
+            stored: None,
+            readings: &readings(&[("ip", value(json!({"host": "203.0.113.20"})))]),
+            now: at(0),
+            refresh: Duration::from_mins(60),
+        })
+        .record
+        .unwrap();
+        let producer_current = observed_numbered("kubernetes", 1, Some(hex_key('a')));
+        let infra_with_value = EnvironmentSnapshot {
+            desired: BTreeMap::from([(name("kubernetes"), declared_object.clone())]),
+            observed: BTreeMap::from([(name("kubernetes"), producer_current.clone())]),
+            observations: BTreeMap::from([(name("kubernetes"), record.clone())]),
+            ..EnvironmentSnapshot::default()
+        };
+        let infra_without_value = EnvironmentSnapshot {
+            observations: BTreeMap::new(),
+            ..infra_with_value.clone()
+        };
+        let mut waiting = consumer(json!({}));
+        waiting.resolved_spec = None;
+        waiting.execution_key = None;
+        waiting.readiness = Readiness::Blocked {
+            reasons: vec![BlockedReason::new(
+                "/values/address",
+                waiting_for("infra/kubernetes", "ip", "no address yet"),
+            )],
+        };
+        let app = BTreeMap::from([(name("dns"), waiting)]);
+        let none = BTreeMap::new();
+        let changed = |foreign: &BTreeMap<EnvironmentName, EnvironmentSnapshot>| {
+            changed_consumers(&app, &BTreeMap::new(), &none, foreign, at(1))
+        };
+
+        assert_eq!(
+            changed(&BTreeMap::from([(infra.clone(), infra_with_value)])),
+            [ChangedConsumer {
+                consumer: name("dns"),
+                producer: ProducerRef::parse("infra/kubernetes").unwrap(),
+                observation: "ip".to_owned(),
+                arrived: true
+            }]
+        );
+        assert!(changed(&BTreeMap::from([(infra, infra_without_value)])).is_empty());
+        assert!(
+            changed(&BTreeMap::new()).is_empty(),
+            "an environment that was not loaded"
+        );
+
+        // The consumer's own environment holds a `kubernetes` with a value, which is not the producer.
+        let local = BTreeMap::from([(name("kubernetes"), declared_object)]);
+        let local_observed = BTreeMap::from([(name("kubernetes"), producer_current)]);
+        let mut with_local = app.clone();
+        with_local.extend(local);
+        let stored_here = BTreeMap::from([(name("kubernetes"), record)]);
+        assert!(changed_consumers(&with_local, &local_observed, &stored_here, &BTreeMap::new(), at(1)).is_empty());
     }
 }

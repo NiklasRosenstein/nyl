@@ -82,21 +82,126 @@
       ],
       "type": "object"
     },
+    "AttestationWait": {
+      "description": "Whether a required attestation that does not pass has not been recorded\nfor the producer's current receipt, or has been recorded as failing.",
+      "enum": [
+        "pending",
+        "failing"
+      ],
+      "type": "string"
+    },
     "BlockedReason": {
       "additionalProperties": false,
+      "description": "One blocked location of a desired document and what it waits for.",
       "properties": {
+        "blocker": {
+          "$ref": "#/$defs/Blocker"
+        },
         "pointer": {
           "description": "Location of the unresolved reference, or empty for a `dependsOn` entry.",
-          "type": "string"
-        },
-        "reason": {
           "type": "string"
         }
       },
       "required": [
-        "reason"
+        "blocker"
       ],
       "type": "object"
+    },
+    "Blocker": {
+      "description": "What one blocked reference or `dependsOn` entry waits for.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The producer has no current receipt yet.",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "no-current-receipt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The producer lacks a required attestation for its current receipt.",
+          "properties": {
+            "name": {
+              "description": "The attestation's name.",
+              "type": "string"
+            },
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "state": {
+              "$ref": "#/$defs/AttestationWait"
+            },
+            "type": {
+              "const": "attestation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer",
+            "name",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The producer's observed value has no usable value yet.",
+          "properties": {
+            "name": {
+              "description": "The observed value's name.",
+              "type": "string"
+            },
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "observation",
+              "type": "string"
+            },
+            "why": {
+              "description": "Why the value is pending, in the driver's words.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer",
+            "name",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Anything else, such as a fenced incarnation or a producer environment\nthat failed in this run, which only its text describes.",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "other",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ChangeDigest": {
       "description": "A digest of the changes a plan would apply, which `bind: plan`\napprovals authorize: `sha256:` and 64 lowercase hex digits.",
@@ -375,10 +480,10 @@
     },
     "DesiredUnit": {
       "additionalProperties": false,
-      "description": "`desired/units/<unit>.yaml`.",
+      "description": "`desired/units/<unit>.yaml`.\n\nFormat `gitops.nyl/v2` stores blocked reasons typed\n([`super::blocked::Blocker`]); a `gitops.nyl/v1` document is migrated when\nit is read ([`super::migration`]).",
       "properties": {
         "apiVersion": {
-          "$ref": "#/$defs/StateV1"
+          "$ref": "#/$defs/StateV2"
         },
         "attestations": {
           "description": "The attestations the unit's receipts can carry.",
@@ -762,6 +867,30 @@
       ],
       "type": "object"
     },
+    "ProducerRef": {
+      "additionalProperties": false,
+      "description": "The producer a blocker names: a unit of the consumer's own environment, or\nof another one.\n\nIts [`Display`](fmt::Display) form is how every blocked reason names the\nproducer, `<unit>` or `<environment>/<unit>`, so a unit of another\nenvironment is never spelled two ways.",
+      "properties": {
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The producer's environment; absent for a unit of the consumer's own."
+        },
+        "unit": {
+          "$ref": "#/$defs/UnitName"
+        }
+      },
+      "required": [
+        "unit"
+      ],
+      "type": "object"
+    },
     "PromotionProvenance": {
       "additionalProperties": false,
       "description": "A value read from a PromotionRecord.",
@@ -1047,8 +1176,8 @@
       "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
       "type": "string"
     },
-    "StateV1": {
-      "const": "gitops.nyl/v1"
+    "StateV2": {
+      "const": "gitops.nyl/v2"
     },
     "TeardownProgress": {
       "oneOf": [
@@ -1183,10 +1312,10 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "`observed/units/<unit>.yaml`: the latest receipt and condition.",
+  "description": "`observed/units/<unit>.yaml`: the latest receipt and condition.\n\nFormat `gitops.nyl/v2` embeds a `gitops.nyl/v2` [`DesiredUnit`]; a\n`gitops.nyl/v1` document is migrated when it is read\n([`super::migration`]).",
   "properties": {
     "apiVersion": {
-      "$ref": "#/$defs/StateV1"
+      "$ref": "#/$defs/StateV2"
     },
     "condition": {
       "anyOf": [

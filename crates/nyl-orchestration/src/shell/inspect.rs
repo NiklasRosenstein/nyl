@@ -217,7 +217,7 @@ pub fn get_value(
     };
     let reason = match resolve(&snapshot.desired) {
         Ok(ReferenceValue::Value { value, .. }) => return Ok(GetValue::Value(value)),
-        Ok(ReferenceValue::Blocked { reason, .. }) => reason,
+        Ok(ReferenceValue::Blocked { reason, .. }) => reason.message(),
         Err(error) => return Err(unresolved(error.message)),
     };
     if !allow_stale {
@@ -245,7 +245,7 @@ pub fn get_value(
                 "run nyl reconcile to make the receipt current",
             ),
         }),
-        Ok(ReferenceValue::Blocked { reason, .. }) => Err(unresolved(reason)),
+        Ok(ReferenceValue::Blocked { reason, .. }) => Err(unresolved(reason.message())),
         Err(error) => Err(unresolved(error.message)),
     }
 }

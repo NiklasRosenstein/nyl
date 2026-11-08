@@ -12,7 +12,8 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunI
 use nyl_core::orchestration::ports::RunState;
 use nyl_core::orchestration::state::{
     ArtifactDigest, ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, DesiredUnitKind, Lease, LeaseKind,
-    Lifecycle, ObservedUnit, ObservedUnitKind, Operation, Readiness, Receipt, Run, RunKind, StateV1, UnitIdentity,
+    Lifecycle, ObservedUnit, ObservedUnitKind, Operation, Readiness, Receipt, Run, RunKind, StateV1, StateV2,
+    UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 use serde_json::{json, Value};
@@ -75,7 +76,7 @@ fn identity(unit: &str, kind: &str) -> UnitIdentity {
 /// A ready, active desired unit whose execution key derives from `seed`.
 pub fn desired(unit: &str, kind: &str, spec: Value, seed: &str) -> DesiredUnit {
     DesiredUnit {
-        api_version: StateV1,
+        api_version: StateV2,
         kind: DesiredUnitKind,
         unit: identity(unit, kind),
         lifecycle: Lifecycle::Active,
@@ -111,7 +112,7 @@ pub fn receipt(seed: &str, outputs: Value, artifacts: Vec<ArtifactDigest>) -> Re
 
 pub fn observed(unit: &str, kind: &str, receipt: Option<Receipt>) -> ObservedUnit {
     ObservedUnit {
-        api_version: nyl_core::orchestration::state::StateV1,
+        api_version: nyl_core::orchestration::state::StateV2,
         operator_modified: None,
         retry: None,
         kind: ObservedUnitKind,

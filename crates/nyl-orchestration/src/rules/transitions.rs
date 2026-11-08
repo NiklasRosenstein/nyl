@@ -161,7 +161,7 @@ fn transition(
                     desired: Option<Box<DesiredUnit>>,
                     waiting: Option<TeardownWaiting>| {
         Applied::Changed(Box::new(ObservedUnit {
-            api_version: nyl_core::orchestration::state::StateV1,
+            api_version: nyl_core::orchestration::state::StateV2,
             operator_modified: if succeeded {
                 None
             } else {
@@ -474,7 +474,7 @@ mod tests {
     fn document(receipt_key: Option<char>, condition: u8) -> ObservedUnit {
         let since: Timestamp = "2026-09-24T11:00:00Z".parse().unwrap();
         ObservedUnit {
-            api_version: nyl_core::orchestration::state::StateV1,
+            api_version: nyl_core::orchestration::state::StateV2,
             operator_modified: None,
             retry: None,
             kind: ObservedUnitKind,

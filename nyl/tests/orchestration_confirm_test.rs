@@ -18,7 +18,8 @@ use nyl_core::orchestration::ports::{
 };
 use nyl_core::orchestration::state::{
     ApprovalIdentity, DesiredUnit, DesiredUnitKind, Lease, LeaseKind, Lifecycle, ObservedUnit, ObservedUnitKind,
-    Operation, Readiness, Run, RunKind, Signal, SignalAction, StateLocation, StateV1, TeardownWaiting, UnitIdentity,
+    Operation, Readiness, Run, RunKind, Signal, SignalAction, StateLocation, StateV1, StateV2, TeardownWaiting,
+    UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 use nyl_orchestration::fault::NoFaults;
@@ -106,7 +107,7 @@ impl Sender {
 
 fn desired(unit: &str) -> DesiredUnit {
     DesiredUnit {
-        api_version: StateV1,
+        api_version: StateV2,
         kind: DesiredUnitKind,
         unit: UnitIdentity {
             environment: dev(),
@@ -131,7 +132,7 @@ fn desired(unit: &str) -> DesiredUnit {
 /// The observed file of `unit`, waiting after phase 1 when `waiting`.
 fn observed(unit: &str, waiting: bool) -> ObservedUnit {
     ObservedUnit {
-        api_version: nyl_core::orchestration::state::StateV1,
+        api_version: nyl_core::orchestration::state::StateV2,
         operator_modified: None,
         retry: None,
         kind: ObservedUnitKind,

@@ -324,6 +324,7 @@ pub fn blocked_references(
     planned: &BTreeMap<EnvironmentName, BTreeSet<nyl_core::orchestration::ids::UnitName>>,
     unavailable: &BTreeSet<EnvironmentName>,
 ) -> Vec<nyl_core::orchestration::state::BlockedReason> {
+    use nyl_core::orchestration::blocked::Blocker;
     use nyl_core::orchestration::ids::UnitName;
     use nyl_core::orchestration::state::BlockedReason;
     let mut reasons = Vec::new();
@@ -341,7 +342,7 @@ pub fn blocked_references(
         } else {
             return;
         };
-        reasons.push(BlockedReason { pointer, reason });
+        reasons.push(BlockedReason::new(pointer, Blocker::other(reason)));
     };
     if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
         for binding in references {

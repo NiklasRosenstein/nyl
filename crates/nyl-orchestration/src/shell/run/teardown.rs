@@ -1426,7 +1426,7 @@ pub(super) fn mark_teardowns(
                         observed.insert(
                             name.clone(),
                             ObservedUnit {
-                                api_version: nyl_core::orchestration::state::StateV1,
+                                api_version: nyl_core::orchestration::state::StateV2,
                                 operator_modified: None,
                                 retry: None,
                                 kind: nyl_core::orchestration::state::ObservedUnitKind,

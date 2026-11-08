@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::orchestration::blocked::Blocker;
+
 pub use binding::{
     BindingKind, FileInputSource, GitInputSource, InputBinding, PromotionInputSource, PublicationInputSource,
     UnitInputSource,
@@ -57,7 +59,7 @@ pub enum Provision<O> {
     Unbound,
     /// The value cannot be read yet, for the given reason, such as a producer
     /// without a current receipt. Resolution continues around it.
-    Blocked(String),
+    Blocked(Blocker),
 }
 
 /// A provider's answer, or the issue that makes the binding invalid. The issue
@@ -74,7 +76,7 @@ pub struct Blocked {
     /// the caller passes, such as `/variables/vpc_id`; for [`resolve`], the
     /// slot name, such as `/image`.
     pub pointer: String,
-    pub reason: String,
+    pub reason: Blocker,
 }
 
 /// The provenance a caller records for each value.
@@ -446,7 +448,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::orchestration::blocked::ProducerRef;
     use crate::orchestration::codes::Code;
+    use crate::orchestration::ids::UnitName;
 
     #[derive(Debug, Clone, PartialEq)]
     enum TestOrigin {
@@ -504,7 +508,9 @@ mod tests {
                     value: output.clone(),
                     origin: TestOrigin::Unit(source.unit.clone()),
                 }),
-                None => Provision::Blocked(format!("{} has no current receipt", source.unit)),
+                None => Provision::Blocked(Blocker::no_current_receipt(ProducerRef::local(
+                    UnitName::new(&source.unit).unwrap(),
+                ))),
             })
         }
 
@@ -617,7 +623,7 @@ mod tests {
             [Blocked {
                 field: "bindings.vpc".to_owned(),
                 pointer: "/vpc".to_owned(),
-                reason: "network has no current receipt".to_owned(),
+                reason: Blocker::no_current_receipt(ProducerRef::local(UnitName::new("network").unwrap())),
             }]
         );
     }
@@ -660,7 +666,7 @@ mod tests {
             [Blocked {
                 field: "spec.variables.db.hosts[0]".to_owned(),
                 pointer: "/variables/db/hosts/0".to_owned(),
-                reason: "database has no current receipt".to_owned(),
+                reason: Blocker::no_current_receipt(ProducerRef::local(UnitName::new("database").unwrap())),
             }]
         );
     }

@@ -271,7 +271,10 @@ fn changed_consumer_warnings(
             None => records.remove(unit),
         };
     }
-    let changed = observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &records, now);
+    // `nyl observe` reads this environment's state alone, so a consumer
+    // waiting for another environment's value is left to resolution.
+    let changed =
+        observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &records, &BTreeMap::new(), now);
     let consumers: BTreeSet<&UnitName> = changed.iter().map(|changed| &changed.consumer).collect();
     consumers
         .into_iter()

@@ -24,11 +24,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
-use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
+use nyl_core::orchestration::state::{
+    BlockedReason, Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress,
+};
 use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::freshness::receipt_is_current;
@@ -217,64 +220,40 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
         .collect()
 }
 
-/// A stored blocked reason in the report's form: `no-current-receipt` with
-/// the producer when the reason says the producer has no current receipt,
-/// `attestation-pending` or `attestation-failing` with the producer and
-/// the attestation when it waits for one (see [`super::evidence`]), and
-/// `observation-pending` with the producer and the observation (see
-/// [`super::observed_values`]).
-pub(crate) fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
-    if let Some(waiting) = super::evidence::parse_reason(reason) {
-        let (environment, unit) = producer(&waiting.producer);
-        return BlockedBy {
-            pointer: pointer.to_owned(),
-            environment,
-            unit,
-            reason: waiting.waiting.stable().to_owned(),
-            attestation: Some(waiting.name),
-            observation: None,
-        };
-    }
-    if let Some(waiting) = super::observed_values::parse_reason(reason) {
-        let (environment, unit) = producer(&waiting.producer);
-        return BlockedBy {
-            pointer: pointer.to_owned(),
-            environment,
-            unit,
-            reason: super::observed_values::OBSERVATION_PENDING.to_owned(),
-            attestation: None,
-            observation: Some(waiting.observation),
-        };
-    }
-    match reason.strip_suffix(" has no current receipt") {
-        Some(text) if producer(text).1.is_some() => {
-            let (environment, unit) = producer(text);
-            BlockedBy {
-                pointer: pointer.to_owned(),
-                environment,
-                unit,
-                reason: NO_CURRENT_RECEIPT.to_owned(),
-                attestation: None,
-                observation: None,
-            }
-        }
-        _ => BlockedBy {
-            pointer: pointer.to_owned(),
+/// A stored blocked reason in the report's form, read from its typed
+/// blocker: `no-current-receipt` with the producer when the producer has no
+/// current receipt, `attestation-pending` or `attestation-failing` with the
+/// producer and the attestation when it waits for one (see
+/// [`super::evidence`]), and `observation-pending` with the producer and the
+/// observation (see [`super::observed_values`]). Any other blocker shows its
+/// text as the reason.
+pub(crate) fn blocked_by(reason: &BlockedReason) -> BlockedBy {
+    let waiting = |producer: &ProducerRef, reason_code: &str| BlockedBy {
+        pointer: reason.pointer.clone(),
+        environment: producer.environment.clone(),
+        unit: Some(producer.unit.clone()),
+        reason: reason_code.to_owned(),
+        attestation: None,
+        observation: None,
+    };
+    match &reason.blocker {
+        Blocker::NoCurrentReceipt { producer } => waiting(producer, NO_CURRENT_RECEIPT),
+        Blocker::Attestation { producer, name, state } => BlockedBy {
+            attestation: Some(name.clone()),
+            ..waiting(producer, super::evidence::stable(*state))
+        },
+        Blocker::Observation { producer, name, .. } => BlockedBy {
+            observation: Some(name.clone()),
+            ..waiting(producer, super::observed_values::OBSERVATION_PENDING)
+        },
+        Blocker::Other { message } => BlockedBy {
+            pointer: reason.pointer.clone(),
             environment: None,
             unit: None,
-            reason: reason.to_owned(),
+            reason: message.clone(),
             attestation: None,
             observation: None,
         },
-    }
-}
-
-/// A producer as a reason writes it: `<unit>`, or `<environment>/<unit>` for
-/// a unit of another environment.
-fn producer(text: &str) -> (Option<EnvironmentName>, Option<UnitName>) {
-    match text.split_once('/') {
-        Some((environment, unit)) => (EnvironmentName::new(environment).ok(), UnitName::new(unit).ok()),
-        None => (None, UnitName::new(text).ok()),
     }
 }
 
@@ -503,8 +482,15 @@ pub fn status_with_readiness(
     // A current consumer whose observed value changed is work for the next
     // reconcile: state `ready`, exit 2. Contract:
     // [Observed values](../../../../design/orchestration-core.md#observed-values).
-    let changed =
-        super::observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &snapshot.observations, now);
+    // Status reads this environment's state alone, so a consumer waiting for
+    // another environment's value is left to resolution.
+    let changed = super::observed_values::changed_consumers(
+        &snapshot.desired,
+        &snapshot.observed,
+        &snapshot.observations,
+        &BTreeMap::new(),
+        now,
+    );
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
@@ -558,10 +544,7 @@ pub fn status_with_readiness(
         // A unit whose every blocker is an observed value that has arrived
         // since is ready, and shows no blocker.
         if let (Readiness::Blocked { reasons }, false) = (&desired.readiness, unit.state == Some(UnitState::Ready)) {
-            unit.blocked_by = reasons
-                .iter()
-                .map(|reason| blocked_by(&reason.pointer, &reason.reason))
-                .collect();
+            unit.blocked_by = reasons.iter().map(blocked_by).collect();
             unit.warnings
                 .extend(super::evidence::warnings(name, environment.as_str(), reasons));
             unit.warnings
@@ -604,6 +587,7 @@ pub fn status_with_readiness(
 mod tests {
     use std::collections::BTreeMap;
 
+    use nyl_core::orchestration::blocked::AttestationWait;
     use nyl_core::orchestration::ports::{Checkpoint, HeldLease};
     use nyl_core::orchestration::state::{Lease, Run};
     use serde_json::json;
@@ -775,7 +759,7 @@ mod tests {
         let mut blocked = desired_numbered("database", 2, None);
         blocked.readiness = serde_json::from_value(json!({
             "state": "blocked",
-            "reasons": [{"pointer": "/values/vpc", "reason": "network has no current receipt"}]
+            "reasons": [{"pointer": "/values/vpc", "blocker": {"type": "no-current-receipt", "producer": {"unit": "network"}}}]
         }))
         .unwrap();
         snapshot.desired.insert(name("database"), blocked);
@@ -1140,11 +1124,19 @@ mod tests {
 
     /// Catches a consumer of another environment's unit losing its producer
     /// in the report: the producer's environment and unit are separate
-    /// fields for every reason that names one, as for a unit of the same
-    /// environment, and a reason that names no producer keeps its text.
+    /// fields for every blocker that names one, as for a unit of the same
+    /// environment, and a blocker that names no producer keeps its text.
     #[test]
     fn test_blocked_by_keeps_the_producer_of_another_environment() {
-        let pending = blocked_by("/dependsOn/0", "attestation healthy of infra/network is pending");
+        let producer = |label: &str| ProducerRef::parse(label).unwrap();
+        let pending = blocked_by(&BlockedReason::new(
+            "/dependsOn/0",
+            Blocker::Attestation {
+                producer: producer("infra/network"),
+                name: "healthy".to_owned(),
+                state: AttestationWait::Pending,
+            },
+        ));
         assert_eq!(
             pending,
             BlockedBy {
@@ -1156,9 +1148,22 @@ mod tests {
                 observation: None,
             }
         );
-        let local = blocked_by("/dependsOn/0", "attestation healthy of network is failing");
-        assert_eq!((local.environment, local.unit), (None, Some(name("network"))));
-        let missing = blocked_by("/values/x", "infra/network has no current receipt");
+        let local = blocked_by(&BlockedReason::new(
+            "/dependsOn/0",
+            Blocker::Attestation {
+                producer: producer("network"),
+                name: "healthy".to_owned(),
+                state: AttestationWait::Failing,
+            },
+        ));
+        assert_eq!(
+            (local.environment, local.unit, local.reason.as_str()),
+            (None, Some(name("network")), "attestation-failing")
+        );
+        let missing = blocked_by(&BlockedReason::new(
+            "/values/x",
+            Blocker::no_current_receipt(producer("infra/network")),
+        ));
         assert_eq!(
             (missing.environment, missing.unit, missing.reason.as_str()),
             (
@@ -1167,10 +1172,32 @@ mod tests {
                 NO_CURRENT_RECEIPT
             )
         );
-        let other = blocked_by(
-            "/values/x",
-            "infra waits because its producer environment failed or is waiting",
+        let observation = blocked_by(&BlockedReason::new(
+            "/values/ip",
+            Blocker::Observation {
+                producer: producer("infra/kubernetes"),
+                name: "ip".to_owned(),
+                why: "not observed yet".to_owned(),
+            },
+        ));
+        assert_eq!(
+            (
+                observation.environment,
+                observation.unit,
+                observation.reason.as_str(),
+                observation.observation.as_deref()
+            ),
+            (
+                Some(EnvironmentName::new("infra").unwrap()),
+                Some(name("kubernetes")),
+                "observation-pending",
+                Some("ip")
+            )
         );
+        let other = blocked_by(&BlockedReason::new(
+            "/values/x",
+            Blocker::other("infra waits because its producer environment failed or is waiting"),
+        ));
         assert_eq!((other.environment, other.unit), (None, None));
         assert!(other.reason.starts_with("infra waits"));
     }

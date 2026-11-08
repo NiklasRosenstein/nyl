@@ -60,8 +60,8 @@ use nyl_core::orchestration::ports::{
     SourceResolver, StateError, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
-    Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
+    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, BlockedReason, Condition, DesiredUnit, Lifecycle,
+    ObservedUnit, Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
 };
 use nyl_core::orchestration::state::{Attestation, ObservationRecord};
 use nyl_core::orchestration::time::{Duration, Timestamp};
@@ -1424,10 +1424,7 @@ fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<Blo
         return (Vec::new(), Vec::new());
     };
     (
-        reasons
-            .iter()
-            .map(|reason| crate::rules::unit_state::blocked_by(&reason.pointer, &reason.reason))
-            .collect(),
+        reasons.iter().map(crate::rules::unit_state::blocked_by).collect(),
         crate::rules::evidence::warnings(&unit.unit.name, environment.as_str(), reasons)
             .into_iter()
             .chain(crate::rules::observed_values::warnings(
@@ -2097,7 +2094,7 @@ fn adopt_tombstones(
             observed.insert(
                 name.clone(),
                 ObservedUnit {
-                    api_version: nyl_core::orchestration::state::StateV1,
+                    api_version: nyl_core::orchestration::state::StateV2,
                     operator_modified: None,
                     retry: None,
                     kind: nyl_core::orchestration::state::ObservedUnitKind,
@@ -3907,7 +3904,7 @@ fn unexecuted_result(
         return UnitResult::Blocked {
             reason: reasons
                 .iter()
-                .map(|reason| reason.reason.as_str())
+                .map(BlockedReason::message)
                 .collect::<Vec<_>>()
                 .join("; "),
         };

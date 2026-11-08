@@ -13,7 +13,7 @@ use nyl_core::orchestration::driver::{
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, Uid, UnitAddress, UnitName};
 use nyl_core::orchestration::state::{
-    DesiredUnit, DesiredUnitKind, FailureCategory, Lifecycle, Readiness, StateV1, UnitIdentity,
+    DesiredUnit, DesiredUnitKind, FailureCategory, Lifecycle, Readiness, StateV2, UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 use nyl_units::command::CommandDriver;
@@ -124,7 +124,7 @@ fn path_env() -> BTreeMap<String, String> {
 
 fn desired(spec: Value) -> DesiredUnit {
     DesiredUnit {
-        api_version: StateV1,
+        api_version: StateV2,
         kind: DesiredUnitKind,
         unit: UnitIdentity {
             environment: EnvironmentName::new("dev").unwrap(),

@@ -131,7 +131,7 @@ fn requested() -> Requested {
 /// An observed unit with a receipt, as a run records it.
 fn observed_unit(unit: &str) -> nyl_core::orchestration::state::ObservedUnit {
     let mut document: serde_json::Value = serde_saphyr::from_str(include_str!(
-        "../../crates/nyl-core/tests/golden/state/observed-unit.v1.yaml"
+        "../../crates/nyl-core/tests/golden/state/observed-unit.v2.yaml"
     ))
     .unwrap();
     document["unit"]["name"] = json!(unit);
