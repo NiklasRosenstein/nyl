@@ -65,13 +65,9 @@ impl Reconciler for Direct {
 
     fn diagnostics(&self, infra: &Infra) -> Vec<Cmd> {
         // The release state Nyl keeps in the cluster, with the workload's Namespace.
-        vec![infra.kubectl().cmd(&[
-            "get",
-            "secrets",
-            "--all-namespaces",
-            "--selector",
-            "nyl.niklasrosenstein.github.com/release",
-        ])]
+        vec![infra
+            .kubectl()
+            .cmd(&["get", "secrets", "--all-namespaces", "--selector", "k8s.nyl/release"])]
     }
 }
 

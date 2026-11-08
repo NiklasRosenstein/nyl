@@ -278,6 +278,10 @@ Render for specific environment:
 nyl render --target production app.yaml
 ```
 
+## Sync waves and phases
+
+Generated resources inherit this resource's Argo CD sync wave and phase; see [Argo CD sync waves and phases](/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases).
+
 ## See Also
 
 - [Git Integration](/nyl/kubernetes-rendering/git-integration/) - Git repository management

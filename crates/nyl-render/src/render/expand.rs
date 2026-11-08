@@ -15,7 +15,7 @@ use crate::resources::{
 };
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
-use nyl_core::constants::{API_VERSION, API_VERSION_COMPONENTS};
+use nyl_core::constants::{legacy, API_VERSION, API_VERSION_COMPONENTS};
 
 /// Filter resources by source kind (before expansion)
 #[cfg(test)]
@@ -94,8 +94,8 @@ const MAX_REMOTE_MANIFEST_BYTES: usize = 30 * 1024 * 1024;
 
 /// Check if an API version looks like it might be a Nyl resource API version
 pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
-    // Check if it contains the Nyl domain
-    if api_version.contains("nyl.niklasrosenstein.github.com") {
+    // Pre-`.nyl` API versions are rejected with their replacement.
+    if api_version.contains(legacy::API_GROUP) {
         return true;
     }
 
@@ -109,7 +109,7 @@ pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
         API_VERSION_COMPONENTS,
         nyl_core::constants::API_VERSION_GITOPS,
         nyl_core::constants::API_VERSION_K8S_GITOPS,
-        "nyl.niklasrosenstein.github.com/v1",
+        legacy::API_VERSION,
     ];
 
     for api_ver in &nyl_api_versions {
@@ -283,8 +283,37 @@ fn render_chart_reference(chart: Option<&serde_json::Value>) -> String {
     reference
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Expand `resource` into the resources it generates, which inherit its Argo
+/// CD sync wave and phase ([`super::sync_order`]). A resource that does not
+/// expand generates only itself.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_resource(
+    resource: &serde_json::Value,
+    context: &TemplateContext,
+    config: &ProjectConfig,
+    kube_version: &str,
+    api_versions: &[String],
+    track_parent: bool,
+    gitops_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
+) -> Result<Vec<serde_json::Value>> {
+    let mut generated = expand_resource(
+        resource,
+        context,
+        config,
+        kube_version,
+        api_versions,
+        track_parent,
+        gitops_cache,
+        artifact_resolver,
+    )
+    .await?;
+    super::sync_order::inherit_sync_order(resource, &mut generated);
+    Ok(generated)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn expand_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,

@@ -91,8 +91,14 @@ These rules keep it maintainable:
 - Render every output (tables, JSON/YAML, transition commit summaries, status,
   exit categories) from the operation's single typed report; give errors and
   warnings stable codes with the fix attached.
-- State-file formats are versioned with golden files; a format change adds a
-  version and a migration.
+- State-file formats are versioned with golden files. Before changing one,
+  ask the user whether to bump or break, and do neither on your own: a bump
+  adds a version and a migration, and a break changes the format in place.
+  Say what the change is, whether a release has shipped the format, and what
+  each choice costs: a bump means a migration and readers that refuse the new
+  version, a break means every Nyl sharing the state must upgrade together.
+  Agents and reviewers working on a change ask; they do not assume either
+  answer from an earlier change.
 
 ### Driver boundary
 
@@ -429,6 +435,11 @@ src/
 - Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
   (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
   `k8s.gitops.nyl/v1`; shared GitRepository resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
+- Nyl's labels, annotations, and Secret types use the `.nyl` API group of the
+  layer that owns them (`k8s.nyl/`, `k8s.gitops.nyl/`), never another domain;
+  the reserved `.nyl` suffix is deliberate. Keys are defined in
+  `nyl_core::constants`; identifiers from before the `.nyl` groups live only in
+  `constants::legacy`, for reading and migration diagnostics.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
   A DeploymentTarget binds exactly one Cluster to one publication destination.

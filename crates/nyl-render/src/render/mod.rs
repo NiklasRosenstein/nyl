@@ -7,6 +7,7 @@ mod expand;
 mod postprocess;
 mod provenance;
 mod session;
+mod sync_order;
 
 #[cfg(test)]
 pub(crate) use bundle::load_release_bundle;
@@ -131,14 +132,8 @@ metadata:
         assert_eq!(levenshtein_distance("abc", "abd"), 1);
         assert_eq!(levenshtein_distance("abc", "abcd"), 1);
         assert_eq!(levenshtein_distance("abc", "def"), 3);
-        assert_eq!(
-            levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.niklasrosenstein.github.com"),
-            0
-        );
-        assert_eq!(
-            levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.nikolasrosenstein.github.com"),
-            1
-        );
+        assert_eq!(levenshtein_distance("k8s.gitops.nyl", "k8s.gitops.nyl"), 0);
+        assert_eq!(levenshtein_distance("k8s.gitops.nyl", "k8s.gitop.nyl"), 1);
     }
 
     #[test]
@@ -195,9 +190,11 @@ metadata:
 
     #[test]
     fn test_is_nyl_like_api_version_contains() {
-        // Should match anything containing the domain
-        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com/v2"));
-        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com"));
+        // Pre-`.nyl` API versions are recognized so they fail with their replacement.
+        assert!(is_nyl_like_api_version(&format!(
+            "{}/v2",
+            nyl_core::constants::legacy::API_GROUP
+        )));
         assert!(is_nyl_like_api_version("foo.k8s.nyl/v1"));
     }
 

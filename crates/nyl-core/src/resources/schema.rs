@@ -10,7 +10,7 @@ use super::environment::{
     KIND_ENVIRONMENT_TEMPLATE,
 };
 use super::{GitRepository, KIND_GIT_REPOSITORY};
-use crate::constants::{API_VERSION, API_VERSION_COMPONENTS, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
+use crate::constants::{legacy, API_VERSION, API_VERSION_COMPONENTS, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::{CoreError, Result};
 use schemars::schema_for;
 use serde_json::{json, Value};
@@ -197,11 +197,11 @@ pub fn validate_resource_api_with_catalog(value: &Value, descriptors: &[Resource
     let Some(kind) = value.get("kind").and_then(Value::as_str) else {
         return Ok(());
     };
-    let expected = if api == "components.nyl.niklasrosenstein.github.com/v1" {
+    let expected = if api == legacy::API_VERSION_COMPONENTS {
         Some(API_VERSION_COMPONENTS)
     } else if matches!(
         api,
-        API_VERSION | API_VERSION_GITOPS | API_VERSION_K8S_GITOPS | "nyl.niklasrosenstein.github.com/v1"
+        API_VERSION | API_VERSION_GITOPS | API_VERSION_K8S_GITOPS | legacy::API_VERSION
     ) || descriptors.iter().any(|resource| resource.api_version == api)
     {
         descriptors
