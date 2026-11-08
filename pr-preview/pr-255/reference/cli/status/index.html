@@ -105,7 +105,12 @@ reconcile, like a changed unit.</li>
 whose recorded value no longer equals the one it resolved, or that was
 blocked on a value that has arrived since, is <code dir="auto">ready</code> and says which
 observed value changed or arrived (<code dir="auto">NYL-OBSERVATION-CHANGED</code>): work for the
-next reconcile. A consumer still waiting for a value shows the blocker,
+next reconcile. That holds for a value of another environment that the unit
+reads with <code dir="auto">environment</code>: status reads the producer environment’s state, without
+a lease, and names it as <code dir="auto">dev/kubernetes</code>; an environment whose state cannot be
+read is a <code dir="auto">NYL-STATE-UNAVAILABLE</code> warning. <a href="/nyl/pr-preview/pr-255/reference/cli/project-resources/"><code dir="auto">nyl get units</code></a>
+shows the same states for the current state, and none from other environments
+with <code dir="auto">--state-revision</code>. A consumer still waiting for a value shows the blocker,
 <code dir="auto">observation-pending</code>, with the driver’s reason (<code dir="auto">NYL-OBSERVATION-PENDING</code>).
 Status reads only recorded values.</li>
 <li><strong>Teardowns.</strong> A unit pending teardown warns with <code dir="auto">NYL-TEARDOWN-PENDING</code>,
