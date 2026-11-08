@@ -352,7 +352,9 @@ then:</p>
 is the Cluster’s declared one, and the fence of every Release;</li>
 <li>publishes the tree;</li>
 <li>applies each Release from the pushed bytes, those that register kinds first,
-as a new release revision that records the unit, the publication, and its commit;</li>
+as a new release revision that records the unit, the publication, and its commit
+(a Release that changed nothing keeps its latest revision instead, see
+<a href="/nyl/pr-preview/pr-256/kubernetes-gitops/workflow/direct-reconciler/#unchanged-releases">Unchanged Releases</a>);</li>
 <li>only when every Release is <code dir="auto">Deployed</code>, deletes the Releases that left the tree.</li>
 </ol>
 <p>A failure after step 2 leaves Git ahead of the cluster, never behind: the unit has no
