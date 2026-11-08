@@ -1300,3 +1300,41 @@ async fn test_a_recorded_commit_the_branch_no_longer_holds_gets_a_new_revision()
         second.spec["commit"].as_str()
     );
 }
+
+/// Catches a kept revision whose recorded commit is on the branch but holds
+/// another Release directory than the new publication: the manifest the apply
+/// records is the revision's own, yet the shared matching would call the Release
+/// `other-publication`, so the apply records a new revision with the new commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_recorded_commit_whose_release_directory_differs_gets_a_new_revision() {
+    let world = direct_world();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let first_unit = unit_with(&driver, &world, "kubernetes", observing_spec());
+    let first = tree_of(&reconcile(&driver, &world, &first_unit, None, &nobody()));
+
+    let mut changed = observing_spec();
+    changed["releases"]["web/web"]["image"] = serde_json::json!("registry.invalid:5000/web@sha256:4567");
+    let second_unit = unit_with(&driver, &world, "kubernetes", changed.clone());
+    let second = tree_of(&reconcile(&driver, &world, &second_unit, Some(&first), &nobody()));
+    assert_eq!(cluster.storage.list_revisions("web", "web").await.unwrap(), vec![1, 2]);
+
+    // Revision 2 claims the first publication, which is on the branch but holds the old image.
+    let mut recorded = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
+    recorded.meta.publication.as_mut().unwrap().commit = first.spec["commit"].as_str().map(str::to_owned);
+    cluster.storage.complete_release(&recorded).await.unwrap();
+
+    add_extra(&world);
+    let third_unit = unit_with(&driver, &world, "kubernetes", changed);
+    let third = tree_of(&reconcile(&driver, &world, &third_unit, Some(&second), &nobody()));
+
+    assert_eq!(
+        cluster.storage.list_revisions("web", "web").await.unwrap(),
+        vec![1, 2, 3]
+    );
+    let latest = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
+    assert_eq!(
+        latest.meta.publication.unwrap().commit.as_deref(),
+        third.spec["commit"].as_str()
+    );
+}

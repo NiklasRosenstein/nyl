@@ -548,6 +548,21 @@ impl<'s> ReleaseRecorder<'s> {
 
     async fn record_failed(storage: &dyn ReleaseStorage, failed: &ReleaseState) {
         if let Err(err) = storage.complete_release(failed).await {
+            // An apply that completed unchanged has released its reservation already,
+            // so there is no revision left to mark.
+            if matches!(
+                storage
+                    .get_release(&failed.release_name, &failed.release_namespace, failed.revision)
+                    .await,
+                Ok(None)
+            ) {
+                tracing::info!(
+                    "Release {} revision {} was released before it could be marked failed",
+                    failed.release_name,
+                    failed.revision
+                );
+                return;
+            }
             tracing::warn!(
                 "Failed to mark release {} revision {} failed: {}",
                 failed.release_name,
@@ -564,9 +579,9 @@ impl<'s> ReleaseRecorder<'s> {
     /// deleting them. Once the revision deployed, revisions beyond the history limit
     /// are deleted. `completed` is set once the revision is recorded.
     ///
-    /// Under [`RevisionPolicy::KeepUnchanged`], a deployed apply that pruned
-    /// nothing and would record what the latest revision records releases its
-    /// reservation instead and settles on the latest revision.
+    /// Under [`RevisionPolicy::KeepUnchanged`], a deployed apply that would record
+    /// what the latest revision records releases its reservation instead and
+    /// settles on the latest revision, which the history limit still applies to.
     async fn complete(
         self,
         client: &dyn KubeClient,
@@ -599,7 +614,6 @@ impl<'s> ReleaseRecorder<'s> {
         // the previous live state in place.
         let mut superseded = None;
         let mut prune_failed_count = 0;
-        let mut pruned_count = 0;
         if release.status == ReleaseStatus::Deployed {
             if let Some(previous) = appended_to {
                 // Append mode does not prune; it only supersedes the revision it merged.
@@ -642,19 +656,23 @@ impl<'s> ReleaseRecorder<'s> {
                 // it stays tracked and counts as a failed prune, so the next apply retries.
                 prune_failed_count = unreadable.len();
                 release.resource_keys.extend(unreadable.into_iter().cloned());
-                let attempted = to_prune.len();
                 let failed = prune_resources(client, to_prune, settings.concurrency, on_event).await;
-                pruned_count = attempted - failed.len();
                 prune_failed_count += failed.len();
                 release.resource_keys.extend(failed.into_iter().cloned());
             }
         }
 
         if let RevisionPolicy::KeepUnchanged { publication_stands } = settings.revisions {
-            let settled = release.status == ReleaseStatus::Deployed && prune_failed_count == 0 && pruned_count == 0;
+            // A pruned object leaves the key set, so it always differs from the latest
+            // revision's; a failed prune or release keeps the keys but is not settled.
+            let settled = release.status == ReleaseStatus::Deployed
+                && prune_failed_count == 0
+                && apply_result.release_failed_count == 0;
             if settled {
                 if let Some(latest) = keep_latest(storage, &release, &revisions, publication_stands).await {
                     completed.store(true, AtomicOrdering::SeqCst);
+                    // The limit may have been lowered since the latest revision deployed.
+                    prune_release_history(storage, &latest, settings.history_limit).await;
                     return Ok(Completed {
                         release: latest,
                         prune_failed_count,
@@ -740,13 +758,25 @@ async fn keep_latest(
         .delete_release(&release.release_name, &release.release_namespace, release.revision)
         .await
     {
-        tracing::warn!(
-            "Failed to release the reservation of release {} revision {}; recording it instead: {}",
-            release.release_name,
-            release.revision,
-            error
-        );
-        return None;
+        // A failed request may still have deleted it: read what is stored. The
+        // reservation gone, or a revision another claimant recorded since, means
+        // ours is released; only our own reservation still there is recorded.
+        let reserved = match storage
+            .get_release(&release.release_name, &release.release_namespace, release.revision)
+            .await
+        {
+            Ok(stored) => stored.is_some_and(|stored| is_reservation(&stored, release)),
+            Err(_) => true,
+        };
+        if reserved {
+            tracing::warn!(
+                "Failed to release the reservation of release {} revision {}; recording it instead: {}",
+                release.release_name,
+                release.revision,
+                error
+            );
+            return None;
+        }
     }
     tracing::info!(
         "Release {}/{} is unchanged at revision {}; no new revision recorded",
@@ -755,6 +785,13 @@ async fn keep_latest(
         latest.revision
     );
     Some(latest)
+}
+
+/// Whether `stored` is the reservation `release` made: still `Rendered`, from the
+/// same moment. The storage API has no precondition on the object's identity, so
+/// this tells our reservation from one another claimant created in its place.
+fn is_reservation(stored: &ReleaseState, release: &ReleaseState) -> bool {
+    stored.status == ReleaseStatus::Rendered && stored.rendered_at == release.rendered_at
 }
 
 /// The latest revision stored before `release`, when `release` records nothing
@@ -2839,5 +2876,201 @@ mod tests {
         // A revision that recorded no commit has nothing that can stand for one.
         let uncommitted = revision(Some(owner("1")), Some(publication("p", None)));
         assert!(!records_same(&uncommitted, &newer, Some(&|_| true)));
+    }
+
+    /// Storage whose revision deletes fail, as a flaky API server does: with
+    /// `deletes_first`, the revision is gone although the request reports failure.
+    struct FailingDeletes {
+        inner: crate::kubernetes::memory::InMemoryReleaseStorage,
+        deletes_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ReleaseStorage for FailingDeletes {
+        async fn save_release(&self, release: &ReleaseState) -> Result<()> {
+            self.inner.save_release(release).await
+        }
+        async fn complete_release(&self, release: &ReleaseState) -> Result<()> {
+            self.inner.complete_release(release).await
+        }
+        async fn get_latest_release(&self, name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
+            self.inner.get_latest_release(name, namespace).await
+        }
+        async fn get_release(&self, name: &str, namespace: &str, revision: u32) -> Result<Option<ReleaseState>> {
+            self.inner.get_release(name, namespace, revision).await
+        }
+        async fn list_revisions(&self, name: &str, namespace: &str) -> Result<Vec<u32>> {
+            self.inner.list_revisions(name, namespace).await
+        }
+        async fn update_release_status(
+            &self,
+            name: &str,
+            namespace: &str,
+            revision: u32,
+            status: ReleaseStatus,
+            error: Option<String>,
+        ) -> Result<()> {
+            self.inner
+                .update_release_status(name, namespace, revision, status, error)
+                .await
+        }
+        async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<crate::kubernetes::ReleaseInfo>> {
+            self.inner.list_releases(namespace).await
+        }
+        async fn delete_release(&self, name: &str, namespace: &str, revision: u32) -> Result<()> {
+            if self.deletes_first {
+                self.inner.delete_release(name, namespace, revision).await?;
+            }
+            Err(NylError::Kubernetes("the API server timed out".to_string()))
+        }
+        async fn delete_all_revisions(&self, name: &str, namespace: &str) -> Result<u32> {
+            self.inner.delete_all_revisions(name, namespace).await
+        }
+    }
+
+    /// A reservation that cannot be released is recorded like any other revision;
+    /// one a failed request deleted anyway is released, and the apply stays a
+    /// success that changed nothing.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_release_of_the_reservation_is_settled_by_what_is_stored() {
+        for (deletes_first, unchanged, revisions) in [(false, false, vec![1, 2]), (true, true, vec![1])] {
+            let storage = FailingDeletes {
+                inner: crate::kubernetes::memory::InMemoryReleaseStorage::new(),
+                deletes_first,
+            };
+            let client = LatencyClient::new("");
+            let manifests = vec![config_map("a")];
+            apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+
+            let run = apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+
+            assert_eq!(run.unchanged, unchanged, "deletes_first: {deletes_first}");
+            assert!(run.error("Apply").is_none());
+            assert_eq!(storage.list_revisions("app", "app").await.unwrap(), revisions);
+            let latest = storage.get_latest_release("app", "app").await.unwrap().unwrap();
+            assert_eq!(latest.status, ReleaseStatus::Deployed);
+        }
+    }
+
+    /// A kept apply still enforces the history limit, which may have been lowered
+    /// since the latest revision deployed.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_kept_apply_enforces_the_history_limit() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let manifests = vec![config_map("a")];
+        for revision in 1..=3 {
+            let mut recorded = release_with_keys(
+                revision,
+                if revision == 3 {
+                    ReleaseStatus::Deployed
+                } else {
+                    ReleaseStatus::Superseded
+                },
+                vec![key("v1", "ConfigMap", Some("app"), "a")],
+            );
+            recorded.manifest = manifests_to_yaml(&manifests).unwrap();
+            storage.save_release(&recorded).await.unwrap();
+        }
+
+        let limited = ApplySettings {
+            history_limit: 2,
+            ..keep_unchanged()
+        };
+        let run = apply_with(&storage, &client, &manifests, limited).await;
+
+        assert!(run.unchanged);
+        assert_eq!(run.release.revision, 3);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![2, 3]);
+    }
+
+    /// `--append-release` compares the merged manifest: appending what the latest
+    /// revision already holds changes nothing, appending something new does.
+    #[tokio::test(start_paused = true)]
+    async fn test_append_release_keeps_an_unchanged_revision_and_records_a_change() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let append = |manifests: Vec<serde_json::Value>| {
+            let (storage, client) = (&storage, &client);
+            async move {
+                let mut scopes = ObjectScopes::default();
+                let recorder = ReleaseRecorder::reserve(
+                    storage,
+                    "app",
+                    "app",
+                    &manifests,
+                    true,
+                    client,
+                    &mut scopes,
+                    &ReleaseClaim::manual(),
+                )
+                .await
+                .unwrap();
+                recorder
+                    .run(
+                        client,
+                        &manifests,
+                        &mut scopes,
+                        keep_unchanged(),
+                        Interruption::never(),
+                        &mut |_| {},
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        assert!(!append(vec![config_map("a")]).await.unchanged);
+        let again = append(vec![config_map("a")]).await;
+        assert!(again.unchanged);
+        assert_eq!(again.release.revision, 1);
+
+        let grown = append(vec![config_map("b")]).await;
+        assert!(!grown.unchanged);
+        assert_eq!(grown.release.revision, 2);
+        assert_eq!(grown.release.resource_keys.len(), 2);
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1, 2]);
+    }
+
+    /// A failure to release field ownership is not a settled apply, even though
+    /// every key is tracked as before.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_release_of_field_ownership_is_never_kept() {
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let client = LatencyClient::new("");
+        let manifests = vec![config_map("a")];
+        apply_with(&storage, &client, &manifests, keep_unchanged()).await;
+        let mut scopes = ObjectScopes::default();
+        let recorder = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &manifests,
+            false,
+            &client,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+        let mut stored_apply = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 1, &mut |_| {})
+            .await
+            .unwrap();
+        stored_apply.release_failed_count = 1;
+        let completed = AtomicBool::new(false);
+        let done = recorder
+            .complete(
+                &client,
+                &stored_apply,
+                &mut scopes,
+                keep_unchanged(),
+                &mut |_| {},
+                &completed,
+            )
+            .await
+            .unwrap();
+
+        assert!(!done.unchanged);
+        assert_eq!(done.release.revision, 2);
     }
 }

@@ -218,8 +218,8 @@ impl<'a> ApplyRenderer<'a> {
             println!();
             if release.status == ReleaseStatus::Deployed && report.release_unchanged {
                 println!(
-                    "Release: {}/{} unchanged at revision {}; no new revision recorded",
-                    release.release_namespace, release.release_name, release.revision
+                    "Release: {} revision {} unchanged in namespace {}; no new revision recorded",
+                    release.release_name, release.revision, release.release_namespace
                 );
             } else if release.status == ReleaseStatus::Deployed && report.prune_failed_count > 0 {
                 println!(

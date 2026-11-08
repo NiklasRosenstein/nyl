@@ -97,11 +97,13 @@ An apply always applies every resource, which repairs drift, but it records no
 new revision when it changed nothing: the latest revision is `Deployed`, records
 the same manifest, resource keys, owner, and publication destination, and the
 apply pruned nothing and failed nothing. The reserved revision is released, the
-latest revision stays current with its original timestamps, and the command
-reports `Release: <namespace>/<name> unchanged at revision <N>`. This keeps
-no-op applies from pushing useful revisions out of the history limit; unlike
-`helm upgrade`, which always creates a revision. [`release rollback`](/nyl/reference/cli/release/#rollback)
-and any apply that changes the release always record one.
+latest revision stays current with its original timestamps (the `[release]`
+history limit still applies to it), and the command reports
+`Release: <name> revision <N> unchanged in namespace <namespace>; no new revision recorded`. This keeps no-op applies
+from pushing useful revisions out of the history limit, which `helm upgrade`
+does not: it creates a revision every time. [`release rollback`](/nyl/reference/cli/release/#rollback),
+a failed or interrupted apply, and any apply that changes or prunes something
+always record a revision.
 
 Pruning deletes the resources a release no longer contains in the reverse of the
 apply order, so dependents go before what they depend on: admission webhook
@@ -224,18 +226,13 @@ Release: web revision 3 deployed successfully to namespace web
 ```
 
 Applying the same Release again changes nothing, so the latest revision stays
-current and no revision is recorded:
+current and no revision is recorded. The resource lines and summary are those of
+any apply; the last line differs:
 
 ```console
 $ nyl apply --target production applications/web/release.yaml
-= Namespace web
-= ConfigMap web/web-config
-= Deployment web/web
-
-Summary: 0 created, 0 updated, 3 unchanged
-Timings: discovery (aggregated) 0.08s, validation 0.00s, apply 0.02s, release 0.02s
-
-Release: web/web unchanged at revision 3; no new revision recorded
+...
+Release: web revision 3 unchanged in namespace web; no new revision recorded
 ```
 
 ### Dry Run

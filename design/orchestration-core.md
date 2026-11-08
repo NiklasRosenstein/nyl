@@ -1606,15 +1606,19 @@ so it never predicts a prune. An apply is unchanged when all of these hold:
   stays tracked for a failed or awaited prune is a difference), the same owner,
   and a publication of the same repository, branch, and prefix, or none on both
   sides;
-- every resource applied and nothing failed to prune or release;
-- nothing was pruned.
+- every resource applied, and nothing failed to prune or to release field
+  ownership. A pruned object leaves the key set, so a prune is always a
+  difference.
 
 Then `complete` deletes the reservation (it only fenced this apply) instead of
 completing it, and the latest revision stays the current one: it is not
-superseded, no revision is added, and the history limit is not enforced again.
-If the reservation cannot be deleted, the revision is recorded like any other.
+superseded and no revision is added. The history limit is still enforced on it,
+since it may have been lowered. A delete that reports failure may still have
+happened, so the revision is read back: gone (or another claimant's revision in
+its place, told apart by status and render time) counts as released, and only a
+reservation that is still ours is recorded like any other revision.
 `ReleaseRun::unchanged` carries the result to the report: `nyl apply` prints
-`Release: <namespace>/<name> unchanged at revision <N>` instead of the deployed
+`Release: <name> revision <N> unchanged in namespace <namespace>; no new revision recorded` instead of the deployed
 line. An interruption or failure before completion marks the reserved revision
 `Failed` as before.
 
@@ -1630,7 +1634,10 @@ commit by the Release's directory tree and recorded inputs. A kept revision with
 an older commit therefore keeps the Release `accepted` exactly when the older
 commit stands for the new one under those same rules, which the driver
 evaluates with the same functions (`running_publication`, `equivalent`) on the
-branch it fetched, before it decides. When it does not (a rewritten branch, a
+branch it fetched, before it reserves the revision (the reservation reads as
+`Mixed` until the apply completes, so the branch is not fetched while it
+stands). The branch is fetched at most once per call, shared with the purge of
+Releases that left the tree. When it does not (a rewritten branch, a
 commit the branch no longer holds, directories or inputs that differ although the
 manifests do not), the apply records a new revision that carries the new commit.
 A revision applied by `nyl apply --target` records no commit, so a direct apply

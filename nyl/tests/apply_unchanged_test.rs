@@ -316,7 +316,10 @@ fn reports_an_unchanged_release_and_records_no_revision() {
 
     let second = apply(&temp);
     assert!(
-        predicate::str::contains("Release: traefik/example unchanged at revision 1").eval(&second),
+        predicate::str::contains(
+            "Release: example revision 1 unchanged in namespace traefik; no new revision recorded"
+        )
+        .eval(&second),
         "{second}"
     );
     // The apply itself still ran.
