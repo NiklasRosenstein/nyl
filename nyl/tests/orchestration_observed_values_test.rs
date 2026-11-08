@@ -1077,3 +1077,110 @@ fn test_the_last_read_of_the_wait_happens_with_a_sub_second_clock() {
         .collect::<Vec<_>>();
     assert_eq!(polls, [0, 15_400, 20_800]);
 }
+
+/// `nyl observe -e dev` names the consumers in other environments whose
+/// cross-environment reference reads a changed observed value, and `nyl
+/// status -e prod` shows such a consumer as ready, with the producer's
+/// environment; the consumer's own environment is read, never written, until
+/// its own reconcile. Catches a consumer in another environment that keeps
+/// showing `current` until someone happens to reconcile it, an observe that
+/// writes the other environment, and a consumer still named after its
+/// reconcile took the value.
+#[test]
+fn test_observe_names_consumers_in_other_environments_whose_input_changed() {
+    let units = "apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: lb
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  observations:
+    ip: {type: string, from: {service: web}}
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: dns
+  labels: {prod: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  values:
+    address: {fromUnit: {environment: dev, unit: lb, observation: ip}}
+";
+    let prod = ENVIRONMENT
+        .replace("name: dev", "name: prod")
+        .replace("{dev: 'true'}", "{prod: 'true'}");
+    let project = project(&[
+        NYL_TOML,
+        ("nyl/dev.yaml", ENVIRONMENT),
+        ("nyl/prod.yaml", &prod),
+        ("nyl/units.yaml", units),
+    ]);
+    let mut shell = shell::Harness::new(project.path(), true);
+    let probe = Arc::new(Probe::default());
+    shell.drivers.register(Arc::new(Observing {
+        inner: CommandDriver,
+        probe: probe.clone(),
+    }));
+    for environment in ["dev", "prod"] {
+        assert_eq!(shell.invoke(&["state", "init", "-e", environment]).exit, 0);
+    }
+    let read = |ip: &'static str| probe.script("lb", [Read::Values(vec![value("ip", json!(ip))])]);
+    read("203.0.113.10");
+    assert_eq!(shell.invoke(&["reconcile", "-e", "dev"]).exit, 0);
+    let ran = shell.invoke(&["reconcile", "-e", "prod", "-o", "json"]);
+    assert_eq!(ran.exit, 0, "{}", ran.stderr);
+    assert_eq!(unit(&ran.report, "dns")["result"], "executed");
+    let current = shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    assert_eq!(current.exit, 0, "{}", current.stderr);
+    assert_eq!(unit(&current.report, "dns")["state"], "current");
+
+    // The address changes: observe names dns in prod and writes nothing there.
+    read("203.0.113.20");
+    let prod_refs = ["refs/heads/nyl/prod/desired", "refs/heads/nyl/prod/observed"].map(|name| shell.tip(name));
+    let changed = shell.invoke(&["observe", "-e", "dev", "-o", "json"]);
+    assert_eq!(changed.exit, 0, "{}", changed.stderr);
+    assert!(
+        changed.stderr.contains("NYL-OBSERVATION-CHANGED")
+            && changed
+                .stderr
+                .contains("observed value ip of dev/lb changed, so prod/dns resolves another value")
+            && changed.stderr.contains("nyl reconcile -e prod"),
+        "{}",
+        changed.stderr
+    );
+    assert_eq!(
+        ["refs/heads/nyl/prod/desired", "refs/heads/nyl/prod/observed"].map(|name| shell.tip(name)),
+        prod_refs,
+        "observing dev never writes prod"
+    );
+    let status = shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    assert_eq!(status.exit, 2, "{}", status.stderr);
+    assert_eq!(unit(&status.report, "dns")["state"], "ready");
+    assert!(
+        unit(&status.report, "dns")["message"]
+            .as_str()
+            .unwrap()
+            .contains("observed value ip of dev/lb changed"),
+        "{}",
+        unit(&status.report, "dns")["message"]
+    );
+    assert!(status.stderr.contains("NYL-OBSERVATION-CHANGED"), "{}", status.stderr);
+
+    // Reconciling prod takes the value; nothing is named afterwards.
+    let ran = shell.invoke(&["reconcile", "-e", "prod", "-o", "json"]);
+    assert_eq!(ran.exit, 0, "{}", ran.stderr);
+    assert_eq!(unit(&ran.report, "dns")["result"], "executed");
+    read("203.0.113.20");
+    let settled = shell.invoke(&["observe", "-e", "dev", "-o", "json"]);
+    assert!(
+        !settled.stderr.contains("NYL-OBSERVATION-CHANGED"),
+        "{}",
+        settled.stderr
+    );
+    assert_eq!(
+        unit(&shell.invoke(&["status", "-e", "prod", "-o", "json"]).report, "dns")["state"],
+        "current"
+    );
+}

@@ -23,18 +23,25 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownRea
 /// the clone's local state branches diverged from the remote. Through a
 /// the offline store it reports local state.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
-    status_with(context, environment, location, None)
+    status_with(context, environment, location, None, &BTreeMap::new())
 }
 
 /// [`status`], with the drivers whose recovery policies decide whether a
-/// drifted unit waits for `--reapply` (`nyl status` passes them).
+/// drifted unit waits for `--reapply` (`nyl status` passes them), and the
+/// state locations of the other environments: status reads the snapshots of
+/// those whose observed values this environment's units read through
+/// cross-environment references, without a lease, and shows a unit whose
+/// resolved value differs from the producer's current one as `ready`. A
+/// producer's state that cannot be read is a warning.
 pub fn status_with(
     context: &Context<'_>,
     environment: &EnvironmentName,
     location: &StateLocation,
     drivers: Option<&DriverSet>,
+    environments: &BTreeMap<EnvironmentName, StateLocation>,
 ) -> RunReport {
-    let read = || {
+    let mut unreadable = Vec::new();
+    let mut read = || {
         let snapshot = context
             .store
             .snapshot(location)
@@ -45,13 +52,26 @@ pub fn status_with(
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
         let readiness = drivers.map(|drivers| teardown_readiness(&snapshot, drivers));
-        let mut report = crate::rules::unit_state::status_with_readiness(
+        let mut producers = BTreeMap::new();
+        for producer in crate::rules::observed_values::observed_producer_environments(environment, &snapshot.desired) {
+            let Some(producer_location) = environments.get(&producer) else {
+                continue;
+            };
+            match context.store.snapshot(producer_location) {
+                Ok(producer_snapshot) => {
+                    producers.insert(producer, producer_snapshot);
+                }
+                Err(error) => unreadable.push(store_error(&producer, &error)),
+            }
+        }
+        let mut report = crate::rules::unit_state::status_with_producers(
             environment,
             &snapshot,
             &coordination,
             context.clock.now(),
             drivers,
             &readiness.unwrap_or_default(),
+            &producers,
         );
         for (name, unit) in &mut report.units {
             unit.receipt_nyl_version = snapshot.desired.get(name).and_then(|desired| {
@@ -66,6 +86,7 @@ pub fn status_with(
         failed.finish(ReportKind::StatusReport);
         failed
     });
+    environment_report.warnings.extend(unreadable);
     // Diverged local branches are reported, never an exit category.
     match super::local::divergence(context.store, location, environment) {
         Ok(Some(warning)) => environment_report.warnings.push(warning),

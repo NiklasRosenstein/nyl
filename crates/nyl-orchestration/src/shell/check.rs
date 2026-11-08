@@ -20,7 +20,9 @@
 //! an `AttestReport`, or an `ObserveReport`, rendered like a reconcile's.
 //! `observe` also names, with `NYL-OBSERVATION-CHANGED`, the consumers whose
 //! stored resolution of an observed value no longer equals the recorded one;
-//! they are work for the next reconcile.
+//! they are work for the next reconcile. They include consumers in other
+//! environments that read the value through a cross-environment reference:
+//! their snapshots are read without a lease and never written.
 //!
 //! The lease it holds lists no units: a check has no effects, so a run
 //! taking over from a dead check has nothing to mark uncertain. It writes
@@ -227,10 +229,10 @@ fn holding(
     }
     if check == Check::Observe {
         report.warnings.extend(changed_consumer_warnings(
+            context,
+            request,
             &snapshot,
             &changes.observations,
-            &request.environment,
-            context.base.clock.now(),
         ));
     }
     report_units(check, report, &snapshot, &planned, results, context.drivers);
@@ -258,12 +260,20 @@ fn holding(
 /// `NYL-OBSERVATION-CHANGED` for each consumer whose stored resolution of an
 /// observed value differs from what the snapshot, with `written` applied,
 /// records: its inputs changed, so it is ready for the next reconcile.
+///
+/// The consumers are this environment's, and those of every other
+/// environment the request names that read this environment's observed
+/// values through a cross-environment reference. The other environments'
+/// snapshots are read like a reconcile reads its producers' (no lease, no
+/// write); one that cannot be read is a warning, never a failed check.
 fn changed_consumer_warnings(
+    context: &RunContext<'_>,
+    request: &RunRequest,
     snapshot: &EnvironmentSnapshot,
     written: &BTreeMap<UnitName, Option<ObservationRecord>>,
-    environment: &EnvironmentName,
-    now: Timestamp,
 ) -> Vec<Finding> {
+    let environment = &request.environment;
+    let now = context.base.clock.now();
     let mut records = snapshot.observations.clone();
     for (unit, record) in written {
         match record {
@@ -273,13 +283,37 @@ fn changed_consumer_warnings(
     }
     let changed = observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &records, now);
     let consumers: BTreeSet<&UnitName> = changed.iter().map(|changed| &changed.consumer).collect();
-    consumers
+    let mut warnings: Vec<Finding> = consumers
         .into_iter()
         .flat_map(|consumer| {
             let reasons: Vec<_> = changed.iter().filter(|changed| &changed.consumer == consumer).collect();
             observed_values::changed_warnings(environment, consumer, &reasons)
         })
-        .collect()
+        .collect();
+
+    let mut others = BTreeMap::new();
+    for (name, location) in &request.environments {
+        if name == environment {
+            continue;
+        }
+        match context.base.store.snapshot(location) {
+            Ok(other) => {
+                others.insert(name.clone(), other);
+            }
+            Err(error) => warnings.push(store_error(name, &error)),
+        }
+    }
+    let view = observed_values::ProducerView {
+        desired: &snapshot.desired,
+        observed: &snapshot.observed,
+        records: &records,
+    };
+    warnings.extend(
+        observed_values::changed_consumers_reading(environment, view, &others, now)
+            .iter()
+            .map(observed_values::external_changed_warning),
+    );
+    warnings
 }
 
 /// The snapshot, refused like a reconcile's when state is missing or
