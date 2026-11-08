@@ -860,11 +860,7 @@ impl Reconcile<'_, '_, '_> {
         );
         if let Some(document) = document {
             observed.insert(name.clone(), document.clone());
-            let checkpoint = Checkpoint {
-                desired: in_progress,
-                observed: document,
-                artifacts: artifacts.get(name).cloned().unwrap_or_default(),
-            };
+            let checkpoint = Checkpoint::new(in_progress, document, artifacts.get(name).cloned().unwrap_or_default());
             self.checkpointed = true;
             if let Err(error) = self.write_run(Some(&checkpoint)) {
                 let finding = store_error(&environment, &error);

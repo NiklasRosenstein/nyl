@@ -871,11 +871,11 @@ mod tests {
         let coordination = Coordination {
             lease: None,
             runs: vec![RunState {
-                checkpoints: vec![Checkpoint {
-                    desired: desired_numbered("web", 3, Some(hex_key('a'))),
-                    observed: cancelled,
-                    artifacts: BTreeMap::new(),
-                }],
+                checkpoints: vec![Checkpoint::new(
+                    desired_numbered("web", 3, Some(hex_key('a'))),
+                    cancelled,
+                    BTreeMap::new(),
+                )],
                 ..run_state(Run {
                     finished: true,
                     ..run_naming(&["db"])
@@ -919,11 +919,11 @@ mod tests {
                 ..run_naming(&["web"])
             })],
             evidence: vec![RunState {
-                checkpoints: vec![Checkpoint {
-                    desired: desired_numbered("database", 2, Some(hex_key('a'))),
-                    observed: observed_numbered("database", 2, Some(hex_key('a'))),
-                    artifacts: BTreeMap::new(),
-                }],
+                checkpoints: vec![Checkpoint::new(
+                    desired_numbered("database", 2, Some(hex_key('a'))),
+                    observed_numbered("database", 2, Some(hex_key('a'))),
+                    BTreeMap::new(),
+                )],
                 ..run_state(Run {
                     finished: true,
                     ..run_naming(&["web"])

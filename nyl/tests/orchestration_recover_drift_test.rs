@@ -383,15 +383,15 @@ fn test_accept_adopts_a_late_checkpoint_and_deletes_its_evidence_ref() {
         units: Vec::new(),
         finished: true,
     };
-    let checkpoint = Checkpoint {
-        desired: snapshot.desired[&network].clone(),
-        observed: ObservedUnit {
+    let checkpoint = Checkpoint::new(
+        snapshot.desired[&network].clone(),
+        ObservedUnit {
             receipt: Some(late_receipt),
             condition: None,
             ..current.clone()
         },
-        artifacts: BTreeMap::new(),
-    };
+        BTreeMap::new(),
+    );
     store.write_run(&location, &dev(), &record, Some(&checkpoint)).unwrap();
     store.retire_run(&location, &dev(), &late, None).unwrap();
     store

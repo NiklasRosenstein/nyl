@@ -2281,6 +2281,49 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         Ending::Killed
     }
 
+    /// Checkpoint again, with the observed values just read, each unit of
+    /// `read` whose current receipt this run's latest checkpoint recorded:
+    /// a run that dies afterwards leaves the values on its run ref next to
+    /// the receipt they were read for. The later checkpoint of a unit
+    /// decides on import. A value no checkpoint can carry (the record names
+    /// another receipt) is left to the transition commit. A store failure is
+    /// a warning: the transition commit still records the values.
+    fn checkpoint_observations(
+        &mut self,
+        checkpointed: &mut BTreeMap<UnitName, Checkpoint>,
+        read: &[UnitName],
+        observations: &BTreeMap<UnitName, ObservationRecord>,
+    ) {
+        for name in read {
+            let Some(latest) = checkpointed.get(name) else {
+                continue;
+            };
+            let record = observations.get(name).cloned();
+            if latest.observations == record {
+                continue;
+            }
+            let candidate = Checkpoint {
+                observations: record,
+                ..latest.clone()
+            };
+            let binds = candidate.observations.is_none()
+                || takeover::checkpointed_evidence(self.environment(), &self.run, &candidate)
+                    .is_some_and(|evidence| evidence.observations == candidate.observations);
+            if !binds {
+                continue;
+            }
+            match self.write_run(Some(&candidate)) {
+                Ok(()) => {
+                    checkpointed.insert(name.clone(), candidate);
+                }
+                Err(error) => {
+                    let finding = store_error(self.environment(), &error);
+                    self.report.warnings.push(finding);
+                }
+            }
+        }
+    }
+
     /// Write the run record; a store failure is reported and ends the run.
     fn write_run(&mut self, checkpoint: Option<&Checkpoint>) -> Result<(), StateError> {
         if !self.session.request.mode.writes_run_record() {
@@ -2482,6 +2525,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut produced = BTreeSet::new();
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
+        // The latest checkpoint this run wrote for each unit it executed, so
+        // that what it reads of the unit's receipt afterwards is
+        // checkpointed with it.
+        let mut checkpointed: BTreeMap<UnitName, Checkpoint> = BTreeMap::new();
         let mut created: BTreeSet<UnitName> = BTreeSet::new();
         let mut taking = Takeover::new(&leftovers, overlay, &prepared.desired.units, &prepared.desired.fenced);
         let runs: Vec<_> = leftovers.runs.iter().map(|state| (*state).clone()).collect();
@@ -2548,7 +2595,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     observed: &observed,
                     handled: &taking.handled,
                 });
-                if taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                if taking.apply(
+                    import,
+                    &mut observed,
+                    &mut artifacts,
+                    &mut attestations,
+                    &mut observations,
+                    &mut produced,
+                    &mut self.report,
+                ) {
                     // Imported receipts may change downstream keys: resolve again.
                     continue;
                 }
@@ -2568,7 +2623,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     if let Err(ending) = self.phase(Vec::new(), lease::deadline(context.base, now, longest), &[]) {
                         return ending;
                     }
-                    if observing.read(
+                    let changed = observing.read(
                         session,
                         &prepared,
                         &resolved,
@@ -2576,7 +2631,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                         &artifacts,
                         &mut observations,
                         &due,
-                    ) {
+                    );
+                    self.checkpoint_observations(&mut checkpointed, &due, &observations);
+                    if changed {
                         // A recorded value changed: its consumers resolve again.
                         continue;
                     }
@@ -2728,6 +2785,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                             }
                         }
                         self.checkpointed = true;
+                        checkpointed.insert(name.clone(), checkpoint.clone());
                         if let Err(error) = self.write_run(Some(checkpoint)) {
                             let finding = store_error(&environment, &error);
                             self.report.errors.push(finding);
@@ -2806,7 +2864,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 observed: &observed,
                 handled: &taking.handled,
             });
-            taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report);
+            taking.apply(
+                import,
+                &mut observed,
+                &mut artifacts,
+                &mut attestations,
+                &mut observations,
+                &mut produced,
+                &mut self.report,
+            );
         }
         self.report.imported = taking.imported.iter().cloned().collect();
         self.report.recovered = taking.recovered.iter().cloned().collect();
@@ -2830,6 +2896,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 desired,
                 &mut observed,
                 &mut artifacts,
+                &mut attestations,
+                &mut observations,
                 &runs,
                 &nyl_core::orchestration::state::Request {
                     by: context.base.requested_by.clone(),
@@ -3155,6 +3223,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         // A run taking over imports against the stored documents.
         let stored: BTreeMap<UnitName, DesiredUnit> = overlay.desired.clone();
         let mut taking = Takeover::new(&leftovers, overlay, &BTreeMap::new(), &BTreeSet::new());
+        let mut attestations = snapshot.attestations.clone();
+        let mut observations = snapshot.observations.clone();
         if taking.active {
             let mut produced = BTreeSet::new();
             loop {
@@ -3177,7 +3247,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     observed: &observed,
                     handled: &taking.handled,
                 });
-                if !taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                if !taking.apply(
+                    import,
+                    &mut observed,
+                    &mut artifacts,
+                    &mut attestations,
+                    &mut observations,
+                    &mut produced,
+                    &mut self.report,
+                ) {
                     break;
                 }
             }
@@ -3245,8 +3323,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             snapshot,
             &observed,
             &artifacts,
-            &snapshot.attestations,
-            &snapshot.observations,
+            &attestations,
+            &observations,
             &life,
             &mut changes,
         );
@@ -3812,12 +3890,17 @@ impl Takeover {
     }
 
     /// Overlay an import on the run's evidence; whether it changed any
-    /// observed document.
+    /// observed document. An imported receipt brings the attestations and
+    /// observed values its checkpoint carried, which replace those of the
+    /// receipt it replaces, as a unit's own execution's do.
+    #[allow(clippy::too_many_arguments)] // The import and every kind of evidence it overlays.
     fn apply(
         &mut self,
         import: takeover::Import,
         observed: &mut BTreeMap<UnitName, ObservedUnit>,
         artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        attestations: &mut BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+        observations: &mut BTreeMap<UnitName, ObservationRecord>,
         produced: &mut BTreeSet<UnitName>,
         report: &mut EnvironmentRunReport,
     ) -> bool {
@@ -3832,6 +3915,14 @@ impl Takeover {
             // Its receipt reaches state with this run's commit.
             produced.insert(name);
         }
+        for (name, set) in import.attestations {
+            if set.is_empty() {
+                attestations.remove(&name);
+            } else {
+                attestations.insert(name, set);
+            }
+        }
+        observations.extend(import.observations);
         self.imported.extend(import.imported);
         self.recovered.extend(import.recovered);
         self.handled.extend(import.handled);
