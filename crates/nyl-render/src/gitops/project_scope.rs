@@ -121,9 +121,15 @@ fn identity(value: &Value) -> String {
 fn context(value: &Value) -> Result<Value> {
     // Baselines published before the `.nyl` annotation carry the legacy key.
     let annotations = &value["metadata"]["annotations"];
-    let annotation = annotations[CONTEXT_ANNOTATION]
-        .as_str()
-        .or_else(|| annotations[LEGACY_CONTEXT_ANNOTATION].as_str());
+    let annotation = annotations[CONTEXT_ANNOTATION].as_str().or_else(|| {
+        let legacy = annotations[LEGACY_CONTEXT_ANNOTATION].as_str()?;
+        crate::util::deprecation::warn_deprecated_key(
+            "The published baseline",
+            LEGACY_CONTEXT_ANNOTATION,
+            &format!("publish the target again to record {CONTEXT_ANNOTATION}"),
+        );
+        Some(legacy)
+    });
     match annotation {
         Some(text) => {
             let invalid = |detail: &str| {

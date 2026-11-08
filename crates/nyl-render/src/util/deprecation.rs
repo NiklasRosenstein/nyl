@@ -43,17 +43,18 @@ pub fn warn_deprecated_api_version(path: &Path, document: &serde_json::Value) {
     }
 }
 
-/// The warning for an object that carries a deprecated label or annotation key.
-pub fn deprecated_key_warning(object: &str, deprecated: &str, replacement: &str) -> String {
+/// The warning for an object that carries a deprecated label or annotation
+/// key, with `fix` saying what to do instead.
+pub fn deprecated_key_warning(object: &str, deprecated: &str, fix: &str) -> String {
     format!(
-        "{object} uses deprecated key {deprecated}; use {replacement} instead. Support for {deprecated} ends in a future release, see {DEPRECATIONS_URL}"
+        "{object} uses deprecated key {deprecated}; {fix}. Support for {deprecated} ends in a future release, see {DEPRECATIONS_URL}"
     )
 }
 
 /// Warn once per process for each object carrying a deprecated label or annotation key.
-pub fn warn_deprecated_key(object: &str, deprecated: &str, replacement: &str) {
+pub fn warn_deprecated_key(object: &str, deprecated: &str, fix: &str) {
     static WARNED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
-    let warning = deprecated_key_warning(object, deprecated, replacement);
+    let warning = deprecated_key_warning(object, deprecated, fix);
     let first = WARNED
         .get_or_init(|| Mutex::new(BTreeSet::new()))
         .lock()
@@ -89,5 +90,15 @@ mod tests {
         assert!(warning.contains("set apiVersion to k8s.nyl/v1"), "{warning}");
         let current = json!({"apiVersion": "k8s.nyl/v1", "kind": "Cluster", "metadata": {"name": "primary"}});
         assert!(deprecated_api_version_warning(Path::new("x"), &current).is_none());
+    }
+
+    #[test]
+    fn test_deprecated_key_warning_names_the_key_fix_and_removal_policy() {
+        let warning = deprecated_key_warning("The published baseline", "old.example/key", "publish again");
+        assert!(
+            warning.starts_with("The published baseline uses deprecated key old.example/key; publish again."),
+            "{warning}"
+        );
+        assert!(warning.contains(DEPRECATIONS_URL), "{warning}");
     }
 }

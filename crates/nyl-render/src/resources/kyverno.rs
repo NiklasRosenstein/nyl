@@ -129,7 +129,7 @@ fn scope_annotation(manifest: &serde_json::Value) -> Option<&serde_json::Value> 
     crate::util::deprecation::warn_deprecated_key(
         &format!("{kind} {name:?}"),
         legacy::ANNOTATION_KYVERNO_SCOPE,
-        ANNOTATION_KYVERNO_SCOPE,
+        &format!("use {ANNOTATION_KYVERNO_SCOPE} instead"),
     );
     Some(value)
 }

@@ -7,5 +7,5 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "a3e7186c-8ba7-4091-8323-0b79a728ce0c"
 type = "breaking change"
-description = "Rendered output changes key names: expanded manifests carry `k8s.nyl/parent-api-version`, `k8s.nyl/parent-kind`, `k8s.nyl/parent-name`, and `k8s.nyl/parent-namespace`, and catalog Applications and AppProjects carry `k8s.gitops.nyl/publication-context`. The next publication rewrites them; `diff-tree` and `publish-tree` still read the old publication-context annotation from baselines"
+description = "Rendered output changes key names: expanded manifests carry `k8s.nyl/parent-api-version`, `k8s.nyl/parent-kind`, `k8s.nyl/parent-name`, and `k8s.nyl/parent-namespace`, and catalog Applications and AppProjects carry `k8s.gitops.nyl/publication-context`. The next publication rewrites them; `diff-tree` and `publish-tree` still read the old publication-context annotation from baselines, with a deprecation warning, until the next publication records the new one"
 author = "@NiklasRosenstein"

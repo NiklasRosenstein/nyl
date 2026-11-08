@@ -13,6 +13,7 @@ the removal release; nothing else changes when you do.
 | `nyl render --context` | nothing: `render` never connects to Kubernetes | 0.6.0 | a future release |
 | `nyl.niklasrosenstein.github.com/apply-policy-scope` annotation on Kyverno policies | `k8s.nyl/apply-policy-scope` | 0.7.0 | a future release |
 | Release state Secrets labelled `nyl.niklasrosenstein.github.com/release` and `nyl.niklasrosenstein.github.com/revision` | `k8s.nyl/release` and `k8s.nyl/revision`, which `nyl apply` records | 0.7.0 | a future release |
+| Published baselines whose catalog carries `nyl.niklasrosenstein.github.com/publication-context` | `k8s.gitops.nyl/publication-context`, which publishing the target again records | 0.7.0 | a future release |
 
 ## Cluster and Release in `k8s.nyl/v1`
 
@@ -49,10 +50,13 @@ under the old labels, with a warning, until the release history limit removes
 them. Keep the history limit set, or delete the old revision Secrets after a
 successful apply, before support ends.
 
-Keys that only Nyl writes into rendered output change without a deprecation:
-expanded manifests carry `k8s.nyl/parent-api-version`, `k8s.nyl/parent-kind`,
-`k8s.nyl/parent-name`, and `k8s.nyl/parent-namespace`, and published catalog
-objects carry `k8s.gitops.nyl/publication-context`. `diff-tree` and
-`publish-tree` still read the old publication-context annotation from a
-baseline, so the first publication after upgrading checks cleanup scope as
-before.
+Published catalog Applications and AppProjects carry
+`k8s.gitops.nyl/publication-context`. `diff-tree` and `publish-tree` still read
+the old annotation from a baseline, with a warning, so the first publication
+after upgrading checks cleanup scope as before and records the new key. Publish
+each target once before support ends.
+
+Expanded manifests rendered with `--track-parent` carry
+`k8s.nyl/parent-api-version`, `k8s.nyl/parent-kind`, `k8s.nyl/parent-name`, and
+`k8s.nyl/parent-namespace`. Nyl only writes these, so they change without a
+deprecation.

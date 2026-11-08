@@ -370,7 +370,7 @@ impl KubernetesReleaseStorage {
                     secret.metadata.name.as_deref().unwrap_or_default()
                 ),
                 legacy::LABEL_RELEASE,
-                LABEL_RELEASE,
+                &format!("nyl apply records new revisions under {LABEL_RELEASE}"),
             );
             secrets.push(secret);
         }
