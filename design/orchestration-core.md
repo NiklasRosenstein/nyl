@@ -2586,6 +2586,13 @@ double, is written with its exact decimal digits, so two values never share a
 digest. The version in `apiVersion` is the format version of each kind:
 a format change adds a version with a migration from the previous one, golden
 files cover every version, and a reader rejects a version it does not know.
+`DesiredUnit` and `ObservedUnit` are at `gitops.nyl/v2`; every other kind is
+at `gitops.nyl/v1`. A `gitops.nyl/v1` document of those two kinds (what Nyl
+0.6 wrote) is read through its migration, which types each stored blocked
+reason once from its text, and is written back as `gitops.nyl/v2` by the next
+transition that touches it. Text it does not recognize becomes an `other`
+blocker with the text unchanged. A Nyl that predates `v2` rejects such a
+document with an instruction to upgrade.
 
 | Kind | Location | Content |
 | --- | --- | --- |
@@ -2638,7 +2645,9 @@ readiness: {state: ready}
 # while blocked:
 # readiness:
 #   state: blocked
-#   reasons: [{pointer: /variables/vpc_id, reason: network has no current receipt}]
+#   reasons:
+#   - pointer: /variables/vpc_id
+#     blocker: {type: no-current-receipt, producer: {unit: network}}
 ```
 
 - `sourceRevision` is S. Resolution writes the resolved commit into every Git
@@ -2672,6 +2681,20 @@ readiness: {state: ready}
   release version, and external tool versions, so a new source commit with
   identical inputs, a producer re-execution that yields identical outputs, or a
   Nyl upgrade does not change it.
+- `readiness.reasons` stores each blocker as data, never as text. `blocker.type`
+  is `no-current-receipt`, `attestation` (with `name` and `state: pending |
+  failing`), `observation` (with `name` and the driver's `why`), or `other`
+  (with a `message`, for what only text describes, such as a fenced
+  incarnation). The first three carry the `producer` as `{environment?,
+  unit}`; `environment` is absent for a unit of the unit's own environment, so
+  a producer of another environment is a typed reference rather than an
+  `<environment>/<unit>` string. The report's stable `blockedBy` reasons, the
+  attestation and observation warnings, and whether a blocked consumer can
+  resolve again once its observed value arrives read these fields; none of
+  them reads text. The human text (`network has no current receipt`,
+  `attestation healthy of infra/network is pending`, `observation ip of
+  kubernetes is pending: <why>`) is rendered from the blocker in one place,
+  `Blocker::message`, for tables, `message` fields, and blocked results.
 - A blocked unit keeps its rendered spec and source commit, so a later wave of
   the same run resolves it from new evidence without rereading source. Each
   run renders every unit from its own source commit S, so the next run

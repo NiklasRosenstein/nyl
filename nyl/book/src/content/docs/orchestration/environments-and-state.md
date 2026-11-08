@@ -55,6 +55,23 @@ state exits 2 with `NYL-LEASE-BROKEN` and names `nyl recover -e <env>`, so
 the dead run's effects are recorded before anything else changes the
 environment. See [Breaking a lease](/nyl/orchestration/recovery/#breaking-a-lease).
 
+## State format versions
+
+Every state document carries the format version of its kind in `apiVersion`.
+A Nyl release reads the versions it knows and rejects a newer one with an
+instruction to upgrade, so an environment's state is never misread. Documents
+written by an earlier release are migrated when they are read and written in
+the current version by the next run that changes them; nothing rewrites state
+in bulk. A migration is one way: once a run with a release that writes a newer
+version has changed a unit, older releases can no longer read that unit's
+documents, so run one Nyl release against an environment's state, in CI and on
+workstations alike.
+
+The desired and observed documents of a unit are at `gitops.nyl/v2`, which
+stores what a blocked unit waits for as data (the producer, with its
+environment, and the attestation or observed value) rather than as text. Their
+JSON Schemas are published under `gitops.nyl/v2/state/`.
+
 ## Preview environments
 
 An [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
