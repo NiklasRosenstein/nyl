@@ -2282,36 +2282,33 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     }
 
     /// Checkpoint again, with the observed values just read, each unit of
-    /// `read` whose current receipt this run's latest checkpoint recorded:
-    /// a run that dies afterwards leaves the values on its run ref next to
-    /// the receipt they were read for. The later checkpoint of a unit
-    /// decides on import. A value no checkpoint can carry (the record names
-    /// another receipt) is left to the transition commit. A store failure is
-    /// a warning: the transition commit still records the values.
+    /// `read` whose current receipt this run's latest checkpoint recorded
+    /// ([`takeover::observation_checkpoint`] decides): a run that dies
+    /// afterwards leaves the values on its run ref next to the receipt they
+    /// were read for. The later checkpoint of a unit decides on import. A
+    /// unit still inside its `observationWait` (`waiting`) is left for the
+    /// read that settles it, so polling writes nothing. A store failure is a
+    /// warning: the transition commit still records the values, and the next
+    /// read tries again.
     fn checkpoint_observations(
         &mut self,
         checkpointed: &mut BTreeMap<UnitName, Checkpoint>,
         read: &[UnitName],
         observations: &BTreeMap<UnitName, ObservationRecord>,
+        waiting: impl Fn(&UnitName) -> bool,
     ) {
         for name in read {
             let Some(latest) = checkpointed.get(name) else {
                 continue;
             };
-            let record = observations.get(name).cloned();
-            if latest.observations == record {
+            if waiting(name) {
                 continue;
             }
-            let candidate = Checkpoint {
-                observations: record,
-                ..latest.clone()
+            let Some(candidate) =
+                takeover::observation_checkpoint(self.environment(), &self.run, latest, observations.get(name))
+            else {
+                continue;
             };
-            let binds = candidate.observations.is_none()
-                || takeover::checkpointed_evidence(self.environment(), &self.run, &candidate)
-                    .is_some_and(|evidence| evidence.observations == candidate.observations);
-            if !binds {
-                continue;
-            }
             match self.write_run(Some(&candidate)) {
                 Ok(()) => {
                     checkpointed.insert(name.clone(), candidate);
@@ -2632,7 +2629,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                         &mut observations,
                         &due,
                     );
-                    self.checkpoint_observations(&mut checkpointed, &due, &observations);
+                    self.checkpoint_observations(&mut checkpointed, &due, &observations, |unit| {
+                        observing.waiting(unit)
+                    });
                     if changed {
                         // A recorded value changed: its consumers resolve again.
                         continue;
@@ -2828,6 +2827,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
             }
         };
+        // What the run still holds of values it read while waiting for them
+        // is checkpointed now, before the rest of the run.
+        let read: Vec<UnitName> = checkpointed.keys().cloned().collect();
+        self.checkpoint_observations(&mut checkpointed, &read, &observations, |_| false);
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
         self.report.warnings.extend(crate::rules::teardown::readiness_warnings(
             context.drivers,

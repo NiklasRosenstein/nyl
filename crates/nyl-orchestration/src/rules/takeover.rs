@@ -333,6 +333,32 @@ pub(crate) fn checkpointed_evidence(
     })
 }
 
+/// The checkpoint to write after a run read observed values for the receipt
+/// `latest`, the run's latest checkpoint of the unit, recorded: `latest` with
+/// `record`, the record the run now holds for the unit. `None` when nothing
+/// changed, or when the record cannot ride with that receipt (it names
+/// another receipt or incarnation, or `latest` records no success of
+/// `run`); the transition commit still records it. A unit's later
+/// checkpoint is its result on import.
+pub(crate) fn observation_checkpoint(
+    environment: &EnvironmentName,
+    run: &RunId,
+    latest: &Checkpoint,
+    record: Option<&ObservationRecord>,
+) -> Option<Checkpoint> {
+    if latest.observations.as_ref() == record {
+        return None;
+    }
+    let candidate = Checkpoint {
+        observations: record.cloned(),
+        ..latest.clone()
+    };
+    let binds = record.is_none()
+        || checkpointed_evidence(environment, run, &candidate)
+            .is_some_and(|evidence| evidence.observations == candidate.observations);
+    binds.then_some(candidate)
+}
+
 /// Whether a checkpoint shows effects that happened: a receipt the run
 /// recorded, or an `uncertain` outcome. A failure claims none.
 fn effects_real(run: &RunId, checkpoint: &Checkpoint) -> bool {
@@ -1039,6 +1065,72 @@ mod tests {
         first_without_values.observations = None;
         let import = import_of_all(vec![first_without_values, first.clone()], "v1");
         assert_eq!(import.observations[&name("network")], first.observations.unwrap());
+    }
+
+    /// Catches a read value being checkpointed with a receipt it was not read
+    /// for, which an import would then take as the receipt's: only a record
+    /// that names the latest checkpoint's receipt (execution key, run, and
+    /// incarnation) rides with it, and an unchanged record writes nothing.
+    #[test]
+    fn test_observation_checkpoint_carries_only_a_record_that_names_the_receipt() {
+        let latest = checkpoint("network", "v1", RUN_2);
+        let record = read(&latest);
+        let written = observation_checkpoint(&env(), &run(RUN_2), &latest, Some(&record)).unwrap();
+        assert_eq!(written.observations, Some(record.clone()));
+        assert_eq!(
+            Checkpoint {
+                observations: None,
+                ..written.clone()
+            },
+            latest,
+            "nothing else of the checkpoint changes"
+        );
+        assert_eq!(
+            observation_checkpoint(&env(), &run(RUN_2), &written, Some(&record)),
+            None,
+            "an unchanged record writes nothing"
+        );
+
+        let mismatches: Vec<(&str, Mismatch<ObservationRecord>)> = vec![
+            (
+                "another key",
+                Box::new(|record| record.execution_key = fixtures::key("another")),
+            ),
+            ("another run", Box::new(|record| record.run = run(OLDER))),
+            (
+                "another incarnation",
+                Box::new(|record| record.unit.uid = Some(fixtures::uid("another-incarnation"))),
+            ),
+        ];
+        for (what, mismatch) in mismatches {
+            let mut record = read(&latest);
+            mismatch(&mut record);
+            assert_eq!(
+                observation_checkpoint(&env(), &run(RUN_2), &latest, Some(&record)),
+                None,
+                "a record of {what} is left to the transition commit"
+            );
+        }
+
+        // A checkpoint of another run's receipt (or of a failure) carries none.
+        assert_eq!(
+            observation_checkpoint(&env(), &run(OLDER), &latest, Some(&record)),
+            None
+        );
+        let mut uncertain = latest.clone();
+        uncertain.observed.condition = Some(Condition::Uncertain {
+            since: at("10:00"),
+            run: run(RUN_2),
+            reason: "tools signalled".to_owned(),
+        });
+        assert_eq!(
+            observation_checkpoint(&env(), &run(RUN_2), &uncertain, Some(&record)),
+            None
+        );
+
+        // A record that went away is checkpointed away too.
+        let cleared = observation_checkpoint(&env(), &run(RUN_2), &written, None).unwrap();
+        assert_eq!(cleared.observations, None);
     }
 
     /// Catches a superseded result, whose effects are real, letting the unit

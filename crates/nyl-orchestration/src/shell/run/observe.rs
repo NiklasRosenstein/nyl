@@ -132,6 +132,12 @@ impl Observing {
         );
     }
 
+    /// Whether the run still owes `unit` a poll: a declared value has none
+    /// and its `observationWait` is open.
+    pub(super) fn waiting(&self, unit: &UnitName) -> bool {
+        self.states.get(unit).is_some_and(ReadState::waiting)
+    }
+
     /// The units to read now: those with a current receipt that no read
     /// covered yet this run, and those whose wait polls again.
     pub(super) fn due(

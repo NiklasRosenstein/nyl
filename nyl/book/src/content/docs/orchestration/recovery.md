@@ -58,9 +58,10 @@ executing.
   The attestations and observed values the checkpoint carries become the
   receipt's too, with the times they were recorded at, so a dependent that
   [requires them](/nyl/orchestration/runs/#requiring-attestations) or reads an
-  observed value proceeds without `nyl attest` or `nyl observe`. A record that
-  names another execution key, run, or incarnation than the receipt is
-  dropped.
+  observed value proceeds without `nyl attest` or `nyl observe`. An
+  attestation must name the receipt's execution key and the unit's
+  incarnation, and an observation record also the run that wrote the receipt;
+  a record that does not is dropped.
 - A unit the dead run was executing without a checkpoint gets an `uncertain`
   condition naming the dead run. The unit is listed under `recovered`.
 - A checkpoint with another key is superseded (`NYL-RUN-SUPERSEDED`). When it

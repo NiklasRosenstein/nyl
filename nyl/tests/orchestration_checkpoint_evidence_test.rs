@@ -14,6 +14,7 @@ mod scenario;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nyl_core::orchestration::codes::Code;
@@ -33,7 +34,7 @@ use nyl_orchestration::shell::state as state_ops;
 use nyl_units::command::CommandDriver;
 use nyl_units::process::ProcessRunner;
 use scenario::runner::FaultSlot;
-use scenario::shell::{codes, dev, names, outcome, project, set, unit, Harness, ENVIRONMENT, NYL_TOML};
+use scenario::shell::{codes, dev, names, outcome, project, set, unit, FaultyStore, Harness, ENVIRONMENT, NYL_TOML};
 use serde_json::{json, Value};
 
 /// The address `lb` reads.
@@ -43,15 +44,32 @@ const IP: &str = "203.0.113.10";
 /// value, and how many executions and reads happened.
 #[derive(Default)]
 struct Probe {
-    reads: Mutex<VecDeque<Option<&'static str>>>,
+    reads: Mutex<VecDeque<Read>>,
     executions: Mutex<usize>,
     read_count: Mutex<usize>,
+    /// A store whose next checkpoint write fails once a read has happened.
+    failing_store: Mutex<Option<Arc<AtomicUsize>>>,
+}
+
+/// What one read of `ip` finds.
+enum Read {
+    Value(&'static str),
+    Pending,
+    Failed,
 }
 
 impl Probe {
     /// The next read finds `address`, or fails for `None`.
     fn script(&self, address: Option<&'static str>) {
-        self.reads.lock().unwrap().push_back(address);
+        self.reads
+            .lock()
+            .unwrap()
+            .push_back(address.map_or(Read::Failed, Read::Value));
+    }
+
+    /// The next read finds the address not assigned yet.
+    fn script_pending(&self) {
+        self.reads.lock().unwrap().push_back(Read::Pending);
     }
 
     fn executions(&self) -> usize {
@@ -144,11 +162,20 @@ impl Driver for Producer {
         _receipt: &Receipt,
     ) -> DriverResult<Supported<ObservedValues>> {
         *self.probe.read_count.lock().unwrap() += 1;
+        if let Some(failures) = &*self.probe.failing_store.lock().unwrap() {
+            failures.store(1, Ordering::SeqCst);
+        }
+        let value = |value| {
+            Ok(Supported::Supported(ObservedValues {
+                values: BTreeMap::from([("ip".to_owned(), value)]),
+            }))
+        };
         match self.probe.reads.lock().unwrap().pop_front() {
-            Some(Some(address)) => Ok(Supported::Supported(ObservedValues {
-                values: BTreeMap::from([("ip".to_owned(), ObservedValue::Value { value: json!(address) })]),
-            })),
-            Some(None) | None => Err(DriverError::before_effects("the system cannot be reached")),
+            Some(Read::Value(address)) => value(ObservedValue::Value { value: json!(address) }),
+            Some(Read::Pending) => value(ObservedValue::Pending {
+                reason: "no address yet".to_owned(),
+            }),
+            Some(Read::Failed) | None => Err(DriverError::before_effects("the system cannot be reached")),
         }
     }
     fn inspect(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
@@ -184,9 +211,50 @@ struct World {
     _project: tempfile::TempDir,
 }
 
+/// How a [`World`] differs from the default.
+#[derive(Default)]
+struct Options<'a> {
+    /// The declared `maxAge` of `ip`.
+    max_age: Option<&'a str>,
+    /// The `observationWait` of `lb`.
+    wait: Option<&'a str>,
+    /// An independent `solo` unit that can be torn down.
+    solo: bool,
+    /// An in-memory store that fails the checkpoint write after `lb`'s first read.
+    faulty_store: bool,
+}
+
 impl World {
     fn new(max_age: Option<&str>) -> Self {
-        let max_age = max_age.map(|age| format!(", maxAge: {age}")).unwrap_or_default();
+        Self::with(&Options {
+            max_age,
+            ..Options::default()
+        })
+    }
+
+    fn with(options: &Options<'_>) -> Self {
+        let max_age = options
+            .max_age
+            .map(|age| format!(", maxAge: {age}"))
+            .unwrap_or_default();
+        let wait = options
+            .wait
+            .map(|wait| format!("  observationWait: {wait}\n"))
+            .unwrap_or_default();
+        let solo = if options.solo {
+            "---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: solo
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  teardown: [sh, -c, 'true']
+"
+        } else {
+            ""
+        };
         let units = format!(
             "apiVersion: units.gitops.nyl/v1
 kind: Command
@@ -198,7 +266,7 @@ spec:
   attestations: [{{name: healthy}}]
   observations:
     ip: {{type: string{max_age}, from: {{service: web}}}}
----
+{wait}---
 apiVersion: units.gitops.nyl/v1
 kind: Command
 metadata:
@@ -209,15 +277,23 @@ spec:
   dependsOn: [{{unit: lb, attestations: [healthy]}}]
   values:
     address: {{fromUnit: {{unit: lb, observation: ip}}}}
-"
+{solo}"
         );
         let project = project(&[
             NYL_TOML,
             ("nyl/environment.yaml", ENVIRONMENT),
             ("nyl/units.yaml", &units),
         ]);
-        let mut harness = Harness::new(project.path(), true);
+        let mut harness = Harness::new(project.path(), !options.faulty_store);
         let probe = Arc::new(Probe::default());
+        if options.faulty_store {
+            let failures = Arc::new(AtomicUsize::new(0));
+            harness.store = Box::new(FaultyStore {
+                checkpoint_failures: failures.clone(),
+                ..FaultyStore::default()
+            });
+            *probe.failing_store.lock().unwrap() = Some(failures);
+        }
         harness.drivers.register(Arc::new(Producer {
             inner: CommandDriver,
             probe: probe.clone(),
@@ -465,4 +541,77 @@ fn test_an_unchanged_read_within_the_refresh_interval_keeps_the_imported_record(
         world.harness.snapshot().observations[&unit("lb")],
         checkpointed.observations.unwrap()
     );
+}
+
+/// A store that refuses the checkpoint written after a read does not stop the
+/// run: the value is evidence for a crash only, and the transition commit
+/// still records it. Catches an optional evidence write ending a run that
+/// would have succeeded.
+#[test]
+fn test_a_store_failure_checkpointing_a_read_value_is_a_warning() {
+    let world = World::with(&Options {
+        faulty_store: true,
+        ..Options::default()
+    });
+    world.probe.script(Some(IP));
+    let report = world.harness.reconcile(&[]);
+    assert_eq!(report.exit.code(), 0, "{report:#?}");
+    assert_eq!(outcome(&report, "executed"), set(&["lb", "dns"]), "{report:#?}");
+    assert_eq!(codes(&report.warnings), [Code::StateUnavailable], "{report:#?}");
+    let snapshot = world.harness.snapshot();
+    assert_eq!(recorded_ip(&snapshot.observations[&unit("lb")]).unwrap().0, json!(IP));
+}
+
+/// A run waiting for a value polls without writing: the unit is checkpointed
+/// again once the wait settles, not on every poll that changed the record.
+/// Catches a run ref that grows a checkpoint per poll.
+#[test]
+fn test_a_wait_for_a_value_checkpoints_the_unit_once_it_settles() {
+    let mut world = World::with(&Options {
+        wait: Some("10m"),
+        ..Options::default()
+    });
+    world.probe.script_pending();
+    world.probe.script_pending();
+    world.probe.script(Some(IP));
+    world.die_before_dns();
+
+    let checkpoints = world.checkpoints();
+    assert_eq!(checkpoints.len(), 2, "the execution, and the settled read");
+    assert_eq!(checkpoints[0].observations, None);
+    let settled = checkpoints[1].observations.as_ref().unwrap();
+    assert_eq!(recorded_ip(settled).unwrap().0, json!(IP));
+    assert!(world.probe.reads() >= 3, "the run polled until the value came");
+}
+
+/// A teardown that takes over a dead run imports the receipts the run
+/// checkpointed with their evidence, as a reconcile does: its transition
+/// commit records them. Catches the teardown entry point diverging.
+#[test]
+fn test_a_teardown_taking_over_imports_the_evidence_with_the_receipt() {
+    let mut world = World::with(&Options {
+        solo: true,
+        ..Options::default()
+    });
+    world.probe.script(Some(IP));
+    world.die_before_dns();
+    let checkpointed = world.checkpoints().pop().unwrap();
+    world.past_the_deadline(41);
+
+    let mut job = world.harness.job(&[], Cancellation::default());
+    job.request.mode = run::RunMode::Teardown {
+        target: run::TeardownTarget::Units([unit("solo")].into()),
+    };
+    job.request.reason = Some("test".to_owned());
+    let report = world.harness.run(&job).environments.remove(0);
+    assert_eq!(names(&report.imported), set(&["lb", "solo"]), "{report:#?}");
+    assert_eq!(outcome(&report, "removed"), set(&["solo"]), "{report:#?}");
+
+    let snapshot = world.harness.snapshot();
+    assert_eq!(
+        snapshot.attestations[&unit("lb")]["healthy"],
+        checkpointed.attestations["healthy"]
+    );
+    assert_eq!(snapshot.observations[&unit("lb")], checkpointed.observations.unwrap());
+    assert_eq!(world.probe.reads(), 1, "teardown reads nothing");
 }

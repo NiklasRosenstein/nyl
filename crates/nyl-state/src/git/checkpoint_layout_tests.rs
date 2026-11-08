@@ -5,10 +5,14 @@
 //! versioned golden file in `nyl-core`. The directory itself has no version:
 //! `attestations.yaml` and `observations.yaml` are optional members, present
 //! only when the run recorded some for the receipt, so a checkpoint written
-//! before they were carried (`without-evidence`, the files v0.6.1 wrote)
-//! reads as it did, and a reader that does not know them ignores them.
-//! A change to the layout adds a directory of golden files and keeps the old
-//! one. After an intended change, regenerate with
+//! before they were carried reads as it did, and a reader that does not know
+//! them ignores them.
+//!
+//! `v0.6.1` is frozen: a checkpoint in the layout v0.6.1 wrote, which every
+//! later reader must still read and which no regeneration touches. A change
+//! to the layout adds a directory and keeps the old ones. `without-evidence`
+//! and `with-evidence` are what the current writer produces; after an
+//! intended change, regenerate those two with
 //! `cargo test -p nyl-state --lib checkpoint_layout -- --ignored`.
 
 use std::collections::BTreeMap;
@@ -137,8 +141,28 @@ fn test_checkpoint_files_match_their_golden_files() {
 /// reading back as written: both ways a run ref survives an upgrade.
 #[test]
 fn test_golden_checkpoints_read_back() {
-    assert_eq!(read("v0.6.1", &stored("without-evidence")), [without_evidence()]);
+    assert_eq!(read("v0.6.1", &stored("v0.6.1")), [without_evidence()]);
     assert_eq!(read("current", &stored("with-evidence")), [with_evidence()]);
+}
+
+/// Catches a ref past 9999 checkpoints reading back out of order: the index
+/// counts past its four digits, where the directory names stop sorting as
+/// text, and the later checkpoint of a unit is its result.
+#[test]
+fn test_checkpoints_read_back_in_the_order_they_were_written_past_four_digits() {
+    let mut tree = Files::new();
+    tree.insert(RUN_FILE.to_owned(), to_yaml(&run_record()).unwrap());
+    let mut expected = Vec::new();
+    for index in [2, 9999, 10000, 10001] {
+        let mut checkpoint = without_evidence();
+        checkpoint.observed.receipt.as_mut().unwrap().outputs = json!({"index": index});
+        insert_checkpoint(&mut tree, index, &checkpoint).unwrap();
+        expected.push(checkpoint);
+    }
+    assert_eq!(
+        read_run("ordered", &tree, "v".to_owned()).unwrap().checkpoints,
+        expected
+    );
 }
 
 /// A reader that does not know the evidence files ignores them: the files of
@@ -154,6 +178,7 @@ fn test_checkpoint_evidence_files_are_optional_members() {
 #[test]
 #[ignore = "regenerates the golden files"]
 fn regenerate_checkpoint_layout_goldens() {
+    // Never `v0.6.1`: it is frozen.
     for (name, checkpoint) in [
         ("without-evidence", without_evidence()),
         ("with-evidence", with_evidence()),

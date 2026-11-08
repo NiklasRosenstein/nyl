@@ -1752,7 +1752,14 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
         .filter_map(|path| path.strip_prefix("checkpoints/"))
         .filter_map(|rest| rest.split_once('/').map(|(directory, _)| directory.to_owned()))
         .collect::<Vec<_>>();
-    directories.sort();
+    // In the order they were written: the index counts up past its four
+    // digits, where the names no longer sort as text.
+    directories.sort_by_key(|directory| {
+        let index = directory
+            .split_once('-')
+            .and_then(|(index, _)| index.parse::<usize>().ok());
+        (index, directory.clone())
+    });
     directories.dedup();
     let mut checkpoints = Vec::new();
     for directory in directories {

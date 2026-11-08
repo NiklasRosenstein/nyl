@@ -2587,6 +2587,21 @@ digest. The version in `apiVersion` is the format version of each kind:
 a format change adds a version with a migration from the previous one, golden
 files cover every version, and a reader rejects a version it does not know.
 
+A directory of documents has no version of its own, such as a checkpoint on a
+run ref, `checkpoints/<n>-<unit>/`: its members are the versioned documents,
+and each is covered as above. A member that can be empty, such as
+`attestations.yaml` and `observations.yaml` beside a receipt, is omitted when
+it is, and a reader ignores members it does not know, so adding an optional
+member needs no version. A checkpoint written before the member existed reads
+as a checkpoint without it. Between Nyl versions, a run ref written by a newer
+Nyl and handled by an older one degrades safely, never wrongly: the older Nyl
+imports the receipt without the attestations and observed values (they are
+pending, as before the members existed), its takeover retires the run ref to
+an evidence ref without the new files, and its `nyl recover` lists a unit
+that the run checkpointed again once per checkpoint. Golden files cover the
+directory's layout (`crates/nyl-state/tests/golden/checkpoint`), including one
+frozen directory per released layout.
+
 | Kind | Location | Content |
 | --- | --- | --- |
 | `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `sourceCommit`, `keepId`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
@@ -2596,8 +2611,8 @@ files cover every version, and a reader rejects a version it does not know.
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
 | `DriftRecord` | `observed/units/<unit>/drift.yaml` | `unit`, `executionKey`, `at`, `result` (`clean`, `drifted` with a summary, or `unknown` with a reason), driver-specific `details` (see [Drift](#drift)) |
-| `ObservationRecord` | `observed/units/<unit>/observations.yaml` | `unit`, `executionKey`, `run` (that produced the receipt), `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
-| `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml` | The latest attestation per name of one scope; see [Attestations](#attestations) |
+| `ObservationRecord` | `observed/units/<unit>/observations.yaml`, and `checkpoints/<n>-<unit>/observations.yaml` on a run ref | `unit`, `executionKey`, `run` (that produced the receipt), `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
+| `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml`, and `checkpoints/<n>-<unit>/attestations.yaml` on a run ref | The latest attestation per name of one scope; see [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
 | `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition, with a receipt's artifacts, attestations, and observed values (a unit's checkpoint is written again when the run reads its observed values) |
 | `Signal` | the signal ref | `run`, `unit`, `action` (`confirm-removed` or `hold`), `phase1Commit` (for `confirm-removed`), `by`, `identity`, `reason`, `at`, `from` |
