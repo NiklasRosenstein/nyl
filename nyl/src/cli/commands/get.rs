@@ -203,9 +203,22 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::EnvironmentTemplates(selection) => declarations(GitOpsResourceKind::EnvironmentTemplate, selection),
         GetCommand::Units(units) => match &units.state.environment {
             None => unit_declarations(&units.path, units.state.output),
-            Some(environment) => state_form(&units.path, environment, &units.state, |snapshot, env| {
-                units_table(env, snapshot, units.state.output, wiring.drivers)
-            }),
+            Some(environment) => state_form_with_peers(
+                &units.path,
+                environment,
+                &units.state,
+                true,
+                |snapshot, env, producers| {
+                    units_table(
+                        env,
+                        snapshot,
+                        units.state.output,
+                        wiring.drivers,
+                        producers,
+                        wiring.clock.now(),
+                    )
+                },
+            ),
         },
         GetCommand::Unit(unit) => {
             let environment = required_environment(&unit.state, "get unit")?;
@@ -277,6 +290,30 @@ fn state_form(
     options: &StateOptions,
     form: impl FnOnce(&EnvironmentSnapshot, &nyl_core::orchestration::ids::EnvironmentName) -> Result<CommandOutcome>,
 ) -> Result<CommandOutcome> {
+    state_form_with_peers(path, environment, options, false, |snapshot, env, _| {
+        form(snapshot, env)
+    })
+}
+
+/// The snapshots of the environments whose observed values the environment's
+/// units read, by name.
+type Producers = std::collections::BTreeMap<nyl_core::orchestration::ids::EnvironmentName, EnvironmentSnapshot>;
+
+/// [`state_form`], which also reads the other environments' snapshots that
+/// `form` needs (`peers`), for the current state only: with `--state-revision`
+/// the other environments are not read, so what consumers resolved from them is
+/// not compared. A state that cannot be read is a warning.
+fn state_form_with_peers(
+    path: &Path,
+    environment: &str,
+    options: &StateOptions,
+    peers: bool,
+    form: impl FnOnce(
+        &EnvironmentSnapshot,
+        &nyl_core::orchestration::ids::EnvironmentName,
+        &Producers,
+    ) -> Result<CommandOutcome>,
+) -> Result<CommandOutcome> {
     let session = match Session::open_offline(path, environment, options.local) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(&finding)),
@@ -304,9 +341,14 @@ fn state_form(
             }
         }
     };
-    let mut outcome = form(&snapshot, &session.resolved.name)?;
+    let (producers, unreadable) = if peers && options.state_revision.is_none() {
+        inspect::producer_snapshots(state, &session.resolved.name, &snapshot.desired, &session.peers())
+    } else {
+        (Producers::new(), Vec::new())
+    };
+    let mut outcome = form(&snapshot, &session.resolved.name, &producers)?;
     let mut warnings = String::new();
-    for finding in &session.resolved.warnings {
+    for finding in session.resolved.warnings.iter().chain(&unreadable) {
         write_finding(&mut warnings, "warning", None, finding);
     }
     outcome.stderr = warnings + &outcome.stderr;
@@ -319,17 +361,20 @@ fn units_table(
     snapshot: &EnvironmentSnapshot,
     output: GetOutput,
     drivers: &nyl_core::orchestration::driver::DriverSet,
+    producers: &Producers,
+    now: nyl_core::orchestration::time::Timestamp,
 ) -> Result<CommandOutcome> {
     // Readiness reads the stored desired documents, never source.
     let readiness = inspect::teardown_readiness(snapshot, drivers);
-    // No run refs are read here, so `now` decides nothing.
-    let report = nyl_orchestration::rules::unit_state::status_with_readiness(
+    // No run refs are read here, so `now` only judges observed values' `maxAge`.
+    let report = nyl_orchestration::rules::unit_state::status_with_producers(
         environment,
         snapshot,
         &Coordination::default(),
-        chrono::DateTime::UNIX_EPOCH,
+        now,
         Some(drivers),
         &readiness,
+        producers,
     );
     let documents = snapshot
         .desired
@@ -432,7 +477,17 @@ fn unit_form(
                         .map(|observed| observed.unit.environment.clone())
                 });
             match environment {
-                Some(environment) => units_table(&environment, &single, args.state.output, drivers)?.stdout,
+                Some(environment) => {
+                    units_table(
+                        &environment,
+                        &single,
+                        args.state.output,
+                        drivers,
+                        &Producers::new(),
+                        chrono::DateTime::UNIX_EPOCH,
+                    )?
+                    .stdout
+                }
                 None => String::new(),
             }
         }

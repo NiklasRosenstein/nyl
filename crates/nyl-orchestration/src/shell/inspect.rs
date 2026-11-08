@@ -23,12 +23,61 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownRea
 /// the clone's local state branches diverged from the remote. Through a
 /// the offline store it reports local state.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
-    status_with(context, environment, location, None, &BTreeMap::new())
+    status_with(context, environment, location, None, &Peers::default())
+}
+
+/// The other environments of the project, for the commands that read the
+/// observed values consumers resolved from them.
+#[derive(Debug, Clone, Default)]
+pub struct Peers {
+    /// Where each environment whose location resolves keeps its state.
+    pub locations: BTreeMap<EnvironmentName, StateLocation>,
+    /// The environments whose location could not be resolved, with why.
+    pub errors: BTreeMap<EnvironmentName, Finding>,
+}
+
+/// The snapshots of the other environments whose observed values the active
+/// units in `desired` (the documents of `environment`) read through
+/// cross-environment references, read without a lease, and a
+/// `NYL-STATE-UNAVAILABLE` warning for each whose location cannot be
+/// resolved or whose state cannot be read.
+pub fn producer_snapshots(
+    store: &dyn StateStore,
+    environment: &EnvironmentName,
+    desired: &BTreeMap<UnitName, DesiredUnit>,
+    peers: &Peers,
+) -> (BTreeMap<EnvironmentName, EnvironmentSnapshot>, Vec<Finding>) {
+    let mut producers = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for producer in crate::rules::observed_values::observed_producer_environments(environment, desired) {
+        if let Some(location) = peers.locations.get(&producer) {
+            match store.snapshot(location) {
+                Ok(snapshot) => {
+                    producers.insert(producer, snapshot);
+                }
+                Err(error) => warnings.push(store_error(&producer, &error)),
+            }
+            continue;
+        }
+        let (why, fix) = match peers.errors.get(&producer) {
+            Some(finding) => (finding.message.clone(), finding.fix.clone()),
+            None => (
+                "it is not a declared environment".to_owned(),
+                format!("declare Environment {producer}, or correct the reference"),
+            ),
+        };
+        warnings.push(Finding::new(
+            Code::StateUnavailable,
+            format!("the observed values of {producer} that {environment} reads were not compared: {why}"),
+            fix,
+        ));
+    }
+    (producers, warnings)
 }
 
 /// [`status`], with the drivers whose recovery policies decide whether a
 /// drifted unit waits for `--reapply` (`nyl status` passes them), and the
-/// state locations of the other environments: status reads the snapshots of
+/// other environments: status reads the snapshots of
 /// those whose observed values this environment's units read through
 /// cross-environment references, without a lease, and shows a unit whose
 /// resolved value differs from the producer's current one as `ready`. A
@@ -38,7 +87,7 @@ pub fn status_with(
     environment: &EnvironmentName,
     location: &StateLocation,
     drivers: Option<&DriverSet>,
-    environments: &BTreeMap<EnvironmentName, StateLocation>,
+    peers: &Peers,
 ) -> RunReport {
     let mut unreadable = Vec::new();
     let mut read = || {
@@ -52,18 +101,8 @@ pub fn status_with(
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
         let readiness = drivers.map(|drivers| teardown_readiness(&snapshot, drivers));
-        let mut producers = BTreeMap::new();
-        for producer in crate::rules::observed_values::observed_producer_environments(environment, &snapshot.desired) {
-            let Some(producer_location) = environments.get(&producer) else {
-                continue;
-            };
-            match context.store.snapshot(producer_location) {
-                Ok(producer_snapshot) => {
-                    producers.insert(producer, producer_snapshot);
-                }
-                Err(error) => unreadable.push(store_error(&producer, &error)),
-            }
-        }
+        let (producers, warnings) = producer_snapshots(context.store, environment, &snapshot.desired, peers);
+        unreadable.extend(warnings);
         let mut report = crate::rules::unit_state::status_with_producers(
             environment,
             &snapshot,

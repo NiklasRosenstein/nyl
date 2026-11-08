@@ -271,6 +271,39 @@ pub fn resolve_reference(
     })
 }
 
+/// Resolve `source`, a reference of a unit of `environment` to another
+/// environment, against `environments` alone: the same rules as
+/// [`resolve_reference`] reading the producer's snapshot, for a caller that
+/// holds no documents of the consumer's own environment (checks of consumers
+/// across environments, which read only stored documents).
+pub fn resolve_foreign(
+    environment: &EnvironmentName,
+    environments: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::EnvironmentSnapshot>,
+    now: Timestamp,
+    source: &UnitInputSource,
+) -> Result<ReferenceValue, ResolutionError> {
+    let nothing = BTreeMap::new();
+    let nobody = BTreeMap::new();
+    let none = BTreeSet::new();
+    resolve_reference(
+        &ReferenceView {
+            environments,
+            environment,
+            desired: &nothing,
+            observed: &nobody,
+            artifacts: &BTreeMap::new(),
+            attestations: &BTreeMap::new(),
+            observations: &BTreeMap::new(),
+            now,
+            observed_commit: None,
+            run: None,
+            produced_in_run: &none,
+            previous: &nothing,
+        },
+        source,
+    )
+}
+
 /// Resolve against the producer's immutable state snapshot; never its lease or checkpoints.
 fn resolve_external(
     view: &ReferenceView<'_>,

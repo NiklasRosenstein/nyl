@@ -44,7 +44,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nyl_core::bindings::unit_references;
+use nyl_core::bindings::{unit_references, UnitInputSource};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
@@ -58,6 +58,7 @@ use nyl_core::resources::units::ObservationDeclaration;
 use serde_json::Value;
 
 use super::freshness::receipt_is_current;
+use super::references::ReferenceValue;
 
 /// The stable `blockedBy` reason of a consumer waiting for an observed value
 /// its producer's current receipt has none of yet.
@@ -374,63 +375,18 @@ impl ChangedConsumer {
     }
 }
 
-/// What one environment records of its units' observed values: their
-/// desired and observed documents and the observation records. A value is
-/// usable only as these show it for the producer's current receipt.
-#[derive(Clone, Copy)]
-pub struct ProducerView<'a> {
-    pub desired: &'a BTreeMap<UnitName, DesiredUnit>,
-    pub observed: &'a BTreeMap<UnitName, ObservedUnit>,
-    pub records: &'a BTreeMap<UnitName, ObservationRecord>,
-}
-
-/// What `producer`'s observation holds now in `view`: its value, if usable
-/// (the producer has a current receipt, and the value is recorded for it and
-/// not older than its `maxAge`).
-fn usable_value(view: ProducerView<'_>, producer: &UnitName, observation: &str, now: Timestamp) -> Option<Value> {
-    let producer_document = view.desired.get(producer)?;
-    if !receipt_is_current(producer_document, view.observed.get(producer)) {
-        return None;
-    }
-    let receipt = view.observed.get(producer)?.receipt.as_ref()?;
-    let declaration = declarations(spec_of(producer_document)).ok()?.remove(observation)?;
-    match standing(
-        producer_document,
-        receipt,
-        &declaration,
-        observation,
-        view.records.get(producer),
-        now,
-    ) {
-        Standing::Value { value, .. } => Some(value),
-        Standing::Pending { .. } => None,
-    }
-}
-
-/// [`usable_value`] for a cross-environment reference, which the resolver
-/// refuses for a producer being deleted or retained (outside the ownership
-/// set): such a producer reads nothing.
-fn usable_external(view: ProducerView<'_>, producer: &UnitName, observation: &str, now: Timestamp) -> Option<Value> {
-    let outside = view
-        .desired
-        .get(producer)
-        .is_some_and(|unit| matches!(unit.lifecycle, Lifecycle::Deleting { .. } | Lifecycle::Retained { .. }));
-    if outside {
-        return None;
-    }
-    usable_value(view, producer, observation, now)
-}
-
-/// The observation references of the active consumers in `desired` whose
-/// stored resolution differs from what `value_of` reads now, found from the
-/// typed references and resolved specs alone. `value_of` receives the
-/// producer's environment (`None` for the consumer's own, which includes a
-/// reference that names it), the producer, and the observation, and returns
-/// the whole value, `None` when there is no usable one.
-fn stale_references(
-    own: Option<&EnvironmentName>,
+/// The observation references to another environment, in the active
+/// consumers of `desired` (the documents of environment `own`), whose stored
+/// resolution differs from what `resolve` reads now. `resolve` is given the
+/// reference and the environment it names and returns the value the
+/// reference selects, `None` when it cannot be read (the resolver blocks it
+/// or refuses it, and the consumer's reconcile reports why). A reference that
+/// names `own` is a reference to this environment, which
+/// [`changed_consumers`] judges.
+fn stale_foreign_references(
+    own: &EnvironmentName,
     desired: &BTreeMap<UnitName, DesiredUnit>,
-    mut value_of: impl FnMut(Option<&EnvironmentName>, &UnitName, &str) -> Option<Value>,
+    mut resolve: impl FnMut(&UnitInputSource, &EnvironmentName) -> Option<Value>,
 ) -> Vec<ChangedConsumer> {
     let mut changed = Vec::new();
     for (consumer, document) in desired {
@@ -451,25 +407,22 @@ fn stale_references(
             let Ok(producer) = UnitName::new(&source.unit) else {
                 continue;
             };
-            let producer_environment = match source.environment.as_deref() {
-                None => None,
-                Some(named) if own.is_some_and(|own| own.as_str() == named) => None,
-                Some(named) => {
-                    let Ok(named) = EnvironmentName::new(named) else {
-                        continue;
-                    };
-                    Some(named)
-                }
-            };
-            let Some(value) = value_of(producer_environment.as_ref(), &producer, observation) else {
+            let Some(producer_environment) = source
+                .environment
+                .as_deref()
+                .and_then(|named| EnvironmentName::new(named).ok())
+                .filter(|named| named != own)
+            else {
                 continue;
             };
-            let selected = nyl_core::json_pointer::resolve(&value, source.pointer.as_deref().unwrap_or(""));
-            if selected != resolved.pointer(&reference.pointer) {
+            let Some(value) = resolve(&source, &producer_environment) else {
+                continue;
+            };
+            if resolved.pointer(&reference.pointer) != Some(&value) {
                 changed.push(ChangedConsumer {
                     consumer: consumer.clone(),
                     producer,
-                    producer_environment,
+                    producer_environment: Some(producer_environment),
                     observation: observation.to_owned(),
                     arrived: false,
                 });
@@ -490,9 +443,12 @@ fn stale_references(
 ///   [`reason`]) that now all have a usable value: `arrived`.
 ///
 /// A producer without a usable value leaves its consumer to resolution,
-/// which blocks it. References to another environment are judged by
-/// [`changed_consumers_across`], which has that environment's documents.
+/// which blocks it. A reference that names `own`, the consumers' environment,
+/// is a reference to this environment. References to another environment are
+/// judged by [`changed_consumers_across`], which has that environment's
+/// documents.
 pub fn changed_consumers(
+    own: &EnvironmentName,
     desired: &BTreeMap<UnitName, DesiredUnit>,
     observed: &BTreeMap<UnitName, ObservedUnit>,
     records: &BTreeMap<UnitName, ObservationRecord>,
@@ -553,7 +509,11 @@ pub fn changed_consumers(
         };
         for reference in references {
             let source = reference.source;
-            let Some(observation) = source.observation.as_deref().filter(|_| source.environment.is_none()) else {
+            let Some(observation) = source
+                .observation
+                .as_deref()
+                .filter(|_| source.environment.as_deref().is_none_or(|named| named == own.as_str()))
+            else {
                 continue;
             };
             let Ok(producer) = UnitName::new(&source.unit) else {
@@ -580,44 +540,59 @@ pub fn changed_consumers(
 }
 
 /// [`changed_consumers`] for the consumers of `environment`, whose stored
-/// documents are `snapshot`, with each of their cross-environment references
-/// to an observation compared to what `producers` (snapshots of the
-/// environments they name, see [`observed_producer_environments`]) record
-/// now: a consumer is ready for its next reconcile when the value it
-/// resolved is not the producer's current one.
+/// documents are `snapshot`, with each of their references to an observation
+/// of another environment resolved against `producers` (snapshots of the
+/// environments they name, see [`observed_producer_environments`]): a
+/// consumer is ready for its next reconcile when the value it resolved is
+/// not the one the reference reads now.
 ///
-/// Across environments only a changed value is judged, from the typed
+/// A cross-environment reference resolves through
+/// [`super::references::resolve_foreign`], the resolver's own rules, so a
+/// reference the resolver blocks or refuses (a producer without a current
+/// receipt or being removed, an unmet attestation requirement, a pointer or
+/// type mismatch) is not reported as changed: the consumer's reconcile
+/// reports it.
+///
+/// Across environments only a changed value is found, from the typed
 /// reference and the consumer's resolved spec. A consumer that waits for
-/// another environment's value is not found: its stored blocked reason names
+/// another environment's value is not found, which is a current limitation
+/// tracked by issue #248: its stored blocked reason names
 /// `<environment>/<unit>`, which the reason reader cannot attribute to a
-/// producer (issue #248), and this never reads it.
+/// producer.
 pub fn changed_consumers_across(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     producers: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
     now: Timestamp,
 ) -> Vec<ChangedConsumer> {
-    let mut changed = changed_consumers(&snapshot.desired, &snapshot.observed, &snapshot.observations, now);
-    changed.extend(stale_references(
-        Some(environment),
+    let mut changed = changed_consumers(
+        environment,
         &snapshot.desired,
-        |producer_environment, producer, observation| {
-            let producer_snapshot = producers.get(producer_environment?)?;
-            usable_external(
-                ProducerView {
-                    desired: &producer_snapshot.desired,
-                    observed: &producer_snapshot.observed,
-                    records: &producer_snapshot.observations,
-                },
-                producer,
-                observation,
-                now,
-            )
-        },
-    ));
+        &snapshot.observed,
+        &snapshot.observations,
+        now,
+    );
+    changed.extend(stale_foreign_references(environment, &snapshot.desired, |source, _| {
+        read_foreign(environment, producers, now, source)
+    }));
     changed.sort();
     changed.dedup();
     changed
+}
+
+/// The value `source`, a reference of a consumer in `environment` to another
+/// environment, reads from `producers` now; `None` when the resolver blocks
+/// or refuses it.
+fn read_foreign(
+    environment: &EnvironmentName,
+    producers: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
+    now: Timestamp,
+    source: &UnitInputSource,
+) -> Option<Value> {
+    match super::references::resolve_foreign(environment, producers, now, source) {
+        Ok(ReferenceValue::Value { value, .. }) => Some(value),
+        Ok(ReferenceValue::Blocked { .. }) | Err(_) => None,
+    }
 }
 
 /// The environments whose observed values the active consumers in `desired`
@@ -628,8 +603,8 @@ pub fn observed_producer_environments(
     desired: &BTreeMap<UnitName, DesiredUnit>,
 ) -> BTreeSet<EnvironmentName> {
     let mut environments = BTreeSet::new();
-    stale_references(Some(own), desired, |environment, _, _| {
-        environments.extend(environment.cloned());
+    stale_foreign_references(own, desired, |_, producer_environment| {
+        environments.insert(producer_environment.clone());
         None
     });
     environments
@@ -645,25 +620,27 @@ pub struct ChangedExternalConsumer {
 
 /// The consumers in `consumers` (other environments' snapshots) that read an
 /// observed value of `producer_environment` through a cross-environment
-/// reference and resolved another value than `view` records now. The
-/// documents are the caller's snapshots, so this is read-only: it needs no
-/// lease and writes nothing there. As for [`changed_consumers_across`], a
-/// consumer that waits for a value is not found.
+/// reference and resolved another value than `producer` (that environment's
+/// documents, after any write) records now. Read-only: the documents are the
+/// caller's snapshots, so it needs no lease and writes nothing. As for
+/// [`changed_consumers_across`], a consumer that waits for a value is not
+/// found, and a reference the resolver blocks or refuses is not reported.
 pub fn changed_consumers_reading(
     producer_environment: &EnvironmentName,
-    view: ProducerView<'_>,
+    producer: &EnvironmentSnapshot,
     consumers: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
     now: Timestamp,
 ) -> Vec<ChangedExternalConsumer> {
+    let producers = BTreeMap::from([(producer_environment.clone(), producer.clone())]);
     let mut found: Vec<ChangedExternalConsumer> = consumers
         .iter()
         .filter(|(environment, _)| *environment != producer_environment)
         .flat_map(|(environment, snapshot)| {
-            stale_references(Some(environment), &snapshot.desired, |named, producer, observation| {
-                if named? != producer_environment {
+            stale_foreign_references(environment, &snapshot.desired, |source, named| {
+                if named != producer_environment {
                     return None;
                 }
-                usable_external(view, producer, observation, now)
+                read_foreign(environment, &producers, now, source)
             })
             .into_iter()
             .map(|changed| ChangedExternalConsumer {
@@ -710,6 +687,8 @@ fn changed_warning(
             "run `nyl reconcile -e {environment}`: it executes {consumer} with the new value, under its own approval"
         ),
     )
+    .with_detail("Environment", environment.as_str())
+    .with_detail("Unit", consumer.as_str())
 }
 
 /// The warnings of `consumer` in `environment` (the environment of the report).
@@ -735,7 +714,7 @@ mod tests {
 
     use nyl_core::orchestration::state::UnitIdentity;
 
-    use super::super::fixtures::{desired_numbered, hex_key, name, observed_numbered};
+    use super::super::fixtures::{desired_numbered, env, hex_key, name, observed_numbered};
     use super::*;
 
     fn at(minutes: i64) -> Timestamp {
@@ -1137,7 +1116,7 @@ mod tests {
 
         let stale = desired(consumer(json!({"values": {"address": "203.0.113.10"}})));
         assert_eq!(
-            changed_consumers(&stale, &observed, &records, at(1)),
+            changed_consumers(&env(), &stale, &observed, &records, at(1)),
             [ChangedConsumer {
                 consumer: name("dns"),
                 producer: name("kubernetes"),
@@ -1147,15 +1126,15 @@ mod tests {
             }]
         );
         let same = desired(consumer(json!({"values": {"address": "203.0.113.20"}})));
-        assert!(changed_consumers(&same, &observed, &records, at(1)).is_empty());
+        assert!(changed_consumers(&env(), &same, &observed, &records, at(1)).is_empty());
         // A producer whose receipt is not current has no value to compare.
         let replaced = BTreeMap::from([(
             name("kubernetes"),
             observed_numbered("kubernetes", 1, Some(hex_key('b'))),
         )]);
-        assert!(changed_consumers(&stale, &replaced, &records, at(1)).is_empty());
+        assert!(changed_consumers(&env(), &stale, &replaced, &records, at(1)).is_empty());
         // Without a record there is nothing recorded to differ from.
-        assert!(changed_consumers(&stale, &observed, &BTreeMap::new(), at(1)).is_empty());
+        assert!(changed_consumers(&env(), &stale, &observed, &BTreeMap::new(), at(1)).is_empty());
 
         // A consumer blocked only on the value, which now has one, can resolve.
         let mut waiting = consumer(json!({}));
@@ -1169,7 +1148,7 @@ mod tests {
         };
         let arrived = desired(waiting.clone());
         assert_eq!(
-            changed_consumers(&arrived, &observed, &records, at(1)),
+            changed_consumers(&env(), &arrived, &observed, &records, at(1)),
             [ChangedConsumer {
                 consumer: name("dns"),
                 producer: name("kubernetes"),
@@ -1179,7 +1158,7 @@ mod tests {
             }]
         );
         // Still blocked when the value is not there, or when something else blocks it too.
-        assert!(changed_consumers(&arrived, &observed, &BTreeMap::new(), at(1)).is_empty());
+        assert!(changed_consumers(&env(), &arrived, &observed, &BTreeMap::new(), at(1)).is_empty());
         let mut also = waiting;
         if let Readiness::Blocked { reasons } = &mut also.readiness {
             reasons.push(BlockedReason {
@@ -1187,54 +1166,65 @@ mod tests {
                 reason: "network has no current receipt".to_owned(),
             });
         }
-        assert!(changed_consumers(&desired(also), &observed, &records, at(1)).is_empty());
+        assert!(changed_consumers(&env(), &desired(also), &observed, &records, at(1)).is_empty());
     }
 
-    /// Catches a consumer in another environment left `current` after the
-    /// value it resolved from this environment changed (judged from the typed
-    /// reference and the resolved spec alone, without reading a blocked
-    /// reason), a consumer named when its value is the current one or its
-    /// producer is outside the ownership set, and one read from the wrong
-    /// environment.
-    #[test]
-    fn test_changed_consumers_across_environments_compare_the_producers_value_with_the_resolved_one() {
-        let dev = EnvironmentName::new("dev").unwrap();
-        let prod = EnvironmentName::new("prod").unwrap();
-        let mut producer_document = producer();
-        producer_document.spec = json!({"observations": {"ip": {"type": "string", "from": {}}}});
-        producer_document.resolved_spec = Some(producer_document.spec.clone());
+    /// The producer `kubernetes` with a current receipt and `ip` recorded.
+    fn producing(ip: &str) -> EnvironmentSnapshot {
+        let mut document = producer();
+        document.spec = json!({"observations": {"ip": {"type": "string", "from": {}}}});
+        document.resolved_spec = Some(document.spec.clone());
         let receipt = receipt_a();
         let record = settle(&SettleInputs {
-            unit: &producer_document,
+            unit: &document,
             receipt: &receipt,
-            declared: &declarations(&producer_document.spec).unwrap(),
+            declared: &declarations(&document.spec).unwrap(),
             stored: None,
-            readings: &readings(&[("ip", value(json!("203.0.113.20")))]),
+            readings: &readings(&[("ip", value(json!(ip)))]),
             now: at(0),
             refresh: Duration::from_mins(60),
         })
         .record
         .unwrap();
-        let desired = BTreeMap::from([(name("kubernetes"), producer_document)]);
-        let observed = BTreeMap::from([(
-            name("kubernetes"),
-            observed_numbered("kubernetes", 1, Some(hex_key('a'))),
-        )]);
-        let records = BTreeMap::from([(name("kubernetes"), record)]);
-        let producing = ProducerView {
-            desired: &desired,
-            observed: &observed,
-            records: &records,
-        };
+        EnvironmentSnapshot {
+            desired: BTreeMap::from([(name("kubernetes"), document)]),
+            observed: BTreeMap::from([(
+                name("kubernetes"),
+                observed_numbered("kubernetes", 1, Some(hex_key('a'))),
+            )]),
+            observations: BTreeMap::from([(name("kubernetes"), record)]),
+            ..EnvironmentSnapshot::default()
+        }
+    }
 
-        let consuming = |resolved: &str, environment: &str| {
-            let mut unit = desired_numbered("dns", 2, Some(hex_key('c')));
-            unit.spec = json!({"values": {"address": {"fromUnit": {"environment": environment, "unit": "kubernetes", "observation": "ip"}}}});
-            unit.resolved_spec = Some(json!({"values": {"address": resolved}}));
-            EnvironmentSnapshot {
-                desired: BTreeMap::from([(name("dns"), unit)]),
-                ..EnvironmentSnapshot::default()
-            }
+    /// `dns`, resolved to `resolved`, reading `kubernetes` of `environment` through `reference`.
+    fn consuming(snapshot: &mut EnvironmentSnapshot, resolved: &str, reference: &Value) {
+        let mut unit = desired_numbered("dns", 2, Some(hex_key('c')));
+        unit.spec = json!({"values": {"address": {"fromUnit": reference}}});
+        unit.resolved_spec = Some(json!({"values": {"address": resolved}}));
+        snapshot.desired.insert(name("dns"), unit);
+    }
+
+    fn reads(environment: &str) -> Value {
+        json!({"environment": environment, "unit": "kubernetes", "observation": "ip"})
+    }
+
+    /// Catches a consumer in another environment left `current` after the
+    /// value it resolved from this environment changed (judged from the typed
+    /// reference and the resolved spec alone, without reading a blocked
+    /// reason), and a consumer reported although the resolver would not read
+    /// the value (a pointer that selects nothing, an attestation the producer
+    /// does not declare, a producer being removed or without a record) or it
+    /// resolved the current one.
+    #[test]
+    fn test_changed_consumers_across_environments_compare_what_the_resolver_reads_with_the_resolved_value() {
+        let dev = EnvironmentName::new("dev").unwrap();
+        let prod = EnvironmentName::new("prod").unwrap();
+        let dev_snapshot = producing("203.0.113.20");
+        let in_prod = |resolved: &str, reference: Value| {
+            let mut snapshot = EnvironmentSnapshot::default();
+            consuming(&mut snapshot, resolved, &reference);
+            BTreeMap::from([(prod.clone(), snapshot)])
         };
         let expected = ChangedExternalConsumer {
             environment: prod.clone(),
@@ -1246,22 +1236,26 @@ mod tests {
                 arrived: false,
             },
         };
-        let stale = BTreeMap::from([(prod.clone(), consuming("203.0.113.10", "dev"))]);
+        let stale = in_prod("203.0.113.10", reads("dev"));
         assert_eq!(
-            changed_consumers_reading(&dev, producing, &stale, at(1)),
+            changed_consumers_reading(&dev, &dev_snapshot, &stale, at(1)),
             std::slice::from_ref(&expected)
         );
         assert_eq!(expected.changed.producer_label(), "dev/kubernetes");
+        let warning = external_changed_warning(&expected);
+        assert_eq!(warning.code, Code::ObservationChanged);
+        assert!(warning.fix.contains("nyl reconcile -e prod"), "{}", warning.fix);
+        assert_eq!(
+            warning
+                .presentation
+                .details
+                .iter()
+                .map(|d| (d.label.as_str(), d.value.as_str()))
+                .collect::<Vec<_>>(),
+            [("Environment", "prod"), ("Unit", "dns")]
+        );
         // The same view from the consumer's environment finds the same consumer.
-        let producers = BTreeMap::from([(
-            dev.clone(),
-            EnvironmentSnapshot {
-                desired: desired.clone(),
-                observed: observed.clone(),
-                observations: records.clone(),
-                ..EnvironmentSnapshot::default()
-            },
-        )]);
+        let producers = BTreeMap::from([(dev.clone(), dev_snapshot.clone())]);
         assert_eq!(
             changed_consumers_across(&prod, &stale[&prod], &producers, at(1)),
             std::slice::from_ref(&expected.changed)
@@ -1270,36 +1264,89 @@ mod tests {
             observed_producer_environments(&prod, &stale[&prod].desired),
             BTreeSet::from([dev.clone()])
         );
-        // This environment's own consumers are left to the same-environment rule,
-        // whether the reference names the environment or not.
-        assert!(changed_consumers(&stale[&prod].desired, &observed, &records, at(1)).is_empty());
-        let own = BTreeMap::from([(dev.clone(), consuming("203.0.113.10", "dev"))]);
-        assert!(changed_consumers_reading(&dev, producing, &own, at(1)).is_empty());
-        assert!(observed_producer_environments(&dev, &own[&dev].desired).is_empty());
-        // A consumer that resolved the current value, or another environment's, is not named.
-        let same = BTreeMap::from([(prod.clone(), consuming("203.0.113.20", "dev"))]);
-        assert!(changed_consumers_reading(&dev, producing, &same, at(1)).is_empty());
-        let elsewhere = BTreeMap::from([(prod.clone(), consuming("203.0.113.10", "staging"))]);
-        assert!(changed_consumers_reading(&dev, producing, &elsewhere, at(1)).is_empty());
-        // Without a usable value nothing is compared: resolution blocks the consumer.
-        let empty = BTreeMap::new();
-        let unrecorded = ProducerView {
-            records: &empty,
-            ..producing
-        };
-        assert!(changed_consumers_reading(&dev, unrecorded, &stale, at(1)).is_empty());
-        // A producer being deleted is outside the ownership set, which resolution refuses.
-        let mut leaving = desired.clone();
-        leaving.get_mut(&name("kubernetes")).unwrap().lifecycle = Lifecycle::Retained {
+
+        // Nothing is named for the value it resolved, another environment's, or a read the resolver refuses.
+        for (resolved, reference, why) in [
+            ("203.0.113.20", reads("dev"), "the current value"),
+            ("203.0.113.10", reads("staging"), "another environment"),
+            (
+                "203.0.113.10",
+                json!({"environment": "dev", "unit": "kubernetes", "observation": "ip", "pointer": "/nothing"}),
+                "a pointer that selects nothing",
+            ),
+            (
+                "203.0.113.10",
+                json!({"environment": "dev", "unit": "kubernetes", "observation": "ip", "attestations": ["healthy"]}),
+                "an attestation the producer does not declare",
+            ),
+        ] {
+            assert!(
+                changed_consumers_reading(&dev, &dev_snapshot, &in_prod(resolved, reference), at(1)).is_empty(),
+                "{why}"
+            );
+        }
+        let mut unrecorded = dev_snapshot.clone();
+        unrecorded.observations.clear();
+        assert!(changed_consumers_reading(&dev, &unrecorded, &stale, at(1)).is_empty());
+        let mut leaving = dev_snapshot.clone();
+        leaving.desired.get_mut(&name("kubernetes")).unwrap().lifecycle = Lifecycle::Retained {
             tombstone: nyl_core::orchestration::state::Tombstone {
                 since: at(0),
                 receipt: None,
             },
         };
-        let retained = ProducerView {
-            desired: &leaving,
-            ..producing
-        };
-        assert!(changed_consumers_reading(&dev, retained, &stale, at(1)).is_empty());
+        assert!(changed_consumers_reading(&dev, &leaving, &stale, at(1)).is_empty());
+    }
+
+    /// Catches a reference that names the consumer's own environment being
+    /// treated as another environment's (never judged) or as the other
+    /// environment's value, when the environment has a producer of its own.
+    #[test]
+    fn test_a_reference_that_names_the_consumers_own_environment_reads_its_own_producer() {
+        let dev = EnvironmentName::new("dev").unwrap();
+        let prod = EnvironmentName::new("prod").unwrap();
+        // prod's own `kubernetes` holds .10, dev's holds .20.
+        let dev_snapshot = producing("203.0.113.20");
+        let mut prod_snapshot = producing("203.0.113.10");
+        consuming(&mut prod_snapshot, "203.0.113.05", &reads("prod"));
+        let stale_own = changed_consumers(
+            &prod,
+            &prod_snapshot.desired,
+            &prod_snapshot.observed,
+            &prod_snapshot.observations,
+            at(1),
+        );
+        assert_eq!(
+            stale_own,
+            [ChangedConsumer {
+                consumer: name("dns"),
+                producer: name("kubernetes"),
+                producer_environment: None,
+                observation: "ip".to_owned(),
+                arrived: false,
+            }]
+        );
+        // It needs no other environment, and dev's value never stands in for prod's.
+        assert!(observed_producer_environments(&prod, &prod_snapshot.desired).is_empty());
+        let producers = BTreeMap::from([(dev.clone(), dev_snapshot.clone())]);
+        assert_eq!(
+            changed_consumers_across(&prod, &prod_snapshot, &producers, at(1)),
+            stale_own
+        );
+        consuming(&mut prod_snapshot, "203.0.113.10", &reads("prod"));
+        assert!(changed_consumers_across(&prod, &prod_snapshot, &producers, at(1)).is_empty());
+        let consumers = BTreeMap::from([(prod.clone(), prod_snapshot)]);
+        assert!(changed_consumers_reading(&dev, &dev_snapshot, &consumers, at(1)).is_empty());
+        // A reference to dev from a consumer in prod is not this environment's.
+        let mut other = EnvironmentSnapshot::default();
+        consuming(&mut other, "203.0.113.10", &reads("dev"));
+        assert!(changed_consumers(
+            &prod,
+            &other.desired,
+            &dev_snapshot.observed,
+            &dev_snapshot.observations,
+            at(1)
+        )
+        .is_empty());
     }
 }

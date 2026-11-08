@@ -73,11 +73,16 @@ warning  observed value ingressIp of dev/kubernetes changed, so prod/dns resolve
   Action  run `nyl reconcile -e prod`: it executes dns with the new value, under its own approval
 ```
 
-Reading the other environments' state takes no lease and writes nothing there
-(a state that cannot be read is a warning, never a failure), and `nyl status -e
-prod` shows `dns` as `ready`. A consumer in another environment that waits for a
-value that has not arrived is `blocked`, not named here; its own next reconcile
-resolves the recorded value.
+Reading the other environments' state takes no lease and writes nothing there,
+and happens after `observe` has written its own commit and released its lease.
+An environment whose state location cannot be resolved, or whose state cannot be
+read, is a `NYL-STATE-UNAVAILABLE` warning and its consumers are not compared;
+the exit code does not change. `nyl status -e prod` shows `dns` as `ready`.
+
+A consumer in another environment that waits for a value that has not arrived is
+not named yet; it stays `blocked` until its own next reconcile resolves the
+recorded value. This is a current limitation, tracked by
+[#248](https://github.com/NiklasRosenstein/nyl/issues/248).
 
 `observe` does not apply a consumer's changed inputs: that reconcile executes
 it, under its own `approval`, as it does for any changed input.

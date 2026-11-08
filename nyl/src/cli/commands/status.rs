@@ -89,7 +89,7 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         &session.resolved.name,
         &session.resolved.location,
         Some(wiring.drivers),
-        &session.environment_locations().0,
+        &session.peers(),
     );
     for environment in &mut report.environments {
         environment.state_repository = Some(session.resolved.location.repository.clone());

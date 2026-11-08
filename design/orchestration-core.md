@@ -2919,18 +2919,28 @@ spec:
   A consumer in another environment that reads the value through `environment`
   resolved one value, which its own environment's desired document records,
   and the producer's environment now records another. `nyl observe -e <producer
-  environment>` reads the other declared environments' snapshots (as a
-  reconcile reads its producers', without a lease and without a write) and
+  environment>` reads the snapshots of the declared environments and instances
+  (as a reconcile reads its producers', without a lease and without a write,
+  after it has written its own observed commit and released its lease) and
   names each such consumer with `NYL-OBSERVATION-CHANGED`, qualified by its
   environment (`prod/dns`), whose fix is `nyl reconcile -e <consumer
-  environment>`; `nyl status -e <consumer environment>` reads the snapshots of
-  the environments its units read observed values from and shows the consumer
-  `ready`, like one that reads a value of its own environment. A snapshot that
-  cannot be read is a warning of the command, never a failure. Across
-  environments only a changed value is found, from the typed reference and the
-  resolved spec: a consumer that waits for another environment's `pending`
-  value is `blocked` and runs when its own next `reconcile` resolves the
-  recorded value (the "arrived" case above is found within an environment only).
+  environment>`; `nyl status -e <consumer environment>` and `nyl get units -e
+  <consumer environment>` read the snapshots of the environments its units read
+  observed values from and show the consumer `ready`, like one that reads a
+  value of its own environment (`get units --state-revision` reads no other
+  environment). The comparison reads the value through the reference resolver,
+  so a reference it would block or refuse is not reported as changed. An
+  environment whose state location cannot be resolved or whose state cannot be
+  read is a `NYL-STATE-UNAVAILABLE` warning of the command, never a failure; its
+  consumers were not compared.
+
+  Across environments only a changed value is found, from the typed reference
+  and the resolved spec. A consumer that waits for another environment's
+  `pending` value is `blocked` and runs when its own next `reconcile` resolves
+  the recorded value; the "arrived" case above is found within an environment
+  only. That is a current limitation, tracked by issue #248, not part of the
+  contract: a stored blocked reason names `<environment>/<unit>`, which the
+  reason reader cannot attribute to a producer.
 - **Waiting.** After the run executes a unit, a `pending` observation is
   polled under the run's lease until it has a value or `observationWait` has
   passed since the execution finished, within the unit's `timeout`; the run
