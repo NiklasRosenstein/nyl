@@ -16,7 +16,7 @@ kind: MutatingPolicy
 metadata:
   name: add-managed-by-label
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -53,7 +53,7 @@ These policy types are detected but require a live Kubernetes cluster:
 
 ## Scope Annotation
 
-Policies must include the `nyl.niklasrosenstein.github.com/apply-policy-scope` annotation to be processed by Nyl.
+Policies must include the `k8s.nyl/apply-policy-scope` annotation to be processed by Nyl.
 
 ### Available Scopes
 
@@ -64,7 +64,7 @@ Applies to all resources in the rendered file. Since Nyl processes single files,
 ```yaml
 metadata:
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 ```
 
 **Use cases:**
@@ -91,7 +91,7 @@ kind: MutatingPolicy
 metadata:
   name: add-labels
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -123,7 +123,7 @@ kind: ValidatingPolicy
 metadata:
   name: require-labels
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -149,7 +149,7 @@ kind: ClusterPolicy
 metadata:
   name: add-default-network-policy
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   rules:
     - name: add-network-policy-annotation
@@ -175,7 +175,7 @@ kind: MutatingPolicy
 metadata:
   name: configure-loadbalancer
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 spec:
   matchConstraints:
     resourceRules:
@@ -330,7 +330,7 @@ Object{
 ```yaml
 metadata:
   annotations:
-    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+    k8s.nyl/apply-policy-scope: Global
 ```
 
 ### Kyverno CLI Not Found

@@ -35,20 +35,21 @@ spec:
           ports:
             - containerPort: 8080
 ---
-# Kyverno post-processor configuration
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
+# Kyverno policy Nyl applies to every resource in this file while rendering
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
 metadata:
   name: update-load-balancer-class
+  annotations:
+    k8s.nyl/apply-policy-scope: Global
 spec:
-  scope: Global
-  # Using shorthand for mutating policy rules
-  mutatingPolicyRules:
+  rules:
     - name: add-loadbalancer-class
       match:
-        resources:
-          kinds:
-            - Service
+        any:
+          - resources:
+              kinds:
+                - Service
       mutate:
         patchStrategicMerge:
           spec:
@@ -57,13 +58,14 @@ spec:
             loadBalancerClass: ngrok
 ---
 # Another Kyverno policy to add labels
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
 metadata:
   name: add-managed-by-label
+  annotations:
+    k8s.nyl/apply-policy-scope: Global
 spec:
-  scope: Global
-  clusterPolicyRules:
+  rules:
     - name: add-label
       match:
         any:
