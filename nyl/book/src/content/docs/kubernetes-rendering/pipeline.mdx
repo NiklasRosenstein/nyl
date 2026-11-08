@@ -18,7 +18,7 @@ import { Steps } from '@astrojs/starlight/components';
 2. Build the template context. Project secrets and admitted `NYL_*` environment variables enter it only with `--allow-secret-inputs`, for direct and tree commands alike.
 3. Load the input manifest file and render Jinja templates.
 4. Apply `--only-source-kind` filtering on top-level input resources (before expansion).
-5. Expand resources recursively (`HelmChart`, `Component`, `RemoteManifest`, aliases) with `--max-depth`.
+5. Expand resources recursively (`HelmChart`, `Component`, `RemoteManifest`, aliases) with `--max-depth`. Generated resources inherit the expanding resource's [Argo CD sync wave and phase](#argo-cd-sync-waves-and-phases).
 6. Apply Kyverno policies (Global scope currently supported).
 7. Deduplicate final manifests (last occurrence wins).
 8. Take the Release's resources as its Argo CD Application deploys them
@@ -31,6 +31,39 @@ Bundle expansion and parsed Helm output are cached by their complete observed
 inputs. `--refresh` bypasses cache reads and replaces successful entries;
 `--no-cache` disables persistent reads and writes. `diff` and `apply` always
 perform their live-cluster work even when desired-manifest rendering is reused.
+
+## Argo CD sync waves and phases
+
+A `HelmChart`, `Component`, or `RemoteManifest` is never applied itself; the
+resources it generates are. When it declares an Argo CD sync wave or phase,
+every generated resource that declares none of its own inherits it, so a
+chart can be ordered as a whole:
+
+```yaml
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: cert-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  chart:
+    repository: https://charts.jetstack.io
+    name: cert-manager
+```
+
+- `argocd.argoproj.io/sync-wave` is copied to each generated resource without
+  its own sync wave or a `helm.sh/hook-weight`, which Argo CD uses as the wave
+  of a Helm hook.
+- `argocd.argoproj.io/hook`, the phase, is copied to each generated resource
+  without its own Argo CD hook or a `helm.sh/hook`. The expanding resource's
+  `argocd.argoproj.io/hook-delete-policy` comes with it, so a resource never
+  combines its own phase with another resource's deletion policy, and one that
+  inherits a phase without a deletion policy keeps none.
+
+Other annotations are not copied. Nested expansion inherits transitively: a
+`HelmChart` that a Component's chart renders passes on the wave it inherited.
+Every command renders the same annotations, from `render` to `publish-tree`.
 
 ## Resource errors
 

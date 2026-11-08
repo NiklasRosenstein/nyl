@@ -4,6 +4,8 @@ title: 'Using Component'
 
 See the [Component resource reference](/nyl/reference/resources/components.k8s.nyl/v1/component/) for the API, example, and field definitions.
 
+Generated resources inherit a Component's Argo CD sync wave and phase; see [Argo CD sync waves and phases](/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases).
+
 ## Local Resolution
 
 With:

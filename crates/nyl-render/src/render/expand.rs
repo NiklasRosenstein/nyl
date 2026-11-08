@@ -283,8 +283,37 @@ fn render_chart_reference(chart: Option<&serde_json::Value>) -> String {
     reference
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Expand `resource` into the resources it generates, which inherit its Argo
+/// CD sync wave and phase ([`super::sync_order`]). A resource that does not
+/// expand generates only itself.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_resource(
+    resource: &serde_json::Value,
+    context: &TemplateContext,
+    config: &ProjectConfig,
+    kube_version: &str,
+    api_versions: &[String],
+    track_parent: bool,
+    gitops_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
+) -> Result<Vec<serde_json::Value>> {
+    let mut generated = expand_resource(
+        resource,
+        context,
+        config,
+        kube_version,
+        api_versions,
+        track_parent,
+        gitops_cache,
+        artifact_resolver,
+    )
+    .await?;
+    super::sync_order::inherit_sync_order(resource, &mut generated);
+    Ok(generated)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn expand_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
