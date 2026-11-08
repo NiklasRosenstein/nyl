@@ -93,6 +93,16 @@ completes, its revision is recorded as failed with only the resources it applied
 press Ctrl-C again to exit without waiting for that. A release that renders no resources
 is still recorded, and its previously deployed resources are pruned.
 
+An apply always applies every resource, which repairs drift, but it records no
+new revision when it changed nothing: the latest revision is `Deployed`, records
+the same manifest, resource keys, owner, and publication destination, and the
+apply pruned nothing and failed nothing. The reserved revision is released, the
+latest revision stays current with its original timestamps, and the command
+reports `Release: <namespace>/<name> unchanged at revision <N>`. This keeps
+no-op applies from pushing useful revisions out of the history limit; unlike
+`helm upgrade`, which always creates a revision. [`release rollback`](/nyl/reference/cli/release/#rollback)
+and any apply that changes the release always record one.
+
 Pruning deletes the resources a release no longer contains in the reverse of the
 apply order, so dependents go before what they depend on: admission webhook
 configurations before the backends they call, custom resources and objects of
@@ -213,6 +223,21 @@ Timings: discovery (aggregated) 0.08s, validation 0.00s, apply 0.02s, release 0.
 Release: web revision 3 deployed successfully to namespace web
 ```
 
+Applying the same Release again changes nothing, so the latest revision stays
+current and no revision is recorded:
+
+```console
+$ nyl apply --target production applications/web/release.yaml
+= Namespace web
+= ConfigMap web/web-config
+= Deployment web/web
+
+Summary: 0 created, 0 updated, 3 unchanged
+Timings: discovery (aggregated) 0.08s, validation 0.00s, apply 0.02s, release 0.02s
+
+Release: web/web unchanged at revision 3; no new revision recorded
+```
+
 ### Dry Run
 
 Use `nyl diff` to preview changes before running `nyl apply`.
@@ -229,6 +254,7 @@ nyl apply --target production --no-release manifest.yaml
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - A `Release` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/reference/cli/release/) to inspect history or [roll back](/nyl/reference/cli/release/#rollback) to a previous revision.
+- An apply that changed nothing records no revision (see [Apply order and progress](#apply-order-and-progress)), so repeating `nyl apply` does not age out older revisions.
 - Each release keeps its five most recent revisions unless `[release] history_limit` says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.
 - The destination namespace and `spec.additionalNamespaces` are applied as
   managed Namespace objects owned by the release, by the group's `namespace`

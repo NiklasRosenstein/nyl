@@ -1587,6 +1587,55 @@ with waits for termination, and the project's `[release] history_limit`. The
 driver's `ApplySettings` come from the declaration alone: `confirm_prune`
 false, no `--append-release`, the history limit from `nyl.toml`.
 
+**Unchanged applies.** Every apply runs, because server-side apply is
+idempotent and repairs drift, but one that changed nothing does not record a
+revision: `helm upgrade` writes a revision even for a no-op, which would churn
+the history and push the useful revisions out of the history limit.
+`ApplySettings::revisions` is `RevisionPolicy::KeepUnchanged` for `nyl apply`
+and the driver, and `Always` for `nyl release rollback`, which is an explicit
+change. The fence and the reservation are unchanged (the reservation is still
+the compare-and-swap, and a foreign owner is still refused before anything is
+written), and the decision is made when the apply completes, from what it did,
+so it never predicts a prune. An apply is unchanged when all of these hold:
+
+- the latest revision stored before the reservation is `Deployed` (a `Failed`
+  or `Rendered` one, which may have applied only some of its resources, is
+  always followed by a new revision);
+- the new revision would record the same manifest (the stored manifest is the
+  digest, compared as bytes), the same resource keys (as a set, so a key that
+  stays tracked for a failed or awaited prune is a difference), the same owner,
+  and a publication of the same repository, branch, and prefix, or none on both
+  sides;
+- every resource applied and nothing failed to prune or release;
+- nothing was pruned.
+
+Then `complete` deletes the reservation (it only fenced this apply) instead of
+completing it, and the latest revision stays the current one: it is not
+superseded, no revision is added, and the history limit is not enforced again.
+If the reservation cannot be deleted, the revision is recorded like any other.
+`ReleaseRun::unchanged` carries the result to the report: `nyl apply` prints
+`Release: <namespace>/<name> unchanged at revision <N>` instead of the deployed
+line. An interruption or failure before completion marks the reserved revision
+`Failed` as before.
+
+Nothing else that differs between runs is compared. The timestamps (`renderedAt`,
+`appliedAt`) say when, not what, so the kept revision keeps the time it was
+deployed; when a unit last reconciled is in its receipt and attestations, not in
+the release state. The publication commit of a direct target changes whenever any
+other part of the target's tree changes, so it must not force a revision, but it
+is read: the reader reports the commit of the latest revision as the running
+revision, and the shared matching requires that commit to be on the publication
+branch, to be matched to a publication, and to be equivalent to the receipt's
+commit by the Release's directory tree and recorded inputs. A kept revision with
+an older commit therefore keeps the Release `accepted` exactly when the older
+commit stands for the new one under those same rules, which the driver
+evaluates with the same functions (`running_publication`, `equivalent`) on the
+branch it fetched, before it decides. When it does not (a rewritten branch, a
+commit the branch no longer holds, directories or inputs that differ although the
+manifests do not), the apply records a new revision that carries the new commit.
+A revision applied by `nyl apply --target` records no commit, so a direct apply
+always records the first revision that does.
+
 **Several Releases.** Each Release is its own release (own name, own
 revisions, own state), applied one at a time in waves so that a target is
 deterministic and reversible:
@@ -1759,7 +1808,7 @@ anchor visible.
 | Reading | From |
 | --- | --- |
 | **Present** | In a reading that concludes absence (a teardown wait), while a tracked object that its `Delete` option deletes still exists, other than a Namespace phase 1 defers (below); otherwise whenever the release has state. The meaning of "present" for a removal reading is the reader's, as for an Argo CD Application that exists until its finalizer has deleted the workloads |
-| **Running revision** | Latest revision `Deployed`, with a recorded publication commit: `Exact(<commit>)`, which the shared matching resolves against the branch as it resolves an Argo CD revision (the directory tree and recorded inputs of the commit decide, not its identity). A latest revision with no commit (`nyl apply`) is `Unreadable` with the fix to reconcile |
+| **Running revision** | Latest revision `Deployed`, with a recorded publication commit: `Exact(<commit>)`, which the shared matching resolves against the branch as it resolves an Argo CD revision (the directory tree and recorded inputs of the commit decide, not its identity). The commit may be older than the receipt's, because an apply that changed nothing keeps the latest revision ([Applying](#applying)). A latest revision with no commit (`nyl apply`) is `Unreadable` with the fix to reconcile |
 | **Mixed** | Latest revision `Failed` or still `Rendered` (an interrupted or partly failed apply, which applied some of its resources): `Mixed {last: <commit of the latest Deployed revision>, reason}` |
 | **Health** | The rollout status of the workload objects in the latest `Deployed` revision's manifest, below |
 | **Source**, **Deleting** | None, false |
@@ -2035,7 +2084,6 @@ Follow-ups, not part of the first version:
 | --- | --- |
 | A `Dedicated` shared-namespace owner for a direct target: a synthetic Release `<group>/_ns-<name>` to hold its release state (rejected for now) | Before direct targets are recommended for shared namespaces |
 | Cluster drift detection for a direct unit | After the first direct runs |
-| Skipping the write of a revision when nothing changed (the apply itself always runs, because server-side apply is idempotent and self-heals) | After revision churn is measured |
 | A `nyl release delete --keep-resources` that keeps the resources and the state (`--no-purge` keeps the resources and deletes the state) | With the Argo CD to direct procedure |
 
 ## Environment templates and previews

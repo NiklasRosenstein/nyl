@@ -374,7 +374,9 @@ then:
    is the Cluster's declared one, and the fence of every Release;
 2. publishes the tree;
 3. applies each Release from the pushed bytes, those that register kinds first,
-   as a new release revision that records the unit, the publication, and its commit;
+   as a new release revision that records the unit, the publication, and its commit
+   (a Release that changed nothing keeps its latest revision instead, see
+   [Unchanged Releases](/nyl/kubernetes-gitops/workflow/direct-reconciler/#unchanged-releases));
 4. only when every Release is `Deployed`, deletes the Releases that left the tree.
 
 A failure after step 2 leaves Git ahead of the cluster, never behind: the unit has no
