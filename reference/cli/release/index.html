@@ -77,6 +77,10 @@
 <div class="sl-heading-wrapper level-h2"><h2 id="description">Description</h2><a class="sl-anchor-link" href="#description"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Description”</span></a></div>
 <p>Every <code dir="auto">nyl apply</code> records a release revision, storing the full rendered manifest
 and the set of applied resources in a Kubernetes Secret in the release namespace.
+The Secret has type <code dir="auto">k8s.nyl/release.v1</code> and the labels <code dir="auto">k8s.nyl/release</code> (the
+release name) and <code dir="auto">k8s.nyl/revision</code>; revisions recorded under the
+<a href="/nyl/reference/deprecations/#labels-and-annotations-in-the-nyl-api-groups">deprecated labels</a>
+are still read.
 The <code dir="auto">release</code> subcommands let you inspect that history and roll back to a previous
 revision. Configure <code dir="auto">[release] history_limit</code> in
 <a href="/nyl/reference/configuration/#release-history"><code dir="auto">nyl.toml</code></a> or pass
