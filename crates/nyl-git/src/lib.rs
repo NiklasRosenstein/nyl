@@ -23,12 +23,14 @@
 
 mod auth;
 mod error;
+mod lfs;
 mod status;
 mod transport;
 mod url;
 
 pub use auth::{CredentialEntry, GitAuth, GitSettings};
 pub use error::{GitError, Rejection, Result};
+pub use lfs::{lfs_filter_problem, lfs_tracked_paths, LfsFilterProblem};
 pub use status::{worktree_status, WorktreeStatusEntry};
 pub use transport::{
     fetch, fetch_branch, ls_remote, push_atomic, push_branch_if_unchanged, remote_branch, repository_command, Expect,

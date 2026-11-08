@@ -176,3 +176,9 @@ id = "c232b073-6c41-4d76-a9f8-c5a3725d238b"
 type = "feature"
 description = "`nyl argocd resources` lists the resources an Argo CD Application records in `status.resources`, and `nyl argocd purge` deletes them on its destination cluster without generating manifests, for Applications whose source path was removed from Git. A purge deletes only objects carrying the Application's tracking, keeps `Delete=false` and (without `--confirm-delete`) `Delete=confirm` resources, deletes in reverse apply order with foreground propagation, supports `--dry-run` and JSON/YAML reports, and with `--delete-application` removes the Application's finalizers and deletes it after a clean purge"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "a0e3429e-015e-4896-81b9-ff3d854f1b26"
+type = "improvement"
+description = "The CI image includes Git LFS with its filters configured system-wide, and when `publish-tree --require-clean` finds changed files tracked by Git LFS while Git finds no `git-lfs` executable or no LFS filter configuration, its error explains how to install and configure Git LFS (`git lfs install --local --skip-repo`), including where CI checks the repository out in a separate container. The files still count as changes. The new [Git LFS in CI](https://niklasrosenstein.github.io/nyl/kubernetes-gitops/workflow/publish/#git-lfs-in-ci) section describes the requirement"
+author = "@NiklasRosenstein"
