@@ -53,6 +53,21 @@ readiness:
         unit: kubernetes
       name: ingressIp
       why: "field-not-set: /status/loadBalancer/ingress/0/ip"
+  - pointer: /values/dns
+    blocker:
+      type: planned-change
+      producer:
+        environment: infra
+        unit: dns
+  - pointer: /dependsOn/3
+    blocker:
+      type: producer-unavailable
+      producer:
+        environment: infra
+        unit: network
+  - blocker:
+      type: other
+      message: its retained tombstone of kind Command is dropped first
   - blocker:
       type: other
       message: the deleting incarnation of app (kind Command) is removed first

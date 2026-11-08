@@ -332,6 +332,39 @@ fn cite(
     }
 }
 
+/// Resolve `source`, a reference of a unit of `environment` to another
+/// environment, against `environments` alone: the same rules as
+/// [`resolve_reference`] reading the producer's snapshot, for a caller that
+/// holds no documents of the consumer's own environment (checks of consumers
+/// across environments, which read only stored documents).
+pub fn resolve_foreign(
+    environment: &EnvironmentName,
+    environments: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::EnvironmentSnapshot>,
+    now: Timestamp,
+    source: &UnitInputSource,
+) -> Result<ReferenceValue, ResolutionError> {
+    let nothing = BTreeMap::new();
+    let nobody = BTreeMap::new();
+    let none = BTreeSet::new();
+    resolve_reference(
+        &ReferenceView {
+            environments,
+            environment,
+            desired: &nothing,
+            observed: &nobody,
+            artifacts: &BTreeMap::new(),
+            attestations: &BTreeMap::new(),
+            observations: &BTreeMap::new(),
+            now,
+            observed_commit: None,
+            run: None,
+            produced_in_run: &none,
+            previous: &nothing,
+        },
+        source,
+    )
+}
+
 /// Resolve against the producer's immutable state snapshot; never its lease or checkpoints.
 fn resolve_external(
     view: &ReferenceView<'_>,
@@ -1384,6 +1417,38 @@ mod tests {
         world.observed.clear();
         world.attestations.clear();
         world
+    }
+
+    /// Catches a cross-environment `dependsOn` entry that names no valid unit
+    /// being reported as a wait for a receipt that can never come (its
+    /// producer could not even be typed): it is a resolution error, as for a
+    /// producer in the same environment, and an undeclared environment is one
+    /// too; neither blocks.
+    #[test]
+    fn test_a_cross_environment_depends_on_naming_an_invalid_unit_is_a_resolution_error() {
+        let world = producer_without_receipt();
+        for (entry, expected) in [
+            (
+                json!({"environment": "infra", "unit": "Not_A_Unit"}),
+                "names an invalid unit",
+            ),
+            (
+                json!({"environment": "elsewhere", "unit": "network"}),
+                "references undeclared environment",
+            ),
+        ] {
+            let unit = desired("smoke", "Command", json!({"dependsOn": [entry]}), "smoke");
+            let resolution = resolve_unit(&world.view(), &unit);
+            assert_eq!(resolution.readiness, Readiness::Ready, "{entry}");
+            let [error] = resolution.errors.as_slice() else {
+                panic!("one error for {entry}: {:?}", resolution.errors)
+            };
+            assert!(
+                error.message.starts_with("spec.dependsOn[0]") && error.message.contains(expected),
+                "{}",
+                error.message
+            );
+        }
     }
 
     /// Catches a cross-environment `dependsOn` entry whose attestation

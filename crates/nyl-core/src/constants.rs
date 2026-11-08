@@ -9,7 +9,7 @@ pub const API_VERSION_GITOPS: &str = "gitops.nyl/v1";
 /// The second format version of the state kinds that changed since
 /// `gitops.nyl/v1` (`DesiredUnit` and `ObservedUnit`); the other state kinds
 /// stay on [`API_VERSION_GITOPS`].
-pub const API_VERSION_GITOPS_V2: &str = "gitops.nyl/v2";
+pub const STATE_FORMAT_V2: &str = "gitops.nyl/v2";
 
 /// API version for Kubernetes rendered-GitOps configuration resources.
 pub const API_VERSION_K8S_GITOPS: &str = "k8s.gitops.nyl/v1";

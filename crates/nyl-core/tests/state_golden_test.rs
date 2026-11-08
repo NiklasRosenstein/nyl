@@ -5,9 +5,11 @@
 //! no longer parses, so a format change is always deliberate: it adds a
 //! version, a migration, and a new golden file, and keeps the old one.
 //! `DesiredUnit` and `ObservedUnit` are at `gitops.nyl/v2` (typed blocked
-//! reasons); their `.v1.yaml` files are what v0.6.1 wrote, kept as the inputs
-//! of the migration and never regenerated. The other kinds are at `v1`, which
-//! is amended in place until a release changes it.
+//! reasons). Their `.v1.yaml` files are the documents the v1 writer produced
+//! (written by that code before the change, except `desired-unit-blocked.v1.yaml`,
+//! which is written by hand to carry each wording of a blocked reason); they
+//! are the inputs of the migration and are never regenerated. The other kinds
+//! are at `v1`.
 //!
 //! After an intended change, regenerate with
 //! `cargo test -p nyl-core --test state_golden_test -- --ignored`.
@@ -146,6 +148,9 @@ fn samples() -> Vec<(&'static str, Value)> {
                     {"pointer": "/dependsOn/1", "blocker": {"type": "attestation", "producer": {"environment": "infra", "unit": "network"}, "name": "healthy", "state": "pending"}},
                     {"pointer": "/dependsOn/2", "blocker": {"type": "attestation", "producer": {"unit": "network"}, "name": "accepted", "state": "failing"}},
                     {"pointer": "/values/ip", "blocker": {"type": "observation", "producer": {"environment": "infra", "unit": "kubernetes"}, "name": "ingressIp", "why": "field-not-set: /status/loadBalancer/ingress/0/ip"}},
+                    {"pointer": "/values/dns", "blocker": {"type": "planned-change", "producer": {"environment": "infra", "unit": "dns"}}},
+                    {"pointer": "/dependsOn/3", "blocker": {"type": "producer-unavailable", "producer": {"environment": "infra", "unit": "network"}}},
+                    {"blocker": {"type": "other", "message": "its retained tombstone of kind Command is dropped first"}},
                     {"blocker": {"type": "other", "message": "the deleting incarnation of app (kind Command) is removed first"}}
                 ]}
             }),
@@ -398,6 +403,21 @@ fn test_migrated_kinds_read_their_older_version_and_reject_newer_ones() {
     assert!(error.contains("upgrade Nyl"), "{error}");
 }
 
+/// Catches a malformed document reporting only serde's message: the error
+/// names the field of the document that is wrong, though the reader buffers
+/// the document to migrate it.
+#[test]
+fn test_a_malformed_state_document_names_the_field_that_failed() {
+    let mut document = samples()
+        .into_iter()
+        .find(|(name, _)| *name == "desired-unit-blocked.v2.yaml")
+        .unwrap()
+        .1;
+    document["unit"]["uid"] = json!("not-a-uid");
+    let error = serde_json::from_value::<DesiredUnit>(document).unwrap_err().to_string();
+    assert!(error.starts_with("unit.uid: "), "{error}");
+}
+
 #[test]
 fn test_observed_v2_preserves_evidence_and_rejects_unknown_versions() {
     for name in ["observed-unit", "observed-unit-waiting", "observed-unit-repaired"] {
@@ -413,9 +433,9 @@ fn test_observed_v2_preserves_evidence_and_rejects_unknown_versions() {
 /// The `gitops.nyl/v1` documents of the kinds that moved to `gitops.nyl/v2`,
 /// and the current golden file each one migrates to. The v1 files are what
 /// Nyl wrote before the move and are never regenerated, so they keep every
-/// migration covered. `desired-unit-blocked.v1.yaml` holds every wording a
-/// blocked reason had.
-const MIGRATED: [(&str, &str); 8] = [
+/// migration covered. `desired-unit-blocked.v1.yaml` holds each wording of a
+/// blocked reason that the v1 writer produced.
+const MIGRATED: [(&str, &str); 10] = [
     ("desired-unit.v1.yaml", "desired-unit.v2.yaml"),
     (
         "desired-unit-held-deleting.v1.yaml",
@@ -430,6 +450,11 @@ const MIGRATED: [(&str, &str); 8] = [
     ("desired-unit-blocked.v1.yaml", "desired-unit-blocked.v2.yaml"),
     ("observed-unit.v1.yaml", "observed-unit.v2.yaml"),
     ("observed-unit-waiting.v1.yaml", "observed-unit-waiting.v2.yaml"),
+    ("observed-unit-repaired.v1.yaml", "observed-unit-repaired.v2.yaml"),
+    (
+        "observed-unit-retry-required.v1.yaml",
+        "observed-unit-retry-required.v2.yaml",
+    ),
 ];
 
 /// Catches a migration that changes more than the format: a stored

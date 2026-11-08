@@ -43,6 +43,12 @@ use crate::run_report::{
 
 /// The stable reason of a blocker waiting for a producer's receipt.
 pub const NO_CURRENT_RECEIPT: &str = "no-current-receipt";
+/// The stable reason of a blocker waiting for the new receipt of a producer
+/// that the plan before a multi-environment run would change.
+pub const PLANNED_CHANGE: &str = "planned-change";
+/// The stable reason of a blocker waiting for a producer whose environment
+/// failed or is waiting in a multi-environment run.
+pub const PRODUCER_UNAVAILABLE: &str = "producer-unavailable";
 
 /// Current, stale, or none, by [`crate::rules::freshness::receipt_is_current`].
 pub fn receipt_state(desired: Option<&DesiredUnit>, observed: Option<&ObservedUnit>) -> ReceiptState {
@@ -225,8 +231,9 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
 /// current receipt, `attestation-pending` or `attestation-failing` with the
 /// producer and the attestation when it waits for one (see
 /// [`super::evidence`]), and `observation-pending` with the producer and the
-/// observation (see [`super::observed_values`]). Any other blocker shows its
-/// text as the reason.
+/// observation (see [`super::observed_values`]), `planned-change` and
+/// `producer-unavailable` with the producer for the waits of a
+/// multi-environment run. Any other blocker shows its text as the reason.
 pub(crate) fn blocked_by(reason: &BlockedReason) -> BlockedBy {
     let waiting = |producer: &ProducerRef, reason_code: &str| BlockedBy {
         pointer: reason.pointer.clone(),
@@ -238,6 +245,8 @@ pub(crate) fn blocked_by(reason: &BlockedReason) -> BlockedBy {
     };
     match &reason.blocker {
         Blocker::NoCurrentReceipt { producer } => waiting(producer, NO_CURRENT_RECEIPT),
+        Blocker::PlannedChange { producer } => waiting(producer, PLANNED_CHANGE),
+        Blocker::ProducerUnavailable { producer } => waiting(producer, PRODUCER_UNAVAILABLE),
         Blocker::Attestation { producer, name, state } => BlockedBy {
             attestation: Some(name.clone()),
             ..waiting(producer, super::evidence::stable(*state))
@@ -426,7 +435,6 @@ pub fn status(
 /// [`status`], with each publication unit's teardown readiness, which the
 /// shell computes from the stored desired document
 /// (`Driver::teardown_readiness`) without rendering.
-#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
 pub fn status_with_readiness(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
@@ -434,6 +442,32 @@ pub fn status_with_readiness(
     now: Timestamp,
     drivers: Option<&DriverSet>,
     readiness: &BTreeMap<UnitName, TeardownReadiness>,
+) -> EnvironmentRunReport {
+    status_with_producers(
+        environment,
+        snapshot,
+        coordination,
+        now,
+        drivers,
+        readiness,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`status_with_readiness`], with the snapshots of the other environments
+/// whose observed values this environment's units read
+/// ([`super::observed_values::observed_producer_environments`] names them): a
+/// unit whose cross-environment observed input differs from the value it
+/// resolved is `ready`, as one whose input in its own environment differs is.
+#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
+pub fn status_with_producers(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    coordination: &Coordination,
+    now: Timestamp,
+    drivers: Option<&DriverSet>,
+    readiness: &BTreeMap<UnitName, TeardownReadiness>,
+    producers: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
 ) -> EnvironmentRunReport {
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
@@ -482,15 +516,7 @@ pub fn status_with_readiness(
     // A current consumer whose observed value changed is work for the next
     // reconcile: state `ready`, exit 2. Contract:
     // [Observed values](../../../../design/orchestration-core.md#observed-values).
-    // Status reads this environment's state alone, so a consumer waiting for
-    // another environment's value is left to resolution.
-    let changed = super::observed_values::changed_consumers(
-        &snapshot.desired,
-        &snapshot.observed,
-        &snapshot.observations,
-        &BTreeMap::new(),
-        now,
-    );
+    let changed = super::observed_values::changed_consumers_across(environment, snapshot, producers, now);
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
@@ -1194,12 +1220,36 @@ mod tests {
                 Some("ip")
             )
         );
+        for (blocker, reason) in [
+            (
+                Blocker::PlannedChange {
+                    producer: producer("infra/network"),
+                },
+                PLANNED_CHANGE,
+            ),
+            (
+                Blocker::ProducerUnavailable {
+                    producer: producer("infra/network"),
+                },
+                PRODUCER_UNAVAILABLE,
+            ),
+        ] {
+            let waiting = blocked_by(&BlockedReason::new("/values/x", blocker));
+            assert_eq!(
+                (waiting.environment, waiting.unit, waiting.reason.as_str()),
+                (
+                    Some(EnvironmentName::new("infra").unwrap()),
+                    Some(name("network")),
+                    reason
+                )
+            );
+        }
         let other = blocked_by(&BlockedReason::new(
             "/values/x",
-            Blocker::other("infra waits because its producer environment failed or is waiting"),
+            Blocker::other("the deleting incarnation of cache (kind Command) is removed first"),
         ));
         assert_eq!((other.environment, other.unit), (None, None));
-        assert!(other.reason.starts_with("infra waits"));
+        assert!(other.reason.starts_with("the deleting incarnation"));
     }
 }
 

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
+use nyl_core::orchestration::blocked::ProducerRef;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
@@ -436,13 +437,16 @@ impl Session {
         }
     }
 
-    /// The request of one `plan` or `reconcile`.
-    pub fn request(&self, options: &RunOptions<'_>) -> Result<RunRequest, Finding> {
-        let units = if options.units.is_empty() {
-            None
-        } else {
-            Some(unit_names("--unit", options.units)?)
-        };
+    /// Where every environment of the project keeps its state: the declared
+    /// ones and the instances, which are consumers only and listed apart,
+    /// and the environments whose location could not be resolved, with why.
+    pub fn environment_locations(
+        &self,
+    ) -> (
+        BTreeMap<EnvironmentName, StateLocation>,
+        BTreeSet<EnvironmentName>,
+        BTreeMap<EnvironmentName, Finding>,
+    ) {
         let mut environments = BTreeMap::new();
         let mut environment_errors = BTreeMap::new();
         for environment in declared(&self.inventory).0 {
@@ -468,6 +472,23 @@ impl Session {
             environments.entry(name.clone()).or_insert_with(|| location.clone());
         }
         environment_errors.extend(self.instance_errors.clone());
+        (environments, instances, environment_errors)
+    }
+
+    /// The other environments, for commands that read what consumers resolved from them.
+    pub fn peers(&self) -> nyl_orchestration::shell::inspect::Peers {
+        let (locations, _, errors) = self.environment_locations();
+        nyl_orchestration::shell::inspect::Peers { locations, errors }
+    }
+
+    /// The request of one `plan` or `reconcile`.
+    pub fn request(&self, options: &RunOptions<'_>) -> Result<RunRequest, Finding> {
+        let units = if options.units.is_empty() {
+            None
+        } else {
+            Some(unit_names("--unit", options.units)?)
+        };
+        let (environments, instances, environment_errors) = self.environment_locations();
         Ok(RunRequest {
             planned: BTreeMap::new(),
             approvals: nyl_orchestration::rules::approval::Approvals::default(),
@@ -895,10 +916,10 @@ pub fn detail(unit: &UnitReport) -> String {
             unit.blocked_by
                 .iter()
                 .map(|blocked| {
-                    let producer = blocked.unit.as_ref().map(|unit| match &blocked.environment {
-                        Some(environment) => format!("{environment}/{unit}"),
-                        None => unit.to_string(),
-                    });
+                    let producer = blocked
+                        .unit
+                        .as_ref()
+                        .map(|unit| ProducerRef::new(blocked.environment.clone(), unit.clone()));
                     match (producer, &blocked.attestation, &blocked.observation) {
                         (Some(producer), Some(attestation), _) => format!(
                             "{} waits for attestation {attestation} of {producer} ({})",

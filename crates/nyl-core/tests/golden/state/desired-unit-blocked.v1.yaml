@@ -29,4 +29,9 @@ readiness:
     reason: attestation accepted of network is failing
   - pointer: /values/ip
     reason: "observation ingressIp of infra/kubernetes is pending: field-not-set: /status/loadBalancer/ingress/0/ip"
+  - pointer: /values/dns
+    reason: infra/dns has a planned change; waiting for its new receipt
+  - pointer: /dependsOn/3
+    reason: infra/network waits because its producer environment failed or is waiting
+  - reason: its retained tombstone of kind Command is dropped first
   - reason: the deleting incarnation of app (kind Command) is removed first

@@ -158,10 +158,9 @@ fn test_multi_environment_plan_blocks_consumers_on_planned_producer_changes_and_
     assert_eq!(plan.exit, 2, "{}", plan.stderr);
     let app = &section(&plan, "app")["units"]["app"];
     assert_eq!(app["state"], "blocked");
-    assert!(
-        app["blockedBy"]
-            .to_string()
-            .contains("infra/network has a planned change"),
+    assert_eq!(
+        app["blockedBy"],
+        json!([{"pointer": "/values/network", "environment": "infra", "unit": "network", "reason": "planned-change"}]),
         "{app}"
     );
     let teardown = harness.invoke(&["teardown", "-e", "infra", "--unit", "network", "-o", "json"]);
@@ -318,14 +317,15 @@ fn test_a_consumer_waits_for_an_attestation_of_another_environments_unit() {
 }
 
 /// A consumer in one environment waits for an observed value of a unit in
-/// another, then proceeds once `nyl observe` records the value.
+/// another; once `nyl observe` records the value, both commands name the
+/// consumer, and it proceeds.
 ///
 /// Catches the cross-environment wait being stored in a form that loses the
 /// producer's environment (the blocker read back from text, where
-/// `<environment>/<unit>` is no unit name), which left such a consumer
-/// unrecognizable as able to resolve: the stored document names the producer
-/// with its environment as typed data, the report shows it, and the consumer
-/// executes with the value after it arrives.
+/// `<environment>/<unit>` is no unit name): the stored document names the
+/// producer with its environment as typed data, `nyl observe -e infra` and
+/// `nyl status -e app` recognize the waiting consumer as able to resolve, and
+/// the consumer executes with the value after it arrives.
 #[test]
 fn test_a_consumer_waits_for_an_observed_value_of_another_environments_unit_then_proceeds() {
     let producer = PRODUCER.replace(
@@ -375,6 +375,23 @@ fn test_a_consumer_waits_for_an_observed_value_of_another_environments_unit_then
     probe.script("network", [Read::Values(vec![value("ip", json!("203.0.113.10"))])]);
     let observed = harness.invoke(&["observe", "-e", "infra"]);
     assert_eq!(observed.exit, 0, "{}", observed.stderr);
+    assert!(
+        observed.stderr.contains("NYL-OBSERVATION-CHANGED")
+            && observed
+                .stderr
+                .contains("observed value ip of infra/network has a value now, so app/app can resolve"),
+        "{}",
+        observed.stderr
+    );
+    let ready = harness.invoke(&["status", "-e", "app", "-o", "json"]);
+    let unit = &section(&ready, "app")["units"]["app"];
+    assert_eq!(unit["state"], "ready", "{}", ready.stdout);
+    assert!(
+        unit["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("observed value ip of infra/network arrived")),
+        "{unit}"
+    );
     let run = harness.invoke(&["reconcile", "-e", "app", "-o", "json"]);
     assert_eq!(run.exit, 0, "{}", run.stderr);
     assert_eq!(section(&run, "app")["units"]["app"]["result"], "executed");

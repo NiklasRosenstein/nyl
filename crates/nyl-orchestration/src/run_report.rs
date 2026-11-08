@@ -809,7 +809,8 @@ pub struct BlockedBy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<UnitName>,
     /// A stable reason: `no-current-receipt`, `attestation-pending`,
-    /// `attestation-failing`, or `observation-pending`.
+    /// `attestation-failing`, `observation-pending`, `planned-change`, or
+    /// `producer-unavailable`; the text of any other blocker.
     pub reason: String,
     /// The attestation of `unit` the consumer waits for, for the two
     /// attestation reasons.

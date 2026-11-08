@@ -2683,10 +2683,11 @@ readiness: {state: ready}
   Nyl upgrade does not change it.
 - `readiness.reasons` stores each blocker as data, never as text. `blocker.type`
   is `no-current-receipt`, `attestation` (with `name` and `state: pending |
-  failing`), `observation` (with `name` and the driver's `why`), or `other`
-  (with a `message`, for what only text describes, such as a fenced
-  incarnation). The first three carry the `producer` as `{environment?,
-  unit}`; `environment` is absent for a unit of the unit's own environment, so
+  failing`), `observation` (with `name` and the driver's `why`),
+  `planned-change` or `producer-unavailable` (the waits of a multi-environment
+  run for a producer of another environment), or `other` (with a `message`,
+  for what only text describes, such as a fenced incarnation). All but `other`
+  carry the `producer` as `{environment?, unit}`; `environment` is absent for a unit of the unit's own environment, so
   a producer of another environment is a typed reference rather than an
   `<environment>/<unit>` string. The report's stable `blockedBy` reasons, the
   attestation and observation warnings, and whether a blocked consumer can
@@ -2936,12 +2937,34 @@ spec:
   names them with `NYL-OBSERVATION-CHANGED`, whose fix is the next
   `nyl reconcile`. A consumer that blocked on a `pending` value that now has
   one is `ready` the same way ("arrived"); both are found from the stored
-  desired documents, without rendering. They name consumers of the
-  same environment only: a consumer that reads another environment's value
-  through `environment` is not named by `observe` or `status` of the producer
-  or of its own environment, and runs when its own next `reconcile` resolves
-  the producer environment's recorded value. That reconcile executes them, under
+  desired documents, without rendering. That reconcile executes them, under
   their own `approval`, as for any changed input.
+
+  A consumer in another environment that reads the value through `environment`
+  resolved one value, which its own environment's desired document records,
+  and the producer's environment now records another. `nyl observe -e <producer
+  environment>` reads the snapshots of the declared environments and instances
+  (as a reconcile reads its producers', without a lease and without a write,
+  after it has written its own observed commit and released its lease) and
+  names each such consumer with `NYL-OBSERVATION-CHANGED`, qualified by its
+  environment (`prod/dns`), whose fix is `nyl reconcile -e <consumer
+  environment>`; `nyl status -e <consumer environment>` and `nyl get units -e
+  <consumer environment>` read the snapshots of the environments its units read
+  observed values from and show the consumer `ready`, like one that reads a
+  value of its own environment (`get units --state-revision` reads no other
+  environment). The comparison reads the value through the reference resolver,
+  so a reference it would block or refuse is not reported as changed. An
+  environment whose state location cannot be resolved or whose state cannot be
+  read is a `NYL-STATE-UNAVAILABLE` warning of the command, never a failure; its
+  consumers were not compared.
+
+  A consumer that waits for another environment's `pending` value is found the
+  same way, from the typed `observation` blocker, which names the producer with
+  its environment: it is `ready` once the producer environment records a value
+  that the consumer's own reference would read (through the reference resolver,
+  so an unmet attestation requirement or a producer being removed keeps it
+  `blocked`), and `nyl observe -e <producer environment>` names it with
+  `arrived`.
 - **Waiting.** After the run executes a unit, a `pending` observation is
   polled under the run's lease until it has a value or `observationWait` has
   passed since the execution finished, within the unit's `timeout`; the run

@@ -185,7 +185,43 @@
         },
         {
           "additionalProperties": false,
-          "description": "Anything else, such as a fenced incarnation or a producer environment\nthat failed in this run, which only its text describes.",
+          "description": "A multi-environment run waits for the producer's new receipt, because\nthe plan that precedes it would change the producer.",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "planned-change",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A multi-environment run waits for a producer whose environment failed\nor is itself waiting in this run.",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "producer-unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Anything else, such as a fenced incarnation, which only its text\ndescribes.",
           "properties": {
             "message": {
               "type": "string"

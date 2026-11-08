@@ -22,7 +22,7 @@
 use serde_json::{json, Map, Value};
 
 use super::blocked::{AttestationWait, Blocker, ProducerRef};
-use crate::constants::{API_VERSION_GITOPS, API_VERSION_GITOPS_V2};
+use crate::constants::{API_VERSION_GITOPS, STATE_FORMAT_V2};
 
 /// Type the blocked reason that a `gitops.nyl/v1` document stored as `text`.
 ///
@@ -32,6 +32,7 @@ pub fn blocker_from_v1_text(text: &str) -> Blocker {
     parse_attestation(text)
         .or_else(|| parse_observation(text))
         .or_else(|| parse_no_current_receipt(text))
+        .or_else(|| parse_multi_environment(text))
         .unwrap_or_else(|| Blocker::other(text))
 }
 
@@ -72,15 +73,32 @@ fn parse_no_current_receipt(text: &str) -> Option<Blocker> {
     Some(Blocker::no_current_receipt(ProducerRef::parse(producer)?))
 }
 
+/// `<environment>/<unit> has a planned change; waiting for its new receipt`
+/// and `<environment>/<unit> waits because its producer environment failed or
+/// is waiting`: the waits of a multi-environment run, which always name a
+/// producer of another environment.
+fn parse_multi_environment(text: &str) -> Option<Blocker> {
+    let producer = |label: &str| ProducerRef::parse(label).filter(|producer| producer.environment.is_some());
+    if let Some(label) = text.strip_suffix(" has a planned change; waiting for its new receipt") {
+        return Some(Blocker::PlannedChange {
+            producer: producer(label)?,
+        });
+    }
+    let label = text.strip_suffix(" waits because its producer environment failed or is waiting")?;
+    Some(Blocker::ProducerUnavailable {
+        producer: producer(label)?,
+    })
+}
+
 /// Migrate a `DesiredUnit` document, as a JSON value, to the current
 /// version: a `gitops.nyl/v1` document's blocked reasons become typed.
 /// Any other version is left for the reader to accept or reject.
-pub(super) fn desired_unit(document: &mut Value) {
+pub(super) fn desired_unit(document: &mut Value) -> Result<(), String> {
     let Some(fields) = document.as_object_mut() else {
-        return;
+        return Ok(());
     };
     if fields.get("apiVersion").and_then(Value::as_str) != Some(API_VERSION_GITOPS) {
-        return;
+        return Ok(());
     }
     if let Some(reasons) = fields
         .get_mut("readiness")
@@ -92,17 +110,35 @@ pub(super) fn desired_unit(document: &mut Value) {
             .filter_map(Value::as_object_mut)
             .for_each(typed_reason);
     }
-    fields.insert("apiVersion".to_owned(), json!(API_VERSION_GITOPS_V2));
+    fields.insert("apiVersion".to_owned(), json!(STATE_FORMAT_V2));
+    Ok(())
 }
 
 /// Migrate an `ObservedUnit` document to the current version. Its own fields
-/// did not change; the desired document it embeds migrates when it is read.
-pub(super) fn observed_unit(document: &mut Value) {
-    if let Some(fields) = document.as_object_mut() {
-        if fields.get("apiVersion").and_then(Value::as_str) == Some(API_VERSION_GITOPS) {
-            fields.insert("apiVersion".to_owned(), json!(API_VERSION_GITOPS_V2));
+/// did not change; a `gitops.nyl/v1` document's embedded desired document
+/// migrates when it is read. A `gitops.nyl/v2` document embeds a
+/// `gitops.nyl/v2` one, because the transition that writes the observed
+/// document writes its desired copy in the same version; one that embeds an
+/// older desired document is refused rather than read as current.
+pub(super) fn observed_unit(document: &mut Value) -> Result<(), String> {
+    let Some(fields) = document.as_object_mut() else {
+        return Ok(());
+    };
+    match fields.get("apiVersion").and_then(Value::as_str) {
+        Some(API_VERSION_GITOPS) => {
+            fields.insert("apiVersion".to_owned(), json!(STATE_FORMAT_V2));
         }
+        Some(STATE_FORMAT_V2) => {
+            let embedded = fields.get("desired").and_then(|desired| desired.get("apiVersion"));
+            if embedded.and_then(Value::as_str) == Some(API_VERSION_GITOPS) {
+                return Err(format!(
+                    "a {STATE_FORMAT_V2} ObservedUnit embeds a {API_VERSION_GITOPS} desired document; it embeds a {STATE_FORMAT_V2} one"
+                ));
+            }
+        }
+        _ => {}
     }
+    Ok(())
 }
 
 /// Replace a `reason` text by the typed `blocker`. A reason that is not
@@ -153,6 +189,18 @@ mod tests {
                 },
             ),
             (
+                "infra/network has a planned change; waiting for its new receipt",
+                Blocker::PlannedChange {
+                    producer: producer("infra/network"),
+                },
+            ),
+            (
+                "infra/network waits because its producer environment failed or is waiting",
+                Blocker::ProducerUnavailable {
+                    producer: producer("infra/network"),
+                },
+            ),
+            (
                 "observation ip of infra/kubernetes is pending: waiting for a load balancer of the cluster",
                 Blocker::Observation {
                     producer: producer("infra/kubernetes"),
@@ -174,8 +222,9 @@ mod tests {
     #[test]
     fn test_blocker_from_v1_text_keeps_other_text_unchanged() {
         for text in [
-            "infra/network has a planned change; waiting for its new receipt",
-            "infra/network waits because its producer environment failed or is waiting",
+            "network has a planned change; waiting for its new receipt",
+            "network waits because its producer environment failed or is waiting",
+            "Infra/network has a planned change; waiting for its new receipt",
             "the deleting incarnation of cache (kind Command) is removed first",
             "its retained tombstone of kind Command is dropped first",
             "two words has no current receipt",
@@ -202,7 +251,7 @@ mod tests {
                 {"reason": "its retained tombstone of kind Command is dropped first"}
             ]}
         });
-        desired_unit(&mut document);
+        desired_unit(&mut document).unwrap();
         assert_eq!(
             document,
             json!({
@@ -214,11 +263,26 @@ mod tests {
             })
         );
         let mut current = document.clone();
-        desired_unit(&mut current);
+        desired_unit(&mut current).unwrap();
         assert_eq!(current, document);
         let mut newer = json!({"apiVersion": "gitops.nyl/v3", "readiness": {"reasons": [{"reason": "x"}]}});
-        desired_unit(&mut newer);
+        desired_unit(&mut newer).unwrap();
         assert_eq!(newer["apiVersion"], "gitops.nyl/v3");
         assert_eq!(newer["readiness"]["reasons"][0]["reason"], "x");
+    }
+
+    /// Catches a v2 observed document passing as current while it embeds a
+    /// desired document of the older format: nothing writes one, so it is
+    /// refused; a v1 observed document takes its embedded v1 desired along.
+    #[test]
+    fn test_observed_unit_migration_refuses_an_older_desired_copy_in_a_current_document() {
+        let embedded_v1 = json!({"apiVersion": "gitops.nyl/v2", "desired": {"apiVersion": "gitops.nyl/v1"}});
+        let mut current = embedded_v1.clone();
+        current["apiVersion"] = json!("gitops.nyl/v2");
+        assert!(observed_unit(&mut current).unwrap_err().contains("embeds"));
+        let mut old = embedded_v1;
+        old["apiVersion"] = json!("gitops.nyl/v1");
+        observed_unit(&mut old).unwrap();
+        assert_eq!(old["apiVersion"], "gitops.nyl/v2");
     }
 }

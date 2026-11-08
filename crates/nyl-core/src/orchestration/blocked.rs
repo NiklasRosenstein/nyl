@@ -112,8 +112,14 @@ pub enum Blocker {
         /// Why the value is pending, in the driver's words.
         why: String,
     },
-    /// Anything else, such as a fenced incarnation or a producer environment
-    /// that failed in this run, which only its text describes.
+    /// A multi-environment run waits for the producer's new receipt, because
+    /// the plan that precedes it would change the producer.
+    PlannedChange { producer: ProducerRef },
+    /// A multi-environment run waits for a producer whose environment failed
+    /// or is itself waiting in this run.
+    ProducerUnavailable { producer: ProducerRef },
+    /// Anything else, such as a fenced incarnation, which only its text
+    /// describes.
     Other { message: String },
 }
 
@@ -133,7 +139,9 @@ impl Blocker {
         match self {
             Self::NoCurrentReceipt { producer }
             | Self::Attestation { producer, .. }
-            | Self::Observation { producer, .. } => Some(producer),
+            | Self::Observation { producer, .. }
+            | Self::PlannedChange { producer }
+            | Self::ProducerUnavailable { producer } => Some(producer),
             Self::Other { .. } => None,
         }
     }
@@ -147,6 +155,12 @@ impl Blocker {
             }
             Self::Observation { producer, name, why } => {
                 format!("observation {name} of {producer} is pending: {why}")
+            }
+            Self::PlannedChange { producer } => {
+                format!("{producer} has a planned change; waiting for its new receipt")
+            }
+            Self::ProducerUnavailable { producer } => {
+                format!("{producer} waits because its producer environment failed or is waiting")
             }
             Self::Other { message } => message.clone(),
         }
@@ -236,6 +250,18 @@ mod tests {
                     why: "not read yet".to_owned(),
                 },
                 "observation ip of infra/kubernetes is pending: not read yet",
+            ),
+            (
+                Blocker::PlannedChange {
+                    producer: producer("infra/network"),
+                },
+                "infra/network has a planned change; waiting for its new receipt",
+            ),
+            (
+                Blocker::ProducerUnavailable {
+                    producer: producer("infra/network"),
+                },
+                "infra/network waits because its producer environment failed or is waiting",
             ),
             (
                 Blocker::other("the deleting incarnation of cache (kind Command) is removed first"),

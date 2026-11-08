@@ -70,7 +70,9 @@ workstations alike.
 The desired and observed documents of a unit are at `gitops.nyl/v2`, which
 stores what a blocked unit waits for as data (the producer, with its
 environment, and the attestation or observed value) rather than as text. Their
-JSON Schemas are published under `gitops.nyl/v2/state/`.
+JSON Schemas are published under `gitops.nyl/v2/state/`; the `gitops.nyl/v1/state/`
+schemas of the same two kinds stay published for the older documents Nyl still
+reads.
 
 ## Preview environments
 

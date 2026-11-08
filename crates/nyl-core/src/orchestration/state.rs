@@ -26,7 +26,7 @@ use serde_json::Value;
 use super::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, JsonPointer, RunId, Uid, UnitName};
 use super::ports::StateSide;
 use super::time::Timestamp;
-use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS, API_VERSION_GITOPS_V2};
+use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS, STATE_FORMAT_V2};
 
 pub use super::blocked::BlockedReason;
 
@@ -93,9 +93,9 @@ constant_marker!(
     /// version; any other `apiVersion` fails, so a reader never misreads a
     /// newer format.
     StateV2,
-    API_VERSION_GITOPS_V2,
+    STATE_FORMAT_V2,
     |version| format_args!(
-        "unsupported state format {version:?}; this Nyl reads {API_VERSION_GITOPS_V2} for this kind and migrates {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
+        "unsupported state format {version:?}; this Nyl reads {STATE_FORMAT_V2} for this kind and migrates {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
     )
 );
 
@@ -393,8 +393,11 @@ macro_rules! migrated_kind {
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
                 let mut document = Value::deserialize(deserializer)?;
-                $migrate(&mut document);
-                $name::deserialize(document).map_err(serde::de::Error::custom)
+                $migrate(&mut document).map_err(serde::de::Error::custom)?;
+                // The path names the field of the document that failed.
+                let mut track = serde_path_to_error::Track::new();
+                $name::deserialize(serde_path_to_error::Deserializer::new(document, &mut track))
+                    .map_err(|error| serde::de::Error::custom(format_args!("{}: {error}", track.path())))
             }
         }
     };
@@ -1237,16 +1240,8 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
             "environment-record",
             schema::<EnvironmentRecord>("EnvironmentRecord"),
         ),
-        (
-            API_VERSION_GITOPS_V2,
-            "desired-unit",
-            schema::<DesiredUnit>("DesiredUnit"),
-        ),
-        (
-            API_VERSION_GITOPS_V2,
-            "observed-unit",
-            schema::<ObservedUnit>("ObservedUnit"),
-        ),
+        (STATE_FORMAT_V2, "desired-unit", schema::<DesiredUnit>("DesiredUnit")),
+        (STATE_FORMAT_V2, "observed-unit", schema::<ObservedUnit>("ObservedUnit")),
         (API_VERSION_GITOPS, "artifact", schema::<ArtifactDocument>("Artifact")),
         (API_VERSION_GITOPS, "drift-record", schema::<DriftRecord>("DriftRecord")),
         (
