@@ -21,7 +21,8 @@ use nyl_core::orchestration::ids::{EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::state::FailureCategory;
 use nyl_render::gitops::direct::release_documents;
 use nyl_render::gitops::observation::{
-    DirectLocation, GitPublicationHistory, ObservedPublication, PublishedDirectRelease, MATCH_WALK_LIMIT,
+    equivalent, running_publication, DeploymentTree, DirectLocation, GitPublicationHistory, ObservedPublication,
+    PublishedDirectRelease, RunningMatch, MATCH_WALK_LIMIT,
 };
 use nyl_render::gitops::publication::{release_history_limit, RenderedTarget};
 use nyl_render::gitops::reconcile::RenderIndexOwner;
@@ -29,7 +30,7 @@ use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
     collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources, ApplyEvent, ApplySettings,
-    Interruption, Protected, ReleaseRecorder,
+    Interruption, Protected, PublicationStands, ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ResourceKey, ResourceOrdering};
@@ -322,6 +323,10 @@ impl<'a, 'c> Direct<'a, 'c> {
             ..self.destination.clone()
         };
         let remaining = self.budget();
+        let destination = &rendered.destination;
+        // The publication branch, fetched when the first Release needs to know whether a
+        // recorded commit still stands, and not at all when every Release changed.
+        let history = std::sync::Mutex::new(None::<Result<GitPublicationHistory, NylError>>);
         let tree_namespaces: BTreeSet<String> = releases
             .iter()
             .zip(&documents)
@@ -384,6 +389,12 @@ impl<'a, 'c> Direct<'a, 'c> {
                         (handed_over, pending)
                     },
                 );
+                let expected = release.expected(destination);
+                let tree = DeploymentTree {
+                    path: &expected.path,
+                    release: expected.release.as_deref(),
+                };
+                let stands = |recorded: &str| self.commit_stands(&history, tree, recorded, commit);
                 match self
                     .apply_one(
                         &cluster,
@@ -392,6 +403,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                         history_limit,
                         end,
                         &claim,
+                        &stands,
                         Protected {
                             handed_over: &handed_over,
                             pending: &pending,
@@ -457,6 +469,36 @@ impl<'a, 'c> Direct<'a, 'c> {
         })
     }
 
+    /// Whether a revision that recorded the publication commit `recorded` still
+    /// stands for `current`, a commit whose tree is applied again: exactly when
+    /// the shared matching ([`running_publication`], [`equivalent`]) would
+    /// accept a Release running `recorded` for a receipt at `current`, so that a
+    /// kept revision never fails the attestation a new one would pass. A branch
+    /// that cannot be read, or that no longer holds `recorded`, does not stand.
+    fn commit_stands(
+        &self,
+        history: &std::sync::Mutex<Option<Result<GitPublicationHistory, NylError>>>,
+        tree: DeploymentTree<'_>,
+        recorded: &str,
+        current: &str,
+    ) -> bool {
+        let mut cached = history.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let history = cached.get_or_insert_with(|| {
+            let variable = |name: &str| self.ctx.env.get(name).cloned();
+            GitPublicationHistory::fetch(&self.observed, &self.ctx.project_dir, &variable)
+        });
+        let Ok(history) = history else {
+            return false;
+        };
+        // A comparison that fails counts as not standing: the apply then records a revision.
+        running_publication(history, tree, recorded, MATCH_WALK_LIMIT)
+            .and_then(|matched| match matched {
+                RunningMatch::Matched(_) => equivalent(history, tree, recorded, current),
+                RunningMatch::NotOnBranch | RunningMatch::NoPublication => Ok(false),
+            })
+            .unwrap_or(false)
+    }
+
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
     async fn apply_one(
         &self,
@@ -466,6 +508,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         history_limit: u32,
         end: tokio::time::Instant,
         claim: &ReleaseClaim<'_>,
+        publication_stands: PublicationStands<'_>,
         protected: Protected<'_>,
     ) -> Result<Applied, NylError> {
         let (namespace, name) = release.identity();
@@ -520,6 +563,9 @@ impl<'a, 'c> Direct<'a, 'c> {
                     ApplySettings {
                         concurrency: CONCURRENCY,
                         history_limit,
+                        revisions: RevisionPolicy::KeepUnchanged {
+                            publication_stands: Some(publication_stands),
+                        },
                         confirm_prune: false,
                         ownership: &ownership,
                         protected: Some(protected),

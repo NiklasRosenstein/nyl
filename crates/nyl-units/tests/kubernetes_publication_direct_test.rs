@@ -1168,3 +1168,135 @@ async fn test_a_teardown_after_a_reconciler_change_says_to_restore_the_declarati
     assert!(message.contains("Restore the declaration"), "{message}");
     assert!(!message.contains("nyl teardown"), "{message}");
 }
+
+fn observing_spec() -> serde_json::Value {
+    let mut spec = spec();
+    spec["observe"] = serde_json::json!({});
+    spec
+}
+
+/// The unit's `accepted` and `healthy` attestations for `tree`, as `nyl attest` records them.
+fn attest(
+    driver: &dyn Driver,
+    world: &World,
+    unit: &DesiredUnit,
+    tree: &ArtifactDocument,
+) -> Vec<(
+    String,
+    nyl_core::orchestration::state::AttestationResult,
+    serde_json::Value,
+)> {
+    use nyl_core::orchestration::driver::AttestationCheck;
+    use nyl_core::orchestration::ids::RunId;
+    use nyl_core::orchestration::state::Receipt;
+
+    let mut ctx = context(world, DriverOperation::Attest, None);
+    ctx.artifacts.insert("tree".to_owned(), tree.clone());
+    let receipt = Receipt {
+        execution_key: unit.execution_key.clone().unwrap(),
+        behavior_version: 1,
+        run: RunId::new("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90").unwrap(),
+        read_desired: None,
+        started_at: chrono::Utc::now(),
+        finished_at: chrono::Utc::now(),
+        versions: BTreeMap::new(),
+        approval: None,
+        provenance: BTreeMap::new(),
+        outputs: serde_json::json!({}),
+        artifacts: Vec::new(),
+        warnings: Vec::new(),
+    };
+    match driver.attest(&ctx, unit, &receipt).unwrap() {
+        Supported::Supported(AttestationCheck::Attested { outcomes }) => outcomes
+            .into_iter()
+            .map(|outcome| (outcome.name, outcome.result, outcome.details))
+            .collect(),
+        Supported::Supported(AttestationCheck::Unknown { reason }) => panic!("the check is unknown: {reason}"),
+        Supported::Unsupported => panic!("an observing unit attests"),
+    }
+}
+
+/// Catches a reconcile that changed nothing for a Release still writing a
+/// revision, and a kept revision that fails the attestation. Another Release
+/// joins the tree, so the target publishes a new commit while the directory of
+/// Release `web` is the same: its latest revision stays revision 1 with the
+/// older commit, the new Release records its own, and `nyl attest` passes for the
+/// new commit because the shared matching compares the Release's tree, not the
+/// commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_release_that_changed_nothing_keeps_its_revision_and_still_attests() {
+    let world = direct_world();
+    let release = world.work().join("applications/web/release.yaml");
+    let text = std::fs::read_to_string(&release).unwrap();
+    std::fs::write(&release, text.replace("replicas: 1", "replicas: 0")).unwrap();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let first_unit = unit_with(&driver, &world, "kubernetes", observing_spec());
+    let first = tree_of(&reconcile(&driver, &world, &first_unit, None, &nobody()));
+
+    // The same tree again publishes no commit and applies the Release again.
+    let again = tree_of(&reconcile(&driver, &world, &first_unit, Some(&first), &nobody()));
+    assert_eq!(again.spec["commit"], first.spec["commit"]);
+    assert_eq!(cluster.storage.list_revisions("web", "web").await.unwrap(), vec![1]);
+
+    add_extra(&world);
+    let second_unit = unit_with(&driver, &world, "kubernetes", observing_spec());
+    let second = tree_of(&reconcile(&driver, &world, &second_unit, Some(&first), &nobody()));
+    assert_ne!(
+        second.spec["commit"], first.spec["commit"],
+        "the target published a new commit"
+    );
+
+    assert_eq!(cluster.storage.list_revisions("web", "web").await.unwrap(), vec![1]);
+    let kept = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
+    assert_eq!(kept.status, ReleaseStatus::Deployed);
+    assert_eq!(
+        kept.meta.publication.unwrap().commit.as_deref(),
+        first.spec["commit"].as_str(),
+        "the kept revision still records the commit it was applied from"
+    );
+    assert_eq!(cluster.storage.list_revisions("extra", "extra").await.unwrap(), vec![1]);
+
+    let attested = attest(&driver, &world, &second_unit, &second);
+    for (name, result, details) in &attested {
+        assert_eq!(
+            *result,
+            nyl_core::orchestration::state::AttestationResult::Pass,
+            "{name}: {details}"
+        );
+    }
+    let deployments = attested[0].2["deployments"].as_array().unwrap();
+    let web = deployments
+        .iter()
+        .find(|deployment| deployment["id"] == "web/web")
+        .unwrap();
+    assert_eq!(web["state"], "accepted");
+    assert_eq!(web["running"], first.spec["commit"]);
+}
+
+/// Catches a kept revision whose commit the shared matching would not accept:
+/// when the commit it recorded is not on the publication branch (a rewritten
+/// branch), the apply records a new revision that carries the new commit, so the
+/// Release is not left `not-on-branch` by a revision nothing would replace.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_recorded_commit_the_branch_no_longer_holds_gets_a_new_revision() {
+    let world = direct_world();
+    let cluster = Cluster::new();
+    let driver = cluster.driver();
+    let unit = unit_with(&driver, &world, "kubernetes", observing_spec());
+    let first = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    let mut recorded = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
+    recorded.meta.publication.as_mut().unwrap().commit = Some("1".repeat(40));
+    cluster.storage.complete_release(&recorded).await.unwrap();
+
+    add_extra(&world);
+    let unit = unit_with(&driver, &world, "kubernetes", observing_spec());
+    let second = tree_of(&reconcile(&driver, &world, &unit, Some(&first), &nobody()));
+
+    assert_eq!(cluster.storage.list_revisions("web", "web").await.unwrap(), vec![1, 2]);
+    let latest = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
+    assert_eq!(
+        latest.meta.publication.unwrap().commit.as_deref(),
+        second.spec["commit"].as_str()
+    );
+}
