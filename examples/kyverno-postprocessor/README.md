@@ -1,6 +1,8 @@
 # Kyverno Post-Processor Example
 
-This example demonstrates how to use the Kyverno post-processor in Nyl.
+This example demonstrates how Nyl applies [Kyverno policies](https://niklasrosenstein.github.io/nyl/kubernetes-rendering/validation/kyverno-policies/)
+at render time. Policies annotated with `k8s.nyl/apply-policy-scope` are applied
+to the other resources instead of being emitted.
 
 ## Setup
 
@@ -19,7 +21,7 @@ This example demonstrates how to use the Kyverno post-processor in Nyl.
 
 ## What This Example Shows
 
-This example shows mutation policies applied to Service resources, demonstrating the Kyverno post-processor in action.
+This example shows mutation policies applied to Service resources, and labels added to Services and Deployments.
 
 See `manifests.yaml` for the full example configuration.
 

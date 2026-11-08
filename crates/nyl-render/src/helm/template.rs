@@ -4,7 +4,7 @@ use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
 use crate::{NylError, Result};
 use std::process::Command;
 
-pub(crate) const HELM_SOURCE_ANNOTATION: &str = "gitops.nyl.niklasrosenstein.github.com/helm-source";
+pub(crate) use nyl_core::constants::ANNOTATION_HELM_SOURCE as HELM_SOURCE_ANNOTATION;
 
 /// Parameters for building a Helm template command
 pub struct HelmTemplateParams<'a> {
@@ -744,7 +744,7 @@ metadata:
         )
         .unwrap();
         assert_eq!(
-            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            manifests[0].pointer("/metadata/annotations/k8s.gitops.nyl~1helm-source"),
             Some(&serde_json::Value::String("chart/crds/widgets.yaml".to_string()))
         );
     }
@@ -764,7 +764,7 @@ metadata:
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0]["data"]["script"], "---\n# Source: not-a-template\n");
         assert_eq!(
-            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            manifests[0].pointer("/metadata/annotations/k8s.gitops.nyl~1helm-source"),
             Some(&serde_json::Value::String("chart/templates/config.yaml".to_string()))
         );
     }
@@ -782,7 +782,7 @@ metadata:
         )
         .unwrap();
         assert_eq!(
-            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            manifests[0].pointer("/metadata/annotations/k8s.gitops.nyl~1helm-source"),
             Some(&serde_json::Value::String("immich/templates/server.yaml".to_string()))
         );
     }

@@ -3,7 +3,7 @@ kind: Application
 metadata:
   annotations:
     environment: production
-    nyl.niklasrosenstein.github.com/publication-context: "{\"cluster\":\"prod-eu-1\",\"destination\":{\"server\":\"https://kubernetes.default.svc\"},\"generated\":false,\"group\":\"workloads\",\"projectNamespace\":\"argocd\",\"source\":\"config/application-groups/workloads.yaml\"}"
+    k8s.gitops.nyl/publication-context: "{\"cluster\":\"prod-eu-1\",\"destination\":{\"server\":\"https://kubernetes.default.svc\"},\"generated\":false,\"group\":\"workloads\",\"projectNamespace\":\"argocd\",\"source\":\"config/application-groups/workloads.yaml\"}"
   finalizers:
   - resources-finalizer.argocd.argoproj.io
   name: api

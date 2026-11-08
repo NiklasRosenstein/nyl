@@ -14,6 +14,10 @@ nyl release <SUBCOMMAND> [OPTIONS]
 
 Every `nyl apply` records a release revision, storing the full rendered manifest
 and the set of applied resources in a Kubernetes Secret in the release namespace.
+The Secret has type `k8s.nyl/release.v1` and the labels `k8s.nyl/release` (the
+release name) and `k8s.nyl/revision`; revisions recorded under the
+[deprecated labels](/nyl/reference/deprecations/#labels-and-annotations-in-the-nyl-api-groups)
+are still read.
 The `release` subcommands let you inspect that history and roll back to a previous
 revision. Configure `[release] history_limit` in
 [`nyl.toml`](/nyl/reference/configuration/#release-history) or pass

@@ -178,6 +178,18 @@ description = "`nyl argocd resources` lists the resources an Argo CD Application
 author = "@NiklasRosenstein"
 
 [[entries]]
+id = "b5bdf18c-6ffa-45ac-873c-3ef1ba06c20a"
+type = "deprecation"
+description = "Nyl's labels, annotations, and Secret types move from `nyl.niklasrosenstein.github.com/` to the `.nyl` API groups: `k8s.nyl/` for release state and Kyverno policies, `k8s.gitops.nyl/` for published catalog provenance. The `nyl.niklasrosenstein.github.com/apply-policy-scope` annotation on Kyverno policies and release state recorded under the old labels stay readable with a warning; new release revisions are recorded under `k8s.nyl/release` and `k8s.nyl/revision`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "a3e7186c-8ba7-4091-8323-0b79a728ce0c"
+type = "breaking change"
+description = "Rendered output changes key names: expanded manifests carry `k8s.nyl/parent-api-version`, `k8s.nyl/parent-kind`, `k8s.nyl/parent-name`, and `k8s.nyl/parent-namespace`, and catalog Applications and AppProjects carry `k8s.gitops.nyl/publication-context`. The next publication rewrites them; `diff-tree` and `publish-tree` still read the old publication-context annotation from baselines, with a deprecation warning, until the next publication records the new one"
+author = "@NiklasRosenstein"
+
+[[entries]]
 id = "a0e3429e-015e-4896-81b9-ff3d854f1b26"
 type = "improvement"
 description = "The CI image includes Git LFS with its filters configured system-wide, and when `publish-tree --require-clean` finds changed files tracked by Git LFS while Git finds no `git-lfs` executable or no LFS filter configuration, its error explains how to install and configure Git LFS (`git lfs install --local --skip-repo`), including where CI checks the repository out in a separate container. The files still count as changes. The new [Git LFS in CI](https://niklasrosenstein.github.io/nyl/kubernetes-gitops/workflow/publish/#git-lfs-in-ci) section describes the requirement"
