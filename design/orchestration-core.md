@@ -1587,6 +1587,62 @@ with waits for termination, and the project's `[release] history_limit`. The
 driver's `ApplySettings` come from the declaration alone: `confirm_prune`
 false, no `--append-release`, the history limit from `nyl.toml`.
 
+**Unchanged applies.** Every apply runs, because server-side apply is
+idempotent and repairs drift, but one that changed nothing does not record a
+revision: `helm upgrade` writes a revision even for a no-op, which would churn
+the history and push the useful revisions out of the history limit.
+`ApplySettings::revisions` is `RevisionPolicy::KeepUnchanged` for `nyl apply`
+and the driver, and `Always` for `nyl release rollback`, which is an explicit
+change. The fence and the reservation are unchanged (the reservation is still
+the compare-and-swap, and a foreign owner is still refused before anything is
+written), and the decision is made when the apply completes, from what it did,
+so it never predicts a prune. An apply is unchanged when all of these hold:
+
+- the latest revision stored before the reservation is `Deployed` (a `Failed`
+  or `Rendered` one, which may have applied only some of its resources, is
+  always followed by a new revision);
+- the new revision would record the same manifest (the stored manifest is the
+  digest, compared as bytes), the same resource keys (as a set, so a key that
+  stays tracked for a failed or awaited prune is a difference), the same owner,
+  and a publication of the same repository, branch, and prefix, or none on both
+  sides;
+- every resource applied, and nothing failed to prune or to release field
+  ownership. A pruned object leaves the key set, so a prune is always a
+  difference.
+
+Then `complete` deletes the reservation (it only fenced this apply) instead of
+completing it, and the latest revision stays the current one: it is not
+superseded and no revision is added. The history limit is still enforced on it,
+since it may have been lowered. A delete that reports failure may still have
+happened, so the revision is read back: gone (or another claimant's revision in
+its place, told apart by status and render time) counts as released, and only a
+reservation that is still ours is recorded like any other revision.
+`ReleaseRun::unchanged` carries the result to the report: `nyl apply` prints
+`Release: <name> revision <N> unchanged in namespace <namespace>; no new revision recorded` instead of the deployed
+line. An interruption or failure before completion marks the reserved revision
+`Failed` as before.
+
+Nothing else that differs between runs is compared. The timestamps (`renderedAt`,
+`appliedAt`) say when, not what, so the kept revision keeps the time it was
+deployed; when a unit last reconciled is in its receipt and attestations, not in
+the release state. The publication commit of a direct target changes whenever any
+other part of the target's tree changes, so it must not force a revision, but it
+is read: the reader reports the commit of the latest revision as the running
+revision, and the shared matching requires that commit to be on the publication
+branch, to be matched to a publication, and to be equivalent to the receipt's
+commit by the Release's directory tree and recorded inputs. A kept revision with
+an older commit therefore keeps the Release `accepted` exactly when the older
+commit stands for the new one under those same rules, which the driver
+evaluates with the same functions (`running_publication`, `equivalent`) on the
+branch it fetched, before it reserves the revision (the reservation reads as
+`Mixed` until the apply completes, so the branch is not fetched while it
+stands). The branch is fetched at most once per call, shared with the purge of
+Releases that left the tree. When it does not (a rewritten branch, a
+commit the branch no longer holds, directories or inputs that differ although the
+manifests do not), the apply records a new revision that carries the new commit.
+A revision applied by `nyl apply --target` records no commit, so a direct apply
+always records the first revision that does.
+
 **Several Releases.** Each Release is its own release (own name, own
 revisions, own state), applied one at a time in waves so that a target is
 deterministic and reversible:
@@ -1759,7 +1815,7 @@ anchor visible.
 | Reading | From |
 | --- | --- |
 | **Present** | In a reading that concludes absence (a teardown wait), while a tracked object that its `Delete` option deletes still exists, other than a Namespace phase 1 defers (below); otherwise whenever the release has state. The meaning of "present" for a removal reading is the reader's, as for an Argo CD Application that exists until its finalizer has deleted the workloads |
-| **Running revision** | Latest revision `Deployed`, with a recorded publication commit: `Exact(<commit>)`, which the shared matching resolves against the branch as it resolves an Argo CD revision (the directory tree and recorded inputs of the commit decide, not its identity). A latest revision with no commit (`nyl apply`) is `Unreadable` with the fix to reconcile |
+| **Running revision** | Latest revision `Deployed`, with a recorded publication commit: `Exact(<commit>)`, which the shared matching resolves against the branch as it resolves an Argo CD revision (the directory tree and recorded inputs of the commit decide, not its identity). The commit may be older than the receipt's, because an apply that changed nothing keeps the latest revision ([Applying](#applying)). A latest revision with no commit (`nyl apply`) is `Unreadable` with the fix to reconcile |
 | **Mixed** | Latest revision `Failed` or still `Rendered` (an interrupted or partly failed apply, which applied some of its resources): `Mixed {last: <commit of the latest Deployed revision>, reason}` |
 | **Health** | The rollout status of the workload objects in the latest `Deployed` revision's manifest, below |
 | **Source**, **Deleting** | None, false |
@@ -2035,7 +2091,6 @@ Follow-ups, not part of the first version:
 | --- | --- |
 | A `Dedicated` shared-namespace owner for a direct target: a synthetic Release `<group>/_ns-<name>` to hold its release state (rejected for now) | Before direct targets are recommended for shared namespaces |
 | Cluster drift detection for a direct unit | After the first direct runs |
-| Skipping the write of a revision when nothing changed (the apply itself always runs, because server-side apply is idempotent and self-heals) | After revision churn is measured |
 | A `nyl release delete --keep-resources` that keeps the resources and the state (`--no-purge` keeps the resources and deletes the state) | With the Argo CD to direct procedure |
 
 ## Environment templates and previews
@@ -2597,6 +2652,21 @@ typed form with the next transition that touches the document. The change is
 breaking in one direction: a Nyl 0.6 cannot read a document written in the typed
 form, so every user of a state repository upgrades together.
 
+A directory of documents has no version of its own, such as a checkpoint on a
+run ref, `checkpoints/<n>-<unit>/`: its members are the versioned documents,
+and each is covered as above. A member that can be empty, such as
+`attestations.yaml` and `observations.yaml` beside a receipt, is omitted when
+it is, and a reader ignores members it does not know, so adding an optional
+member needs no version. A checkpoint written before the member existed reads
+as a checkpoint without it. Between Nyl versions, a run ref written by a newer
+Nyl and handled by an older one degrades safely, never wrongly: the older Nyl
+imports the receipt without the attestations and observed values (they are
+pending, as before the members existed), its takeover retires the run ref to
+an evidence ref without the new files, and its `nyl recover` lists a unit
+that the run checkpointed again once per checkpoint. Golden files cover the
+directory's layout (`crates/nyl-state/tests/golden/checkpoint`), including one
+frozen directory per released layout.
+
 | Kind | Location | Content |
 | --- | --- | --- |
 | `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `sourceCommit`, `keepId`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, `state-deleted`, each with time, requester, and reason. A last event `state-deleted` is the deleted marker `nyl state delete` leaves (see [Instances](#instances)) |
@@ -2606,10 +2676,10 @@ form, so every user of a state repository upgrades together.
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
 | `DriftRecord` | `observed/units/<unit>/drift.yaml` | `unit`, `executionKey`, `at`, `result` (`clean`, `drifted` with a summary, or `unknown` with a reason), driver-specific `details` (see [Drift](#drift)) |
-| `ObservationRecord` | `observed/units/<unit>/observations.yaml` | `unit`, `executionKey`, `run` (that produced the receipt), `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
-| `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml` | The latest attestation per name of one scope; see [Attestations](#attestations) |
+| `ObservationRecord` | `observed/units/<unit>/observations.yaml`, and `checkpoints/<n>-<unit>/observations.yaml` on a run ref | `unit`, `executionKey`, `run` (that produced the receipt), `at` (the last read), and `values`: each declared name with `value` and `observedAt` (the last successful read), or `pending` with the driver's reason (see [Observed values](#observed-values)) |
+| `AttestationRecord` | `observed/units/<unit>/attestations.yaml`, `observed/attestations.yaml`, and `checkpoints/<n>-<unit>/attestations.yaml` on a run ref | The latest attestation per name of one scope; see [Attestations](#attestations) |
 | `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
-| `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
+| `Run` | the run ref's first commit, updated per phase; kept on an evidence ref after a takeover retires the run ref | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and `finished`; `created/<unit>.yaml`, the desired document and new uid of every unit the run created, recorded when the unit starts; and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition, with a receipt's artifacts, attestations, and observed values (a unit's checkpoint is written again when the run reads its observed values) |
 | `Signal` | the signal ref | `run`, `unit`, `action` (`confirm-removed` or `hold`), `phase1Commit` (for `confirm-removed`), `by`, `identity`, `reason`, `at`, `from` |
 
 Each unit has one desired file and at most one observed file, holding only the
@@ -2843,9 +2913,10 @@ attestations:
   the unit declares are recorded with `source: {driver: reconcile}` in the
   run's transition commit, for the receipt the execution wrote, and are
   visible to the consumers of a later wave of that run. A declared name it
-  leaves out stays pending. Run checkpoints do not carry them: a receipt that a
-  later run imports from a dead run, or that `nyl recover --accept` adopts, has
-  its attestations pending until `nyl attest` or a new execution records them.
+  leaves out stays pending. The unit's checkpoint carries them next to the
+  receipt, so a receipt that a later run imports from a dead run, or that
+  `nyl recover --accept` adopts, has them with it and keeps their times; see
+  [Runs and leases](#runs-and-leases), item 3.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -2983,6 +3054,12 @@ spec:
   `NYL-OBSERVATION-FAILED`, naming the driver's reason. An observation
   declared with `maxAge` stops resolving once its last successful read is
   older than that; it is then `pending` for its consumers.
+- **Run checkpoints.** A run that reads the observed values of a receipt it
+  executed checkpoints the unit again with the record it holds, next to the
+  receipt, so a run that dies afterwards does not lose them; the run or `nyl
+  recover` that imports the receipt imports the record with it, and a
+  dependent proceeds on it without a read. See [Runs and leases](#runs-and-leases),
+  item 3.
 - **Recording.** A run or `nyl observe` writes the unit's observation record
   (`observed/units/<unit>/observations.yaml`, see
   [State layout](#state-layout)) only when a value or its `pending` state
@@ -3351,7 +3428,7 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 | Ref | Content | Lifetime |
 | --- | --- | --- |
 | `refs/nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
-| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record, carrying the same deadline and units executing as the lease; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before the unit starts; and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit; after a takeover, deleted or retired to an evidence ref by the run that imported it |
+| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record, carrying the same deadline and units executing as the lease; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before the unit starts; and a checkpoint commit per finished unit: its receipt or failure, and the receipt's artifacts, attestations, and observed values | Deleted after its results reach a transition commit; after a takeover, deleted or retired to an evidence ref by the run that imported it |
 | `refs/nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run: teardown confirmations (see [Teardown](#kubernetes-publication-unit)) and holds (see [Deletion](#deletion)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 | `refs/nyl/<env>/evidence/<run-id>` | A retired run ref: the `Run` record and checkpoints of a dead run that are still evidence for a unit with an `uncertain` condition, such as a late checkpoint `nyl recover --accept` may adopt | Created by a takeover in place of the run ref; deleted by a later takeover or by `nyl recover` once no `uncertain` unit needs it |
 
@@ -3396,6 +3473,26 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    its desired document and new uid are recorded under `created/` on the run
    ref, so a crash during its execution leaves the uid behind. A crash loses
    no evidence.
+   - A success's checkpoint carries, next to its receipt, the attestations the
+     driver reported with it (`source: {driver: reconcile}`) and, once the run
+     has read the unit's observed values for that receipt, the observation
+     record. The run checkpoints the unit again with the record after each
+     read that changes it, and the latest checkpoint of a unit on a run ref is
+     its result. Only a receipt this run wrote carries them: a failure or an
+     `uncertain` outcome carries none.
+   - They import only together with that exact receipt. An attestation must
+     name the receipt's execution key and the incarnation (environment, unit,
+     and uid) that executed it; an observation record must name the receipt's
+     execution key and run and that incarnation. A record that names anything
+     else is dropped, as is every record of a checkpoint that is not imported
+     (superseded, late, or of another incarnation). They replace the
+     attestations and observed values of the receipt the import replaces, as
+     a unit's own execution's do.
+   - An imported record keeps its own times (`at`, `observedAt`): the import
+     never makes evidence younger. Age is judged where evidence is consumed,
+     by the same rules as for any record: an observation's `maxAge`, the
+     refresh interval of a later read, and `maxAttestationAge` on promotion
+     paths.
 4. **Takeover.** A run that finds an expired lease replaces it with
    compare-and-swap. After resolving, it imports every leftover run ref. A
    checkpointed result becomes a receipt when the new resolution of that unit
@@ -3565,8 +3662,8 @@ without a condition with `NYL-RECOVER-NOTHING`. Accepting an
 uncertain execution as applied requires outputs, so it is possible only through
 `inspect`, or through a checkpoint that recorded the execution's result:
 `nyl recover -e <env> --unit <u> --accept <run> --reason <text>` adopts the
-receipt, outputs, and artifacts that run checkpointed, typically after a
-runner that lost its lease finished late. It is allowed only when the
+receipt, outputs, artifacts, attestations, and observed values that run
+checkpointed, typically after a runner that lost its lease finished late. It is allowed only when the
 checkpoint's execution key and uid equal the unit's current desired
 document's (`NYL-RECOVER-KEY-MISMATCH` otherwise), refuses a run without a
 checkpointed receipt of the unit (`NYL-RECOVER-CHECKPOINT-MISSING`), and

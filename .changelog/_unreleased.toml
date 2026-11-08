@@ -212,3 +212,15 @@ id = "acca9bc3-f8c7-41a5-bba7-b44f32321cb7"
 type = "feature"
 description = "`nyl observe -e <env>` and `nyl status -e <env>` name consumers in other environments whose observed input changed. A unit that reads an observed value with `fromUnit: {environment, unit, observation}` and resolved another value than its producer's environment records now is `ready` in `nyl status` of its own environment, and `nyl observe` of the producer's environment warns with `NYL-OBSERVATION-CHANGED`, naming it with its environment (`prod/dns`) and the fix `nyl reconcile -e <consumer environment>`. Reading the other environments' state takes no lease and writes nothing there. `nyl get units` shows the same state. A consumer in another environment that was blocked waiting for a value that now has one is named too (`has a value now`) and shown `ready`, judged as its own reconcile resolves the reference"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ecf3a67a-425f-4a0c-baf2-4fc17a27ba6e"
+type = "feature"
+description = "`nyl apply` and the direct reconciler (`KubernetesPublication` with `reconciler: {direct: {}}`) no longer record a release revision when nothing changed: they still apply every resource, which repairs drift, but when the latest revision is `Deployed` and records the same manifest, resource keys, owner, and publication destination, and the apply pruned nothing and failed nothing, that revision stays current and `nyl apply` reports `Release: <name> revision <N> unchanged in namespace <namespace>; no new revision recorded`. A direct apply keeps the older publication commit only while the shared matching still accepts it for the new one (same Release directory and recorded inputs, still on the branch), so `nyl attest` is unaffected. Failed or interrupted revisions, prunes, and `nyl release rollback` always record a revision. Repeated no-op applies no longer push useful revisions out of the history limit"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "9fa47e85-2d1a-4824-89e0-864f42d64cc1"
+type = "fix"
+description = "A run that dies after a unit executed no longer loses what it recorded for the unit's receipt: run checkpoints carry the attestations the unit reported and the observed values the run read, next to the receipt, and the run or `nyl recover` that imports or accepts the receipt imports them with it, keeping their recorded times. Dependents that require attestations or read an observed value proceed without `nyl attest` or `nyl observe`; records that name another execution key, run, or incarnation than the receipt are dropped. The unit's checkpoint on the run ref is written again when the run reads its observed values, and gains optional `attestations.yaml` and `observations.yaml` files"
+author = "@NiklasRosenstein"

@@ -12,6 +12,8 @@
 //! move of the lease to a new commit land in one atomic push, so a run whose
 //! lease was taken over never changes state.
 
+#[cfg(test)]
+mod checkpoint_layout_tests;
 mod initialize;
 mod refs;
 mod tree;
@@ -28,7 +30,8 @@ use nyl_core::orchestration::ports::{
     TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    Attestation, AttestationRecord, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation, StateRecord,
+    Attestation, AttestationRecord, DesiredUnit, Lease, ObservationRecord, ObservedUnit, Run, Signal, StateLocation,
+    StateRecord,
 };
 use nyl_git::GitAuth;
 
@@ -1725,6 +1728,15 @@ fn insert_checkpoint(files: &mut Files, index: usize, checkpoint: &Checkpoint) -
     for (artifact, document) in &checkpoint.artifacts {
         files.insert(format!("{directory}/artifacts/{artifact}.yaml"), to_yaml(document)?);
     }
+    // The receipt's attestations and observed values, as the documents
+    // `observed/units/<unit>/` holds them in. A checkpoint without any has
+    // neither file, like every checkpoint written before they were carried.
+    if let Some(record) = AttestationRecord::from_set(&checkpoint.attestations) {
+        files.insert(format!("{directory}/attestations.yaml"), to_yaml(&record)?);
+    }
+    if let Some(record) = &checkpoint.observations {
+        files.insert(format!("{directory}/observations.yaml"), to_yaml(record)?);
+    }
     Ok(())
 }
 
@@ -1740,7 +1752,14 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
         .filter_map(|path| path.strip_prefix("checkpoints/"))
         .filter_map(|rest| rest.split_once('/').map(|(directory, _)| directory.to_owned()))
         .collect::<Vec<_>>();
-    directories.sort();
+    // In the order they were written: the index counts up past its four
+    // digits, where the names no longer sort as text.
+    directories.sort_by_key(|directory| {
+        let index = directory
+            .split_once('-')
+            .and_then(|(index, _)| index.parse::<usize>().ok());
+        (index, directory.clone())
+    });
     directories.dedup();
     let mut checkpoints = Vec::new();
     for directory in directories {
@@ -1762,10 +1781,21 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
             })
             .map(|(artifact, bytes)| Ok((artifact, from_yaml(name, bytes)?)))
             .collect::<StateResult<BTreeMap<_, _>>>()?;
+        let optional = |file: &str| files.get(&format!("checkpoints/{directory}/{file}"));
+        let attestations = optional("attestations.yaml")
+            .map(|bytes| from_yaml::<AttestationRecord>(name, bytes))
+            .transpose()?
+            .map(AttestationRecord::into_set)
+            .unwrap_or_default();
+        let observations = optional("observations.yaml")
+            .map(|bytes| from_yaml::<ObservationRecord>(name, bytes))
+            .transpose()?;
         checkpoints.push(Checkpoint {
             desired,
             observed,
             artifacts,
+            attestations,
+            observations,
         });
     }
     let created = files

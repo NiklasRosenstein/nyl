@@ -6,9 +6,12 @@
 //!
 //! - `--retry` clears an uncertain condition or a failure; it never
 //!   executes, so the unit becomes ready for the next `reconcile`.
-//! - `--accept <run>` adopts the receipt, outputs, and artifacts `<run>`
-//!   checkpointed for the unit, allowed only when the checkpoint's execution
-//!   key and uid equal the unit's current desired document's.
+//! - `--accept <run>` adopts the receipt, outputs, artifacts, attestations,
+//!   and observed values `<run>` checkpointed for the unit, allowed only when
+//!   the checkpoint's execution key and uid equal the unit's current desired
+//!   document's. The attestations and observed values are adopted only
+//!   together with that receipt ([`checkpointed_evidence`]), keep their own
+//!   times, and replace those of the receipt the accepted one replaces.
 //! - Both refuse a unit without a condition (`NYL-RECOVER-NOTHING`); accept
 //!   refuses a run without such a checkpoint (`NYL-RECOVER-CHECKPOINT-MISSING`)
 //!   or with another key (`NYL-RECOVER-KEY-MISMATCH`).
@@ -30,6 +33,7 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Lifecycle, O
 use serde::Serialize;
 
 use crate::rules::freshness::same_incarnation;
+use crate::rules::takeover::{checkpointed_evidence, CheckpointedEvidence};
 use crate::rules::transitions::{apply, Applied, Event, Refusal};
 
 /// What the operator asked for.
@@ -57,6 +61,9 @@ pub struct Recovery {
     pub observed: ObservedUnit,
     /// The accepted checkpoint's artifact set; `None` leaves artifacts as they are.
     pub artifacts: Option<BTreeMap<String, ArtifactDocument>>,
+    /// The accepted checkpoint's attestations and observed values, which
+    /// replace the unit's; `None` leaves them as they are.
+    pub evidence: Option<CheckpointedEvidence>,
 }
 
 /// Decide `action` for `unit` from its current documents and the run refs.
@@ -113,6 +120,7 @@ pub fn decide(
         Ok(Applied::Changed(document)) => Ok(Recovery {
             observed: *document,
             artifacts,
+            evidence: None,
         }),
         Ok(Applied::Evidence) | Err(Refusal::NothingToRecover) => Err(nothing()),
     };
@@ -167,6 +175,7 @@ pub fn decide(
             // The accepted receipt was produced for the unit's desired
             // document (its uid and key equal the checkpoint's).
             recovery.observed.desired = Some(Box::new(desired.clone()));
+            recovery.evidence = Some(checkpointed_evidence(environment, run, checkpoint).unwrap_or_default());
             Ok(recovery)
         }
     }
@@ -284,6 +293,8 @@ pub fn evidence(unit: &UnitName, desired: Option<&DesiredUnit>, runs: &[RunState
     // Run IDs are UUIDv7: their order is the order the runs started. The
     // sort is stable, so a run's checkpoints keep their order.
     found.sort_by(|left, right| right.run.as_str().cmp(left.run.as_str()));
+    // A checkpoint written again with the values read for its receipt lists once.
+    found.dedup();
     found
 }
 
@@ -337,11 +348,11 @@ mod tests {
         }))
         .unwrap();
         RunState {
-            checkpoints: vec![Checkpoint {
-                desired: desired_numbered("database", uid_number, Some(hex_key(key_digit))),
+            checkpoints: vec![Checkpoint::new(
+                desired_numbered("database", uid_number, Some(hex_key(key_digit))),
                 observed,
-                artifacts: BTreeMap::from([("image".to_owned(), artifact)]),
-            }],
+                BTreeMap::from([("image".to_owned(), artifact)]),
+            )],
             version: format!("v{number}"),
             ..run_state(Run {
                 finished: true,
@@ -376,6 +387,10 @@ mod tests {
             assert_eq!(recovery.observed.condition, None);
             assert_eq!(recovery.observed.receipt, current.receipt);
             assert_eq!(recovery.artifacts, None, "a retry leaves artifacts as they are");
+            assert_eq!(
+                recovery.evidence, None,
+                "a retry leaves attestations and values as they are"
+            );
         }
     }
 
@@ -426,6 +441,84 @@ mod tests {
             recovery.observed.desired.as_deref(),
             Some(&desired_numbered("database", 1, Some(hex_key('b')))),
             "the receipt carries the desired document it was produced for"
+        );
+    }
+
+    /// A run ref of run 2 whose checkpoint of `database` carries what the run
+    /// attested and read for its receipt: `healthy` and an observed `ip`.
+    fn evidenced_run_ref() -> RunState {
+        let mut observed = observed_numbered("database", 1, Some(hex_key('b')));
+        observed.receipt.as_mut().unwrap().run = run_id(2);
+        let mut late = run_ref(2, 1, 'b', observed);
+        let checkpoint = &mut late.checkpoints[0];
+        let receipt = checkpoint.observed.receipt.clone().unwrap();
+        let at: nyl_core::orchestration::time::Timestamp = "2026-01-01T01:30:00Z".parse().unwrap();
+        checkpoint.attestations = BTreeMap::from([(
+            "healthy".to_owned(),
+            nyl_core::orchestration::state::Attestation {
+                api_version: nyl_core::orchestration::state::StateV1,
+                kind: nyl_core::orchestration::state::AttestationKind,
+                name: "healthy".to_owned(),
+                unit: Some(nyl_core::orchestration::state::ArtifactUnit {
+                    environment: env(),
+                    name: database(),
+                    uid: uid_numbered(1),
+                }),
+                execution_key: receipt.execution_key.to_string(),
+                result: nyl_core::orchestration::state::AttestationResult::Pass,
+                at,
+                source: serde_json::json!({"driver": "reconcile"}),
+                reason: None,
+                details: serde_json::Value::Null,
+            },
+        )]);
+        checkpoint.observations = Some(nyl_core::orchestration::state::ObservationRecord {
+            api_version: nyl_core::orchestration::state::StateV1,
+            kind: nyl_core::orchestration::state::ObservationRecordKind,
+            unit: checkpoint.desired.unit.clone(),
+            execution_key: receipt.execution_key.clone(),
+            run: receipt.run.clone(),
+            at,
+            values: BTreeMap::from([(
+                "ip".to_owned(),
+                nyl_core::orchestration::state::RecordedObservation::Value {
+                    value: serde_json::json!("203.0.113.10"),
+                    observed_at: at,
+                },
+            )]),
+        });
+        late
+    }
+
+    /// Catches `--accept` adopting a receipt and leaving the attestations and
+    /// observed values its run recorded for it pending, or adopting ones that
+    /// name another receipt. They replace the unit's own either way, since the
+    /// accepted receipt replaces the one they described.
+    #[test]
+    fn test_accept_adopts_the_evidence_of_the_receipt_and_drops_what_names_another() {
+        let current = uncertain(observed_numbered("database", 1, Some(hex_key('a'))));
+        let accept = RecoverAction::Accept { run: run_id(2) };
+        let late = evidenced_run_ref();
+        let recovery = decide_for(&current, &accept, std::slice::from_ref(&late)).unwrap();
+        let evidence = recovery.evidence.expect("accepting replaces the evidence");
+        assert_eq!(evidence.attestations, late.checkpoints[0].attestations);
+        assert_eq!(
+            evidence.observations, late.checkpoints[0].observations,
+            "with its own times"
+        );
+
+        let mut other = late.clone();
+        other.checkpoints[0]
+            .attestations
+            .get_mut("healthy")
+            .unwrap()
+            .execution_key = hex_key('c').to_string();
+        other.checkpoints[0].observations.as_mut().unwrap().execution_key = hex_key('c');
+        let recovery = decide_for(&current, &accept, &[other]).unwrap();
+        assert_eq!(
+            recovery.evidence,
+            Some(CheckpointedEvidence::default()),
+            "evidence of another receipt is dropped, and the unit's own goes with the replaced receipt"
         );
     }
 

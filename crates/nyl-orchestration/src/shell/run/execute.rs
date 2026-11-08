@@ -255,11 +255,7 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                     message,
                 };
                 if let Ok(Applied::Changed(observed)) = transitions::apply_to(unit, current, event) {
-                    execution.checkpoint = Some(Checkpoint {
-                        desired: unit.clone(),
-                        observed: *observed,
-                        artifacts: job.previous_artifacts,
-                    });
+                    execution.checkpoint = Some(Checkpoint::new(unit.clone(), *observed, job.previous_artifacts));
                 }
             }
             let _ = std::fs::remove_dir_all(&job.directory);
@@ -480,11 +476,16 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     let Ok(Applied::Changed(observed)) = transitions::apply_to(unit, current, event) else {
         return execution;
     };
-    execution.checkpoint = Some(Checkpoint {
-        desired: unit.clone(),
-        observed: *observed,
-        artifacts: execution.artifacts.clone().unwrap_or(job.previous_artifacts),
-    });
+    // A success's checkpoint carries what the driver attested with it, next
+    // to the receipt it is for, so a run that dies after this unit executed
+    // does not lose it.
+    let mut checkpoint = Checkpoint::new(
+        unit.clone(),
+        *observed,
+        execution.artifacts.clone().unwrap_or(job.previous_artifacts),
+    );
+    checkpoint.attestations = execution.attestations.clone().unwrap_or_default();
+    execution.checkpoint = Some(checkpoint);
     execution
 }
 

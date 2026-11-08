@@ -24,3 +24,10 @@ clock passes the deadline, a reconcile that takes over and exits 0 with the
 A run resolves again before each wave, and that resolution phase renews the
 lease for the resolution timeout, so a kill after a resolution leaves its
 30m + 10m deadline rather than the previous wave's.
+
+[`observed-value-before-dependent`](observed-value-before-dependent/scenario.yaml)
+follows the same steps in the
+[`observed-value`](../walkthroughs/observed-value) walkthrough's project: it
+kills the run before the lease update that starts `dns`, after `kubernetes`
+executed and its address was read. The next run imports `kubernetes` with the
+value its dead run read, though its own read fails, and executes `dns` on it.

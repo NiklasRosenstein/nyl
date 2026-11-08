@@ -69,9 +69,9 @@ gitops_scaffold_path = "config"
 
 ## Release history
 
-`nyl apply` and `nyl release rollback` record every revision of a release as a
-Kubernetes Secret in the release namespace. Limit how many revisions each
-release keeps:
+`nyl apply` and `nyl release rollback` record each revision of a release as a
+Kubernetes Secret in the release namespace; an apply that [changed nothing](/nyl/reference/cli/apply/#apply-order-and-progress)
+records none. Limit how many revisions each release keeps:
 
 ```toml
 [release]

@@ -635,11 +635,7 @@ fn test_run_refs_carry_checkpoints_and_signals_until_deleted() {
         let run = run();
         store.write_run(&location, &dev, &run, None).unwrap();
         let (desired, observed) = unit("seed");
-        let checkpoint = Checkpoint {
-            desired,
-            observed,
-            artifacts: BTreeMap::new(),
-        };
+        let checkpoint = Checkpoint::new(desired, observed, BTreeMap::new());
         store.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
         let mut finished = run.clone();
         finished.finished = true;
@@ -844,6 +840,48 @@ fn test_drift_records_observations_and_attestations_round_trip_on_the_observed_r
     }
 }
 
+/// A checkpoint carries the attestations and observed values its run
+/// recorded for the receipt, and a run ref retired to evidence keeps them,
+/// whichever store holds them. Catches evidence that survives only in one
+/// store implementation, or only until the run ref is retired.
+#[test]
+fn test_checkpoints_carry_attestations_and_observed_values_through_retirement() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let run = run();
+        let (desired, observed) = unit("seed");
+        let identity = json!({"environment": "dev", "name": "seed", "uid": UID,
+                              "apiVersion": "units.gitops.nyl/v1", "kind": "Command"});
+        let mut checkpoint = Checkpoint::new(desired, observed, BTreeMap::new());
+        checkpoint.attestations = BTreeMap::from([(
+            "healthy".to_owned(),
+            serde_json::from_value::<Attestation>(json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "healthy",
+                "unit": {"environment": "dev", "name": "seed", "uid": UID}, "executionKey": KEY, "result": "pass",
+                "at": "2026-09-24T10:01:00Z", "source": {"driver": "reconcile"}
+            }))
+            .unwrap(),
+        )]);
+        checkpoint.observations = Some(
+            serde_json::from_value::<ObservationRecord>(json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "ObservationRecord", "unit": identity,
+                "executionKey": KEY, "run": RUN_A, "at": "2026-09-24T10:02:00Z",
+                "values": {"ip": {"value": "203.0.113.10", "observedAt": "2026-09-24T10:02:00Z"}}
+            }))
+            .unwrap(),
+        );
+        store.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
+        let runs = store.coordination(&location, &dev).unwrap().runs;
+        assert_eq!(runs[0].checkpoints, vec![checkpoint.clone()], "{}", subject.name);
+
+        store.retire_run(&location, &dev, &run.run, None).unwrap();
+        let evidence = store.coordination(&location, &dev).unwrap().evidence;
+        assert_eq!(evidence[0].checkpoints, vec![checkpoint], "{}", subject.name);
+    }
+}
+
 #[test]
 fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
     for subject in subjects() {
@@ -855,11 +893,7 @@ fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
         store
             .write_run_created(&location, &dev, &run, std::slice::from_ref(&desired))
             .unwrap();
-        let checkpoint = Checkpoint {
-            desired: desired.clone(),
-            observed,
-            artifacts: BTreeMap::new(),
-        };
+        let checkpoint = Checkpoint::new(desired.clone(), observed, BTreeMap::new());
         store.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
         let coordination = store.coordination(&location, &dev).unwrap();
         assert_eq!(coordination.runs[0].created, vec![desired.clone()], "{}", subject.name);
@@ -934,11 +968,7 @@ fn test_run_ref_writes_follow_a_ref_another_clone_moved() {
     let dev = environment("dev");
     let run = run();
     let (desired, observed) = unit("seed");
-    let checkpoint = Checkpoint {
-        desired,
-        observed,
-        artifacts: BTreeMap::new(),
-    };
+    let checkpoint = Checkpoint::new(desired, observed, BTreeMap::new());
     running.write_run(&location, &dev, &run, Some(&checkpoint)).unwrap();
 
     // Another clone writes the run ref it never wrote, then retires it.
