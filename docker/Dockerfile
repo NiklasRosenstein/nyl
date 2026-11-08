@@ -75,8 +75,12 @@ RUN case "$(cat /BINARY_ARCH)" in \
     && tar -xzf kubeconform.tar.gz -C /usr/local/bin kubeconform
 
 FROM debian:bookworm-slim AS nyl-ci
+# Git LFS and its system-wide filter configuration let Git compare hydrated LFS
+# files with their pointers, so publish-tree --require-clean sees an unchanged
+# checkout as clean even when another container checked it out.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends bash git ca-certificates && \
+    apt-get install -y --no-install-recommends bash git git-lfs ca-certificates && \
+    git lfs install --system --skip-repo && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=helm-bin /usr/local/bin/helm /usr/local/bin/helm

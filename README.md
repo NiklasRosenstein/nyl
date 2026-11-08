@@ -16,7 +16,7 @@ for installation, resource selectors, container helpers, and rendered-manifest t
 - Kubernetes-shaped Cluster and DeploymentTarget configuration
 - `render`, `diff`, and `apply` commands
 - Rendered manifest GitOps workflow for ArgoCD, Flux, or plain `kubectl`
-- CI image with Nyl, Helm, Git, SOPS, and Kyverno CLI
+- CI image with Nyl, Helm, Git, Git LFS, SOPS, and Kyverno CLI
 
 ## Quick Start
 
