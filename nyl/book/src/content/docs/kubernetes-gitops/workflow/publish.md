@@ -28,6 +28,33 @@ intended generation. Unrelated modifications and symbolic-link ancestors fail
 closed. Git credentials and protected-branch rules remain forge configuration.
 
 
+## Git LFS in CI
+
+When the source repository tracks files with Git LFS, such as vendored Helm
+chart archives, the container that runs Nyl needs Git LFS too. Git compares an
+LFS file with its committed pointer through the LFS clean filter. Without it,
+Git compares the hydrated file itself, so an unchanged archive can appear
+modified and `--require-clean` rejects the worktree. This can be intermittent:
+Git trusts its cached file metadata until something, such as a timestamp-only
+change, makes it compare content.
+
+CI systems that check the repository out in a separate container hide the
+missing tool. GitLab Runner's
+[helper container](https://docs.gitlab.com/runner/configuration/advanced-configuration/#helper-image)
+can hydrate LFS files successfully while the job's own image has no Git LFS, and
+rendering still works because Nyl reads the hydrated files. In the job's image:
+
+- install `git-lfs` so it is on the `PATH` Nyl runs Git with, and
+- run `git lfs install --local --skip-repo` in the checkout to configure its
+  filters.
+
+The [Nyl CI image](https://github.com/NiklasRosenstein/nyl/tree/develop/docker)
+includes Git LFS and configures its filters system-wide. Keep `--require-clean`
+enabled: the fix is to make Git see the checkout correctly, and Nyl never
+exempts LFS files from the cleanliness check. When changed files are tracked by
+Git LFS and Git cannot run its filter, the `--require-clean` error says which
+of the two is missing.
+
 See [`publish-tree`](/nyl/reference/cli/publish-tree/) for all flags and the
 [security guide](/nyl/kubernetes-gitops/security/) for ownership and publication
 boundaries.

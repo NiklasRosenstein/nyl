@@ -56,6 +56,10 @@ pub fn worktree_source_state(project_root: &Path, carried: &[PathBuf]) -> Result
 /// index/worktree status codes and paths relative to the repository root.
 /// Paths are quoted and escaped so whitespace and control characters stay unambiguous.
 /// The diagnostic is bounded; git status can show the complete list.
+///
+/// When changed tracked files use Git LFS and Git cannot run its clean
+/// filter, the summary explains how to install it, since such files read as
+/// modified even when their content is unchanged. The files still count as changes.
 pub fn dirty_worktree_summary(project_root: &Path, carried: &[PathBuf]) -> Result<String> {
     const MAX_PATHS: usize = 20;
 
@@ -66,16 +70,81 @@ pub fn dirty_worktree_summary(project_root: &Path, carried: &[PathBuf]) -> Resul
     let mut summary = format!("Dirty files (relative to {}):", root.display());
     for change in changes.iter().take(MAX_PATHS) {
         summary.push_str("\n  ");
-        summary.push_str(change);
+        summary.push_str(&format_change(change));
     }
     if changes.len() > MAX_PATHS {
         write!(summary, "\n  ... and {} more", changes.len() - MAX_PATHS).expect("writing to a String cannot fail");
     }
     summary.push_str("\nRun `git status --short --untracked-files=all` at that repository root for the full status.");
+    if let Some(hint) = lfs_filter_hint(&repository, root, &changes) {
+        summary.push('\n');
+        summary.push_str(&hint);
+    }
     Ok(summary)
 }
 
-fn dirty_worktree_changes(repository: &Repository, project_root: &Path, carried: &[PathBuf]) -> Result<Vec<String>> {
+/// Explains changed tracked LFS files that Git cannot compare through the LFS
+/// clean filter. A failure to inspect Git LFS only omits the hint, so it never
+/// replaces the cleanliness error it accompanies.
+fn lfs_filter_hint(
+    repository: &Repository,
+    worktree: &Path,
+    changes: &[nyl_git::WorktreeStatusEntry],
+) -> Option<String> {
+    let tracked = changes
+        .iter()
+        .filter(|change| !change.untracked)
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
+    let inspect = || -> nyl_git::Result<Option<(usize, nyl_git::LfsFilterProblem)>> {
+        let lfs = nyl_git::lfs_tracked_paths(repository.path(), worktree, &tracked)?;
+        if lfs.is_empty() {
+            return Ok(None);
+        }
+        Ok(nyl_git::lfs_filter_problem(repository.path(), worktree)?.map(|problem| (lfs.len(), problem)))
+    };
+    let (count, problem) = match inspect() {
+        Ok(found) => found?,
+        Err(error) => {
+            tracing::debug!(%error, "Failed to inspect Git LFS for the dirty worktree summary");
+            return None;
+        }
+    };
+    Some(lfs_filter_hint_text(count, problem))
+}
+
+fn lfs_filter_hint_text(count: usize, problem: nyl_git::LfsFilterProblem) -> String {
+    let files = if count == 1 {
+        "1 changed file is".to_string()
+    } else {
+        format!("{count} changed files are")
+    };
+    let reason = match problem {
+        nyl_git::LfsFilterProblem::ExecutableMissing => "Git finds no `git-lfs` executable",
+        nyl_git::LfsFilterProblem::FilterNotConfigured => "Git has no `filter.lfs` clean or process filter configured",
+    };
+    format!(
+        "Hint: {files} tracked by Git LFS, but {reason}. Without the LFS clean filter, Git compares a hydrated file \
+         with its committed pointer, so an unchanged file can appear modified. Install Git LFS where Nyl runs and run \
+         `git lfs install --local --skip-repo` in the checkout. When CI checks the repository out in a separate \
+         container, such as GitLab Runner's helper container, the job's own image needs Git LFS too."
+    )
+}
+
+fn format_change(change: &nyl_git::WorktreeStatusEntry) -> String {
+    format!(
+        "{}{} {:?}",
+        char::from(change.status[0]),
+        char::from(change.status[1]),
+        change.path.to_string_lossy()
+    )
+}
+
+fn dirty_worktree_changes(
+    repository: &Repository,
+    project_root: &Path,
+    carried: &[PathBuf],
+) -> Result<Vec<nyl_git::WorktreeStatusEntry>> {
     let worktree = repository
         .workdir()
         .ok_or_else(|| NylError::config("Source Git repository has no worktree"))?;
@@ -83,20 +152,14 @@ fn dirty_worktree_changes(repository: &Repository, project_root: &Path, carried:
         .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?;
     let carried = carried.iter().map(|path| canonical_file_path(path)).collect::<Vec<_>>();
     let worktree = canonical_file_path(worktree);
-    let mut changes = Vec::new();
-    for entry in &statuses {
-        let carried_file = entry.untracked && carried.contains(&worktree.join(&entry.path));
-        if carried_file || is_project_cache_status(repository, project_root, &entry.path) {
-            continue;
-        }
-        changes.push(format!(
-            "{}{} {:?}",
-            char::from(entry.status[0]),
-            char::from(entry.status[1]),
-            entry.path.to_string_lossy()
-        ));
-    }
-    changes.sort();
+    let mut changes = statuses
+        .into_iter()
+        .filter(|entry| {
+            let carried_file = entry.untracked && carried.contains(&worktree.join(&entry.path));
+            !carried_file && !is_project_cache_status(repository, project_root, &entry.path)
+        })
+        .collect::<Vec<_>>();
+    changes.sort_by_cached_key(format_change);
     Ok(changes)
 }
 
@@ -290,7 +353,11 @@ mod tests {
         index.write().unwrap();
         let carried = [project.join("carried.json")];
 
-        let changes = dirty_worktree_changes(&repository, &project, &carried).unwrap();
+        let changes = dirty_worktree_changes(&repository, &project, &carried)
+            .unwrap()
+            .iter()
+            .map(format_change)
+            .collect::<Vec<_>>();
         assert_eq!(
             changes,
             [" M \"nyl.toml\"", "?? \"untracked note.txt\"", "A  \"staged.txt\""]
@@ -298,6 +365,37 @@ mod tests {
         let summary = dirty_worktree_summary(&project, &carried).unwrap();
         assert!(summary.contains(&format!("relative to {}", repository.workdir().unwrap().display())));
         assert!(summary.contains("git status --short --untracked-files=all"));
+    }
+
+    #[test]
+    fn test_dirty_worktree_summary_keeps_lfs_changes_and_explains_a_missing_filter() {
+        let (directory, repository) = committed_worktree();
+        let root = directory.path();
+        std::fs::write(root.join(".gitattributes"), "*.tgz filter=lfs -text\n").unwrap();
+        std::fs::write(root.join("chart.tgz"), "pointer").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = Signature::now("Test", "test@example.invalid").unwrap();
+        let head = repository.head().unwrap().peel_to_commit().unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "LFS", &tree, &[&head])
+            .unwrap();
+        std::fs::write(root.join("chart.tgz"), "hydrated chart").unwrap();
+        std::fs::write(root.join("notes.txt"), "untracked").unwrap();
+
+        let summary = dirty_worktree_summary(root, &[]).unwrap();
+        assert!(summary.contains(r#" M "chart.tgz""#), "{summary}");
+        // The hint depends on whether Git can run the LFS filter here, but it
+        // counts only tracked LFS changes and always carries the fix.
+        let workdir = repository.workdir().unwrap();
+        match nyl_git::lfs_filter_problem(repository.path(), workdir).unwrap() {
+            Some(problem) => assert!(summary.ends_with(&lfs_filter_hint_text(1, problem)), "{summary}"),
+            None => assert!(!summary.contains("Git LFS"), "{summary}"),
+        }
+        assert!(lfs_filter_hint_text(1, nyl_git::LfsFilterProblem::ExecutableMissing)
+            .contains("git lfs install --local --skip-repo"));
     }
 
     #[test]

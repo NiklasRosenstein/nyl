@@ -27,6 +27,10 @@ rendering. Its error lists up to 20 dirty files with Git index/worktree status
 codes and repository-relative paths, and reports how many more were omitted.
 It identifies the repository root so the full status can be inspected even when
 Nyl is invoked from a project subdirectory.
+When changed tracked files use Git LFS and Git finds no `git-lfs` executable
+or no LFS filter configuration, the error adds a hint to install Git LFS and run
+`git lfs install --local --skip-repo`; the files still count as changes. See
+[Git LFS in CI](/nyl/kubernetes-gitops/workflow/publish/#git-lfs-in-ci).
 
 `--allow-dirty` skips the clean-checkout comparison and publishes the
 working-tree render explicitly; the ownership index records `dirty: true` and
