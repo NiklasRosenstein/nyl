@@ -59,20 +59,25 @@ environment. See [Breaking a lease](/nyl/orchestration/recovery/#breaking-a-leas
 
 Every state document carries the format version of its kind in `apiVersion`.
 A Nyl release reads the versions it knows and rejects a newer one with an
-instruction to upgrade, so an environment's state is never misread. Documents
-written by an earlier release are migrated when they are read and written in
-the current version by the next run that changes them; nothing rewrites state
-in bulk. A migration is one way: once a run with a release that writes a newer
-version has changed a unit, older releases can no longer read that unit's
-documents, so run one Nyl release against an environment's state, in CI and on
-workstations alike.
+instruction to upgrade, so an environment's state is never misread.
 
-The desired and observed documents of a unit are at `gitops.nyl/v2`, which
-stores what a blocked unit waits for as data (the producer, with its
-environment, and the attestation or observed value) rather than as text. Their
-JSON Schemas are published under `gitops.nyl/v2/state/`; the `gitops.nyl/v1/state/`
-schemas of the same two kinds stay published for the older documents Nyl still
-reads.
+A release changes a format in one of two ways: it adds a version and a
+migration, or it changes the version in place. The change that stores what a
+blocked unit waits for as data changed `gitops.nyl/v1` in place. The desired
+document of a unit (and the copy of it that the observed document embeds) now
+records each blocked reason as a typed `blocker` (the producer, with its
+environment, and the attestation, observed value, or planned change it waits
+for) instead of as text under `reason`.
+
+- This Nyl still reads state written by Nyl 0.6, text reasons included, and
+  writes the typed form with the next run that changes a document. Nothing
+  rewrites state in bulk.
+- Nyl 0.6 cannot read a document written in the typed form. Once a run of this
+  release has written a blocked unit, `nyl` 0.6 fails on that environment's
+  state. Every user of a state repository, in CI and on workstations alike, has
+  to upgrade together.
+- The `gitops.nyl/v1/state/` JSON Schemas of the desired and observed
+  documents describe the typed form.
 
 ## Preview environments
 

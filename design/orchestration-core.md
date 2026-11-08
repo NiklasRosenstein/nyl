@@ -2583,16 +2583,19 @@ published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form (RFC 8785), so formatting never
 affects them. An integer beyond ±(2^53 - 1), which RFC 8785 would round to a
 double, is written with its exact decimal digits, so two values never share a
-digest. The version in `apiVersion` is the format version of each kind:
-a format change adds a version with a migration from the previous one, golden
-files cover every version, and a reader rejects a version it does not know.
-`DesiredUnit` and `ObservedUnit` are at `gitops.nyl/v2`; every other kind is
-at `gitops.nyl/v1`. A `gitops.nyl/v1` document of those two kinds (what Nyl
-0.6 wrote) is read through its migration, which types each stored blocked
-reason once from its text, and is written back as `gitops.nyl/v2` by the next
-transition that touches it. Text it does not recognize becomes an `other`
-blocker with the text unchanged. A Nyl that predates `v2` rejects such a
-document with an instruction to upgrade.
+digest. The version in `apiVersion` is the format version of each kind, golden
+files cover every version, and a reader rejects a version it does not know. A
+format change either bumps the version with a migration from the previous one
+or changes the format in place; which one is decided for each change with the
+user, never by the change alone. Every kind is at `gitops.nyl/v1`. The change
+to the stored blocked reasons of `DesiredUnit` (and so of the desired copy an
+`ObservedUnit` embeds) changed `v1` in place, by that decision: `readiness.reasons`
+stores a typed `blocker` where Nyl 0.6 stored the `reason` text. This Nyl still
+reads the text form, typing each reason once from its wording (text it does not
+recognize becomes an `other` blocker with the text unchanged), and writes the
+typed form with the next transition that touches the document. The change is
+breaking in one direction: a Nyl 0.6 cannot read a document written in the typed
+form, so every user of a state repository upgrades together.
 
 | Kind | Location | Content |
 | --- | --- | --- |

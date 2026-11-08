@@ -43,7 +43,6 @@ pub mod driver;
 pub mod graph;
 pub mod ids;
 pub mod instance;
-pub mod migration;
 pub mod ports;
 pub mod progress;
 pub mod state;

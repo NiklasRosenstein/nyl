@@ -24,7 +24,7 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunI
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::{
     Deletion, DeletionIntent, DeletionReason, DesiredUnit, DesiredUnitKind, Lifecycle, ObservedUnit, ObservedUnitKind,
-    Readiness, StateV2, TeardownProgress, TeardownWaiting, UnitIdentity,
+    Readiness, StateV1, TeardownProgress, TeardownWaiting, UnitIdentity,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -140,7 +140,7 @@ pub fn spec() -> Value {
 
 pub fn desired(spec: Value, key: ExecutionKey) -> DesiredUnit {
     DesiredUnit {
-        api_version: StateV2,
+        api_version: StateV1,
         kind: DesiredUnitKind,
         unit: UnitIdentity {
             environment: EnvironmentName::new("dev").unwrap(),
@@ -291,7 +291,7 @@ pub fn deleting(unit: DesiredUnit) -> DesiredUnit {
 /// The observed file of a unit whose teardown waits after `phase1`.
 pub fn waiting_on(unit: &DesiredUnit, phase1: &str) -> ObservedUnit {
     ObservedUnit {
-        api_version: nyl_core::orchestration::state::StateV2,
+        api_version: nyl_core::orchestration::state::StateV1,
         operator_modified: None,
         retry: None,
         kind: ObservedUnitKind,

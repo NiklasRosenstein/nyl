@@ -319,7 +319,7 @@ mod tests {
     };
     use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, Uid, UnitAddress};
     use nyl_core::orchestration::state::{
-        DeletionIntent, DeletionReason, DesiredUnit, DesiredUnitKind, Lifecycle, Readiness, StateV2, UnitIdentity,
+        DeletionIntent, DeletionReason, DesiredUnit, DesiredUnitKind, Lifecycle, Readiness, StateV1, UnitIdentity,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -334,7 +334,7 @@ mod tests {
 
     fn desired(name: &str, spec: Value) -> DesiredUnit {
         DesiredUnit {
-            api_version: StateV2,
+            api_version: StateV1,
             kind: DesiredUnitKind,
             unit: UnitIdentity {
                 environment: EnvironmentName::new("dev").unwrap(),

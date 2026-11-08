@@ -766,7 +766,7 @@ mod tests {
     }
     use nyl_core::orchestration::driver::{DriverOperation, SourceRoot, ToolRunner};
     use nyl_core::orchestration::ids::{CommitId, ExecutionKey, UnitAddress, UnitName};
-    use nyl_core::orchestration::state::{DesiredUnitKind, Lifecycle, Readiness, StateV2, UnitIdentity};
+    use nyl_core::orchestration::state::{DesiredUnitKind, Lifecycle, Readiness, StateV1, UnitIdentity};
     use std::sync::Mutex;
 
     #[test]
@@ -851,7 +851,7 @@ mod tests {
     }
     fn unit(spec: Value) -> DesiredUnit {
         DesiredUnit {
-            api_version: StateV2,
+            api_version: StateV1,
             kind: DesiredUnitKind,
             unit: UnitIdentity {
                 environment: EnvironmentName::new("dev").unwrap(),

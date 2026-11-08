@@ -9,9 +9,13 @@
 //! Every document carries `apiVersion` and `kind`, and the version in
 //! `apiVersion` is the format version of that kind. Readers reject a version
 //! or kind they do not know, through the marker types below, so a newer
-//! format is never misread. A format change adds a version with a migration;
-//! golden files under `crates/nyl-core/tests/golden/state/` cover every kind
-//! and version.
+//! format is never misread. A format change either adds a version with a
+//! migration or changes the format in place, decided for each change with the
+//! user; golden files under `crates/nyl-core/tests/golden/state/` cover every
+//! kind and version. The blocked reasons of `DesiredUnit` changed in place in
+//! `gitops.nyl/v1`: they are written typed ([`super::blocked::Blocker`]), and
+//! the reader still accepts the text form of earlier releases
+//! ([`super::blocked::BlockedReason`]).
 //!
 //! Lifecycle and conditions are enums that carry their data, so every state
 //! a unit can be in is spelled out and exhaustive matching forces each new
@@ -26,7 +30,7 @@ use serde_json::Value;
 use super::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, JsonPointer, RunId, Uid, UnitName};
 use super::ports::StateSide;
 use super::time::Timestamp;
-use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS, STATE_FORMAT_V2};
+use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS};
 
 pub use super::blocked::BlockedReason;
 
@@ -83,19 +87,6 @@ constant_marker!(
     API_VERSION_GITOPS,
     |version| format_args!(
         "unsupported state format {version:?}; this Nyl reads {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
-    )
-);
-
-constant_marker!(
-    /// The second format version of the state kinds that changed since
-    /// `gitops.nyl/v1`, `DesiredUnit` and `ObservedUnit`. They read
-    /// `gitops.nyl/v1` through [`super::migration`] and always write this
-    /// version; any other `apiVersion` fails, so a reader never misreads a
-    /// newer format.
-    StateV2,
-    STATE_FORMAT_V2,
-    |version| format_args!(
-        "unsupported state format {version:?}; this Nyl reads {STATE_FORMAT_V2} for this kind and migrates {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
     )
 );
 
@@ -336,16 +327,13 @@ pub struct UnitIdentity {
 
 /// `desired/units/<unit>.yaml`.
 ///
-/// Format `gitops.nyl/v2` stores blocked reasons typed
-/// ([`super::blocked::Blocker`]); a `gitops.nyl/v1` document is migrated when
-/// it is read ([`super::migration`]).
+/// Its blocked reasons are stored typed ([`super::blocked::Blocker`]); the
+/// text form that releases before this change wrote still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-// The derives describe the current format; the `Serialize` and `Deserialize`
-// impls below wrap them, the reader through the migration.
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredUnit {
     #[serde(rename = "apiVersion")]
-    pub api_version: StateV2,
+    pub api_version: StateV1,
     pub kind: DesiredUnitKind,
     pub unit: UnitIdentity,
     pub lifecycle: Lifecycle,
@@ -379,33 +367,6 @@ pub struct DesiredUnit {
     pub readiness: Readiness,
 }
 
-/// Implements `Serialize` and `Deserialize` for a kind that reads older
-/// format versions: `Serialize` is the derive's, and `Deserialize` buffers the
-/// document, migrates it to the current version, and reads that.
-macro_rules! migrated_kind {
-    ($name:ident, $migrate:path) => {
-        impl Serialize for $name {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-                $name::serialize(self, serializer)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-                let mut document = Value::deserialize(deserializer)?;
-                $migrate(&mut document).map_err(serde::de::Error::custom)?;
-                // The path names the field of the document that failed.
-                let mut track = serde_path_to_error::Track::new();
-                $name::deserialize(serde_path_to_error::Deserializer::new(document, &mut track))
-                    .map_err(|error| serde::de::Error::custom(format_args!("{}: {error}", track.path())))
-            }
-        }
-    };
-}
-
-migrated_kind!(DesiredUnit, super::migration::desired_unit);
-migrated_kind!(ObservedUnit, super::migration::observed_unit);
-
 impl DesiredUnit {
     /// A held marker: the desired file `nyl hold` writes for a unit with no
     /// desired document in state (never reconciled in the environment). It
@@ -417,7 +378,7 @@ impl DesiredUnit {
     /// "Holds freeze a unit".
     pub fn held_marker(environment: EnvironmentName, name: UnitName, hold: Hold) -> Self {
         Self {
-            api_version: StateV2,
+            api_version: StateV1,
             kind: DesiredUnitKind,
             unit: UnitIdentity {
                 environment,
@@ -613,16 +574,11 @@ pub enum Readiness {
 }
 
 /// `observed/units/<unit>.yaml`: the latest receipt and condition.
-///
-/// Format `gitops.nyl/v2` embeds a `gitops.nyl/v2` [`DesiredUnit`]; a
-/// `gitops.nyl/v1` document is migrated when it is read
-/// ([`super::migration`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-// See `DesiredUnit`: the impls below wrap the derives with the migration.
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ObservedUnit {
     #[serde(rename = "apiVersion")]
-    pub api_version: StateV2,
+    pub api_version: StateV1,
     pub kind: ObservedUnitKind,
     pub unit: UnitIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1225,8 +1181,7 @@ pub struct Signal {
 }
 
 /// JSON Schemas of the state documents, published with the resource
-/// references under `gitops.nyl/v1/state/`, or `gitops.nyl/v2/state/` for the
-/// kinds whose current format is `gitops.nyl/v2`.
+/// references under `gitops.nyl/v1/state/`.
 pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
     fn schema<T: JsonSchema>(title: &str) -> serde_json::Value {
         let mut schema = serde_json::to_value(schemars::schema_for!(T)).expect("schemas serialize");
@@ -1240,8 +1195,12 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
             "environment-record",
             schema::<EnvironmentRecord>("EnvironmentRecord"),
         ),
-        (STATE_FORMAT_V2, "desired-unit", schema::<DesiredUnit>("DesiredUnit")),
-        (STATE_FORMAT_V2, "observed-unit", schema::<ObservedUnit>("ObservedUnit")),
+        (API_VERSION_GITOPS, "desired-unit", schema::<DesiredUnit>("DesiredUnit")),
+        (
+            API_VERSION_GITOPS,
+            "observed-unit",
+            schema::<ObservedUnit>("ObservedUnit"),
+        ),
         (API_VERSION_GITOPS, "artifact", schema::<ArtifactDocument>("Artifact")),
         (API_VERSION_GITOPS, "drift-record", schema::<DriftRecord>("DriftRecord")),
         (

@@ -52,8 +52,8 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, RenderedSource, RenderedUnit};
 use nyl_core::orchestration::state::{
     BlockedReason, DeletionIntent, DeletionReason, DesiredUnit, DesiredUnitKind, EnvironmentRecord,
-    EnvironmentRecordKind, HoldPending, Lifecycle, ObservedUnit, Readiness, Receipt, SourceChoice, StateV1, StateV2,
-    Tombstone, UnitIdentity,
+    EnvironmentRecordKind, HoldPending, Lifecycle, ObservedUnit, Readiness, Receipt, SourceChoice, StateV1, Tombstone,
+    UnitIdentity,
 };
 use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::units::{CommonUnitFields, DeletionPolicy, KindSupport};
@@ -462,7 +462,7 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
             scopes.push((scope, name.clone()));
         }
         let document = |uid: Option<Uid>| DesiredUnit {
-            api_version: StateV2,
+            api_version: StateV1,
             kind: DesiredUnitKind,
             unit: UnitIdentity {
                 environment: environment.clone(),
@@ -951,7 +951,7 @@ mod tests {
 
     fn stored(unit: &str, kind: &str, uid_number: u64, spec: Value) -> DesiredUnit {
         DesiredUnit {
-            api_version: StateV2,
+            api_version: StateV1,
             kind: DesiredUnitKind,
             unit: UnitIdentity {
                 environment: EnvironmentName::new("dev").unwrap(),

@@ -82,21 +82,162 @@
       ],
       "type": "object"
     },
+    "AttestationWait": {
+      "description": "Whether a required attestation that does not pass has not been recorded\nfor the producer's current receipt, or has been recorded as failing.",
+      "enum": [
+        "pending",
+        "failing"
+      ],
+      "type": "string"
+    },
     "BlockedReason": {
       "additionalProperties": false,
+      "description": "One blocked location of a desired document and what it waits for.\n\nIt is stored as `{pointer, blocker}`. A document written by a release\nbefore the typed form stores `{pointer, reason}` with the text instead,\nand reads as the blocker [`Blocker::from_stored_text`] makes of it; that\nform is read, never written.",
       "properties": {
+        "blocker": {
+          "$ref": "#/$defs/Blocker"
+        },
         "pointer": {
           "description": "Location of the unresolved reference, or empty for a `dependsOn` entry.",
-          "type": "string"
-        },
-        "reason": {
           "type": "string"
         }
       },
       "required": [
-        "reason"
+        "blocker"
       ],
       "type": "object"
+    },
+    "Blocker": {
+      "description": "What one blocked reference or `dependsOn` entry waits for.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The producer has no current receipt yet.",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "no-current-receipt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The producer lacks a required attestation for its current receipt.",
+          "properties": {
+            "name": {
+              "description": "The attestation's name.",
+              "type": "string"
+            },
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "state": {
+              "$ref": "#/$defs/AttestationWait"
+            },
+            "type": {
+              "const": "attestation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer",
+            "name",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The producer's observed value has no usable value yet.",
+          "properties": {
+            "name": {
+              "description": "The observed value's name.",
+              "type": "string"
+            },
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "observation",
+              "type": "string"
+            },
+            "why": {
+              "description": "Why the value is pending, in the driver's words.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer",
+            "name",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A multi-environment run waits for the producer's new receipt, because\nthe plan that precedes it would change the producer.",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "planned-change",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A multi-environment run waits for a producer whose environment failed\nor is itself waiting in this run.",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "type": {
+              "const": "producer-unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Anything else, such as a fenced incarnation, which only its text\ndescribes.",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "other",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ChangeDigest": {
       "description": "A digest of the changes a plan would apply, which `bind: plan`\napprovals authorize: `sha256:` and 64 lowercase hex digits.",
@@ -375,7 +516,7 @@
     },
     "DesiredUnit": {
       "additionalProperties": false,
-      "description": "`desired/units/<unit>.yaml`.",
+      "description": "`desired/units/<unit>.yaml`.\n\nIts blocked reasons are stored typed ([`super::blocked::Blocker`]); the\ntext form that releases before this change wrote still reads.",
       "properties": {
         "apiVersion": {
           "$ref": "#/$defs/StateV1"
@@ -759,6 +900,30 @@
       "required": [
         "by",
         "at"
+      ],
+      "type": "object"
+    },
+    "ProducerRef": {
+      "additionalProperties": false,
+      "description": "The producer a blocker names: a unit of the consumer's own environment, or\nof another one.\n\nIts [`Display`](fmt::Display) form is how every blocked reason names the\nproducer, `<unit>` or `<environment>/<unit>`, so a unit of another\nenvironment is never spelled two ways.",
+      "properties": {
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The producer's environment; absent for a unit of the consumer's own."
+        },
+        "unit": {
+          "$ref": "#/$defs/UnitName"
+        }
+      },
+      "required": [
+        "unit"
       ],
       "type": "object"
     },

@@ -2094,7 +2094,7 @@ fn adopt_tombstones(
             observed.insert(
                 name.clone(),
                 ObservedUnit {
-                    api_version: nyl_core::orchestration::state::StateV2,
+                    api_version: nyl_core::orchestration::state::StateV1,
                     operator_modified: None,
                     retry: None,
                     kind: nyl_core::orchestration::state::ObservedUnitKind,

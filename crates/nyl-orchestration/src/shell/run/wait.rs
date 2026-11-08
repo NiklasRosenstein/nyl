@@ -194,7 +194,7 @@ mod tests {
     use nyl_core::orchestration::ports::{
         Clock, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository, SourceResolver, SourceResult,
     };
-    use nyl_core::orchestration::state::{DesiredUnitKind, Lifecycle, Readiness, SignalAction, StateV2, UnitIdentity};
+    use nyl_core::orchestration::state::{DesiredUnitKind, Lifecycle, Readiness, SignalAction, StateV1, UnitIdentity};
     use serde_json::json;
 
     use super::*;
@@ -291,7 +291,7 @@ mod tests {
     fn unit(teardown_wait: &serde_json::Value) -> DesiredUnit {
         let spec = json!({"target": "dev", "teardownWait": teardown_wait});
         DesiredUnit {
-            api_version: StateV2,
+            api_version: StateV1,
             kind: DesiredUnitKind,
             unit: UnitIdentity {
                 environment: dev(),

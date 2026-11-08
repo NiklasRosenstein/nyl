@@ -20,18 +20,54 @@ readiness:
   state: blocked
   reasons:
   - pointer: /values/host
-    reason: network has no current receipt
+    blocker:
+      type: no-current-receipt
+      producer:
+        unit: network
   - pointer: /dependsOn/0
-    reason: infra/network has no current receipt
+    blocker:
+      type: no-current-receipt
+      producer:
+        environment: infra
+        unit: network
   - pointer: /dependsOn/1
-    reason: attestation healthy of infra/network is pending
+    blocker:
+      type: attestation
+      producer:
+        environment: infra
+        unit: network
+      name: healthy
+      state: pending
   - pointer: /dependsOn/2
-    reason: attestation accepted of network is failing
+    blocker:
+      type: attestation
+      producer:
+        unit: network
+      name: accepted
+      state: failing
   - pointer: /values/ip
-    reason: "observation ingressIp of infra/kubernetes is pending: field-not-set: /status/loadBalancer/ingress/0/ip"
+    blocker:
+      type: observation
+      producer:
+        environment: infra
+        unit: kubernetes
+      name: ingressIp
+      why: "field-not-set: /status/loadBalancer/ingress/0/ip"
   - pointer: /values/dns
-    reason: infra/dns has a planned change; waiting for its new receipt
+    blocker:
+      type: planned-change
+      producer:
+        environment: infra
+        unit: dns
   - pointer: /dependsOn/3
-    reason: infra/network waits because its producer environment failed or is waiting
-  - reason: its retained tombstone of kind Command is dropped first
-  - reason: the deleting incarnation of app (kind Command) is removed first
+    blocker:
+      type: producer-unavailable
+      producer:
+        environment: infra
+        unit: network
+  - blocker:
+      type: other
+      message: its retained tombstone of kind Command is dropped first
+  - blocker:
+      type: other
+      message: the deleting incarnation of app (kind Command) is removed first
