@@ -108,9 +108,9 @@ Cluster’s <code dir="auto">live.context</code> and the kubeconfig it admits as
 server must be the one the Cluster declares.</p>
 <p>Releases apply one at a time in waves: Releases that render CustomResourceDefinitions
 or APIServices come first. Each Release is prepared when its wave comes, so a
-custom resource without a namespace resolves after its CRD applied, unless the CRD
-is in the same Release or recorded by the target Cluster (vendored CRDs included),
-which declare the scope first; see
+custom resource without a namespace takes its scope from a CRD of any Release of the
+target or from the target Cluster’s recorded capabilities (vendored CRDs included)
+before the live cluster is asked; see
 <a href="/nyl/pr-preview/pr-260/reference/cli/apply/#which-kinds-are-namespaced">which kinds are namespaced</a>. A Release applied after
 another that registered kinds waits, within the unit’s deadline, until the cluster
 serves the kinds that Release registered and this one uses; it does not wait for

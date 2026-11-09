@@ -151,7 +151,8 @@ kinds are served once it is Established, so the custom resources apply after the
 CRD is Established; the CRDs apply first, so the wait is usually already over, and
 nothing waits for a CRD the cluster already serves. Only the kinds a CRD declares
 are waited for, and, like Argo CD, Nyl does not wait for the backend of a CRD’s
-conversion webhook. When several documents describe the same object
+conversion webhook. A legacy <code dir="auto">v1beta1</code> CRD that lists no <code dir="auto">versions</code> still declares
+its scope, but names no kind to wait for, so nothing waits for it. When several documents describe the same object
 (the same group, kind, namespace, and name, in any API version; cluster-scoped
 objects ignore a namespace), only the last one is applied and recorded. A resource
 that fails to apply does not stop the others; the release is recorded as failed
@@ -204,23 +205,36 @@ Nyl uses aggregated API discovery (two requests) when the API server supports it
 and falls back to per-group discovery otherwise; the timing line names the mode.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="which-kinds-are-namespaced">Which kinds are namespaced</h2><a class="sl-anchor-link" href="#which-kinds-are-namespaced"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Which kinds are namespaced”</span></a></div>
 <p>A resource that sets no namespace takes the destination namespace when its kind is
-namespaced. Nyl decides that scope in one fixed order, the same for <code dir="auto">apply</code>,
+namespaced. One resolver decides that scope, in one fixed order, for <code dir="auto">apply</code>,
 <a href="/nyl/pr-preview/pr-260/reference/cli/diff/"><code dir="auto">diff</code></a>, <code dir="auto">release rollback</code>, and the direct reconciler, and
 for the Application and AppProject Nyl derives for a target:</p>
 <ol>
-<li>The CustomResourceDefinitions in the manifest. A CRD names its kind’s scope, and
-counts when it serves a version. Where two CRD documents declare one kind, the
-later one wins.</li>
-<li>With a DeploymentTarget (<code dir="auto">--target</code>, or the target the project selects), the
-target Cluster’s recorded Kubernetes capabilities, which include the CRDs
-vendored by <a href="/nyl/pr-preview/pr-260/kubernetes-gitops/resource-guides/cluster/"><code dir="auto">nyl capture cluster --crds</code></a>.</li>
-<li>The live cluster, only for a kind nothing above knows. Without GitOps
-configuration, <code dir="auto">--context</code> selects the cluster and there is no step 2.</li>
+<li>The CustomResourceDefinitions of the Release being applied (the manifest’s CRDs).
+A CRD names its kind’s scope, and counts when it serves a version: a CRD that
+lists versions but serves none declares nothing. Where two CRD documents declare
+one kind, the later one wins. The direct reconciler and the tree also know the CRDs
+of the other Releases of the target.</li>
+<li>With a DeploymentTarget (<code dir="auto">--target</code>, or the target the project selects), the target
+Cluster’s recorded Kubernetes capabilities, which include the CRDs vendored by
+<a href="/nyl/pr-preview/pr-260/kubernetes-gitops/resource-guides/cluster/"><code dir="auto">nyl capture cluster --crds</code></a>.</li>
+<li>The built-in Kubernetes kinds, whose scope is fixed.</li>
+<li>The live cluster, only for a kind nothing above knows, and only for <code dir="auto">nyl apply</code>,
+<code dir="auto">diff</code>, and <code dir="auto">release rollback</code>: the tree and AppProject derivation never ask a
+cluster. Without GitOps configuration, <code dir="auto">--context</code> selects the cluster and there is
+no step 2.</li>
 </ol>
 <p>The result therefore follows what is declared, and a custom resource whose CRD is
 new in the manifest, or vendored but not yet installed, gets its namespace before
-anything is applied. A kind that none of these knows, such as one an APIService in
-the same manifest will serve, keeps no namespace: set <code dir="auto">metadata.namespace</code> on it.</p>
+anything is applied. A stale vendored snapshot takes precedence over the live cluster,
+so a kind whose scope changed in the cluster keeps the vendored scope until
+<code dir="auto">nyl capture cluster &#x3C;name> --crds</code> refreshes the snapshot. When a scope the Cluster
+records differs from what the connected cluster reports, <code dir="auto">apply</code>, <code dir="auto">diff</code>, and
+<code dir="auto">release rollback</code> still use the recorded scope and warn once per kind with
+<code dir="auto">NYL-KUBERNETES-SCOPE-MISMATCH</code>; its fix is to re-run
+<code dir="auto">nyl capture cluster &#x3C;name> --crds</code> and commit the result. The direct reconciler
+reports the same warning in its run. A kind that none of these
+knows, such as one an APIService in the same manifest will serve, keeps no namespace:
+set <code dir="auto">metadata.namespace</code> on it.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="examples">Examples</h2><a class="sl-anchor-link" href="#examples"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Examples”</span></a></div>
 <div class="sl-heading-wrapper level-h3"><h3 id="basic-apply">Basic Apply</h3><a class="sl-anchor-link" href="#basic-apply"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Basic Apply”</span></a></div>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># Apply a manifest file</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">apply</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">manifest.yaml</span></div></div><div class="ec-line"><div class="code">
