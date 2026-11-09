@@ -84,6 +84,7 @@ fn prepare(args: &ExecArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandO
         mode: RunMode::Reconcile,
         lifecycle: LifecycleOptions::default(),
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: args.reason.as_deref(),
     })?;

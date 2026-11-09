@@ -19,6 +19,10 @@
 //!   units to execute although they are current; a non-converging named
 //!   unit follows the approval rule above and never fails the run.
 //! - A new receipt drops the unit's drift record in the same commit.
+//! - `nyl reconcile --detect-drift` lays the records its own check found
+//!   over the snapshot's before it selects, so the rules above decide the
+//!   repair of a unit found drifted in the same run as they would in the next
+//!   ([`super::checks::reconcile_targets`] names the units it checks).
 //!
 //! - `nyl status` reports a current unit whose latest drift record of
 //!   its receipt is `drifted` as `drifted` ([`status_drift`]), whatever the

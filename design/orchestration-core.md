@@ -1821,9 +1821,8 @@ follow Argo CD's gitops-engine (`pkg/sync/hook`, `pkg/sync/sync_tasks.go`,
   state itself is unchanged: the manifest is the same text and the tracked keys are a
   subset. One value is new in the unit state schemas, though: the finding code
   `NYL-KUBERNETES-HOOK-IGNORED` joins the `Code` enumeration of
-  `gitops.nyl/v1/state/desired-unit` and `observed-unit`, which a reader that predates it
-  rejects. That is an in-place change to `gitops.nyl/v1`, pending the decision to bump or
-  break the format, and its wording is to be settled with it.
+  `gitops.nyl/v1/state/desired-unit` and `observed-unit` as an in-place change to
+  `gitops.nyl/v1`, so a reader that predates it rejects state that records it.
 - **Order against pruning.** `PostSync` runs after the prune, which Argo CD does within
   `Sync`; `ReleaseRecorder::complete` runs it, and a failed `PostSync` hook records the
   revision `Failed` after the prune.
@@ -3349,6 +3348,9 @@ Nyl-Version: 0.7.0
   latest drift record was `drifted`, and `reapplied` records
   `{by, at, reason, units}` of a `--reapply`; each appears only when not
   empty.
+- With `--detect-drift`, a unit's entry in `units:` also carries
+  `driftCheck`, the result of the check the run made of it
+  (`{"check":"drifted","summary":"…"}`); a unit it did not check has none.
 - `observationsChanged` lists, per unit, the observed values whose recorded
   value or `pending` state the operation changed; it appears only when not
   empty.
@@ -3443,6 +3445,8 @@ rules below apply unchanged.
    current receipt is a candidate again when its latest drift record for
    that receipt is `drifted`, or when `--reapply` names it; the drift rules
    decide whether it is selected or awaits approval (see [Drift](#drift)).
+   With `--detect-drift`, the run first checks the current units for drift and
+   selection reads the fresh records (see [Drift](#drift)).
    Held units are never selected (see [Deletion](#deletion)).
 4. **Wave.** Execute ready units, independent units in parallel up to a
    concurrency limit, and checkpoint each result on the run ref. Each
@@ -3503,6 +3507,9 @@ apply to desired state without mixing with observed commits.
 - `--reapply` executes the named units again although their receipts are
   current (see [Drift](#drift)). It is a flag that requires `--unit` and
   `--reason`; the names go through the same validation as every `--unit`.
+- `--detect-drift` checks the named units, or every unit, for drift first (see
+  [Drift](#drift)). It excludes `--leaving` and `--reapply`
+  (`NYL-DRIFT-OPTION-INVALID`).
 
 **Transition commit conflicts.** Operations on one environment are serialized
 by its lease, and the final push is fenced by it (see
@@ -3962,9 +3969,10 @@ Drift is a reason to act, not evidence: it decides whether a unit executes
 again, while attestations are evidence for promotion and dependents (see
 [Attestations](#attestations)). Nyl does not watch for drift itself: a
 pipeline runs `nyl detect-drift` on a schedule, followed by `nyl reconcile`,
-until a continuous runner (M7) takes over the cadence. A planned opt-in
-`nyl reconcile --detect-drift` (M7) does both under one lease and in one
-transition commit; without it, reconcile never detects drift.
+until a continuous runner (M7) takes over the cadence. The opt-in `nyl
+reconcile --detect-drift` does both under one lease and in one transition
+commit, for a scheduled job that wants one command; without it, reconcile
+never detects drift.
 
 - **What it checks.** It checks every unit of the environment, or those
   `--unit` names. A unit without a current receipt is reported `no-receipt`
@@ -4006,6 +4014,88 @@ transition commit; without it, reconcile never detects drift.
   the approval rule above: `awaiting-approval` without a matching invocation
   approval, executed with `--approve`. It never fails the whole run. `nyl plan`
   has no `--reapply`.
+- **`reconcile --detect-drift`.** The run checks its current units for
+  drift before it selects what to execute, under the lease it already holds,
+  so no other run can change the resources between the check and the repair.
+  It is one run and one transition commit per state ref, with one decision
+  path for each part:
+  - *Which units.* The units selection leaves current whose driver
+    detects drift for their spec (owner: `rules::checks`, whose
+    `reconcile_targets` runs `select` with no drift records and takes its
+    `Current` units, once, when the run first selects, then keeps those whose
+    driver's `capabilities` have `detectDrift`; the rule names no kind). A
+    unit `--unit` did not name, a held, blocked, or uncertain unit, a unit
+    awaiting an approval, and a unit that executes anyway, because its inputs
+    changed or it has no current receipt, is not checked: a receipt this run
+    replaces says nothing its new receipt keeps. Selection runs once, so a
+    unit blocked at that point is not checked in this run, even if it ends the
+    run current. The check follows `--unit` as execution does, so
+    dependencies and dependents of a named unit are not pulled in. A kind
+    that cannot detect drift is left out, as `attest` leaves out a unit that
+    cannot attest, and is `unsupported` only when `--unit` names it, as in
+    `detect-drift`. A unit that is current at that point is checked even when the
+    outputs of a dependency this run executes later change its key; its
+    record then goes with the receipt it was about. A unit whose stored
+    record says `drifted` is checked again, because the check replaces the
+    record and a unit repaired by hand is not executed on stale evidence. The
+    units are checked as the run resolved them, in the project directory its
+    own executions use, in batches of the concurrency limit, each unit within
+    its own `timeout` and the lease's deadline, which the run moves for each
+    batch as a standalone check does.
+  - *The same check.* It is the check of `nyl detect-drift`: the driver's
+    `detect_drift`, the drift record tied to the receipt's execution key, and
+    the rule that a record equal to the stored one but for its time keeps the
+    stored one. A driver failure or a check past its deadline is an error
+    (`NYL-DRIVER-ERROR`, exit 1) that records nothing for the unit, and the
+    run goes on. The run then has no evidence about that unit, so selection
+    does not read its stored record: a stored `drifted` record is not repaired
+    on evidence the run could not renew, and it stays in the state, so
+    `status` still shows it. The error is the report of the failure; no
+    `NYL-DRIFT-UNKNOWN` warning repeats it. A signal before the checks finish
+    ends the run as one between waves (`NYL-RUN-CANCELLED`, exit 4, nothing
+    written).
+  - *Records.* The drift records join the run's transition commit; the run
+    writes no commit of its own for them. A record is written when it
+    differs from the stored one and still describes the unit's receipt at
+    the end of the run: a unit the run executed again has a new receipt,
+    which drops the record about the old one in the same commit, so a
+    repaired unit leaves no record, as in a reconcile after `detect-drift`.
+    A run that finds nothing new and executes nothing writes nothing.
+  - *Selection.* Selection runs once with the snapshot's drift records
+    overlaid by the fresh ones, through the one rule above (`select`), so a
+    unit that came back `drifted` is repaired exactly as the next reconcile
+    would repair it: executed under `driftRepair: converge` for a `converge`
+    unit, `awaiting-approval` for another, left `drifted` under `manual`.
+    There is no second rule for units found in the same run, and a reconcile
+    after `detect-drift` and one with the flag make the same decision from
+    the same records.
+  - *Reports.* Each checked unit's report entry carries `driftCheck`
+    (`clean`, `drifted` with `summary`, `unknown` with `reason`, or
+    `unsupported`), nested because `result` flattens its own fields next to
+    it, and the unit's entry in the transition commit summary carries the
+    same `driftCheck`. The table adds `drift check: …` to the unit's detail.
+    Drift the run repaired is reported by `driftRepaired` and `driftCheck`,
+    not by a warning. Drift it left carries `NYL-DRIFT-DETECTED` with the
+    fix `detect-drift` gives; `unknown` and `unsupported` (a named unit whose
+    kind cannot detect drift) carry `NYL-DRIFT-UNKNOWN` and
+    `NYL-DRIFT-UNSUPPORTED`.
+  - *Exit.* A unit's exit is its reconcile result's, as without the flag
+    (`drifted` and `awaiting-approval` exit 2, a failed repair 3, an
+    uncertain one 4), and a check that could not conclude (`unknown`) makes
+    the run incomplete (exit 2), as `detect-drift` does. A named
+    `unsupported` unit adds nothing: it is a note, not a failed check.
+  - *Other options.* `--leaving` and `--reapply` leave the check nothing to
+    do (units outside the ownership set have no receipt to check, and
+    `--reapply` executes its units whether or not they drifted), so they are
+    refused with `NYL-DRIFT-OPTION-INVALID` and exit 1 before the run takes
+    the lease or writes anything. `--worktree`, `--source`, `--local`,
+    `--fail-fast`, `--unit`, `--template`, and the selection of several
+    environments combine: every selected environment runs its own check
+    inside its own run, lease, and transition commit, and `--unit` is
+    qualified as for any multi-environment run. `nyl plan` has no
+    `--detect-drift`, because a check takes the lease and writes records.
+    A teardown, including the removal of an expired instance, checks
+    nothing.
 - **Drift warnings.** `nyl detect-drift` reports each drifted unit with
   `NYL-DRIFT-DETECTED`, whose fix says, per unit, what the next reconcile does:
   it repairs the unit, the unit awaits approval, or, under `manual`, it needs
@@ -4785,7 +4875,7 @@ spec:
 | Command | Effect | Writes |
 | --- | --- | --- |
 | `plan` | Resolve and run driver planning for ready units and for `deleting` units with teardown intent (destroy plans); report units leaving the ownership set, blocked units, and incomplete plans; `--teardown` previews a requested teardown (see [Planning](#planning)) | Nothing |
-| `reconcile` | Resolve, then execute waves until nothing is ready, and carry out lifecycle work: teardowns (`--allow-teardown` to start one caused by omission), retentions, releases, and drops; `--leaving` does only the lifecycle work; `--unit … --reapply --reason …` forces named units; `--fail-fast` stops after the first failure, uncertain outcome, or approval wait | One transition commit per state ref |
+| `reconcile` | Resolve, then execute waves until nothing is ready, and carry out lifecycle work: teardowns (`--allow-teardown` to start one caused by omission), retentions, releases, and drops; `--leaving` does only the lifecycle work; `--unit … --reapply --reason …` forces named units; `--detect-drift` first checks the current units for drift under the run's own lease and repairs what drifted by `driftRepair`; `--fail-fast` stops after the first failure, uncertain outcome, or approval wait | One transition commit per state ref |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `detect-drift` | Ask each driver whether a current receipt still holds (see [Drift](#drift)) | One observed commit with the changed drift records |
 | `attest` | Ask the drivers that attest for their units' specs to attest current receipts, or record an external attestation for a unit's current receipt or the environment's current state (see [Attestations](#attestations)) | One observed commit with the changed attestations |
@@ -5035,7 +5125,7 @@ The table applies to each command as follows:
 
 | Command | 0 | 1 | 2 | 3 | 4 |
 | --- | --- | --- | --- | --- | --- |
-| `reconcile`, `teardown` | As the table | As the table | As the table | As the table | As the table |
+| `reconcile`, `teardown` | As the table | As the table | As the table; with `--detect-drift`, also a drift check that could not conclude (`unknown`) | As the table | As the table |
 | `plan` | The plan is complete, whatever changes it shows | Error, or `--fail-on-leaving` with a unit leaving | Incomplete: a unit is blocked, so its change cannot be planned | A driver's planning failed | — |
 | `detect-drift` | Every checked unit is clean | Error, including a check that passed its unit's deadline | A unit could not be checked: no current receipt, a kind that cannot detect drift, or `unknown` drift | Drift | — |
 | `attest` | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline | A unit could not be attested: no current receipt, `--unit` named a unit whose kind does not attest, or the driver could not tell (`unknown`) | A failing attestation | — |
@@ -5071,7 +5161,9 @@ Reconcile, teardown, detect-drift, attest, and status reports have the same
 shape, with `result` per unit as in the transition commit summary, `state`
 in a status report, and `check` in a detect-drift or attest report:
 `clean`, `drifted`, `attested` (with the unit's `attestations`), `unknown`,
-`no-receipt`, or `unsupported`. The report's
+`no-receipt`, or `unsupported`. A reconcile report with `--detect-drift`
+carries the same values, except `attested` and `no-receipt`, in `driftCheck`
+per unit it checked. The report's
 `apiVersion` versions the machine output.
 
 ## Walkthroughs
@@ -5254,7 +5346,12 @@ the idempotent unit, listed under `driftRepaired`, and reports the other
 `awaiting-approval`, exit 2; an explicit approval permits it to run.
 Under `driftRepair: manual`, `reconcile` repairs nothing and the unit stays
 `drifted` until `reconcile --unit idempotent --reapply --reason …`, recorded
-under `reapplied`.
+under `reapplied`. With `reconcile --detect-drift`, one run does the check and
+the repair under one lease: it finds both drifted, repairs the idempotent unit,
+reports the other `awaiting-approval`, and records the other's drift in the same
+transition commit, so `status` shows it `drifted` with no `detect-drift` in
+between; a local run with `--approve` repairs it, and a reconcile without the
+flag detects nothing.
 ([`drift`](../nyl/tests/scenarios/walkthroughs/drift/scenario.yaml))
 
 **Observed value (M5).** The `kubernetes` publication with `observe: {}`

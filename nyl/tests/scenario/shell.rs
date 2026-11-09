@@ -293,6 +293,7 @@ impl Harness {
                 mode: run::RunMode::default(),
                 lifecycle: run::LifecycleOptions::default(),
                 reapply: false,
+                detect_drift: false,
                 fail_fast: false,
                 reason: None,
                 keep_prefix: None,

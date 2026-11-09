@@ -1,7 +1,8 @@
 //! `nyl reconcile -e <env>`: execute an environment's ready units in waves
 //! and record the results in one transition commit per state ref.
 //!
-//! Contract: [Execution](../../../../design/orchestration-core.md#execution).
+//! Contract: [Execution](../../../../design/orchestration-core.md#execution);
+//! `--detect-drift` is [Drift](../../../../design/orchestration-core.md#drift).
 //! Exit categories: 0 all selected units current; 2 blocked, held, awaiting
 //! approval, or the lease is held; 3 an execution failed; 4 uncertain, the
 //! lease was lost, or the run was cancelled by SIGINT or SIGTERM; 1 error; the most severe wins (4 > 3 > 1 > 2 > 0).
@@ -149,6 +150,12 @@ pub struct ReconcileArgs {
     #[arg(long)]
     pub reason: Option<String>,
 
+    /// First check the current units for drift, under this run's lease, and
+    /// repair what drifted by each unit's driftRepair, in one transition
+    /// commit. Without it, reconcile never detects drift.
+    #[arg(long)]
+    pub detect_drift: bool,
+
     /// Start no further unit after the first failure, uncertain outcome, or
     /// approval wait; what finished is still recorded.
     #[arg(long)]
@@ -248,10 +255,27 @@ fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
     None
 }
 
+/// `--detect-drift` with an option that leaves it nothing to check, refused
+/// by the rule the run itself applies (`reconcile_environment` refuses it for
+/// every other caller of the engine). This copy exists to refuse before an
+/// instance is created or extended, which happens ahead of the run.
+fn detect_drift_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
+    if !args.detect_drift {
+        return None;
+    }
+    let finding = nyl_orchestration::rules::checks::detect_drift_conflict(args.leaving, args.reapply)?;
+    Some(stopped(
+        ReportKind::ReconcileReport,
+        args.environment.first().map_or("local", String::as_str),
+        args.output,
+        finding.into(),
+    ))
+}
+
 /// Run the command in-process with `wiring`.
 pub fn run(args: &ReconcileArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     use crate::orchestration::multi_environment::{dispatch, select, Expiry};
-    if let Some(outcome) = template_selection_error(args) {
+    if let Some(outcome) = template_selection_error(args).or_else(|| detect_drift_error(args)) {
         return Ok(outcome);
     }
     if args.template.is_some() && args.environment.is_empty() {
@@ -586,6 +610,7 @@ fn reconcile(
             ..nyl_orchestration::shell::run::LifecycleOptions::default()
         },
         reapply: args.reapply,
+        detect_drift: args.detect_drift,
         fail_fast: args.fail_fast,
         reason: args.reason.as_deref(),
     })?;

@@ -1441,3 +1441,143 @@ fn test_a_teardown_is_given_the_artifacts_the_unit_recorded() {
         "the stored artifacts reach the driver: {artifacts:?}"
     );
 }
+
+/// The names of the files the observed ref holds beneath `observed/units`.
+fn observed_files(harness: &Harness) -> Vec<String> {
+    git_output(
+        &harness.world.bare(),
+        &["ls-tree", "-r", "--name-only", OBSERVED, "observed/units"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// The engine refuses `reconcile --detect-drift` with an option that leaves
+/// it nothing to check, for every caller (the command line refuses earlier,
+/// before it creates an instance): before the run takes the lease, writes a
+/// ref, or touches a unit. Catches the engine accepting the combination
+/// when it is called without the command line's guard.
+#[test]
+fn test_the_engine_refuses_detect_drift_with_options_that_leave_nothing_to_check() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let observed = harness.tip(OBSERVED);
+    for (leaving, reapply) in [(true, false), (false, true)] {
+        let mut job = harness.job(&[], Cancellation::default());
+        job.request.detect_drift = true;
+        job.request.lifecycle.leaving = leaving;
+        job.request.reapply = reapply;
+        let report = harness.run(&job).environments.remove(0);
+        let codes: Vec<Code> = report.errors.iter().map(|finding| finding.code).collect();
+        assert_eq!(codes, [Code::DriftOptionInvalid], "{report:#?}");
+        assert_eq!(report.exit.code(), 1, "{report:#?}");
+        assert!(report.run.is_none(), "no run took a lease: {report:#?}");
+        assert!(report.units.is_empty(), "{report:#?}");
+    }
+    assert_eq!(harness.tip(OBSERVED), observed);
+    assert!(harness.coordination_refs("").is_empty());
+}
+
+/// A check inside a reconcile that passes its unit's timeout is a failed
+/// `timeout` (`NYL-DRIVER-ERROR`, exit 1), as for `detect-drift`: the run
+/// goes on, the unit is reconciled by its stored state (current), and nothing
+/// is recorded for it. Catches a timed-out check recorded as evidence. The
+/// run checks `network` alone, since the clock the fakes advance is shared and
+/// would time out any unit checked after it.
+#[test]
+fn test_a_reconcile_drift_check_past_its_timeout_fails_and_records_nothing_for_the_unit() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    recorder
+        .advance
+        .lock()
+        .unwrap()
+        .insert("network".to_owned(), Duration::from_mins(61));
+
+    let outcome = harness.reconcile(&["--detect-drift", "--unit", "network"]);
+    assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
+    let errors = outcome.report["environments"][0]["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0]["code"], "NYL-DRIVER-ERROR", "{}", outcome.stdout);
+    assert!(errors[0]["message"].as_str().unwrap().contains("timeout"), "{errors:?}");
+    assert_eq!(unit_field(&outcome.report, "network", "result"), "current");
+    assert_eq!(unit_field(&outcome.report, "network", "driftCheck")["check"], "unknown");
+    let files = observed_files(&harness);
+    assert!(
+        !files.contains(&"observed/units/network/drift.yaml".to_owned()),
+        "{files:?}"
+    );
+}
+
+/// A check that fails keeps the unit's stored `drifted` record in the state
+/// but not in this run's selection: the unit is not repaired on evidence the
+/// run could not renew, and the failure is reported once, as the error, not
+/// again as an `unknown` warning. Catches a repair decided by a record the
+/// run's own check failed to confirm.
+#[test]
+fn test_a_failed_drift_check_does_not_repair_on_the_stored_record() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let network = unit("network");
+    harness
+        .script
+        .push(network.clone(), DriverOperation::DetectDrift, &Scripted::Drifted, 1);
+    let detected = harness.invoke(&["detect-drift", "-e", "dev", "--unit", "network", "-o", "json"]);
+    assert_eq!(detected.exit, 3, "{}", detected.stderr);
+    let stored = harness.show(OBSERVED, "observed/units/network/drift.yaml");
+    assert!(stored.contains("drift: drifted"), "{stored}");
+
+    harness.script.push(
+        network,
+        DriverOperation::DetectDrift,
+        &Scripted::Failed {
+            category: FailureCategory::ToolError,
+            retryable: true,
+        },
+        1,
+    );
+    let run = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(run.exit, 1, "{}", run.stderr);
+    assert_eq!(
+        run.report["environments"][0]["errors"][0]["code"], "NYL-DRIVER-ERROR",
+        "{}",
+        run.stdout
+    );
+    assert_eq!(unit_field(&run.report, "network", "result"), "current", "not repaired");
+    assert_eq!(unit_field(&run.report, "network", "driftCheck")["check"], "unknown");
+    assert!(
+        !run.stderr.contains("NYL-DRIFT-UNKNOWN"),
+        "the failure is reported once: {}",
+        run.stderr
+    );
+    assert_eq!(harness.show(OBSERVED, "observed/units/network/drift.yaml"), stored);
+}
+
+/// A reconcile cancelled during its drift check starts no further batch,
+/// writes no observed commit, releases the lease, and exits 4 with
+/// `NYL-RUN-CANCELLED`, as between waves. Catches a run that goes on to
+/// select and execute after the signal, or that leaves its lease behind.
+#[test]
+fn test_a_reconcile_cancelled_during_its_drift_check_records_nothing() {
+    let (harness, recorder) = Harness::recording();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let observed = harness.tip(OBSERVED);
+    let cancellation = Cancellation::new();
+    *recorder.cancel.lock().unwrap() = Some(cancellation.clone());
+
+    let mut job = harness.job(&[], cancellation);
+    job.request.detect_drift = true;
+    job.request.concurrency = 1;
+    let report = harness.run(&job).environments.remove(0);
+    assert_eq!(report.exit.code(), 4, "{report:#?}");
+    let codes: Vec<Code> = report.errors.iter().map(|finding| finding.code).collect();
+    assert_eq!(codes, [Code::RunCancelled], "{report:#?}");
+    assert_eq!(recorder.seen.lock().unwrap().len(), 1, "one batch ran");
+    assert_eq!(harness.tip(OBSERVED), observed, "a cancelled run records nothing");
+    assert!(harness.coordination_refs("").is_empty(), "the lease is released");
+}

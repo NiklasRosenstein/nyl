@@ -151,6 +151,8 @@ codes! {
     DriftUnsupported => "NYL-DRIFT-UNSUPPORTED",
     /// A unit drifted from its current receipt.
     DriftDetected => "NYL-DRIFT-DETECTED",
+    /// `nyl reconcile --detect-drift` was combined with an option that leaves it nothing to check.
+    DriftOptionInvalid => "NYL-DRIFT-OPTION-INVALID",
     /// `nyl attest --unit` named a unit without a current receipt to attest.
     AttestNoReceipt => "NYL-ATTEST-NO-RECEIPT",
     /// A unit's driver could not produce its attestations.

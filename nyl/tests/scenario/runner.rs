@@ -961,6 +961,7 @@ fn history<'r>(repository: &'r git2::Repository, reference: &str) -> impl Iterat
 fn reads_summary(expect: &Expect) -> bool {
     outcome_sets(expect).iter().any(|(_, set)| set.is_some())
         || list_keys(expect).iter().any(|(_, list)| list.is_some())
+        || expect.drift_checks.is_some()
         || expect.lease_broken.is_some()
 }
 
@@ -1107,6 +1108,39 @@ pub fn check_results(expect: &Expect, report: &Value, summaries: Option<&[Value]
         };
         if reported != expected {
             return Err(format!("{key}: the report lists {reported:?} instead of {expected:?}"));
+        }
+    }
+    if let Some(expected) = &expect.drift_checks {
+        // The report's and the newest summary's units that carry a `driftCheck`.
+        let found = |units: Option<&serde_json::Map<String, Value>>| -> BTreeMap<String, String> {
+            units
+                .into_iter()
+                .flatten()
+                .filter_map(|(name, unit)| {
+                    Some((name.clone(), unit.pointer("/driftCheck/check")?.as_str()?.to_owned()))
+                })
+                .collect()
+        };
+        let reported = found(
+            run_environment(report)
+                .and_then(|environment| environment.get("units"))
+                .and_then(Value::as_object),
+        );
+        if &reported != expected {
+            return Err(format!(
+                "drift-checks: the report has {reported:?} instead of {expected:?}"
+            ));
+        }
+        // No commit lists no check, so it satisfies only an empty expectation.
+        if let Some(newest) = newest {
+            let listed = newest.map_or_else(BTreeMap::new, |summary| {
+                found(summary.get("units").and_then(Value::as_object))
+            });
+            if &listed != expected {
+                return Err(format!(
+                    "drift-checks: the transition commit summary has {listed:?} instead of {expected:?}"
+                ));
+            }
         }
     }
     if let Some(expected) = expect.lease_broken {

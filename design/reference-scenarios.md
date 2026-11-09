@@ -233,6 +233,7 @@ and to the harness's validation, together with the first scenario using them.
 | --- | --- |
 | `executed`, `current`, `ready`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed`, `released`, `held`, `drifted` | Exactly the units with that outcome in the operation's report, so `executed: []` asserts that nothing executed; a key that is not given is not checked. The outcome is each unit's `result` in a reconcile report and its `state` in a plan or status report (`UnitReport::outcome_name`). For a reconcile that wrote a transition commit, the commit summary's `units:` block must list the same sets |
 | `recovered`, `imported`, `driftRepaired`, `reapplied`, `observationsChanged` | The summary's lists of the same name (for `reapplied` and `observationsChanged`, their units), and the report's |
+| `drift-checks` | What `reconcile --detect-drift` found, per unit (`clean`, `drifted`, `unknown`, `unsupported`): exactly the units named carry a `driftCheck`, in the report and, when the step wrote a transition commit, in its summary; `{}` asserts that no unit was checked |
 | `lease-broken` | Whether the transition commit records a lease break under `leaseBroken` |
 | `outcome` | How a state operation such as `hold` or `resume` ended: `done`, `unchanged`, or `refused` |
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |

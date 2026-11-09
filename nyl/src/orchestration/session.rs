@@ -521,6 +521,7 @@ impl Session {
             mode: options.mode.clone(),
             lifecycle: options.lifecycle,
             reapply: options.reapply,
+            detect_drift: options.detect_drift,
             fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
             keep_prefix: self.keep_prefix(),
@@ -581,6 +582,8 @@ pub struct RunOptions<'a> {
     pub lifecycle: nyl_orchestration::shell::run::LifecycleOptions,
     /// `reconcile --reapply` (with `--unit`).
     pub reapply: bool,
+    /// `reconcile --detect-drift`.
+    pub detect_drift: bool,
     /// `--fail-fast` of `reconcile` and `teardown`.
     pub fail_fast: bool,
     /// `--reason` of an operator action.
@@ -967,6 +970,18 @@ pub fn detail(unit: &UnitReport) -> String {
     }
     if let Some(drift) = &unit.drift {
         parts.push(format!("drift: {}", drift.result));
+    }
+    // What `reconcile --detect-drift` found, next to the unit's result.
+    if let Some(check) = &unit.drift_check {
+        parts.push(match check {
+            nyl_orchestration::run_report::CheckResult::Drifted { summary } => {
+                format!("drift check: drifted ({})", summary.lines().next().unwrap_or_default())
+            }
+            nyl_orchestration::run_report::CheckResult::Unknown { reason } => {
+                format!("drift check: unknown ({})", reason.lines().next().unwrap_or_default())
+            }
+            other => format!("drift check: {}", other.name()),
+        });
     }
     parts.join("; ")
 }
