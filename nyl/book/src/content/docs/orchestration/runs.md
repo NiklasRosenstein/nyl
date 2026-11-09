@@ -234,9 +234,11 @@ before never satisfies a reference.
   environment>` reads the other environments' state without taking a lease or
   writing, and names it with its environment (`prod/dns`) and the fix
   `nyl reconcile -e prod`, and `nyl status -e prod` shows it `ready` once the
-  producer environment records another value than the one it resolved. An
-  environment whose state cannot be read is a `NYL-STATE-UNAVAILABLE` warning;
-  its consumers are not compared. A consumer in another environment that waits
+  producer environment records another value than the one it resolved. What a
+  problem with one of those environments means follows
+  [Other environments](#other-environments): `observe` only advises, so one it
+  cannot use is a `NYL-STATE-UNAVAILABLE` warning and its consumers are not
+  compared, while `status` requires the producers it compares against. A consumer in another environment that waits
   for a value that has now arrived is found the same way: `nyl observe` names it
   as ready, and `nyl status -e prod` shows it `ready` rather than `blocked`.
 - **What is written.** The record changes only when a value arrives, changes,
@@ -629,3 +631,23 @@ held units and units awaiting teardown whose source no longer declares them.
 If an environment's state cannot be read, environments
 that claim native resources are refused until access returns; independent
 units without resource claims can still run.
+
+### Other environments
+
+A command reads an environment other than its own for one of two reasons, and
+the reason decides what a problem there means, whatever kind of problem it is:
+
+| The command reads it | An invalid declaration or unreadable state is |
+| --- | --- |
+| **Required**: it cannot do its job without it, such as the producer environment a unit's reference resolves from (`plan`, `reconcile`, `status`, `get units`), or every other environment when a unit is leaving, because any of them may hold a consumer | An error with a code and a fix: `NYL-STATE-UNAVAILABLE`, or the environment's own code |
+| **Advisory**: it reads it only to give advice, such as the scan of [`nyl observe`](/nyl/reference/cli/observe/) for consumers elsewhere whose input changed | A `NYL-STATE-UNAVAILABLE` warning that names the environment, and a fix that points to `nyl validate` |
+| Not at all | Not judged |
+
+An environment the command's `-e` names is always required. A state URL that is
+not a URL, a `repositoryRef` that names no GitRepository, a repository that
+cannot be read, and an environment nobody declares count alike. A broken
+declaration of an environment a command does not read never fails it:
+`nyl reconcile -e dev`, `nyl plan -e dev`, `nyl status -e dev`, and
+`nyl observe -e dev` run while the state URL of `prod` is malformed.
+[`nyl validate`](/nyl/reference/cli/validate/) reports every invalid
+declaration as an error, so a pipeline catches it anyway.

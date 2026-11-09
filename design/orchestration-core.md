@@ -3027,10 +3027,12 @@ spec:
   observed values from and show the consumer `ready`, like one that reads a
   value of its own environment (`get units --state-revision` reads no other
   environment). The comparison reads the value through the reference resolver,
-  so a reference it would block or refuse is not reported as changed. An
-  environment whose state location cannot be resolved or whose state cannot be
-  read is a `NYL-STATE-UNAVAILABLE` warning of the command, never a failure; its
-  consumers were not compared.
+  so a reference it would block or refuse is not reported as changed. What a
+  problem with one of these environments means follows
+  [Other environments](#other-environments): `observe` reads them only for
+  this advice, so one it cannot use is a `NYL-STATE-UNAVAILABLE` warning and
+  its consumers were not compared, while `status` and `get units` require the
+  producers they compare against, so one they cannot use is an error.
 
   A consumer that waits for another environment's `pending` value is found the
   same way, from the typed `observation` blocker, which names the producer with
@@ -4652,6 +4654,40 @@ invocation, in any one of three forms:
   category is the most severe across them under the usual precedence (see
   [Inspection](#inspection)). `--output json` lists the environments with
   their own categories.
+
+### Other environments
+
+A command reads an environment other than its own for one of two reasons, and
+the reason, not the kind of problem, decides what a problem there means. One
+decision owns it for every command (`rules::peers::judge`, read through
+`shell::peers::Peers::read`):
+
+| The command reads it | Why | An invalid declaration or unreadable state is |
+| --- | --- | --- |
+| **Required** | It cannot do its job without it: the producer environment a unit's reference resolves from (`plan`, `reconcile`, `status`, `get units`), and every other environment when a unit is leaving, because any of them may hold a consumer | An error, with the cause's own code and fix |
+| **Advisory** | It reads it only to give advice: the scan of `nyl observe` for consumers in other environments whose input changed | A `NYL-STATE-UNAVAILABLE` warning that names the environment; the fix adds `nyl validate` |
+| Not at all | The command does not need it | Not judged |
+
+- The command's own environments (`-e`) are always required, and their errors
+  are the same findings as before.
+- Every kind of problem counts alike: a state URL that is not a URL, a
+  `repositoryRef` that names no GitRepository, a repository that cannot be
+  read, and an environment nobody declares. A location that cannot be resolved
+  is carried as that environment's own finding instead of failing the request,
+  so one broken declaration never fails the commands that do not read it:
+  `reconcile -e dev`, `plan -e dev`, `status -e dev`, and `observe -e dev` run
+  while the state URL of `prod` is malformed.
+- A producer that cannot be read fails the consumer's run with the producer's
+  error, never with a complaint about an undeclared environment. Nothing is
+  executed or torn down on a guess.
+- A leaving unit needs every other environment, readable or not; with no unit
+  leaving, no other environment is read for it. Stored ownership claims are
+  checked across every environment by commands that execute units claiming
+  native resources, and an environment whose claims cannot be read refuses
+  them (`NYL-STATE-UNAVAILABLE`).
+- `nyl validate` reports every invalid declaration as an error, whichever
+  command needs the environment, so a pipeline catches what the commands that
+  do not need it tolerate.
 
 ### Planning
 

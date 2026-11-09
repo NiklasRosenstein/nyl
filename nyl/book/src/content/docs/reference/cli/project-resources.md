@@ -85,7 +85,9 @@ nyl get units -e dev --local                  # this clone's local view
   `incomplete:` with the unmet requirements, and `-` for other kinds.
   The state is the one [`nyl status`](/nyl/reference/cli/status/) shows,
   including `ready` for a unit that reads an observed value of another
-  environment that changed since it resolved. With `--state-revision`, no
+  environment that changed since it resolved; that producer environment is
+  [required](/nyl/orchestration/runs/#other-environments), so one that cannot
+  be read is an error. With `--state-revision`, no
   other environment is read, so that readiness is not evaluated.
 - `get unit <name> -e <env> -o yaml|json` prints exactly the persisted
   `{desired, observed}` documents, never a synthesized merge. `--desired` or

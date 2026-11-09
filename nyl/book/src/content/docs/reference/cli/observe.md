@@ -75,9 +75,13 @@ warning  observed value ingressIp of dev/kubernetes changed, so prod/dns resolve
 
 Reading the other environments' state takes no lease and writes nothing there,
 and happens after `observe` has written its own commit and released its lease.
-An environment whose state location cannot be resolved, or whose state cannot be
-read, is a `NYL-STATE-UNAVAILABLE` warning and its consumers are not compared;
-the exit code does not change. `nyl status -e prod` shows `dns` as `ready`.
+`observe` reads the other environments only to give this advice, so they are
+[advisory](/nyl/orchestration/runs/#other-environments): an environment whose
+declaration cannot be used (a malformed state URL, a `repositoryRef` that names
+no GitRepository) or whose state cannot be read is a `NYL-STATE-UNAVAILABLE`
+warning that names it, and its consumers are not compared; the exit code does
+not change, and the fix points to [`nyl validate`](/nyl/reference/cli/validate/).
+`nyl status -e prod` shows `dns` as `ready`.
 
 A consumer in another environment that was blocked waiting for a value that now
 has one is named too, as `has a value now, so prod/dns can resolve`. It is judged
