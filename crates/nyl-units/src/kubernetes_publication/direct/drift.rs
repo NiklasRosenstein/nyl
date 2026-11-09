@@ -11,29 +11,38 @@
 //!   manifest of its newest `Deployed` revision applied for this unit's
 //!   publication (repository, branch, prefix; the reader's rule,
 //!   [`applied_for`]) stands for it. A newer revision of another publication,
-//!   or of a manual apply, is not this unit's and is skipped. The Releases, the
-//!   destination, and where the cluster is reached are the facts the unit
-//!   recorded at resolution, as `nyl attest` reads them.
+//!   or of a manual apply, is not this unit's and is not used as the desired
+//!   state. The Releases, the destination, and where the cluster is reached are
+//!   the facts the unit recorded at resolution, as `nyl attest` reads them. Whether
+//!   the cluster is compared at all follows the target as it renders: a direct
+//!   unit that recorded no facts is `unknown`.
 //! - **Comparison.** Per object a live read and a server-side apply dry run as
 //!   Nyl's field manager, the machinery `nyl diff` uses
-//!   ([`DiffEngine::are_equivalent_as`]): the dry run changes only fields the
-//!   manifest declares, so a field only another manager sets (an HPA's
-//!   replicas, a controller's annotation) is not drift. The objects come from
-//!   the manifest, never from keys that stay tracked only because their prune
-//!   awaits confirmation or because another Release has yet to apply them.
-//!   An object two Releases render is compared once, by the revision applied
-//!   last.
+//!   ([`DiffEngine::compare_as`]): the dry run changes only fields the
+//!   manifest declares, so a field only another manager sets (a controller's
+//!   annotation) is not drift. The dry run's answer carries the version it was
+//!   applied to; when the object moved since the live read, both are done
+//!   again once. The objects come from the manifest, never from keys that stay
+//!   tracked without a document (their prune awaits confirmation, failed, or
+//!   another Release has yet to apply them): those are not compared. An object
+//!   two Releases render is compared once, against the Release that applies
+//!   last ([`wave_of`], then the Release key), as the cluster holds it.
 //! - **Missing is drift**, except a Job whose `ttlSecondsAfterFinished` makes
 //!   its disappearance after completion expected ([`job_expires`], the
 //!   reader's rule). A Release without a revision applied for this publication
-//!   is drift too.
+//!   is drift too. A kind the cluster answers with an unknown API resource is
+//!   told apart: missing when the kind is gone ([`KubeClient::is_kind_removed`]),
+//!   drift ("its apiVersion is no longer served") when it is served at another
+//!   version, unverified otherwise (an aggregated API that is down).
 //! - **Unreadable is never clean.** An unreachable cluster, a read or dry run
-//!   the credentials may not make, an object the API rejects, or a deadline
-//!   that passes is `unknown`, unless drift was already found, which is
+//!   the credentials may not make, an object the API rejects (an admission
+//!   webhook whose `sideEffects` are `Unknown` or `Some` refuses dry runs), or a
+//!   deadline that passes is `unknown`, unless drift was already found, which is
 //!   reported with what stayed unverified.
 //! - **Cost.** One live read and one dry run per object, eight at a time, one
-//!   Release's state read after another, all within the unit's deadline.
-//!   Objects not compared by then are unverified.
+//!   Release's state read after another, all within the unit's deadline less a
+//!   [`margin`], so the check can still report what it found. Objects not
+//!   compared by then are unverified.
 //!
 //! Objects that carry Nyl's labels but that no current revision tracks
 //! (orphans) are not reported.
@@ -54,9 +63,10 @@ use nyl_render::kubernetes::{
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
+use super::apply::wave_of;
 use super::health::job_expires;
 use super::reader::{api_error, applied_for};
-use super::{ClusterAccess, ClusterHandle};
+use super::{destination_of, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::observe::facts_of;
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, KUBECONFIG_ENV};
 
@@ -68,25 +78,29 @@ const LISTED: usize = 8;
 
 const DEADLINE: &str = "the unit's deadline passed before the cluster was compared; raise the unit's `timeout`";
 
-/// The drift of the cluster of a unit whose target is direct, or `None` for a
-/// unit whose recorded reconciler is another one, which has no cluster of
-/// its own to compare.
-pub(crate) fn detect(
-    ctx: &ExecutionContext<'_>,
-    unit: &DesiredUnit,
-    target: &str,
-    access: &ClusterAccess,
-) -> Option<Drift> {
-    let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-    if spec.pointer("/reconciler/kind").and_then(Value::as_str) != Some("direct") {
-        return None;
-    }
+/// How long before the unit's deadline the check stops: a tenth of what is
+/// left, at most ten seconds. The shell discards what a check returns once the
+/// deadline passed, so a check that used the whole budget could never report
+/// what it had found.
+fn margin(remaining: Duration) -> Duration {
+    (remaining / 10).min(Duration::from_secs(10))
+}
+
+/// The drift of the cluster of a unit whose target is direct (the caller decides
+/// that from the target as it renders). The unit's recorded facts say where the
+/// cluster is and which Releases it applied; a unit that records none for a
+/// direct reconciler cannot be compared, which is `unknown`, never clean.
+pub(crate) fn detect(ctx: &ExecutionContext<'_>, unit: &DesiredUnit, target: &str, access: &ClusterAccess) -> Drift {
     let facts = match facts_of(unit) {
         Ok(facts) => facts,
-        Err(reason) => return Some(Drift::Unknown { reason }),
+        Err(reason) => return Drift::Unknown { reason },
     };
     let ReconcilerLocation::Direct(location) = &facts.location else {
-        return None;
+        return Drift::Unknown {
+            reason: "the unit was resolved for an Argo CD target, which the target no longer declares; reconcile it \
+                     so it records the direct reconciler"
+                .to_owned(),
+        };
     };
     let Some(repository) = facts
         .expected
@@ -95,22 +109,18 @@ pub(crate) fn detect(
         .map(|deployment| deployment.source.repository.clone())
     else {
         // A target without Releases applies nothing, so nothing can differ.
-        return Some(Drift::Clean);
+        return Drift::Clean;
     };
-    let destination = ReleasePublication {
-        repository,
-        branch: facts.expected.publication.branch.clone(),
-        path_prefix: facts.expected.publication.path_prefix.clone(),
-        commit: None,
-    };
+    let destination = destination_of(repository, &facts.expected.publication);
     let now = ctx.now.max(ctx.clock.now());
     let remaining = (ctx.deadline - now).to_std().unwrap_or_default();
+    let usable = remaining.saturating_sub(margin(remaining));
     let kubeconfig = ctx.env.get(KUBECONFIG_ENV).map(String::as_str);
     let report = block_on(|| async {
-        let end = tokio::time::Instant::now() + remaining;
+        let end = tokio::time::Instant::now() + usable;
         let cluster = match tokio::time::timeout_at(
             end,
-            access.open(location, kubeconfig, remaining.max(Duration::from_secs(1))),
+            access.open(location, kubeconfig, usable.max(Duration::from_secs(1))),
         )
         .await
         {
@@ -120,10 +130,10 @@ pub(crate) fn detect(
         };
         compare(&cluster, &facts.expected.deployments, &destination, end).await
     });
-    Some(match report {
+    match report {
         Ok(report) => report.into_drift(target),
         Err(error) => Drift::Unknown { reason: error.message },
-    })
+    }
 }
 
 /// What the cluster check found.
@@ -181,7 +191,11 @@ impl Report {
         if self.differences.len() > LISTED {
             let _ = write!(summary, " (and {} more)", self.differences.len() - LISTED);
         }
-        let _ = write!(summary, "; `nyl diff --target {target}` shows each change");
+        let target = if target.is_empty() { "<target>" } else { target };
+        let _ = write!(
+            summary,
+            "; run `nyl diff --target {target}` on the Release's file to see each change in full"
+        );
         if !self.unverified.is_empty() {
             let _ = write!(summary, "; not compared: {}", bounded(&self.unverified, "problem"));
         }
@@ -201,7 +215,10 @@ fn bounded(items: &[String], noun: &str) -> String {
 /// One object of a Release's desired manifest.
 struct Object {
     release: String,
-    applied: Option<chrono::DateTime<chrono::Utc>>,
+    /// Where its Release applies among the target's: the wave, then the Release
+    /// key, which is the order [`super::apply`] applies them in. The Release
+    /// that applies last owns an object that two render.
+    order: (u8, String),
     manifest: Value,
     key: ResourceKey,
 }
@@ -211,6 +228,8 @@ enum Found {
     Same,
     Changed,
     Missing,
+    /// The object's kind is served, but not at the manifest's version.
+    Unserved,
     /// A Job a TTL removed after it finished.
     Expired,
     Failed(String),
@@ -246,7 +265,7 @@ async fn compare(
                 release: label,
                 what: "no revision applied for this publication is recorded".to_owned(),
             }),
-            Ok(Ok(Some(state))) => match objects_of(&label, &state) {
+            Ok(Ok(Some(state))) => match objects_of(&label, &deployment.id, &state) {
                 Ok(found) => objects.extend(found),
                 Err(problem) => report.unverified.push(problem),
             },
@@ -279,6 +298,9 @@ async fn compare(
             Found::Same | Found::Expired => {}
             Found::Changed => report.differences.push(label("changed")),
             Found::Missing => report.differences.push(label("is missing")),
+            Found::Unserved => report
+                .differences
+                .push(label("is missing: its apiVersion is no longer served")),
             Found::Failed(problem) => {
                 if !report.unverified.contains(&problem) {
                     report.unverified.push(problem);
@@ -318,14 +340,16 @@ async fn desired_revision(
     Ok(None)
 }
 
-/// The documents of a revision's manifest, each with its key.
-fn objects_of(release: &str, state: &ReleaseState) -> Result<Vec<Object>, String> {
+/// The documents of a revision's manifest, each with its key. `id` is the
+/// Release's key in the target, which orders it among the Releases.
+fn objects_of(release: &str, id: &str, state: &ReleaseState) -> Result<Vec<Object>, String> {
     let documents = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&state.manifest).map_err(|error| {
         format!(
             "the manifest of revision {} of Release {release} cannot be read: {error}",
             state.revision
         )
     })?;
+    let order = (wave_of(&documents), id.to_owned());
     documents
         .into_iter()
         .map(|manifest| {
@@ -337,7 +361,7 @@ fn objects_of(release: &str, state: &ReleaseState) -> Result<Vec<Object>, String
             })?;
             Ok(Object {
                 release: release.to_owned(),
-                applied: state.applied_at,
+                order: order.clone(),
                 manifest,
                 key,
             })
@@ -345,8 +369,9 @@ fn objects_of(release: &str, state: &ReleaseState) -> Result<Vec<Object>, String
         .collect()
 }
 
-/// An object that two Releases render is compared once, by the revision applied
-/// last, which is the one the cluster holds.
+/// An object that two Releases render is compared once, by the Release that
+/// applies last, whose revision the cluster holds. Not by when the revisions were
+/// applied: an apply that changed nothing keeps its revision, and its timestamps.
 async fn one_owner_each(client: &dyn KubeClient, objects: Vec<Object>) -> Vec<Object> {
     let keys: Vec<ResourceKey> = objects.iter().map(|object| object.key.clone()).collect();
     let mut scopes = ObjectScopes::default();
@@ -356,7 +381,7 @@ async fn one_owner_each(client: &dyn KubeClient, objects: Vec<Object>) -> Vec<Ob
     for object in objects {
         let identity = scopes.identity(&object.key);
         match position.get(&identity) {
-            Some(&index) if object.applied > owned[index].applied => owned[index] = object,
+            Some(&index) if object.order > owned[index].order => owned[index] = object,
             Some(_) => {}
             None => {
                 position.insert(identity, owned.len());
@@ -367,34 +392,102 @@ async fn one_owner_each(client: &dyn KubeClient, objects: Vec<Object>) -> Vec<Ob
     owned
 }
 
+/// What the cluster holds of `object`. The live object and the dry run are two
+/// requests, and the object may change between them (an autoscaler scaling it):
+/// the dry run's answer carries the version it was applied to, and when that is
+/// not the version read, the object is read and compared once more. Changing
+/// again is not something to judge by, so the object is unverified.
 async fn compare_object(client: &dyn KubeClient, object: &Object) -> Found {
     let key = &object.key;
-    let live = match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
-        Ok(live) => live,
-        // A kind the cluster no longer serves holds no object.
-        Err(error) if error.is_api_resource_not_found_error() => return Found::Missing,
-        Err(error) => return Found::Failed(failure(&error, &format!("read {key}"))),
-    };
-    let Some(live) = live else {
-        let is_job = key.gvk.group == "batch" && key.gvk.kind == "Job";
-        return if is_job && job_expires(&object.manifest) {
-            Found::Expired
-        } else {
-            Found::Missing
+    for attempt in 0..2 {
+        let live = match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+            Ok(live) => live,
+            Err(error) if error.is_api_resource_not_found_error() => return unserved(client, key).await,
+            Err(error) => return Found::Failed(failure(&error, &format!("read {key}"))),
         };
-    };
-    let live = match serde_json::to_value(&live) {
-        Ok(live) => live,
-        Err(error) => return Found::Failed(format!("cannot read {key} as it is: {error}")),
-    };
-    match DiffEngine::are_equivalent_as(&object.manifest, &live, client, NYL_FIELD_MANAGER).await {
-        Ok(true) => Found::Same,
-        Ok(false) => Found::Changed,
-        Err(error) => Found::Failed(failure(
-            &error,
-            &format!("compare {key} by a server-side apply dry run"),
-        )),
+        let Some(live) = live else {
+            let is_job = key.gvk.group == "batch" && key.gvk.kind == "Job";
+            return if is_job && job_expires(&object.manifest) {
+                Found::Expired
+            } else {
+                Found::Missing
+            };
+        };
+        let live_version = live.metadata.resource_version.clone();
+        let live = match serde_json::to_value(&live) {
+            Ok(live) => live,
+            Err(error) => return Found::Failed(format!("cannot read {key} as it is: {error}")),
+        };
+        let comparison = match DiffEngine::compare_as(&object.manifest, &live, client, NYL_FIELD_MANAGER).await {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                return Found::Failed(failure(
+                    &error,
+                    &format!("compare {key} by a server-side apply dry run"),
+                ))
+            }
+        };
+        let moved = matches!((&comparison.resource_version, &live_version), (Some(dry), Some(live)) if dry != live);
+        if !moved {
+            return if comparison.equivalent {
+                Found::Same
+            } else {
+                Found::Changed
+            };
+        }
+        if attempt == 1 {
+            return Found::Failed(format!(
+                "{key} changed while it was compared, twice; detect drift again"
+            ));
+        }
     }
+    unreachable!("the second attempt returns")
+}
+
+/// What it means that the cluster answers a read of `key` with an unknown API
+/// resource. A version of the kind that is no longer served, while another is,
+/// holds no object at that version: drift. A kind that is gone altogether (no
+/// version, no CRD, no APIService) holds none either: missing. Anything else,
+/// such as an aggregated API that is down, cannot be told from an object that
+/// exists behind it: unverified.
+async fn unserved(client: &dyn KubeClient, key: &ResourceKey) -> Found {
+    let gvk = &key.gvk;
+    match client.get_api_versions().await {
+        Ok(served) if serves_another_version(&served, gvk) => return Found::Unserved,
+        Ok(_) => {}
+        Err(error) => return Found::Failed(failure(&error, &format!("list the API versions to read {key}"))),
+    }
+    match client.is_kind_removed(gvk).await {
+        Ok(true) => Found::Missing,
+        Ok(false) => Found::Failed(format!(
+            "cannot tell whether {key} exists: the cluster does not serve {}, which may be an aggregated API that is \
+             unavailable; check the APIService, or run detect-drift again once it is",
+            api_version_of(gvk)
+        )),
+        Err(error) => Found::Failed(failure(&error, &format!("check whether the kind of {key} was removed"))),
+    }
+}
+
+fn api_version_of(gvk: &nyl_render::kubernetes::GroupVersionKind) -> String {
+    if gvk.group.is_empty() {
+        format!("{} {}", gvk.version, gvk.kind)
+    } else {
+        format!("{}/{} {}", gvk.group, gvk.version, gvk.kind)
+    }
+}
+
+/// Whether `served` (`<group>/<version>/<Kind>`, or `<version>/<Kind>` for the
+/// core group, as [`KubeClient::get_api_versions`] lists them) holds the kind of
+/// `gvk` at another version.
+fn serves_another_version(served: &[String], gvk: &nyl_render::kubernetes::GroupVersionKind) -> bool {
+    served.iter().any(|entry| {
+        let parts: Vec<&str> = entry.split('/').collect();
+        match parts.as_slice() {
+            [version, kind] => gvk.group.is_empty() && *kind == gvk.kind && *version != gvk.version,
+            [group, version, kind] => *group == gvk.group && *kind == gvk.kind && *version != gvk.version,
+            _ => false,
+        }
+    })
 }
 
 /// A failed read or dry run, with the fix attached.
@@ -460,6 +553,146 @@ mod tests {
             release: release.to_owned(),
             what: format!("ConfigMap {release}/{object} changed"),
         }
+    }
+
+    /// A client that records the field manager of each dry run it answers.
+    struct Recording {
+        inner: nyl_render::kubernetes::MockKubeClient,
+        managers: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl KubeClient for Recording {
+        async fn get_resource(
+            &self,
+            gvk: &nyl_render::kubernetes::GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+        ) -> nyl_render::Result<Option<kube::api::DynamicObject>> {
+            self.inner.get_resource(gvk, namespace, name).await
+        }
+
+        async fn apply_resource(
+            &self,
+            resource: &kube::api::DynamicObject,
+            manager: &str,
+            dry_run: bool,
+        ) -> nyl_render::Result<nyl_render::kubernetes::ApplyOutcome> {
+            self.inner.apply_resource(resource, manager, dry_run).await
+        }
+
+        async fn get_server_version(&self) -> nyl_render::Result<String> {
+            self.inner.get_server_version().await
+        }
+
+        async fn get_api_versions(&self) -> nyl_render::Result<Vec<String>> {
+            self.inner.get_api_versions().await
+        }
+
+        async fn is_namespaced(&self, gvk: &nyl_render::kubernetes::GroupVersionKind) -> nyl_render::Result<bool> {
+            self.inner.is_namespaced(gvk).await
+        }
+
+        fn default_namespace(&self) -> &str {
+            self.inner.default_namespace()
+        }
+
+        async fn delete_resource_with(
+            &self,
+            gvk: &nyl_render::kubernetes::GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+            options: &nyl_render::kubernetes::DeleteOptions,
+        ) -> nyl_render::Result<()> {
+            self.inner.delete_resource_with(gvk, namespace, name, options).await
+        }
+
+        async fn get_normalized_resource(
+            &self,
+            resource: &kube::api::DynamicObject,
+            manager: &str,
+        ) -> nyl_render::Result<kube::api::DynamicObject> {
+            self.managers.lock().unwrap().push(manager.to_owned());
+            self.inner.get_normalized_resource(resource, manager).await
+        }
+
+        async fn release_field_manager(
+            &self,
+            resource: &kube::api::DynamicObject,
+            manager: &str,
+        ) -> nyl_render::Result<bool> {
+            self.inner.release_field_manager(resource, manager).await
+        }
+    }
+
+    /// Catches the comparison being made as another field manager than Nyl's,
+    /// which would judge by fields Nyl does not own: the dry run of an object
+    /// that exists is applied as `nyl`.
+    #[tokio::test]
+    async fn test_the_dry_run_is_made_as_nyls_field_manager() {
+        let manifest = serde_json::json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "cfg", "namespace": "web"}, "data": {"a": "b"}
+        });
+        let key = ResourceKey::from_json_value(&manifest).unwrap();
+        let client = Recording {
+            inner: nyl_render::kubernetes::MockKubeClient::new(),
+            managers: std::sync::Mutex::default(),
+        };
+        client
+            .inner
+            .add_resource(key.clone(), serde_json::from_value(manifest.clone()).unwrap());
+        let object = Object {
+            release: "web/web".to_owned(),
+            order: (1, "web/web".to_owned()),
+            manifest,
+            key,
+        };
+
+        assert!(matches!(compare_object(&client, &object).await, Found::Same));
+
+        assert_eq!(*client.managers.lock().unwrap(), [NYL_FIELD_MANAGER]);
+    }
+
+    /// Catches a check that spends the whole budget: the shell discards what a
+    /// check returns after the deadline, so the check stops a tenth of what is
+    /// left before it, at most ten seconds.
+    #[test]
+    fn test_the_check_stops_before_the_deadline() {
+        assert_eq!(margin(Duration::from_secs(600)), Duration::from_secs(10));
+        assert_eq!(margin(Duration::from_secs(30)), Duration::from_secs(3));
+        assert_eq!(margin(Duration::ZERO), Duration::ZERO);
+    }
+
+    /// Catches another version of a kind being mistaken for the kind, and a kind
+    /// being served at another version being missed, in the list the cluster
+    /// reports its API versions in (`<group>/<version>/<Kind>`, and
+    /// `<version>/<Kind>` for the core group).
+    #[test]
+    fn test_another_served_version_of_the_kind_is_recognized() {
+        let served = |entries: &[&str]| entries.iter().map(|entry| (*entry).to_owned()).collect::<Vec<_>>();
+        let gvk = |group: &str, version: &str, kind: &str| nyl_render::kubernetes::GroupVersionKind {
+            group: group.to_owned(),
+            version: version.to_owned(),
+            kind: kind.to_owned(),
+        };
+        let list = served(&[
+            "v1",
+            "v1/ConfigMap",
+            "apps/v1",
+            "apps/v1/Deployment",
+            "batch/v1/Job",
+            "v2/Widget",
+        ]);
+
+        assert!(serves_another_version(&list, &gvk("apps", "v1beta1", "Deployment")));
+        assert!(serves_another_version(&list, &gvk("", "v1beta1", "ConfigMap")));
+        assert!(!serves_another_version(&list, &gvk("apps", "v1", "Deployment")));
+        assert!(!serves_another_version(&list, &gvk("apps", "v1", "Gone")));
+        assert!(!serves_another_version(
+            &list,
+            &gvk("other.example.com", "v2", "Widget")
+        ));
     }
 
     /// Catches a summary that grows with the number of changed objects: it

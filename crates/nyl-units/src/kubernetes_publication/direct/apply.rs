@@ -160,7 +160,7 @@ fn outcome_of(context: &str, failures: &[Why]) -> Outcome {
 
 /// Which wave a Release applies in, and, reversed, is removed in: Releases that
 /// register kinds (CustomResourceDefinitions, APIServices) come first.
-fn wave_of(documents: &[Value]) -> u8 {
+pub(super) fn wave_of(documents: &[Value]) -> u8 {
     let registers = documents.iter().any(|document| {
         ResourceKey::from_json_value(document).is_ok_and(|key| ResourceOrdering::registers_api_group(&key.gvk))
     });
@@ -558,7 +558,77 @@ impl<'a, 'c> Direct<'a, 'c> {
             .flatten()
     }
 
+    /// The Jobs of `manifests` that a TTL removed after they finished: the Job
+    /// sets `ttlSecondsAfterFinished`, the cluster no longer has it, and its
+    /// document is the one the Release's latest revision, `Deployed` for this
+    /// destination, already holds. Applying it again would run it a second
+    /// time, on every execution; a Job whose document changed is applied, as
+    /// it is meant to run again. Anything that cannot be read counts as not
+    /// expired, so the Job is applied.
+    async fn expired_jobs(
+        &self,
+        cluster: &ClusterHandle,
+        name: &str,
+        namespace: &str,
+        manifests: &[Value],
+    ) -> HashSet<ResourceKey> {
+        let candidates: Vec<(ResourceKey, &Value)> = manifests
+            .iter()
+            .filter(|manifest| manifest.pointer("/spec/ttlSecondsAfterFinished").is_some())
+            .filter_map(|manifest| ResourceKey::from_json_value(manifest).ok().map(|key| (key, manifest)))
+            .filter(|(key, _)| key.gvk.group == "batch" && key.gvk.kind == "Job")
+            .collect();
+        let mut expired = HashSet::new();
+        if candidates.is_empty() {
+            return expired;
+        }
+        let Some(previous) = self.latest_deployed_manifest(cluster, name, namespace).await else {
+            return expired;
+        };
+        for (key, manifest) in candidates {
+            let unchanged = previous.iter().any(|document| document == manifest);
+            let gone = matches!(
+                cluster
+                    .client
+                    .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                    .await,
+                Ok(None)
+            );
+            if unchanged && gone {
+                expired.insert(key);
+            }
+        }
+        expired
+    }
+
+    /// The documents of the manifest the latest revision of a Release records,
+    /// when it is `Deployed` and was applied for this target's destination.
+    async fn latest_deployed_manifest(
+        &self,
+        cluster: &ClusterHandle,
+        name: &str,
+        namespace: &str,
+    ) -> Option<Vec<Value>> {
+        let latest = cluster
+            .storage
+            .list_revisions(name, namespace)
+            .await
+            .ok()?
+            .into_iter()
+            .max()?;
+        let state = cluster.storage.get_release(name, namespace, latest).await.ok()??;
+        let applied_here = state
+            .meta
+            .publication
+            .as_ref()
+            .is_some_and(|publication| publication.same_destination(&self.destination));
+        (state.status == ReleaseStatus::Deployed && applied_here)
+            .then(|| nyl_render::yaml::parse_yaml_documents_k8s_compatible(&state.manifest).ok())
+            .flatten()
+    }
+
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
+    #[allow(clippy::too_many_lines)] // One Release's apply in order: prepare, reserve, run, and map its failures.
     async fn apply_one(
         &self,
         cluster: &ClusterHandle,
@@ -582,6 +652,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         .await?;
         ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
+        let expired = self.expired_jobs(cluster, name, namespace, &manifests).await;
         ensure_namespace_exists(cluster.client.as_ref(), namespace, &ownership).await?;
         // Decided before the reservation, which makes the latest revision read as
         // `Rendered` (a mixed reading) until the apply completes: the branch is not
@@ -637,6 +708,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                         confirm_prune: false,
                         ownership: &ownership,
                         protected: Some(protected),
+                        unapplied: Some(&expired),
                     },
                     Interruption {
                         interrupt: tokio::time::sleep_until(end),

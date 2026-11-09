@@ -118,7 +118,8 @@ impl KubernetesPublicationDriver {
     /// Whether the destination branch still holds the tree the unit renders:
     /// a dry publication that would commit something, or one that finds an
     /// owned file modified outside Nyl, is drift.
-    fn tree_drift(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit, spec: &Value) -> DriverResult<Drift> {
+    /// Also whether the target as it renders is direct.
+    fn tree_drift(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit, spec: &Value) -> DriverResult<(Drift, bool)> {
         let rendered = render(
             &self.resource_catalogue,
             &ctx.worktree,
@@ -139,7 +140,8 @@ impl KubernetesPublicationDriver {
             time: ctx.now,
         };
         let variable = |name: &str| ctx.env.get(name).cloned();
-        Ok(
+        let direct = rendered.delivery.kind() == "direct";
+        let tree = {
             match prepare_target_publication(&rendered, &ctx.project_dir, "nyl: drift check", &author, &variable) {
                 Ok(prepared) if prepared.is_unchanged() => Drift::Clean,
                 Ok(_) => Drift::Drifted {
@@ -159,8 +161,9 @@ impl KubernetesPublicationDriver {
                 Err(error) => Drift::Unknown {
                     reason: format!("cannot compare the publication branch with the rendered tree: {error}"),
                 },
-            },
-        )
+            }
+        };
+        Ok((tree, direct))
     }
 }
 
@@ -400,11 +403,16 @@ impl Driver for KubernetesPublicationDriver {
         _receipt: &Receipt,
     ) -> DriverResult<Supported<DriftDetection>> {
         let spec = resolved_spec(unit)?;
-        let tree = self.tree_drift(ctx, unit, spec)?;
+        let (tree, direct) = self.tree_drift(ctx, unit, spec)?;
         // A direct target has no reconciler keeping the cluster in line with
         // the tree between runs, so the cluster is compared with what the
-        // unit applied; an Argo CD target is kept in line by Argo CD.
-        let cluster = direct::drift::detect(ctx, unit, &unit_target(spec).unwrap_or_default(), &self.cluster);
+        // unit applied; an Argo CD target is kept in line by Argo CD. The target
+        // as it renders says which it is, never the facts the unit recorded.
+        // The cluster is compared though the tree already drifted: the two are
+        // independent, and a summary that named only one would leave the other
+        // unseen until the repair.
+        let cluster =
+            direct.then(|| direct::drift::detect(ctx, unit, &unit_target(spec).unwrap_or_default(), &self.cluster));
         let drift = direct::drift::combine([("publication branch", Some(tree)), ("cluster", cluster)]);
         Ok(Supported::Supported(drift.into()))
     }

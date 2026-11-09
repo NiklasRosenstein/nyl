@@ -79,7 +79,10 @@ that never reaches it (or with no receipt at all) fails with
 ## Unchanged Releases
 
 Every reconcile applies every Release, which repairs anything changed in the
-cluster by hand. A Release that changed nothing does not record a new release
+cluster by hand, except a Job that sets `ttlSecondsAfterFinished`, is gone from the
+cluster, and has the document its Release's latest revision holds: it ran and its TTL
+removed it, and applying it again would run it again. It stays tracked, and the Release
+is judged unchanged without it. A Release that changed nothing does not record a new release
 revision, so the history keeps its useful revisions instead of filling with
 copies of one. A Release is unchanged when its latest revision is `Deployed`
 and records the same manifest, resource keys, owner, and publication
@@ -107,38 +110,50 @@ comparing the publication branch with the tree as it does for Argo CD:
 - **What is compared.** For each Release, the manifest of its newest `Deployed`
   revision applied for this unit's publication (repository, branch, and prefix),
   which is what the unit applied, never the declaration as it reads now. A newer
-  revision of another publication, or one applied by hand, is skipped. A Release with
-  no revision of this publication is drift.
+  revision of another publication, or one applied by hand, is not used as the desired
+  state. A Release with no revision of this publication is drift, so a Release only
+  ever applied by hand, or by a Nyl that recorded no publication, reports drift until
+  the unit reconciles.
 - **How.** Each object is read, then compared by a server-side apply dry run as the
   field manager `nyl`, the comparison `nyl diff` makes. Only fields the manifest
   declares count: a field only another manager sets, such as the replicas an
   autoscaler owns when the manifest leaves them out, is not drift. An object the
-  manifest declares that changed, or that is gone, is drift.
-- **What is not drift.** An object a Release keeps tracked only because its
-  `Prune=confirm` option awaits confirmation, or because another Release has yet to apply
-  it; a Job whose `ttlSecondsAfterFinished` let the cluster remove it after it
-  finished. An object two Releases render is compared once, against the revision
-  applied last.
-  Objects carrying Nyl's labels that no current revision tracks (orphans) are not reported.
+  manifest declares that changed, or that is gone, is drift. An object that changes
+  between the read and the dry run (an autoscaler scaling it) is compared again once.
+- **What is not drift.** A Job whose `ttlSecondsAfterFinished` let the cluster remove
+  it after it finished. An object two Releases render is compared once, against the
+  Release that applies last (the order of the apply), which is what the cluster holds.
+- **What is not compared.** Objects a Release keeps tracked without a document in its
+  manifest: because their `Prune=confirm` option awaits confirmation, because their
+  prune failed, or because another Release has yet to apply them. Objects carrying Nyl's
+  labels that no current revision tracks (orphans) are not reported.
 - **What it says.** `drifted`, naming each Release and the first eight changed or
-  missing objects, then how many more; `nyl diff --target <target>` shows each
-  change in full.
+  missing objects, then how many more; run `nyl diff --target <target>` on the
+  Release's file to see each change in full. A kind the cluster no longer serves at the
+  manifest's version, while it serves another, is drift worded "its apiVersion is no
+  longer served"; a kind that is gone altogether is missing.
 - **What it cannot tell.** An unreachable cluster, credentials that may not read the
-  objects or run the dry run, an object the API rejects, or an unfinished comparison
-  at the unit's deadline is `unknown`, never `clean`. Drift found anyway is reported as
-  drift, with what stayed uncompared. The check reads Secrets of the Release
-  namespaces for the release state, the objects the Releases apply, and needs `patch`
-  for the dry runs.
+  objects or run the dry run, an object the API rejects, an aggregated API that is
+  down, or an unfinished comparison at the unit's deadline is `unknown`, never `clean`.
+  Drift found anyway is reported as drift, with what stayed uncompared. The check reads
+  Secrets of the Release namespaces for the release state, the objects the Releases
+  apply, and needs `patch` for the dry runs. An admission webhook whose `sideEffects`
+  are `Unknown` or `Some` refuses dry runs, so a unit with such a webhook on one of its
+  objects stays `unknown`.
 
-The check does one read and one dry run per object, eight at a time, within the unit's
-`timeout`. Like a reconcile it uses only the kubeconfig the unit admits and the Cluster's
-declared context.
+The check does one read and one dry run per object, eight at a time, and stops a tenth
+of the unit's `timeout` (at most ten seconds) before it so it can still report what it
+found. Like a reconcile it uses only the kubeconfig the unit admits and the Cluster's
+declared context. The cluster is compared even when the publication branch already
+drifted: the two are independent, and the summary names both.
 
 A drifted unit is repaired like any other: the next `nyl reconcile` under the default
 `driftRepair: converge` executes it again, which applies every Release again (see
 [Unchanged Releases](#unchanged-releases)). The apply puts back what was changed or
 deleted and keeps the recorded revision, so a repair that changed nothing in the release
-state records no revision. It also applies a Job again whose TTL removed it.
+state records no revision. A Job its TTL removed is not applied again, here or in any
+other reconcile, while its document is the one the Release's latest revision holds: it
+would run a second time. A Job whose document changed is applied.
 
 ## Fencing and manual changes
 

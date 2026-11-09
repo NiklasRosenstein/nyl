@@ -22,7 +22,7 @@ use serde_json::Value;
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 
 use super::health::{fold, is_workload, Found};
-use super::{not_removable, ClusterAccess, ClusterHandle};
+use super::{destination_of, not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{
     block_on, Health, Observed, Proof, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, Running,
     Visibility,
@@ -301,12 +301,7 @@ impl DirectReader {
             .first()
             .map(|deployment| deployment.source.repository.clone())
             .unwrap_or_default();
-        let destination = ReleasePublication {
-            repository,
-            branch: self.publication.branch.clone(),
-            path_prefix: self.publication.path_prefix.clone(),
-            commit: None,
-        };
+        let destination = destination_of(repository, &self.publication);
         // A removal reading waits for no Namespace at all: the first phase of a
         // teardown defers every Namespace that holds the state of any Release it
         // purges, those of Releases that left the tree and of foreign ones

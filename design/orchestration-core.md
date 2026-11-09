@@ -1885,46 +1885,69 @@ either is `drifted`, a half that cannot tell beside a clean one is `unknown`.
 
 - **Desired state is what was applied, never the declaration.** Drift is the
   cluster moving away from what Nyl applied, not the declaration moving on, so
-  the check does not render the cluster half. It reads the recorded
-  `reconciler` facts (location, publication, and the Releases) and, per Release,
-  the manifest of the newest `Deployed` revision whose `meta.publication`
-  equals the unit's publication: the reader's rule ([Reading](#reading)). A
-  newer revision of another publication, or of a manual apply, is skipped. A
-  Release with no such revision is drift. The credentials are the unit's
-  admitted `KUBECONFIG` and the Cluster's declared context, as for the apply
-  and the reader; no ambient context.
+  the cluster half renders nothing. Whether it runs follows the target as it
+  renders (`rendered.delivery`), never the recorded facts: a direct unit that
+  recorded no `reconciler` facts is `unknown`, with the fix to reconcile. The
+  facts (location, publication, and the Releases) say where the cluster is and
+  which Releases to read and, per Release, the manifest of the newest `Deployed`
+  revision whose `meta.publication` equals the unit's publication is the desired
+  state: the reader's rule ([Reading](#reading)). A newer revision of another
+  publication, or of a manual apply, is not used as the desired state. A Release
+  with no such revision is drift (so a Release only ever applied by hand, or by a
+  Nyl that recorded no publication, is drift until the unit reconciles). The
+  credentials are the unit's admitted `KUBECONFIG` and the Cluster's declared
+  context, as for the apply and the reader; no ambient context.
 - **Comparison.** Each manifest document is read, then compared by a
-  server-side apply dry run as the field manager `nyl` (`DiffEngine::are_equivalent_as`,
+  server-side apply dry run as the field manager `nyl` (`DiffEngine::compare_as`,
   the comparison `nyl diff` makes with its own manager name). The dry run
   changes only fields the manifest declares, so a field only another manager sets
-  (the replicas an HPA owns, a controller's annotation) is not drift. A changed
-  object, or one that is gone (or whose kind the cluster no longer serves), is
-  drift.
-- **Not drift.** Keys a revision tracks without a manifest document, which
-  stay tracked because their prune awaits confirmation or because another Release
-  has yet to apply them: only manifest documents are compared. A Job that
-  declares `ttlSecondsAfterFinished` and is gone, as the health rules read it.
-  An object that two Releases render, compared once against the revision
-  applied last. The state of another publication.
+  (a controller's annotation) is not drift. The dry run's answer carries the
+  `resourceVersion` it was applied to; when it is not the one read, the object
+  moved between the two requests (an autoscaler scaling it), and both are done
+  again once; an object that moves again is unverified. A changed object, or
+  one that is gone, is drift. An unknown API resource is told apart: a version of
+  the kind that is no longer served while the kind is served at another is
+  drift ("its apiVersion is no longer served"); a kind that is gone altogether
+  (`is_kind_removed`) is missing; anything else, such as an aggregated API that is
+  down, is unverified.
+- **Not drift.** A Job that declares `ttlSecondsAfterFinished` and is gone, as
+  the health rules read it. An object that two Releases render (a stale
+  revision of one of them), compared once against the Release that applies
+  last, in the apply's order (the wave, then the Release key), never by when the
+  revisions were applied: a revision an apply kept keeps its timestamps. The state
+  of another publication.
+- **Not compared.** Keys a revision tracks without a manifest document: their
+  prune awaits confirmation, their prune failed, or another Release has yet to
+  apply them. Only manifest documents are compared.
 - **Unreadable is never clean.** An unreachable cluster, credentials that may
   not read an object or run the dry run (`get`, and `patch` for dry runs, besides
-  the Secrets of the release state), an object the API rejects, or a deadline that
-  passes is `unknown` with the reason and the fix. Drift found anyway is `drifted`,
-  with what stayed uncompared.
+  the Secrets of the release state), an object the API rejects (an admission
+  webhook whose `sideEffects` are `Unknown` or `Some` refuses dry runs, so such a
+  unit stays `unknown`), or a deadline that passes is `unknown` with the reason
+  and the fix. Drift found anyway is `drifted`, with what stayed uncompared.
 - **Report.** `drifted` with a summary naming each Release and the first eight
-  changed or missing objects, then a count; the full diff stays with
-  `nyl diff --target`. No driver details are recorded: a record that grew with
-  the objects would grow the state.
+  changed or missing objects, then a count, and the fix: run
+  `nyl diff --target <target>` on the Release's file for the full diff. No
+  driver details are recorded: a record that grew with the objects would grow
+  the state. The branch and the cluster are both checked even when the branch
+  already drifted, because the two are independent and the summary names both.
 - **Cost.** One live read and one dry run per object, eight at a time, the
   Releases' state read one after another, all within the unit's deadline
-  (`timeout`); objects not compared by then are unverified. `detect-drift` does
+  (`timeout`) less a margin (a tenth of what is left, at most ten seconds), so
+  the check can still report: the shell discards a result that arrives after the
+  deadline. Objects not compared by then are unverified. `detect-drift` does
   not select Releases: the check is one unit's, and a unit is the target.
 - **Repair.** `driftRepair: converge` executes the unit again, the same path as a
   reconcile of a changed unit: the tree is published unchanged (no commit) and every
   Release is applied again by server-side apply, which puts back what changed
   or was deleted. The apply records no revision when it changed nothing in the
   release state ([Applying](#applying)), so a repair keeps the recorded revision.
-  It also applies again a Job its TTL removed.
+  An apply, a repair or not, leaves a Job unapplied when the cluster no longer has
+  it, it declares `ttlSecondsAfterFinished`, and its document equals the one the
+  Release's latest `Deployed` revision for this publication holds: it ran, and
+  applying it again would run it a second time on every execution. It stays
+  tracked, so the Release stays unchanged without it. A Job whose document
+  changed is applied (`ApplySettings::unapplied`).
 - **Orphans.** Objects that carry Nyl's labels and that no current revision tracks
   are not reported; a follow-up could list them.
 

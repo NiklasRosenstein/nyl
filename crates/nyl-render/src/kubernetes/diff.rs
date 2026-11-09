@@ -224,10 +224,29 @@ impl DiffEngine {
         client: &dyn crate::kubernetes::KubeClient,
         manager: &str,
     ) -> Result<bool> {
-        // Normalize desired with server-side defaults
-        let desired_normalized = Self::normalize_as(desired, Some((client, manager))).await?;
+        Ok(Self::compare_as(desired, live, client, manager).await?.equivalent)
+    }
 
-        // Normalize live without server call
+    /// [`Self::are_equivalent_as`], also reporting the `resourceVersion` the
+    /// dry run's answer carries: the version of the object the dry run was
+    /// applied to. When it is not the version of `live`, the object changed
+    /// between the two requests and the comparison is of two moments.
+    pub async fn compare_as(
+        desired: &Value,
+        live: &Value,
+        client: &dyn crate::kubernetes::KubeClient,
+        manager: &str,
+    ) -> Result<ServerComparison> {
+        let dynamic: DynamicObject = serde_json::from_value(desired.clone())?;
+        let answer = serde_json::to_value(client.get_normalized_resource(&dynamic, manager).await?)?;
+        let resource_version = answer
+            .pointer("/metadata/resourceVersion")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        // Normalize desired with server-side defaults, live without a server call
+        let mut desired_normalized = answer;
+        Self::normalize(&mut desired_normalized);
         let live_normalized = Self::normalize_as(live, None).await?;
 
         // Convert to YAML for comparison
@@ -236,8 +255,20 @@ impl DiffEngine {
         let live_yaml = crate::yaml::serialize_yaml_value(&live_normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))?;
 
-        Ok(desired_yaml == live_yaml)
+        Ok(ServerComparison {
+            equivalent: desired_yaml == live_yaml,
+            resource_version,
+        })
     }
+}
+
+/// What a dry-run comparison found ([`DiffEngine::compare_as`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerComparison {
+    /// Whether applying the desired resource would change nothing.
+    pub equivalent: bool,
+    /// The `resourceVersion` of the dry run's answer, when it carries one.
+    pub resource_version: Option<String>,
 }
 
 #[cfg(test)]

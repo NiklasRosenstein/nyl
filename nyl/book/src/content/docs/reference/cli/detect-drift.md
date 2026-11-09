@@ -58,7 +58,7 @@ summary names the Release and the first eight objects. It needs the unit's
 admitted `KUBECONFIG`, the Cluster's declared context, and `get`, `patch` (for the
 dry runs), and access to the Release state Secrets; a cluster it cannot read is
 `unknown` (`NYL-DRIFT-UNKNOWN`, with the reason and the fix), never `clean`.
-`nyl diff --target <target>` shows each change in full.
+Run `nyl diff --target <target>` on a Release's file to see each change in full.
 
 `detect-drift` and `attest` do not import runs, so they refuse a lease that
 [`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break) broke while
