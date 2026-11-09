@@ -1577,9 +1577,11 @@ the current context, `~/.kube/config`, or in-cluster configuration; a missing
 variable is a failure naming it and the `env` entry that admits it).
 Server-side apply is as `nyl apply` makes it: force-applied as the field
 manager `nyl` (a handoff to Argo CD is a manual option and has no meaning for
-a direct target), resources in Argo CD's kind order, one concurrent batch per
-kind with at most eight in flight, discovery refreshed after
-CustomResourceDefinitions register kinds, release state recorded `Rendered` before the
+a direct target), resources applied CustomResourceDefinitions first, then
+Namespaces, then in Argo CD's kind order, one concurrent batch per
+kind with at most eight in flight, discovery refreshed (bounded, and cut short
+by the unit's deadline) until the kinds that CustomResourceDefinitions register
+are served, which is when they are Established, release state recorded `Rendered` before the
 cluster is touched, completed `Deployed` or `Failed`, then pruning by
 release state (the most recent `Deployed` revision plus what failed revisions
 applied) honoring each live object's `Prune` option, in reverse apply order

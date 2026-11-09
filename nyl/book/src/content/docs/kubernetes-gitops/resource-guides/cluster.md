@@ -18,6 +18,9 @@ with `core` for the core API group; every other kind in `apiVersions` is
 namespaced. When `vendoredCrds` is true, the API versions and scopes of
 CustomResourceDefinitions come from the Cluster's vendored CRD snapshot instead
 of these lists, and rendering fails while that snapshot is missing or stale.
+The recorded scopes are also what [`nyl apply`](/nyl/reference/cli/apply/#which-kinds-are-namespaced),
+`nyl diff`, and the direct reconciler use, after the manifest's own CRDs and before
+the live cluster, to decide which resources take the destination namespace.
 
 ## Rendering behavior
 

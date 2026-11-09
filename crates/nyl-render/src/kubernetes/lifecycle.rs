@@ -12,8 +12,8 @@
 //! context for the driver) belongs to each entry point.
 //!
 //! - [`prepare_desired_manifests`] resolves namespaces and collapses
-//!   duplicate objects, [`apply_sorted_manifests`] applies in Argo CD's kind
-//!   order, and [`ReleaseRecorder`] reserves a revision before the cluster is
+//!   duplicate objects, [`apply_sorted_manifests`] applies CustomResourceDefinitions,
+//!   then Namespaces, then Argo CD's kind order ([`ResourceOrdering`]), and [`ReleaseRecorder`] reserves a revision before the cluster is
 //!   touched, completes it, prunes by release state, and supersedes the
 //!   previous revision. An apply that changed nothing keeps the latest revision
 //!   instead ([`RevisionPolicy`]).
@@ -29,13 +29,14 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use super::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
+use super::CrdDeclaration;
 use super::{
     delete_in_prune_order, enforce_release_history_limit,
     fence::{admit, ReleaseClaim},
     field_manager::FieldOwnership,
     prune::{delete_decision, prune_decision, PruneDecision},
     run_concurrently, ApplyOutcome, DeleteOptions, GroupVersionKind, KubeClient, ObjectIdentity, PruneEvent,
-    ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+    ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
 };
 use crate::{NylError, Result};
 
@@ -119,14 +120,25 @@ fn apply_error(command: &str, apply: &ApplyExecutionResult, prune_failed: usize)
 
 /// Whether each kind is namespaced, so keys can be compared by [`ObjectIdentity`].
 ///
-/// Kinds the cluster does not know keep the namespace their manifest names.
+/// A kind's scope comes from the [`ScopeResolver`] (manifest CRDs, then the Cluster's
+/// capabilities) and only then from the live cluster. Kinds none of them knows keep
+/// the namespace their manifest names.
 #[derive(Default)]
 pub struct ObjectScopes {
+    resolver: ScopeResolver,
     /// `None` when the lookup failed, so it is not repeated.
     namespaced: HashMap<(String, String), Option<bool>>,
 }
 
 impl ObjectScopes {
+    /// Scopes resolved through `resolver` before the live cluster is asked.
+    pub fn new(resolver: ScopeResolver) -> Self {
+        Self {
+            resolver,
+            namespaced: HashMap::new(),
+        }
+    }
+
     /// Look up the scope of every kind among `keys` not yet known.
     pub async fn load(&mut self, client: &dyn KubeClient, keys: &[ResourceKey]) {
         for key in keys {
@@ -134,7 +146,7 @@ impl ObjectScopes {
             if self.namespaced.contains_key(&group_kind) {
                 continue;
             }
-            let namespaced = match client.is_namespaced(&key.gvk).await {
+            let namespaced = match self.resolver.resolve(client, &key.gvk).await {
                 Ok(namespaced) => Some(namespaced),
                 Err(err) => {
                     tracing::debug!(resource = %key, error = %err, "Kind scope unknown; keeping its namespace");
@@ -265,26 +277,47 @@ async fn prune_resources<'k>(
 ///
 /// Namespace resolution and API versions can make distinct documents describe one
 /// object; the last is kept, so the applied and recorded manifests agree.
+///
+/// Every scope is decided by one [`ScopeResolver`], so the order is fixed: the CRDs
+/// among `manifests` and those `scopes` already knows (the CRDs of other Releases of
+/// the target, for the direct reconciler), then the recorded Kubernetes capabilities of
+/// the declared Cluster `scopes` holds (vendored CRDs included), then the built-in
+/// kinds, and only then the live cluster.
 pub async fn prepare_desired_manifests(
     client: &dyn KubeClient,
     mut manifests: Vec<serde_json::Value>,
     duplicates: &mut HashMap<ResourceKey, usize>,
     destination_namespace: Option<&str>,
+    scopes: ScopeResolver,
 ) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
-    resolve_manifest_namespaces(client, &mut manifests, destination_namespace).await?;
-    *duplicates = adjust_duplicate_keys_for_namespace_resolution(client, duplicates, destination_namespace).await?;
-    collapse_rendered_duplicates(client, manifests, duplicates).await
+    let resolver = scopes.with_manifests(&manifests);
+    resolve_manifest_namespaces(client, &resolver, &mut manifests, destination_namespace).await?;
+    *duplicates =
+        adjust_duplicate_keys_for_namespace_resolution(client, &resolver, duplicates, destination_namespace).await?;
+    collapse_with(client, resolver, manifests, duplicates).await
 }
 
 /// Load the scope of every rendered kind and collapse documents describing one
 /// object ([`collapse_duplicate_objects`]). Returns the collapsed manifests and the
-/// loaded scopes, which later identity comparisons extend.
+/// loaded scopes, which later identity comparisons extend. Scopes resolve as for
+/// [`prepare_desired_manifests`].
 pub async fn collapse_rendered_duplicates(
     client: &dyn KubeClient,
     manifests: Vec<serde_json::Value>,
     duplicates: &mut HashMap<ResourceKey, usize>,
+    scopes: ScopeResolver,
 ) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
-    let mut scopes = ObjectScopes::default();
+    let resolver = scopes.with_manifests(&manifests);
+    collapse_with(client, resolver, manifests, duplicates).await
+}
+
+async fn collapse_with(
+    client: &dyn KubeClient,
+    resolver: ScopeResolver,
+    manifests: Vec<serde_json::Value>,
+    duplicates: &mut HashMap<ResourceKey, usize>,
+) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
+    let mut scopes = ObjectScopes::new(resolver);
     scopes.load(client, &manifest_keys(&manifests)?).await;
     let manifests = collapse_duplicate_objects(manifests, duplicates, &scopes)?;
     Ok((manifests, scopes))
@@ -1065,11 +1098,14 @@ fn append_keys(previous: &[ResourceKey], current: &[ResourceKey], scopes: &Objec
 /// Apply manifests in [`ResourceOrdering::apply_batches`], at most `concurrency` at a time.
 ///
 /// As in Argo CD, the resources of one kind form a batch that is applied
-/// concurrently, and every batch finishes before the next starts, so Namespaces
-/// precede the resources in them and CustomResourceDefinitions and APIServices
-/// precede the kinds they register. Before the first batch containing a kind of an
-/// API group registered earlier in this apply, discovery is refreshed until the
-/// registered kinds are served. A failed resource does not stop the others, matching
+/// concurrently, and every batch finishes before the next starts, so
+/// CustomResourceDefinitions and APIServices precede the kinds they register, and
+/// Namespaces precede the resources in them. Before the first batch containing a
+/// kind of an API group registered earlier in this apply, discovery is refreshed
+/// until the registered kinds are served, which a CustomResourceDefinition's kinds
+/// are once it is Established. The wait is bounded, and the caller's deadline cuts it
+/// short; the CRDs apply first, so it is usually over by then, and a Release whose
+/// CRDs are already served waits for nothing. A failed resource does not stop the others, matching
 /// serial apply. Callers collapse duplicate objects first
 /// ([`collapse_duplicate_objects`]); concurrent applies of one object would race.
 ///
@@ -1095,27 +1131,19 @@ pub async fn apply_sorted_manifests(
     let mut results: Vec<Option<Result<ApplyOutcome>>> = (0..manifests.len()).map(|_| None).collect();
     let mut released_count = 0;
     let mut release_failed_count = 0;
-    // API groups registered by CRDs or APIServices applied so far and not yet
+    // Kinds registered by CRDs or APIServices applied so far and not yet
     // confirmed in discovery.
-    let mut registered_groups: HashSet<String> = HashSet::new();
+    let mut registered = RegisteredKinds::default();
 
     for batch in batches {
         // Kinds of a newly registered group are not resolvable until discovery is
         // refreshed (otherwise apply fails with ApiResourceNotFound), and a fresh CRD
         // or APIService may not be served the instant its apply returns.
-        if keys[batch.clone()]
-            .iter()
-            .any(|key| registered_groups.contains(&key.gvk.group))
-        {
-            let mut needed: Vec<GroupVersionKind> = keys[batch.start..]
-                .iter()
-                .filter(|key| registered_groups.contains(&key.gvk.group))
-                .map(|key| key.gvk.clone())
-                .collect();
-            needed.sort_by(|a, b| (&a.group, &a.version, &a.kind).cmp(&(&b.group, &b.version, &b.kind)));
-            needed.dedup();
-            client.refresh_discovery_until_available(&needed).await?;
-            registered_groups.clear();
+        if keys[batch.clone()].iter().any(|key| registered.needs(&key.gvk)) {
+            client
+                .refresh_discovery_until_available(&registered.needed(&keys[batch.start..]))
+                .await?;
+            registered.clear();
         }
 
         run_concurrently(
@@ -1149,9 +1177,7 @@ pub async fn apply_sorted_manifests(
                     }
                 }
                 if result.is_ok() {
-                    if let Some(group) = registered_api_group(&keys[index], &manifests[index]) {
-                        registered_groups.insert(group);
-                    }
+                    registered.record(&manifests[index]);
                 }
                 results[index] = Some(result);
             },
@@ -1182,16 +1208,92 @@ pub async fn apply_sorted_manifests(
     })
 }
 
-/// The API group whose kinds this manifest registers: a CustomResourceDefinition's or
-/// an APIService's `spec.group`.
-fn registered_api_group(key: &ResourceKey, manifest: &serde_json::Value) -> Option<String> {
-    if !ResourceOrdering::registers_api_group(&key.gvk) {
-        return None;
+/// The kinds that CustomResourceDefinitions and APIServices applied so far
+/// register, which the cluster does not serve until they are Established or their
+/// backend is up.
+///
+/// A CustomResourceDefinition registers the kinds it declares ([`CrdDeclaration`]),
+/// an APIService every kind of its group, which it does not declare. A kind of a
+/// registered group that no CRD declares is not waited for: nothing will serve it.
+#[derive(Debug, Default, Clone)]
+pub struct RegisteredKinds {
+    kinds: HashSet<GroupVersionKind>,
+    groups: HashSet<String>,
+}
+
+impl RegisteredKinds {
+    /// What the CustomResourceDefinitions and APIServices among `manifests` register.
+    pub fn of(manifests: &[serde_json::Value]) -> Self {
+        let mut registered = Self::default();
+        for manifest in manifests {
+            registered.record(manifest);
+        }
+        registered
     }
-    manifest["spec"]["group"]
-        .as_str()
-        .filter(|group| !group.is_empty())
-        .map(str::to_string)
+
+    /// Add what `manifest` registers, if it is a CustomResourceDefinition or APIService.
+    pub fn record(&mut self, manifest: &serde_json::Value) {
+        let Ok(key) = ResourceKey::from_json_value(manifest) else {
+            return;
+        };
+        if !ResourceOrdering::registers_api_group(&key.gvk) {
+            return;
+        }
+        if key.gvk.kind == "CustomResourceDefinition" {
+            self.kinds.extend(
+                CrdDeclaration::from_manifest(manifest)
+                    .iter()
+                    .flat_map(CrdDeclaration::gvks),
+            );
+        } else if let Some(group) = manifest["spec"]["group"].as_str().filter(|group| !group.is_empty()) {
+            self.groups.insert(group.to_string());
+        }
+    }
+
+    /// Add what `other` registers.
+    pub fn extend(&mut self, other: Self) {
+        self.kinds.extend(other.kinds);
+        self.groups.extend(other.groups);
+    }
+
+    fn clear(&mut self) {
+        self.kinds.clear();
+        self.groups.clear();
+    }
+
+    fn needs(&self, gvk: &GroupVersionKind) -> bool {
+        self.kinds.contains(gvk) || self.groups.contains(&gvk.group)
+    }
+
+    /// The distinct registered kinds among `keys`, in a fixed order.
+    fn needed(&self, keys: &[ResourceKey]) -> Vec<GroupVersionKind> {
+        let mut kinds: Vec<GroupVersionKind> = keys
+            .iter()
+            .filter(|key| self.needs(&key.gvk))
+            .map(|key| key.gvk.clone())
+            .collect();
+        kinds.sort_by(|a, b| (&a.group, &a.version, &a.kind).cmp(&(&b.group, &b.version, &b.kind)));
+        kinds.dedup();
+        kinds
+    }
+}
+
+/// Wait until the kinds among `manifests` that `registered` covers are served, for a
+/// Release applied after the one whose CustomResourceDefinitions or APIServices
+/// registered them. The apply of the registering Release refreshes discovery only for
+/// kinds it applies itself, so this carries the wait across Releases: once a kind is
+/// served the wait ends at once, so it never repeats what [`apply_sorted_manifests`]
+/// already waited for. Bounded, like that wait.
+pub async fn await_registered_kinds(
+    client: &dyn KubeClient,
+    manifests: &[serde_json::Value],
+    registered: &RegisteredKinds,
+) -> Result<()> {
+    let needed = registered.needed(&manifest_keys(manifests)?);
+    if needed.is_empty() {
+        return Ok(());
+    }
+    client.refresh_discovery_until_available(&needed).await
 }
 
 /// Convert manifests to YAML string
@@ -1292,6 +1394,10 @@ pub async fn purge_resources(
     confirmed: bool,
     on_event: &mut ApplyEventSink<'_>,
 ) -> Purged {
+    // The keys are what a release recorded, each with the namespace resolved when it
+    // was recorded; the scope only tells which keys name one object, and a kind it
+    // cannot tell keeps its namespace. No Cluster capabilities are needed to delete
+    // what exists, so the live cluster is the only source here.
     let mut scopes = ObjectScopes::default();
     scopes.load(client, keys).await;
     let mut seen = HashSet::new();
@@ -1355,6 +1461,7 @@ pub async fn remaining_after_purge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::ClusterKubernetesCapabilities;
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -1697,7 +1804,7 @@ mod tests {
         let mut manifests = vec![
             json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "widget", "namespace": "app"}}),
             json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "deploy", "namespace": "app"}}),
-            json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "metadata": {"name": "widgets.example.com"}, "spec": {"group": "example.com"}}),
+            widget_crd("Namespaced"),
             json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "app"}}),
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
@@ -1706,8 +1813,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(client.position("end app") < client.position("start widgets.example.com"));
-        assert!(client.position("end widgets.example.com") < client.position("start deploy"));
+        assert!(client.position("end widgets.example.com") < client.position("start app"));
+        assert!(client.position("end app") < client.position("start deploy"));
         assert!(client.position("end deploy") < client.position("refresh Widget"));
         assert!(client.position("refresh Widget") < client.position("start widget"));
     }
@@ -1729,6 +1836,338 @@ mod tests {
 
         assert!(client.position("end v1.metrics.example.com") < client.position("refresh Metric"));
         assert!(client.position("refresh Metric") < client.position("start metric"));
+    }
+
+    /// A cluster that enforces what the real API server does for dependent
+    /// objects: a custom resource is rejected until its CustomResourceDefinition
+    /// is applied and Established (what discovery reports), a namespaced object
+    /// without a namespace is rejected, and so is one in a Namespace that does not
+    /// exist. Records what it accepted, in order.
+    struct StrictClient {
+        inner: crate::kubernetes::MockKubeClient,
+        state: std::sync::Mutex<StrictState>,
+    }
+
+    #[derive(Default)]
+    struct StrictState {
+        /// Applied CRDs by group and kind: whether namespaced, and whether Established.
+        crds: HashMap<(String, String), (bool, bool)>,
+        namespaces: HashSet<String>,
+        accepted: Vec<String>,
+        /// Kinds discovery was refreshed for.
+        refreshed: Vec<String>,
+        /// Kinds the live cluster was asked the scope of.
+        scope_lookups: Vec<String>,
+    }
+
+    impl StrictClient {
+        fn new() -> Self {
+            Self {
+                inner: crate::kubernetes::MockKubeClient::new(),
+                state: std::sync::Mutex::default(),
+            }
+        }
+
+        fn accepted(&self) -> Vec<String> {
+            self.state.lock().unwrap().accepted.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KubeClient for StrictClient {
+        async fn get_resource(
+            &self,
+            gvk: &GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+        ) -> Result<Option<DynamicObject>> {
+            self.inner.get_resource(gvk, namespace, name).await
+        }
+
+        async fn apply_resource(&self, resource: &DynamicObject, manager: &str, dry_run: bool) -> Result<ApplyOutcome> {
+            use kube::ResourceExt;
+            let json = serde_json::to_value(resource)?;
+            let key = ResourceKey::from_json_value(&json)?;
+            {
+                let mut state = self.state.lock().unwrap();
+                match key.gvk.kind.as_str() {
+                    "Namespace" => {
+                        state.namespaces.insert(resource.name_any());
+                    }
+                    "CustomResourceDefinition" => {
+                        let (group, kind) = (
+                            json["spec"]["group"].as_str().unwrap().to_string(),
+                            json["spec"]["names"]["kind"].as_str().unwrap().to_string(),
+                        );
+                        let namespaced = json["spec"]["scope"] == "Namespaced";
+                        state.crds.insert((group, kind), (namespaced, false));
+                    }
+                    _ => {
+                        let custom = key.gvk.group.contains('.');
+                        let namespaced = if custom {
+                            match state.crds.get(&(key.gvk.group.clone(), key.gvk.kind.clone())) {
+                                Some((_, false)) | None => {
+                                    return Err(NylError::ApiResourceNotFound(key.gvk.kind.clone()))
+                                }
+                                Some((namespaced, true)) => *namespaced,
+                            }
+                        } else {
+                            true
+                        };
+                        if namespaced {
+                            let Some(namespace) = key.namespace.as_deref() else {
+                                return Err(NylError::Config(format!(
+                                    "Namespace required for namespaced resource {}",
+                                    key.gvk.kind
+                                )));
+                            };
+                            if !state.namespaces.contains(namespace) {
+                                return Err(NylError::Kubernetes(format!("namespaces \"{namespace}\" not found")));
+                            }
+                        }
+                    }
+                }
+                state.accepted.push(format!("{}/{}", key.gvk.kind, key.name));
+            }
+            self.inner.apply_resource(resource, manager, dry_run).await
+        }
+
+        async fn get_server_version(&self) -> Result<String> {
+            self.inner.get_server_version().await
+        }
+
+        async fn get_api_versions(&self) -> Result<Vec<String>> {
+            self.inner.get_api_versions().await
+        }
+
+        /// The cluster knows no custom kind before its CRD is applied.
+        async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            self.state.lock().unwrap().scope_lookups.push(gvk.kind.clone());
+            if gvk.group.contains('.') {
+                let state = self.state.lock().unwrap();
+                return match state.crds.get(&(gvk.group.clone(), gvk.kind.clone())) {
+                    Some((namespaced, _)) => Ok(*namespaced),
+                    None => Err(NylError::ApiResourceNotFound(gvk.kind.clone())),
+                };
+            }
+            self.inner.is_namespaced(gvk).await
+        }
+
+        fn default_namespace(&self) -> &str {
+            self.inner.default_namespace()
+        }
+
+        async fn delete_resource_with(
+            &self,
+            gvk: &GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+            options: &DeleteOptions,
+        ) -> Result<()> {
+            self.inner.delete_resource_with(gvk, namespace, name, options).await
+        }
+
+        async fn get_normalized_resource(&self, resource: &DynamicObject, manager: &str) -> Result<DynamicObject> {
+            self.inner.get_normalized_resource(resource, manager).await
+        }
+
+        async fn release_field_manager(&self, resource: &DynamicObject, manager: &str) -> Result<bool> {
+            self.inner.release_field_manager(resource, manager).await
+        }
+
+        async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
+            let mut state = self.state.lock().unwrap();
+            for gvk in required {
+                state.refreshed.push(gvk.kind.clone());
+                if let Some(crd) = state.crds.get_mut(&(gvk.group.clone(), gvk.kind.clone())) {
+                    crd.1 = true;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn widget_crd(scope: &str) -> serde_json::Value {
+        json!({
+            "apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+            "metadata": {"name": "widgets.example.com"},
+            "spec": {"group": "example.com", "scope": scope, "names": {"kind": "Widget", "plural": "widgets"},
+                     "versions": [{"name": "v1", "served": true, "storage": true}]}
+        })
+    }
+
+    /// One manifest, written in an order that fails when applied as written: the
+    /// custom resource and the object in the new Namespace come before what they
+    /// need. `nyl apply` prepares, sorts, and applies it as it is, and everything is
+    /// accepted: the CRD and the Namespace first, a namespace-less custom resource of
+    /// the new CRD placed in the destination namespace, and the custom resource only
+    /// once its CRD is Established.
+    #[tokio::test]
+    async fn test_apply_sorted_manifests_applies_crds_and_namespaces_before_their_dependents() {
+        let client = StrictClient::new();
+        let documents = vec![
+            json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "widget"}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "config", "namespace": "app"}}),
+            json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web", "namespace": "app"}}),
+            json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "app"}}),
+            widget_crd("Namespaced"),
+        ];
+        let rejected = apply_sorted_manifests(&client, &documents, &FieldOwnership::Nyl, 8, &mut |_| {})
+            .await
+            .unwrap();
+        assert!(
+            rejected.failed_count > 0,
+            "the order as written must fail on this cluster"
+        );
+
+        let client = StrictClient::new();
+        let (mut manifests, _) = prepare_desired_manifests(
+            &client,
+            documents,
+            &mut HashMap::new(),
+            Some("app"),
+            ScopeResolver::default(),
+        )
+        .await
+        .unwrap();
+        ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
+        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.failed_count, 0);
+        assert_eq!(
+            client.accepted(),
+            [
+                "CustomResourceDefinition/widgets.example.com",
+                "Namespace/app",
+                "ConfigMap/config",
+                "Deployment/web",
+                "Widget/widget"
+            ]
+        );
+        assert_eq!(client.state.lock().unwrap().refreshed, ["Widget"]);
+        let widget = result.resource_keys.iter().find(|key| key.name == "widget").unwrap();
+        assert_eq!(widget.namespace.as_deref(), Some("app"));
+    }
+
+    /// Only the kinds a CRD declares are waited for: a kind of the same group that no
+    /// CRD defines will never be served, so waiting for it would only cost the timeout.
+    #[tokio::test]
+    async fn test_apply_sorted_manifests_waits_only_for_kinds_the_crds_declare() {
+        let client = StrictClient::new();
+        let mut manifests = vec![
+            json!({"apiVersion": "example.com/v1", "kind": "Undefined", "metadata": {"name": "u", "namespace": "app"}}),
+            json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "w", "namespace": "app"}}),
+            json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "app"}}),
+            widget_crd("Namespaced"),
+        ];
+        ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
+
+        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
+            .await
+            .unwrap();
+
+        // Only the undefined kind fails, and discovery was never asked about it.
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(client.state.lock().unwrap().refreshed, ["Widget"]);
+    }
+
+    /// A kind the manifest's CRD declares is namespaced or not as the CRD says, whatever
+    /// the live cluster reports for it.
+    #[tokio::test]
+    async fn test_object_scopes_declared_scope_wins_over_the_cluster() {
+        let client = crate::kubernetes::MockKubeClient::new();
+        let gvk = GroupVersionKind::from_api_version_kind("example.com/v1", "Widget").unwrap();
+        assert!(client.is_namespaced(&gvk).await.unwrap(), "the cluster says namespaced");
+        let key = ResourceKey {
+            gvk,
+            namespace: Some("app".to_string()),
+            name: "w".to_string(),
+        };
+        let mut scopes = ObjectScopes::new(ScopeResolver::new(None, [&widget_crd("Cluster")]));
+
+        scopes.load(&client, std::slice::from_ref(&key)).await;
+
+        assert_eq!(scopes.identity(&key).namespace, None);
+    }
+
+    /// A kind the Cluster's recorded capabilities (which include vendored CRDs) know
+    /// resolves from them, and a CRD in the manifest still overrides what they record.
+    /// The live cluster only gets asked to compare, once per kind, never to decide.
+    #[tokio::test]
+    async fn test_prepare_desired_manifests_resolves_scope_from_capabilities_before_the_live_cluster() {
+        let client = StrictClient::new();
+        let capabilities = ClusterKubernetesCapabilities {
+            kube_version: None,
+            api_versions: vec!["example.com/v1/Widget".to_string(), "example.com/v1/Gadget".to_string()],
+            cluster_scoped_kinds: vec!["example.com/Gadget".to_string()],
+            vendored_crds: true,
+        };
+        let documents = vec![
+            json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "widget"}}),
+            json!({"apiVersion": "example.com/v1", "kind": "Gadget", "metadata": {"name": "gadget"}}),
+        ];
+
+        let (manifests, _) = prepare_desired_manifests(
+            &client,
+            documents.clone(),
+            &mut HashMap::new(),
+            Some("app"),
+            ScopeResolver::from_capabilities(Some(&capabilities)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manifests[0]["metadata"]["namespace"], "app");
+        assert!(manifests[1]["metadata"].get("namespace").is_none());
+        // The live cluster, which does not know either kind, was asked once for each.
+        let first = client.state.lock().unwrap().scope_lookups.clone();
+        assert_eq!(first, ["Widget", "Gadget"]);
+
+        // The manifest's own CRD wins over the recorded scope.
+        let mut with_crd = documents;
+        with_crd.push(widget_crd("Cluster"));
+        let (manifests, _) = prepare_desired_manifests(
+            &client,
+            with_crd,
+            &mut HashMap::new(),
+            Some("app"),
+            ScopeResolver::from_capabilities(Some(&capabilities)),
+        )
+        .await
+        .unwrap();
+        assert!(manifests[0]["metadata"].get("namespace").is_none());
+        // The manifest's CRD decided Widget, so the live cluster was not asked about it.
+        let lookups = client.state.lock().unwrap().scope_lookups.clone();
+        assert!(!lookups[first.len()..].contains(&"Widget".to_string()), "{lookups:?}");
+    }
+
+    /// A custom resource of a cluster-scoped CRD in the manifest gets no namespace,
+    /// and a kind no manifest defines and the cluster does not know keeps none.
+    #[tokio::test]
+    async fn test_prepare_desired_manifests_reads_the_scope_of_new_crds_from_the_manifest() {
+        let client = StrictClient::new();
+        let documents = vec![
+            widget_crd("Cluster"),
+            json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "widget"}}),
+            json!({"apiVersion": "other.io/v1", "kind": "Gadget", "metadata": {"name": "gadget"}}),
+        ];
+
+        let (manifests, scopes) = prepare_desired_manifests(
+            &client,
+            documents,
+            &mut HashMap::new(),
+            Some("app"),
+            ScopeResolver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(manifests[1]["metadata"].get("namespace").is_none());
+        assert!(manifests[2]["metadata"].get("namespace").is_none());
+        let widget = ResourceKey::from_json_value(&manifests[1]).unwrap();
+        assert_eq!(scopes.identity(&widget).namespace, None);
     }
 
     /// A failed resource is reported and counted without stopping the rest, and it is
@@ -1754,17 +2193,39 @@ mod tests {
         assert_eq!(client.inner.get_all_resources().len(), 2);
     }
 
-    /// Pruning deletes each kind concurrently and dependents before what they depend
-    /// on: the webhook before its backend, the custom resource before its CRD.
-    #[tokio::test(start_paused = true)]
-    async fn test_prune_resources_deletes_in_reverse_apply_order() {
-        let client = LatencyClient::new("");
-        let key = |api_version: &str, kind: &str, namespace: Option<&str>, name: &str| ResourceKey {
+    fn key_of(api_version: &str, kind: &str, namespace: Option<&str>, name: &str) -> ResourceKey {
+        ResourceKey {
             gvk: GroupVersionKind::from_api_version_kind(api_version, kind).unwrap(),
             namespace: namespace.map(str::to_string),
             name: name.to_string(),
-        };
+        }
+    }
+
+    /// What a release with a CRD, a Namespace, and objects of each depending on them
+    /// owns, in no particular order.
+    fn dependent_keys() -> Vec<ResourceKey> {
+        vec![
+            key_of(
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                None,
+                "widgets.example.com",
+            ),
+            key_of("v1", "Namespace", None, "app"),
+            key_of("example.com/v1", "Widget", Some("app"), "widget"),
+            key_of("v1", "ConfigMap", Some("app"), "config"),
+        ]
+    }
+
+    /// Pruning deletes each kind concurrently and dependents before what they depend
+    /// on: the webhook before its backend, the custom resource before its CRD, and
+    /// the Namespace and then the CRD last, after every object that needs them.
+    #[tokio::test(start_paused = true)]
+    async fn test_prune_resources_deletes_in_reverse_apply_order() {
+        let client = LatencyClient::new("");
+        let key = key_of;
         let keys = [
+            key("v1", "Namespace", None, "app"),
             key(
                 "admissionregistration.k8s.io/v1",
                 "ValidatingWebhookConfiguration",
@@ -1792,13 +2253,36 @@ mod tests {
         })
         .await;
 
-        // One round trip per kind: six kinds, one resource each.
-        assert_eq!(started.elapsed(), client.latency * 6);
+        // One round trip per kind: seven kinds, one resource each.
+        assert_eq!(started.elapsed(), client.latency * 7);
         assert_eq!(
             pruned,
-            vec!["hook", "widget", "api", "backend", "svc", "widgets.example.com"]
+            vec!["hook", "widget", "api", "backend", "svc", "app", "widgets.example.com"]
         );
         assert!(failed.is_empty());
+    }
+
+    /// A purge deletes in the same order as a prune: the objects that need a
+    /// Namespace or a CRD go before it, the Namespace next to last, the CRD last.
+    #[tokio::test(start_paused = true)]
+    async fn test_purge_resources_deletes_dependents_before_their_namespace_and_crd() {
+        let client = LatencyClient::new("");
+        let keys = dependent_keys();
+
+        let purged = purge_resources(&client, &keys, &|_| false, 8, false, &mut |_| {}).await;
+
+        assert!(purged.failed.is_empty());
+        let deleted: Vec<String> = client
+            .events()
+            .into_iter()
+            .filter_map(|event| event.strip_prefix("delete-start ").map(str::to_string))
+            .collect();
+        assert_eq!(deleted, ["widget", "config", "app", "widgets.example.com"]);
+        // Each waits for the one before it: the Namespace is deleted after the
+        // objects in it finished, and the CRD after the Namespace did.
+        assert!(client.position("delete-end widget") < client.position("delete-start app"));
+        assert!(client.position("delete-end config") < client.position("delete-start app"));
+        assert!(client.position("delete-end app") < client.position("delete-start widgets.example.com"));
     }
 
     /// Documents for one object collapse to the last, even across API versions and
@@ -2437,7 +2921,7 @@ mod tests {
         };
         // The refresh after the CRD batch fails, aborting the apply.
         let manifests = vec![
-            json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "metadata": {"name": "widgets.example.com"}, "spec": {"group": "example.com"}}),
+            widget_crd("Namespaced"),
             json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "w", "namespace": "app"}}),
         ];
         let mut scopes = ObjectScopes::default();

@@ -17,6 +17,13 @@ It compares exactly what [`apply`](/nyl/reference/cli/apply/) would apply and
 prune. See [Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/#the-releases-application)
 for the behavior `render`, `diff`, and `apply` share.
 
+A diff creates nothing, so a custom resource of a CustomResourceDefinition that is
+new in the same manifest cannot be compared with the server. It is listed as added
+with the note `CRD will be installed` and is not an error; a custom resource whose
+CRD is neither in the manifest nor in the cluster is an error. The namespace such a
+resource takes is decided as `apply` decides it
+([which kinds are namespaced](/nyl/reference/cli/apply/#which-kinds-are-namespaced)).
+
 ## Arguments
 
 - `<FILE>` - Path to the manifest file to diff (required)

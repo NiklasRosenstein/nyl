@@ -848,11 +848,15 @@ async fn test_a_teardown_leaves_an_object_an_earlier_revision_tracked_and_a_late
 }
 
 /// A cluster client that behaves like an API server where the mock is lenient:
-/// a custom kind is unknown until its CustomResourceDefinition was applied, and
-/// deleting a named object can be made to fail.
+/// a custom kind is unknown until its CustomResourceDefinition was applied and
+/// discovery was refreshed for it, and deleting a named object can be made to fail.
 struct StrictClient {
     inner: Arc<MockKubeClient>,
     registered: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Registered kinds discovery was refreshed for, so they can be applied.
+    served: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The kinds each discovery refresh waited for, in order.
+    refreshes: std::sync::Mutex<Vec<Vec<String>>>,
     failing_deletes: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
@@ -861,6 +865,8 @@ impl StrictClient {
         Arc::new(Self {
             inner,
             registered: std::sync::Mutex::default(),
+            served: std::sync::Mutex::default(),
+            refreshes: std::sync::Mutex::default(),
             failing_deletes: std::sync::Mutex::default(),
         })
     }
@@ -884,6 +890,15 @@ impl KubeClient for StrictClient {
         dry_run: bool,
     ) -> nyl_render::Result<nyl_render::kubernetes::ApplyOutcome> {
         let object = serde_json::to_value(resource).unwrap();
+        let kind = object["kind"].as_str().unwrap_or_default();
+        if object["apiVersion"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("example.com/"))
+            && !dry_run
+            && !self.served.lock().unwrap().contains(kind)
+        {
+            return Err(nyl_render::NylError::ApiResourceNotFound(kind.to_owned()));
+        }
         if object["kind"] == "CustomResourceDefinition" && !dry_run {
             if let Some(kind) = object.pointer("/spec/names/kind").and_then(serde_json::Value::as_str) {
                 self.registered.lock().unwrap().insert(kind.to_owned());
@@ -941,6 +956,13 @@ impl KubeClient for StrictClient {
     ) -> nyl_render::Result<bool> {
         self.inner.release_field_manager(resource, manager).await
     }
+
+    async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> nyl_render::Result<()> {
+        let kinds: Vec<String> = required.iter().map(|gvk| gvk.kind.clone()).collect();
+        self.served.lock().unwrap().extend(kinds.iter().cloned());
+        self.refreshes.lock().unwrap().push(kinds);
+        Ok(())
+    }
 }
 
 impl Cluster {
@@ -953,10 +975,10 @@ impl Cluster {
     }
 }
 
-/// Catches the first deploy of a custom resource failing before it starts: Releases
-/// are prepared when their wave comes, because a namespaced custom resource
-/// without a `metadata.namespace` cannot be resolved until the wave-0 Release
-/// that registers its CustomResourceDefinition applied.
+/// Catches the first deploy of a custom resource failing before it starts: its kind is
+/// not served until the wave-0 Release that registers its CustomResourceDefinition
+/// applied and the cluster serves it, so the Release waits for it. Its namespace comes
+/// from that CRD, which the target declares, without waiting.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_custom_resource_in_wave_1_resolves_after_its_crd_applied_in_wave_0() {
     let world = direct_world();
@@ -975,7 +997,58 @@ async fn test_a_custom_resource_in_wave_1_resolves_after_its_crd_applied_in_wave
     )
     .unwrap();
     let cluster = Cluster::new();
-    let strict: Arc<dyn KubeClient> = StrictClient::new(cluster.client.clone());
+    let strict = StrictClient::new(cluster.client.clone());
+    let driver = cluster.driver_through(strict.clone());
+    let unit = unit_for(&driver, &world, "kubernetes");
+
+    let outcome = reconcile(&driver, &world, &unit, None, &nobody());
+
+    tree_of(&outcome);
+    assert!(
+        cluster
+            .exists("example.com/v1", "Widget", Some("widgets"), "first")
+            .await,
+        "the custom resource lands in its Release's namespace, once its kind is served"
+    );
+    // Waited for once: before the Release that uses the kind, not again by its own apply.
+    assert_eq!(*strict.refreshes.lock().unwrap(), [["Widget"]]);
+    assert!(
+        cluster
+            .exists(
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                None,
+                "widgets.example.com"
+            )
+            .await
+    );
+}
+
+/// Catches the direct reconciler resolving scope without the target Cluster's recorded
+/// capabilities (`RenderedTarget.cluster_kubernetes`): no Release renders the CRD of
+/// `Widget`, and the live cluster does not know the kind, so only the capabilities
+/// can say it is namespaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_custom_resource_resolves_its_scope_from_the_clusters_recorded_capabilities() {
+    let world = direct_world();
+    let platform = world.work().join("nyl/platform.yaml");
+    let text = std::fs::read_to_string(&platform).unwrap();
+    let edited = text.replace(
+        "apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]",
+        "apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment, example.com/v1/Widget]",
+    );
+    assert_ne!(text, edited);
+    std::fs::write(&platform, edited).unwrap();
+    std::fs::write(
+        world.work().join("applications/web/widgets.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: widgets, namespace: widgets}\nspec: {}\n---\n\
+         apiVersion: example.com/v1\nkind: Widget\nmetadata: {name: first}\nspec: {size: 1}\n",
+    )
+    .unwrap();
+    let cluster = Cluster::new();
+    let strict = StrictClient::new(cluster.client.clone());
+    // The cluster serves the kind but, with no CRD anywhere, cannot report its scope.
+    strict.served.lock().unwrap().insert("Widget".to_owned());
     let driver = cluster.driver_through(strict);
     let unit = unit_for(&driver, &world, "kubernetes");
 
@@ -986,17 +1059,7 @@ async fn test_a_custom_resource_in_wave_1_resolves_after_its_crd_applied_in_wave
         cluster
             .exists("example.com/v1", "Widget", Some("widgets"), "first")
             .await,
-        "the custom resource lands in its Release's namespace"
-    );
-    assert!(
-        cluster
-            .exists(
-                "apiextensions.k8s.io/v1",
-                "CustomResourceDefinition",
-                None,
-                "widgets.example.com"
-            )
-            .await
+        "the capabilities say Widget is namespaced, so it takes its Release's namespace"
     );
 }
 

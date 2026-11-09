@@ -16,7 +16,7 @@ use nyl_render::{
             apply_sorted_manifests, ensure_namespace_exists, prepare_desired_manifests, ApplySettings, Interruption,
             ReleaseRecorder, RevisionPolicy,
         },
-        KubernetesReleaseStorage, ResourceKey, ResourceOrdering,
+        KubernetesReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
     },
     NylError, Result,
 };
@@ -62,9 +62,10 @@ pub struct ApplyArgs {
 
     /// Maximum number of resources applied or pruned at the same time.
     ///
-    /// Resources are applied in Argo CD's kind order, one batch per kind; the
-    /// resources of a batch are applied concurrently and a batch completes before
-    /// the next one starts. Use 1 to apply serially.
+    /// Resources are applied CustomResourceDefinitions first, then Namespaces, then
+    /// the other kinds in Argo CD's kind order, one batch per kind; the resources
+    /// of a batch are applied concurrently and a batch completes before the next
+    /// one starts. Use 1 to apply serially.
     #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
     pub concurrency: u16,
 
@@ -149,8 +150,22 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     let destination_namespace = preflight.destination_namespace.as_deref().or(args.namespace.as_deref());
 
-    let (collapsed, mut scopes) =
-        prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, destination_namespace).await?;
+    // Scope follows the declaration first: the manifest's CRDs, then the target
+    // Cluster's recorded capabilities (vendored CRDs included), then the live cluster.
+    let capabilities = ScopeResolver::from_capabilities(
+        preflight
+            .resolved_target
+            .as_ref()
+            .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref()),
+    );
+    let (collapsed, mut scopes) = prepare_desired_manifests(
+        &kube_client,
+        desired_manifests,
+        &mut duplicates,
+        destination_namespace,
+        capabilities,
+    )
+    .await?;
     desired_manifests = collapsed;
 
     // Display duplicate resources warning if any
@@ -158,7 +173,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         print_duplicate_warning(&duplicates);
     }
 
-    // 3. Sort resources into apply order (Argo CD's kind order).
+    // 3. Sort resources into apply order (CRDs, Namespaces, then Argo CD's kind order).
     // Sort in place so the recorded release manifest is stored in the same order it
     // is applied (and consistent with `release rollback`, which also stores sorted).
     ResourceOrdering::sort_by_priority(&mut desired_manifests)?;

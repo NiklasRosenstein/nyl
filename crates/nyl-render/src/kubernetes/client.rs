@@ -723,7 +723,10 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
-        const MAX_ATTEMPTS: u32 = 10;
+        // A CustomResourceDefinition is served once it is Established, which takes a
+        // moment (longer on a busy API server); an APIService once its backend is up.
+        // The caller's own deadline cuts the wait short.
+        const WAIT: Duration = Duration::from_secs(30);
         const DELAY: Duration = Duration::from_millis(500);
 
         let all_known = || {
@@ -735,7 +738,8 @@ impl KubeClient for KubeRsClient {
             return Ok(());
         }
 
-        for attempt in 1..=MAX_ATTEMPTS {
+        let deadline = Instant::now() + WAIT;
+        for attempt in 1_u32.. {
             match self.refresh_discovery().await {
                 Ok(()) if all_known() => break,
                 Ok(()) => tracing::debug!(
@@ -746,9 +750,10 @@ impl KubeClient for KubeRsClient {
                 // discovery with 503 until it is ready.
                 Err(err) => tracing::debug!(attempt, error = %err, "Discovery refresh failed; retrying"),
             }
-            if attempt < MAX_ATTEMPTS {
-                tokio::time::sleep(DELAY).await;
+            if Instant::now() + DELAY >= deadline {
+                break;
             }
+            tokio::time::sleep(DELAY).await;
         }
 
         if !all_known() {
@@ -1006,37 +1011,11 @@ fn crd_api_resource() -> ApiResource {
 
 /// The scope of every served version of a CRD's kind (`true` when namespaced).
 fn crd_scope_entries(crd: &DynamicObject) -> Vec<(GroupVersionKind, bool)> {
-    let Some(spec) = crd.data.get("spec") else {
+    let Some(declaration) = crd.data.get("spec").and_then(super::CrdDeclaration::from_spec) else {
         return Vec::new();
     };
-    let (Some(group), Some(kind), Some(versions)) = (
-        spec.get("group").and_then(serde_json::Value::as_str),
-        spec.get("names")
-            .and_then(|names| names.get("kind"))
-            .and_then(serde_json::Value::as_str),
-        spec.get("versions").and_then(serde_json::Value::as_array),
-    ) else {
-        return Vec::new();
-    };
-    let namespaced = match spec.get("scope").and_then(serde_json::Value::as_str) {
-        Some("Namespaced") => true,
-        Some("Cluster") => false,
-        _ => return Vec::new(),
-    };
-    // Mirror Kubernetes behavior: only served versions are requestable.
-    versions
-        .iter()
-        .filter(|version| version.get("served").and_then(serde_json::Value::as_bool) == Some(true))
-        .filter_map(|version| version.get("name").and_then(serde_json::Value::as_str))
-        .map(|version| {
-            let gvk = GroupVersionKind {
-                group: group.to_string(),
-                version: version.to_string(),
-                kind: kind.to_string(),
-            };
-            (gvk, namespaced)
-        })
-        .collect()
+    let namespaced = declaration.scope == crate::resources::ResourceScope::Namespaced;
+    declaration.gvks().map(|gvk| (gvk, namespaced)).collect()
 }
 
 #[cfg(test)]

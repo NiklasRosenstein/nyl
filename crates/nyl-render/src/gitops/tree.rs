@@ -10,6 +10,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::git::GitManager;
+use crate::kubernetes::ScopeResolver;
 use crate::render::cache::{CacheLayer, CacheOutcome};
 use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
@@ -1064,7 +1065,7 @@ async fn compile_target_tree_recording(
         usage.record(&owner.manifest);
     }
     let scopes = ScopeResolver::new(
-        &cluster,
+        cluster.spec.kubernetes.as_ref(),
         pending_workloads.iter().flat_map(|workload| workload.manifests.iter()),
     );
     let empty_usage = ProjectUsage::default();
@@ -3055,55 +3056,9 @@ impl ProjectUsage {
     }
 }
 
-/// Resource scopes known for a target: CRDs it renders, then the Cluster's capabilities.
-/// Resource scope from rendered CustomResourceDefinitions and a Cluster's
-/// recorded Kubernetes capabilities.
-pub(super) struct ScopeResolver<'a> {
-    rendered: BTreeMap<(String, String), crate::resources::ResourceScope>,
-    capabilities: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
-}
-
-impl<'a> ScopeResolver<'a> {
-    fn new<'m>(cluster: &'a Cluster, manifests: impl IntoIterator<Item = &'m Value>) -> Self {
-        Self::with_capabilities(cluster.spec.kubernetes.as_ref(), manifests)
-    }
-
-    pub(super) fn with_capabilities<'m>(
-        capabilities: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
-        manifests: impl IntoIterator<Item = &'m Value>,
-    ) -> Self {
-        let mut rendered = BTreeMap::new();
-        for manifest in manifests {
-            if manifest.get("kind").and_then(Value::as_str) != Some("CustomResourceDefinition") {
-                continue;
-            }
-            let field = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str);
-            let scope = match field("/spec/scope") {
-                Some("Cluster") => crate::resources::ResourceScope::Cluster,
-                Some("Namespaced") => crate::resources::ResourceScope::Namespaced,
-                _ => continue,
-            };
-            if let (Some(group), Some(kind)) = (field("/spec/group"), field("/spec/names/kind")) {
-                rendered.insert((group.to_owned(), kind.to_owned()), scope);
-            }
-        }
-        Self { rendered, capabilities }
-    }
-
-    pub(super) fn scope(&self, group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
-        self.rendered
-            .get(&(group.to_owned(), kind.to_owned()))
-            .copied()
-            .or_else(|| {
-                self.capabilities
-                    .and_then(|capabilities| capabilities.scope_of(group, kind))
-            })
-    }
-}
-
 impl GeneratedProject {
     /// The AppProject manifest, with omitted fields derived from the group's usage.
-    fn finish(&self, usage: &ProjectUsage, scopes: &ScopeResolver<'_>) -> Result<Value> {
+    fn finish(&self, usage: &ProjectUsage, scopes: &ScopeResolver) -> Result<Value> {
         let mut spec = self.spec.clone();
         let namespaces = usage
             .namespaces
@@ -4306,7 +4261,7 @@ mod tests {
     #[test]
     fn test_retention_augments_inferred_and_declared_project_scope() {
         let cluster = scoped_cluster();
-        let scopes = ScopeResolver::new(&cluster, []);
+        let scopes = ScopeResolver::new(cluster.spec.kubernetes.as_ref(), []);
         for declared in [false, true] {
             let mut group: ApplicationGroup = serde_json::from_value(serde_json::json!({
                 "apiVersion":"k8s.gitops.nyl/v1", "kind":"ApplicationGroup", "metadata":{"name":"web"},
@@ -4382,7 +4337,7 @@ mod tests {
         // A CRD rendered in the target decides its kind's scope.
         let crd = serde_json::json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
             "spec": {"group": "example.com", "scope": "Cluster", "names": {"kind": "Widget"}}});
-        let scopes = ScopeResolver::new(&cluster, [&crd]);
+        let scopes = ScopeResolver::new(cluster.spec.kubernetes.as_ref(), [&crd]);
         let project = generated_project(AppProjectTemplate::default())
             .finish(
                 &usage(&[
@@ -4415,7 +4370,7 @@ mod tests {
     #[test]
     fn test_generated_project_requires_known_scopes_only_for_derived_whitelists() {
         let cluster = scoped_cluster();
-        let scopes = ScopeResolver::new(&cluster, []);
+        let scopes = ScopeResolver::new(cluster.spec.kubernetes.as_ref(), []);
         let unknown = usage(&[("example.com", "Widget")]);
         let error = generated_project(AppProjectTemplate::default())
             .finish(&unknown, &scopes)
