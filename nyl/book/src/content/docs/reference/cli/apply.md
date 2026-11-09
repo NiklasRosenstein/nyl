@@ -93,11 +93,7 @@ kinds are served once it is Established, so the custom resources apply after the
 CRD is Established; the CRDs apply first, so the wait is usually already over, and
 nothing waits for a CRD the cluster already serves. Only the kinds a CRD declares
 are waited for, and, like Argo CD, Nyl does not wait for the backend of a CRD's
-conversion webhook. A custom resource without a
-namespace takes the destination namespace when its CRD, in the same manifest or
-already in the cluster, declares the kind namespaced. A kind that no manifest CRD
-defines and the cluster does not know, such as one an APIService in the same
-manifest will serve, keeps no namespace: set `metadata.namespace` on it. When several documents describe the same object
+conversion webhook. When several documents describe the same object
 (the same group, kind, namespace, and name, in any API version; cluster-scoped
 objects ignore a namespace), only the last one is applied and recorded. A resource
 that fails to apply does not stop the others; the release is recorded as failed
@@ -153,6 +149,27 @@ line follows each resource whose `nyl` fields were released. The summary is foll
 the time spent in API discovery, validation, apply, and release bookkeeping.
 Nyl uses aggregated API discovery (two requests) when the API server supports it
 and falls back to per-group discovery otherwise; the timing line names the mode.
+
+## Which kinds are namespaced
+
+A resource that sets no namespace takes the destination namespace when its kind is
+namespaced. Nyl decides that scope in one fixed order, the same for `apply`,
+[`diff`](/nyl/reference/cli/diff/), `release rollback`, and the direct reconciler, and
+for the Application and AppProject Nyl derives for a target:
+
+1. The CustomResourceDefinitions in the manifest. A CRD names its kind's scope, and
+   counts when it serves a version. Where two CRD documents declare one kind, the
+   later one wins.
+2. With a DeploymentTarget (`--target`, or the target the project selects), the
+   target Cluster's recorded Kubernetes capabilities, which include the CRDs
+   vendored by [`nyl capture cluster --crds`](/nyl/kubernetes-gitops/resource-guides/cluster/).
+3. The live cluster, only for a kind nothing above knows. Without GitOps
+   configuration, `--context` selects the cluster and there is no step 2.
+
+The result therefore follows what is declared, and a custom resource whose CRD is
+new in the manifest, or vendored but not yet installed, gets its namespace before
+anything is applied. A kind that none of these knows, such as one an APIService in
+the same manifest will serve, keeps no namespace: set `metadata.namespace` on it.
 
 ## Examples
 

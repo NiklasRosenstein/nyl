@@ -150,8 +150,20 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     let destination_namespace = preflight.destination_namespace.as_deref().or(args.namespace.as_deref());
 
-    let (collapsed, mut scopes) =
-        prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, destination_namespace).await?;
+    // Scope follows the declaration first: manifest CRDs, then the target Cluster's
+    // recorded capabilities (vendored CRDs included), then the live cluster.
+    let capabilities = preflight
+        .resolved_target
+        .as_ref()
+        .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref());
+    let (collapsed, mut scopes) = prepare_desired_manifests(
+        &kube_client,
+        desired_manifests,
+        &mut duplicates,
+        destination_namespace,
+        capabilities,
+    )
+    .await?;
     desired_manifests = collapsed;
 
     // Display duplicate resources warning if any

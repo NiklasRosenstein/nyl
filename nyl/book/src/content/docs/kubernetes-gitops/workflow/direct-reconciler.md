@@ -64,7 +64,9 @@ server must be the one the Cluster declares.
 Releases apply one at a time in waves: Releases that render CustomResourceDefinitions
 or APIServices come first. Each Release is prepared when its wave comes, so a
 custom resource without a namespace resolves after its CRD applied, unless the CRD
-is in the same Release, which declares the scope itself. A Release applied after
+is in the same Release or recorded by the target Cluster (vendored CRDs included),
+which declare the scope first; see
+[which kinds are namespaced](/nyl/reference/cli/apply/#which-kinds-are-namespaced). A Release applied after
 another that registered kinds waits, within the unit's deadline, until the cluster
 serves the kinds that Release registered and this one uses; it does not wait for
 a Release that failed. Inside a Release, CustomResourceDefinitions apply first, then

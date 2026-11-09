@@ -105,11 +105,18 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Resolve namespaces and collapse duplicates exactly as `nyl apply` does.
     let destination_namespace = preflight.destination_namespace.as_deref().unwrap_or(&release_namespace);
+    // The same scope order as `apply`: manifest CRDs, the target Cluster's recorded
+    // capabilities, then the live cluster.
+    let capabilities = preflight
+        .resolved_target
+        .as_ref()
+        .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref());
     let (ready, mut scopes) = prepare_desired_manifests(
         &kube_client,
         desired_manifests,
         &mut duplicates,
         Some(destination_namespace),
+        capabilities,
     )
     .await?;
 
@@ -974,7 +981,7 @@ mod tests {
         });
         let client = SelectiveApiResourceNotFoundClient::new([("example.com", "v1", "Widget")]);
         let (ready, mut scopes) =
-            prepare_desired_manifests(&client, vec![widget, crd], &mut HashMap::new(), Some("app"))
+            prepare_desired_manifests(&client, vec![widget, crd], &mut HashMap::new(), Some("app"), None)
                 .await
                 .unwrap();
 

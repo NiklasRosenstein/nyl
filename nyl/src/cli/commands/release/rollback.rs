@@ -124,7 +124,8 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     // Revisions recorded before duplicates were collapsed at apply time may still
     // hold several documents for one object; apply only the last, as apply did.
     let mut duplicates = std::collections::HashMap::new();
-    let (mut manifests, mut scopes) = collapse_rendered_duplicates(&kube_client, manifests, &mut duplicates).await?;
+    let (mut manifests, mut scopes) =
+        collapse_rendered_duplicates(&kube_client, manifests, &mut duplicates, cluster.capabilities.as_ref()).await?;
 
     // Sort resources into apply order (CRDs, Namespaces, then Argo CD's kind order), record the rollback as
     // a new revision before touching the cluster, and apply.

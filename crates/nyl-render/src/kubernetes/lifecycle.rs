@@ -28,17 +28,17 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
-use super::namespace_resolution::{
-    adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces, DeclaredScopes,
-};
+use super::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
+use super::CrdDeclaration;
 use super::{
     delete_in_prune_order, enforce_release_history_limit,
     fence::{admit, ReleaseClaim},
     field_manager::FieldOwnership,
     prune::{delete_decision, prune_decision, PruneDecision},
     run_concurrently, ApplyOutcome, DeleteOptions, GroupVersionKind, KubeClient, ObjectIdentity, PruneEvent,
-    ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+    ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
 };
+use crate::resources::ClusterKubernetesCapabilities;
 use crate::{NylError, Result};
 
 /// Something that happened during an apply, reported as it happens.
@@ -121,14 +121,25 @@ fn apply_error(command: &str, apply: &ApplyExecutionResult, prune_failed: usize)
 
 /// Whether each kind is namespaced, so keys can be compared by [`ObjectIdentity`].
 ///
-/// Kinds the cluster does not know keep the namespace their manifest names.
+/// A kind's scope comes from the [`ScopeResolver`] (manifest CRDs, then the Cluster's
+/// capabilities) and only then from the live cluster. Kinds none of them knows keep
+/// the namespace their manifest names.
 #[derive(Default)]
 pub struct ObjectScopes {
+    resolver: ScopeResolver,
     /// `None` when the lookup failed, so it is not repeated.
     namespaced: HashMap<(String, String), Option<bool>>,
 }
 
 impl ObjectScopes {
+    /// Scopes resolved through `resolver` before the live cluster is asked.
+    pub fn new(resolver: ScopeResolver) -> Self {
+        Self {
+            resolver,
+            namespaced: HashMap::new(),
+        }
+    }
+
     /// Look up the scope of every kind among `keys` not yet known.
     pub async fn load(&mut self, client: &dyn KubeClient, keys: &[ResourceKey]) {
         for key in keys {
@@ -136,7 +147,7 @@ impl ObjectScopes {
             if self.namespaced.contains_key(&group_kind) {
                 continue;
             }
-            let namespaced = match client.is_namespaced(&key.gvk).await {
+            let namespaced = match self.resolver.resolve(client, &key.gvk).await {
                 Ok(namespaced) => Some(namespaced),
                 Err(err) => {
                     tracing::debug!(resource = %key, error = %err, "Kind scope unknown; keeping its namespace");
@@ -144,15 +155,6 @@ impl ObjectScopes {
                 }
             };
             self.namespaced.insert(group_kind, namespaced);
-        }
-    }
-
-    /// Take the scope of every kind the manifests' own CustomResourceDefinitions
-    /// define ([`DeclaredScopes`]), which no cluster lookup can answer before they apply.
-    pub fn declare(&mut self, declared: &DeclaredScopes) {
-        for ((group, kind), namespaced) in declared.kinds() {
-            self.namespaced
-                .insert((group.to_string(), kind.to_string()), Some(namespaced));
         }
     }
 
@@ -276,29 +278,46 @@ async fn prune_resources<'k>(
 ///
 /// Namespace resolution and API versions can make distinct documents describe one
 /// object; the last is kept, so the applied and recorded manifests agree.
+///
+/// Every scope is decided by one [`ScopeResolver`], so the order is fixed: the CRDs
+/// among `manifests`, then `capabilities`, the recorded Kubernetes capabilities of the
+/// declared Cluster (`None` without one, which includes its vendored CRDs), and only
+/// then the live cluster.
 pub async fn prepare_desired_manifests(
     client: &dyn KubeClient,
     mut manifests: Vec<serde_json::Value>,
     duplicates: &mut HashMap<ResourceKey, usize>,
     destination_namespace: Option<&str>,
+    capabilities: Option<&ClusterKubernetesCapabilities>,
 ) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
-    resolve_manifest_namespaces(client, &mut manifests, destination_namespace).await?;
-    let declared = DeclaredScopes::of(&manifests);
+    let resolver = ScopeResolver::new(capabilities, &manifests);
+    resolve_manifest_namespaces(client, &resolver, &mut manifests, destination_namespace).await?;
     *duplicates =
-        adjust_duplicate_keys_for_namespace_resolution(client, &declared, duplicates, destination_namespace).await?;
-    collapse_rendered_duplicates(client, manifests, duplicates).await
+        adjust_duplicate_keys_for_namespace_resolution(client, &resolver, duplicates, destination_namespace).await?;
+    collapse_with(client, resolver, manifests, duplicates).await
 }
 
 /// Load the scope of every rendered kind and collapse documents describing one
 /// object ([`collapse_duplicate_objects`]). Returns the collapsed manifests and the
-/// loaded scopes, which later identity comparisons extend.
+/// loaded scopes, which later identity comparisons extend. Scopes resolve as for
+/// [`prepare_desired_manifests`].
 pub async fn collapse_rendered_duplicates(
     client: &dyn KubeClient,
     manifests: Vec<serde_json::Value>,
     duplicates: &mut HashMap<ResourceKey, usize>,
+    capabilities: Option<&ClusterKubernetesCapabilities>,
 ) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
-    let mut scopes = ObjectScopes::default();
-    scopes.declare(&DeclaredScopes::of(&manifests));
+    let resolver = ScopeResolver::new(capabilities, &manifests);
+    collapse_with(client, resolver, manifests, duplicates).await
+}
+
+async fn collapse_with(
+    client: &dyn KubeClient,
+    resolver: ScopeResolver,
+    manifests: Vec<serde_json::Value>,
+    duplicates: &mut HashMap<ResourceKey, usize>,
+) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
+    let mut scopes = ObjectScopes::new(resolver);
     scopes.load(client, &manifest_keys(&manifests)?).await;
     let manifests = collapse_duplicate_objects(manifests, duplicates, &scopes)?;
     Ok((manifests, scopes))
@@ -1193,7 +1212,7 @@ pub async fn apply_sorted_manifests(
 /// register, which the cluster does not serve until they are Established or their
 /// backend is up.
 ///
-/// A CustomResourceDefinition registers the kinds it declares ([`DeclaredScopes`]),
+/// A CustomResourceDefinition registers the kinds it declares ([`CrdDeclaration`]),
 /// an APIService every kind of its group, which it does not declare. A kind of a
 /// registered group that no CRD declares is not waited for: nothing will serve it.
 #[derive(Debug, Default, Clone)]
@@ -1221,8 +1240,11 @@ impl RegisteredKinds {
             return;
         }
         if key.gvk.kind == "CustomResourceDefinition" {
-            self.kinds
-                .extend(DeclaredScopes::of(std::slice::from_ref(manifest)).gvks().cloned());
+            self.kinds.extend(
+                CrdDeclaration::from_manifest(manifest)
+                    .iter()
+                    .flat_map(CrdDeclaration::gvks),
+            );
         } else if let Some(group) = manifest["spec"]["group"].as_str().filter(|group| !group.is_empty()) {
             self.groups.insert(group.to_string());
         }
@@ -1829,6 +1851,8 @@ mod tests {
         accepted: Vec<String>,
         /// Kinds discovery was refreshed for.
         refreshed: Vec<String>,
+        /// Kinds the live cluster was asked the scope of.
+        scope_lookups: Vec<String>,
     }
 
     impl StrictClient {
@@ -1913,6 +1937,7 @@ mod tests {
 
         /// The cluster knows no custom kind before its CRD is applied.
         async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            self.state.lock().unwrap().scope_lookups.push(gvk.kind.clone());
             if gvk.group.contains('.') {
                 let state = self.state.lock().unwrap();
                 return match state.crds.get(&(gvk.group.clone(), gvk.kind.clone())) {
@@ -1991,7 +2016,7 @@ mod tests {
         );
 
         let client = StrictClient::new();
-        let (mut manifests, _) = prepare_desired_manifests(&client, documents, &mut HashMap::new(), Some("app"))
+        let (mut manifests, _) = prepare_desired_manifests(&client, documents, &mut HashMap::new(), Some("app"), None)
             .await
             .unwrap();
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
@@ -2049,12 +2074,58 @@ mod tests {
             namespace: Some("app".to_string()),
             name: "w".to_string(),
         };
-        let mut scopes = ObjectScopes::default();
-        scopes.declare(&DeclaredScopes::of(&[widget_crd("Cluster")]));
+        let mut scopes = ObjectScopes::new(ScopeResolver::new(None, [&widget_crd("Cluster")]));
 
         scopes.load(&client, std::slice::from_ref(&key)).await;
 
         assert_eq!(scopes.identity(&key).namespace, None);
+    }
+
+    /// A kind the Cluster's recorded capabilities (which include vendored CRDs) know
+    /// resolves from them, without asking the live cluster, and a CRD in the manifest
+    /// still overrides what they record.
+    #[tokio::test]
+    async fn test_prepare_desired_manifests_resolves_scope_from_capabilities_before_the_live_cluster() {
+        let client = StrictClient::new();
+        let capabilities = ClusterKubernetesCapabilities {
+            kube_version: None,
+            api_versions: vec!["example.com/v1/Widget".to_string(), "example.com/v1/Gadget".to_string()],
+            cluster_scoped_kinds: vec!["example.com/Gadget".to_string()],
+            vendored_crds: true,
+        };
+        let documents = vec![
+            json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "widget"}}),
+            json!({"apiVersion": "example.com/v1", "kind": "Gadget", "metadata": {"name": "gadget"}}),
+        ];
+
+        let (manifests, _) = prepare_desired_manifests(
+            &client,
+            documents.clone(),
+            &mut HashMap::new(),
+            Some("app"),
+            Some(&capabilities),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manifests[0]["metadata"]["namespace"], "app");
+        assert!(manifests[1]["metadata"].get("namespace").is_none());
+        assert!(client.state.lock().unwrap().scope_lookups.is_empty());
+
+        // The manifest's own CRD wins over the recorded scope.
+        let mut with_crd = documents;
+        with_crd.push(widget_crd("Cluster"));
+        let (manifests, _) =
+            prepare_desired_manifests(&client, with_crd, &mut HashMap::new(), Some("app"), Some(&capabilities))
+                .await
+                .unwrap();
+        assert!(manifests[0]["metadata"].get("namespace").is_none());
+        // Only the CRD document itself, which no declaration covers, is looked up.
+        let lookups = client.state.lock().unwrap().scope_lookups.clone();
+        assert!(
+            lookups.iter().all(|kind| kind == "CustomResourceDefinition"),
+            "{lookups:?}"
+        );
     }
 
     /// A custom resource of a cluster-scoped CRD in the manifest gets no namespace,
@@ -2068,7 +2139,7 @@ mod tests {
             json!({"apiVersion": "other.io/v1", "kind": "Gadget", "metadata": {"name": "gadget"}}),
         ];
 
-        let (manifests, scopes) = prepare_desired_manifests(&client, documents, &mut HashMap::new(), Some("app"))
+        let (manifests, scopes) = prepare_desired_manifests(&client, documents, &mut HashMap::new(), Some("app"), None)
             .await
             .unwrap();
 

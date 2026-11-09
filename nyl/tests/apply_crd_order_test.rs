@@ -19,17 +19,19 @@ struct Cluster {
     namespaces: HashSet<String>,
     /// The CustomResourceDefinition was applied, so its kind is served.
     widgets_served: bool,
+    /// Discovery reports the served kind as cluster-scoped.
+    widgets_cluster_scoped: bool,
 }
 
 /// A Kubernetes stub that, like a real API server, rejects writes into a
 /// namespace that does not exist and serves a custom kind only once its
 /// CustomResourceDefinition was applied. Returns the writes it served, in order.
-fn serve(listener: TcpListener, done: &Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<String>> {
+fn serve(listener: TcpListener, done: &Arc<AtomicBool>, initial: Cluster) -> std::thread::JoinHandle<Vec<String>> {
     let done = done.clone();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(40);
         let mut writes = Vec::new();
-        let mut cluster = Cluster::default();
+        let mut cluster = initial;
         while !done.load(Ordering::Relaxed) && Instant::now() < deadline {
             let (mut socket, _) = match listener.accept() {
                 Ok(connection) => connection,
@@ -139,7 +141,8 @@ fn response(method: &str, path: &str, cluster: &mut Cluster) -> (u16, String) {
         "/apis/example.com/v1" if cluster.widgets_served => {
             return resource_list(
                 "example.com/v1",
-                &json!([{"name": "widgets", "singularName": "", "kind": "Widget", "namespaced": true, "verbs": verbs}]),
+                &json!([{"name": "widgets", "singularName": "", "kind": "Widget",
+                         "namespaced": !cluster.widgets_cluster_scoped, "verbs": verbs}]),
             )
         }
         "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" => {
@@ -160,6 +163,14 @@ fn response(method: &str, path: &str, cluster: &mut Cluster) -> (u16, String) {
             &json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
                           "metadata": {"name": name, "resourceVersion": "1"}}),
         );
+    }
+
+    if let Some(name) = path.strip_prefix("/apis/example.com/v1/widgets/") {
+        if method != "PATCH" || !cluster.widgets_served {
+            return not_found(&format!("widgets \"{name}\" not found"));
+        }
+        return ok(&json!({"apiVersion": "example.com/v1", "kind": "Widget",
+                          "metadata": {"name": name, "resourceVersion": "1"}}));
     }
 
     let (api_version, rest) = match path.strip_prefix("/apis/example.com/v1/namespaces/") {
@@ -206,9 +217,9 @@ fn response(method: &str, path: &str, cluster: &mut Cluster) -> (u16, String) {
     }
 }
 
-/// A project whose manifest lists the custom resource and the object in the new
-/// Namespace before the CustomResourceDefinition and the Namespace they need.
-fn project(server: &str) -> TempDir {
+/// A project whose Cluster records `kubernetes` capabilities and whose manifest is
+/// `manifest`.
+fn project(server: &str, kubernetes: &str, manifest: &str) -> TempDir {
     let temp = TempDir::new().unwrap();
     git2::Repository::init(temp.path()).unwrap();
     std::fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
@@ -220,7 +231,7 @@ kind: Cluster
 metadata: {{name: test}}
 spec:
   destination: {{server: '{server}'}}
-  kubernetes: {{kubeVersion: 1.31.4, apiVersions: [v1]}}
+  kubernetes: {kubernetes}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -254,9 +265,13 @@ users:
         ),
     )
     .unwrap();
-    std::fs::write(
-        temp.path().join("manifest.yaml"),
-        r"apiVersion: k8s.nyl/v1
+    std::fs::write(temp.path().join("manifest.yaml"), manifest).unwrap();
+    temp
+}
+
+/// The manifest lists the custom resource and the object in the new Namespace before
+/// the CustomResourceDefinition and the Namespace they need.
+const MANIFEST_WITH_CRD: &str = r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata: {name: example, namespace: release-ns}
 spec: {additionalNamespaces: [app]}
@@ -287,27 +302,16 @@ spec:
     served: true
     storage: true
     schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}
-",
-    )
-    .unwrap();
-    temp
-}
+";
 
-#[test]
-fn applies_crds_and_namespaces_before_the_resources_that_need_them() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let server = format!("http://{}", listener.local_addr().unwrap());
-    let done = Arc::new(AtomicBool::new(false));
-    let worker = serve(listener, &done);
-    let temp = project(&server);
-
+/// Runs `nyl apply --target test` on the project and returns its output.
+fn apply(temp: &TempDir) -> std::process::Output {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     // The stub cluster is local; an ambient proxy must not intercept it.
     for variable in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
         command.env_remove(variable);
     }
-    let output = command
+    command
         .current_dir(temp.path())
         .env("KUBECONFIG", temp.path().join("kubeconfig"))
         // CI sets colored output on; the assertions below read plain text.
@@ -322,7 +326,19 @@ fn applies_crds_and_namespaces_before_the_resources_that_need_them() {
         ])
         .timeout(Duration::from_secs(30))
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn applies_crds_and_namespaces_before_the_resources_that_need_them() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let done = Arc::new(AtomicBool::new(false));
+    let worker = serve(listener, &done, Cluster::default());
+    let temp = project(&server, "{kubeVersion: 1.31.4, apiVersions: [v1]}", MANIFEST_WITH_CRD);
+
+    let output = apply(&temp);
     done.store(true, Ordering::Relaxed);
     let writes = worker.join().unwrap();
 
@@ -347,4 +363,37 @@ fn applies_crds_and_namespaces_before_the_resources_that_need_them() {
         crd < namespace && namespace < config_map && namespace < widget,
         "the CRD and the Namespace come first: {writes:?}"
     );
+}
+
+/// The Cluster's recorded capabilities, which include the CRDs vendored by `nyl capture
+/// cluster --crds`, decide a kind's scope before the live cluster does. Here the CRD is
+/// not in the manifest, and the live cluster reports `Widget` as cluster-scoped; the
+/// declaration says namespaced, so the custom resource takes the Release's namespace
+/// without the live cluster's answer deciding it.
+#[test]
+fn takes_the_scope_of_a_kind_from_the_clusters_recorded_capabilities_before_the_live_cluster() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let done = Arc::new(AtomicBool::new(false));
+    let live = Cluster {
+        widgets_served: true,
+        widgets_cluster_scoped: true,
+        ..Cluster::default()
+    };
+    let worker = serve(listener, &done, live);
+    let temp = project(
+        &server,
+        "{kubeVersion: 1.31.4, apiVersions: [v1, example.com/v1/Widget], clusterScopedKinds: [core/Namespace]}",
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: example, namespace: release-ns}\n---\n\
+         apiVersion: example.com/v1\nkind: Widget\nmetadata: {name: first}\nspec: {size: 1}\n",
+    );
+
+    let output = apply(&temp);
+    done.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+
+    assert_cmd::assert::Assert::new(output)
+        .success()
+        .stdout(predicate::str::contains("+ Widget release-ns/first"));
 }

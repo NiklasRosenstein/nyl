@@ -21,7 +21,8 @@ A diff creates nothing, so a custom resource of a CustomResourceDefinition that 
 new in the same manifest cannot be compared with the server. It is listed as added
 with the note `CRD will be installed` and is not an error; a custom resource whose
 CRD is neither in the manifest nor in the cluster is an error. The namespace such a
-resource takes is read from the CRD in the manifest, as `apply` reads it.
+resource takes is decided as `apply` decides it
+([which kinds are namespaced](/nyl/reference/cli/apply/#which-kinds-are-namespaced)).
 
 ## Arguments
 

@@ -3,114 +3,24 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::{
-    kubernetes::{GroupVersionKind, KubeClient, ResourceKey},
+    kubernetes::{GroupVersionKind, KubeClient, ResourceKey, ScopeResolver},
     NylError, Result,
 };
-
-/// The scopes of the kinds that CustomResourceDefinitions among the manifests define.
-///
-/// A custom resource whose CRD is new in the same manifest set has no kind the
-/// cluster can name yet, and a dry run never creates the CRD. The CRD declares the
-/// scope, so reading it there resolves the resource's namespace before anything is
-/// applied: `apply`, `diff`, and the keys a release records agree, and the result
-/// depends only on the declaration. Like the cluster's discovery, only served
-/// versions are requestable.
-#[derive(Debug, Default, Clone)]
-pub struct DeclaredScopes {
-    namespaced: HashMap<GroupVersionKind, bool>,
-}
-
-impl DeclaredScopes {
-    /// The scopes declared by the CustomResourceDefinitions among `manifests`. When
-    /// two documents declare one kind with different scopes, the later one wins, as
-    /// the later of two documents for one object does.
-    pub fn of(manifests: &[Value]) -> Self {
-        let namespaced = manifests
-            .iter()
-            .filter(|manifest| {
-                manifest["kind"].as_str() == Some("CustomResourceDefinition")
-                    && manifest["apiVersion"]
-                        .as_str()
-                        .is_some_and(|api_version| api_version.split('/').next() == Some("apiextensions.k8s.io"))
-            })
-            .flat_map(|crd| crd_scope_entries(&crd["spec"]))
-            .collect();
-        Self { namespaced }
-    }
-
-    /// Whether the kind is namespaced, when a manifest declares it.
-    pub fn is_namespaced(&self, gvk: &GroupVersionKind) -> Option<bool> {
-        self.namespaced.get(gvk).copied()
-    }
-
-    /// Every declared group, version, and kind.
-    pub(crate) fn gvks(&self) -> impl Iterator<Item = &GroupVersionKind> {
-        self.namespaced.keys()
-    }
-
-    /// Every declared kind with its scope, by group and kind.
-    pub(crate) fn kinds(&self) -> impl Iterator<Item = ((&str, &str), bool)> {
-        self.namespaced
-            .iter()
-            .map(|(gvk, namespaced)| ((gvk.group.as_str(), gvk.kind.as_str()), *namespaced))
-    }
-
-    /// Whether the kind is namespaced: as a manifest declares it, otherwise as the
-    /// cluster reports it.
-    async fn resolve(&self, client: &dyn KubeClient, gvk: &GroupVersionKind) -> Result<bool> {
-        match self.is_namespaced(gvk) {
-            Some(namespaced) => Ok(namespaced),
-            None => client.is_namespaced(gvk).await,
-        }
-    }
-}
-
-/// The served kinds and scope a CustomResourceDefinition's `spec` defines.
-pub(crate) fn crd_scope_entries(spec: &Value) -> Vec<(GroupVersionKind, bool)> {
-    let (Some(group), Some(kind), Some(versions)) = (
-        spec.get("group").and_then(Value::as_str),
-        spec.get("names")
-            .and_then(|names| names.get("kind"))
-            .and_then(Value::as_str),
-        spec.get("versions").and_then(Value::as_array),
-    ) else {
-        return Vec::new();
-    };
-    let namespaced = match spec.get("scope").and_then(Value::as_str) {
-        Some("Namespaced") => true,
-        Some("Cluster") => false,
-        _ => return Vec::new(),
-    };
-    // Mirror Kubernetes behavior: only served versions are requestable.
-    versions
-        .iter()
-        .filter(|version| version.get("served").and_then(Value::as_bool) == Some(true))
-        .filter_map(|version| version.get("name").and_then(Value::as_str))
-        .map(|version| {
-            let gvk = GroupVersionKind {
-                group: group.to_string(),
-                version: version.to_string(),
-                kind: kind.to_string(),
-            };
-            (gvk, namespaced)
-        })
-        .collect()
-}
 
 /// Resolve missing metadata.namespace values for namespaced resources.
 ///
 /// A resource keeps its own namespace; otherwise it takes the destination
 /// namespace, as Argo CD's Application destination gives it. The kube
 /// context's default namespace is never used, so the result depends only on
-/// the declaration. The scope of a kind that a CustomResourceDefinition among
-/// the manifests defines is read from it ([`DeclaredScopes`]); any other kind
-/// is looked up in the cluster, and one the cluster does not know is left alone.
+/// the declaration. A kind's scope comes from `scopes` (manifest CRDs, then the
+/// Cluster's capabilities, see [`ScopeResolver`]) and only then from the live
+/// cluster; a kind none of them knows is left alone.
 pub async fn resolve_manifest_namespaces(
     client: &dyn KubeClient,
+    scopes: &ScopeResolver,
     manifests: &mut [Value],
     destination_namespace: Option<&str>,
 ) -> Result<usize> {
-    let declared = DeclaredScopes::of(manifests);
     let mut resolved_count = 0;
     let mut scope_cache: HashMap<GroupVersionKind, bool> = HashMap::new();
 
@@ -123,7 +33,7 @@ pub async fn resolve_manifest_namespaces(
         let is_namespaced = if let Some(cached) = scope_cache.get(&key.gvk) {
             *cached
         } else {
-            let discovered = match declared.resolve(client, &key.gvk).await {
+            let discovered = match scopes.resolve(client, &key.gvk).await {
                 Ok(v) => v,
                 Err(err) if err.is_api_resource_not_found_error() => {
                     tracing::warn!(
@@ -171,7 +81,7 @@ pub async fn resolve_manifest_namespaces(
 /// Re-key duplicate map after namespace resolution mutates manifest keys.
 pub async fn adjust_duplicate_keys_for_namespace_resolution(
     client: &dyn KubeClient,
-    declared: &DeclaredScopes,
+    scopes: &ScopeResolver,
     duplicates: &HashMap<ResourceKey, usize>,
     destination_namespace: Option<&str>,
 ) -> Result<HashMap<ResourceKey, usize>> {
@@ -187,7 +97,7 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
         let is_namespaced = if let Some(cached) = scope_cache.get(&key.gvk) {
             *cached
         } else {
-            let discovered = match declared.resolve(client, &key.gvk).await {
+            let discovered = match scopes.resolve(client, &key.gvk).await {
                 Ok(v) => v,
                 Err(err) if err.is_api_resource_not_found_error() => {
                     tracing::warn!(
@@ -440,7 +350,7 @@ mod tests {
             "metadata": {"name": "cm", "namespace": "explicit"}
         })];
 
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release"))
+        let resolved = resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, Some("release"))
             .await
             .unwrap();
 
@@ -457,9 +367,10 @@ mod tests {
             "metadata": {"name": "sa"}
         })];
 
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release-ns"))
-            .await
-            .unwrap();
+        let resolved =
+            resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, Some("release-ns"))
+                .await
+                .unwrap();
 
         assert_eq!(resolved, 1);
         assert_eq!(manifests[0]["metadata"]["namespace"].as_str(), Some("release-ns"));
@@ -474,9 +385,10 @@ mod tests {
             "metadata": {"name": "ns"}
         })];
 
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release-ns"))
-            .await
-            .unwrap();
+        let resolved =
+            resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, Some("release-ns"))
+                .await
+                .unwrap();
 
         assert_eq!(resolved, 0);
         assert!(manifests[0]["metadata"]["namespace"].is_null());
@@ -491,7 +403,7 @@ mod tests {
             "metadata": {"name": "sa"}
         })];
 
-        let error = resolve_manifest_namespaces(&client, &mut manifests, None)
+        let error = resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, None)
             .await
             .unwrap_err();
 
@@ -509,9 +421,10 @@ mod tests {
             "metadata": {"name": "sa", "namespace": "   "}
         })];
 
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release-ns"))
-            .await
-            .unwrap();
+        let resolved =
+            resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, Some("release-ns"))
+                .await
+                .unwrap();
         assert_eq!(resolved, 1);
         assert_eq!(manifests[0]["metadata"]["namespace"].as_str(), Some("release-ns"));
     }
@@ -535,7 +448,7 @@ mod tests {
 
         let adjusted = adjust_duplicate_keys_for_namespace_resolution(
             &client,
-            &DeclaredScopes::default(),
+            &ScopeResolver::default(),
             &duplicates,
             Some("release"),
         )
@@ -570,7 +483,7 @@ mod tests {
             }),
         ];
 
-        resolve_manifest_namespaces(&client, &mut manifests, Some("release"))
+        resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, Some("release"))
             .await
             .unwrap();
 
@@ -608,7 +521,7 @@ mod tests {
 
         adjust_duplicate_keys_for_namespace_resolution(
             &client,
-            &DeclaredScopes::default(),
+            &ScopeResolver::default(),
             &duplicates,
             Some("release"),
         )
@@ -639,7 +552,7 @@ mod tests {
             }),
         ];
 
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release"))
+        let resolved = resolve_manifest_namespaces(&client, &ScopeResolver::default(), &mut manifests, Some("release"))
             .await
             .unwrap();
 
@@ -676,7 +589,7 @@ mod tests {
 
         let adjusted = adjust_duplicate_keys_for_namespace_resolution(
             &client,
-            &DeclaredScopes::default(),
+            &ScopeResolver::default(),
             &duplicates,
             Some("release"),
         )
@@ -698,51 +611,29 @@ mod tests {
 
     /// A CRD in the manifests decides the scope of its custom resources, so one that
     /// no cluster can name yet still takes the destination namespace (or none, for a
-    /// cluster-scoped kind), and only the served versions count.
+    /// cluster-scoped kind).
     #[tokio::test]
     async fn test_resolve_manifest_namespaces_reads_scope_from_crds_in_the_manifests() {
         let client = ErroringKubeClient::new("ctx-default");
-        let versions = json!([
-            {"name": "v1", "served": true, "storage": true},
-            {"name": "v1alpha1", "served": false, "storage": false}
-        ]);
+        let versions = json!([{"name": "v1", "served": true, "storage": true}]);
         let mut manifests = vec![
             crd("example.com", "Widget", "Namespaced", versions.clone()),
             crd("example.com", "Cluster", "Cluster", versions),
             json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "w"}}),
             json!({"apiVersion": "example.com/v1", "kind": "Cluster", "metadata": {"name": "c"}}),
-            json!({"apiVersion": "example.com/v1alpha1", "kind": "Widget", "metadata": {"name": "unserved"}}),
+            json!({"apiVersion": "other.io/v1", "kind": "Gadget", "metadata": {"name": "unknown"}}),
         ];
+        let scopes = ScopeResolver::new(None, &manifests);
 
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release"))
+        let resolved = resolve_manifest_namespaces(&client, &scopes, &mut manifests, Some("release"))
             .await
             .unwrap();
 
         assert_eq!(resolved, 1);
         assert_eq!(manifests[2]["metadata"]["namespace"], "release");
         assert!(manifests[3]["metadata"].get("namespace").is_none());
-        // An unserved version is not requestable, so the cluster is asked, and cannot say.
+        // The cluster cannot say either, so the kind is left alone.
         assert!(manifests[4]["metadata"].get("namespace").is_none());
-    }
-
-    /// Two CRD documents that disagree on a kind's scope resolve the same way every
-    /// time: the later one wins.
-    #[test]
-    fn test_declared_scopes_of_conflicting_crds_takes_the_later_document() {
-        let versions = json!([{"name": "v1", "served": true}]);
-        let gvk = GroupVersionKind {
-            group: "example.com".to_string(),
-            version: "v1".to_string(),
-            kind: "Widget".to_string(),
-        };
-        let namespaced = crd("example.com", "Widget", "Namespaced", versions.clone());
-        let cluster = crd("example.com", "Widget", "Cluster", versions);
-
-        let later_cluster = DeclaredScopes::of(&[namespaced.clone(), cluster.clone()]);
-        let later_namespaced = DeclaredScopes::of(&[cluster, namespaced]);
-
-        assert_eq!(later_cluster.is_namespaced(&gvk), Some(false));
-        assert_eq!(later_namespaced.is_namespaced(&gvk), Some(true));
     }
 
     /// The duplicate counts follow the namespace the resources resolve to.
@@ -768,7 +659,7 @@ mod tests {
 
         let adjusted = adjust_duplicate_keys_for_namespace_resolution(
             &client,
-            &DeclaredScopes::of(&manifests),
+            &ScopeResolver::new(None, &manifests),
             &duplicates,
             Some("release"),
         )

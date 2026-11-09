@@ -205,6 +205,9 @@ pub async fn load_command_kube_config(target: Option<&str>, context: Option<&str
 pub struct CommandCluster {
     pub config: kube::Config,
     pub publication: Option<nyl_render::kubernetes::ReleasePublication>,
+    /// The recorded Kubernetes capabilities of the target's Cluster, vendored CRDs
+    /// included; `None` for a bare kube context, which has no declaration.
+    pub capabilities: Option<nyl_render::resources::ClusterKubernetesCapabilities>,
 }
 
 /// Resolve the cluster of a command that takes `--target` and `--context`.
@@ -219,7 +222,20 @@ pub async fn resolve_command_cluster(target: Option<&str>, context: Option<&str>
         )?),
         _ => None,
     };
-    Ok(CommandCluster { config, publication })
+    let capabilities = match (&source, &inventory) {
+        (ClusterSource::Target(name), Some(inventory)) => {
+            resolve_target_cluster_from_inventory(inventory, name)?
+                .cluster
+                .spec
+                .kubernetes
+        }
+        _ => None,
+    };
+    Ok(CommandCluster {
+        config,
+        publication,
+        capabilities,
+    })
 }
 
 /// The kube config for `cluster`: `context_override`, else the Cluster's

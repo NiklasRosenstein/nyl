@@ -30,10 +30,11 @@ use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
     await_registered_kinds, collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources,
-    ApplyEvent, ApplySettings, Interruption, Protected, RegisteredKinds, ReleaseRecorder, RevisionPolicy,
+    ApplyEvent, ApplySettings, Interruption, ObjectScopes, Protected, RegisteredKinds, ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering};
+use nyl_render::resources::ClusterKubernetesCapabilities;
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
@@ -203,6 +204,10 @@ pub(crate) struct Direct<'a, 'c> {
     /// The destination of the target's tree, without a commit.
     pub destination: ReleasePublication,
     pub observed: ObservedPublication,
+    /// The target Cluster's recorded Kubernetes capabilities, vendored CRDs included,
+    /// which decide a kind's scope after the Release's own CRDs and before the live
+    /// cluster does, as for `nyl apply --target`.
+    pub capabilities: Option<ClusterKubernetesCapabilities>,
 }
 
 impl<'a, 'c> Direct<'a, 'c> {
@@ -229,6 +234,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                 branch: rendered.destination.branch.clone(),
                 path_prefix: rendered.destination.path_prefix.clone(),
             },
+            capabilities: rendered.cluster_kubernetes.clone(),
         }
     }
 
@@ -582,6 +588,29 @@ impl<'a, 'c> Direct<'a, 'c> {
             .flatten()
     }
 
+    /// A Release's documents prepared for its apply. This happens when its wave comes,
+    /// so the kinds an earlier wave registers resolve, once the cluster serves them,
+    /// and every kind's scope follows the order the target's declaration gives: the
+    /// Release's own CRDs, the Cluster's recorded capabilities, then the live cluster.
+    async fn prepare(
+        &self,
+        cluster: &ClusterHandle,
+        release: &PublishedDirectRelease,
+        documents: Vec<Value>,
+        registered: &RegisteredKinds,
+        end: tokio::time::Instant,
+    ) -> Result<(Vec<Value>, ObjectScopes), NylError> {
+        await_earlier_kinds(cluster, &documents, registered, end, release.identity()).await?;
+        prepare_desired_manifests(
+            cluster.client.as_ref(),
+            documents,
+            &mut HashMap::new(),
+            Some(&release.release.destination_namespace),
+            self.capabilities.as_ref(),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
     async fn apply_one(
         &self,
@@ -596,17 +625,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         protected: Protected<'_>,
     ) -> Result<Applied, NylError> {
         let (namespace, name) = release.identity();
-        // Prepared when its wave comes, so the kinds an earlier wave registers resolve,
-        // once the cluster serves them (a Release applied earlier registered them).
-        await_earlier_kinds(cluster, &documents, registered, end, (namespace, name)).await?;
-        let mut duplicates = HashMap::new();
-        let (mut manifests, mut scopes) = prepare_desired_manifests(
-            cluster.client.as_ref(),
-            documents,
-            &mut duplicates,
-            Some(&release.release.destination_namespace),
-        )
-        .await?;
+        let (mut manifests, mut scopes) = self.prepare(cluster, release, documents, registered, end).await?;
         ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
         ensure_namespace_exists(cluster.client.as_ref(), namespace, &ownership).await?;

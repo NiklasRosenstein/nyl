@@ -1011,10 +1011,11 @@ fn crd_api_resource() -> ApiResource {
 
 /// The scope of every served version of a CRD's kind (`true` when namespaced).
 fn crd_scope_entries(crd: &DynamicObject) -> Vec<(GroupVersionKind, bool)> {
-    crd.data
-        .get("spec")
-        .map(super::namespace_resolution::crd_scope_entries)
-        .unwrap_or_default()
+    let Some(declaration) = crd.data.get("spec").and_then(super::CrdDeclaration::from_spec) else {
+        return Vec::new();
+    };
+    let namespaced = declaration.scope == crate::resources::ResourceScope::Namespaced;
+    declaration.gvks().map(|gvk| (gvk, namespaced)).collect()
 }
 
 #[cfg(test)]

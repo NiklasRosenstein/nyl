@@ -10,9 +10,9 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::tree::ScopeResolver;
 use super::{DesiredFiles, CATALOG_DIRECTORY};
 use crate::kubernetes::prune::{delete_decision, prune_decision, PruneDecision, SYNC_OPTIONS_ANNOTATION};
+use crate::kubernetes::ScopeResolver;
 use crate::resources::{ClusterKubernetesCapabilities, ResourceScope};
 use crate::{NylError, Result};
 
@@ -309,7 +309,7 @@ impl<'a> Snapshot<'a> {
         prefix: &str,
         next: &Snapshot<'_>,
         next_prefix: &str,
-        scopes: &Scopes<'_>,
+        scopes: &Scopes,
     ) -> Result<Vec<Value>> {
         let new_app = next.applications.get(&identity(app));
         let same_cluster = new_app.is_some_and(|new| {
@@ -345,7 +345,7 @@ impl<'a> Snapshot<'a> {
     /// A namespaced resource without `metadata.namespace` lives in the
     /// Application's destination namespace; one of unknown scope is compared
     /// under both readings, so neither can hide a contraction.
-    fn resources(&self, app: &Value, prefix: &str, scopes: &Scopes<'_>) -> Result<BTreeMap<String, Value>> {
+    fn resources(&self, app: &Value, prefix: &str, scopes: &Scopes) -> Result<BTreeMap<String, Value>> {
         let source = field(app, "/spec/source/path");
         nyl_core::resources::validate_relative_path("catalog Application spec.source.path", source, false, false)?;
         let root = Path::new(source).strip_prefix(prefix).map_err(|_| {
@@ -382,12 +382,12 @@ fn is_namespace(resource: &Value) -> bool {
 
 /// Resource scope for the comparison: CRDs either snapshot renders, then the
 /// target Cluster's recorded capabilities, then built-in Kubernetes kinds.
-struct Scopes<'a> {
-    resolver: ScopeResolver<'a>,
+struct Scopes {
+    resolver: ScopeResolver,
 }
 
-impl<'a> Scopes<'a> {
-    fn new(snapshots: [&DesiredFiles<'_>; 2], capabilities: Option<&'a ClusterKubernetesCapabilities>) -> Self {
+impl Scopes {
+    fn new(snapshots: [&DesiredFiles<'_>; 2], capabilities: Option<&ClusterKubernetesCapabilities>) -> Self {
         const CRD_MARKER: &[u8] = b"CustomResourceDefinition";
         // Only CRDs carry scope; skip parsing every other manifest.
         let crds = snapshots
@@ -401,7 +401,7 @@ impl<'a> Scopes<'a> {
             .filter(|resource| field(resource, "/kind") == "CustomResourceDefinition")
             .collect::<Vec<_>>();
         Self {
-            resolver: ScopeResolver::with_capabilities(capabilities, crds.iter()),
+            resolver: ScopeResolver::new(capabilities, crds.iter()),
         }
     }
 
