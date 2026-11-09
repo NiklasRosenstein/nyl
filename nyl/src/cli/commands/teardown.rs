@@ -133,6 +133,7 @@ fn teardown(args: &TeardownArgs, wiring: &Wiring<'_>) -> std::result::Result<Com
             ..LifecycleOptions::default()
         },
         reapply: false,
+        detect_drift: false,
         fail_fast: args.fail_fast,
         reason: args.reason.as_deref(),
     })?;

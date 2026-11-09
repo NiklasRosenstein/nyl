@@ -69,6 +69,10 @@ spec:
   driftRepair: manual
 ```
 
+A pipeline that wants one command for both steps runs
+[`nyl reconcile --detect-drift`](/nyl/reference/cli/reconcile/#drift), which checks
+first and repairs by these rules in the same run.
+
 The new receipt of a repaired unit replaces the one the drift was detected
 on, so the drift record is dropped in the same commit and the unit is
 current again. An EnvironmentGroup supplies `driftRepair` when the

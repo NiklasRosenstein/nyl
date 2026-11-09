@@ -740,6 +740,7 @@ fn test_every_live_instance_is_in_the_run_requests_environments() {
             mode: nyl_orchestration::shell::run::RunMode::Reconcile,
             lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
             reapply: false,
+            detect_drift: false,
             fail_fast: false,
             reason: None,
         })

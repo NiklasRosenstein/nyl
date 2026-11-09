@@ -126,6 +126,7 @@ fn run_one(args: &CheckArgs, check: Check, wiring: &Wiring<'_>) -> std::result::
         mode: nyl_orchestration::shell::run::RunMode::default(),
         lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: None,
     })?;

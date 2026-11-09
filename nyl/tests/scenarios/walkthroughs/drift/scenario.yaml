@@ -1,6 +1,7 @@
 # Drift: `verify` finds drift, `reconcile` repairs the idempotent unit, and
 # the other waits for an approval (design/orchestration-core.md, Drift, as
-# amended by the part 5 decisions).
+# amended by the part 5 decisions); `reconcile --detect-drift` (M7) does the
+# check and the repair in one run.
 contract: design/orchestration-core.md#drift
 milestone: M3
 tiers: [1]                            # the local run uses tier 1's Git repository
@@ -93,3 +94,44 @@ steps:
     exit: 0
     expect:
       current: [idempotent, other]
+
+  # `reconcile --detect-drift` does the check and the repair in one run: one
+  # lease, one transition commit per state ref, and no gap in which another run
+  # could change what the check saw. It repairs by the same rule as the plain
+  # reconcile above, so the idempotent unit runs again and the other waits.
+  - commit: {branch: main, message: "Repair drift by itself again", apply: patches/converge}
+  - file: {path: resources/idempotent, content: "changed outside Nyl a third time\n"}
+  - file: {path: resources/other, content: "changed outside Nyl a third time\n"}
+  - nyl: [reconcile, -e, dev, --detect-drift]
+    exit: 2
+    expect:
+      executed: [idempotent]
+      awaiting-approval: [other]
+      driftRepaired: [idempotent]
+      drift-checks: {idempotent: drifted, other: drifted}
+      codes: [NYL-DRIFT-DETECTED]
+      commits: {desired: 1, observed: 1}   # the Environment's new record, and the drift and the receipt
+  # The run recorded `other`'s drift itself; no `detect-drift` ran in between.
+  - nyl: [status, -e, dev]
+    exit: 2
+    expect:
+      current: [idempotent]
+      drifted: [other]
+      units:
+        other: {drift: {result: drifted}}
+  # A local run checks again and repairs `other` with an approval; the
+  # idempotent unit checks clean.
+  - nyl: [reconcile, -e, dev, --detect-drift, --local, --approve, other]
+    exit: 0
+    expect:
+      executed: [other]
+      current: [idempotent]
+      driftRepaired: [other]
+      drift-checks: {idempotent: clean, other: drifted}
+  # Without the flag a reconcile never detects drift.
+  - file: {path: resources/idempotent, content: "changed outside Nyl a fourth time\n"}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      current: [idempotent, other]
+      drift-checks: {}

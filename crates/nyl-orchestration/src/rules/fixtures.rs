@@ -252,6 +252,7 @@ impl Driver for TestDriver {
         Capabilities {
             teardown: self.kind == "Publication",
             attest: spec["attests"] == json!(true),
+            detect_drift: spec["detectsDrift"] == json!(true),
             observed_values: spec["observes"] == json!(true),
             ..Capabilities::default()
         }

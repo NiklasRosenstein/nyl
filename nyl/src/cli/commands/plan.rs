@@ -161,6 +161,7 @@ fn plan(
         mode: teardown_mode(args)?,
         lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: None,
     })?;

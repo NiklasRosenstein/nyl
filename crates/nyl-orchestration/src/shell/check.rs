@@ -26,6 +26,11 @@
 //! with one is a warning, because they are read only for this advice
 //! ([Other environments](../../../../design/orchestration-core.md#other-environments)).
 //!
+//! `nyl reconcile --detect-drift` runs the same drift check inside a
+//! reconcile, under the reconcile's lease ([`detect_in_run`]): the driver call,
+//! the drift record, and its settling are this module's, and the reconcile
+//! decides what to select and writes the records in its own transition commit.
+//!
 //! The lease it holds lists no units: a check has no effects, so a run
 //! taking over from a dead check has nothing to mark uncertain. It writes
 //! no run ref for the same reason. Its deadline covers the units it
@@ -117,13 +122,23 @@ enum Records {
 }
 
 /// What checking one unit found.
-struct Checked {
-    name: UnitName,
+pub(super) struct Checked {
+    pub(super) name: UnitName,
     /// The documents to store, `None` when the driver reported nothing to record.
     records: Option<Records>,
-    result: UnitCheck,
-    message: Option<String>,
-    error: Option<Finding>,
+    pub(super) result: UnitCheck,
+    pub(super) message: Option<String>,
+    pub(super) error: Option<Finding>,
+}
+
+impl Checked {
+    /// The drift record of a `detect-drift` check that concluded.
+    pub(super) fn drift_record(&self) -> Option<&DriftRecord> {
+        match &self.records {
+            Some(Records::Drift(record)) => Some(record),
+            _ => None,
+        }
+    }
 }
 
 fn check_environment(context: &RunContext<'_>, request: &RunRequest, check: Check) -> EnvironmentRunReport {
@@ -380,10 +395,9 @@ fn read(
     Ok(snapshot)
 }
 
-/// Check every `Check` target, in batches of the concurrency limit, each
-/// unit of a batch on its own thread and slot. Before each batch the
-/// lease's deadline moves to cover the batch's longest unit timeout; a lease
-/// lost meanwhile ends the check with `NYL-LEASE-LOST`.
+/// Check every `Check` target of a standalone check: the units' project
+/// directories located as reconcile located them, and the lease's deadline
+/// moved to cover each batch ([`check_batches`]).
 fn check_units(
     context: &RunContext<'_>,
     request: &RunRequest,
@@ -400,28 +414,105 @@ fn check_units(
         .map(|(name, _)| name)
         .collect();
     let projects = project_dirs(context, request, snapshot, &names, &slots);
+    let outcome = check_batches(
+        context,
+        request,
+        check,
+        snapshot,
+        &names,
+        &slots,
+        &directory,
+        &projects,
+        &mut |longest| {
+            // Move the lease's deadline to cover the batch about to start.
+            let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
+            lease::update(context.base, held, held.lease.units.clone(), deadline)
+                .map_err(|error| store_error(&request.environment, &error))?;
+            Ok(held.lease.deadline)
+        },
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+    outcome.map_err(|halted| match halted {
+        Halted::Cancelled(signal) => cancelled(check, &request.environment, signal),
+        Halted::Lease(finding) => finding,
+    })
+}
+
+/// Why a check stopped before it checked every unit.
+pub(super) enum Halted<E> {
+    /// SIGINT or SIGTERM (the signal) cancelled it.
+    Cancelled(i32),
+    /// The caller could not move the lease's deadline for the next batch.
+    Lease(E),
+}
+
+/// `nyl reconcile --detect-drift`: check `names`, units of `view` with a
+/// current receipt, as `nyl detect-drift` checks them, while the run holds
+/// its lease. `view` holds the units as the run resolved them and the
+/// receipts and artifacts as the run stands (`desired`, `observed`,
+/// `artifacts`, and the stored `drift`), and `project_dir` is the project
+/// directory the run's own executions use, so a driver sees the same
+/// checkout its unit would execute in. `extend` moves the run's lease for the
+/// longest unit timeout of a batch and returns the lease's new deadline.
+/// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+pub(super) fn detect_in_run<E>(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    view: &EnvironmentSnapshot,
+    names: &[&UnitName],
+    project_dir: &str,
+    extend: &mut dyn FnMut(Duration) -> Result<Timestamp, E>,
+) -> Result<Vec<Checked>, Halted<E>> {
+    let directory = fresh_directory(context.workspace, Check::DetectDrift.command());
+    let slots = Slots::new(&directory);
+    let projects = names
+        .iter()
+        .map(|name| ((*name).clone(), Ok(project_dir.to_owned())))
+        .collect();
+    let outcome = check_batches(
+        context,
+        request,
+        Check::DetectDrift,
+        view,
+        names,
+        &slots,
+        &directory,
+        &projects,
+        extend,
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+    outcome
+}
+
+/// Check `names` in batches of the concurrency limit, each unit of a batch
+/// on its own thread and slot. Before each batch `extend` moves the lease's
+/// deadline to cover the batch's longest unit timeout and returns the
+/// lease's deadline, which bounds each unit's own; a failure of `extend`
+/// ends the check ([`Halted::Lease`]), as does a signal ([`Halted::Cancelled`]).
+#[allow(clippy::too_many_arguments)] // One check's inputs: the run, the units, their directories, and the lease.
+fn check_batches<E>(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    check: Check,
+    snapshot: &EnvironmentSnapshot,
+    names: &[&UnitName],
+    slots: &Slots,
+    directory: &Path,
+    projects: &BTreeMap<UnitName, Result<String, String>>,
+    extend: &mut dyn FnMut(Duration) -> Result<Timestamp, E>,
+) -> Result<Vec<Checked>, Halted<E>> {
     let mut results = Vec::new();
-    let mut outcome = Ok(());
     for batch in names.chunks(request.concurrency.max(1)) {
         if let Some(signal) = request.cancellation.signal() {
-            outcome = Err(cancelled(check, &request.environment, signal));
-            break;
+            return Err(Halted::Cancelled(signal));
         }
         let longest = longest_timeout(context.drivers, batch.iter().map(|name| &snapshot.desired[*name]));
-        // Move the lease's deadline to cover the batch about to start.
-        let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
-        if let Err(error) = lease::update(context.base, held, held.lease.units.clone(), deadline) {
-            outcome = Err(store_error(&request.environment, &error));
-            break;
-        }
-        let lease_deadline = held.lease.deadline;
+        let lease_deadline = extend(longest).map_err(Halted::Lease)?;
         let batch_results: Vec<Checked> = std::thread::scope(|scope| {
             let handles: Vec<_> = batch
                 .iter()
                 .enumerate()
                 .map(|(slot, name)| {
-                    let slots = &slots;
-                    let directory = &directory;
                     let project_dir = &projects[*name];
                     scope.spawn(move || {
                         let job = UnitJob {
@@ -438,11 +529,10 @@ fn check_units(
         });
         results.extend(batch_results);
     }
-    if let (Ok(()), Some(signal)) = (&outcome, request.cancellation.signal()) {
-        outcome = Err(cancelled(check, &request.environment, signal));
+    if let Some(signal) = request.cancellation.signal() {
+        return Err(Halted::Cancelled(signal));
     }
-    let _ = std::fs::remove_dir_all(&directory);
-    outcome.map(|()| results)
+    Ok(results)
 }
 
 /// `NYL-RUN-CANCELLED` for a check cancelled by `signal`

@@ -502,6 +502,7 @@ fn readiness_preview(ctx: &OperationContext<'_>, wiring: &Wiring<'_>) -> Vec<Fin
         mode: RunMode::Reconcile,
         lifecycle: LifecycleOptions::default(),
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: None,
     });
@@ -1156,6 +1157,7 @@ pub(crate) fn run_lifecycle(
         mode,
         lifecycle,
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: common.reason.as_deref(),
     }) {

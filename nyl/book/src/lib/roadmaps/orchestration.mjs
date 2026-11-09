@@ -143,7 +143,7 @@ export const orchestrationRoadmap = {
       needs: ['M6'],
       items: [
         { text: 'Evaluate a scheduled or long-running runner and its observation cadence using M3–M6 evidence. The drift-repair policy is settled in M3 part 5: converging units repair recorded drift automatically by default.', done: false },
-        { text: 'Add an opt-in `nyl reconcile --detect-drift`: the run checks its current units for drift under its own lease, then repairs what drifted by `driftRepair`, all in one transition commit, so a scheduled job needs one command and no lease gap between `nyl detect-drift` and `nyl reconcile`. It reuses the drift detection path; without the flag, reconcile does not detect drift.', done: false },
+        { text: 'Add an opt-in `nyl reconcile --detect-drift`: the run checks its current units for drift under its own lease, then repairs what drifted by `driftRepair`, all in one transition commit, so a scheduled job needs one command and no lease gap between `nyl detect-drift` and `nyl reconcile`. It reuses the drift detection path; without the flag, reconcile does not detect drift.', done: true },
         { text: 'Decide which command-unit uses warrant typed drivers, and whether to add the plugin driver protocol.', done: false },
         { text: 'Support minimum healthy durations and flapping guards over recorded observations.', done: false },
         { text: 'Evaluate application-level checks as promotion evidence.', done: false },
