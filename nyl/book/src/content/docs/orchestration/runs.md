@@ -228,10 +228,18 @@ before never satisfies a reference.
   again like for any changed input, under its own
   [`approval`](#approvals), while the producer does not execute. `nyl status`
   and `nyl plan` show such a consumer as `ready`, and `nyl observe` names it
-  with `NYL-OBSERVATION-CHANGED`. They find consumers of the same environment
-  from its stored documents: a consumer in another environment (a reference with
-  `environment`) is not named, and stays `current` in its own `status` until its
-  next `reconcile` resolves the producer environment's recorded value and runs it.
+  with `NYL-OBSERVATION-CHANGED`. They find consumers from the stored documents,
+  without rendering. That includes a consumer in another environment that reads
+  the value through a reference with `environment`: `nyl observe -e <producer
+  environment>` reads the other environments' state without taking a lease or
+  writing, and names it with its environment (`prod/dns`) and the fix
+  `nyl reconcile -e prod`, and `nyl status -e prod` shows it `ready` once the
+  producer environment records another value than the one it resolved. An
+  environment whose state cannot be read is a `NYL-STATE-UNAVAILABLE` warning;
+  its consumers are not compared. A consumer in another environment that waits
+  for a value is not found yet (a current limitation, tracked by
+  [#248](https://github.com/NiklasRosenstein/nyl/issues/248)): it stays
+  `blocked` and resolves the recorded value at its own next `reconcile`.
 - **What is written.** The record changes only when a value arrives, changes,
   or becomes pending again, or when the last successful read is older than an
   hour (half the `maxAge` when that is shorter), so an unchanged read writes

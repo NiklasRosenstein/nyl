@@ -447,7 +447,6 @@ pub fn status(
 /// [`status`], with each publication unit's teardown readiness, which the
 /// shell computes from the stored desired document
 /// (`Driver::teardown_readiness`) without rendering.
-#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
 pub fn status_with_readiness(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
@@ -455,6 +454,32 @@ pub fn status_with_readiness(
     now: Timestamp,
     drivers: Option<&DriverSet>,
     readiness: &BTreeMap<UnitName, TeardownReadiness>,
+) -> EnvironmentRunReport {
+    status_with_producers(
+        environment,
+        snapshot,
+        coordination,
+        now,
+        drivers,
+        readiness,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`status_with_readiness`], with the snapshots of the other environments
+/// whose observed values this environment's units read
+/// ([`super::observed_values::observed_producer_environments`] names them): a
+/// unit whose cross-environment observed input differs from the value it
+/// resolved is `ready`, as one whose input in its own environment differs is.
+#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
+pub fn status_with_producers(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    coordination: &Coordination,
+    now: Timestamp,
+    drivers: Option<&DriverSet>,
+    readiness: &BTreeMap<UnitName, TeardownReadiness>,
+    producers: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
 ) -> EnvironmentRunReport {
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
@@ -503,8 +528,7 @@ pub fn status_with_readiness(
     // A current consumer whose observed value changed is work for the next
     // reconcile: state `ready`, exit 2. Contract:
     // [Observed values](../../../../design/orchestration-core.md#observed-values).
-    let changed =
-        super::observed_values::changed_consumers(&snapshot.desired, &snapshot.observed, &snapshot.observations, now);
+    let changed = super::observed_values::changed_consumers_across(environment, snapshot, producers, now);
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
@@ -533,7 +557,7 @@ pub fn status_with_readiness(
                         .map(|changed| format!(
                             "observed value {} of {} {}",
                             changed.observation,
-                            changed.producer,
+                            changed.producer_label(),
                             if changed.arrived { "arrived" } else { "changed" }
                         ))
                         .collect::<Vec<_>>()
