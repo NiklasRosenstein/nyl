@@ -21,8 +21,8 @@ use nyl_core::orchestration::ids::{EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::state::FailureCategory;
 use nyl_render::gitops::direct::release_documents;
 use nyl_render::gitops::observation::{
-    equivalent, running_publication, DeploymentTree, DirectLocation, GitPublicationHistory, ObservedPublication,
-    PublishedDirectRelease, RunningMatch, MATCH_WALK_LIMIT,
+    equivalent, running_publication, DeploymentTree, DirectLocation, DirectRelease, GitPublicationHistory,
+    ObservedPublication, PublishedDirectRelease, RunningMatch, MATCH_WALK_LIMIT,
 };
 use nyl_render::gitops::publication::{release_history_limit, RenderedTarget};
 use nyl_render::gitops::reconcile::RenderIndexOwner;
@@ -40,6 +40,8 @@ use nyl_render::resources::ClusterKubernetesCapabilities;
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
+use super::drift::desired_revision;
+use super::health::is_ttl_job;
 use super::reader::api_error;
 use super::{not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, ReadErrorKind, KUBECONFIG_ENV};
@@ -163,7 +165,7 @@ fn outcome_of(context: &str, failures: &[Why]) -> Outcome {
 
 /// Which wave a Release applies in, and, reversed, is removed in: Releases that
 /// register kinds (CustomResourceDefinitions, APIServices) come first.
-fn wave_of(documents: &[Value]) -> u8 {
+pub(super) fn wave_of(documents: &[Value]) -> u8 {
     let registers = documents.iter().any(|document| {
         ResourceKey::from_json_value(document).is_ok_and(|key| ResourceOrdering::registers_api_group(&key.gvk))
     });
@@ -606,6 +608,51 @@ impl<'a, 'c> Direct<'a, 'c> {
             .flatten()
     }
 
+    /// The Jobs of `manifests` that a TTL removed after they finished: the Job
+    /// sets `ttlSecondsAfterFinished`, the cluster no longer has it, and its
+    /// document is the one the Release's newest `Deployed` revision for this
+    /// publication holds (the revision drift detection compares the cluster
+    /// with, [`desired_revision`], whatever revisions failed after it).
+    /// Applying it again would run it a second time, on every execution; a Job
+    /// whose document changed is applied, as it is meant to run again. Anything
+    /// that cannot be read counts as not expired, so the Job is applied.
+    async fn expired_jobs(
+        &self,
+        cluster: &ClusterHandle,
+        release: &DirectRelease,
+        manifests: &[Value],
+    ) -> HashSet<ResourceKey> {
+        let candidates: Vec<(ResourceKey, &Value)> = manifests
+            .iter()
+            .filter_map(|manifest| ResourceKey::from_json_value(manifest).ok().map(|key| (key, manifest)))
+            .filter(|(key, manifest)| is_ttl_job(key, manifest))
+            .collect();
+        let mut expired = HashSet::new();
+        if candidates.is_empty() {
+            return expired;
+        }
+        let Ok(Some(previous)) = desired_revision(cluster, release, &self.destination).await else {
+            return expired;
+        };
+        let Ok(previous) = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&previous.manifest) else {
+            return expired;
+        };
+        for (key, manifest) in candidates {
+            let unchanged = previous.iter().any(|document| document == manifest);
+            let gone = matches!(
+                cluster
+                    .client
+                    .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                    .await,
+                Ok(None)
+            );
+            if unchanged && gone {
+                expired.insert(key);
+            }
+        }
+        expired
+    }
+
     /// A Release's documents prepared for its apply. This happens when its wave comes,
     /// so the kinds an earlier wave registers resolve, once the cluster serves them,
     /// and every kind's scope follows the order the target's declaration gives: the
@@ -631,6 +678,7 @@ impl<'a, 'c> Direct<'a, 'c> {
     }
 
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
+    #[allow(clippy::too_many_lines)] // One Release's apply in order: prepare, reserve, run, and map its failures.
     async fn apply_one(
         &self,
         cluster: &ClusterHandle,
@@ -647,6 +695,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         let (mut manifests, mut scopes) = self.prepare(cluster, release, documents, earlier, end).await?;
         ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
+        let expired = self.expired_jobs(cluster, &release.release, &manifests).await;
         ensure_namespace_exists(cluster.client.as_ref(), namespace, &ownership).await?;
         // Decided before the reservation, which makes the latest revision read as
         // `Rendered` (a mixed reading) until the apply completes: the branch is not
@@ -702,6 +751,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                         confirm_prune: false,
                         ownership: &ownership,
                         protected: Some(protected),
+                        unapplied: Some(&expired),
                     },
                     Interruption {
                         interrupt: tokio::time::sleep_until(end),

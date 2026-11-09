@@ -10,6 +10,9 @@ use kube::api::DynamicObject;
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
+/// The field manager `nyl diff` makes its normalizing dry-run applies as.
+const DIFF_FIELD_MANAGER: &str = "nyl-diff";
+
 /// Diff engine for comparing Kubernetes resources
 pub struct DiffEngine;
 
@@ -198,10 +201,33 @@ impl DiffEngine {
         live: &Value,
         client: &dyn crate::kubernetes::KubeClient,
     ) -> Result<bool> {
-        // Normalize desired with server-side defaults
-        let desired_normalized = Self::normalize_with_server(desired, Some(client)).await?;
+        Ok(Self::compare_as(desired, live, client, DIFF_FIELD_MANAGER)
+            .await?
+            .equivalent)
+    }
 
-        // Normalize live without server call
+    /// Whether applying `desired` as `manager` with a dry run would change
+    /// `live`, also reporting the `resourceVersion` the dry run's answer carries:
+    /// the version of the object the dry run was applied to. When it is not the
+    /// version of `live`, the object changed between the two requests and the
+    /// comparison is of two moments. Fields `desired` does not declare keep their
+    /// live values, so a field only another manager sets never makes the two differ.
+    pub async fn compare_as(
+        desired: &Value,
+        live: &Value,
+        client: &dyn crate::kubernetes::KubeClient,
+        manager: &str,
+    ) -> Result<ServerComparison> {
+        let dynamic: DynamicObject = serde_json::from_value(desired.clone())?;
+        let answer = serde_json::to_value(client.get_normalized_resource(&dynamic, manager).await?)?;
+        let resource_version = answer
+            .pointer("/metadata/resourceVersion")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        // Normalize desired with server-side defaults, live without a server call
+        let mut desired_normalized = answer;
+        Self::normalize(&mut desired_normalized);
         let live_normalized = Self::normalize_with_server(live, None).await?;
 
         // Convert to YAML for comparison
@@ -210,8 +236,20 @@ impl DiffEngine {
         let live_yaml = crate::yaml::serialize_yaml_value(&live_normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))?;
 
-        Ok(desired_yaml == live_yaml)
+        Ok(ServerComparison {
+            equivalent: desired_yaml == live_yaml,
+            resource_version,
+        })
     }
+}
+
+/// What a dry-run comparison found ([`DiffEngine::compare_as`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerComparison {
+    /// Whether applying the desired resource would change nothing.
+    pub equivalent: bool,
+    /// The `resourceVersion` of the dry run's answer, when it carries one.
+    pub resource_version: Option<String>,
 }
 
 #[cfg(test)]

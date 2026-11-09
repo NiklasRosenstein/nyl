@@ -49,6 +49,18 @@ deadline. A check that passes its deadline fails with a timeout
 A unit without a current receipt is reported as `no-receipt`, and a unit
 whose kind cannot detect drift as `unsupported`; neither is skipped silently.
 
+A [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/#execution-key-and-result)
+compares the publication branch with the tree it renders. When its target uses
+`reconciler: {direct: {}}`, it also [compares the cluster](/nyl/kubernetes-gitops/workflow/direct-reconciler/#detecting-drift)
+with what the unit last applied, with a server-side apply dry run as Nyl's field
+manager, so a changed field Nyl manages or a deleted object is `drifted` and the
+summary names the Release and the first eight objects. It needs the unit's
+admitted `KUBECONFIG`, the Cluster's declared context, and `get`, `patch` (for the
+dry runs), and access to the Release state Secrets, plus `get` on
+customresourcedefinitions and `list` on apiservices when a kind is not served; a cluster it cannot read is
+`unknown` (`NYL-DRIFT-UNKNOWN`, with the reason and the fix), never `clean`.
+Run `nyl diff --target <target>` on a Release's file to see each change in full.
+
 `detect-drift` and `attest` do not import runs, so they refuse a lease that
 [`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break) broke while
 the broken run is not imported yet, writing nothing; a check with nothing

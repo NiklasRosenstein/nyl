@@ -22,7 +22,7 @@ use serde_json::Value;
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 
 use super::health::{fold, is_workload, Found};
-use super::{not_removable, ClusterAccess, ClusterHandle};
+use super::{destination_of, not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{
     block_on, Health, Observed, Proof, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, Running,
     Visibility,
@@ -67,27 +67,41 @@ impl DirectReader {
     }
 }
 
+/// What the reader needs the context to be allowed to do.
+const READER_GRANT: &str =
+    "`get` and `list` on Secrets of the Release namespaces and `get` on the workloads the Releases apply";
+
 /// A read error of the Kubernetes API, as the reader reports it.
 pub(super) fn api_error(error: &NylError, what: &str) -> ReadError {
+    api_error_granting(error, what, READER_GRANT)
+}
+
+/// [`api_error`] for a caller that needs other permissions: `grant` is what a
+/// 403 tells the user to grant.
+pub(super) fn api_error_granting(error: &NylError, what: &str, grant: &str) -> ReadError {
     let text = error.to_string();
-    let kind = match error.kube_kind() {
-        Some(KubeErrorKind::Forbidden) => ReadErrorKind::Forbidden,
-        Some(KubeErrorKind::Unauthorized) => ReadErrorKind::Rejected,
-        _ => ReadErrorKind::Unreachable,
-    };
     let first = text.lines().next().unwrap_or_default();
-    let message = match kind {
-        ReadErrorKind::Forbidden => format!(
-            "the context may not {what} (HTTP 403): grant its user `get` and `list` on Secrets of the Release namespaces \
-             and `get` on the workloads the Releases apply. {first}"
+    match error.kube_kind() {
+        Some(KubeErrorKind::Forbidden) => ReadError::new(
+            ReadErrorKind::Forbidden,
+            format!("the context may not {what} (HTTP 403): grant its user {grant}. {first}"),
         ),
-        ReadErrorKind::Rejected => format!(
-            "the Kubernetes API rejected the kubeconfig's credentials (HTTP 401): they are invalid or have expired; \
-             log in again or refresh the admitted kubeconfig. {first}"
+        Some(KubeErrorKind::Unauthorized) => ReadError::new(
+            ReadErrorKind::Rejected,
+            format!(
+                "the Kubernetes API rejected the kubeconfig's credentials (HTTP 401): they are invalid or have expired; \
+                 log in again or refresh the admitted kubeconfig. {first}"
+            ),
         ),
-        _ => format!("cannot {what}: {first}"),
-    };
-    ReadError::new(kind, message)
+        Some(KubeErrorKind::Rejected) => ReadError::new(
+            ReadErrorKind::Unreachable,
+            format!(
+                "the Kubernetes API rejected the object when asked to {what} (HTTP 422); an admission webhook may \
+                 refuse it or it holds a field that cannot change. {first}"
+            ),
+        ),
+        _ => ReadError::new(ReadErrorKind::Unreachable, format!("cannot {what}: {first}")),
+    }
 }
 
 fn locator(deployment: &ExpectedDeployment) -> Result<DirectRelease, ReadError> {
@@ -121,7 +135,7 @@ async fn revisions(cluster: &ClusterHandle, release: &DirectRelease) -> Result<V
     Ok(states)
 }
 
-fn applied_for(state: &ReleaseState, destination: &ReleasePublication) -> bool {
+pub(super) fn applied_for(state: &ReleaseState, destination: &ReleasePublication) -> bool {
     state
         .meta
         .publication
@@ -301,12 +315,7 @@ impl DirectReader {
             .first()
             .map(|deployment| deployment.source.repository.clone())
             .unwrap_or_default();
-        let destination = ReleasePublication {
-            repository,
-            branch: self.publication.branch.clone(),
-            path_prefix: self.publication.path_prefix.clone(),
-            commit: None,
-        };
+        let destination = destination_of(repository, &self.publication);
         // A removal reading waits for no Namespace at all: the first phase of a
         // teardown defers every Namespace that holds the state of any Release it
         // purges, those of Releases that left the tree and of foreign ones

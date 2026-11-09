@@ -284,6 +284,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
                 protected: None,
+                unapplied: None,
             },
             Interruption {
                 interrupt: async {

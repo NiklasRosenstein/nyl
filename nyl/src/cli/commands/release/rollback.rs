@@ -169,6 +169,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
                 protected: None,
+                unapplied: None,
             },
             Interruption {
                 interrupt: async {

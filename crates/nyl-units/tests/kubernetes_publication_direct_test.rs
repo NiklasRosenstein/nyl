@@ -14,9 +14,9 @@ use std::sync::Arc;
 use nyl_core::orchestration::driver::{
     Driver, DriverOperation, IncarnationStatus, Outcome, ResolutionContext, Supported, WaitCompletion,
 };
-use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
+use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId};
 use nyl_core::orchestration::ports::CommitIdentity;
-use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, FailureCategory};
+use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, FailureCategory, Receipt};
 use nyl_render::kubernetes::{
     GroupVersionKind, InMemoryReleaseStorage, KubeClient, MockKubeClient, ReleaseStatus, ReleaseStorage,
 };
@@ -1399,5 +1399,770 @@ async fn test_a_recorded_commit_whose_release_directory_differs_gets_a_new_revis
     assert_eq!(
         latest.meta.publication.unwrap().commit.as_deref(),
         third.spec["commit"].as_str()
+    );
+}
+
+// Drift of the cluster: what `nyl detect-drift` finds of a direct unit between runs.
+//
+// Contract: [Direct reconciler](../../../design/orchestration-core.md#direct-reconciler), drift.
+
+/// How a read or a dry run of the drift test cluster fails.
+#[derive(Clone, Copy)]
+enum Fails {
+    Forbidden,
+    Unreachable,
+}
+
+impl Fails {
+    fn error(self) -> nyl_render::NylError {
+        match self {
+            Self::Forbidden => nyl_render::NylError::KubernetesApi {
+                kind: nyl_render::KubeErrorKind::Forbidden,
+                message: "Permission denied: forbidden".to_owned(),
+            },
+            Self::Unreachable => nyl_render::NylError::KubernetesApi {
+                kind: nyl_render::KubeErrorKind::Connection,
+                message: "connection refused".to_owned(),
+            },
+        }
+    }
+}
+
+/// A cluster client that answers a server-side apply dry run as an API server
+/// does: the object as live, with the fields the applied configuration declares
+/// taken from it. The mock returns the configuration as it is, which cannot
+/// tell a field Nyl manages from one only another manager sets. Reads of a kind,
+/// and the dry run, can be made to fail, a kind can stop being served in one of
+/// the ways an API server stops serving it, and objects can change between a
+/// read and the dry run that follows it.
+struct ApiServer {
+    inner: Arc<MockKubeClient>,
+    unreadable: std::sync::Mutex<Option<(String, Fails)>>,
+    dry_run_fails: std::sync::Mutex<Option<Fails>>,
+    unserved: std::sync::Mutex<Option<(String, Unserved)>>,
+    /// How many of the next dry runs find the object changed since it was read.
+    moves: std::sync::atomic::AtomicU32,
+    versions: std::sync::atomic::AtomicU32,
+}
+
+/// Why a kind answers with an unknown API resource.
+#[derive(Clone, Copy)]
+enum Unserved {
+    /// No version, no CRD, no APIService.
+    Removed,
+    /// Its aggregated API is down.
+    Unavailable,
+    /// The version of the manifest is gone; `v2` is served.
+    OtherVersion,
+    /// The credentials may not look at the CRDs and APIServices that tell.
+    Forbidden,
+}
+
+impl ApiServer {
+    fn new(inner: Arc<MockKubeClient>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            unreadable: std::sync::Mutex::default(),
+            dry_run_fails: std::sync::Mutex::default(),
+            unserved: std::sync::Mutex::default(),
+            moves: std::sync::atomic::AtomicU32::new(0),
+            versions: std::sync::atomic::AtomicU32::new(1),
+        })
+    }
+}
+
+/// `applied` laid over `live`: objects merge by field, everything else is replaced.
+fn laid_over(live: serde_json::Value, applied: &serde_json::Value) -> serde_json::Value {
+    match (live, applied) {
+        (serde_json::Value::Object(mut live), serde_json::Value::Object(applied)) => {
+            for (field, value) in applied {
+                let merged = match live.remove(field) {
+                    Some(existing) => laid_over(existing, value),
+                    None => value.clone(),
+                };
+                live.insert(field.clone(), merged);
+            }
+            serde_json::Value::Object(live)
+        }
+        (_, applied) => applied.clone(),
+    }
+}
+
+#[async_trait::async_trait]
+impl KubeClient for ApiServer {
+    async fn get_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> nyl_render::Result<Option<kube::api::DynamicObject>> {
+        if let Some((kind, fails)) = &*self.unreadable.lock().unwrap() {
+            if *kind == gvk.kind {
+                return Err(fails.error());
+            }
+        }
+        if matches!(&*self.unserved.lock().unwrap(), Some((kind, _)) if *kind == gvk.kind) {
+            return Err(nyl_render::NylError::ApiResourceNotFound(gvk.kind.clone()));
+        }
+        self.inner.get_resource(gvk, namespace, name).await
+    }
+
+    async fn is_kind_removed(&self, gvk: &GroupVersionKind) -> nyl_render::Result<bool> {
+        match &*self.unserved.lock().unwrap() {
+            Some((kind, Unserved::Forbidden)) if *kind == gvk.kind => Err(Fails::Forbidden.error()),
+            Some((kind, Unserved::Removed)) if *kind == gvk.kind => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    async fn apply_resource(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+        dry_run: bool,
+    ) -> nyl_render::Result<nyl_render::kubernetes::ApplyOutcome> {
+        self.inner.apply_resource(resource, manager, dry_run).await
+    }
+
+    async fn get_server_version(&self) -> nyl_render::Result<String> {
+        self.inner.get_server_version().await
+    }
+
+    async fn get_api_versions(&self) -> nyl_render::Result<Vec<String>> {
+        let mut versions = self.inner.get_api_versions().await?;
+        if let Some((kind, Unserved::OtherVersion)) = &*self.unserved.lock().unwrap() {
+            versions.push(format!("v2/{kind}"));
+        }
+        Ok(versions)
+    }
+
+    async fn is_namespaced(&self, gvk: &GroupVersionKind) -> nyl_render::Result<bool> {
+        self.inner.is_namespaced(gvk).await
+    }
+
+    fn default_namespace(&self) -> &str {
+        self.inner.default_namespace()
+    }
+
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &nyl_render::kubernetes::DeleteOptions,
+    ) -> nyl_render::Result<()> {
+        self.inner.delete_resource_with(gvk, namespace, name, options).await
+    }
+
+    async fn get_normalized_resource(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+    ) -> nyl_render::Result<kube::api::DynamicObject> {
+        assert_eq!(manager, "nyl", "drift is judged by the fields Nyl manages");
+        let gvk = nyl_render::kubernetes::extract_gvk(&serde_json::to_value(resource).unwrap())?;
+        let moving = gvk.kind == "Deployment"
+            && self
+                .moves
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |moves| moves.checked_sub(1),
+                )
+                .is_ok();
+        if moving {
+            // An autoscaler set the replicas between the read and this dry run.
+            let name = resource.metadata.name.as_deref().unwrap();
+            let live = self
+                .inner
+                .get_resource(&gvk, resource.metadata.namespace.as_deref(), name)
+                .await?
+                .unwrap();
+            let mut moved = serde_json::to_value(live).unwrap();
+            moved["spec"]["replicas"] = serde_json::json!(1);
+            moved["metadata"]["resourceVersion"] =
+                serde_json::json!((self.versions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1).to_string());
+            let key = nyl_render::kubernetes::ResourceKey::from_json_value(&moved).unwrap();
+            self.inner.add_resource(key, serde_json::from_value(moved).unwrap());
+        }
+        if let Some(fails) = *self.dry_run_fails.lock().unwrap() {
+            return Err(fails.error());
+        }
+        let applied = serde_json::to_value(resource).unwrap();
+        let gvk = nyl_render::kubernetes::extract_gvk(&applied)?;
+        let live = self
+            .inner
+            .get_resource(
+                &gvk,
+                resource.metadata.namespace.as_deref(),
+                resource.metadata.name.as_deref().unwrap(),
+            )
+            .await?;
+        Ok(match live {
+            Some(live) => serde_json::from_value(laid_over(serde_json::to_value(live).unwrap(), &applied)).unwrap(),
+            None => resource.clone(),
+        })
+    }
+
+    async fn release_field_manager(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.release_field_manager(resource, manager).await
+    }
+}
+
+const CONFIG: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: cfg, namespace: cfg}\nspec: {}\n---\n\
+                      apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: cfg}\ndata: {a: b}\n";
+
+const JOBS: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: jobs, namespace: jobs}\nspec: {}\n---\n\
+                    apiVersion: batch/v1\nkind: Job\nmetadata: {name: migrate, namespace: jobs}\n\
+                    spec:\n  ttlSecondsAfterFinished: 60\n  template:\n    spec:\n      restartPolicy: Never\n      \
+                    containers: [{name: migrate, image: 'registry.invalid:5000/migrate'}]\n";
+
+/// A direct unit applied to a cluster that answers dry runs like an API server,
+/// through the walkthrough Release `web`, a `cfg` Release holding a ConfigMap,
+/// and a `jobs` Release holding a Job a TTL removes.
+struct Applied {
+    world: World,
+    cluster: Cluster,
+    server: Arc<ApiServer>,
+    driver: KubernetesPublicationDriver,
+    unit: DesiredUnit,
+    tree: ArtifactDocument,
+}
+
+impl Applied {
+    fn new() -> Self {
+        let world = direct_world();
+        std::fs::write(world.work().join("applications/web/cfg.yaml"), CONFIG).unwrap();
+        std::fs::write(world.work().join("applications/web/jobs.yaml"), JOBS).unwrap();
+        let cluster = Cluster::new();
+        let server = ApiServer::new(cluster.client.clone());
+        let driver = cluster.driver_through(server.clone());
+        let unit = unit_for(&driver, &world, "kubernetes");
+        let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+        Self {
+            world,
+            cluster,
+            server,
+            driver,
+            unit,
+            tree,
+        }
+    }
+
+    fn drift(&self) -> Drift {
+        self.drift_of(&self.unit, chrono::Duration::minutes(10))
+    }
+
+    /// What `detect-drift` finds of `unit` with `budget` left of its deadline.
+    fn drift_of(&self, unit: &DesiredUnit, budget: chrono::Duration) -> Drift {
+        let mut ctx = context(&self.world, DriverOperation::DetectDrift, None);
+        ctx.deadline = ctx.now + budget;
+        let receipt = Receipt {
+            execution_key: self.unit.execution_key.clone().unwrap(),
+            behavior_version: 1,
+            run: RunId::new("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90").unwrap(),
+            read_desired: None,
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            versions: BTreeMap::new(),
+            approval: None,
+            provenance: BTreeMap::new(),
+            outputs: serde_json::json!({}),
+            artifacts: Vec::new(),
+            warnings: Vec::new(),
+        };
+        match self.driver.detect_drift(&ctx, unit, &receipt).unwrap() {
+            Supported::Supported(detection) => detection.drift,
+            Supported::Unsupported => panic!("the driver detects drift"),
+        }
+    }
+
+    fn drifted(&self) -> String {
+        match self.drift() {
+            Drift::Drifted { summary } => summary,
+            other => panic!("expected drift, got {other:?}"),
+        }
+    }
+
+    /// Change a field of a live object, as `kubectl edit` or another controller does.
+    async fn edit(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let gvk = GroupVersionKind::from_api_version_kind(api_version, kind).unwrap();
+        let live = self
+            .cluster
+            .client
+            .get_resource(&gvk, Some(namespace), name)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut value = serde_json::to_value(live).unwrap();
+        edit(&mut value);
+        let key = nyl_render::kubernetes::ResourceKey::from_json_value(&value).unwrap();
+        self.cluster
+            .client
+            .add_resource(key, serde_json::from_value(value).unwrap());
+    }
+
+    async fn remove(&self, api_version: &str, kind: &str, namespace: &str, name: &str) {
+        let gvk = GroupVersionKind::from_api_version_kind(api_version, kind).unwrap();
+        self.cluster
+            .client
+            .delete_resource(&gvk, Some(namespace), name)
+            .await
+            .unwrap();
+    }
+}
+
+/// Catches drift detection of a direct unit answering `clean` without
+/// comparing the cluster, and a comparison that changes it: a unit whose
+/// objects hold what it applied is clean, and the dry run writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_direct_unit_whose_cluster_holds_what_it_applied_is_clean() {
+    let applied = Applied::new();
+    let before = applied.cluster.storage.list_revisions("web", "web").await.unwrap();
+
+    assert_eq!(applied.drift(), Drift::Clean);
+
+    assert_eq!(
+        applied.cluster.storage.list_revisions("web", "web").await.unwrap(),
+        before
+    );
+}
+
+/// Catches a `kubectl edit` of a field the manifest declares going unnoticed,
+/// and a summary that does not say which Release and object changed, or where
+/// the full diff is.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_changed_field_nyl_manages_is_drift_naming_the_release_and_object() {
+    let applied = Applied::new();
+    applied
+        .edit("apps/v1", "Deployment", "web", "web", |object| {
+            object["spec"]["replicas"] = serde_json::json!(5);
+        })
+        .await;
+
+    let summary = applied.drifted();
+
+    assert!(
+        summary.contains("Release web/web: Deployment web/web changed"),
+        "{summary}"
+    );
+    assert!(summary.contains("nyl diff --target dev"), "{summary}");
+}
+
+/// Catches a field another manager owns counting as drift: the server-side
+/// apply dry run changes only what the manifest declares, so a field the
+/// manifest never sets (`minReadySeconds` set by another tool, a controller's annotation)
+/// differs without being drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_field_the_manifest_does_not_declare_is_not_drift() {
+    let applied = Applied::new();
+    applied
+        .edit("apps/v1", "Deployment", "web", "web", |object| {
+            object["spec"]["minReadySeconds"] = serde_json::json!(30);
+            object["metadata"]["annotations"] = serde_json::json!({"autoscaling.example/last-scaled": "now"});
+        })
+        .await;
+
+    assert_eq!(applied.drift(), Drift::Clean);
+}
+
+/// Catches an object deleted from the cluster going unnoticed: a tracked
+/// object that is gone is drift, and the summary names it with its Release.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_tracked_object_that_was_deleted_is_drift() {
+    let applied = Applied::new();
+    applied.remove("v1", "ConfigMap", "cfg", "cfg").await;
+
+    let summary = applied.drifted();
+
+    assert!(
+        summary.contains("Release cfg/cfg: ConfigMap cfg/cfg is missing"),
+        "{summary}"
+    );
+}
+
+/// Catches a Job that a TTL removed after it finished counting as drift: its
+/// disappearance is expected (the reader's rule), though another deleted
+/// object of the same unit is still drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_job_a_ttl_removed_is_not_drift() {
+    let applied = Applied::new();
+    applied.remove("batch/v1", "Job", "jobs", "migrate").await;
+    assert_eq!(applied.drift(), Drift::Clean);
+
+    applied.remove("v1", "ConfigMap", "cfg", "cfg").await;
+    let summary = applied.drifted();
+    assert!(summary.contains("ConfigMap cfg/cfg is missing"), "{summary}");
+    assert!(!summary.contains("Job"), "{summary}");
+}
+
+/// Catches a cluster that cannot be read being reported clean: a forbidden
+/// read, an unreachable cluster, and a dry run the API refuses are `unknown`
+/// with the reason, never `clean`; drift found elsewhere is still drift, with
+/// what stayed unverified.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_cluster_that_cannot_be_read_is_unknown_never_clean() {
+    let applied = Applied::new();
+
+    *applied.server.unreadable.lock().unwrap() = Some(("Deployment".to_owned(), Fails::Forbidden));
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("a forbidden read is unknown");
+    };
+    assert!(
+        reason.contains("may not read Deployment web/web (HTTP 403)"),
+        "{reason}"
+    );
+
+    *applied.server.unreadable.lock().unwrap() = Some(("Deployment".to_owned(), Fails::Unreachable));
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("an unreachable cluster is unknown");
+    };
+    assert!(reason.contains("cannot read Deployment web/web"), "{reason}");
+
+    *applied.server.unreadable.lock().unwrap() = None;
+    *applied.server.dry_run_fails.lock().unwrap() = Some(Fails::Forbidden);
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("a refused dry run is unknown");
+    };
+    assert!(reason.contains("server-side apply dry run"), "{reason}");
+
+    *applied.server.dry_run_fails.lock().unwrap() = None;
+    applied.remove("v1", "ConfigMap", "cfg", "cfg").await;
+    *applied.server.unreadable.lock().unwrap() = Some(("Deployment".to_owned(), Fails::Forbidden));
+    let summary = applied.drifted();
+    assert!(summary.contains("ConfigMap cfg/cfg is missing"), "{summary}");
+    assert!(summary.contains("not compared: "), "{summary}");
+}
+
+/// Catches the state of another publication standing for this unit's Release:
+/// a newer revision applied for another destination, or by hand, is not what
+/// the unit applied, so it neither makes the unit drifted nor replaces its
+/// desired state. A Release with no revision of this publication at all is
+/// drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_revision_of_another_publication_is_ignored() {
+    use nyl_render::kubernetes::ReleasePublication;
+    let applied = Applied::new();
+    let mut foreign = applied
+        .cluster
+        .storage
+        .get_latest_release("web", "web")
+        .await
+        .unwrap()
+        .unwrap();
+    foreign.revision = 2;
+    foreign.manifest = foreign.manifest.replace("replicas: 1", "replicas: 9");
+    foreign.meta.publication = Some(ReleasePublication {
+        repository: "https://example.invalid/other.git".to_owned(),
+        branch: "deploy".to_owned(),
+        path_prefix: "dev".to_owned(),
+        commit: Some("b".repeat(40)),
+    });
+    applied.cluster.storage.save_release(&foreign).await.unwrap();
+    let mut by_hand = foreign.clone();
+    by_hand.revision = 3;
+    by_hand.meta.publication = None;
+    applied.cluster.storage.save_release(&by_hand).await.unwrap();
+
+    assert_eq!(
+        applied.drift(),
+        Drift::Clean,
+        "the newest revision of this publication is revision 1"
+    );
+
+    applied.cluster.storage.delete_release("web", "web", 1).await.unwrap();
+    let summary = applied.drifted();
+    assert!(
+        summary.contains("Release web/web: no revision applied for this publication is recorded"),
+        "{summary}"
+    );
+}
+
+/// Catches an object a Release only keeps tracked counting as drift: a key
+/// that stays tracked because its prune awaits confirmation, or because
+/// another Release has yet to apply it, has no document in the manifest, so it
+/// is neither compared nor missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_key_tracked_without_a_manifest_document_is_not_drift() {
+    let applied = Applied::new();
+    let mut latest = applied
+        .cluster
+        .storage
+        .get_latest_release("web", "web")
+        .await
+        .unwrap()
+        .unwrap();
+    latest.resource_keys.push(
+        nyl_render::kubernetes::ResourceKey::from_json_value(&serde_json::json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "awaiting", "namespace": "web", "annotations": {"argocd.argoproj.io/sync-options": "Prune=confirm"}}
+        }))
+        .unwrap(),
+    );
+    applied.cluster.storage.complete_release(&latest).await.unwrap();
+
+    assert_eq!(applied.drift(), Drift::Clean);
+}
+
+/// Catches a repair that does not restore the cluster or that records a
+/// revision for an unchanged apply: reconciling a drifted unit applies the
+/// recorded tree again, so the deleted object returns, the revision is kept,
+/// and the next check is clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconciling_a_drifted_unit_repairs_the_cluster_and_keeps_its_revision() {
+    let applied = Applied::new();
+    applied.remove("v1", "ConfigMap", "cfg", "cfg").await;
+    applied
+        .edit("apps/v1", "Deployment", "web", "web", |object| {
+            object["spec"]["replicas"] = serde_json::json!(5);
+        })
+        .await;
+    applied.drifted();
+
+    tree_of(&reconcile(
+        &applied.driver,
+        &applied.world,
+        &applied.unit,
+        Some(&applied.tree),
+        &nobody(),
+    ));
+
+    assert!(applied.cluster.exists("v1", "ConfigMap", Some("cfg"), "cfg").await);
+    assert_eq!(
+        applied.cluster.storage.list_revisions("web", "web").await.unwrap(),
+        vec![1]
+    );
+    assert_eq!(
+        applied.cluster.storage.list_revisions("cfg", "cfg").await.unwrap(),
+        vec![1]
+    );
+    assert_eq!(applied.drift(), Drift::Clean);
+}
+
+/// Catches a false drift from a race: the object changes between the live read
+/// and the dry run (an autoscaler sets the replicas), so the dry run's answer
+/// is of another version than the read. The comparison is made again once; an
+/// object that moves every time is unverified, never judged.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_an_object_that_changes_between_the_read_and_the_dry_run_is_compared_again() {
+    use std::sync::atomic::Ordering;
+    let applied = Applied::new();
+    let scaled = |object: &mut serde_json::Value| {
+        object["spec"]["replicas"] = serde_json::json!(5);
+        object["metadata"]["resourceVersion"] = serde_json::json!("1");
+    };
+    applied.edit("apps/v1", "Deployment", "web", "web", scaled).await;
+    applied.server.moves.store(1, Ordering::SeqCst);
+    assert_eq!(
+        applied.drift(),
+        Drift::Clean,
+        "the second reading holds the replicas the manifest declares"
+    );
+
+    applied.edit("apps/v1", "Deployment", "web", "web", scaled).await;
+    applied.server.moves.store(2, Ordering::SeqCst);
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("an object that moves every time is unknown");
+    };
+    assert!(reason.contains("changed while it was compared"), "{reason}");
+}
+
+/// Catches an unknown API resource being read as one thing: a kind that is gone
+/// holds no object (missing), a version no longer served while the kind is
+/// served at another is drift worded as such, and an aggregated API that is
+/// down cannot tell whether the object exists, so it is unknown.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_kind_the_cluster_does_not_serve_is_told_apart() {
+    let applied = Applied::new();
+
+    *applied.server.unserved.lock().unwrap() = Some(("ConfigMap".to_owned(), Unserved::Removed));
+    let summary = applied.drifted();
+    assert!(summary.contains("ConfigMap cfg/cfg is missing"), "{summary}");
+    assert!(!summary.contains("apiVersion"), "{summary}");
+
+    *applied.server.unserved.lock().unwrap() = Some(("ConfigMap".to_owned(), Unserved::OtherVersion));
+    let summary = applied.drifted();
+    assert!(
+        summary.contains("ConfigMap cfg/cfg is missing: its apiVersion is no longer served"),
+        "{summary}"
+    );
+
+    *applied.server.unserved.lock().unwrap() = Some(("ConfigMap".to_owned(), Unserved::Unavailable));
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("an aggregated API that is down is unknown");
+    };
+    assert!(reason.contains("aggregated API"), "{reason}");
+
+    // Telling them apart reads CRDs and APIServices; a 403 names exactly those.
+    *applied.server.unserved.lock().unwrap() = Some(("ConfigMap".to_owned(), Unserved::Forbidden));
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("a forbidden look at the CRDs is unknown");
+    };
+    assert!(
+        reason.contains("`get` on customresourcedefinitions and `list` on apiservices"),
+        "{reason}"
+    );
+}
+
+/// Catches a TTL Job running again on the retry of a failed apply: revision 1
+/// deployed the Job, revision 2 failed on something else, and the TTL removed the
+/// Job. The retry compares the Job with the newest `Deployed` revision of this
+/// publication, as drift does, not with the latest revision, which is `Failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_ttl_job_is_not_applied_again_after_a_failed_revision() {
+    let applied = Applied::new();
+    let mut failed = applied
+        .cluster
+        .storage
+        .get_latest_release("jobs", "jobs")
+        .await
+        .unwrap()
+        .unwrap();
+    failed.revision = 2;
+    failed.status = ReleaseStatus::Failed;
+    failed.error = Some("apply did not complete".to_owned());
+    applied.cluster.storage.save_release(&failed).await.unwrap();
+    applied.remove("batch/v1", "Job", "jobs", "migrate").await;
+
+    tree_of(&reconcile(
+        &applied.driver,
+        &applied.world,
+        &applied.unit,
+        Some(&applied.tree),
+        &nobody(),
+    ));
+
+    assert!(
+        !applied.cluster.exists("batch/v1", "Job", Some("jobs"), "migrate").await,
+        "the Job ran once and its TTL removed it"
+    );
+}
+
+/// Catches a direct unit being judged by what it recorded instead of by its
+/// target: a unit resolved without the reconciler facts a direct unit records is
+/// `unknown` with the fix, never clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_direct_unit_without_recorded_facts_is_unknown_not_clean() {
+    let applied = Applied::new();
+    let mut unit = applied.unit.clone();
+    unit.resolved_spec
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("reconciler");
+
+    let Drift::Unknown { reason } = applied.drift_of(&unit, chrono::Duration::minutes(10)) else {
+        panic!("a direct unit without facts cannot be compared");
+    };
+
+    assert!(reason.contains("records no reconciler facts"), "{reason}");
+}
+
+/// Catches the owner of an object two Releases render being chosen by when
+/// their revisions were applied: an apply that changed nothing keeps its
+/// revision and timestamps, so the older revision would win and the check
+/// would report drift for good. The Release that applies last owns it, as in
+/// the cluster (the wave, then the Release key).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_an_object_two_releases_render_belongs_to_the_one_that_applies_last() {
+    let applied = Applied::new();
+    let shared = |data: &str| {
+        format!(
+            "\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {{name: shared, namespace: web}}\ndata: {{a: {data}}}\n"
+        )
+    };
+    // `web/jobs` sorts after `web/cfg`, so it applies last; the revision of
+    // `cfg` is the one with the later timestamp.
+    for (name, later) in [("cfg", true), ("jobs", false)] {
+        let mut state = applied
+            .cluster
+            .storage
+            .get_latest_release(name, name)
+            .await
+            .unwrap()
+            .unwrap();
+        state.manifest.push_str(&shared(name));
+        state.applied_at = Some(chrono::Utc::now() + chrono::Duration::hours(i64::from(later)));
+        applied.cluster.storage.complete_release(&state).await.unwrap();
+    }
+    let held = serde_json::json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "shared", "namespace": "web"}, "data": {"a": "jobs"}
+    });
+    applied.cluster.client.add_resource(
+        nyl_render::kubernetes::ResourceKey::from_json_value(&held).unwrap(),
+        serde_json::from_value(held).unwrap(),
+    );
+
+    assert_eq!(applied.drift(), Drift::Clean);
+}
+
+/// Catches a Job its TTL removed running again on every execution: the apply
+/// leaves a Job that is gone, sets `ttlSecondsAfterFinished`, and whose document
+/// the latest revision already holds, and still records the revision as before.
+/// A Job whose document changed is applied, as it is meant to run again.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_job_a_ttl_removed_is_not_applied_again_until_its_document_changes() {
+    let applied = Applied::new();
+    assert!(applied.cluster.exists("batch/v1", "Job", Some("jobs"), "migrate").await);
+    applied.remove("batch/v1", "Job", "jobs", "migrate").await;
+
+    tree_of(&reconcile(
+        &applied.driver,
+        &applied.world,
+        &applied.unit,
+        Some(&applied.tree),
+        &nobody(),
+    ));
+
+    assert!(
+        !applied.cluster.exists("batch/v1", "Job", Some("jobs"), "migrate").await,
+        "the Job ran once and its TTL removed it"
+    );
+    assert_eq!(
+        applied.cluster.storage.list_revisions("jobs", "jobs").await.unwrap(),
+        vec![1],
+        "the Release is unchanged"
+    );
+    let latest = applied
+        .cluster
+        .storage
+        .get_latest_release("jobs", "jobs")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        latest.resource_keys.iter().any(|key| key.gvk.kind == "Job"),
+        "the Job stays tracked"
+    );
+
+    let jobs = applied.world.work().join("applications/web/jobs.yaml");
+    let text = std::fs::read_to_string(&jobs).unwrap();
+    std::fs::write(&jobs, text.replace("migrate'", "migrate:2'")).unwrap();
+    let changed = unit_for(&applied.driver, &applied.world, "kubernetes");
+    tree_of(&reconcile(
+        &applied.driver,
+        &applied.world,
+        &changed,
+        Some(&applied.tree),
+        &nobody(),
+    ));
+
+    assert!(applied.cluster.exists("batch/v1", "Job", Some("jobs"), "migrate").await);
+    assert_eq!(
+        applied.cluster.storage.list_revisions("jobs", "jobs").await.unwrap(),
+        vec![1, 2]
     );
 }

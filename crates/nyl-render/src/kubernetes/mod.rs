@@ -22,7 +22,7 @@ mod state;
 pub use client::{builtin_scope, is_known_cluster_scoped_gvk};
 pub use client::{DeleteOptions, DeletePropagation, DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
 pub use cluster_server::{normalize_cluster_url, verifiable_cluster_server, verify_cluster_server, verify_server};
-pub use diff::DiffEngine;
+pub use diff::{DiffEngine, ServerComparison};
 pub use memory::InMemoryReleaseStorage;
 pub use namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
 pub use ordered_delete::{delete_in_prune_order, run_concurrently, PruneEvent, PRUNE_TERMINATION_TIMEOUT};

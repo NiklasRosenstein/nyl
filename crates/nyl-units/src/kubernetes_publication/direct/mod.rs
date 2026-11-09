@@ -13,6 +13,8 @@
 //!   over the release state the apply recorded and the rollout status of the
 //!   workloads ([`health`]), so the shared evaluation judges a direct target
 //!   exactly as it judges Argo CD.
+//! - [`drift`] compares the cluster with what the unit last applied, for
+//!   `nyl detect-drift`, from the release state the apply recorded.
 //! - [`apply`] holds the driver's operations: preflight, publish, apply in
 //!   waves, purge, and the two teardown phases, over the lifecycle code
 //!   `nyl apply` shares.
@@ -32,6 +34,7 @@ use super::argocd::Connection;
 use super::reconciler::{ReadError, ReadErrorKind, ReconcilerReader, KUBECONFIG_ENV};
 
 pub mod apply;
+pub(crate) mod drift;
 pub mod health;
 mod reader;
 
@@ -82,6 +85,18 @@ pub(crate) fn not_removable(
         None => true,
     };
     (!(same_unit && gone)).then(|| format!("it is owned by {recorded}"))
+}
+
+/// The destination a target's Releases are applied for, without a commit: the
+/// repository of its tree and the recorded branch and prefix. What the reader
+/// and the drift check judge a revision's recorded publication by.
+pub(crate) fn destination_of(repository: String, publication: &ObservedPublication) -> ReleasePublication {
+    ReleasePublication {
+        repository,
+        branch: publication.branch.clone(),
+        path_prefix: publication.path_prefix.clone(),
+        commit: None,
+    }
 }
 
 /// A connection to the target's Cluster: what applies resources and what

@@ -10,6 +10,7 @@
 //! is a finding, except a Job whose `ttlSecondsAfterFinished` makes its
 //! disappearance after completion expected.
 
+use nyl_render::kubernetes::ResourceKey;
 use serde_json::Value;
 
 use crate::kubernetes_publication::reconciler::Health;
@@ -213,6 +214,13 @@ fn job(live: &Value) -> Status {
 /// disappearance after completion is expected.
 pub fn job_expires(manifest: &Value) -> bool {
     manifest.pointer("/spec/ttlSecondsAfterFinished").is_some()
+}
+
+/// Whether the object `key` names, whose manifest is `manifest`, is a Job that
+/// sets `ttlSecondsAfterFinished`: a Job whose absence after it ran is expected,
+/// and that applying again would run a second time.
+pub fn is_ttl_job(key: &ResourceKey, manifest: &Value) -> bool {
+    key.gvk.group == "batch" && key.gvk.kind == "Job" && job_expires(manifest)
 }
 
 /// One workload of the revision's manifest and what was found of it.

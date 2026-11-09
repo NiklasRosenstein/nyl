@@ -531,8 +531,31 @@ impl<'s> ReleaseRecorder<'s> {
         };
         let work = async {
             let apply_started = Instant::now();
-            let apply =
-                apply_sorted_manifests(client, manifests, settings.ownership, settings.concurrency, &mut track).await?;
+            let (applicable, left): (Vec<_>, Vec<_>) = match settings.unapplied {
+                Some(unapplied) => {
+                    let mut applicable = Vec::new();
+                    let mut left = Vec::new();
+                    for manifest in manifests {
+                        let key = ResourceKey::from_json_value(manifest)?;
+                        if unapplied.contains(&key) {
+                            left.push(key);
+                        } else {
+                            applicable.push(manifest.clone());
+                        }
+                    }
+                    (applicable, left)
+                }
+                None => (manifests.to_vec(), Vec::new()),
+            };
+            let mut apply = apply_sorted_manifests(
+                client,
+                &applicable,
+                settings.ownership,
+                settings.concurrency,
+                &mut track,
+            )
+            .await?;
+            apply.resource_keys.extend(left);
             let apply_elapsed = apply_started.elapsed();
 
             let release_started = Instant::now();
@@ -899,6 +922,11 @@ pub struct ApplySettings<'a> {
     /// delete: an object that moved between releases is not removed from the one
     /// that took it over.
     pub protected: Option<Protected<'a>>,
+    /// Objects of the manifests that this apply leaves alone and still records
+    /// as applied, so the revision stays the one it would be had they been
+    /// applied: the driver names an object whose absence is expected and whose
+    /// document did not change, such as a Job a TTL removed after it finished.
+    pub unapplied: Option<&'a HashSet<ResourceKey>>,
 }
 
 /// The objects other releases of one run render, by whether they applied yet.
@@ -3007,6 +3035,7 @@ mod tests {
             confirm_prune: false,
             ownership: &NYL_OWNERSHIP,
             protected: None,
+            unapplied: None,
         }
     }
 
