@@ -84,6 +84,13 @@ for qualified unit options and independent state transactions.
 A changed producer outside that filter still blocks a selected consumer in
 another environment until its new receipt exists.
 
+`plan` reads the producer environments its units' references name, so they are
+[required](/nyl/orchestration/runs/#other-environments): a producer whose
+declaration cannot be used or whose state cannot be read is a
+`NYL-STATE-UNAVAILABLE` error with its fix, as for
+[`reconcile`](/nyl/reference/cli/reconcile/#other-environments). An
+environment the plan does not read never affects it.
+
 ## Options
 
 | Option | Meaning |

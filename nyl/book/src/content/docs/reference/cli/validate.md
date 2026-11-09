@@ -18,7 +18,11 @@ nyl validate [path] [--strict]
 3. Existence of each `project.components_search_paths` entry
 4. Existence of each `project.helm_chart_search_paths` entry
 5. Git-visible GitOps resources and references when the project is in Git
-6. Environments, their groups, and their state locations
+6. Environments, their groups, and their state locations: one that cannot be
+   resolved, such as a `repositoryRef` that names no GitRepository or a
+   `file://` URL that names no local path, is an error for every environment,
+   including the ones a command does not read (see
+   [Other environments](/nyl/orchestration/runs/#other-environments))
 7. Unit envelopes: a literal `apiVersion`, `kind`, `metadata.name`, and
    `metadata.labels`, and names unique across unit kinds
 8. Which Environment places each DeploymentTarget, and the `fromUnit` bindings

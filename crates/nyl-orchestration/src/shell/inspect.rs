@@ -15,7 +15,9 @@ use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateStore, StateTips}
 use nyl_core::orchestration::state::{DesiredUnit, Lifecycle, ObservedUnit, StateLocation};
 use serde_json::Value;
 
+use super::peers::Peers;
 use super::{store_error, Context};
+use crate::rules::peers::{Need, Problem};
 use crate::rules::references::{resolve_reference, ReferenceValue, ReferenceView};
 use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownReadiness};
 
@@ -26,53 +28,26 @@ pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &S
     status_with(context, environment, location, None, &Peers::default())
 }
 
-/// The other environments of the project, for the commands that read the
-/// observed values consumers resolved from them.
-#[derive(Debug, Clone, Default)]
-pub struct Peers {
-    /// Where each environment whose location resolves keeps its state.
-    pub locations: BTreeMap<EnvironmentName, StateLocation>,
-    /// The environments whose location could not be resolved, with why.
-    pub errors: BTreeMap<EnvironmentName, Finding>,
-}
-
 /// The snapshots of the other environments whose observed values the active
 /// units in `desired` (the documents of `environment`) read through
-/// cross-environment references, read without a lease, and a
-/// `NYL-STATE-UNAVAILABLE` warning for each whose location cannot be
-/// resolved or whose state cannot be read.
+/// cross-environment references, read without a lease. They are required
+/// ([`Need::Required`]): a producer whose declaration cannot be used or whose
+/// state cannot be read is an error, because what its consumers resolved
+/// cannot be compared.
 pub fn producer_snapshots(
     store: &dyn StateStore,
     environment: &EnvironmentName,
     desired: &BTreeMap<UnitName, DesiredUnit>,
     peers: &Peers,
-) -> (BTreeMap<EnvironmentName, EnvironmentSnapshot>, Vec<Finding>) {
+) -> Result<BTreeMap<EnvironmentName, EnvironmentSnapshot>, Finding> {
     let mut producers = BTreeMap::new();
-    let mut warnings = Vec::new();
     for producer in crate::rules::observed_values::observed_producer_environments(environment, desired) {
-        if let Some(location) = peers.locations.get(&producer) {
-            match store.snapshot(location) {
-                Ok(snapshot) => {
-                    producers.insert(producer, snapshot);
-                }
-                Err(error) => warnings.push(store_error(&producer, &error)),
-            }
-            continue;
-        }
-        let (why, fix) = match peers.errors.get(&producer) {
-            Some(finding) => (finding.message.clone(), finding.fix.clone()),
-            None => (
-                "it is not a declared environment".to_owned(),
-                format!("declare Environment {producer}, or correct the reference"),
-            ),
-        };
-        warnings.push(Finding::new(
-            Code::StateUnavailable,
-            format!("the observed values of {producer} that {environment} reads were not compared: {why}"),
-            fix,
-        ));
+        let snapshot = peers
+            .read(store, &producer, Need::Required)
+            .map_err(Problem::into_finding)?;
+        producers.insert(producer, snapshot);
     }
-    (producers, warnings)
+    Ok(producers)
 }
 
 /// [`status`], with the drivers whose recovery policies decide whether a
@@ -81,7 +56,8 @@ pub fn producer_snapshots(
 /// those whose observed values this environment's units read through
 /// cross-environment references, without a lease, and shows a unit whose
 /// resolved value differs from the producer's current one as `ready`. A
-/// producer's state that cannot be read is a warning.
+/// producer that cannot be read is an error of the status
+/// ([`producer_snapshots`]).
 pub fn status_with(
     context: &Context<'_>,
     environment: &EnvironmentName,
@@ -89,8 +65,7 @@ pub fn status_with(
     drivers: Option<&DriverSet>,
     peers: &Peers,
 ) -> RunReport {
-    let mut unreadable = Vec::new();
-    let mut read = || {
+    let read = || {
         let snapshot = context
             .store
             .snapshot(location)
@@ -101,8 +76,7 @@ pub fn status_with(
             .coordination(location, environment)
             .map_err(|error| store_error(environment, &error))?;
         let readiness = drivers.map(|drivers| teardown_readiness(&snapshot, drivers));
-        let (producers, warnings) = producer_snapshots(context.store, environment, &snapshot.desired, peers);
-        unreadable.extend(warnings);
+        let producers = producer_snapshots(context.store, environment, &snapshot.desired, peers)?;
         let mut report = crate::rules::unit_state::status_with_producers(
             environment,
             &snapshot,
@@ -125,7 +99,6 @@ pub fn status_with(
         failed.finish(ReportKind::StatusReport);
         failed
     });
-    environment_report.warnings.extend(unreadable);
     // Diverged local branches are reported, never an exit category.
     match super::local::divergence(context.store, location, environment) {
         Ok(Some(warning)) => environment_report.warnings.push(warning),

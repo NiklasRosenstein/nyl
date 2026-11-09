@@ -30,5 +30,6 @@ pub mod transitions;
 pub mod unit_state;
 
 pub mod multi_environment;
+pub mod peers;
 
 pub mod approval;

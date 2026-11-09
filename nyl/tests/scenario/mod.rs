@@ -8,6 +8,7 @@
 
 #![allow(dead_code)] // Each test binary uses part of the harness.
 
+pub mod cross;
 pub mod format;
 #[cfg(feature = "tier2")]
 pub mod native;

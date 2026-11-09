@@ -106,14 +106,23 @@ impl Session {
         for template in &listing.unavailable {
             // A synthetic name stands for instances nobody could list.
             if let Ok(name) = EnvironmentName::new(format!("{template}-instances")) {
-                instance_errors.insert(
-                    name,
-                    Finding::new(
+                let finding = match listing.invalid.get(template) {
+                    // The location cannot be resolved: the declaration is what to fix.
+                    Some(cause) => Finding::new(
+                        Code::StateUnavailable,
+                        format!(
+                            "the instances of EnvironmentTemplate {template} cannot be listed, so their state is unknown: {}",
+                            cause.message
+                        ),
+                        cause.fix.clone(),
+                    ),
+                    None => Finding::new(
                         Code::StateUnavailable,
                         format!("the instances of EnvironmentTemplate {template} could not be listed, so their state is unknown"),
                         "check access to the template's state repository, or run without network access with --local",
                     ),
-                );
+                };
+                instance_errors.insert(name, finding);
             }
         }
         let mut instance_locations = BTreeMap::new();
@@ -476,9 +485,9 @@ impl Session {
     }
 
     /// The other environments, for commands that read what consumers resolved from them.
-    pub fn peers(&self) -> nyl_orchestration::shell::inspect::Peers {
+    pub fn peers(&self) -> nyl_orchestration::shell::peers::Peers {
         let (locations, _, errors) = self.environment_locations();
-        nyl_orchestration::shell::inspect::Peers { locations, errors }
+        nyl_orchestration::shell::peers::Peers { locations, errors }
     }
 
     /// The request of one `plan` or `reconcile`.

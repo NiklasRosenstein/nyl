@@ -123,6 +123,18 @@ The transition commit's summary lists the observations whose value changed under
 without them can leave the reading to [`nyl observe`](/nyl/reference/cli/observe/)
 elsewhere.
 
+## Other environments
+
+A reconcile reads the producer environments its units' references name, so
+they are [required](/nyl/orchestration/runs/#other-environments): one whose
+declaration cannot be used or whose state cannot be read stops the consumer
+with that environment's `NYL-STATE-UNAVAILABLE` error and its fix, exit 1,
+before any unit executes. When a unit is leaving, every other environment is
+read to find its consumers, so one that cannot be read is an error and nothing
+is torn down on a guess; without a leaving unit, no other environment is read
+for that. An environment the reconcile does not read, however broken its
+declaration, never fails it.
+
 ## Deletion
 
 `plan` and `reconcile` warn about each unmet teardown requirement, and each

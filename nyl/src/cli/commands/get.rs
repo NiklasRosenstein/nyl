@@ -302,7 +302,7 @@ type Producers = std::collections::BTreeMap<nyl_core::orchestration::ids::Enviro
 /// [`state_form`], which also reads the other environments' snapshots that
 /// `form` needs (`peers`), for the current state only: with `--state-revision`
 /// the other environments are not read, so what consumers resolved from them is
-/// not compared. A state that cannot be read is a warning.
+/// not compared. A producer that cannot be read is an error, as for `status`.
 fn state_form_with_peers(
     path: &Path,
     environment: &str,
@@ -341,14 +341,26 @@ fn state_form_with_peers(
             }
         }
     };
-    let (producers, unreadable) = if peers && options.state_revision.is_none() {
-        inspect::producer_snapshots(state, &session.resolved.name, &snapshot.desired, &session.peers())
+    let producers = if peers && options.state_revision.is_none() {
+        match inspect::producer_snapshots(state, &session.resolved.name, &snapshot.desired, &session.peers()) {
+            Ok(producers) => producers,
+            Err(finding) => {
+                // What resolving the environment warned about still comes first.
+                let mut outcome = refused(&finding);
+                let mut warnings = String::new();
+                for warning in &session.resolved.warnings {
+                    write_finding(&mut warnings, "warning", None, warning);
+                }
+                outcome.stderr = warnings + &outcome.stderr;
+                return Ok(outcome);
+            }
+        }
     } else {
-        (Producers::new(), Vec::new())
+        Producers::new()
     };
     let mut outcome = form(&snapshot, &session.resolved.name, &producers)?;
     let mut warnings = String::new();
-    for finding in session.resolved.warnings.iter().chain(&unreadable) {
+    for finding in &session.resolved.warnings {
         write_finding(&mut warnings, "warning", None, finding);
     }
     outcome.stderr = warnings + &outcome.stderr;

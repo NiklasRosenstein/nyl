@@ -10,6 +10,7 @@ pub mod lease;
 pub mod lifecycle;
 pub mod local;
 pub mod operator;
+pub mod peers;
 mod progress;
 pub mod recover;
 pub mod removal;

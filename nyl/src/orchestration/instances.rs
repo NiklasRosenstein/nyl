@@ -133,7 +133,7 @@ fn existing(
 ) -> Result<Vec<Existing>, Finding> {
     let declaration = nyl_render::gitops::instances::find_template(&session.inventory, template)
         .expect("the instance's template resolved");
-    if listing_location(&session.inventory, declaration).is_none() {
+    if listing_location(&session.inventory, declaration)?.is_none() {
         return Err(Finding::new(
             Code::InstanceNotListable,
             format!(

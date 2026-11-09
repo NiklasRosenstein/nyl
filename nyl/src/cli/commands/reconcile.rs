@@ -437,7 +437,7 @@ fn fleet_instances(args: &ReconcileArgs, template: &str) -> std::result::Result<
             "list the templates with `nyl get environment-templates`",
         )
     })?;
-    if listing_location(&inventory, declaration).is_none() {
+    if listing_location(&inventory, declaration)?.is_none() {
         return Err(Finding::new(
             Code::InstanceNotListable,
             format!(

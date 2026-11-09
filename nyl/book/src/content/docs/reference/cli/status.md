@@ -43,8 +43,11 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   observed value changed or arrived (`NYL-OBSERVATION-CHANGED`): work for the
   next reconcile. That holds for a value of another environment that the unit
   reads with `environment`: status reads the producer environment's state, without
-  a lease, and names it as `dev/kubernetes`; an environment whose state cannot be
-  read is a `NYL-STATE-UNAVAILABLE` warning. [`nyl get units`](/nyl/reference/cli/project-resources/)
+  a lease, and names it as `dev/kubernetes`. That producer environment is
+  [required](/nyl/orchestration/runs/#other-environments): if its declaration
+  cannot be used or its state cannot be read, `status` fails with
+  `NYL-STATE-UNAVAILABLE` and its fix, because what the consumer resolved
+  cannot be compared. Other environments are not read. [`nyl get units`](/nyl/reference/cli/project-resources/)
   shows the same states for the current state, and none from other environments
   with `--state-revision`. A consumer still waiting for a value shows the blocker,
   `observation-pending`, with the driver's reason (`NYL-OBSERVATION-PENDING`).
