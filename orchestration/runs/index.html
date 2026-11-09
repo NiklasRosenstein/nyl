@@ -253,9 +253,8 @@ writing, and names it with its environment (<code dir="auto">prod/dns</code>) an
 producer environment records another value than the one it resolved. An
 environment whose state cannot be read is a <code dir="auto">NYL-STATE-UNAVAILABLE</code> warning;
 its consumers are not compared. A consumer in another environment that waits
-for a value is not found yet (a current limitation, tracked by
-<a href="https://github.com/NiklasRosenstein/nyl/issues/248">#248</a>): it stays
-<code dir="auto">blocked</code> and resolves the recorded value at its own next <code dir="auto">reconcile</code>.</li>
+for a value that has now arrived is found the same way: <code dir="auto">nyl observe</code> names it
+as ready, and <code dir="auto">nyl status -e prod</code> shows it <code dir="auto">ready</code> rather than <code dir="auto">blocked</code>.</li>
 <li><strong>What is written.</strong> The record changes only when a value arrives, changes,
 or becomes pending again, or when the last successful read is older than an
 hour (half the <code dir="auto">maxAge</code> when that is shorter), so an unchanged read writes

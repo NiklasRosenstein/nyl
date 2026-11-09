@@ -122,10 +122,10 @@ and happens after <code dir="auto">observe</code> has written its own commit and
 An environment whose state location cannot be resolved, or whose state cannot be
 read, is a <code dir="auto">NYL-STATE-UNAVAILABLE</code> warning and its consumers are not compared;
 the exit code does not change. <code dir="auto">nyl status -e prod</code> shows <code dir="auto">dns</code> as <code dir="auto">ready</code>.</p>
-<p>A consumer in another environment that waits for a value that has not arrived is
-not named yet; it stays <code dir="auto">blocked</code> until its own next reconcile resolves the
-recorded value. This is a current limitation, tracked by
-<a href="https://github.com/NiklasRosenstein/nyl/issues/248">#248</a>.</p>
+<p>A consumer in another environment that was blocked waiting for a value that now
+has one is named too, as <code dir="auto">has a value now, so prod/dns can resolve</code>. It is judged
+as its reconcile will resolve the reference, so a consumer that also requires an
+attestation the producer lacks stays <code dir="auto">blocked</code>.</p>
 <p><code dir="auto">observe</code> does not apply a consumer’s changed inputs: that reconcile executes
 it, under its own <code dir="auto">approval</code>, as it does for any changed input.</p>
 <p>Like <code dir="auto">detect-drift</code>, <code dir="auto">observe</code> does not import runs, so it refuses a lease that
