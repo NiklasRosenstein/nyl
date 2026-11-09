@@ -11,7 +11,7 @@
 //!   in-cluster configuration.
 //! - [`DirectReader`] implements [`ReconcilerReader`](super::reconciler::ReconcilerReader)
 //!   over the release state the apply recorded and the rollout status of the
-//!   workloads ([`health`]), so the shared evaluation judges a direct target
+//!   workloads ([`nyl_render::kubernetes::health`]), so the shared evaluation judges a direct target
 //!   exactly as it judges Argo CD.
 //! - [`drift`] compares the cluster with what the unit last applied, for
 //!   `nyl detect-drift`, from the release state the apply recorded.
@@ -35,7 +35,6 @@ use super::reconciler::{ReadError, ReadErrorKind, ReconcilerReader, KUBECONFIG_E
 
 pub mod apply;
 pub(crate) mod drift;
-pub mod health;
 mod reader;
 
 pub use reader::DirectReader;

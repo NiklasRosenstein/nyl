@@ -28,15 +28,17 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
+use super::hooks::{self, DeletePolicy, HookPhase, IgnoredHook};
 use super::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
+use super::sync_run::{HookReport, SyncExecution, WaitSettings};
 use super::CrdDeclaration;
 use super::{
     delete_in_prune_order, enforce_release_history_limit,
     fence::{admit, ReleaseClaim},
     field_manager::FieldOwnership,
     prune::{delete_decision, prune_decision, PruneDecision},
-    run_concurrently, ApplyOutcome, DeleteOptions, GroupVersionKind, KubeClient, ObjectIdentity, PruneEvent,
-    ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
+    ApplyOutcome, DeleteOptions, GroupVersionKind, KubeClient, ObjectIdentity, PruneEvent, ReleaseState, ReleaseStatus,
+    ReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
 };
 use crate::{NylError, Result};
 
@@ -76,6 +78,28 @@ pub enum ApplyEvent<'a> {
         decision: PruneDecision,
         option: &'static str,
     },
+    /// Hooks that have no sync phase were left out of the apply, reported once
+    /// for the Release ([`super::hooks::IGNORED_CODE`]).
+    HooksIgnored { hooks: &'a [IgnoredHook] },
+    /// A hook was created and now runs; the sync waits for it.
+    HookStarted {
+        key: &'a ResourceKey,
+        phase: HookPhase,
+        wave: i64,
+    },
+    /// A hook completed (`Ok`) or failed, with why.
+    HookFinished {
+        key: &'a ResourceKey,
+        phase: HookPhase,
+        wave: i64,
+        result: &'a std::result::Result<(), String>,
+    },
+    /// A hook object was deleted by its delete policy, or failed to be.
+    HookDeleted {
+        key: &'a ResourceKey,
+        policy: DeletePolicy,
+        result: &'a Result<()>,
+    },
 }
 
 /// Receiver of [`ApplyEvent`]s.
@@ -84,7 +108,21 @@ pub type ApplyEventSink<'s> = dyn FnMut(ApplyEvent<'_>) + Send + 's;
 pub struct ApplyExecutionResult {
     pub outcomes: Vec<ApplyOutcome>,
     pub failed_count: usize,
+    /// The objects the release tracks: the resources that applied, never a hook.
     pub resource_keys: Vec<ResourceKey>,
+    /// Every run of every hook that ran, in order, with why it failed if it did.
+    pub hooks: Vec<HookReport>,
+    /// Hook runs that failed. They fail the apply like a resource that failed to apply.
+    pub hook_failed_count: usize,
+    /// Workloads of a step that never became healthy, which stopped the sync before
+    /// the steps after it.
+    pub unhealthy: Vec<(ResourceKey, String)>,
+    /// Hooks left out of the apply for having no sync phase.
+    pub ignored_hooks: Vec<IgnoredHook>,
+    /// Objects of the manifests that are not tracked: hooks, hooks left out, and
+    /// `Skip` documents. The release never prunes them, whatever an earlier
+    /// revision recorded for them.
+    pub untracked: Vec<ResourceKey>,
     /// The manager whose fields a handoff released, if the apply handed off.
     pub released_manager: Option<String>,
     /// Applied resources whose released manager owned fields that are now released.
@@ -98,14 +136,51 @@ impl ApplyExecutionResult {
     pub fn error(&self, command: &str) -> Option<NylError> {
         apply_error(command, self, 0)
     }
+
+    /// Whether the sync failed: a resource, a hook, or a wait.
+    pub fn sync_failed(&self) -> bool {
+        self.failed_count > 0 || self.hook_failed_count > 0 || !self.unhealthy.is_empty()
+    }
+
+    /// What failed, for the revision's error and the command's.
+    fn sync_failure_text(&self) -> Option<String> {
+        let mut failures = Vec::new();
+        if self.failed_count > 0 {
+            failures.push(format!("{} resource(s) failed to apply", self.failed_count));
+        }
+        if self.hook_failed_count > 0 {
+            let detail = self
+                .hooks
+                .iter()
+                .filter_map(|hook| {
+                    hook.failure
+                        .as_ref()
+                        .map(|why| format!("{} {}: {why}", hook.phase, hook.key))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            failures.push(format!("{} hook(s) failed ({detail})", self.hook_failed_count));
+        }
+        if !self.unhealthy.is_empty() {
+            let detail = self
+                .unhealthy
+                .iter()
+                .map(|(key, why)| format!("{key}: {why}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            failures.push(format!(
+                "{} resource(s) did not become healthy ({detail})",
+                self.unhealthy.len()
+            ));
+        }
+        (!failures.is_empty()).then(|| failures.join(" and "))
+    }
 }
 
 /// The error of a command whose apply, handoff release, or prune failed.
 fn apply_error(command: &str, apply: &ApplyExecutionResult, prune_failed: usize) -> Option<NylError> {
     let mut failures = Vec::new();
-    if apply.failed_count > 0 {
-        failures.push(format!("{} resource(s) failed to apply", apply.failed_count));
-    }
+    failures.extend(apply.sync_failure_text());
     if apply.release_failed_count > 0 {
         failures.push(format!(
             "{} resource(s) failed to release field ownership",
@@ -170,6 +245,17 @@ impl ObjectScopes {
 
 fn manifest_keys(manifests: &[serde_json::Value]) -> Result<Vec<ResourceKey>> {
     manifests.iter().map(ResourceKey::from_json_value).collect()
+}
+
+/// The keys a release tracks for `manifests`: every document that is an ordinary
+/// resource. A hook is applied and recorded in the manifest, but is not an owned
+/// object: it is neither pruned nor purged, and never counts as drift.
+pub fn tracked_keys(manifests: &[serde_json::Value]) -> Result<Vec<ResourceKey>> {
+    manifests
+        .iter()
+        .filter(|manifest| hooks::is_resource(manifest))
+        .map(ResourceKey::from_json_value)
+        .collect()
 }
 
 /// Determine which previously-live resources are no longer present in `current_keys`
@@ -439,7 +525,7 @@ impl<'s> ReleaseRecorder<'s> {
         // another claimant created since makes this create fail.
         let revisions = admitted.revisions;
         let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
-        let desired_keys = manifest_keys(desired_manifests)?;
+        let desired_keys = tracked_keys(desired_manifests)?;
 
         let mut release = ReleaseState {
             release_name: release_name.to_string(),
@@ -547,15 +633,15 @@ impl<'s> ReleaseRecorder<'s> {
                 }
                 None => (manifests.to_vec(), Vec::new()),
             };
-            let mut apply = apply_sorted_manifests(
-                client,
+            let mut execution = SyncExecution::new(
                 &applicable,
                 settings.ownership,
                 settings.concurrency,
+                settings.waits,
                 &mut track,
-            )
-            .await?;
-            apply.resource_keys.extend(left);
+            )?;
+            execution.leave_recorded(left);
+            execution.run_to_sync(client, &mut track).await?;
             let apply_elapsed = apply_started.elapsed();
 
             let release_started = Instant::now();
@@ -564,8 +650,9 @@ impl<'s> ReleaseRecorder<'s> {
                 prune_failed_count,
                 unchanged,
             } = self
-                .complete(client, &apply, scopes, settings, &mut track, &completed)
+                .complete(client, &mut execution, scopes, settings, &mut track, &completed)
                 .await?;
+            let apply = execution.result(settings.ownership.released_manager());
             Ok(ReleaseRun {
                 apply,
                 release,
@@ -638,10 +725,11 @@ impl<'s> ReleaseRecorder<'s> {
     /// Under [`RevisionPolicy::KeepUnchanged`], a deployed apply that would record
     /// what the latest revision records releases its reservation instead and
     /// settles on the latest revision, which the history limit still applies to.
+    #[allow(clippy::too_many_lines)] // One ordered pass: record the outcome, prune, run PostSync, then settle the revision.
     async fn complete(
         self,
         client: &dyn KubeClient,
-        apply_result: &ApplyExecutionResult,
+        execution: &mut SyncExecution<'_>,
         scopes: &mut ObjectScopes,
         settings: ApplySettings<'_>,
         on_event: &mut ApplyEventSink<'_>,
@@ -654,16 +742,17 @@ impl<'s> ReleaseRecorder<'s> {
             appended_to,
         } = self;
 
+        let apply_result = execution.result(settings.ownership.released_manager());
         release.resource_keys = match &appended_to {
             Some(previous) => append_keys(&previous.resource_keys, &apply_result.resource_keys, scopes),
             None => apply_result.resource_keys.clone(),
         };
-        if apply_result.failed_count == 0 {
+        if let Some(failure) = apply_result.sync_failure_text() {
+            release.status = ReleaseStatus::Failed;
+            release.error = Some(failure);
+        } else {
             release.status = ReleaseStatus::Deployed;
             release.applied_at = Some(Utc::now());
-        } else {
-            release.status = ReleaseStatus::Failed;
-            release.error = Some(format!("{} resource(s) failed to apply", apply_result.failed_count));
         }
 
         // Only a fully applied revision supersedes and prunes; a Failed one leaves
@@ -690,9 +779,17 @@ impl<'s> ReleaseRecorder<'s> {
 
                 let live_keys_list: Vec<ResourceKey> = live_keys.iter().cloned().collect();
                 scopes.load(client, &live_keys_list).await;
+                scopes.load(client, &apply_result.untracked).await;
+                // What an earlier revision tracked, and this one applies as a hook or skips,
+                // is no longer tracked, and is not deleted for it.
+                let untracked: HashSet<ObjectIdentity> =
+                    apply_result.untracked.iter().map(|key| scopes.identity(key)).collect();
                 let mut to_prune: Vec<&ResourceKey> = Vec::new();
                 for key in keys_to_prune(&live_keys, &release.resource_keys, scopes) {
                     let identity = scopes.identity(key);
+                    if untracked.contains(&identity) {
+                        continue;
+                    }
                     match settings.protected {
                         // Another Release applied it already: it is theirs now.
                         Some(protected) if protected.handed_over.contains(&identity) => {}
@@ -715,6 +812,20 @@ impl<'s> ReleaseRecorder<'s> {
                 let failed = prune_resources(client, to_prune, settings.concurrency, on_event).await;
                 prune_failed_count += failed.len();
                 release.resource_keys.extend(failed.into_iter().cloned());
+            }
+        }
+
+        // `PostSync` hooks run once the `Sync` phase is healthy and pruned, and a
+        // failed one fails the revision, as a failed hook fails an Argo CD sync.
+        if release.status == ReleaseStatus::Deployed {
+            execution.run_post_sync(client, on_event).await?;
+            if execution.failed() {
+                release.status = ReleaseStatus::Failed;
+                release.applied_at = None;
+                release.error = execution
+                    .result(settings.ownership.released_manager())
+                    .sync_failure_text();
+                superseded = None;
             }
         }
 
@@ -914,6 +1025,8 @@ pub struct ApplySettings<'a> {
     pub history_limit: u32,
     /// Whether an apply that changed nothing records a revision.
     pub revisions: RevisionPolicy<'a>,
+    /// How long the apply waits for hooks and for workloads before a later wave.
+    pub waits: WaitSettings,
     /// `--confirm-prune`: prune resources whose sync option is `Prune=confirm`.
     pub confirm_prune: bool,
     /// The field manager resources are applied as, and the one a handoff releases.
@@ -1123,117 +1236,43 @@ fn append_keys(previous: &[ResourceKey], current: &[ResourceKey], scopes: &Objec
         .collect()
 }
 
-/// Apply manifests in [`ResourceOrdering::apply_batches`], at most `concurrency` at a time.
+/// Sync manifests the way Argo CD does, at most `concurrency` resources at a time.
 ///
-/// As in Argo CD, the resources of one kind form a batch that is applied
-/// concurrently, and every batch finishes before the next starts, so
-/// CustomResourceDefinitions and APIServices precede the kinds they register, and
-/// Namespaces precede the resources in them. Before the first batch containing a
-/// kind of an API group registered earlier in this apply, discovery is refreshed
-/// until the registered kinds are served, which a CustomResourceDefinition's kinds
-/// are once it is Established. The wait is bounded, and the caller's deadline cuts it
-/// short; the CRDs apply first, so it is usually over by then, and a Release whose
-/// CRDs are already served waits for nothing. A failed resource does not stop the others, matching
-/// serial apply. Callers collapse duplicate objects first
-/// ([`collapse_duplicate_objects`]); concurrent applies of one object would race.
+/// The documents of a step (a phase and a sync wave, see [`super::sync_run`]) are
+/// ordered by [`ResourceOrdering::apply_batches`]: as in Argo CD, the resources of
+/// one kind form a batch that is applied concurrently, and every batch finishes
+/// before the next starts, so CustomResourceDefinitions and APIServices precede the
+/// kinds they register, and Namespaces precede the resources in them. Before the
+/// first batch containing a kind of an API group registered earlier in this apply,
+/// discovery is refreshed until the registered kinds are served, which a
+/// CustomResourceDefinition's kinds are once it is Established. The wait is bounded,
+/// and the caller's deadline cuts it short; the CRDs apply first, so it is usually
+/// over by then, and a Release whose CRDs are already served waits for nothing. A
+/// failed resource does not stop the others of its step, matching serial apply.
+/// Callers collapse duplicate objects first ([`collapse_duplicate_objects`]);
+/// concurrent applies of one object would race.
+///
+/// A Release without hooks or sync waves is one step. Hooks ([`super::hooks`]) run
+/// in their phases around it, and the apply is not complete before they are:
+/// `PreSync` hooks complete before the first resource is applied, and `PostSync`
+/// hooks run after the workloads are healthy. Without a release to prune, `PostSync`
+/// follows the `Sync` phase directly; [`ReleaseRecorder`] prunes in between.
 ///
 /// `on_event` receives each result as it completes so progress is visible before the
 /// whole apply ends; the returned outcomes and keys keep manifest order regardless of
-/// completion order.
+/// completion order. Hooks are not tracked: the keys are of ordinary resources only.
 pub async fn apply_sorted_manifests(
     client: &dyn KubeClient,
     manifests: &[serde_json::Value],
     ownership: &FieldOwnership,
     concurrency: usize,
+    waits: WaitSettings,
     on_event: &mut ApplyEventSink<'_>,
 ) -> Result<ApplyExecutionResult> {
-    let keys = manifest_keys(manifests)?;
-    let batches = ResourceOrdering::apply_batches(keys.iter().map(|key| &key.gvk));
-    tracing::info!(
-        "Applying {} resources in {} batches (up to {} at a time)",
-        manifests.len(),
-        batches.len(),
-        concurrency
-    );
-
-    let mut results: Vec<Option<Result<ApplyOutcome>>> = (0..manifests.len()).map(|_| None).collect();
-    let mut released_count = 0;
-    let mut release_failed_count = 0;
-    // Kinds registered by CRDs or APIServices applied so far and not yet
-    // confirmed in discovery.
-    let mut registered = RegisteredKinds::default();
-
-    for batch in batches {
-        // Kinds of a newly registered group are not resolvable until discovery is
-        // refreshed (otherwise apply fails with ApiResourceNotFound), and a fresh CRD
-        // or APIService may not be served the instant its apply returns.
-        if keys[batch.clone()].iter().any(|key| registered.needs(&key.gvk)) {
-            client
-                .refresh_discovery_until_available(&registered.needed(&keys[batch.start..]))
-                .await?;
-            registered.clear();
-        }
-
-        run_concurrently(
-            batch,
-            concurrency,
-            |index| apply_manifest(client, &manifests[index], ownership),
-            |index, (result, release)| {
-                on_event(ApplyEvent::Applied {
-                    key: &keys[index],
-                    result: &result,
-                });
-                if let (Some(release), Some(manager)) = (release, ownership.released_manager()) {
-                    match release {
-                        Ok(false) => {}
-                        Ok(true) => {
-                            released_count += 1;
-                            on_event(ApplyEvent::OwnershipReleased {
-                                key: &keys[index],
-                                manager,
-                                result: &Ok(()),
-                            });
-                        }
-                        Err(err) => {
-                            release_failed_count += 1;
-                            on_event(ApplyEvent::OwnershipReleased {
-                                key: &keys[index],
-                                manager,
-                                result: &Err(err),
-                            });
-                        }
-                    }
-                }
-                if result.is_ok() {
-                    registered.record(&manifests[index]);
-                }
-                results[index] = Some(result);
-            },
-        )
-        .await;
-    }
-
-    let mut outcomes = Vec::new();
-    let mut failed_count = 0;
-    let mut resource_keys = Vec::new();
-    for (key, result) in keys.into_iter().zip(results) {
-        match result.expect("every manifest belongs to exactly one apply batch") {
-            Ok(outcome) => {
-                outcomes.push(outcome);
-                resource_keys.push(key);
-            }
-            Err(_) => failed_count += 1,
-        }
-    }
-
-    Ok(ApplyExecutionResult {
-        outcomes,
-        failed_count,
-        resource_keys,
-        released_manager: ownership.released_manager().map(str::to_string),
-        released_count,
-        release_failed_count,
-    })
+    let mut execution = SyncExecution::new(manifests, ownership, concurrency, waits, on_event)?;
+    execution.run_to_sync(client, on_event).await?;
+    execution.run_post_sync(client, on_event).await?;
+    Ok(execution.result(ownership.released_manager()))
 }
 
 /// The kinds that CustomResourceDefinitions and APIServices applied so far
@@ -1284,22 +1323,23 @@ impl RegisteredKinds {
         self.groups.extend(other.groups);
     }
 
-    fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.kinds.clear();
         self.groups.clear();
     }
 
-    fn needs(&self, gvk: &GroupVersionKind) -> bool {
+    pub(super) fn needs(&self, gvk: &GroupVersionKind) -> bool {
         self.kinds.contains(gvk) || self.groups.contains(&gvk.group)
     }
 
     /// The distinct registered kinds among `keys`, in a fixed order.
     fn needed(&self, keys: &[ResourceKey]) -> Vec<GroupVersionKind> {
-        let mut kinds: Vec<GroupVersionKind> = keys
-            .iter()
-            .filter(|key| self.needs(&key.gvk))
-            .map(|key| key.gvk.clone())
-            .collect();
+        self.needed_among(keys.iter().map(|key| &key.gvk))
+    }
+
+    /// The distinct registered kinds among `gvks`, in a fixed order.
+    pub(super) fn needed_among<'g>(&self, gvks: impl Iterator<Item = &'g GroupVersionKind>) -> Vec<GroupVersionKind> {
+        let mut kinds: Vec<GroupVersionKind> = gvks.filter(|gvk| self.needs(gvk)).cloned().collect();
         kinds.sort_by(|a, b| (&a.group, &a.version, &a.kind).cmp(&(&b.group, &b.version, &b.kind)));
         kinds.dedup();
         kinds
@@ -1339,7 +1379,7 @@ pub fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
 /// Apply a single manifest as the ownership's manager, then release what the
 /// manager a handoff replaces owns. The release result is `None` unless the
 /// apply succeeded and the ownership hands off.
-async fn apply_manifest(
+pub(super) async fn apply_manifest(
     client: &dyn KubeClient,
     manifest: &serde_json::Value,
     ownership: &FieldOwnership,
@@ -1729,9 +1769,16 @@ mod tests {
 
         let started = tokio::time::Instant::now();
         let mut reported_at = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {
-            reported_at.push(started.elapsed());
-        })
+        let result = apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {
+                reported_at.push(started.elapsed());
+            },
+        )
         .await
         .unwrap();
         let elapsed = started.elapsed();
@@ -1768,16 +1815,23 @@ mod tests {
             FieldOwnership::from_handoff(Some(crate::kubernetes::field_manager::ARGOCD_FIELD_MANAGER)).unwrap();
 
         let mut released = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, &ownership, 8, &mut |event| {
-            if let ApplyEvent::OwnershipReleased {
-                key,
-                manager,
-                result: Ok(()),
-            } = event
-            {
-                released.push((key.clone(), manager.to_string()));
-            }
-        })
+        let result = apply_sorted_manifests(
+            &client,
+            &manifests,
+            &ownership,
+            8,
+            WaitSettings::default(),
+            &mut |event| {
+                if let ApplyEvent::OwnershipReleased {
+                    key,
+                    manager,
+                    result: Ok(()),
+                } = event
+                {
+                    released.push((key.clone(), manager.to_string()));
+                }
+            },
+        )
         .await
         .unwrap();
 
@@ -1801,9 +1855,16 @@ mod tests {
         let manifests = config_maps(1);
         let key = ResourceKey::from_json_value(&manifests[0]).unwrap();
 
-        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
-            .await
-            .unwrap();
+        let result = apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         assert_eq!(client.applied_managers(&key), vec!["nyl"]);
         assert!(result.released_manager.is_none());
@@ -1815,9 +1876,16 @@ mod tests {
         let manifests = config_maps(4);
 
         let started = tokio::time::Instant::now();
-        apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 1, &mut |_| {})
-            .await
-            .unwrap();
+        apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            1,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         assert_eq!(started.elapsed(), client.latency * 4);
         assert_eq!(client.max_in_flight.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1837,9 +1905,16 @@ mod tests {
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
 
-        apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
-            .await
-            .unwrap();
+        apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         assert!(client.position("end widgets.example.com") < client.position("start app"));
         assert!(client.position("end app") < client.position("start deploy"));
@@ -1858,9 +1933,16 @@ mod tests {
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
 
-        apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
-            .await
-            .unwrap();
+        apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         assert!(client.position("end v1.metrics.example.com") < client.position("refresh Metric"));
         assert!(client.position("refresh Metric") < client.position("start metric"));
@@ -2040,9 +2122,16 @@ mod tests {
             json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "app"}}),
             widget_crd("Namespaced"),
         ];
-        let rejected = apply_sorted_manifests(&client, &documents, &FieldOwnership::Nyl, 8, &mut |_| {})
-            .await
-            .unwrap();
+        let rejected = apply_sorted_manifests(
+            &client,
+            &documents,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         assert!(
             rejected.failed_count > 0,
             "the order as written must fail on this cluster"
@@ -2059,9 +2148,16 @@ mod tests {
         .await
         .unwrap();
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
-        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
-            .await
-            .unwrap();
+        let result = apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.failed_count, 0);
         assert_eq!(
@@ -2092,9 +2188,16 @@ mod tests {
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
 
-        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |_| {})
-            .await
-            .unwrap();
+        let result = apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         // Only the undefined kind fails, and discovery was never asked about it.
         assert_eq!(result.failed_count, 1);
@@ -2206,11 +2309,18 @@ mod tests {
         let manifests = config_maps(3);
 
         let mut failures = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 8, &mut |event| {
-            if let ApplyEvent::Applied { key, result: Err(_) } = event {
-                failures.push(key.name.clone());
-            }
-        })
+        let result = apply_sorted_manifests(
+            &client,
+            &manifests,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |event| {
+                if let ApplyEvent::Applied { key, result: Err(_) } = event {
+                    failures.push(key.name.clone());
+                }
+            },
+        )
         .await
         .unwrap();
 
@@ -3035,6 +3145,7 @@ mod tests {
             confirm_prune: false,
             ownership: &NYL_OWNERSHIP,
             protected: None,
+            waits: WaitSettings::default(),
             unapplied: None,
         }
     }
@@ -3566,15 +3677,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut stored_apply = apply_sorted_manifests(&client, &manifests, &FieldOwnership::Nyl, 1, &mut |_| {})
-            .await
-            .unwrap();
-        stored_apply.release_failed_count = 1;
+        let mut execution = SyncExecution::new(
+            &manifests,
+            &FieldOwnership::Nyl,
+            1,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        execution.run_to_sync(&client, &mut |_| {}).await.unwrap();
+        execution.set_release_failed_count(1);
         let completed = AtomicBool::new(false);
         let done = recorder
             .complete(
                 &client,
-                &stored_apply,
+                &mut execution,
                 &mut scopes,
                 keep_unchanged(),
                 &mut |_| {},
@@ -3585,5 +3702,201 @@ mod tests {
 
         assert!(!done.unchanged);
         assert_eq!(done.release.revision, 2);
+    }
+
+    /// Reserves, applies, and completes one apply of `manifests` over a cluster that
+    /// runs hooks, as `nyl apply` would.
+    async fn apply_hooked(
+        storage: &dyn ReleaseStorage,
+        cluster: &crate::kubernetes::hook_tests::HookCluster,
+        manifests: &[serde_json::Value],
+    ) -> ReleaseRun {
+        let mut scopes = ObjectScopes::default();
+        let recorder = ReleaseRecorder::reserve(
+            storage,
+            "app",
+            "app",
+            manifests,
+            false,
+            cluster,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+        let settings = ApplySettings {
+            waits: crate::kubernetes::hook_tests::waits(),
+            ..keep_unchanged()
+        };
+        recorder
+            .run(
+                cluster,
+                manifests,
+                &mut scopes,
+                settings,
+                Interruption::never(),
+                &mut |_| {},
+            )
+            .await
+            .unwrap()
+    }
+
+    fn hook(name: &str, annotations: serde_json::Value) -> serde_json::Value {
+        crate::kubernetes::hook_tests::job(name, annotations)
+    }
+
+    /// A hook is recorded in the revision's manifest, which a rollback applies again,
+    /// but never among its tracked objects: a later revision that drops it does not
+    /// prune it, and it is no part of what the release owns.
+    #[tokio::test(start_paused = true)]
+    async fn test_hooks_are_recorded_in_the_manifest_but_never_tracked_or_pruned() {
+        use crate::kubernetes::hook_tests::{config_map as cm, HookCluster};
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let cluster = HookCluster::new();
+        let migrate = hook(
+            "migrate",
+            json!({"argocd.argoproj.io/hook": "PreSync", "argocd.argoproj.io/hook-delete-policy": "HookFailed"}),
+        );
+
+        let first = apply_hooked(&storage, &cluster, &[cm("old", json!({})), migrate]).await;
+
+        let tracked: Vec<&str> = first
+            .release
+            .resource_keys
+            .iter()
+            .map(|key| key.name.as_str())
+            .collect();
+        assert_eq!(tracked, ["old"]);
+        assert!(
+            first.release.manifest.contains("name: migrate"),
+            "rollback applies the hook again"
+        );
+        assert_eq!(first.apply.hooks.len(), 1);
+
+        let second = apply_hooked(&storage, &cluster, &[cm("new", json!({}))]).await;
+
+        assert_eq!(second.release.revision, 2);
+        assert!(
+            !cluster.exists("old"),
+            "an ordinary resource that left the Release is pruned"
+        );
+        assert!(cluster.exists("migrate"), "a hook is never pruned");
+    }
+
+    /// An earlier revision tracked what is a hook now (the hook was an ordinary
+    /// resource then): it is neither pruned nor tracked from now on.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_hook_an_earlier_revision_tracked_is_not_pruned() {
+        use crate::kubernetes::hook_tests::{config_map as cm, HookCluster};
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let cluster = HookCluster::new();
+        let migrate = hook(
+            "migrate",
+            json!({"argocd.argoproj.io/hook": "PreSync", "argocd.argoproj.io/hook-delete-policy": "HookFailed"}),
+        );
+        cluster.seed(&migrate);
+        storage
+            .save_release(&release_with_keys(
+                1,
+                ReleaseStatus::Deployed,
+                vec![
+                    key("v1", "ConfigMap", Some("app"), "cfg"),
+                    key("batch/v1", "Job", Some("app"), "migrate"),
+                ],
+            ))
+            .await
+            .unwrap();
+
+        let run = apply_hooked(&storage, &cluster, &[cm("cfg", json!({})), migrate]).await;
+
+        assert_eq!(run.prune_failed_count, 0);
+        assert!(cluster.exists("migrate"));
+        let tracked: Vec<&str> = run.release.resource_keys.iter().map(|key| key.name.as_str()).collect();
+        assert_eq!(tracked, ["cfg"]);
+    }
+
+    /// `PostSync` runs after the `Sync` phase is pruned, as Argo CD prunes within
+    /// `Sync`, so a PostSync check sees the cluster as the Release leaves it.
+    #[tokio::test(start_paused = true)]
+    async fn test_postsync_hooks_run_after_the_release_pruned() {
+        use crate::kubernetes::hook_tests::{config_map as cm, HookCluster};
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let cluster = HookCluster::new();
+        apply_hooked(&storage, &cluster, &[cm("old", json!({}))]).await;
+
+        let run = apply_hooked(
+            &storage,
+            &cluster,
+            &[
+                cm("new", json!({})),
+                hook("smoke-test", json!({"argocd.argoproj.io/hook": "PostSync"})),
+            ],
+        )
+        .await;
+
+        assert_eq!(run.release.status, ReleaseStatus::Deployed);
+        assert!(cluster.position("delete ConfigMap old") < cluster.position("apply Job smoke-test"));
+        assert!(cluster.position("apply ConfigMap new") < cluster.position("apply Job smoke-test"));
+    }
+
+    /// A failed `PostSync` hook fails the revision, as a failed hook fails an Argo
+    /// CD sync, though the resources were applied and pruned.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_postsync_hook_fails_the_revision() {
+        use crate::kubernetes::hook_tests::{config_map as cm, HookCluster, Outcome};
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let cluster = HookCluster::new();
+        cluster.outcome("smoke-test", Outcome::Fails);
+
+        let run = apply_hooked(
+            &storage,
+            &cluster,
+            &[
+                cm("cfg", json!({})),
+                hook("smoke-test", json!({"argocd.argoproj.io/hook": "PostSync"})),
+            ],
+        )
+        .await;
+
+        assert_eq!(run.release.status, ReleaseStatus::Failed);
+        assert!(run
+            .release
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("PostSync Job app/smoke-test"));
+        assert!(run.error("Apply").is_some());
+        assert!(cluster.exists("cfg"));
+    }
+
+    /// A re-apply of an unchanged revision records no revision, and still runs its
+    /// hooks: Argo CD runs hooks on every sync, and the apply itself always runs.
+    #[tokio::test(start_paused = true)]
+    async fn test_an_unchanged_apply_keeps_the_revision_and_runs_the_hooks_again() {
+        use crate::kubernetes::hook_tests::{config_map as cm, HookCluster};
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let cluster = HookCluster::new();
+        let manifests = [
+            cm("cfg", json!({})),
+            hook("migrate", json!({"argocd.argoproj.io/hook": "PreSync"})),
+        ];
+
+        let first = apply_hooked(&storage, &cluster, &manifests).await;
+        let second = apply_hooked(&storage, &cluster, &manifests).await;
+
+        assert!(!first.unchanged);
+        assert!(second.unchanged);
+        assert_eq!(second.release.revision, 1);
+        let runs = cluster
+            .applies()
+            .iter()
+            .filter(|entry| *entry == "apply Job migrate")
+            .count();
+        assert_eq!(runs, 2, "{:?}", cluster.log());
+        assert_eq!(second.apply.hooks.len(), 1);
+        assert!(
+            cluster.log().contains(&"delete Job migrate".to_owned()),
+            "BeforeHookCreation"
+        );
     }
 }

@@ -90,6 +90,8 @@ codes! {
     KubernetesPruneAwaitingConfirmation => "NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION",
     /// A Cluster's recorded capabilities (vendored CRDs included) give a kind one scope and the live cluster another; the command used the recorded one. A warning.
     KubernetesScopeMismatch => "NYL-KUBERNETES-SCOPE-MISMATCH",
+    /// A Release declares hooks that have no sync phase (Helm's `test`, `pre-delete`, `post-delete`, `pre-rollback`, `post-rollback`, Argo CD's `PreDelete` and `PostDelete`), which Argo CD does not sync either; the apply left them out. A warning.
+    KubernetesHookIgnored => "NYL-KUBERNETES-HOOK-IGNORED",
     /// A direct target's apply found a Release that left the tree and is not this unit's to purge, and left it. A warning.
     KubernetesReleaseLeftBehind => "NYL-KUBERNETES-RELEASE-LEFT-BEHIND",
     /// A cross-environment reference or `dependsOn` entry names an instance of an EnvironmentTemplate as its producer. Instances are consumers only.

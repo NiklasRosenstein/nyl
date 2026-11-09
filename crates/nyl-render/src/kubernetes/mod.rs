@@ -9,6 +9,10 @@ mod cluster_server;
 mod diff;
 pub mod fence;
 pub mod field_manager;
+pub mod health;
+#[cfg(test)]
+mod hook_tests;
+pub mod hooks;
 pub mod lifecycle;
 pub mod memory;
 mod namespace_resolution;
@@ -18,6 +22,7 @@ pub mod prune;
 mod resource;
 mod scope;
 mod state;
+mod sync_run;
 
 pub use client::{builtin_scope, is_known_cluster_scoped_gvk};
 pub use client::{DeleteOptions, DeletePropagation, DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
@@ -34,6 +39,7 @@ pub use state::{
     enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseMeta,
     ReleasePublication, ReleaseState, ReleaseStatus, ReleaseStorage,
 };
+pub use sync_run::{HookReport, WaitSettings};
 
 use serde::{Deserialize, Serialize};
 

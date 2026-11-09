@@ -1,25 +1,48 @@
 //! The health of the workloads a release applied, from their live status.
 //!
-//! Contract: [Reading a direct target](../../../../../design/promotion.md#reading-a-direct-target).
-//! Rollout status has the semantics of `kubectl rollout status` for the kinds
-//! that roll out: Deployments, StatefulSets, DaemonSets, Jobs, and ReplicaSets
-//! no controller owns. Every other kind is not read, as an Argo CD resource
-//! without a health check counts as healthy once synced. The objects come from
-//! the manifest of the revision (never from keys that stay tracked only
-//! because their prune awaits confirmation), and an object that does not exist
-//! is a finding, except a Job whose `ttlSecondsAfterFinished` makes its
+//! Contract: [Reading a direct target](../../../../design/promotion.md#reading-a-direct-target)
+//! and [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler),
+//! applying. Rollout status has the semantics of `kubectl rollout status` for the
+//! kinds that roll out: Deployments, StatefulSets, DaemonSets, Jobs, and ReplicaSets
+//! no controller owns, and a Pod follows its phase. Every other kind is not read, as
+//! an Argo CD resource without a health check counts as healthy once synced.
+//!
+//! Two callers read it: the apply's waits between Argo CD sync waves and phases
+//! ([`super::hooks`]), and the direct reconciler's reader, which takes the objects
+//! from the manifest of the revision (never from keys that stay tracked only
+//! because their prune awaits confirmation, and never a hook). An object that does
+//! not exist is a finding, except a Job whose `ttlSecondsAfterFinished` makes its
 //! disappearance after completion expected.
 
-use nyl_render::kubernetes::ResourceKey;
 use serde_json::Value;
 
-use crate::kubernetes_publication::reconciler::Health;
+use super::ResourceKey;
+
+/// How healthy a workload is. The direct reader maps it onto the reconciler-neutral
+/// health it reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    Progressing,
+    Degraded,
+    /// Anything else, and nothing reported: never a pass.
+    Unknown,
+}
 
 /// Whether a kind rolls out and is read.
 pub fn is_workload(api_version: &str, kind: &str) -> bool {
     matches!(
         (api_version, kind),
         ("apps/v1", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet") | ("batch/v1", "Job")
+    )
+}
+
+/// Whether an apply reads the health of this built-in kind ([`rollout`]): the
+/// workloads and Pods. Any other kind counts as healthy once it exists.
+pub fn assessed(group: &str, kind: &str) -> bool {
+    matches!(
+        (group, kind),
+        ("apps", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet") | ("batch", "Job") | ("", "Pod")
     )
 }
 
@@ -93,6 +116,7 @@ pub fn rollout(kind: &str, live: &Value) -> Option<Status> {
         "DaemonSet" => daemon_set(live),
         "ReplicaSet" => replica_set(live),
         "Job" => job(live),
+        "Pod" => pod(live),
         _ => return None,
     })
 }
@@ -207,6 +231,24 @@ fn job(live: &Value) -> Status {
         Status::healthy()
     } else {
         Status::of(Health::Progressing, "the Job is running")
+    }
+}
+
+/// A Pod's phase, as Argo CD's Pod health reads it: a Pod that runs to completion
+/// is healthy once it succeeded and degraded once it failed, and one that keeps
+/// running (`restartPolicy: Always`) is healthy once it is ready.
+fn pod(live: &Value) -> Status {
+    let phase = live
+        .pointer("/status/phase")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let keeps_running = live.pointer("/spec/restartPolicy").and_then(Value::as_str) == Some("Always");
+    match phase {
+        "Succeeded" => Status::healthy(),
+        "Failed" => Status::terminal("the Pod failed"),
+        "Running" if keeps_running && condition_is(live, "Ready", "True") => Status::healthy(),
+        "Running" => Status::of(Health::Progressing, "the Pod is running"),
+        _ => Status::of(Health::Progressing, "the Pod is pending"),
     }
 }
 

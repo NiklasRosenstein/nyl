@@ -34,17 +34,18 @@ use nyl_render::kubernetes::lifecycle::{
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{
-    ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering, ScopeMismatch, ScopeResolver,
+    hooks, ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering, ScopeMismatch,
+    ScopeResolver, WaitSettings,
 };
 use nyl_render::resources::ClusterKubernetesCapabilities;
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
 use super::drift::desired_revision;
-use super::health::is_ttl_job;
 use super::reader::api_error;
 use super::{not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, ReadErrorKind, KUBECONFIG_ENV};
+use nyl_render::kubernetes::health::is_ttl_job;
 
 /// Resources applied or pruned at the same time, as `nyl apply` does by default.
 const CONCURRENCY: usize = 8;
@@ -411,6 +412,8 @@ impl<'a, 'c> Direct<'a, 'c> {
             let mut applied_releases: HashSet<usize> = HashSet::new();
             let mut failures = Vec::new();
             let mut awaiting = Vec::new();
+            // Hooks left out, once per Release.
+            let mut hook_warnings: Vec<Finding> = Vec::new();
             let mut tracked: HashSet<ObjectKey> = HashSet::new();
             let mut current_wave = None;
             // The kinds the Releases applied so far registered: they are
@@ -480,6 +483,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     Ok(done) => {
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
+                        hook_warnings.extend(done.warnings);
                         if done.failures.is_empty() {
                             // Only a Release that applied registers kinds a later one waits for.
                             registered.extend(RegisteredKinds::of(&documents[index]));
@@ -491,7 +495,9 @@ impl<'a, 'c> Direct<'a, 'c> {
                 }
             }
             if !failures.is_empty() {
-                return Ok::<_, Failure>((failures, awaiting, scope_warnings(&target_scopes)));
+                let mut warnings = scope_warnings(&target_scopes);
+                warnings.extend(hook_warnings);
+                return Ok::<_, Failure>((failures, awaiting, warnings));
             }
             let mut warnings = tokio::time::timeout_at(
                 end,
@@ -504,6 +510,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                 )
             })??;
             warnings.extend(scope_warnings(&target_scopes));
+            warnings.extend(hook_warnings);
             Ok((failures, awaiting, warnings))
         })
         .map_err(|error| DriverError::after_effects(error.message))?;
@@ -624,6 +631,8 @@ impl<'a, 'c> Direct<'a, 'c> {
     ) -> HashSet<ResourceKey> {
         let candidates: Vec<(ResourceKey, &Value)> = manifests
             .iter()
+            // A hook is judged by its own policies, never by whether it is still there.
+            .filter(|manifest| hooks::is_resource(manifest))
             .filter_map(|manifest| ResourceKey::from_json_value(manifest).ok().map(|key| (key, manifest)))
             .filter(|(key, manifest)| is_ttl_job(key, manifest))
             .collect();
@@ -735,6 +744,19 @@ impl<'a, 'c> Direct<'a, 'c> {
                     decision: PruneDecision::AwaitConfirmation,
                     ..
                 } => applied.awaiting.push(key.to_string()),
+                ApplyEvent::HookFinished {
+                    key,
+                    phase,
+                    result: Err(why),
+                    ..
+                } => applied
+                    .failure_texts
+                    .push((format!("{phase} hook {key}"), why.clone(), false)),
+                ApplyEvent::HooksIgnored { hooks: ignored } => applied.warnings.push(Finding::new(
+                    Code::KubernetesHookIgnored,
+                    hooks::ignored_message(ignored),
+                    hooks::IGNORED_FIX,
+                )),
                 _ => {}
             };
             recorder
@@ -751,6 +773,8 @@ impl<'a, 'c> Direct<'a, 'c> {
                         confirm_prune: false,
                         ownership: &ownership,
                         protected: Some(protected),
+                        // The unit's deadline bounds every wait: it interrupts the apply.
+                        waits: WaitSettings::unbounded(),
                         unapplied: Some(&expired),
                     },
                     Interruption {
@@ -1210,8 +1234,10 @@ struct Applied {
     tracked: Vec<ResourceKey>,
     awaiting: Vec<String>,
     failures: Vec<Why>,
-    /// Each failed resource, its error, and whether the API rejected the object itself.
+    /// Each failed resource or hook, its error, and whether the API rejected the object itself.
     failure_texts: Vec<(String, String, bool)>,
+    /// What the apply found that does not fail it, such as hooks it left out.
+    warnings: Vec<Finding>,
 }
 
 /// An object's group, kind, namespace, and name.

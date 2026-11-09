@@ -55,6 +55,7 @@ use nyl_core::orchestration::driver::ExecutionContext;
 use nyl_core::orchestration::state::{DesiredUnit, Drift};
 use nyl_render::gitops::observation::{DirectRelease, ExpectedDeployment, ReconcilerLocation};
 use nyl_render::kubernetes::field_manager::NYL_FIELD_MANAGER;
+use nyl_render::kubernetes::hooks;
 use nyl_render::kubernetes::lifecycle::ObjectScopes;
 use nyl_render::kubernetes::{
     run_concurrently, DiffEngine, GroupVersionKind, KubeClient, ObjectIdentity, ReleasePublication, ReleaseState,
@@ -64,11 +65,11 @@ use nyl_render::NylError;
 use serde_json::Value;
 
 use super::apply::wave_of;
-use super::health::is_ttl_job;
 use super::reader::{api_error_granting, applied_for};
 use super::{destination_of, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::observe::facts_of;
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, KUBECONFIG_ENV};
+use nyl_render::kubernetes::health::is_ttl_job;
 
 /// Objects compared at the same time, as an apply writes them.
 const CONCURRENCY: usize = 8;
@@ -382,6 +383,9 @@ fn objects_of(release: &str, id: &str, state: &ReleaseState) -> Result<Vec<Objec
     let order = (wave_of(&documents), id.to_owned());
     documents
         .into_iter()
+        // A hook is never compared: it runs when a sync runs it, is deleted by its own
+        // policy, and is no drift by being gone, as Argo CD does not judge hooks either.
+        .filter(hooks::is_resource)
         .map(|manifest| {
             let key = ResourceKey::from_json_value(&manifest).map_err(|error| {
                 format!(

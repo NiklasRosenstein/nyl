@@ -11,6 +11,7 @@ use std::time::Duration;
 use colored::Colorize;
 
 use nyl_render::kubernetes::{
+    hooks,
     lifecycle::{ApplyEvent, ApplyExecutionResult, ReleaseRun},
     prune::PruneDecision,
     ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey,
@@ -63,6 +64,26 @@ pub(crate) struct ApplyReport<'a> {
     pub(crate) release_unchanged: bool,
     /// Phase durations, in the order the phases ran.
     pub(crate) timings: &'a [PhaseTiming],
+    /// What the hooks did.
+    pub(crate) hooks: HookSummary,
+}
+
+/// How many hook runs completed and failed, and how many workloads never became healthy.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct HookSummary {
+    pub(crate) run: usize,
+    pub(crate) failed: usize,
+    pub(crate) unhealthy: usize,
+}
+
+impl HookSummary {
+    pub(crate) fn of(apply: &ApplyExecutionResult) -> Self {
+        Self {
+            run: apply.hooks.len(),
+            failed: apply.hook_failed_count,
+            unhealthy: apply.unhealthy.len(),
+        }
+    }
 }
 
 /// The field ownership a handoff released.
@@ -126,6 +147,46 @@ impl<'a> ApplyRenderer<'a> {
                 }
             }
             ApplyEvent::PruneFinished => println!(),
+            ApplyEvent::HooksIgnored { hooks } => tracing::warn!(
+                "{}: {}; fix: {}",
+                hooks::IGNORED_CODE,
+                hooks::ignored_message(hooks),
+                hooks::IGNORED_FIX
+            ),
+            ApplyEvent::HookStarted { key, phase, wave } => {
+                println!("{} {} hook {}{}", "▶".cyan().bold(), phase, key, wave_note(wave));
+            }
+            ApplyEvent::HookFinished {
+                key,
+                phase,
+                result: Ok(()),
+                ..
+            } => println!("{} {} hook {} completed", "✓".green().bold(), phase, key),
+            ApplyEvent::HookFinished {
+                key,
+                phase,
+                result: Err(why),
+                ..
+            } => {
+                let error_msg = format!("({why})");
+                println!("{} {} hook {} failed {}", "✗".red().bold(), phase, key, error_msg.red());
+            }
+            ApplyEvent::HookDeleted {
+                key,
+                policy,
+                result: Ok(()),
+            } => println!("  {} deleted hook {} ({})", "↳".bright_black(), key, policy),
+            ApplyEvent::HookDeleted {
+                key,
+                policy,
+                result: Err(e),
+            } => println!(
+                "  {} Failed to delete hook {} ({}): {}",
+                "✗".red().bold(),
+                key,
+                policy,
+                e
+            ),
             ApplyEvent::PruneKept {
                 key,
                 decision: PruneDecision::Retain,
@@ -183,6 +244,15 @@ impl<'a> ApplyRenderer<'a> {
         }
         if report.failed_count > 0 {
             parts.push(format!("{} failed", report.failed_count.to_string().red()));
+        }
+        if report.hooks.run > 0 {
+            parts.push(format!("{} hook run(s)", report.hooks.run.to_string().cyan()));
+        }
+        if report.hooks.failed > 0 {
+            parts.push(format!("{} hook(s) failed", report.hooks.failed.to_string().red()));
+        }
+        if report.hooks.unhealthy > 0 {
+            parts.push(format!("{} not healthy", report.hooks.unhealthy.to_string().red()));
         }
         if let Some(ownership) = &report.ownership {
             parts.push(format!(
@@ -259,6 +329,15 @@ impl<'a> ApplyRenderer<'a> {
     }
 }
 
+/// The sync wave of a hook, when it is not the default one.
+fn wave_note(wave: i64) -> String {
+    if wave == 0 {
+        String::new()
+    } else {
+        format!(" (wave {wave})")
+    }
+}
+
 /// The outcome a dry run stands for, or the outcome itself.
 fn effective_outcome(outcome: &ApplyOutcome) -> &ApplyOutcome {
     match outcome {
@@ -286,5 +365,6 @@ pub(crate) fn report_of<'a>(run: &'a ReleaseRun, timings: &'a [PhaseTiming]) -> 
         release: Some(&run.release),
         release_unchanged: run.unchanged,
         timings,
+        hooks: HookSummary::of(&run.apply),
     }
 }

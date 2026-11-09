@@ -21,12 +21,13 @@ use serde_json::Value;
 
 use nyl_render::gitops::reconcile::RenderIndexOwner;
 
-use super::health::{fold, is_workload, Found};
 use super::{destination_of, not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{
     block_on, Health, Observed, Proof, ReadError, ReadErrorKind, ReadRequest, Reading, ReconcilerReader, Running,
     Visibility,
 };
+use nyl_render::kubernetes::health::{fold, is_workload, Found, Health as Rollout};
+use nyl_render::kubernetes::hooks::{classify, Classification};
 
 /// Reads a direct target's Releases from the cluster they were applied to.
 pub struct DirectReader {
@@ -241,7 +242,9 @@ async fn health_of(cluster: &ClusterHandle, state: &ReleaseState) -> Result<(Hea
         ) else {
             continue;
         };
-        if !is_workload(api_version, kind) {
+        // A hook runs, finishes, and is deleted by its policy: it is no part of the
+        // release's health, as in Argo CD, which does not assess hook objects.
+        if !is_workload(api_version, kind) || !matches!(classify(document), Classification::Resource) {
             continue;
         }
         let key = ResourceKey::from_json_value(document).map_err(|error| api_error(&error, "read a workload"))?;
@@ -271,7 +274,14 @@ async fn health_of(cluster: &ClusterHandle, state: &ReleaseState) -> Result<(Hea
             live: live.clone(),
         })
         .collect::<Vec<_>>();
-    Ok(fold(&items))
+    let (health, reason, terminal) = fold(&items);
+    let health = match health {
+        Rollout::Healthy => Health::Healthy,
+        Rollout::Progressing => Health::Progressing,
+        Rollout::Degraded => Health::Degraded,
+        Rollout::Unknown => Health::Unknown,
+    };
+    Ok((health, reason, terminal))
 }
 
 /// Every key any recorded revision tracks, for the removal reading.

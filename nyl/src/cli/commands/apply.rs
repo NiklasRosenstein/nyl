@@ -1,6 +1,6 @@
 use clap::Args;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::cli::{
     apply_output::{ApplyRenderer, ApplyReport, Phase, PhaseTiming},
@@ -16,7 +16,7 @@ use nyl_render::{
             apply_sorted_manifests, ensure_namespace_exists, prepare_desired_manifests, ApplySettings, Interruption,
             ReleaseRecorder, RevisionPolicy,
         },
-        KubernetesReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
+        KubernetesReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver, WaitSettings,
     },
     NylError, Result,
 };
@@ -82,6 +82,9 @@ pub struct ApplyArgs {
 
     #[command(flatten)]
     pub handoff: HandoffArgs,
+
+    #[command(flatten)]
+    pub waits: SyncWaitArgs,
 }
 
 /// Field ownership options shared by the commands that apply a release.
@@ -105,6 +108,26 @@ impl HandoffArgs {
     /// The field ownership these options select.
     pub(crate) fn ownership(&self) -> Result<FieldOwnership> {
         FieldOwnership::from_handoff(self.handoff.as_deref())
+    }
+}
+
+/// How long the commands that apply a release wait for hooks and workloads.
+#[derive(Args, Debug)]
+pub struct SyncWaitArgs {
+    /// Seconds to wait, at each step, for hooks to complete and for the workloads
+    /// applied before a later sync wave or phase to become healthy; the apply fails
+    /// when the wait runs out. 0 waits until interrupted, as Argo CD does.
+    #[arg(long, value_name = "SECONDS", default_value_t = WaitSettings::DEFAULT_TIMEOUT.as_secs())]
+    pub hook_timeout: u64,
+}
+
+impl SyncWaitArgs {
+    /// The waits these options select.
+    pub(crate) fn settings(&self) -> WaitSettings {
+        WaitSettings {
+            timeout: (self.hook_timeout > 0).then(|| Duration::from_secs(self.hook_timeout)),
+            ..WaitSettings::default()
+        }
     }
 }
 
@@ -249,6 +272,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             &desired_manifests,
             &ownership,
             concurrency,
+            args.waits.settings(),
             &mut |event| {
                 renderer.event(event);
             },
@@ -263,6 +287,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             release: None,
             release_unchanged: false,
             timings: &timings,
+            hooks: crate::cli::apply_output::HookSummary::of(&apply_result),
         });
         return apply_result.error("Apply").map_or(Ok(()), Err);
     };
@@ -284,6 +309,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
                 protected: None,
+                waits: args.waits.settings(),
                 unapplied: None,
             },
             Interruption {
