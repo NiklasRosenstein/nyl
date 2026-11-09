@@ -121,7 +121,7 @@ async fn revisions(cluster: &ClusterHandle, release: &DirectRelease) -> Result<V
     Ok(states)
 }
 
-fn applied_for(state: &ReleaseState, destination: &ReleasePublication) -> bool {
+pub(super) fn applied_for(state: &ReleaseState, destination: &ReleasePublication) -> bool {
     state
         .meta
         .publication

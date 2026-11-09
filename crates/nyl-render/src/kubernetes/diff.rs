@@ -10,6 +10,9 @@ use kube::api::DynamicObject;
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
+/// The field manager `nyl diff` makes its normalizing dry-run applies as.
+const DIFF_FIELD_MANAGER: &str = "nyl-diff";
+
 /// Diff engine for comparing Kubernetes resources
 pub struct DiffEngine;
 
@@ -119,12 +122,22 @@ impl DiffEngine {
         resource: &Value,
         client: Option<&dyn crate::kubernetes::KubeClient>,
     ) -> Result<Value> {
-        let normalized = if let Some(client) = client {
+        Self::normalize_as(resource, client.map(|client| (client, DIFF_FIELD_MANAGER))).await
+    }
+
+    /// [`Self::normalize_with_server`] with the dry-run apply made as the
+    /// given field manager, so what the server would change is judged by what
+    /// that manager owns.
+    pub async fn normalize_as(
+        resource: &Value,
+        server: Option<(&dyn crate::kubernetes::KubeClient, &str)>,
+    ) -> Result<Value> {
+        let normalized = if let Some((client, manager)) = server {
             // Convert to DynamicObject for server-side normalization
             let dynamic: DynamicObject = serde_json::from_value(resource.clone())?;
 
             // Get server-normalized version using dry-run apply
-            let server_normalized = client.get_normalized_resource(&dynamic, "nyl-diff").await?;
+            let server_normalized = client.get_normalized_resource(&dynamic, manager).await?;
 
             // Convert back to Value
             serde_json::to_value(&server_normalized)?
@@ -198,11 +211,24 @@ impl DiffEngine {
         live: &Value,
         client: &dyn crate::kubernetes::KubeClient,
     ) -> Result<bool> {
+        Self::are_equivalent_as(desired, live, client, DIFF_FIELD_MANAGER).await
+    }
+
+    /// [`Self::are_equivalent_with_server`] with the dry-run apply made as
+    /// `manager`: whether applying `desired` as that manager would change
+    /// `live`. Fields `desired` does not declare keep their live values, so a
+    /// field only another manager sets never makes the two differ.
+    pub async fn are_equivalent_as(
+        desired: &Value,
+        live: &Value,
+        client: &dyn crate::kubernetes::KubeClient,
+        manager: &str,
+    ) -> Result<bool> {
         // Normalize desired with server-side defaults
-        let desired_normalized = Self::normalize_with_server(desired, Some(client)).await?;
+        let desired_normalized = Self::normalize_as(desired, Some((client, manager))).await?;
 
         // Normalize live without server call
-        let live_normalized = Self::normalize_with_server(live, None).await?;
+        let live_normalized = Self::normalize_as(live, None).await?;
 
         // Convert to YAML for comparison
         let desired_yaml = crate::yaml::serialize_yaml_value(&desired_normalized)

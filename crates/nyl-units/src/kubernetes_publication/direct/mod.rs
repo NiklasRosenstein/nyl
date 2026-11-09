@@ -13,6 +13,8 @@
 //!   over the release state the apply recorded and the rollout status of the
 //!   workloads ([`health`]), so the shared evaluation judges a direct target
 //!   exactly as it judges Argo CD.
+//! - [`drift`] compares the cluster with what the unit last applied, for
+//!   `nyl detect-drift`, from the release state the apply recorded.
 //! - [`apply`] holds the driver's operations: preflight, publish, apply in
 //!   waves, purge, and the two teardown phases, over the lifecycle code
 //!   `nyl apply` shares.
@@ -32,6 +34,7 @@ use super::argocd::Connection;
 use super::reconciler::{ReadError, ReadErrorKind, ReconcilerReader, KUBECONFIG_ENV};
 
 pub mod apply;
+pub(crate) mod drift;
 pub mod health;
 mod reader;
 

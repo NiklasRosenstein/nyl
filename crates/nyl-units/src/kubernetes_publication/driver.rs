@@ -26,8 +26,10 @@
 //!   target ([`super::build`]).
 //! - **Drift.** Drift is the destination branch no longer holding the tree
 //!   the unit renders: a dry publication that would commit something, or one
-//!   that finds an owned file modified outside Nyl. A comparison that cannot
-//!   be made, such as an unreachable remote, is `unknown`.
+//!   that finds an owned file modified outside Nyl. For a direct target it is
+//!   also the cluster no longer holding what the unit last applied
+//!   ([`super::direct::drift`]). A comparison that cannot be made, such as an
+//!   unreachable remote or cluster, is `unknown`.
 //!
 //! - **Observed values.** With `observe: {}` the unit reads a field of a
 //!   resource its target renders from the workload Cluster, once the
@@ -58,7 +60,7 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Recei
 use nyl_render::gitops::publication::{prepare_target_publication, PublicationAuthor, TeardownSettings};
 use serde_json::{json, Value};
 
-use super::direct::ClusterAccess;
+use super::direct::{self, ClusterAccess};
 use super::observe::{self, RECONCILER};
 use super::observed_values::{self, ClusterReader, LiveReader};
 use super::readiness::{evaluate, evaluate_direct};
@@ -109,6 +111,56 @@ impl KubernetesPublicationDriver {
     pub fn with_live_reader(mut self, live: Arc<dyn LiveReader>) -> Self {
         self.live = live;
         self
+    }
+}
+
+impl KubernetesPublicationDriver {
+    /// Whether the destination branch still holds the tree the unit renders:
+    /// a dry publication that would commit something, or one that finds an
+    /// owned file modified outside Nyl, is drift.
+    fn tree_drift(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit, spec: &Value) -> DriverResult<Drift> {
+        let rendered = render(
+            &self.resource_catalogue,
+            &ctx.worktree,
+            &ctx.project_dir,
+            &ctx.cache_dir,
+            ctx.instances,
+            spec,
+            Some(unit_owner(unit)?),
+        )?;
+        // Nothing is committed to the destination: the commit this prepares
+        // in a temporary checkout is only compared, so its author is a
+        // placeholder that never reaches the repository.
+        let author = PublicationAuthor {
+            identity: CommitIdentity {
+                name: "nyl drift check".to_owned(),
+                email: "nyl@localhost".to_owned(),
+            },
+            time: ctx.now,
+        };
+        let variable = |name: &str| ctx.env.get(name).cloned();
+        Ok(
+            match prepare_target_publication(&rendered, &ctx.project_dir, "nyl: drift check", &author, &variable) {
+                Ok(prepared) if prepared.is_unchanged() => Drift::Clean,
+                Ok(_) => Drift::Drifted {
+                    summary: format!(
+                        "{}@{} no longer holds the tree the unit publishes",
+                        rendered.destination.repository, rendered.destination.branch
+                    ),
+                },
+                // An owned file edited outside Nyl is drift: reconciling it fails as a publication does.
+                Err(error) if error.is_owned_file_modified() => Drift::Drifted {
+                    summary: error.to_string(),
+                },
+                // Another incarnation's prefix is not this unit's to compare; reconciling decides whether it takes it over.
+                Err(error) if error.is_owner_fenced() => Drift::Unknown {
+                    reason: error.to_string(),
+                },
+                Err(error) => Drift::Unknown {
+                    reason: format!("cannot compare the publication branch with the rendered tree: {error}"),
+                },
+            },
+        )
     }
 }
 
@@ -348,47 +400,12 @@ impl Driver for KubernetesPublicationDriver {
         _receipt: &Receipt,
     ) -> DriverResult<Supported<DriftDetection>> {
         let spec = resolved_spec(unit)?;
-        let rendered = render(
-            &self.resource_catalogue,
-            &ctx.worktree,
-            &ctx.project_dir,
-            &ctx.cache_dir,
-            ctx.instances,
-            spec,
-            Some(unit_owner(unit)?),
-        )?;
-        // Nothing is committed to the destination: the commit this prepares
-        // in a temporary checkout is only compared, so its author is a
-        // placeholder that never reaches the repository.
-        let author = PublicationAuthor {
-            identity: CommitIdentity {
-                name: "nyl drift check".to_owned(),
-                email: "nyl@localhost".to_owned(),
-            },
-            time: ctx.now,
-        };
-        let variable = |name: &str| ctx.env.get(name).cloned();
-        let drift =
-            match prepare_target_publication(&rendered, &ctx.project_dir, "nyl: drift check", &author, &variable) {
-                Ok(prepared) if prepared.is_unchanged() => Drift::Clean,
-                Ok(_) => Drift::Drifted {
-                    summary: format!(
-                        "{}@{} no longer holds the tree the unit publishes",
-                        rendered.destination.repository, rendered.destination.branch
-                    ),
-                },
-                // An owned file edited outside Nyl is drift: reconciling it fails as a publication does.
-                Err(error) if error.is_owned_file_modified() => Drift::Drifted {
-                    summary: error.to_string(),
-                },
-                // Another incarnation's prefix is not this unit's to compare; reconciling decides whether it takes it over.
-                Err(error) if error.is_owner_fenced() => Drift::Unknown {
-                    reason: error.to_string(),
-                },
-                Err(error) => Drift::Unknown {
-                    reason: format!("cannot compare the publication branch with the rendered tree: {error}"),
-                },
-            };
+        let tree = self.tree_drift(ctx, unit, spec)?;
+        // A direct target has no reconciler keeping the cluster in line with
+        // the tree between runs, so the cluster is compared with what the
+        // unit applied; an Argo CD target is kept in line by Argo CD.
+        let cluster = direct::drift::detect(ctx, unit, &unit_target(spec).unwrap_or_default(), &self.cluster);
+        let drift = direct::drift::combine([("publication branch", Some(tree)), ("cluster", cluster)]);
         Ok(Supported::Supported(drift.into()))
     }
 
