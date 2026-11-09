@@ -861,8 +861,9 @@ fn test_a_template_that_cannot_be_listed_fails_checks_across_environments_closed
 
     assert_eq!(invoke(&harness, "main", &["reconcile", "-e", "dev"]).exit, 0);
     let teardown = invoke(&harness, "main", &["teardown", "-e", "dev", "--all", "-o", "json"]);
-    // Nothing is torn down: the unit waits, with the reason.
-    assert_eq!(teardown.exit, 2, "{}\n{}", teardown.stderr, teardown.stdout);
+    // Nothing is torn down: the unit stays, and the run fails with the reason, because the
+    // instances it needs to read for consumers are required (exit 1).
+    assert_eq!(teardown.exit, 1, "{}\n{}", teardown.stderr, teardown.stdout);
     assert!(
         teardown
             .stderr

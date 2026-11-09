@@ -686,20 +686,16 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
     let (_, groups) = declared(inventory);
     for template in nyl_render::gitops::instances::templates(inventory) {
         // A limit counts the instances, which only a listable location lets Nyl do.
-        if template.spec.max_instances.is_some() {
-            match listing_location(inventory, template) {
-                Ok(Some(_)) => {}
-                Ok(None) => invalid.push(Finding::new(
-                    Code::TemplateInvalid,
-                    format!(
-                        "EnvironmentTemplate {} sets maxInstances, but its instances cannot be listed: its state location depends on the instance name",
-                        template.metadata.name
-                    ),
-                    "end spec.state.path with `{{ environment.name }}` and keep the repository and refs independent of the name, or drop maxInstances",
-                )),
-                // The samples below report the unresolvable location.
-                Err(_) => {}
-            }
+        // (An unresolvable location is reported by the samples below.)
+        if template.spec.max_instances.is_some() && matches!(listing_location(inventory, template), Ok(None)) {
+            invalid.push(Finding::new(
+                Code::TemplateInvalid,
+                format!(
+                    "EnvironmentTemplate {} sets maxInstances, but its instances cannot be listed: its state location depends on the instance name",
+                    template.metadata.name
+                ),
+                "end spec.state.path with `{{ environment.name }}` and keep the repository and refs independent of the name, or drop maxInstances",
+            ));
         }
         let mut sampled = Vec::new();
         for (name, _) in nyl_render::gitops::instances::sample_instances(template) {

@@ -186,7 +186,7 @@ fn known_instances(
     nyl_core::orchestration::instance::Instances,
     BTreeMap<String, Finding>,
     Vec<String>,
-    Vec<(String, String)>,
+    Unlisted,
     Expiries,
 ) {
     let (declared_environments, _) = declared(inventory);
@@ -195,7 +195,7 @@ fn known_instances(
     let mut errors = BTreeMap::new();
     let mut undeclared = Vec::new();
     let listing = super::project::list_instances(inventory, offline);
-    let unlisted: Vec<(String, String)> = listing
+    let unlisted: Unlisted = listing
         .unavailable
         .iter()
         .map(|template| {
@@ -271,6 +271,9 @@ fn removing_instances(
 /// Each known instance's template and recorded expiry.
 type Expiries = BTreeMap<EnvironmentName, (String, Option<nyl_core::orchestration::time::Timestamp>)>;
 
+/// The templates whose instances could not be listed, with why.
+type Unlisted = Vec<(String, String)>;
+
 /// Stored incarnations keep their resource claims until they leave state,
 /// including when source changes or stops selecting a held or deleting unit.
 fn ownership_preflight(
@@ -279,7 +282,7 @@ fn ownership_preflight(
     errors: &mut BTreeMap<String, Finding>,
     drivers: &nyl_core::orchestration::driver::DriverSet,
     hint: &dyn Fn(&str) -> InstanceRequest,
-    unlisted: &[(String, String)],
+    unlisted: &Unlisted,
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
     // What keeps an environment's stored claims from being read, with the

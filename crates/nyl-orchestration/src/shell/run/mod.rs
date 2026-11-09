@@ -1059,7 +1059,7 @@ impl<'r, 'a> Session<'r, 'a> {
             };
             let resolution = {
                 let view = ReferenceView {
-                    environments: &external,
+                    environments: external,
                     environment: self.environment(),
                     desired: &units,
                     observed: evidence.observed,

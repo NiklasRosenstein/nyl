@@ -299,7 +299,7 @@ fn test_owner_fencing_follows_whether_the_owning_incarnation_still_exists_in_sta
             "kubernetes",
             uid.as_str(),
             "NYL-KUBERNETES-OWNER-UNKNOWN",
-            "environment ghost is not declared",
+            "the project declares no Environment ghost",
         ),
     ] {
         rewrite_owner(&harness, environment, unit, owner_uid);
