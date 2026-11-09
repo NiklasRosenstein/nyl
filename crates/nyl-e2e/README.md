@@ -16,7 +16,11 @@ One scenario, run against a real Kubernetes cluster with each reconciler:
    rollout began (the creation of its newest ReplicaSet, which each revision
    moves): Argo CD and the direct reconciler run hooks the same way. After the
    second revision the hook ran again, as a new Job that started after the second
-   rollout.
+   rollout. Because Argo CD can finish the sync that re-creates the Job while the
+   Job still runs, and leave its `argocd.argoproj.io/hook-finalizer` on it (which
+   blocks the teardown's cascade deletion), the suite removes that finalizer from
+   a finished hook Job once Argo CD's sync has ended, logging the Job and its UID
+   (`src/reconciler/argocd_hook_race.rs`, to remove once Argo CD fixes the race).
 3. It reads the attestations the reconcile recorded in the observed state
    (`accepted` and `healthy`, source `reconcile`) and cross-checks them with a
    single `nyl attest`. `nyl observe` reads the live values (the Service's

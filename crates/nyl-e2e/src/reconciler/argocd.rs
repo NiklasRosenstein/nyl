@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::Reconciler;
+use super::{argocd_hook_race, Reconciler};
 use crate::checks::{application_converged, needs_sync};
 use crate::cmd::Cmd;
 use crate::env::Env;
@@ -123,7 +123,9 @@ impl Reconciler for ArgoCd {
             .project
             .remote_head(PUBLICATION_BRANCH)?
             .context(format!("the {PUBLICATION_BRANCH} branch does not exist on the server"))?;
-        converge(&env.kubectl, WORKLOAD_APPLICATION, &head, stop)
+        converge(&env.kubectl, WORKLOAD_APPLICATION, &head, stop)?;
+        // Works around an Argo CD race that leaks the hook finalizer; see the module.
+        argocd_hook_race::release_leaked_hook_finalizers(&env.kubectl, WORKLOAD_APPLICATION, stop)
     }
 
     fn after_teardown(&self, env: &Env) -> Result<()> {
@@ -155,6 +157,16 @@ impl Reconciler for ArgoCd {
                 "--output",
                 "wide",
             ]),
+            // The fields a stuck deletion or an early-finished sync shows in, which
+            // the YAML below can lose to truncation.
+            kubectl.cmd(&[
+                "get",
+                "applications.argoproj.io",
+                "--namespace",
+                ARGOCD_NAMESPACE,
+                "--output",
+                APPLICATION_SUMMARY,
+            ]),
             kubectl.cmd(&[
                 "get",
                 "applications.argoproj.io",
@@ -175,6 +187,20 @@ impl Reconciler for ArgoCd {
         commands
     }
 }
+
+/// Per Application: its deletion and finalizers, the operation under way, and how
+/// the last one ran (when it started and finished, and each resource's result).
+const APPLICATION_SUMMARY: &str = "jsonpath={range .items[*]}{.metadata.name}\
+{\"\\n  deletionTimestamp: \"}{.metadata.deletionTimestamp}\
+{\"\\n  finalizers: \"}{.metadata.finalizers}\
+{\"\\n  operation: \"}{.operation}\
+{\"\\n  operationState: phase \"}{.status.operationState.phase}\
+{\", startedAt \"}{.status.operationState.startedAt}\
+{\", finishedAt \"}{.status.operationState.finishedAt}\
+{\", message \"}{.status.operationState.message}\
+{\"\\n  syncResult.revision: \"}{.status.operationState.syncResult.revision}\
+{\"\\n  syncResult.resources: \"}{.status.operationState.syncResult.resources}\
+{\"\\n\"}{end}";
 
 /// The reconciler's part of the project, for `api_server` (the API server's
 /// URL as the host reaches it, for the `api` method).

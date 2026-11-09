@@ -4,6 +4,7 @@
 //! tree, and what to check after a teardown.
 
 mod argocd;
+mod argocd_hook_race;
 mod direct;
 
 use std::collections::BTreeMap;
