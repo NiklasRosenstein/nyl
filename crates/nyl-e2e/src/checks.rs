@@ -71,6 +71,35 @@ pub fn deployment_ready(deployment: &Value, image: &str, database_host: &str) ->
     Poll::Ready(())
 }
 
+/// Whether a `PostSync` hook Job succeeded after the Deployment existed, and
+/// which object that was (its UID): a Job that started before the Deployment was
+/// created ran in the wrong phase, whichever reconciler ran it.
+pub fn hook_ran_after_workload(job: &Value, deployment: &Value) -> Poll<String> {
+    let succeeded = job.pointer("/status/succeeded").and_then(Value::as_i64).unwrap_or(0);
+    if succeeded < 1 {
+        return Poll::pending(format!("the Job has {succeeded} succeeded pods"));
+    }
+    let started = job.pointer("/status/startTime").and_then(Value::as_str);
+    let created = deployment
+        .pointer("/metadata/creationTimestamp")
+        .and_then(Value::as_str);
+    let (Some(started), Some(created)) = (started, created) else {
+        return Poll::pending(format!(
+            "the Job started at {started:?} and the Deployment was created at {created:?}"
+        ));
+    };
+    // RFC 3339 UTC timestamps of one format order as text.
+    if started <= created {
+        return Poll::pending(format!(
+            "the Job started at {started}, not after the Deployment was created at {created}"
+        ));
+    }
+    match job.pointer("/metadata/uid").and_then(Value::as_str) {
+        Some(uid) => Poll::Ready(uid.to_owned()),
+        None => Poll::pending("the Job has no UID"),
+    }
+}
+
 /// Whether `nyl attest` recorded `accepted` and `healthy` as passing for `unit`.
 pub fn attestation_ready(report: &Value, unit_name: &str) -> Poll<()> {
     let Some(entry) = unit(report, unit_name) else {
@@ -302,6 +331,20 @@ mod tests {
             Poll::Pending(reason) => reason,
             Poll::Ready(value) => panic!("expected pending, got ready({value:?})"),
         }
+    }
+
+    /// Catches a hook that ran before the workload passing for a PostSync hook.
+    #[test]
+    fn test_a_hook_is_ready_when_it_succeeded_after_the_workload_was_created() {
+        let deployment = json!({"metadata": {"creationTimestamp": "2026-01-01T10:00:05Z"}});
+        let job = |succeeded: i64, started: &str| json!({"metadata": {"uid": "abc"}, "status": {"succeeded": succeeded, "startTime": started}});
+
+        assert!(reason(hook_ran_after_workload(&job(0, "2026-01-01T10:00:30Z"), &deployment)).contains("0 succeeded"));
+        assert!(reason(hook_ran_after_workload(&job(1, "2026-01-01T10:00:05Z"), &deployment)).contains("not after"));
+        assert!(matches!(
+            hook_ran_after_workload(&job(1, "2026-01-01T10:00:30Z"), &deployment),
+            Poll::Ready(uid) if uid == "abc"
+        ));
     }
 
     #[test]
