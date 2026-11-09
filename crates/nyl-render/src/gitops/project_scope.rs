@@ -309,7 +309,7 @@ impl<'a> Snapshot<'a> {
         prefix: &str,
         next: &Snapshot<'_>,
         next_prefix: &str,
-        scopes: &Scopes,
+        scopes: &ScopeResolver,
     ) -> Result<Vec<Value>> {
         let new_app = next.applications.get(&identity(app));
         let same_cluster = new_app.is_some_and(|new| {
@@ -345,7 +345,7 @@ impl<'a> Snapshot<'a> {
     /// A namespaced resource without `metadata.namespace` lives in the
     /// Application's destination namespace; one of unknown scope is compared
     /// under both readings, so neither can hide a contraction.
-    fn resources(&self, app: &Value, prefix: &str, scopes: &Scopes) -> Result<BTreeMap<String, Value>> {
+    fn resources(&self, app: &Value, prefix: &str, scopes: &ScopeResolver) -> Result<BTreeMap<String, Value>> {
         let source = field(app, "/spec/source/path");
         nyl_core::resources::validate_relative_path("catalog Application spec.source.path", source, false, false)?;
         let root = Path::new(source).strip_prefix(prefix).map_err(|_| {
@@ -380,36 +380,26 @@ fn is_namespace(resource: &Value) -> bool {
     field(resource, "/apiVersion") == "v1" && field(resource, "/kind") == "Namespace"
 }
 
-/// Resource scope for the comparison: CRDs either snapshot renders, then the
-/// target Cluster's recorded capabilities, then built-in Kubernetes kinds.
-struct Scopes {
-    resolver: ScopeResolver,
-}
-
-impl Scopes {
-    fn new(snapshots: [&DesiredFiles<'_>; 2], capabilities: Option<&ClusterKubernetesCapabilities>) -> Self {
-        const CRD_MARKER: &[u8] = b"CustomResourceDefinition";
-        // Only CRDs carry scope; skip parsing every other manifest.
-        let crds = snapshots
-            .into_iter()
-            .flat_map(|files| files.iter())
-            .filter(|(_, bytes)| bytes.windows(CRD_MARKER.len()).any(|window| window == CRD_MARKER))
-            // An unreadable file leaves its kinds of unknown scope, which are
-            // checked both ways, so skipping it cannot hide a contraction.
-            .filter_map(|(path, bytes)| parse(path, bytes).ok())
-            .flatten()
-            .filter(|resource| field(resource, "/kind") == "CustomResourceDefinition")
-            .collect::<Vec<_>>();
-        Self {
-            resolver: ScopeResolver::new(capabilities, crds.iter()),
-        }
-    }
-
-    fn scope(&self, group: &str, kind: &str) -> Option<ResourceScope> {
-        self.resolver
-            .scope(group, kind)
-            .or_else(|| crate::kubernetes::builtin_scope(group, kind))
-    }
+/// The resource scopes for the comparison, from the one [`ScopeResolver`]: CRDs either
+/// snapshot renders, then the target Cluster's recorded capabilities, then built-in
+/// Kubernetes kinds.
+fn snapshot_scopes(
+    snapshots: [&DesiredFiles<'_>; 2],
+    capabilities: Option<&ClusterKubernetesCapabilities>,
+) -> ScopeResolver {
+    const CRD_MARKER: &[u8] = b"CustomResourceDefinition";
+    // Only CRDs carry scope; skip parsing every other manifest.
+    let crds = snapshots
+        .into_iter()
+        .flat_map(|files| files.iter())
+        .filter(|(_, bytes)| bytes.windows(CRD_MARKER.len()).any(|window| window == CRD_MARKER))
+        // An unreadable file leaves its kinds of unknown scope, which are
+        // checked both ways, so skipping it cannot hide a contraction.
+        .filter_map(|(path, bytes)| parse(path, bytes).ok())
+        .flatten()
+        .filter(|resource| field(resource, "/kind") == "CustomResourceDefinition")
+        .collect::<Vec<_>>();
+    ScopeResolver::new(capabilities, crds.iter())
 }
 
 /// The API group of a resource's `apiVersion`, `""` for the core group.
@@ -438,7 +428,7 @@ pub fn project_scope_contractions(
     proposed_prefix: &str,
     capabilities: Option<&ClusterKubernetesCapabilities>,
 ) -> Result<Vec<ProjectScopeContraction>> {
-    let scopes = Scopes::new([previous, proposed], capabilities);
+    let scopes = snapshot_scopes([previous, proposed], capabilities);
     let previous = Snapshot::new(previous)?;
     let proposed = Snapshot::new(proposed)?;
     let mut findings: BTreeMap<(String, String, String, String), ProjectScopeContraction> = BTreeMap::new();

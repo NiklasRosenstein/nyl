@@ -210,31 +210,44 @@ pub struct CommandCluster {
     pub capabilities: Option<nyl_render::resources::ClusterKubernetesCapabilities>,
 }
 
+/// What the declaration gives a command for `source`, resolved once: the target's
+/// publication and its Cluster, whose recorded capabilities are the declared source
+/// of scope. Both are `None` for a bare kube context.
+struct DeclaredCluster {
+    publication: Option<nyl_render::kubernetes::ReleasePublication>,
+    cluster: Option<Cluster>,
+}
+
+fn declared_cluster(source: &ClusterSource, inventory: Option<&GitOpsInventory>) -> Result<DeclaredCluster> {
+    let (ClusterSource::Target(name), Some(inventory)) = (source, inventory) else {
+        return Ok(DeclaredCluster {
+            publication: None,
+            cluster: None,
+        });
+    };
+    let resolved = resolve_target_cluster_from_inventory(inventory, name)?;
+    Ok(DeclaredCluster {
+        publication: Some(nyl_render::gitops::publication::release_publication(
+            inventory,
+            &resolved.target,
+        )?),
+        cluster: Some(resolved.cluster),
+    })
+}
+
 /// Resolve the cluster of a command that takes `--target` and `--context`.
 pub async fn resolve_command_cluster(target: Option<&str>, context: Option<&str>) -> Result<CommandCluster> {
     let cwd = std::env::current_dir()?;
     let (source, inventory) = resolve_cluster_source(&cwd, target, context, true)?;
-    let config = load_source_kube_config(&source, inventory.as_ref(), context).await?;
-    let publication = match (&source, &inventory) {
-        (ClusterSource::Target(name), Some(inventory)) => Some(nyl_render::gitops::publication::release_publication(
-            inventory,
-            get_target(inventory, name)?,
-        )?),
-        _ => None,
-    };
-    let capabilities = match (&source, &inventory) {
-        (ClusterSource::Target(name), Some(inventory)) => {
-            resolve_target_cluster_from_inventory(inventory, name)?
-                .cluster
-                .spec
-                .kubernetes
-        }
-        _ => None,
+    let declared = declared_cluster(&source, inventory.as_ref())?;
+    let config = match &declared.cluster {
+        Some(cluster) => load_cluster_kube_config(cluster, context).await?,
+        None => load_source_kube_config(&source, inventory.as_ref(), context).await?,
     };
     Ok(CommandCluster {
         config,
-        publication,
-        capabilities,
+        publication: declared.publication,
+        capabilities: declared.cluster.and_then(|cluster| cluster.spec.kubernetes),
     })
 }
 
@@ -755,6 +768,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store::read_cluster_index(&root, "staging").unwrap().unwrap(), updated);
+    }
+
+    /// A command's declared Cluster carries its recorded capabilities, vendored CRDs
+    /// included, so scope follows the declaration; a bare kube context has none.
+    #[tokio::test]
+    async fn test_declared_cluster_supplies_the_targets_capabilities_including_vendored_crds() {
+        let directory = capture_fixture();
+        let mut args = capture_args(false);
+        args.crds = true;
+        capture_with_client(args, directory.path(), &capture_stub("integer"))
+            .await
+            .unwrap();
+        fs::write(
+            directory.path().join("target.yaml"),
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata: {name: staging}\nspec:\n  reconciler: {argocd: {}}\n  clusterRef: {name: staging}\n  publication:\n    repository: {repoURL: 'https://example.invalid/deploy.git'}\n    revision: deploy/staging\n",
+        )
+        .unwrap();
+        let inventory =
+            nyl_render::gitops::discover_gitops_inventory(directory.path(), None, crate::resource_catalogue()).unwrap();
+
+        let declared = declared_cluster(&ClusterSource::Target("staging".to_owned()), Some(&inventory)).unwrap();
+
+        // Widget is in the vendored snapshot, not in what the Cluster itself records.
+        let capabilities = declared.cluster.unwrap().spec.kubernetes.unwrap();
+        assert_eq!(
+            capabilities.scope_of("example.com", "Widget"),
+            Some(nyl_render::resources::ResourceScope::Namespaced)
+        );
+        assert!(declared.publication.is_some());
+        let bare = declared_cluster(&ClusterSource::LiveContext("kind".to_owned()), Some(&inventory)).unwrap();
+        assert!(bare.cluster.is_none() && bare.publication.is_none());
     }
 
     #[tokio::test]

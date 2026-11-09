@@ -11,7 +11,7 @@ use nyl_render::{
         lifecycle::{prepare_desired_manifests, ObjectScopes},
         prune::{prune_decision, PruneDecision},
         DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseStatus,
-        ReleaseStorage, ResourceKey,
+        ReleaseStorage, ResourceKey, ScopeResolver,
     },
     NylError, Result,
 };
@@ -105,12 +105,14 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Resolve namespaces and collapse duplicates exactly as `nyl apply` does.
     let destination_namespace = preflight.destination_namespace.as_deref().unwrap_or(&release_namespace);
-    // The same scope order as `apply`: manifest CRDs, the target Cluster's recorded
-    // capabilities, then the live cluster.
-    let capabilities = preflight
-        .resolved_target
-        .as_ref()
-        .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref());
+    // The same scope order as `apply`: the manifest's CRDs, the target Cluster's
+    // recorded capabilities, then the live cluster.
+    let capabilities = ScopeResolver::from_capabilities(
+        preflight
+            .resolved_target
+            .as_ref()
+            .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref()),
+    );
     let (ready, mut scopes) = prepare_desired_manifests(
         &kube_client,
         desired_manifests,
@@ -980,10 +982,15 @@ mod tests {
             "metadata": { "name": "first" }
         });
         let client = SelectiveApiResourceNotFoundClient::new([("example.com", "v1", "Widget")]);
-        let (ready, mut scopes) =
-            prepare_desired_manifests(&client, vec![widget, crd], &mut HashMap::new(), Some("app"), None)
-                .await
-                .unwrap();
+        let (ready, mut scopes) = prepare_desired_manifests(
+            &client,
+            vec![widget, crd],
+            &mut HashMap::new(),
+            Some("app"),
+            ScopeResolver::default(),
+        )
+        .await
+        .unwrap();
 
         let result = compute_diff_from_live(&client, &ready, None, DiffMode::Raw, &mut scopes, false)
             .await

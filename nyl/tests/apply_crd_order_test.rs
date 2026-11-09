@@ -393,7 +393,10 @@ fn takes_the_scope_of_a_kind_from_the_clusters_recorded_capabilities_before_the_
     done.store(true, Ordering::Relaxed);
     worker.join().unwrap();
 
+    // The recorded scope decides, and the disagreement is reported once, with its fix.
     assert_cmd::assert::Assert::new(output)
         .success()
-        .stdout(predicate::str::contains("+ Widget release-ns/first"));
+        .stdout(predicate::str::contains("+ Widget release-ns/first"))
+        .stderr(predicate::str::contains("NYL-KUBERNETES-SCOPE-MISMATCH").count(1))
+        .stderr(predicate::str::contains("nyl capture cluster <name> --crds"));
 }

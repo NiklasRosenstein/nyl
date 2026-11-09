@@ -29,7 +29,7 @@ pub use ordered_delete::{delete_in_prune_order, run_concurrently, PruneEvent, PR
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
 pub use resource::{ApplyOutcome, GroupVersionKind, ObjectIdentity, ResourceKey};
-pub use scope::{CrdDeclaration, ScopeResolver};
+pub use scope::{CrdDeclaration, ScopeMismatch, ScopeResolver};
 pub use state::{
     enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseMeta,
     ReleasePublication, ReleaseState, ReleaseStatus, ReleaseStorage,

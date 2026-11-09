@@ -5,17 +5,18 @@ use dialoguer::Confirm;
 use crate::{
     cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
     cli::commands::apply::{HandoffArgs, DEFAULT_APPLY_CONCURRENCY},
-    cli::commands::cluster::resolve_command_cluster,
+    cli::commands::cluster::{resolve_command_cluster, CommandCluster},
 };
 use nyl_render::{
     config::ProjectConfig,
     kubernetes::{
         fence::{ReleaseClaim, Requester},
         lifecycle::{
-            collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, Interruption, ReleaseRecorder,
-            RevisionPolicy,
+            collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, Interruption, ObjectScopes,
+            ReleaseRecorder, RevisionPolicy,
         },
-        KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering,
+        KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering,
+        ScopeResolver,
     },
     NylError, Result,
 };
@@ -79,7 +80,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
 
     // Create Kubernetes clients
     let cluster = resolve_command_cluster(args.target.as_deref(), args.context.as_deref()).await?;
-    let client = kube::Client::try_from(cluster.config)?;
+    let client = kube::Client::try_from(cluster.config.clone())?;
     let kube_client = KubeRsClient::from_client(client.clone()).await?;
     let storage = KubernetesReleaseStorage::new(client);
 
@@ -125,7 +126,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     // hold several documents for one object; apply only the last, as apply did.
     let mut duplicates = std::collections::HashMap::new();
     let (mut manifests, mut scopes) =
-        collapse_rendered_duplicates(&kube_client, manifests, &mut duplicates, cluster.capabilities.as_ref()).await?;
+        prepare_rollback_manifests(&kube_client, &cluster, manifests, &mut duplicates).await?;
 
     // Sort resources into apply order (CRDs, Namespaces, then Argo CD's kind order), record the rollback as
     // a new revision before touching the cluster, and apply.
@@ -193,6 +194,25 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
 /// defaults to the revision immediately before the latest one (i.e. undo the most
 /// recent deployment). Returns a clear error when the release or revision does not
 /// exist, or when there is no previous revision to roll back to.
+/// The stored manifests, prepared for a rollback: documents for one object collapsed
+/// and every kind's scope resolved as `apply` resolves it, from the manifests' CRDs,
+/// then the capabilities of the target's Cluster that `cluster` carries, then the
+/// live cluster.
+async fn prepare_rollback_manifests(
+    kube_client: &dyn KubeClient,
+    cluster: &CommandCluster,
+    manifests: Vec<serde_json::Value>,
+    duplicates: &mut std::collections::HashMap<nyl_render::kubernetes::ResourceKey, usize>,
+) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
+    collapse_rendered_duplicates(
+        kube_client,
+        manifests,
+        duplicates,
+        ScopeResolver::from_capabilities(cluster.capabilities.as_ref()),
+    )
+    .await
+}
+
 async fn resolve_rollback_target(
     storage: &dyn ReleaseStorage,
     name: &str,
@@ -245,6 +265,49 @@ pub(crate) mod tests {
     use nyl_render::kubernetes::memory::InMemoryReleaseStorage as MockReleaseStorage;
 
     use nyl_render::kubernetes::memory::sample_release as make_release;
+
+    /// Rollback resolves each kind's scope through the capabilities its `CommandCluster`
+    /// carries: here the Cluster records `Widget` as cluster-scoped while the live
+    /// cluster says namespaced, so the object's identity drops its namespace only with
+    /// them.
+    #[tokio::test]
+    async fn test_prepare_rollback_manifests_resolves_scope_through_the_command_clusters_capabilities() {
+        let widget = serde_json::json!({"apiVersion": "example.com/v1", "kind": "Widget",
+            "metadata": {"name": "w", "namespace": "app"}});
+        let key = nyl_render::kubernetes::ResourceKey::from_json_value(&widget).unwrap();
+        let cluster = |capabilities| CommandCluster {
+            config: kube::Config::new("http://localhost".parse().unwrap()),
+            publication: None,
+            capabilities,
+        };
+        let declared = nyl_render::resources::ClusterKubernetesCapabilities {
+            kube_version: None,
+            api_versions: vec!["example.com/v1/Widget".to_owned()],
+            cluster_scoped_kinds: vec!["example.com/Widget".to_owned()],
+            vendored_crds: false,
+        };
+        let live = nyl_render::kubernetes::MockKubeClient::new();
+
+        let (_, scopes) = prepare_rollback_manifests(
+            &live,
+            &cluster(Some(declared)),
+            vec![widget.clone()],
+            &mut std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scopes.identity(&key).namespace, None);
+
+        let (_, scopes) = prepare_rollback_manifests(
+            &live,
+            &cluster(None),
+            vec![widget],
+            &mut std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scopes.identity(&key).namespace.as_deref(), Some("app"));
+    }
 
     async fn seed(storage: &MockReleaseStorage, name: &str, ns: &str, revisions: &[u32]) {
         for (i, rev) in revisions.iter().enumerate() {

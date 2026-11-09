@@ -975,10 +975,10 @@ impl Cluster {
     }
 }
 
-/// Catches the first deploy of a custom resource failing before it starts: Releases
-/// are prepared when their wave comes, because a namespaced custom resource
-/// without a `metadata.namespace` cannot be resolved until the wave-0 Release
-/// that registers its CustomResourceDefinition applied.
+/// Catches the first deploy of a custom resource failing before it starts: its kind is
+/// not served until the wave-0 Release that registers its CustomResourceDefinition
+/// applied and the cluster serves it, so the Release waits for it. Its namespace comes
+/// from that CRD, which the target declares, without waiting.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_custom_resource_in_wave_1_resolves_after_its_crd_applied_in_wave_0() {
     let world = direct_world();
@@ -1021,6 +1021,45 @@ async fn test_a_custom_resource_in_wave_1_resolves_after_its_crd_applied_in_wave
                 "widgets.example.com"
             )
             .await
+    );
+}
+
+/// Catches the direct reconciler resolving scope without the target Cluster's recorded
+/// capabilities (`RenderedTarget.cluster_kubernetes`): no Release renders the CRD of
+/// `Widget`, and the live cluster does not know the kind, so only the capabilities
+/// can say it is namespaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_custom_resource_resolves_its_scope_from_the_clusters_recorded_capabilities() {
+    let world = direct_world();
+    let platform = world.work().join("nyl/platform.yaml");
+    let text = std::fs::read_to_string(&platform).unwrap();
+    let edited = text.replace(
+        "apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]",
+        "apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment, example.com/v1/Widget]",
+    );
+    assert_ne!(text, edited);
+    std::fs::write(&platform, edited).unwrap();
+    std::fs::write(
+        world.work().join("applications/web/widgets.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: widgets, namespace: widgets}\nspec: {}\n---\n\
+         apiVersion: example.com/v1\nkind: Widget\nmetadata: {name: first}\nspec: {size: 1}\n",
+    )
+    .unwrap();
+    let cluster = Cluster::new();
+    let strict = StrictClient::new(cluster.client.clone());
+    // The cluster serves the kind but, with no CRD anywhere, cannot report its scope.
+    strict.served.lock().unwrap().insert("Widget".to_owned());
+    let driver = cluster.driver_through(strict);
+    let unit = unit_for(&driver, &world, "kubernetes");
+
+    let outcome = reconcile(&driver, &world, &unit, None, &nobody());
+
+    tree_of(&outcome);
+    assert!(
+        cluster
+            .exists("example.com/v1", "Widget", Some("widgets"), "first")
+            .await,
+        "the capabilities say Widget is namespaced, so it takes its Release's namespace"
     );
 }
 

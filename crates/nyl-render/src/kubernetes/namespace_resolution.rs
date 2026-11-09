@@ -472,13 +472,13 @@ mod tests {
         let client = CountingKubeClient::new(inner);
         let mut manifests = vec![
             json!({
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
+                "apiVersion": "example.com/v1",
+                "kind": "Widget",
                 "metadata": {"name": "sa-one"}
             }),
             json!({
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
+                "apiVersion": "example.com/v1",
+                "kind": "Widget",
                 "metadata": {"name": "sa-two"}
             }),
         ];
@@ -488,9 +488,9 @@ mod tests {
             .unwrap();
 
         let gvk = GroupVersionKind {
-            group: String::new(),
+            group: "example.com".to_string(),
             version: "v1".to_string(),
-            kind: "ServiceAccount".to_string(),
+            kind: "Widget".to_string(),
         };
         assert_eq!(client.is_namespaced_call_count(&gvk), 1);
     }
@@ -502,9 +502,9 @@ mod tests {
         let mut duplicates = HashMap::new();
         let key = ResourceKey {
             gvk: GroupVersionKind {
-                group: String::new(),
+                group: "example.com".to_string(),
                 version: "v1".to_string(),
-                kind: "ServiceAccount".to_string(),
+                kind: "Widget".to_string(),
             },
             namespace: None,
             name: "sa".to_string(),

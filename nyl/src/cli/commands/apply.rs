@@ -16,7 +16,7 @@ use nyl_render::{
             apply_sorted_manifests, ensure_namespace_exists, prepare_desired_manifests, ApplySettings, Interruption,
             ReleaseRecorder, RevisionPolicy,
         },
-        KubernetesReleaseStorage, ResourceKey, ResourceOrdering,
+        KubernetesReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
     },
     NylError, Result,
 };
@@ -150,12 +150,14 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     let destination_namespace = preflight.destination_namespace.as_deref().or(args.namespace.as_deref());
 
-    // Scope follows the declaration first: manifest CRDs, then the target Cluster's
-    // recorded capabilities (vendored CRDs included), then the live cluster.
-    let capabilities = preflight
-        .resolved_target
-        .as_ref()
-        .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref());
+    // Scope follows the declaration first: the manifest's CRDs, then the target
+    // Cluster's recorded capabilities (vendored CRDs included), then the live cluster.
+    let capabilities = ScopeResolver::from_capabilities(
+        preflight
+            .resolved_target
+            .as_ref()
+            .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref()),
+    );
     let (collapsed, mut scopes) = prepare_desired_manifests(
         &kube_client,
         desired_manifests,

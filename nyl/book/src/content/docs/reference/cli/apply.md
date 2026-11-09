@@ -93,7 +93,8 @@ kinds are served once it is Established, so the custom resources apply after the
 CRD is Established; the CRDs apply first, so the wait is usually already over, and
 nothing waits for a CRD the cluster already serves. Only the kinds a CRD declares
 are waited for, and, like Argo CD, Nyl does not wait for the backend of a CRD's
-conversion webhook. When several documents describe the same object
+conversion webhook. A legacy `v1beta1` CRD that lists no `versions` still declares
+its scope, but names no kind to wait for, so nothing waits for it. When several documents describe the same object
 (the same group, kind, namespace, and name, in any API version; cluster-scoped
 objects ignore a namespace), only the last one is applied and recorded. A resource
 that fails to apply does not stop the others; the release is recorded as failed
@@ -153,23 +154,36 @@ and falls back to per-group discovery otherwise; the timing line names the mode.
 ## Which kinds are namespaced
 
 A resource that sets no namespace takes the destination namespace when its kind is
-namespaced. Nyl decides that scope in one fixed order, the same for `apply`,
+namespaced. One resolver decides that scope, in one fixed order, for `apply`,
 [`diff`](/nyl/reference/cli/diff/), `release rollback`, and the direct reconciler, and
 for the Application and AppProject Nyl derives for a target:
 
-1. The CustomResourceDefinitions in the manifest. A CRD names its kind's scope, and
-   counts when it serves a version. Where two CRD documents declare one kind, the
-   later one wins.
-2. With a DeploymentTarget (`--target`, or the target the project selects), the
-   target Cluster's recorded Kubernetes capabilities, which include the CRDs
-   vendored by [`nyl capture cluster --crds`](/nyl/kubernetes-gitops/resource-guides/cluster/).
-3. The live cluster, only for a kind nothing above knows. Without GitOps
-   configuration, `--context` selects the cluster and there is no step 2.
+1. The CustomResourceDefinitions of the Release being applied (the manifest's CRDs).
+   A CRD names its kind's scope, and counts when it serves a version: a CRD that
+   lists versions but serves none declares nothing. Where two CRD documents declare
+   one kind, the later one wins. The direct reconciler and the tree also know the CRDs
+   of the other Releases of the target.
+2. With a DeploymentTarget (`--target`, or the target the project selects), the target
+   Cluster's recorded Kubernetes capabilities, which include the CRDs vendored by
+   [`nyl capture cluster --crds`](/nyl/kubernetes-gitops/resource-guides/cluster/).
+3. The built-in Kubernetes kinds, whose scope is fixed.
+4. The live cluster, only for a kind nothing above knows, and only for `nyl apply`,
+   `diff`, and `release rollback`: the tree and AppProject derivation never ask a
+   cluster. Without GitOps configuration, `--context` selects the cluster and there is
+   no step 2.
 
 The result therefore follows what is declared, and a custom resource whose CRD is
 new in the manifest, or vendored but not yet installed, gets its namespace before
-anything is applied. A kind that none of these knows, such as one an APIService in
-the same manifest will serve, keeps no namespace: set `metadata.namespace` on it.
+anything is applied. A stale vendored snapshot takes precedence over the live cluster,
+so a kind whose scope changed in the cluster keeps the vendored scope until
+`nyl capture cluster <name> --crds` refreshes the snapshot. When a scope the Cluster
+records differs from what the connected cluster reports, `apply`, `diff`, and
+`release rollback` still use the recorded scope and warn once per kind with
+`NYL-KUBERNETES-SCOPE-MISMATCH`; its fix is to re-run
+`nyl capture cluster <name> --crds` and commit the result. The direct reconciler
+reports the same warning in its run. A kind that none of these
+knows, such as one an APIService in the same manifest will serve, keeps no namespace:
+set `metadata.namespace` on it.
 
 ## Examples
 
