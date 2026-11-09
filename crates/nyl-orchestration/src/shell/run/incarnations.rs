@@ -12,50 +12,55 @@
 //! taken over; drivers ask only when they find an owner that is not them, so
 //! runs that never fence read nothing.
 
-use std::collections::BTreeMap;
-
 use nyl_core::orchestration::driver::{IncarnationDirectory, IncarnationStatus};
 use nyl_core::orchestration::ids::{EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateStore};
 use nyl_core::orchestration::state::StateLocation;
 
+use crate::shell::peers::Peers;
+
 /// Reads an environment's state at its location, or why it cannot.
 type Snapshots<'a> = dyn Fn(&StateLocation) -> Result<EnvironmentSnapshot, String> + Send + Sync + 'a;
 
 /// The incarnations of every declared environment, read at the locations the
-/// run's request declares.
+/// run's request declares. An environment whose declaration cannot be used is
+/// unknown with the finding of resolving it.
 pub(super) struct StateIncarnations<'a> {
     snapshots: Box<Snapshots<'a>>,
-    locations: &'a BTreeMap<EnvironmentName, StateLocation>,
+    peers: Peers,
 }
 
 impl<'a> StateIncarnations<'a> {
     /// Incarnations read from `store`.
-    pub(super) fn over(store: &'a dyn StateStore, locations: &'a BTreeMap<EnvironmentName, StateLocation>) -> Self {
+    pub(super) fn over(store: &'a dyn StateStore, peers: Peers) -> Self {
         Self::reading(
             move |location| store.snapshot(location).map_err(|error| error.to_string()),
-            locations,
+            peers,
         )
     }
 
     /// Incarnations read through `snapshots`.
     pub(super) fn reading(
         snapshots: impl Fn(&StateLocation) -> Result<EnvironmentSnapshot, String> + Send + Sync + 'a,
-        locations: &'a BTreeMap<EnvironmentName, StateLocation>,
+        peers: Peers,
     ) -> Self {
         Self {
             snapshots: Box::new(snapshots),
-            locations,
+            peers,
         }
     }
 }
 
 impl IncarnationDirectory for StateIncarnations<'_> {
     fn status(&self, environment: &EnvironmentName, unit: &UnitName, uid: &Uid) -> IncarnationStatus {
-        let Some(location) = self.locations.get(environment) else {
-            return IncarnationStatus::Unknown(format!(
-                "environment {environment} is not declared at this source commit, so its state cannot be located"
-            ));
+        let location = match self.peers.locate(environment) {
+            Ok(location) => location,
+            Err(finding) => {
+                return IncarnationStatus::Unknown(format!(
+                    "the state of environment {environment} cannot be located: {}",
+                    finding.message
+                ));
+            }
         };
         match (self.snapshots)(location) {
             Err(error) => IncarnationStatus::Unknown(format!(
@@ -78,10 +83,13 @@ impl IncarnationDirectory for StateIncarnations<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use nyl_core::orchestration::state::{Lifecycle, Tombstone};
+
+    use nyl_core::orchestration::codes::{Code, Finding};
 
     use super::*;
     use crate::rules::fixtures::{desired_numbered, env, name, uid_numbered};
@@ -103,8 +111,18 @@ mod tests {
         }
     }
 
-    fn locations() -> BTreeMap<EnvironmentName, StateLocation> {
-        BTreeMap::from([(env(), location(""))])
+    fn peers() -> Peers {
+        Peers {
+            locations: BTreeMap::from([(env(), location(""))]),
+            errors: BTreeMap::from([(
+                EnvironmentName::new("broken").unwrap(),
+                Finding::new(
+                    Code::StateUnavailable,
+                    "cannot resolve the state location of broken: invalid local state repository URL",
+                    "fix spec.state.repository",
+                ),
+            )]),
+        }
     }
 
     /// Catches an incarnation in any lifecycle, such as one that is still
@@ -131,8 +149,7 @@ mod tests {
             },
         };
         let held = snapshot(vec![desired_numbered("active", 1, None), deleting, retained]);
-        let locations = locations();
-        let directory = StateIncarnations::reading(move |_| Ok(held.clone()), &locations);
+        let directory = StateIncarnations::reading(move |_| Ok(held.clone()), peers());
         let status = |unit: &str, uid: u64| directory.status(&env(), &name(unit), &uid_numbered(uid));
         for (unit, uid) in [("active", 1), ("deleting", 2), ("retained", 3)] {
             assert_eq!(status(unit, uid), IncarnationStatus::Exists, "{unit}");
@@ -145,18 +162,23 @@ mod tests {
         assert_eq!(status("forgotten", 1), IncarnationStatus::Gone, "no document");
     }
 
-    /// Catches an environment that is not declared, or whose state cannot be
-    /// read, answering `gone`: a driver would take the prefix over, so state
-    /// that cannot say must say so.
+    /// Catches an environment that is not declared, whose declaration cannot
+    /// be used, or whose state cannot be read, answering `gone`: a driver would
+    /// take the prefix over, so state that cannot say must say so, and an
+    /// invalid declaration says why with the finding of resolving it.
     #[test]
-    fn test_an_undeclared_environment_and_unreadable_state_are_unknown() {
-        let locations = locations();
-        let directory = StateIncarnations::reading(|_| Err("the remote is unreachable".to_owned()), &locations);
+    fn test_an_unlocatable_environment_and_unreadable_state_are_unknown() {
+        let directory = StateIncarnations::reading(|_| Err("the remote is unreachable".to_owned()), peers());
         let other = EnvironmentName::new("ghost").unwrap();
         let IncarnationStatus::Unknown(reason) = directory.status(&other, &name("web"), &uid_numbered(1)) else {
             panic!("an undeclared environment is unknown");
         };
-        assert!(reason.contains("environment ghost is not declared"), "{reason}");
+        assert!(reason.contains("declares no Environment ghost"), "{reason}");
+        let broken = EnvironmentName::new("broken").unwrap();
+        let IncarnationStatus::Unknown(reason) = directory.status(&broken, &name("web"), &uid_numbered(1)) else {
+            panic!("an invalid declaration is unknown");
+        };
+        assert!(reason.contains("invalid local state repository URL"), "{reason}");
         let IncarnationStatus::Unknown(reason) = directory.status(&env(), &name("web"), &uid_numbered(1)) else {
             panic!("unreadable state is unknown");
         };
@@ -170,13 +192,12 @@ mod tests {
     fn test_every_answer_reads_state_again() {
         let state = Mutex::new(snapshot(Vec::new()));
         let reads = AtomicUsize::new(0);
-        let locations = locations();
         let directory = StateIncarnations::reading(
             |_| {
                 reads.fetch_add(1, Ordering::Relaxed);
                 Ok(state.lock().unwrap().clone())
             },
-            &locations,
+            peers(),
         );
         let ask = || directory.status(&env(), &name("web"), &uid_numbered(1));
         assert_eq!(ask(), IncarnationStatus::Gone);

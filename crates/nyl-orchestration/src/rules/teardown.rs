@@ -956,4 +956,105 @@ mod tests {
         );
         assert!(warnings.iter().all(|warning| warning.message.starts_with("dev/web: ")));
     }
+
+    fn held(unit: &str, deletion: Option<Deletion>) -> DesiredUnit {
+        let mut document = fixtures::desired(unit, "Publication", json!({}), unit);
+        document.lifecycle = Lifecycle::Held {
+            hold: Hold {
+                since: "2026-09-24T10:00:00Z".parse().unwrap(),
+                by: "alice".to_owned(),
+                reason: None,
+                pending: None,
+            },
+            deletion,
+        };
+        document
+    }
+
+    /// `leaves` decides whether a run reads the other environments for
+    /// consumers, so it must be true exactly when the plan decides about any
+    /// unit: a `leaves` that is false while the plan would tear down, retain,
+    /// release, or hold a unit lets a teardown go on without seeing the
+    /// consumers that protect it, and one that is true with nothing to decide
+    /// makes every run depend on every other environment.
+    #[test]
+    fn test_leaves_is_true_exactly_when_the_plan_decides_about_a_unit() {
+        let tombstone = {
+            let mut unit = fixtures::desired("cache", "Command", json!({}), "cache");
+            unit.lifecycle = Lifecycle::Retained {
+                tombstone: Tombstone {
+                    since: "2026-09-24T10:00:00Z".parse().unwrap(),
+                    receipt: None,
+                },
+            };
+            unit
+        };
+        let pending_deletion = Deletion {
+            hold: false,
+            reason: DeletionReason::Teardown,
+            intent: DeletionIntent::Teardown,
+            teardown: Some(TeardownProgress::Pending),
+            requested: None,
+        };
+        let named = Box::leak(Box::new(BTreeSet::from([name("api")])));
+        let cases = vec![
+            ("no units", Case::new(vec![])),
+            (
+                "active units only",
+                Case::new(vec![fixtures::desired("web", "Publication", json!({}), "web")]),
+            ),
+            (
+                "a teardown",
+                Case::new(vec![teardown("network", json!({})), teardown("account", json!({}))]),
+            ),
+            (
+                "a retention",
+                Case::new(vec![deleting(
+                    "image",
+                    json!({}),
+                    DeletionReason::Omission,
+                    DeletionIntent::Retain,
+                )]),
+            ),
+            ("a tombstone nothing drops", Case::new(vec![tombstone.clone()])),
+            ("a held unit nobody names", Case::new(vec![held("api", None)])),
+            (
+                "a held unit with a pending deletion",
+                Case::new(vec![held("api", Some(pending_deletion))]),
+            ),
+        ];
+        let mut with_options = Vec::new();
+        for (label, case) in cases {
+            with_options.push((label.to_owned(), case.desired.clone(), case.drops.clone(), case.options));
+        }
+        // The same units under other invocations: a named held unit, and a release.
+        let mut named_held = Case::new(vec![held("api", None)]);
+        named_held.options.named = Some(named);
+        with_options.push((
+            "a held unit named by --unit".to_owned(),
+            named_held.desired,
+            BTreeSet::new(),
+            named_held.options,
+        ));
+        let mut release = Case::new(vec![tombstone]);
+        release.drops.insert(name("cache"));
+        with_options.push((
+            "a released unit".to_owned(),
+            release.desired,
+            release.drops,
+            release.options,
+        ));
+        for (label, desired, drops, options) in with_options {
+            let case = Case {
+                external: BTreeMap::new(),
+                desired: desired.clone(),
+                options,
+                waiting: BTreeSet::new(),
+                drops: drops.clone(),
+            };
+            let plan = case.plan();
+            let decides = !plan.ready.is_empty() || !plan.pending.is_empty();
+            assert_eq!(leaves(&desired, &drops, options), decides, "{label}: {plan:?}");
+        }
+    }
 }

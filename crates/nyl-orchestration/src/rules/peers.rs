@@ -51,8 +51,11 @@ impl Problem {
 ///
 /// A required problem keeps the cause's code, message, and fix. An advisory
 /// one is a `NYL-STATE-UNAVAILABLE` warning that names `peer`, says its
-/// consumers were not checked, and adds `nyl validate` to the fix, which
-/// reports an invalid declaration as an error.
+/// consumers were not checked, and adds `nyl validate` to the cause's own fix
+/// (access to the repository for an unreadable one, the declaration for an
+/// invalid one), because validate reports an invalid declaration as an error.
+/// `peer` may also be the synthetic name of the instances of a template that
+/// could not be listed; the cause's message says which.
 pub fn judge(need: Need, peer: &EnvironmentName, cause: Finding) -> Problem {
     match need {
         Need::Required => Problem::Error(cause),
@@ -60,7 +63,7 @@ pub fn judge(need: Need, peer: &EnvironmentName, cause: Finding) -> Problem {
             Code::StateUnavailable,
             format!("the consumers in {peer} were not checked: {}", cause.message),
             format!(
-                "{}; `nyl validate` reports an invalid declaration of {peer} as an error",
+                "{}; if a declaration is invalid, `nyl validate` reports it as an error",
                 cause.fix
             ),
         )),

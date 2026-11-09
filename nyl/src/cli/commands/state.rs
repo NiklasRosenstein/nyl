@@ -629,7 +629,11 @@ fn run_move_template(
             "list the templates with `nyl get environment-templates`",
         )));
     };
-    let Some((located, new_parent)) = crate::orchestration::project::listing_location(&inventory, declaration) else {
+    let listed = match crate::orchestration::project::listing_location(&inventory, declaration) {
+        Ok(listed) => listed,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let Some((located, new_parent)) = listed else {
         return Ok(refused(Finding::new(
             Code::InstanceNotListable,
             format!(

@@ -344,7 +344,16 @@ fn state_form_with_peers(
     let producers = if peers && options.state_revision.is_none() {
         match inspect::producer_snapshots(state, &session.resolved.name, &snapshot.desired, &session.peers()) {
             Ok(producers) => producers,
-            Err(finding) => return Ok(refused(&finding)),
+            Err(finding) => {
+                // What resolving the environment warned about still comes first.
+                let mut outcome = refused(&finding);
+                let mut warnings = String::new();
+                for warning in &session.resolved.warnings {
+                    write_finding(&mut warnings, "warning", None, warning);
+                }
+                outcome.stderr = warnings + &outcome.stderr;
+                return Ok(outcome);
+            }
         }
     } else {
         Producers::new()

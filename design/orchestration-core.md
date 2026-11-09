@@ -4680,14 +4680,23 @@ decision owns it for every command (`rules::peers::judge`, read through
 - A producer that cannot be read fails the consumer's run with the producer's
   error, never with a complaint about an undeclared environment. Nothing is
   executed or torn down on a guess.
-- A leaving unit needs every other environment, readable or not; with no unit
-  leaving, no other environment is read for it. Stored ownership claims are
-  checked across every environment by commands that execute units claiming
-  native resources, and an environment whose claims cannot be read refuses
-  them (`NYL-STATE-UNAVAILABLE`).
-- `nyl validate` reports every invalid declaration as an error, whichever
-  command needs the environment, so a pipeline catches what the commands that
-  do not need it tolerate.
+- A leaving unit needs every other environment, readable or not, and the
+  instances of every template: a template whose state location cannot be
+  resolved makes its instances unknown, never absent. Then the reconcile fails
+  with `NYL-STATE-UNAVAILABLE` (exit 1) and the unit stays in state. An
+  environment whose own preflight failed in the same invocation counts as
+  unreadable for this. With no unit leaving, no other environment is read for
+  it.
+- Stored ownership claims are checked across every environment before units
+  that claim native resources run, so those units are required to see every
+  environment: with one whose declaration is invalid or whose state cannot be
+  read, `reconcile -e dev` runs only when dev's units claim no native
+  resources. The refusal is `NYL-STATE-UNAVAILABLE` with the finding's own
+  message, and its fix names `nyl validate`. `exec` reads every other
+  environment's claims the same way.
+- `nyl validate` reports every invalid declaration as an error, all of them in
+  one run and whichever command needs the environment, so a pipeline catches
+  what the commands that do not need it tolerate.
 
 ### Planning
 

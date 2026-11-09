@@ -529,7 +529,7 @@ impl<'r, 'a> Session<'r, 'a> {
         Self {
             context,
             request,
-            incarnations: incarnations::StateIncarnations::over(context.base.store, &request.environments),
+            incarnations: incarnations::StateIncarnations::over(context.base.store, Peers::of(request)),
             directory,
             default_branch: OnceCell::new(),
             revisions: RefCell::new(BTreeMap::new()),
@@ -562,6 +562,25 @@ impl<'r, 'a> Session<'r, 'a> {
             return Ok(dependents);
         }
         let peers = Peers::of(self.request);
+        // An environment whose own preflight failed in this invocation has no
+        // usable state here (a reference to it reads an empty snapshot), so
+        // its consumers cannot be seen.
+        if let Some(environment) = self
+            .request
+            .unavailable
+            .iter()
+            .find(|environment| *environment != self.environment())
+        {
+            return Err(Finding::new(
+                Code::StateUnavailable,
+                format!(
+                    "the state of {environment} was not read because its own preflight failed in this invocation, so its consumers of a leaving unit cannot be checked"
+                ),
+                format!(
+                    "fix {environment} (`nyl validate` reports an invalid declaration), or run this environment on its own"
+                ),
+            ));
+        }
         for environment in peers.others(self.environment()) {
             if !self.environments.borrow().contains_key(environment) {
                 let snapshot = peers
@@ -931,12 +950,17 @@ impl<'r, 'a> Session<'r, 'a> {
                 if environment == *self.environment() || self.environments.borrow().contains_key(&environment) {
                     continue;
                 }
+                // Each consumer of an instance is named in its own error.
                 if self.request.instances.contains(&environment) {
                     errors.push(crate::rules::multi_environment::instance_producer_finding(
                         &format!("unit {}", unit.unit.name),
                         &environment,
                     ));
                     failed.insert(environment);
+                    continue;
+                }
+                // A producer is read, and fails, once per run.
+                if failed.contains(&environment) {
                     continue;
                 }
                 if self.request.unavailable.contains(&environment) {
@@ -954,11 +978,7 @@ impl<'r, 'a> Session<'r, 'a> {
                         self.environments.borrow_mut().insert(environment, snapshot);
                     }
                     Err(problem) => {
-                        let finding = problem.into_finding();
-                        // Several units can read one producer; it fails once.
-                        if !errors.contains(&finding) {
-                            errors.push(finding);
-                        }
+                        errors.push(problem.into_finding());
                         failed.insert(environment);
                     }
                 }
@@ -1002,7 +1022,22 @@ impl<'r, 'a> Session<'r, 'a> {
         held: &BTreeMap<UnitName, DesiredUnit>,
     ) -> Resolved {
         let (external_errors, failed_producers) = self.read_environments(prepared);
-        let external = self.environments.borrow();
+        // A producer that could not be read has no snapshot to resolve from:
+        // it resolves as one with no units, so its consumers' own errors are
+        // their own, and the producer's error (in `external_errors`) says why
+        // the run stops. The cache itself never holds that stand-in.
+        let cached = self.environments.borrow();
+        let stand_ins;
+        let external = if failed_producers.is_empty() {
+            &*cached
+        } else {
+            let mut merged = cached.clone();
+            for producer in &failed_producers {
+                merged.entry(producer.clone()).or_default();
+            }
+            stand_ins = merged;
+            &stand_ins
+        };
         let mut units = Self::resolution_units(prepared, held);
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
@@ -1057,24 +1092,14 @@ impl<'r, 'a> Session<'r, 'a> {
             }
             unit.provenance = resolution.provenance;
             unit.readiness = resolution.readiness;
-            // A producer that could not be read has no snapshot to resolve
-            // from, so its consumers' own errors would only repeat it as an
-            // undeclared environment: the producer's error stands instead.
-            let reads_failed_producer = !failed_producers.is_empty()
-                && crate::rules::multi_environment::dependencies(&unit.spec)
-                    .iter()
-                    .any(|environment| failed_producers.contains(environment));
-            if !resolution.errors.is_empty() && !in_shadow && !reads_failed_producer {
-                errors.insert(
-                    name.clone(),
-                    resolution
-                        .errors
-                        .iter()
-                        .map(|error| {
-                            Finding::new(error.code, format!("unit {name}: {}", error.message), error.fix.clone())
-                        })
-                        .collect(),
-                );
+            if !resolution.errors.is_empty() && !in_shadow {
+                // The unit's own errors join the producers' errors, never replace them.
+                errors
+                    .entry(name.clone())
+                    .or_default()
+                    .extend(resolution.errors.iter().map(|error| {
+                        Finding::new(error.code, format!("unit {name}: {}", error.message), error.fix.clone())
+                    }));
             }
             let fenced = prepared.desired.fenced.contains(name);
             if let (Some(mut spec), true, false) = (resolution.resolved_spec, resolution.errors.is_empty(), fenced) {

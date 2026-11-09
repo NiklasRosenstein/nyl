@@ -370,10 +370,26 @@ fn locate(
     };
     if let Some(endpoint) = &endpoint {
         local_repository_path(&inventory.project_root, endpoint).map_err(|message| {
+            // The URL comes from the GitRepository the state names, when it names one.
+            let named = environment
+                .spec
+                .state
+                .repository_ref
+                .as_ref()
+                .or_else(|| {
+                    group
+                        .filter(|_| environment.spec.state.repository.is_none())
+                        .and_then(|group| group.spec.state.repository_ref.as_ref())
+                })
+                .map(|reference| reference.name.clone());
+            let field = named.map_or_else(
+                || "spec.state.repository of the Environment, its template, or its group".to_owned(),
+                |name| format!("repoURL of GitRepository {name}"),
+            );
             Finding::new(
                 Code::StateUnavailable,
                 format!("cannot resolve the state location of {name}: {message}"),
-                "fix spec.state.repository of the Environment, its template, or its group: a file:// URL names a local path such as file:///srv/state.git",
+                format!("fix {field}: a file:// URL names a local path, an absolute path after file:// with no host"),
             )
         })?;
     }
@@ -645,11 +661,6 @@ pub fn state_tips_at(
     })
 }
 
-/// Map a finding to the CLI's error type, keeping its code and fix.
-fn finding_error(finding: &Finding) -> NylError {
-    NylError::config(format!("{}: {}\nHint: {}", finding.code, finding.message, finding.fix))
-}
-
 /// Check every declared Environment's state configuration: group overlaps
 /// and state refs that Git cannot hold together are errors; refs forges
 /// cannot protect are returned as warnings.
@@ -657,11 +668,17 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
     let (environments, _) = declared(inventory);
     let mut locations = Vec::new();
     let mut warnings = Vec::new();
+    // Every invalid declaration is reported, not the first: validation is how a
+    // pipeline learns about environments the commands that do not need them tolerate.
+    let mut invalid: Vec<Finding> = Vec::new();
     for environment in &environments {
-        let resolved =
-            resolve_environment(inventory, &environment.metadata.name).map_err(|finding| finding_error(&finding))?;
-        warnings.extend(resolved.warnings);
-        locations.push((resolved.name, resolved.location));
+        match resolve_environment(inventory, &environment.metadata.name) {
+            Ok(resolved) => {
+                warnings.extend(resolved.warnings);
+                locations.push((resolved.name, resolved.location));
+            }
+            Err(finding) => invalid.push(finding),
+        }
     }
     // Instances of a template get one state location each, wherever the
     // template puts it: two sample instances must not share one, or a second
@@ -669,32 +686,47 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
     let (_, groups) = declared(inventory);
     for template in nyl_render::gitops::instances::templates(inventory) {
         // A limit counts the instances, which only a listable location lets Nyl do.
-        if template.spec.max_instances.is_some() && listing_location(inventory, template).is_none() {
-            return Err(finding_error(&Finding::new(
-                Code::TemplateInvalid,
-                format!(
-                    "EnvironmentTemplate {} sets maxInstances, but its instances cannot be listed: its state location depends on the instance name",
-                    template.metadata.name
-                ),
-                "end spec.state.path with `{{ environment.name }}` and keep the repository and refs independent of the name, or drop maxInstances",
-            )));
+        if template.spec.max_instances.is_some() {
+            match listing_location(inventory, template) {
+                Ok(Some(_)) => {}
+                Ok(None) => invalid.push(Finding::new(
+                    Code::TemplateInvalid,
+                    format!(
+                        "EnvironmentTemplate {} sets maxInstances, but its instances cannot be listed: its state location depends on the instance name",
+                        template.metadata.name
+                    ),
+                    "end spec.state.path with `{{ environment.name }}` and keep the repository and refs independent of the name, or drop maxInstances",
+                )),
+                // The samples below report the unresolvable location.
+                Err(_) => {}
+            }
         }
         let mut sampled = Vec::new();
         for (name, _) in nyl_render::gitops::instances::sample_instances(template) {
-            let state = nyl_render::gitops::instances::instance_state(template, &name)
-                .map_err(|finding| finding_error(&finding))?;
-            let mut skeleton = template.environment_skeleton(name.as_str());
-            skeleton.spec.state = state;
-            let located = locate(inventory, &skeleton, &groups).map_err(|finding| finding_error(&finding))?;
-            warnings.extend(located.warnings.clone());
-            sampled.push((located.name, located.location));
+            let located = nyl_render::gitops::instances::instance_state(template, &name).and_then(|state| {
+                let mut skeleton = template.environment_skeleton(name.as_str());
+                skeleton.spec.state = state;
+                locate(inventory, &skeleton, &groups)
+            });
+            match located {
+                Ok(located) => {
+                    warnings.extend(located.warnings.clone());
+                    sampled.push((located.name, located.location));
+                }
+                Err(finding) => {
+                    // Two samples fail alike; one finding says it.
+                    if !invalid.contains(&finding) {
+                        invalid.push(finding);
+                    }
+                }
+            }
         }
         if let [(first, left), (second, right)] = sampled.as_slice() {
             if left.repository == right.repository
                 && left.path == right.path
                 && (left.desired_ref == right.desired_ref || left.observed_ref == right.observed_ref)
             {
-                return Err(finding_error(&Finding::new(
+                invalid.push(Finding::new(
                     Code::TemplateInvalid,
                     format!(
                         "EnvironmentTemplate {} gives instances {first} and {second} the same state location {}",
@@ -702,16 +734,23 @@ pub fn validate_environments(inventory: &GitOpsInventory) -> Result<Vec<Finding>
                         nyl_orchestration::rules::state_location::describe(left)
                     ),
                     "set spec.state.path to `{{ environment.name }}`, or refs that read environment.name",
-                )));
+                ));
             }
         }
         locations.extend(sampled);
     }
-    let conflicts = nyl_orchestration::rules::state_location::ref_conflicts(&locations);
-    if let Some(conflict) = conflicts.first() {
-        return Err(finding_error(conflict));
+    invalid.extend(nyl_orchestration::rules::state_location::ref_conflicts(&locations));
+    if invalid.is_empty() {
+        Ok(warnings)
+    } else {
+        Err(NylError::config(
+            invalid
+                .iter()
+                .map(|finding| format!("{}: {}\nHint: {}", finding.code, finding.message, finding.fix))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
     }
-    Ok(warnings)
 }
 
 /// Sample instances of every template the project declares, which
@@ -811,8 +850,25 @@ pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> Listing {
     let mut listing = Listing::default();
     let (declared_environments, _) = declared(inventory);
     for template in nyl_render::gitops::instances::templates(inventory) {
-        let Some((located, parent_location)) = listing_location(inventory, template) else {
-            continue;
+        let (located, parent_location) = match listing_location(inventory, template) {
+            Ok(Some(found)) => found,
+            // Found by name only: there is no one location to list.
+            Ok(None) => continue,
+            // Instances at a location that cannot be resolved are unknown, not
+            // absent, so the checks across environments fail closed.
+            Err(finding) => {
+                listing.warnings.push(Finding::new(
+                    Code::StateUnavailable,
+                    format!(
+                        "cannot list the instances of EnvironmentTemplate {}: {}",
+                        template.metadata.name, finding.message
+                    ),
+                    finding.fix.clone(),
+                ));
+                listing.unavailable.push(template.metadata.name.clone());
+                listing.invalid.insert(template.metadata.name.clone(), finding);
+                continue;
+            }
         };
         let records = open_store_mode(inventory, &located, None, offline)
             .map_err(|error| error.to_string())
@@ -881,25 +937,31 @@ pub fn list_instances(inventory: &GitOpsInventory, offline: bool) -> Listing {
 /// them all: the template's state location for a sentinel name, and the
 /// directory of that location whose records are the instances. `None` when
 /// the refs or the repository depend on the instance name, or `state.path`
-/// does not end in it, so the instances are found by name only.
+/// does not end in it, so the instances are found by name only. `Err` when
+/// the template's state location cannot be resolved at all, such as a state
+/// URL that is not a URL: its instances are then unknown, never absent.
 pub fn listing_location(
     inventory: &GitOpsInventory,
     template: &EnvironmentTemplate,
-) -> Option<(ResolvedEnvironment, StateLocation)> {
-    let sentinel = EnvironmentName::new(SENTINEL_NAME).ok()?;
+) -> std::result::Result<Option<(ResolvedEnvironment, StateLocation)>, Finding> {
+    let Ok(sentinel) = EnvironmentName::new(SENTINEL_NAME) else {
+        return Ok(None);
+    };
     let (_, groups) = declared(inventory);
-    let state = nyl_render::gitops::instances::instance_state(template, &sentinel).ok()?;
+    let state = nyl_render::gitops::instances::instance_state(template, &sentinel)?;
     let mut skeleton = template.environment_skeleton(SENTINEL_NAME);
     skeleton.spec.state = state;
-    let located = locate(inventory, &skeleton, &groups).ok()?;
+    let located = locate(inventory, &skeleton, &groups)?;
     let location = &located.location;
     let by_name = [&location.repository, &location.desired_ref, &location.observed_ref]
         .iter()
         .any(|part| part.contains(SENTINEL_NAME));
-    let parent = location.path.strip_suffix(SENTINEL_NAME).filter(|_| !by_name)?;
+    let Some(parent) = location.path.strip_suffix(SENTINEL_NAME).filter(|_| !by_name) else {
+        return Ok(None);
+    };
     let mut parent_location = location.clone();
     parent.trim_matches('/').clone_into(&mut parent_location.path);
-    Some((located, parent_location))
+    Ok(Some((located, parent_location)))
 }
 
 /// What listing the instances of every template found.
@@ -914,4 +976,7 @@ pub struct Listing {
     /// Templates whose state location could not be read: their instances are
     /// unknown, so a check across environments must treat them as unavailable.
     pub unavailable: Vec<String>,
+    /// The templates among `unavailable` whose state location cannot be
+    /// resolved, with the finding of resolving it. The others could not be read.
+    pub invalid: BTreeMap<String, Finding>,
 }

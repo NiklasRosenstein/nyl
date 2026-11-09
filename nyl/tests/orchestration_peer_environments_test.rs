@@ -216,6 +216,37 @@ fn test_validate_reports_a_malformed_state_url_and_an_undeclared_repository() {
     }
 }
 
+/// `nyl validate` reports every invalid environment declaration, not the
+/// first it finds, and a template whose state URL is malformed too. Catches a
+/// pipeline that fixes one declaration per run.
+#[test]
+fn test_validate_reports_every_invalid_environment_declaration() {
+    let nowhere = tempfile::TempDir::new().unwrap();
+    let [_, undeclared, malformed] = broken_states(nowhere.path());
+    let cross = Cross::new();
+    cross.declare("stage", &undeclared.1);
+    cross.declare("qa", &malformed.1);
+    cross.shell.world.commit_files(
+        "main",
+        "declare a preview template",
+        &[("nyl/preview.yaml", BROKEN_TEMPLATE)],
+    );
+    let clone = cross.shell.world.fresh_clone("main");
+    let validate = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .args(["validate", "nyl"])
+        .current_dir(&clone)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&validate.get_output().stderr).into_owned();
+    for culprit in ["stage", "qa", "preview"] {
+        assert!(
+            stderr.contains(&format!("state location of {culprit}"))
+                || stderr.contains(&format!("EnvironmentTemplate {culprit}")),
+            "{culprit}: {stderr}"
+        );
+    }
+}
+
 /// A unit that leaves its environment may be read by a consumer in any other
 /// environment, so then every other environment is required: one whose state
 /// cannot be read is an error and nothing is torn down on a guess. Catches a
@@ -239,4 +270,156 @@ fn test_a_leaving_unit_requires_every_other_environment() {
     let plan = cross.shell.invoke(&["plan", "-e", "dev", "-o", "json"]);
     assert_eq!(plan.exit, 1, "{}", plan.stderr);
     assert_eq!(unavailable(&plan, "errors", "prod").len(), 1, "{}", plan.stderr);
+}
+
+/// A preview template whose state URL is not a URL.
+const BROKEN_TEMPLATE: &str = "\
+apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata: {name: preview}
+spec:
+  parameters:
+    pr: {type: integer}
+  unitSelector: {matchLabels: {preview: 'true'}}
+  state:
+    repository: {repoURL: 'file://bad host/previews.git'}
+    desiredRef: nyl/previews
+    observedRef: nyl/previews
+    path: '{{ environment.name }}'
+  allowUnprotectedSource: true
+";
+
+/// `dev`'s `lb` leaves the source, and `prod`'s `dns` is reconciled so that it
+/// no longer reads it.
+fn retire_lb(cross: &Cross) {
+    let dns_only = scenario::cross::CROSS_UNITS.split("---\n").nth(1).unwrap().replace(
+        "fromUnit: {environment: dev, unit: lb, observation: ip}",
+        "value: static",
+    );
+    cross.shell.world.commit_files(
+        "main",
+        "drop lb and its consumer's reference",
+        &[("nyl/units.yaml", &dns_only)],
+    );
+    let prod = cross.shell.invoke(&["reconcile", "-e", "prod"]);
+    assert_eq!(prod.exit, 0, "{}", prod.stderr);
+}
+
+fn dev_holds_lb(cross: &Cross) -> bool {
+    let table = cross.shell.invoke(&["get", "units", "-e", "dev"]);
+    assert_eq!(table.exit, 0, "{}", table.stderr);
+    table.stdout.lines().any(|line| line.starts_with("lb"))
+}
+
+/// A leaving unit is torn down only after every other environment, and every
+/// instance of every template, has been read for consumers. An environment or
+/// a template whose state location cannot be resolved hides its consumers, so
+/// `reconcile --allow-teardown` refuses and the unit stays in state, while the
+/// same run with nothing broken tears it down. Catches a template that
+/// disappears from instance listing when its state URL is malformed, which
+/// lets a producer that preview instances consume be torn down.
+#[test]
+fn test_a_teardown_is_refused_while_an_environment_or_template_that_may_consume_it_cannot_be_read() {
+    let nowhere = tempfile::TempDir::new().unwrap();
+    let (_, state) = broken_states(nowhere.path()).into_iter().last().unwrap();
+
+    let control = Cross::new();
+    retire_lb(&control);
+    let run = control
+        .shell
+        .invoke(&["reconcile", "-e", "dev", "--allow-teardown", "-o", "json"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert!(!dev_holds_lb(&control), "the unit is torn down when nothing is broken");
+
+    for (kind, culprit) in [("environment", "prod"), ("template", "preview")] {
+        let cross = Cross::new();
+        retire_lb(&cross);
+        if kind == "environment" {
+            cross.declare("prod", &state);
+        } else {
+            cross.shell.world.commit_files(
+                "main",
+                "declare a preview template",
+                &[("nyl/preview.yaml", BROKEN_TEMPLATE)],
+            );
+        }
+        let run = cross
+            .shell
+            .invoke(&["reconcile", "-e", "dev", "--allow-teardown", "-o", "json"]);
+        assert_eq!(run.exit, 1, "{kind}: {}", run.stderr);
+        assert_eq!(unavailable(&run, "errors", culprit).len(), 1, "{kind}: {}", run.stderr);
+        assert!(dev_holds_lb(&cross), "{kind}: the unit stays in state");
+    }
+}
+
+/// An environment whose own preflight failed in the same invocation reads as
+/// an empty snapshot to the references of the others, but its stored consumers
+/// still protect a leaving producer, so the teardown is refused instead of
+/// proceeding without seeing them.
+#[test]
+fn test_a_teardown_is_refused_while_a_selected_consumer_failed_its_preflight() {
+    let cross = Cross::new();
+    // `lb` leaves dev's source while prod's `dns` still reads it, which fails prod's preflight.
+    let dns_only = scenario::cross::CROSS_UNITS.split("---\n").nth(1).unwrap();
+    cross
+        .shell
+        .world
+        .commit_files("main", "drop lb", &[("nyl/units.yaml", dns_only)]);
+    let run = cross
+        .shell
+        .invoke(&["reconcile", "-e", "dev", "-e", "prod", "--allow-teardown", "-o", "json"]);
+    let dev = run.report["environments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|environment| environment["name"] == "dev")
+        .unwrap();
+    assert_eq!(dev["exit"], 1, "{}", run.stderr);
+    assert!(
+        dev["errors"].as_array().unwrap().iter().any(
+            |error| error["code"] == "NYL-STATE-UNAVAILABLE" && error["message"].as_str().unwrap().contains("prod")
+        ),
+        "{dev}"
+    );
+    assert!(dev_holds_lb(&cross), "the unit stays in state");
+}
+
+/// Units that claim native resources are checked against the stored claims of
+/// every environment, so one whose declaration cannot be used refuses them,
+/// with the finding's own message and a pointer to `nyl validate`; units that
+/// claim nothing (the `Command` units above) run regardless. Catches claims
+/// that go unchecked, and a refusal that blames unavailable state for an
+/// invalid declaration.
+#[test]
+fn test_a_resource_claiming_unit_is_refused_while_another_environment_cannot_be_resolved() {
+    let nowhere = tempfile::TempDir::new().unwrap();
+    let (_, state) = broken_states(nowhere.path()).into_iter().last().unwrap();
+    let claiming = "apiVersion: units.gitops.nyl/v1\nkind: OpenTofu\nmetadata:\n  name: network\n  labels: {dev: 'true'}\nspec:\n  source: {path: ../infra}\n  backend: {path: '%SCENARIO_TMP%/network.tfstate'}\n";
+    let project = scenario::shell::project(&[
+        scenario::shell::NYL_TOML,
+        ("nyl/dev.yaml", &environment("dev", "")),
+        ("nyl/stage.yaml", &environment("stage", &state)),
+        ("nyl/network.yaml", claiming),
+        ("infra/main.tf", "# fake infrastructure source\n"),
+    ]);
+    let harness = scenario::shell::Harness::new(project.path(), true);
+    let init = harness.invoke(&["state", "init", "-e", "dev"]);
+    assert_eq!(init.exit, 0, "{}", init.stderr);
+    let run = harness.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(run.exit, 1, "{}", run.stderr);
+    let errors = findings(&run, "errors");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let message = errors[0]["message"].as_str().unwrap();
+    assert!(
+        errors[0]["code"] == "NYL-STATE-UNAVAILABLE"
+            && message.contains("invalid local state repository URL")
+            && !message.contains("state is unavailable"),
+        "{}",
+        errors[0]
+    );
+    assert!(
+        errors[0]["fix"].as_str().unwrap().contains("nyl validate"),
+        "{}",
+        errors[0]
+    );
 }

@@ -186,7 +186,7 @@ fn known_instances(
     nyl_core::orchestration::instance::Instances,
     BTreeMap<String, Finding>,
     Vec<String>,
-    Vec<String>,
+    Vec<(String, String)>,
     Expiries,
 ) {
     let (declared_environments, _) = declared(inventory);
@@ -195,7 +195,17 @@ fn known_instances(
     let mut errors = BTreeMap::new();
     let mut undeclared = Vec::new();
     let listing = super::project::list_instances(inventory, offline);
-    let unlisted = listing.unavailable;
+    let unlisted: Vec<(String, String)> = listing
+        .unavailable
+        .iter()
+        .map(|template| {
+            let why = listing.invalid.get(template).map_or_else(
+                || "its state could not be read".to_owned(),
+                |cause| cause.message.clone(),
+            );
+            (template.clone(), why)
+        })
+        .collect();
     for instance in listing.instances {
         expiries.insert(
             instance.name.clone(),
@@ -269,14 +279,23 @@ fn ownership_preflight(
     errors: &mut BTreeMap<String, Finding>,
     drivers: &nyl_core::orchestration::driver::DriverSet,
     hint: &dyn Fn(&str) -> InstanceRequest,
-    unlisted: &[String],
+    unlisted: &[(String, String)],
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
-    // Instances that could not be listed hold claims nobody can check.
-    let mut unknown = unlisted
+    // What keeps an environment's stored claims from being read, with the
+    // finding's own message and fix: its declaration cannot be used, or its
+    // state cannot be read. Instances that could not be listed hold claims
+    // nobody can check.
+    let mut unknown: Vec<Finding> = unlisted
         .iter()
-        .map(|template| format!("the instances of EnvironmentTemplate {template}"))
-        .collect::<Vec<_>>();
+        .map(|(template, why)| {
+            Finding::new(
+                Code::StateUnavailable,
+                format!("the instances of EnvironmentTemplate {template} could not be listed: {why}"),
+                "check access to the template's state repository",
+            )
+        })
+        .collect();
     for name in nyl_render::gitops::instances::environment_names(inventory)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?
     {
@@ -284,7 +303,12 @@ fn ownership_preflight(
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
             }
-            Err(_) => unknown.push(name.to_string()),
+            Err(Stop::Finding(finding)) => unknown.push(finding),
+            Err(Stop::Error(error)) => unknown.push(Finding::new(
+                Code::StateUnavailable,
+                format!("cannot read the state of {name}: {error}"),
+                "check access to the environment's state",
+            )),
         }
     }
     if let Some(finding) =
@@ -295,17 +319,28 @@ fn ownership_preflight(
         return Err(finding.into());
     }
     if !unknown.is_empty() {
+        let message = format!(
+            "cannot check the stored resource ownership claims of every environment: {}",
+            unknown
+                .iter()
+                .map(|finding| finding.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        let mut fixes: Vec<&str> = Vec::new();
+        for finding in &unknown {
+            if !fixes.contains(&finding.fix.as_str()) {
+                fixes.push(finding.fix.as_str());
+            }
+        }
+        let fix = format!(
+            "{}; `nyl validate` reports an invalid declaration. Units that claim native resources run once every environment's state can be read",
+            fixes.join("; ")
+        );
         for owner in nyl_orchestration::rules::desired::scope_owners(sources, drivers) {
-            errors.entry(owner.to_string()).or_insert_with(|| {
-                Finding::new(
-                    Code::StateUnavailable,
-                    format!(
-                        "cannot check stored resource ownership claims of environments {}: state is unavailable",
-                        unknown.join(", ")
-                    ),
-                    "restore access before running units that claim native resources",
-                )
-            });
+            errors
+                .entry(owner.to_string())
+                .or_insert_with(|| Finding::new(Code::StateUnavailable, message.clone(), fix.clone()));
         }
     }
     Ok(())

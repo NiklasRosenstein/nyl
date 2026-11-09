@@ -648,6 +648,19 @@ not a URL, a `repositoryRef` that names no GitRepository, a repository that
 cannot be read, and an environment nobody declares count alike. A broken
 declaration of an environment a command does not read never fails it:
 `nyl reconcile -e dev`, `nyl plan -e dev`, `nyl status -e dev`, and
-`nyl observe -e dev` run while the state URL of `prod` is malformed.
+`nyl observe -e dev` run while the state URL of `prod` is malformed, with
+two exceptions that follow from what they need:
+
+- A unit that is leaving needs the consumers in every other environment and
+  in every instance of every template, so with one of them unusable, the
+  reconcile fails with `NYL-STATE-UNAVAILABLE` (exit 1) and the unit stays in
+  state. A template whose state URL is malformed counts: its instances are
+  unknown, not absent.
+- Units that claim native resources, such as OpenTofu, are checked against the
+  stored claims of every environment. With one environment's declaration
+  invalid, `reconcile -e dev` runs only when dev's units claim no native
+  resources; otherwise it fails with the invalid declaration's own message,
+  and its fix names `nyl validate`.
+
 [`nyl validate`](/nyl/reference/cli/validate/) reports every invalid
-declaration as an error, so a pipeline catches it anyway.
+declaration as an error, all of them in one run, so a pipeline catches them.
