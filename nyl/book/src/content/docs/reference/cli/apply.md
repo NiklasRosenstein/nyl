@@ -188,16 +188,24 @@ Helm annotation is not read. `helm.sh/hook-delete-policy` is read next to
 runs by sync wave (`argocd.argoproj.io/sync-wave`, else `helm.sh/hook-weight`, else
 0; lowest first), then by kind (the order above), then by name. The `Sync` phase holds
 the ordinary resources and the `Sync` hooks, so sync waves order ordinary resources
-too. Each step (a phase and a wave) must finish before the next starts:
+too. A Namespace, and a CustomResourceDefinition, applies in the phase and wave of
+the first document that needs it when that comes earlier: a document in the
+Namespace, or an object of the kind the CRD defines, a hook included. A custom
+resource of sync wave `-1` therefore gets its CRD and its Namespace first, though
+both declare no wave, as in Argo CD. Each step (a phase and a wave) must finish
+before the next starts:
 
-- A hook has finished when a Job has completed or a Pod has succeeded; a workload
-  hook when it is healthy; a hook of any other kind once it exists. A hook that is
-  deleted before it finishes has failed.
+- A hook has finished when a Job has completed, a Pod has succeeded, or an Argo
+  Workflow has succeeded; a workload hook when it is healthy; a hook of any other
+  kind once it exists. A hook that is deleted before it finishes has failed.
 - Before a step is followed by another, the workloads it applied (Deployments,
-  StatefulSets, DaemonSets, ReplicaSets, Jobs, Pods) must be healthy, as for
-  `kubectl rollout status`. That is why `PostSync` hooks start only after the
-  `Sync` phase is healthy. Kinds without a health check count as healthy once
-  applied.
+  StatefulSets, DaemonSets, ReplicaSets, Jobs, Pods, Argo Workflows) must be
+  healthy, as for `kubectl rollout status`. That is why `PostSync` hooks start only
+  after the `Sync` phase is healthy. In a sync of more than one step the last step
+  waits for them too when it holds a hook; the last step of ordinary resources
+  alone is done once they are applied, and a Release of one step waits for nothing.
+  Kinds without a health check count as healthy once applied. A workload that
+  cannot be read is waited for until the wait runs out; one that is gone is not.
 - A Release without hooks or sync waves is one step: nothing waits for a rollout.
 
 **Failure.** A failed resource, a failed hook, or a wait that ran out fails the sync
@@ -216,10 +224,19 @@ until its policy deletes it.
 
 **Hooks are not owned.** The revision's manifest holds the hooks, so `release
 rollback` runs them again, but the revision does not track them: `apply` never prunes
-a hook, `release delete` and a purge never delete one, and
-[`detect-drift`](/nyl/reference/cli/detect-drift/) and the health reading never
-compare one. A hook that an earlier Nyl tracked as an ordinary resource is no longer
-pruned once it is a hook.
+a hook, and [`detect-drift`](/nyl/reference/cli/detect-drift/) and the health reading
+never compare one. A hook that an earlier Nyl tracked as an ordinary resource is no
+longer pruned once it is a hook. `release delete --purge` and a teardown do delete
+the hooks the latest revision's manifest holds, with the rest of the Release: what a
+hook left behind (a finished Job, a hook ServiceAccount or Role) would otherwise
+outlive it.
+
+**The hook finalizer.** Nyl creates a hook with Argo CD's
+`argocd.argoproj.io/hook-finalizer`, and removes it once it has seen how the hook
+ended, or when the hook is deleted or purged, so a Job with a small
+`ttlSecondsAfterFinished` is still there to be read when it finishes. If Nyl is
+interrupted while a hook runs, it removes the finalizer on the way out; if it cannot
+(the cluster is unreachable), the next sync or purge of that hook removes it first.
 
 **When hooks run.** Every apply runs every hook, as every Argo CD sync does,
 including an apply that changed nothing and so records no new revision (see above):
@@ -228,31 +245,37 @@ is written. `release rollback` runs the hooks of the revision it applies. Make h
 safe to run twice.
 
 **Hooks left out.** Hooks that name no sync phase are not applied, as Argo CD does
-not sync them, and `nyl apply` warns once per Release with
-`NYL-KUBERNETES-HOOK-IGNORED`, naming them. The fix is to remove the annotation or
-give the hook a phase Argo CD syncs; `Skip` leaves a document out without the
-warning. Hooks Argo CD runs when it removes an Application (`PreDelete`,
-`PostDelete`, `pre-delete`, `post-delete`) are not run by Nyl when it removes a
-Release: `release delete` warns with the same code and the purge goes ahead.
+not sync them. Helm's `test` hook and the rollback hooks (`pre-rollback`,
+`post-rollback`) are left out silently, as Argo CD leaves them out: every chart made
+by `helm create` declares a `test` hook, and it changes nothing here. [`nyl
+diff`](/nyl/reference/cli/diff/#hooks) lists them, for information. Hooks Argo CD runs
+when it removes an Application (`PreDelete`, `PostDelete`, `pre-delete`,
+`post-delete`) are never run by Nyl when it removes a Release, and that matters:
+`nyl apply` warns once per Release with `NYL-KUBERNETES-HOOK-IGNORED`, naming them,
+and `release delete --purge` warns too, before it goes ahead. To act on the warning,
+do what the hook does yourself before the Release is removed, drop the hook from the
+Release, or mark it `argocd.argoproj.io/hook: Skip`, which leaves it out of Argo CD's
+sync as well and ends the warning.
 
 **Where Nyl differs from Argo CD.**
 
-- Nyl does not add Argo CD's hook finalizer to hook objects, and it does not wait
-  two seconds between sync waves: it reads the workloads' `observedGeneration`.
-- Argo CD reads the health of more kinds than Nyl does between waves (a Service of
-  type `LoadBalancer`, an Ingress, a PersistentVolumeClaim); Nyl reads workloads and
-  Pods only, and counts any other kind as healthy once applied.
+- Nyl does not wait two seconds between sync waves: it reads the workloads'
+  `observedGeneration`.
+- Argo CD reads the health of more kinds than Nyl does between waves, and runs custom
+  Lua health checks. Nyl reads Deployments, StatefulSets, DaemonSets, ReplicaSets,
+  Jobs, Pods, and Argo Workflows, and counts any other kind as healthy once applied:
+  a Service of type `LoadBalancer`, an Ingress, a PersistentVolumeClaim, an
+  APIService, and a HorizontalPodAutoscaler are not waited for.
 - Nyl bounds each wait with `--hook-timeout` (ten minutes by default); Argo CD waits
   until the sync is terminated. A hook still running when the apply is interrupted
-  (Ctrl-C) keeps running.
+  (Ctrl-C) keeps running; Nyl removes its finalizer, and the hook is deleted by its
+  policy at the next sync.
 - A hook needs a `metadata.name`; `generateName` is not supported.
-- A `PreSync` hook runs before the Release's Namespace object is applied. `nyl apply`
-  creates the release's own namespace first, where Argo CD would fail without
-  `CreateNamespace=true`; keep hooks of a Release that must work under both in a
-  namespace that exists, or make them `PostSync`.
-- Argo CD applies a `Sync` hook and an ordinary resource of one wave in one kind
-  order; Nyl does too, but a CustomResourceDefinition or Namespace of a later wave
-  is not moved ahead of an earlier one.
+- `nyl apply` creates the Release's own destination namespace before the first step,
+  so a hook of the first step can run in it though the Release declares no Namespace
+  object. A Namespace the Release declares is applied with its first dependent, as
+  above. Whether the same hook finds its namespace under Argo CD depends on how the
+  namespace is created there.
 
 ## Which kinds are namespaced
 

@@ -84,10 +84,13 @@ They share one implementation, so a Release is applied the same way by each:
   otherwise (`HookSucceeded` after a good sync, `HookFailed` after a failed one).
 - Helm hooks map as Argo CD maps them: `pre-install` and `pre-upgrade` to `PreSync`,
   `post-install` and `post-upgrade` to `PostSync`; `crd-install` documents are
-  ordinary resources; hooks with no sync phase (`test`, `pre-delete`, `post-delete`,
-  `pre-rollback`, `post-rollback`) are left out with a warning.
-- Hooks are not owned objects: they are not pruned, purged, or compared, and a hook
-  that is gone is not drift.
+  ordinary resources; hooks with no sync phase are left out: `test` and the rollback
+  hooks silently, delete hooks (`pre-delete`, `post-delete`, `PreDelete`,
+  `PostDelete`), which Nyl never runs, with a warning.
+- Hooks are not owned objects: they are not pruned or compared, and a hook that is
+  gone is not drift. A purge of the Release deletes them with the rest.
+- A Namespace or CustomResourceDefinition applies in the step of the first document
+  that needs it when that comes earlier, as in Argo CD.
 
 A Release that declares no waves or hooks is applied in one step, as before. The
 rules, the waits, the failure behavior, and where Nyl differs from Argo CD are in

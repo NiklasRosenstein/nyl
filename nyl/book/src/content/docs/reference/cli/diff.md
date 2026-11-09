@@ -156,8 +156,11 @@ Hooks that would run:
 Summary: 0 to add, 0 to modify, 0 to delete, 1 unchanged
 ```
 
-Hooks that name no sync phase are left out, with the warning
-`NYL-KUBERNETES-HOOK-IGNORED` once for the Release; see
+Hooks that name no sync phase are left out of the apply. Helm's `test` hook and the
+rollback hooks are listed after the hooks that would run, for information, under
+"Hooks left out"; delete hooks (`PreDelete`, `PostDelete`, `pre-delete`,
+`post-delete`), which Nyl never runs, get the warning `NYL-KUBERNETES-HOOK-IGNORED`
+once for the Release. See
 [Hooks left out](/nyl/reference/cli/apply/#hooks-and-sync-waves).
 
 Before the first apply, every resource is new, including the managed Namespaces

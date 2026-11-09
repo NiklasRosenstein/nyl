@@ -147,10 +147,12 @@ such as managed Namespaces, unless `--confirm-delete` is passed. See
 - `--take-over` - Delete a release an environment owns anyway (see [`nyl apply --take-over`](/nyl/reference/cli/apply/)). Resources are deleted in reverse apply order, waiting for each kind to terminate before the next, as a prune does.
 - `--dry-run` - Show what would be deleted without deleting it
 
-A purge deletes the objects the release tracks, never its hooks (the revision does not
-track them), and runs none: Argo CD runs `PreDelete` and `PostDelete` hooks when it
-removes an Application, and Nyl does not when it removes a Release. When the latest
-revision declares such a hook, the command warns with `NYL-KUBERNETES-HOOK-IGNORED`,
+A purge deletes the objects the release tracks and the hooks the latest revision's
+manifest holds, which no revision tracks: a finished hook Job, or a ServiceAccount or
+Role a hook created, would otherwise outlive the release. It runs no hook: Argo CD runs
+`PreDelete` and `PostDelete` hooks when it removes an Application, and Nyl does not
+when it removes a Release. When the latest revision declares such a hook (or Helm's
+`pre-delete` or `post-delete`), the command warns with `NYL-KUBERNETES-HOOK-IGNORED`,
 naming it, and goes ahead.
 
 ## See Also

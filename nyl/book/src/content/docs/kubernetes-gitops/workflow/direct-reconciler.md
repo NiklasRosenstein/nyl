@@ -104,18 +104,24 @@ implementation with the unit.
   does not run again for that.
 - **What the revision holds.** The recorded manifest holds the hooks, so
   `nyl release rollback` of a Release the unit applied runs them again; the tracked
-  keys do not, so a hook is never pruned, never purged by a teardown, and never read
-  as a workload by `nyl attest` or the health reading.
+  keys do not, so a hook is never pruned and never read as a workload by `nyl attest`
+  or the health reading. A teardown, and the purge of a Release that left the tree,
+  delete the hooks the latest revision's manifest holds with the rest of the Release,
+  so a finished hook Job does not outlive it.
 - **Failure.** A failed hook, or a wait that exceeds the unit's deadline, fails the
-  unit as a retryable `tool-error` or `timeout`, naming the Release and the hook; Git
-  stays ahead and the next execution applies again. The unit waits for hooks and
-  workloads until its deadline (`timeout`), not for the ten minutes of
-  `nyl apply --hook-timeout`.
+  unit as a retryable `tool-error`, naming the Release and the hook (a `timeout` when the
+  deadline still cuts the execution short); Git stays ahead and the next execution
+  applies again. The unit waits for hooks and workloads until its
+  deadline less a margin (at most thirty seconds), not for the ten minutes of
+  `nyl apply --hook-timeout`. A hook that hangs therefore fails the sync as it does under
+  `nyl apply`: the `SyncFail` hooks run, the `HookFailed` policy deletes what it names,
+  and the revision is recorded `Failed`, before the deadline cuts the execution short.
 - **Hooks left out.** Hooks with no sync phase (Helm's `test`, `pre-delete`,
   `post-delete`, and the rollback hooks, Argo CD's `PreDelete` and `PostDelete`) are
-  not applied; each execution warns once per Release with
-  `NYL-KUBERNETES-HOOK-IGNORED`. Nyl does not run delete hooks when a teardown
-  removes a Release.
+  not applied. Helm's `test` and the rollback hooks are left out silently, as in Argo CD.
+  Delete hooks are never run: Nyl does not run them when a teardown removes a Release,
+  and each execution warns once per Release with `NYL-KUBERNETES-HOOK-IGNORED`, which
+  stays while the Release declares one.
 
 ## Unchanged Releases
 
@@ -123,7 +129,9 @@ Every reconcile applies every Release, and runs its [hooks](#hooks) again, which
 repairs anything changed in the
 cluster by hand, except a Job that sets `ttlSecondsAfterFinished`, is gone from the
 cluster, and has the document the Release's latest `Deployed` revision for this
-publication holds: it ran and its TTL removed it, and applying it again would run it again. It stays tracked, and the Release
+publication holds: it ran and its TTL removed it, and applying it again would run it again.
+A [hook](#hooks) Job is not that Job: it runs on every execution, and so again on a drift
+repair, as a self-healing Argo CD runs it again. It stays tracked, and the Release
 is judged unchanged without it. A Release that changed nothing does not record a new release
 revision, so the history keeps its useful revisions instead of filling with
 copies of one. A Release is unchanged when its latest revision is `Deployed`
@@ -199,7 +207,8 @@ deleted and keeps the recorded revision, so a repair that changed nothing in the
 state records no revision. A Job its TTL removed is not applied again, here or in any
 other reconcile, while its document is the one the Release's latest `Deployed` revision
 for this publication holds (a later `Failed` revision does not matter): it would run a
-second time. A Job whose document changed is applied.
+second time. A Job whose document changed is applied. A hook is not a Job of this rule:
+the repair runs the hooks again, as an Argo CD self-heal sync does.
 
 ## Fencing and manual changes
 

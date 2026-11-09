@@ -1750,25 +1750,56 @@ follow Argo CD's gitops-engine (`pkg/sync/hook`, `pkg/sync/sync_tasks.go`,
   `pre-install` and `pre-upgrade` run as `PreSync`, `post-install` and `post-upgrade`
   as `PostSync`. `crd-install` is an ordinary resource and `Skip` alone is never
   applied. A hook with no sync phase (Helm `test`, `pre-delete`, `post-delete`,
-  `pre-rollback`, `post-rollback`; Argo CD `PreDelete`, `PostDelete`) is left out and
-  reported once per Release as the warning `NYL-KUBERNETES-HOOK-IGNORED`
-  (`ApplyEvent::HooksIgnored`; the driver turns it into a `Finding`). Delete policies
+  `pre-rollback`, `post-rollback`; Argo CD `PreDelete`, `PostDelete`) is left out of the
+  apply. Only the delete hooks among them (`pre-delete`, `post-delete`, `PreDelete`,
+  `PostDelete`) are reported, once per Release, as the warning
+  `NYL-KUBERNETES-HOOK-IGNORED` (`ApplyEvent::DeleteHooksIgnored` carries the
+  `Finding`, which the driver adds to its warnings), because Argo CD would run them
+  when it removes the Release and Nyl never does. `test` and the rollback hooks are
+  left out silently, as Argo CD leaves them out (`nyl diff` lists them for
+  information); every `helm create` chart declares a `test` hook. Delete policies
   are read from both vocabularies and merged; none means `BeforeHookCreation`.
 - **Steps.** A sync is the ascending `(phase, wave)` steps of `PreSync`, `Sync`, and
   `PostSync`. The wave is `argocd.argoproj.io/sync-wave`, else `helm.sh/hook-weight`,
   else 0, for hooks and ordinary resources alike. A step applies its documents by the
   kind order (`ResourceOrdering`, then name for hooks), one concurrent batch per
-  kind. A Release without hooks or waves is one step, applied as before.
-- **Waits.** A step finishes when its hooks have: a Job or Pod succeeded, a workload
-  healthy, any other kind created; a hook deleted meanwhile failed. When a later step
-  follows, the workloads the step applied (Deployment, StatefulSet, DaemonSet,
-  ReplicaSet, Job, Pod) must be healthy by the rules of the Health table in
-  [Reading](#reading) (the reader itself does not read Pods), which is how `PostSync`
-  waits for the `Sync` phase. A Pod is healthy once it `Succeeded`, or is `Running` and
-  ready with `restartPolicy: Always`, and failed when it `Failed`. Each wait is
-  bounded by `WaitSettings`: `nyl apply` takes `--hook-timeout` (ten minutes by
-  default); the driver passes none and relies on the unit's deadline, which interrupts
-  the apply.
+  kind. A Release without hooks or waves is one step, applied as before. A Namespace
+  and a CustomResourceDefinition apply in the step of their first dependent when it
+  is earlier (`hooks::resource_slots`, Argo CD's `adjustDeps`): a document in the
+  Namespace, or one of the kind the CRD defines (`spec.group`, `spec.names.kind`),
+  a hook included and a `SyncFail` hook not, so a custom resource of an early wave
+  keeps the CRD, Namespace, rest order of [Applying](#applying). A step is never moved later.
+- **Waits.** A step finishes when its hooks have: a Job, Pod, or Argo Workflow
+  succeeded, a workload healthy, any other kind created; a hook deleted meanwhile
+  failed. When a later step follows, the workloads the step applied (Deployment,
+  StatefulSet, DaemonSet, ReplicaSet, Job, Pod, Argo Workflow) must be healthy by the
+  rules of the Health table in [Reading](#reading) (the reader itself reads neither Pods
+  nor Workflows), which is how `PostSync` waits for the `Sync` phase. A Pod is healthy
+  once it `Succeeded`, or is `Running` and ready with `restartPolicy: Always`, and
+  failed when it `Failed`; a Workflow follows `status.phase` (`Succeeded` healthy,
+  `Failed` and `Error` degraded, else progressing); a paused Deployment is suspended,
+  which is waited for, not failed on. The last step waits for the workloads it applied
+  too when it holds a hook and the sync has more than one step (Argo CD's
+  `(multiStep || isHook)`); the last step of ordinary resources alone is done once they
+  are applied, and a one-step sync waits for nothing. A read that fails is not a
+  verdict, for a hook or a workload: the wait goes on until it ends. Only a gone object
+  is not waited for. Argo CD also reads the health of Ingresses, LoadBalancer Services,
+  PersistentVolumeClaims, APIServices, and HorizontalPodAutoscalers, and runs custom Lua
+  checks, none of which Nyl does. Each wait is bounded by `WaitSettings`: `nyl apply`
+  takes `--hook-timeout` (ten minutes by default). The driver bounds no wait of its own
+  but passes the unit's deadline less a margin (the smaller of thirty seconds and a
+  fifth of the time left, `WaitSettings::until`), so a hook that hangs fails the sync
+  through the failure path below, `SyncFail` hooks included, which may run in the
+  margin, instead of an interrupt cutting the execution short. Reads of one wait pause
+  longer each time, up to five times the poll interval.
+- **Finalizer.** A hook is created with `argocd.argoproj.io/hook-finalizer`, so a Job a
+  TTL controller deletes the moment it finishes is still readable, and the sync removes
+  it (`KubeClient::remove_finalizer`) once it has seen how the hook ended, however it
+  ended (completed, failed, timed out). A hook object that still holds it is cleaned by
+  every path that deletes a hook: `BeforeHookCreation` and the delete policies remove
+  it first, a purge removes it first, and `ReleaseRecorder::run` removes it from the
+  hooks it left running when it is interrupted. If the cluster cannot be reached the
+  finalizer stays until the next sync or purge of that hook.
 - **Failure.** A failed document, hook, or wait stops the sync after its step, and
   `SyncFail` hooks run. `HookFailed` objects are then deleted; after a successful sync
   `HookSucceeded` objects are (never a `SyncFail` hook, as in Argo CD). The revision is
@@ -1782,8 +1813,17 @@ follow Argo CD's gitops-engine (`pkg/sync/hook`, `pkg/sync/sync_tasks.go`,
   that is not an ordinary resource. A hook is therefore never pruned, purged, or
   compared (`hooks::is_resource` filters the drift check and the health reading), and
   what an earlier revision tracked and is a hook or skipped now is not pruned either
-  (`ApplyExecutionResult::untracked`). No state format changes: the manifest is the
-  same text, and the keys are a subset.
+  (`ApplyExecutionResult::untracked`; `prunable_keys` is the one decision `nyl apply` and
+  `nyl diff` share). A purge does delete them, so what a hook left behind (a finished
+  Job, a hook's ServiceAccount or Role) does not outlive the Release: `purge_keys` adds
+  the hooks the latest revision's manifest holds to the tracked keys, for `nyl release
+  delete --purge`, a teardown, and the purge of a vanished Release alike. The release
+  state itself is unchanged: the manifest is the same text and the tracked keys are a
+  subset. One value is new in the unit state schemas, though: the finding code
+  `NYL-KUBERNETES-HOOK-IGNORED` joins the `Code` enumeration of
+  `gitops.nyl/v1/state/desired-unit` and `observed-unit`, which a reader that predates it
+  rejects. That is an in-place change to `gitops.nyl/v1`, pending the decision to bump or
+  break the format, and its wording is to be settled with it.
 - **Order against pruning.** `PostSync` runs after the prune, which Argo CD does within
   `Sync`; `ReleaseRecorder::complete` runs it, and a failed `PostSync` hook records the
   revision `Failed` after the prune.
@@ -1796,12 +1836,12 @@ follow Argo CD's gitops-engine (`pkg/sync/hook`, `pkg/sync/sync_tasks.go`,
 - **Not supported.** Hooks that run when a Release is removed (`PreDelete`,
   `PostDelete`, Helm's `pre-delete` and `post-delete`) are not run by a purge, a
   teardown, or `release delete`; `release delete` warns with the same code, and every
-  apply of the Release has already warned. Hooks have no `generateName` and no hook
-  finalizer; a hook interrupted by Ctrl-C or the deadline keeps running.
+  apply of the Release has already warned. Hooks have no `generateName`; a hook
+  interrupted by Ctrl-C or the deadline keeps running, without its finalizer.
 
 | Where it stops | What happened | Outcome |
 | --- | --- | --- |
-| A `PreSync` hook fails or times out | Nothing of the Release's resources applied; `SyncFail` hooks ran | `Failed` (`tool-error`, or `timeout` at the deadline), naming the Release, phase, and hook |
+| A `PreSync` hook fails or times out | Nothing of the Release's resources applied; `SyncFail` hooks ran | `Failed` (`tool-error`; a `timeout` only when the deadline still cuts the execution short), naming the Release, phase, and hook |
 | A workload of a step never becomes healthy | Later steps, `PostSync` included, never started | `Failed`, naming the workload and why |
 | A `PostSync` hook fails | Resources applied and pruned; the revision is `Failed` | `Failed`; the next execution applies again |
 
@@ -2023,7 +2063,8 @@ either is `drifted`, a half that cannot tell beside a clean one is `unknown`.
   Release's latest `Deployed` revision for this publication holds: it ran, and
   applying it again would run it a second time on every execution. It stays
   tracked, so the Release stays unchanged without it. A Job whose document
-  changed is applied (`ApplySettings::unapplied`).
+  changed is applied (`ApplySettings::unapplied`). A hook Job is not such a Job: it runs
+  on every execution, so a repair runs the hooks again, as an Argo CD self-heal sync does.
 - **Orphans.** Objects that carry Nyl's labels and that no current revision tracks
   are not reported; a follow-up could list them.
 
@@ -2048,7 +2089,8 @@ generic engine rule, with no kind-specific branch.
    `purge_release`, honoring each object's `Delete` option (`Delete=false`
    keeps it, `Delete=confirm` keeps it because the driver never confirms), in
    the exact reverse of the apply order (wave, then `<group>/<release>` key)
-   with waits for termination. What the teardown removes is read before anything
+   with waits for termination. The objects of a Release are those its revisions track
+   and the hooks its latest revision's manifest holds (`purge_keys`). What the teardown removes is read before anything
    is published or deleted: the union above, so a failure to read it leaves
    everything as it was. Phase 1 **defers every Namespace that holds the release
    state of any Release in that set** (the Releases' release namespaces, which
