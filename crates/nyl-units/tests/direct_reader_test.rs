@@ -204,6 +204,32 @@ async fn test_a_rolled_out_deployment_is_healthy() {
     assert_eq!(reading.deployments["web/web"].health, Health::Healthy);
 }
 
+/// Catches a hook being read as a workload of the release: its policy deleted it
+/// (or it never ran again), so a hook Job that is gone is no finding, while the
+/// same Job without the hook annotation would be a missing workload.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_hook_that_is_gone_is_not_a_finding() {
+    let job = |annotations: &str| {
+        format!(
+            "\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: migrate\n  namespace: web\n  annotations: {annotations}\n"
+        )
+    };
+    let mut healths = Vec::new();
+    for annotations in ["{argocd.argoproj.io/hook: PreSync}", "{team: web}"] {
+        let world = World::new();
+        let mut state = revision(1, ReleaseStatus::Deployed, Some(publication("dev", Some("abc"))));
+        state.manifest = format!("{MANIFEST}{}", job(annotations));
+        world.save(state).await;
+        world.deployment(2);
+        let reading = tokio::task::spawn_blocking(move || read(&world.reader(None), false))
+            .await
+            .unwrap();
+        healths.push(reading.deployments["web/web"].health);
+    }
+
+    assert_eq!(healths, [Health::Healthy, Health::Degraded]);
+}
+
 /// Catches a partly failed apply standing for a revision: the failed latest
 /// revision is a mix, and names the commit of the last complete one.
 #[tokio::test(flavor = "multi_thread")]

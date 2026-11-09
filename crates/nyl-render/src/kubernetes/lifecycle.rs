@@ -17,6 +17,11 @@
 //!   touched, completes it, prunes by release state, and supersedes the
 //!   previous revision. An apply that changed nothing keeps the latest revision
 //!   instead ([`RevisionPolicy`]).
+//! - The apply is one Argo CD sync ([`super::sync_run`]): resource hooks run in their
+//!   phases and sync waves around the resources ([`super::hooks`]), the recorded
+//!   manifest holds the hooks, and [`tracked_keys`] leaves them out, so they are never
+//!   pruned, purged, or compared. Every apply runs them, including one that
+//!   [`RevisionPolicy::KeepUnchanged`] records no revision for.
 //! - [`purge_release`] deletes a release's resources by their `Delete` sync
 //!   option, in reverse apply order with waits for termination.
 //! - [`ApplyEvent`] reports progress as it happens; the caller renders it.

@@ -6,7 +6,7 @@ use crate::cli::commands::cluster::load_command_kube_config;
 use nyl_render::{
     kubernetes::{
         fence::{admit, ReleaseClaim, Requester},
-        KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
+        hooks, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
     },
     NylError, Result,
 };
@@ -170,6 +170,7 @@ async fn delete_release(
                 "⚠".yellow(),
                 release.resource_keys.len()
             );
+            warn_delete_hooks(release);
         }
     }
 
@@ -228,6 +229,26 @@ async fn delete_release(
     );
 
     Ok(())
+}
+
+/// Warn, once, that the hooks the release declares for its removal are not run:
+/// Argo CD runs `PreDelete` and `PostDelete` hooks when it removes an Application,
+/// and a purge by Nyl runs none of them ([`hooks::IGNORED_CODE`]).
+fn warn_delete_hooks(release: &nyl_render::kubernetes::ReleaseState) {
+    let Ok(documents) = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&release.manifest) else {
+        return;
+    };
+    let Ok(delete_hooks) = hooks::delete_hooks(&documents) else {
+        return;
+    };
+    if !delete_hooks.is_empty() {
+        tracing::warn!(
+            "{}: {}; fix: {}",
+            hooks::IGNORED_CODE,
+            hooks::ignored_message(&delete_hooks),
+            hooks::IGNORED_FIX
+        );
+    }
 }
 
 /// Delete the release's resources, keeping those whose Argo CD `Delete` sync

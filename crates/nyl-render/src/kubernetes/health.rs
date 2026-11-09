@@ -391,6 +391,26 @@ mod tests {
         assert_eq!(rollout("Job", &json!({})).unwrap().health, Health::Progressing);
     }
 
+    /// Catches a hook Pod that keeps the sync waiting after it succeeded, or passes
+    /// while it still runs: a Pod that runs to completion follows its phase, and
+    /// one that keeps running is healthy once it is ready.
+    #[test]
+    fn test_a_pod_follows_its_phase_and_readiness() {
+        let pod = |phase: &str, restart: &str, ready: bool| {
+            json!({"spec": {"restartPolicy": restart}, "status": {"phase": phase,
+                "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }}]}})
+        };
+        let health = |live: Value| rollout("Pod", &live).unwrap().health;
+
+        assert_eq!(health(pod("Succeeded", "Never", false)), Health::Healthy);
+        assert_eq!(health(pod("Running", "Never", true)), Health::Progressing);
+        assert_eq!(health(pod("Pending", "OnFailure", false)), Health::Progressing);
+        assert_eq!(health(pod("Failed", "Never", false)), Health::Degraded);
+        assert_eq!(health(pod("Running", "Always", true)), Health::Healthy);
+        assert_eq!(health(pod("Running", "Always", false)), Health::Progressing);
+        assert!(assessed("", "Pod") && assessed("batch", "Job") && !assessed("example.com", "Job"));
+    }
+
     /// Catches kinds without a rollout being judged, which would make every
     /// ConfigMap a finding.
     #[test]

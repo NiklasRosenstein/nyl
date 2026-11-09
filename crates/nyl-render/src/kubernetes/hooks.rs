@@ -208,6 +208,34 @@ fn delete_policies(manifest: &Value) -> Vec<DeletePolicy> {
     policies
 }
 
+/// Whether `manifest` declares a hook that runs when a Release is removed:
+/// Argo CD's `PreDelete` and `PostDelete`, Helm's `pre-delete` and `post-delete`.
+fn is_delete_hook(manifest: &Value) -> bool {
+    csv(manifest, HOOK)
+        .iter()
+        .any(|value| matches!(*value, "PreDelete" | "PostDelete"))
+        || csv(manifest, HELM_HOOK)
+            .iter()
+            .any(|value| matches!(*value, "pre-delete" | "post-delete"))
+}
+
+/// The delete hooks among `manifests`: documents Argo CD runs when it removes an
+/// Application, which Nyl does not run when it removes a Release.
+pub fn delete_hooks(manifests: &[Value]) -> Result<Vec<IgnoredHook>> {
+    let mut hooks = Vec::new();
+    for manifest in manifests {
+        if let Classification::Ignored(reason) = classify(manifest) {
+            if is_delete_hook(manifest) {
+                hooks.push(IgnoredHook {
+                    key: ResourceKey::from_json_value(manifest)?,
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(hooks)
+}
+
 /// What `manifest` is to the apply. Pure; the one reading of the hook
 /// annotations.
 pub fn classify(manifest: &Value) -> Classification {
@@ -245,7 +273,12 @@ pub fn classify(manifest: &Value) -> Classification {
             (None, Some(value)) => format!("{HELM_HOOK}: {value}"),
             (None, None) => unreachable!("a hook declares an annotation"),
         };
-        return Classification::Ignored(format!("it declares {declares}, which names no sync phase"));
+        let reason = if is_delete_hook(manifest) {
+            format!("it declares {declares}, a delete hook, and Nyl runs no hooks when it removes a Release")
+        } else {
+            format!("it declares {declares}, which names no sync phase")
+        };
+        return Classification::Ignored(reason);
     }
     Classification::Hook(HookSpec {
         phases,
@@ -490,8 +523,23 @@ mod tests {
             let Classification::Ignored(reason) = hook(annotations.clone()) else {
                 panic!("{annotations} should be ignored");
             };
-            assert!(reason.contains("names no sync phase"), "{reason}");
+            assert!(
+                reason.contains("names no sync phase") || reason.contains("a delete hook"),
+                "{reason}"
+            );
         }
+        let delete = [
+            document("Job", "post-delete", json!({HELM_HOOK: "post-delete"})),
+            document("Job", "pre-delete", json!({HOOK: "PreDelete"})),
+            document("Job", "test", json!({HELM_HOOK: "test"})),
+            document("Job", "plain", json!({})),
+        ];
+        let names: Vec<String> = delete_hooks(&delete)
+            .unwrap()
+            .into_iter()
+            .map(|hook| hook.key.name)
+            .collect();
+        assert_eq!(names, ["post-delete", "pre-delete"]);
         let Classification::Ignored(reason) = hook(json!({HELM_HOOK: "test"})) else {
             unreachable!()
         };
