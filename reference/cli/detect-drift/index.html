@@ -105,6 +105,17 @@ deadline. A check that passes its deadline fails with a timeout
 (<code dir="auto">NYL-DRIVER-ERROR</code>, exit 1), and nothing is recorded for that unit.</p>
 <p>A unit without a current receipt is reported as <code dir="auto">no-receipt</code>, and a unit
 whose kind cannot detect drift as <code dir="auto">unsupported</code>; neither is skipped silently.</p>
+<p>A <a href="/nyl/orchestration/resource-guides/kubernetes-publication/#execution-key-and-result"><code dir="auto">KubernetesPublication</code></a>
+compares the publication branch with the tree it renders. When its target uses
+<code dir="auto">reconciler: {direct: {}}</code>, it also <a href="/nyl/kubernetes-gitops/workflow/direct-reconciler/#detecting-drift">compares the cluster</a>
+with what the unit last applied, with a server-side apply dry run as Nyl’s field
+manager, so a changed field Nyl manages or a deleted object is <code dir="auto">drifted</code> and the
+summary names the Release and the first eight objects. It needs the unit’s
+admitted <code dir="auto">KUBECONFIG</code>, the Cluster’s declared context, and <code dir="auto">get</code>, <code dir="auto">patch</code> (for the
+dry runs), and access to the Release state Secrets, plus <code dir="auto">get</code> on
+customresourcedefinitions and <code dir="auto">list</code> on apiservices when a kind is not served; a cluster it cannot read is
+<code dir="auto">unknown</code> (<code dir="auto">NYL-DRIFT-UNKNOWN</code>, with the reason and the fix), never <code dir="auto">clean</code>.
+Run <code dir="auto">nyl diff --target &#x3C;target></code> on a Release’s file to see each change in full.</p>
 <p><code dir="auto">detect-drift</code> and <code dir="auto">attest</code> do not import runs, so they refuse a lease that
 <a href="/nyl/reference/cli/state/#nyl-lease-break"><code dir="auto">nyl lease break</code></a> broke while
 the broken run is not imported yet, writing nothing; a check with nothing
