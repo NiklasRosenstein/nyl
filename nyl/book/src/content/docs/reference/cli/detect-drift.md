@@ -91,7 +91,10 @@ unit's recovery policy, and the `NYL-DRIFT-DETECTED` fix names it per unit:
 | `manual` | `inspect` or `manual` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text> --approve <unit>` |
 
 A repair writes a new receipt and drops the unit's drift record in the
-same commit; detect drift again to check the new receipt. See
+same commit; detect drift again to check the new receipt. A pipeline that
+wants the check and the repair as one command, under one lease and in one
+transition commit, runs [`nyl reconcile --detect-drift`](/nyl/reference/cli/reconcile/#drift),
+which uses this check. See
 [drift repair](/nyl/orchestration/resource-guides/environment/#drift-repair).
 
 ## nyl attest

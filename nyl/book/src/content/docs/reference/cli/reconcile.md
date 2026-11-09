@@ -25,6 +25,7 @@ nyl reconcile -e dev --worktree
 nyl reconcile -e dev --allow-teardown
 nyl reconcile -e dev --leaving --allow-teardown
 nyl reconcile -e dev --unit config --reapply --reason "rotate credentials"
+nyl reconcile -e dev --detect-drift
 nyl reconcile -e dev --fail-fast
 nyl reconcile -e pr-123 --template preview --param pr=123
 nyl reconcile -e pr-123 --renew
@@ -168,6 +169,61 @@ re-run is `awaiting-approval` while the rest of the run continues. Under `driftR
 drifted units stay `drifted` until `--reapply` names them. See
 [Repairing drift](/nyl/orchestration/recovery/#repairing-drift).
 
+A reconcile never detects drift by itself. `--detect-drift` makes it check the
+units that are current for drift first, under the lease it holds, and repair
+what drifted by the same rules in the same run and the same transition commit,
+so a scheduled job needs one command and there is no gap between
+[`nyl detect-drift`](/nyl/reference/cli/detect-drift/) and `nyl reconcile`
+in which another run could change the resources:
+
+```console
+$ nyl reconcile -e dev --detect-drift
+[dev/api] starting Command (reconcile): repair drift
+[dev/api] executed in 0.0s
+UNIT   KIND     RESULT             DETAIL
+api    Command  executed           reason: repair drift; drift check: drifted (detectDrift reported drift (exit code 2))
+job    Command  awaiting-approval  drift check: drifted (detectDrift reported drift (exit code 2))
+notes  Command  current            drift check: unsupported
+
+  run:      01a1c08e-e3e7-7c61-9db2-f1acdc0e4fb5
+  source:   4532545735b96c34bb646e0b36dcd120eaf95a5a
+  observed: 32befb91d4d401b2faf3a57c4b7cebe4e7b1c2d8
+
+warning  job in dev drifted from its receipt: detectDrift reported drift (exit code 2)
+
+  Action  it awaits approval, since job is not safe to re-run: run `nyl reconcile -e dev --approve job`
+
+  NYL-DRIFT-DETECTED (job)
+
+warning  the kind of notes cannot detect drift
+
+  Action  check the unit with its own tool, or give it a drift detection step where its kind supports one
+
+  NYL-DRIFT-UNSUPPORTED (notes)
+```
+
+`api` was repaired in the same run and left no record; `job` awaits approval and
+keeps the record the run wrote, so `nyl status` shows it `drifted` with no
+further check.
+
+- A unit that executes anyway, because its inputs changed or it has no current
+  receipt, is not checked. `--unit` limits the check to the named units.
+- Each checked unit's `driftCheck` in `-o json`, and in the commit summary, is
+  `clean`, `drifted` (with a `summary`), `unknown` (with a `reason`), or
+  `unsupported`; the table adds it to the unit's detail. The run records the
+  records the check found, unless the unit's new receipt replaced the one
+  they are about.
+- A check that cannot tell (`unknown`, `NYL-DRIFT-UNKNOWN`) makes the run exit
+  2, as `detect-drift` does. A kind that cannot detect drift
+  (`unsupported`, `NYL-DRIFT-UNSUPPORTED`) warns without changing the exit. A
+  check that fails to run or passes its deadline is an error
+  (`NYL-DRIVER-ERROR`, exit 1) that records nothing for the unit, and the run
+  goes on with the stored records. Drift the run left is `NYL-DRIFT-DETECTED`
+  with the fix to apply.
+- `--detect-drift` is refused with `--leaving` and `--reapply`
+  (`NYL-DRIFT-OPTION-INVALID`, exit 1, before the run takes the lease).
+  Each selected environment checks within its own run.
+
 
 ## Stopping at the first failure
 
@@ -243,6 +299,7 @@ for qualified unit options and independent state transactions.
 | `--leaving` | Do only the lifecycle work of units outside the ownership set. Conflicts with `--unit`. |
 | `--reapply` | Execute the units named by `--unit` although their receipts are current, such as to repair drift under `driftRepair: manual`. Requires `--unit` and `--reason`; recorded under `reapplied`. A named unit that is not safe to re-run awaits approval, or runs with a matching `--approve`. |
 | `--reason <text>` | Why, for `--reapply`; recorded with the `Nyl-Reason` trailer. |
+| `--detect-drift` | Before selecting units, check the current units for drift under the run's own lease, and repair what drifted by each unit's `driftRepair`, in the same transition commit. Conflicts with `--leaving` and `--reapply` (`NYL-DRIFT-OPTION-INVALID`). See [Drift](#drift). |
 | `--fail-fast` | Start no further unit after the first failure, uncertain outcome, or approval wait. Units not started report `blocked`, and the run warns with `NYL-RUN-STOPPED`. |
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
 | `--source <rev>` | Render units at this revision or commit instead of the Environment's source, for this run only. It must pass the same [reachability checks](/nyl/orchestration/runs/#source-commit), and the transition commit marks it as an override. |
@@ -284,7 +341,7 @@ a stable code and its fix.
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed (`removed`, `retained`, `released`). |
 | 1 | A configuration, resolution, or operational error, such as `NYL-STATE-MISSING`, `NYL-SOURCE-UNREACHABLE`, `NYL-UNIT-UNKNOWN`, or `NYL-COMMIT-IDENTITY-MISSING`. |
-| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`). |
+| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`); with `--detect-drift`, a drift check could not tell (`NYL-DRIFT-UNKNOWN`). |
 | 3 | At least one execution failed. |
 | 4 | At least one execution is uncertain, the run lost its lease (`NYL-LEASE-LOST`), or it was cancelled (`NYL-RUN-CANCELLED`). |
 
@@ -297,6 +354,8 @@ Besides the codes above, a reconcile reports:
 
 | Code | Meaning and fix |
 | --- | --- |
+| `NYL-DRIFT-DETECTED`, `NYL-DRIFT-UNKNOWN`, `NYL-DRIFT-UNSUPPORTED` | With `--detect-drift`, as [`nyl detect-drift`](/nyl/reference/cli/detect-drift/#codes) reports them, except that drift the run repaired is not warned about. |
+| `NYL-DRIFT-OPTION-INVALID` | `--detect-drift` was given with `--leaving` or `--reapply`, which leave it nothing to check. Drop the option, or run `nyl detect-drift` as a separate command. |
 | `NYL-SOURCE-WORKTREE` | The run uses an immutable working-file snapshot retained in state history. Commit changes and run without `--worktree` for committed-source evidence. |
 | `NYL-UNIT-UNCERTAIN` | A unit may have had effects without a recorded result. Check what it did; a converging unit runs again in the next reconcile, others need [`nyl recover`](/nyl/reference/cli/recover/). |
 | `NYL-RUN-SUPERSEDED` | A dead run checkpointed a unit with an execution key the new resolution no longer has. Its effects are real, so the unit becomes `uncertain` when the result recorded effects. |

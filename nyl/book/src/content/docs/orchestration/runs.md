@@ -376,7 +376,8 @@ same outputs leaves its consumers current, and a unit that must run again
 whenever a producer is recreated says so in its inputs, for example by
 reading an output that changes with every creation. A unit whose latest
 drift record is `drifted` runs again too, as
-[Recovery](/nyl/orchestration/recovery/#repairing-drift) describes.
+[Recovery](/nyl/orchestration/recovery/#repairing-drift) describes, and
+`nyl reconcile --detect-drift` records that drift first, in the same run.
 
 The execution key is a digest of everything that decides what the unit does:
 its resolved spec, including the values its references resolved to, the
@@ -508,6 +509,11 @@ recovered: []
 imported: []
 driftRepaired: [config]
 ```
+
+With `nyl reconcile --detect-drift`, a unit's entry also carries `driftCheck`,
+what the run's [drift check](/nyl/orchestration/recovery/#detecting-drift-in-a-reconcile)
+found for it, such as `"driftCheck":{"check":"drifted","summary":"…"}`; a unit
+the run did not check has none.
 
 Lifecycle work adds its details: `released` and `retained` list the units
 and what they left in place, `allowDependents` the tombstones an override

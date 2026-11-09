@@ -787,7 +787,7 @@ policy.
 | plan | Preview effects and unresolved inputs without executing |
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
-| detect-drift | Check whether current receipts still hold and record drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
+| detect-drift | Check whether current receipts still hold and record drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`), and `reconcile --detect-drift` checks and repairs in one run under one lease |
 | promote | Move a proven source commit and selected values into the target environment, or open a change for review |
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
