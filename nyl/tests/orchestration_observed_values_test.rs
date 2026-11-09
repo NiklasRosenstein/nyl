@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use nyl_core::orchestration::ports::Clock;
 use nyl_units::command::CommandDriver;
+use scenario::cross::Cross;
 use scenario::observing::{failed, pending, value, Observing, Probe, Read};
 use scenario::shell::{self, project, ENVIRONMENT, NYL_TOML};
 use serde_json::{json, Value};
@@ -875,92 +876,6 @@ fn test_the_last_read_of_the_wait_happens_with_a_sub_second_clock() {
     assert_eq!(polls, [0, 15_400, 20_800]);
 }
 
-/// `dev` observes the `ip` of `lb`; `dns` of `prod` reads it through
-/// `fromUnit: {environment: dev, …}`.
-const CROSS_UNITS: &str = "apiVersion: units.gitops.nyl/v1
-kind: Command
-metadata:
-  name: lb
-  labels: {dev: 'true'}
-spec:
-  command: [sh, -c, 'true']
-  observations:
-    ip: {type: string, from: {service: web}}
----
-apiVersion: units.gitops.nyl/v1
-kind: Command
-metadata:
-  name: dns
-  labels: {prod: 'true'}
-spec:
-  command: [sh, -c, 'true']
-  values:
-    address: {fromUnit: {environment: dev, unit: lb, observation: ip}}
-";
-
-fn environment(name: &str, state: &str) -> String {
-    format!(
-        "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: {name}\nspec:\n  unitSelector:\n    matchLabels: {{{name}: 'true'}}\n  allowUnprotectedSource: true\n{state}"
-    )
-}
-
-/// A project with `dev` and `prod`, both initialized, `lb` observed as
-/// 203.0.113.10 and `dns` reconciled with it.
-struct Cross {
-    shell: shell::Harness,
-    probe: Arc<Probe>,
-    _project: tempfile::TempDir,
-}
-
-impl Cross {
-    fn new() -> Self {
-        let project = project(&[
-            NYL_TOML,
-            ("nyl/dev.yaml", &environment("dev", "")),
-            ("nyl/prod.yaml", &environment("prod", "")),
-            ("nyl/units.yaml", CROSS_UNITS),
-        ]);
-        let mut shell = shell::Harness::new(project.path(), true);
-        let probe = Arc::new(Probe::default());
-        shell.drivers.register(Arc::new(Observing {
-            inner: CommandDriver,
-            probe: probe.clone(),
-        }));
-        let cross = Self {
-            shell,
-            probe,
-            _project: project,
-        };
-        for name in ["dev", "prod"] {
-            assert_eq!(cross.shell.invoke(&["state", "init", "-e", name]).exit, 0);
-        }
-        cross.read("203.0.113.10");
-        assert_eq!(cross.shell.invoke(&["reconcile", "-e", "dev"]).exit, 0);
-        let ran = cross.shell.invoke(&["reconcile", "-e", "prod", "-o", "json"]);
-        assert_eq!(ran.exit, 0, "{}", ran.stderr);
-        assert_eq!(unit(&ran.report, "dns")["result"], "executed");
-        cross
-    }
-
-    /// The next read of `lb` finds `ip`.
-    fn read(&self, ip: &'static str) {
-        self.probe.script("lb", [Read::Values(vec![value("ip", json!(ip))])]);
-    }
-
-    /// Commit a changed declaration of an environment to the project's branch.
-    fn declare(&self, name: &str, state: &str) {
-        self.shell.world.commit_files(
-            "main",
-            "change the state of an environment",
-            &[(&format!("nyl/{name}.yaml"), &environment(name, state))],
-        );
-    }
-
-    fn status_of_prod(&self) -> nyl::orchestration::run::CommandOutcome {
-        self.shell.invoke(&["status", "-e", "prod", "-o", "json"])
-    }
-}
-
 /// `nyl observe -e dev` names the consumers in other environments whose
 /// cross-environment reference reads a changed observed value, and `nyl
 /// status -e prod` and `nyl get units -e prod` show such a consumer as ready,
@@ -1047,72 +962,4 @@ fn test_observe_names_consumers_in_other_environments_whose_input_changed() {
         settled.stderr
     );
     assert_eq!(unit(&cross.status_of_prod().report, "dns")["state"], "current");
-}
-
-/// An environment whose state cannot be located or read is a warning of
-/// `observe` and of `status`, naming it; neither command fails because of it,
-/// and the exit code is what it is without the peer. Catches a consumer's
-/// environment skipped silently, which hides that its consumers were not
-/// compared, and a missing peer failing a check that wrote its own state.
-#[test]
-fn test_an_environment_whose_state_cannot_be_read_is_a_warning_of_observe_and_status() {
-    // A repository URL that is valid on every platform but names nothing.
-    let nowhere = tempfile::TempDir::new().unwrap();
-    let missing_url = reqwest::Url::from_file_path(nowhere.path().join("nyl-state.git")).unwrap();
-    let missing_repository = format!("  state:\n    repository: {{repoURL: '{missing_url}'}}\n");
-    let missing_repository = missing_repository.as_str();
-    let unresolvable = "  state:\n    repositoryRef: {name: nowhere}\n";
-
-    // observe -e dev: prod's state is in a repository that is not there, and a
-    // third environment's state names a repository the project does not declare.
-    let cross = Cross::new();
-    cross.declare("prod", missing_repository);
-    cross.shell.world.commit_files(
-        "main",
-        "declare stage",
-        &[("nyl/stage.yaml", &environment("stage", unresolvable))],
-    );
-    cross.read("203.0.113.20");
-    let observed = cross.shell.invoke(&["observe", "-e", "dev", "-o", "json"]);
-    assert_eq!(observed.exit, 0, "{}", observed.stderr);
-    assert_eq!(observed.report["environments"][0]["units"]["lb"]["check"], "observed");
-    let unavailable = observed.report["environments"][0]["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|warning| warning["code"] == "NYL-STATE-UNAVAILABLE")
-        .map(|warning| warning["message"].as_str().unwrap().to_owned())
-        .collect::<Vec<_>>();
-    assert!(
-        unavailable.iter().any(|message| message.contains("prod")),
-        "{unavailable:?}\n{}",
-        observed.stderr
-    );
-    assert!(
-        unavailable.iter().any(|message| message.contains("stage")),
-        "{unavailable:?}\n{}",
-        observed.stderr
-    );
-
-    // status -e prod: the producer environment's state is in a missing
-    // repository, so what dns resolved cannot be compared.
-    let cross = Cross::new();
-    cross.declare("dev", missing_repository);
-    let status = cross.status_of_prod();
-    assert_eq!(status.exit, 0, "{}", status.stderr);
-    assert_eq!(unit(&status.report, "dns")["state"], "current");
-    assert!(
-        status.stderr.contains("NYL-STATE-UNAVAILABLE") && status.stderr.contains("dev"),
-        "{}",
-        status.stderr
-    );
-    // And one the project cannot locate at all.
-    cross.declare("dev", unresolvable);
-    let status = cross.status_of_prod();
-    assert_eq!(status.exit, 0, "{}", status.stderr);
-    assert!(
-        status.stderr.contains("NYL-STATE-UNAVAILABLE") && status.stderr.contains("dev"),
-        "{}",
-        status.stderr
-    );
 }

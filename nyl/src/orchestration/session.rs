@@ -476,9 +476,9 @@ impl Session {
     }
 
     /// The other environments, for commands that read what consumers resolved from them.
-    pub fn peers(&self) -> nyl_orchestration::shell::inspect::Peers {
+    pub fn peers(&self) -> nyl_orchestration::shell::peers::Peers {
         let (locations, _, errors) = self.environment_locations();
-        nyl_orchestration::shell::inspect::Peers { locations, errors }
+        nyl_orchestration::shell::peers::Peers { locations, errors }
     }
 
     /// The request of one `plan` or `reconcile`.

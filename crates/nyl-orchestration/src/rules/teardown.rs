@@ -150,12 +150,7 @@ pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
         .iter()
         // A unit whose wait goes on is tearing down; the run reports it.
         .filter(|(name, _)| !inputs.waiting.contains(*name))
-        .filter(|(name, unit)| {
-            deleting(unit)
-                || inputs.drops.contains(*name)
-                || (matches!(unit.lifecycle, Lifecycle::Held { .. })
-                    && inputs.options.named.is_some_and(|named| named.contains(*name)))
-        })
+        .filter(|(name, unit)| is_candidate(name, unit, inputs.drops, inputs.options))
         .map(|(name, _)| name)
         .collect();
     let waiting_on = waiting_dependencies(&dependencies, inputs.waiting);
@@ -228,6 +223,27 @@ pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
             .collect();
     }
     plan
+}
+
+/// Whether `unit` is a unit this invocation may decide to leave: on its way
+/// out, dropped by a release, or held and named by `nyl teardown --unit`.
+fn is_candidate(name: &UnitName, unit: &DesiredUnit, drops: &BTreeSet<UnitName>, options: TeardownOptions<'_>) -> bool {
+    deleting(unit)
+        || drops.contains(name)
+        || (matches!(unit.lifecycle, Lifecycle::Held { .. }) && options.named.is_some_and(|named| named.contains(name)))
+}
+
+/// Whether any unit of `desired` may leave. Only then do consumers in other
+/// environments matter ([`TeardownInputs::external_dependents`]), so only then
+/// does a run read the other environments to find them.
+pub fn leaves(
+    desired: &BTreeMap<UnitName, DesiredUnit>,
+    drops: &BTreeSet<UnitName>,
+    options: TeardownOptions<'_>,
+) -> bool {
+    desired
+        .iter()
+        .any(|(name, unit)| is_candidate(name, unit, drops, options))
 }
 
 /// Whether a desired document is on its way out: deleting, or held with a

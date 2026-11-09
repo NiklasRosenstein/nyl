@@ -22,7 +22,9 @@
 //! stored resolution of an observed value no longer equals the recorded one;
 //! they are work for the next reconcile. They include consumers in other
 //! environments that read the value through a cross-environment reference:
-//! their snapshots are read without a lease and never written.
+//! their snapshots are read without a lease and never written, and a problem
+//! with one is a warning, because they are read only for this advice
+//! ([Other environments](../../../../design/orchestration-core.md#other-environments)).
 //!
 //! The lease it holds lists no units: a check has no effects, so a run
 //! taking over from a dead check has nothing to mark uncertain. It writes
@@ -58,6 +60,7 @@ use nyl_core::orchestration::state::{Attestation, DriftRecord, ObservationRecord
 use nyl_core::orchestration::time::{Duration, Timestamp};
 
 use super::lease::{self, HeldLease};
+use super::peers::Peers;
 use super::run::slots::Slots;
 use super::run::{
     execution_credentials, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
@@ -70,6 +73,7 @@ use crate::rules::checks::{
 };
 use crate::rules::drift::stored_drift_repair;
 use crate::rules::observed_values::{self, SettleInputs};
+use crate::rules::peers::Need;
 use crate::rules::selection::execution_recovery;
 use crate::rules::sources::effective_commit;
 use crate::rules::unit_state::receipt_state;
@@ -318,35 +322,25 @@ fn changed_consumer_warnings(
 /// environment that `observed` now holds.
 ///
 /// The other environments' snapshots are read like a reconcile reads its
-/// producers' (no lease, no write). One whose location cannot be resolved,
-/// or whose state cannot be read, is a `NYL-STATE-UNAVAILABLE` warning, never
-/// a failed check: its consumers were not checked.
+/// producers' (no lease, no write), but only for this advice, so they are
+/// [`Need::Advisory`]: one whose declaration cannot be used, or whose state
+/// cannot be read, is a `NYL-STATE-UNAVAILABLE` warning that names it, never
+/// a failed check; its consumers were not checked.
 fn other_environment_warnings(
     context: &RunContext<'_>,
     request: &RunRequest,
     observed: &EnvironmentSnapshot,
 ) -> Vec<Finding> {
     let environment = &request.environment;
+    let peers = Peers::of(request);
     let mut warnings = Vec::new();
-    for (name, finding) in &request.environment_errors {
-        if name != environment {
-            warnings.push(Finding::new(
-                Code::StateUnavailable,
-                format!("the consumers in {name} were not checked: {}", finding.message),
-                finding.fix.clone(),
-            ));
-        }
-    }
     let mut others = BTreeMap::new();
-    for (name, location) in &request.environments {
-        if name == environment {
-            continue;
-        }
-        match context.base.store.snapshot(location) {
+    for name in peers.others(environment) {
+        match peers.read(context.base.store, name, Need::Advisory) {
             Ok(other) => {
                 others.insert(name.clone(), other);
             }
-            Err(error) => warnings.push(store_error(name, &error)),
+            Err(problem) => warnings.push(problem.into_finding()),
         }
     }
     warnings.extend(

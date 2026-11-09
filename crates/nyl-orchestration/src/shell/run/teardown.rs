@@ -403,7 +403,8 @@ impl Reconcile<'_, '_, '_> {
         inputs: &LeaveInputs<'_>,
         observed: &BTreeMap<UnitName, ObservedUnit>,
     ) -> teardown_rules::TeardownPlan {
-        let external = self.session.external_dependents(&life.desired);
+        let leaves = teardown_rules::leaves(&life.desired, &life.releases, inputs.options);
+        let external = self.session.external_dependents(&life.desired, leaves);
         let mut plan = teardown_rules::plan(&TeardownInputs {
             external_dependents: external.as_ref().unwrap_or(&BTreeMap::new()),
             environment: self.environment(),

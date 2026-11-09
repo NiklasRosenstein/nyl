@@ -368,6 +368,15 @@ fn locate(
             write: resolved.publish_url.clone(),
         })
     };
+    if let Some(endpoint) = &endpoint {
+        local_repository_path(&inventory.project_root, endpoint).map_err(|message| {
+            Finding::new(
+                Code::StateUnavailable,
+                format!("cannot resolve the state location of {name}: {message}"),
+                "fix spec.state.repository of the Environment, its template, or its group: a file:// URL names a local path such as file:///srv/state.git",
+            )
+        })?;
+    }
     Ok(ResolvedEnvironment {
         name: environment_name,
         environment: environment.clone(),
@@ -433,6 +442,28 @@ pub fn open_store_mode(
     Ok(if offline { store.offline() } else { store })
 }
 
+/// The local path an endpoint's read URL names, or `None` for a remote
+/// repository. A `file://` URL that does not name a local path is an error
+/// the state location reports, so that `nyl validate` and every command find
+/// it where the environment is resolved, not where its store is opened.
+fn local_repository_path(
+    project_root: &std::path::Path,
+    endpoint: &Endpoint,
+) -> std::result::Result<Option<PathBuf>, String> {
+    if endpoint.read.starts_with("file://") {
+        return reqwest::Url::parse(&endpoint.read)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .map(Some)
+            .ok_or_else(|| format!("invalid local state repository URL: {}", endpoint.read));
+    }
+    let path = std::path::Path::new(&endpoint.read);
+    Ok(
+        (path.is_absolute() || (!endpoint.read.contains("://") && !endpoint.read.contains(':')))
+            .then(|| project_root.join(path)),
+    )
+}
+
 /// Route a repository identity through its own local object database.
 pub fn configure_repository(
     inventory: &GitOpsInventory,
@@ -442,18 +473,7 @@ pub fn configure_repository(
     endpoint: Endpoint,
 ) -> Result<GitStateStore> {
     let cache = nyl_render::git::CacheLayout::for_project(&inventory.project_root);
-    let file_path = if endpoint.read.starts_with("file://") {
-        Some(
-            reqwest::Url::parse(&endpoint.read)
-                .ok()
-                .and_then(|url| url.to_file_path().ok())
-                .ok_or_else(|| NylError::config(format!("invalid local state repository URL: {}", endpoint.read)))?,
-        )
-    } else {
-        let path = std::path::Path::new(&endpoint.read);
-        (path.is_absolute() || (!endpoint.read.contains("://") && !endpoint.read.contains(':')))
-            .then(|| inventory.project_root.join(path))
-    };
+    let file_path = local_repository_path(&inventory.project_root, &endpoint).map_err(NylError::config)?;
     let direct = file_path.is_some() && endpoint.write.as_ref().is_none_or(|write| write == &endpoint.read);
     let source = git2::Repository::open(git_dir)
         .ok()

@@ -70,6 +70,7 @@ use nyl_core::resources::units::OutputDeclaration;
 use serde_json::{json, Map, Value};
 
 use super::lease::{self, HeldLease};
+use super::peers::Peers;
 use super::{store_error, Context};
 use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{
@@ -80,6 +81,7 @@ use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial
 use crate::rules::freshness::{receipt_is_current, same_incarnation};
 use crate::rules::graph::{extract, topological_order};
 use crate::rules::observed_values;
+use crate::rules::peers::{Need, Problem};
 use crate::rules::references::{resolve_unit, ReferenceView};
 use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
 use crate::rules::sources::{
@@ -544,24 +546,27 @@ impl<'r, 'a> Session<'r, 'a> {
 
     /// Read declared consumers once, without taking their leases. Stored specs,
     /// including held and retained ones, protect producers throughout teardown.
+    ///
+    /// Any environment may hold a consumer, so every other environment is
+    /// required ([`Need::Required`]) when a unit is leaving: one that cannot
+    /// be read is an error and nothing leaves. With no unit leaving
+    /// (`leaving` is false), nothing needs the consumers, and no other
+    /// environment is read.
     fn external_dependents(
         &self,
         desired: &BTreeMap<UnitName, DesiredUnit>,
+        leaving: bool,
     ) -> Result<BTreeMap<UnitName, Vec<String>>, Finding> {
-        if let Some(finding) = self.request.environment_errors.values().next() {
-            return Err(finding.clone());
-        }
         let mut dependents: BTreeMap<UnitName, Vec<String>> = BTreeMap::new();
-        for (environment, location) in &self.request.environments {
-            if environment == self.environment() {
-                continue;
-            }
+        if !leaving {
+            return Ok(dependents);
+        }
+        let peers = Peers::of(self.request);
+        for environment in peers.others(self.environment()) {
             if !self.environments.borrow().contains_key(environment) {
-                let snapshot = self
-                    .base()
-                    .store
-                    .snapshot(location)
-                    .map_err(|error| store_error(environment, &error))?;
+                let snapshot = peers
+                    .read(self.base().store, environment, Need::Required)
+                    .map_err(Problem::into_finding)?;
                 self.environments.borrow_mut().insert(environment.clone(), snapshot);
             }
             let environments = self.environments.borrow();
@@ -911,8 +916,16 @@ impl<'r, 'a> Session<'r, 'a> {
     }
 
     /// Cache producer snapshots once; a preflight-failed selected producer supplies no evidence.
-    fn read_environments(&self, prepared: &Prepared) -> Vec<Finding> {
+    ///
+    /// The producers a unit's references name are required
+    /// ([`Need::Required`]): one whose declaration cannot be used or whose
+    /// state cannot be read is an error of the run, and so is a reference to an
+    /// instance. Each producer that failed is in the second result, so its
+    /// consumers report that error instead of an undeclared environment.
+    fn read_environments(&self, prepared: &Prepared) -> (Vec<Finding>, BTreeSet<EnvironmentName>) {
+        let peers = Peers::of(self.request);
         let mut errors = Vec::new();
+        let mut failed = BTreeSet::new();
         for unit in prepared.desired.units.values() {
             for environment in crate::rules::multi_environment::dependencies(&unit.spec) {
                 if environment == *self.environment() || self.environments.borrow().contains_key(&environment) {
@@ -923,6 +936,7 @@ impl<'r, 'a> Session<'r, 'a> {
                         &format!("unit {}", unit.unit.name),
                         &environment,
                     ));
+                    failed.insert(environment);
                     continue;
                 }
                 if self.request.unavailable.contains(&environment) {
@@ -931,21 +945,26 @@ impl<'r, 'a> Session<'r, 'a> {
                         .insert(environment, EnvironmentSnapshot::default());
                     continue;
                 }
-                if let Some(finding) = self.request.environment_errors.get(&environment) {
-                    errors.push(finding.clone());
+                // An environment nobody declares is the reference's own error.
+                if !peers.knows(&environment) {
                     continue;
                 }
-                if let Some(location) = self.request.environments.get(&environment) {
-                    match self.base().store.snapshot(location) {
-                        Ok(snapshot) => {
-                            self.environments.borrow_mut().insert(environment, snapshot);
+                match peers.read(self.base().store, &environment, Need::Required) {
+                    Ok(snapshot) => {
+                        self.environments.borrow_mut().insert(environment, snapshot);
+                    }
+                    Err(problem) => {
+                        let finding = problem.into_finding();
+                        // Several units can read one producer; it fails once.
+                        if !errors.contains(&finding) {
+                            errors.push(finding);
                         }
-                        Err(error) => errors.push(store_error(&environment, &error)),
+                        failed.insert(environment);
                     }
                 }
             }
         }
-        errors
+        (errors, failed)
     }
 
     /// Include held producers, preserving their frozen documents and marker declarations.
@@ -982,7 +1001,7 @@ impl<'r, 'a> Session<'r, 'a> {
         evidence: &Evidence<'_>,
         held: &BTreeMap<UnitName, DesiredUnit>,
     ) -> Resolved {
-        let external_errors = self.read_environments(prepared);
+        let (external_errors, failed_producers) = self.read_environments(prepared);
         let external = self.environments.borrow();
         let mut units = Self::resolution_units(prepared, held);
         let mut commits = BTreeMap::new();
@@ -1038,7 +1057,14 @@ impl<'r, 'a> Session<'r, 'a> {
             }
             unit.provenance = resolution.provenance;
             unit.readiness = resolution.readiness;
-            if !resolution.errors.is_empty() && !in_shadow {
+            // A producer that could not be read has no snapshot to resolve
+            // from, so its consumers' own errors would only repeat it as an
+            // undeclared environment: the producer's error stands instead.
+            let reads_failed_producer = !failed_producers.is_empty()
+                && crate::rules::multi_environment::dependencies(&unit.spec)
+                    .iter()
+                    .any(|environment| failed_producers.contains(environment));
+            if !resolution.errors.is_empty() && !in_shadow && !reads_failed_producer {
                 errors.insert(
                     name.clone(),
                     resolution
@@ -1787,7 +1813,8 @@ fn plan_leaving(
     }
     let attempted = BTreeSet::new();
     let waiting = BTreeSet::new();
-    let external = session.external_dependents(&life.desired);
+    let leaves = crate::rules::teardown::leaves(&life.desired, &life.releases, options);
+    let external = session.external_dependents(&life.desired, leaves);
     let mut plan = crate::rules::teardown::plan(&crate::rules::teardown::TeardownInputs {
         external_dependents: external.as_ref().unwrap_or(&BTreeMap::new()),
         environment,
