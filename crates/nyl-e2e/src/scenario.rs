@@ -119,6 +119,15 @@ impl Scenario<'_> {
             Ok(())
         })?;
 
+        // Nothing but Nyl keeps a direct target's cluster in line with its
+        // tree; with Argo CD, Argo CD does.
+        if !self.reconciler.needs_operator() {
+            step(
+                "a change made behind Nyl's back is drift, and a reconcile repairs it",
+                || self.drift(),
+            )?;
+        }
+
         step("nyl teardown removes everything, waiting for the reconciler", || {
             self.teardown()
         })?;
@@ -398,6 +407,69 @@ impl Scenario<'_> {
                 "`nyl get observation {UNIT_PUBLICATION}/{name}` prints {recorded:?}, expected {expected:?}"
             );
         }
+        Ok(())
+    }
+
+    /// `nyl detect-drift` finds the publication clean, then drifted after a
+    /// `kubectl scale` of the workload, naming the Deployment; the next
+    /// reconcile executes the publication again and the Deployment is back to
+    /// the replicas it applied.
+    fn drift(&self) -> Result<()> {
+        let nyl = &self.env.nyl;
+        let kubectl = &self.env.kubectl;
+        let check = |expected: &str, exits: &[i32]| -> Result<String> {
+            let report = nyl.report(&["detect-drift", "-e", ENVIRONMENT, "--unit", UNIT_PUBLICATION], exits)?;
+            let entry = report.unit(UNIT_PUBLICATION)?;
+            let actual = entry
+                .get("check")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(none)");
+            ensure!(
+                actual == expected,
+                "nyl detect-drift reports {UNIT_PUBLICATION} {actual:?}, expected {expected:?}; the report is\n{}",
+                serde_json::to_string_pretty(&report.json).unwrap_or_default()
+            );
+            Ok(entry
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned())
+        };
+        check("clean", &[0])?;
+        kubectl.run(&[
+            "scale",
+            "deployment",
+            fixture::DEPLOYMENT,
+            "--namespace",
+            NAMESPACE,
+            "--replicas=3",
+        ])?;
+        let summary = check("drifted", &[3])?;
+        ensure!(
+            summary.contains(&format!("Deployment {NAMESPACE}/{}", fixture::DEPLOYMENT)),
+            "the drift summary does not name the Deployment: {summary}"
+        );
+        let report = nyl.report(&["reconcile", "-e", ENVIRONMENT], &[0])?;
+        let result = report.result(UNIT_PUBLICATION)?;
+        ensure!(
+            result == "executed",
+            "the reconcile did not repair the drifted {UNIT_PUBLICATION}: its result is {result:?}"
+        );
+        Waiter::new(
+            "the Deployment to have the replicas Nyl applied again",
+            Duration::from_secs(2 * 60),
+        )
+        .backoff(Duration::from_secs(2), Duration::from_secs(10))
+        .until(|| {
+            let deployment = kubectl.json(&["get", "deployment", fixture::DEPLOYMENT, "--namespace", NAMESPACE])?;
+            let replicas = deployment.pointer("/spec/replicas").and_then(serde_json::Value::as_i64);
+            Ok(if replicas == Some(1) {
+                Poll::Ready(())
+            } else {
+                Poll::pending(format!("the Deployment has {replicas:?} replicas"))
+            })
+        })?;
+        check("clean", &[0])?;
         Ok(())
     }
 
