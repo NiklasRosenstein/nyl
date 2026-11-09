@@ -126,7 +126,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let mut duplicates = std::collections::HashMap::new();
     let (mut manifests, mut scopes) = collapse_rendered_duplicates(&kube_client, manifests, &mut duplicates).await?;
 
-    // Sort resources into apply order (Argo CD's kind order), record the rollback as
+    // Sort resources into apply order (CRDs, Namespaces, then Argo CD's kind order), record the rollback as
     // a new revision before touching the cluster, and apply.
     ResourceOrdering::sort_by_priority(&mut manifests)?;
     ensure_namespace_exists(&kube_client, &args.namespace, &ownership).await?;

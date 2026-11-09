@@ -29,8 +29,8 @@ use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
-    collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources, ApplyEvent, ApplySettings,
-    Interruption, Protected, ReleaseRecorder, RevisionPolicy,
+    await_registered_kinds, collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources,
+    registered_api_groups, ApplyEvent, ApplySettings, Interruption, Protected, ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering};
@@ -165,6 +165,24 @@ fn wave_of(documents: &[Value]) -> u8 {
         ResourceKey::from_json_value(document).is_ok_and(|key| ResourceOrdering::registers_api_group(&key.gvk))
     });
     u8::from(!registers)
+}
+
+/// Wait, within the unit's deadline, for the kinds of a Release's `documents` that an
+/// earlier Release registered to be served by the cluster.
+async fn await_earlier_kinds(
+    cluster: &ClusterHandle,
+    documents: &[Value],
+    registered: &HashSet<String>,
+    end: tokio::time::Instant,
+    (namespace, name): (&str, &str),
+) -> Result<(), NylError> {
+    tokio::time::timeout_at(end, await_registered_kinds(cluster.client.as_ref(), documents, registered))
+        .await
+        .map_err(|_| {
+            NylError::Interrupted(format!(
+                "the unit's deadline passed while Release {namespace}/{name} waited for the kinds an earlier Release registered"
+            ))
+        })?
 }
 
 fn identity(key: &ResourceKey) -> ObjectKey {
@@ -375,6 +393,9 @@ impl<'a, 'c> Direct<'a, 'c> {
             let mut awaiting = Vec::new();
             let mut tracked: HashSet<ObjectKey> = HashSet::new();
             let mut current_wave = None;
+            // The API groups the Releases applied so far registered: their kinds are
+            // waited for once, before the first Release that uses them.
+            let mut registered: HashSet<String> = HashSet::new();
             for &index in &order {
                 let wave = wave_of(&documents[index]);
                 if current_wave.is_some_and(|current| current != wave) && !failures.is_empty() {
@@ -419,6 +440,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                         &cluster,
                         release,
                         documents[index].clone(),
+                        &registered,
                         history_limit,
                         end,
                         &claim,
@@ -431,6 +453,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     .await
                 {
                     Ok(done) => {
+                        registered.extend(registered_api_groups(&documents[index]));
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
                         if done.failures.is_empty() {
@@ -564,6 +587,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         cluster: &ClusterHandle,
         release: &PublishedDirectRelease,
         documents: Vec<Value>,
+        registered: &HashSet<String>,
         history_limit: u32,
         end: tokio::time::Instant,
         claim: &ReleaseClaim<'_>,
@@ -571,7 +595,9 @@ impl<'a, 'c> Direct<'a, 'c> {
         protected: Protected<'_>,
     ) -> Result<Applied, NylError> {
         let (namespace, name) = release.identity();
-        // Prepared when its wave comes, so the kinds an earlier wave registers resolve.
+        // Prepared when its wave comes, so the kinds an earlier wave registers resolve,
+        // once the cluster serves them (a Release applied earlier registered them).
+        await_earlier_kinds(cluster, &documents, registered, end, (namespace, name)).await?;
         let mut duplicates = HashMap::new();
         let (mut manifests, mut scopes) = prepare_desired_manifests(
             cluster.client.as_ref(),

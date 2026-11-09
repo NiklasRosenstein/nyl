@@ -62,9 +62,10 @@ pub struct ApplyArgs {
 
     /// Maximum number of resources applied or pruned at the same time.
     ///
-    /// Resources are applied in Argo CD's kind order, one batch per kind; the
-    /// resources of a batch are applied concurrently and a batch completes before
-    /// the next one starts. Use 1 to apply serially.
+    /// Resources are applied CustomResourceDefinitions first, then Namespaces, then
+    /// the other kinds in Argo CD's kind order, one batch per kind; the resources
+    /// of a batch are applied concurrently and a batch completes before the next
+    /// one starts. Use 1 to apply serially.
     #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
     pub concurrency: u16,
 
@@ -158,7 +159,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         print_duplicate_warning(&duplicates);
     }
 
-    // 3. Sort resources into apply order (Argo CD's kind order).
+    // 3. Sort resources into apply order (CRDs, Namespaces, then Argo CD's kind order).
     // Sort in place so the recorded release manifest is stored in the same order it
     // is applied (and consistent with `release rollback`, which also stores sorted).
     ResourceOrdering::sort_by_priority(&mut desired_manifests)?;

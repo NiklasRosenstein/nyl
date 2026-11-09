@@ -23,7 +23,9 @@ pub use client::{DeleteOptions, DeletePropagation, DiscoveryMode, KubeClient, Ku
 pub use cluster_server::{normalize_cluster_url, verifiable_cluster_server, verify_cluster_server, verify_server};
 pub use diff::DiffEngine;
 pub use memory::InMemoryReleaseStorage;
-pub use namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
+pub use namespace_resolution::{
+    adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces, DeclaredScopes,
+};
 pub use ordered_delete::{delete_in_prune_order, run_concurrently, PruneEvent, PRUNE_TERMINATION_TIMEOUT};
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
