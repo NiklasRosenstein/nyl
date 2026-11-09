@@ -29,11 +29,14 @@ use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
-    collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources, ApplyEvent, ApplySettings,
-    Interruption, Protected, ReleaseRecorder, RevisionPolicy,
+    await_registered_kinds, collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources,
+    ApplyEvent, ApplySettings, Interruption, ObjectScopes, Protected, RegisteredKinds, ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
-use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering};
+use nyl_render::kubernetes::{
+    ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering, ScopeMismatch, ScopeResolver,
+};
+use nyl_render::resources::ClusterKubernetesCapabilities;
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
@@ -169,6 +172,34 @@ pub(super) fn wave_of(documents: &[Value]) -> u8 {
     u8::from(!registers)
 }
 
+/// Wait, within the unit's deadline, for the kinds of a Release's `documents` that an
+/// earlier Release registered to be served by the cluster.
+async fn await_earlier_kinds(
+    cluster: &ClusterHandle,
+    documents: &[Value],
+    registered: &RegisteredKinds,
+    end: tokio::time::Instant,
+    (namespace, name): (&str, &str),
+) -> Result<(), NylError> {
+    tokio::time::timeout_at(end, await_registered_kinds(cluster.client.as_ref(), documents, registered))
+        .await
+        .map_err(|_| {
+            NylError::Interrupted(format!(
+                "the unit's deadline passed while Release {namespace}/{name} waited for the kinds an earlier Release registered"
+            ))
+        })?
+}
+
+/// The kinds whose scope the Cluster's recorded capabilities and the live cluster
+/// disagree on, as warnings: the recorded scope was used.
+fn scope_warnings(scopes: &ScopeResolver) -> Vec<Finding> {
+    scopes
+        .mismatches()
+        .iter()
+        .map(|mismatch| Finding::new(Code::KubernetesScopeMismatch, mismatch.message(), ScopeMismatch::FIX))
+        .collect()
+}
+
 fn identity(key: &ResourceKey) -> ObjectKey {
     (
         key.gvk.group.clone(),
@@ -187,6 +218,10 @@ pub(crate) struct Direct<'a, 'c> {
     /// The destination of the target's tree, without a commit.
     pub destination: ReleasePublication,
     pub observed: ObservedPublication,
+    /// The target Cluster's recorded Kubernetes capabilities, vendored CRDs included,
+    /// which decide a kind's scope after the Release's own CRDs and before the live
+    /// cluster does, as for `nyl apply --target`.
+    pub capabilities: Option<ClusterKubernetesCapabilities>,
 }
 
 impl<'a, 'c> Direct<'a, 'c> {
@@ -213,6 +248,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                 branch: rendered.destination.branch.clone(),
                 path_prefix: rendered.destination.path_prefix.clone(),
             },
+            capabilities: rendered.cluster_kubernetes.clone(),
         }
     }
 
@@ -377,6 +413,14 @@ impl<'a, 'c> Direct<'a, 'c> {
             let mut awaiting = Vec::new();
             let mut tracked: HashSet<ObjectKey> = HashSet::new();
             let mut current_wave = None;
+            // The kinds the Releases applied so far registered: they are
+            // waited for once, before the first Release that uses them.
+            let mut registered = RegisteredKinds::default();
+            // Every Release's CRDs and the Cluster's recorded capabilities, known before
+            // any Release applies, like the tree's per-target scope: a custom resource
+            // resolves from a CRD of another Release of the target without waiting for
+            // that Release to have applied.
+            let target_scopes = ScopeResolver::new(self.capabilities.as_ref(), documents.iter().flatten());
             for &index in &order {
                 let wave = wave_of(&documents[index]);
                 if current_wave.is_some_and(|current| current != wave) && !failures.is_empty() {
@@ -421,6 +465,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                         &cluster,
                         release,
                         documents[index].clone(),
+                        (&registered, &target_scopes),
                         history_limit,
                         end,
                         &claim,
@@ -436,6 +481,8 @@ impl<'a, 'c> Direct<'a, 'c> {
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
                         if done.failures.is_empty() {
+                            // Only a Release that applied registers kinds a later one waits for.
+                            registered.extend(RegisteredKinds::of(&documents[index]));
                             applied_releases.insert(index);
                         }
                         failures.extend(done.failures);
@@ -444,9 +491,9 @@ impl<'a, 'c> Direct<'a, 'c> {
                 }
             }
             if !failures.is_empty() {
-                return Ok::<_, Failure>((failures, awaiting, Vec::new()));
+                return Ok::<_, Failure>((failures, awaiting, scope_warnings(&target_scopes)));
             }
-            let warnings = tokio::time::timeout_at(
+            let mut warnings = tokio::time::timeout_at(
                 end,
                 self.purge_vanished(&cluster, releases, &tree_namespaces, &tracked, &probe, &history),
             )
@@ -456,6 +503,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     "the unit's deadline passed while purging the Releases that left the tree".to_owned(),
                 )
             })??;
+            warnings.extend(scope_warnings(&target_scopes));
             Ok((failures, awaiting, warnings))
         })
         .map_err(|error| DriverError::after_effects(error.message))?;
@@ -605,6 +653,30 @@ impl<'a, 'c> Direct<'a, 'c> {
         expired
     }
 
+    /// A Release's documents prepared for its apply. This happens when its wave comes,
+    /// so the kinds an earlier wave registers resolve, once the cluster serves them,
+    /// and every kind's scope follows the order the target's declaration gives: the
+    /// CRDs of the target's Releases (`scopes`, which also holds the Cluster's recorded
+    /// capabilities), the Release's own CRDs, then the live cluster.
+    async fn prepare(
+        &self,
+        cluster: &ClusterHandle,
+        release: &PublishedDirectRelease,
+        documents: Vec<Value>,
+        (registered, scopes): (&RegisteredKinds, &ScopeResolver),
+        end: tokio::time::Instant,
+    ) -> Result<(Vec<Value>, ObjectScopes), NylError> {
+        await_earlier_kinds(cluster, &documents, registered, end, release.identity()).await?;
+        prepare_desired_manifests(
+            cluster.client.as_ref(),
+            documents,
+            &mut HashMap::new(),
+            Some(&release.release.destination_namespace),
+            scopes.clone(),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
     #[allow(clippy::too_many_lines)] // One Release's apply in order: prepare, reserve, run, and map its failures.
     async fn apply_one(
@@ -612,6 +684,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         cluster: &ClusterHandle,
         release: &PublishedDirectRelease,
         documents: Vec<Value>,
+        earlier: (&RegisteredKinds, &ScopeResolver),
         history_limit: u32,
         end: tokio::time::Instant,
         claim: &ReleaseClaim<'_>,
@@ -619,15 +692,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         protected: Protected<'_>,
     ) -> Result<Applied, NylError> {
         let (namespace, name) = release.identity();
-        // Prepared when its wave comes, so the kinds an earlier wave registers resolve.
-        let mut duplicates = HashMap::new();
-        let (mut manifests, mut scopes) = prepare_desired_manifests(
-            cluster.client.as_ref(),
-            documents,
-            &mut duplicates,
-            Some(&release.release.destination_namespace),
-        )
-        .await?;
+        let (mut manifests, mut scopes) = self.prepare(cluster, release, documents, earlier, end).await?;
         ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
         let expired = self.expired_jobs(cluster, &release.release, &manifests).await;

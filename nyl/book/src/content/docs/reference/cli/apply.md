@@ -64,11 +64,20 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ## Apply order and progress
 
-Nyl applies resources in the same order as Argo CD: Namespaces, cluster policy
-(NetworkPolicies, ResourceQuotas, LimitRanges, PodDisruptionBudgets),
-ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
-Services, workloads, Ingresses, and APIServices, followed by every other kind,
-including custom resources. Built-in kinds are matched by API group and kind, so a
+Nyl applies resources in phases, whatever order the manifest lists them in:
+
+1. CustomResourceDefinitions.
+2. Namespaces.
+3. Everything else in Argo CD's order: cluster policy (NetworkPolicies,
+   ResourceQuotas, LimitRanges, PodDisruptionBudgets), ServiceAccounts, Secrets and
+   ConfigMaps, storage, RBAC, Services, workloads, Ingresses, and APIServices,
+   followed by every other kind, including custom resources.
+
+A release can therefore define a CRD and custom resources of it, or a Namespace and
+objects in it, and apply in one run. Nyl orders by kind only: the
+[Argo CD sync waves and phases](/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases)
+a manifest carries order what Argo CD applies, and `nyl apply` does not read them.
+Built-in kinds are matched by API group and kind, so a
 custom kind named like a built-in one, such as a CNI's `NetworkPolicy`, is ordered
 as a custom resource. Admission webhook configurations are applied last, so a
 webhook is not registered before the resources it admits while its backend may
@@ -79,7 +88,13 @@ while resources of one kind do not wait for each other.
 
 Before applying the first resource of an API group that a CustomResourceDefinition
 or APIService registered earlier in the same apply, Nyl refreshes API discovery
-until the new kinds are served. When several documents describe the same object
+until the new kinds are served, for up to 30 seconds. A CustomResourceDefinition's
+kinds are served once it is Established, so the custom resources apply after the
+CRD is Established; the CRDs apply first, so the wait is usually already over, and
+nothing waits for a CRD the cluster already serves. Only the kinds a CRD declares
+are waited for, and, like Argo CD, Nyl does not wait for the backend of a CRD's
+conversion webhook. A legacy `v1beta1` CRD that lists no `versions` still declares
+its scope, but names no kind to wait for, so nothing waits for it. When several documents describe the same object
 (the same group, kind, namespace, and name, in any API version; cluster-scoped
 objects ignore a namespace), only the last one is applied and recorded. A resource
 that fails to apply does not stop the others; the release is recorded as failed
@@ -109,7 +124,8 @@ Pruning deletes the resources a release no longer contains in the reverse of the
 apply order, so dependents go before what they depend on: admission webhook
 configurations before the backends they call, custom resources and objects of
 aggregated APIs before the CustomResourceDefinitions and APIServices behind them,
-APIServices before their backends, and Namespaces last. As with apply, the
+APIServices before their backends, then Namespaces, and CustomResourceDefinitions
+last, after every object that needs them. A purge deletes in the same order. As with apply, the
 resources of one kind are deleted concurrently. Before deleting the next kind,
 Nyl waits until the deleted resources are gone, so finalizers run while the
 controllers, CRDs, and webhooks they need still exist. After two minutes of waiting
@@ -134,6 +150,40 @@ line follows each resource whose `nyl` fields were released. The summary is foll
 the time spent in API discovery, validation, apply, and release bookkeeping.
 Nyl uses aggregated API discovery (two requests) when the API server supports it
 and falls back to per-group discovery otherwise; the timing line names the mode.
+
+## Which kinds are namespaced
+
+A resource that sets no namespace takes the destination namespace when its kind is
+namespaced. One resolver decides that scope, in one fixed order, for `apply`,
+[`diff`](/nyl/reference/cli/diff/), `release rollback`, and the direct reconciler, and
+for the Application and AppProject Nyl derives for a target:
+
+1. The CustomResourceDefinitions of the Release being applied (the manifest's CRDs).
+   A CRD names its kind's scope, and counts when it serves a version: a CRD that
+   lists versions but serves none declares nothing. Where two CRD documents declare
+   one kind, the later one wins. The direct reconciler and the tree also know the CRDs
+   of the other Releases of the target.
+2. With a DeploymentTarget (`--target`, or the target the project selects), the target
+   Cluster's recorded Kubernetes capabilities, which include the CRDs vendored by
+   [`nyl capture cluster --crds`](/nyl/kubernetes-gitops/resource-guides/cluster/).
+3. The built-in Kubernetes kinds, whose scope is fixed.
+4. The live cluster, only for a kind nothing above knows, and only for `nyl apply`,
+   `diff`, and `release rollback`: the tree and AppProject derivation never ask a
+   cluster. Without GitOps configuration, `--context` selects the cluster and there is
+   no step 2.
+
+The result therefore follows what is declared, and a custom resource whose CRD is
+new in the manifest, or vendored but not yet installed, gets its namespace before
+anything is applied. A stale vendored snapshot takes precedence over the live cluster,
+so a kind whose scope changed in the cluster keeps the vendored scope until
+`nyl capture cluster <name> --crds` refreshes the snapshot. When a scope the Cluster
+records differs from what the connected cluster reports, `apply`, `diff`, and
+`release rollback` still use the recorded scope and warn once per kind with
+`NYL-KUBERNETES-SCOPE-MISMATCH`; its fix is to re-run
+`nyl capture cluster <name> --crds` and commit the result. The direct reconciler
+reports the same warning in its run. A kind that none of these
+knows, such as one an APIService in the same manifest will serve, keeps no namespace:
+set `metadata.namespace` on it.
 
 ## Examples
 
