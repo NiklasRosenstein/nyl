@@ -370,7 +370,8 @@ same outputs leaves its consumers current, and a unit that must run again
 whenever a producer is recreated says so in its inputs, for example by
 reading an output that changes with every creation. A unit whose latest
 drift record is <code dir="auto">drifted</code> runs again too, as
-<a href="/nyl/orchestration/recovery/#repairing-drift">Recovery</a> describes.</p>
+<a href="/nyl/orchestration/recovery/#repairing-drift">Recovery</a> describes, and
+<code dir="auto">nyl reconcile --detect-drift</code> records that drift first, in the same run.</p>
 <p>The execution key is a digest of everything that decides what the unit does:
 its resolved spec, including the values its references resolved to, the
 content its kind reads, such as a Command’s <code dir="auto">files</code> and <code dir="auto">fingerprint</code>, and
@@ -513,6 +514,10 @@ drifted, and <code dir="auto">reapplied</code> records who forced which units wi
 why; each appears only when it is not empty:</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">nyl: reconcile dev (1 executed, 1 awaiting-approval)</span></div></div><div class="ec-line"><div class="code">
 </div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">units:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">cache: {"result":"current"}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">config: {"executionKey":"sha256:42971c708f5916f2fab3a4319476c9a88123240b1cac2134e08d570e504a40b1","result":"executed"}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">extra: {"result":"current"}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">seed: {"result":"awaiting-approval"}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">worker: {"result":"current"}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">recovered: []</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">imported: []</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">driftRepaired: [config]</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl: reconcile dev (1 executed, 1 awaiting-approval)units:  cache: {&#x22;result&#x22;:&#x22;current&#x22;}  config: {&#x22;executionKey&#x22;:&#x22;sha256:42971c708f5916f2fab3a4319476c9a88123240b1cac2134e08d570e504a40b1&#x22;,&#x22;result&#x22;:&#x22;executed&#x22;}  extra: {&#x22;result&#x22;:&#x22;current&#x22;}  seed: {&#x22;result&#x22;:&#x22;awaiting-approval&#x22;}  worker: {&#x22;result&#x22;:&#x22;current&#x22;}recovered: []imported: []driftRepaired: [config]"><div></div></button></div></figure></div>
+<p>With <code dir="auto">nyl reconcile --detect-drift</code>, a unit’s entry also carries <code dir="auto">driftCheck</code>,
+what the run’s <a href="/nyl/orchestration/recovery/#detecting-drift-in-a-reconcile">drift check</a>
+found for it, such as <code dir="auto">"driftCheck":{"check":"drifted","summary":"…"}</code>; a unit
+the run did not check has none.</p>
 <p>Lifecycle work adds its details: <code dir="auto">released</code> and <code dir="auto">retained</code> list the units
 and what they left in place, <code dir="auto">allowDependents</code> the tombstones an override
 passed, <code dir="auto">confirmedRemoval</code> how a publication’s teardown wait ended,
