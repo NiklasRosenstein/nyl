@@ -2,11 +2,17 @@
 //!
 //! Each golden file is the YAML Nyl writes for a representative document of
 //! one kind. The test fails when serialization changes or when a golden file
-//! no longer parses, so a format change is always deliberate: it adds a
-//! version, a migration, and a new golden file, and keeps the old one.
-//! (The v1 formats are unreleased; until the first
-//! release that writes them, v1 is amended in place and its golden files
-//! regenerated.)
+//! no longer parses, so a format change is always deliberate. A change either
+//! bumps the version with a migration (and keeps the old golden file as the
+//! migration's input) or changes the format in place and regenerates the
+//! golden files; which one is decided for each change with the user.
+//!
+//! The blocked reasons of `DesiredUnit` changed in place in `gitops.nyl/v1`:
+//! they are written typed (`blocker`), and the reader still accepts the text
+//! form of earlier releases (`reason`). The documents under `legacy/` are in
+//! that older form, each beside the golden file it must read as; they are
+//! never regenerated. `legacy/desired-unit-blocked.v1.yaml` is written by hand
+//! and carries each wording of a blocked reason that earlier releases wrote.
 //!
 //! After an intended change, regenerate with
 //! `cargo test -p nyl-core --test state_golden_test -- --ignored`.
@@ -14,8 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use nyl_core::orchestration::state::{
-    ArtifactDocument, AttestationRecord, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord,
-    ObservedUnit, Run, Signal, StateRecord,
+    ArtifactDocument, AttestationRecord, BlockedReason, DesiredUnit, DriftRecord, EnvironmentRecord, Lease,
+    ObservationRecord, ObservedUnit, Readiness, Run, Signal, StateRecord,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -128,7 +134,28 @@ fn samples() -> Vec<(&'static str, Value)> {
                                  "requested": {"by": "alice", "at": "2026-09-24T12:00:00Z", "reason": "decommission"}}
                 },
                 "sourceCommit": COMMIT, "sourceRevision": COMMIT, "spec": {"command": ["./cache.sh"]},
-                "readiness": {"state": "blocked", "reasons": [{"pointer": "/values/host", "reason": "network has no current receipt"}]}
+                "readiness": {"state": "blocked", "reasons": [{"pointer": "/values/host", "blocker": {"type": "no-current-receipt", "producer": {"unit": "network"}}}]}
+            }),
+        ),
+        (
+            // Every kind of blocker, with producers of the consumer's own
+            // environment and of another one.
+            "desired-unit-blocked.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("app", "Command"),
+                "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
+                "spec": {"values": {"host": {"fromUnit": {"unit": "network", "output": "host"}}}},
+                "readiness": {"state": "blocked", "reasons": [
+                    {"pointer": "/values/host", "blocker": {"type": "no-current-receipt", "producer": {"unit": "network"}}},
+                    {"pointer": "/dependsOn/0", "blocker": {"type": "no-current-receipt", "producer": {"environment": "infra", "unit": "network"}}},
+                    {"pointer": "/dependsOn/1", "blocker": {"type": "attestation", "producer": {"environment": "infra", "unit": "network"}, "name": "healthy", "state": "pending"}},
+                    {"pointer": "/dependsOn/2", "blocker": {"type": "attestation", "producer": {"unit": "network"}, "name": "accepted", "state": "failing"}},
+                    {"pointer": "/values/ip", "blocker": {"type": "observation", "producer": {"environment": "infra", "unit": "kubernetes"}, "name": "ingressIp", "why": "field-not-set: /status/loadBalancer/ingress/0/ip"}},
+                    {"pointer": "/values/dns", "blocker": {"type": "planned-change", "producer": {"environment": "infra", "unit": "dns"}}},
+                    {"pointer": "/dependsOn/3", "blocker": {"type": "producer-unavailable", "producer": {"environment": "infra", "unit": "network"}}},
+                    {"blocker": {"type": "other", "message": "its retained tombstone of kind Command is dropped first"}},
+                    {"blocker": {"type": "other", "message": "the deleting incarnation of app (kind Command) is removed first"}}
+                ]}
             }),
         ),
         (
@@ -339,7 +366,7 @@ fn test_state_documents_match_their_golden_files() {
         assert_eq!(
             render(name, &sample),
             golden,
-            "{name} changed; a format change adds a version"
+            "{name} changed; a format change is deliberate (a new version with a migration, or in place with regenerated golden files)"
         );
         assert_eq!(reparse(name, &golden), golden, "{name} does not round-trip");
     }
@@ -360,16 +387,100 @@ fn test_readers_reject_unknown_format_versions_and_kinds() {
     assert!(serde_json::from_value::<Lease>(lease).is_err());
 }
 
+/// Catches a reader that accepts a newer format of a kind whose fields it
+/// does not know, instead of asking for an upgrade.
 #[test]
-fn test_observed_v1_preserves_evidence_and_rejects_unknown_versions() {
+fn test_desired_and_observed_units_reject_unknown_format_versions() {
+    for (name, kind) in [
+        ("desired-unit.v1.yaml", "DesiredUnit"),
+        ("observed-unit.v1.yaml", "ObservedUnit"),
+    ] {
+        let mut document = samples().into_iter().find(|(file, _)| *file == name).unwrap().1;
+        document["apiVersion"] = json!("gitops.nyl/v2");
+        let error = match kind {
+            "DesiredUnit" => serde_json::from_value::<DesiredUnit>(document).unwrap_err(),
+            _ => serde_json::from_value::<ObservedUnit>(document).unwrap_err(),
+        };
+        assert!(error.to_string().contains("upgrade Nyl"), "{kind}: {error}");
+    }
+}
+
+#[test]
+fn test_observed_units_preserve_evidence_and_reject_unknown_versions() {
     for name in ["observed-unit", "observed-unit-waiting", "observed-unit-repaired"] {
         let original = std::fs::read_to_string(golden_dir().join(format!("{name}.v1.yaml"))).unwrap();
         let document: ObservedUnit = serde_saphyr::from_str(&original).unwrap();
         assert_eq!(serde_saphyr::to_string(&document).unwrap(), original);
-        let mut unknown = serde_json::to_value(document).unwrap();
-        unknown["apiVersion"] = json!("gitops.nyl/v2");
-        assert!(serde_json::from_value::<ObservedUnit>(unknown).is_err());
     }
+}
+
+/// The documents of earlier releases, which stored blocked reasons as text,
+/// and the golden file each one must read as.
+const LEGACY: [(&str, &str); 2] = [
+    (
+        "legacy/desired-unit-held-deleting.v1.yaml",
+        "desired-unit-held-deleting.v1.yaml",
+    ),
+    ("legacy/desired-unit-blocked.v1.yaml", "desired-unit-blocked.v1.yaml"),
+];
+
+/// Catches reading the older text form of a blocked reason into anything but
+/// the typed value the current writer produces: a stored document of an
+/// earlier release must read and write back as exactly the current golden
+/// document, so the next transition that touches it writes the typed form.
+#[test]
+fn test_documents_with_text_blocked_reasons_read_as_the_current_golden_files() {
+    for (old, current) in LEGACY {
+        let text = std::fs::read_to_string(golden_dir().join(old)).unwrap();
+        let value: Value = serde_saphyr::from_str(&text).unwrap_or_else(|error| panic!("{old}: {error}"));
+        assert!(
+            value["readiness"]["reasons"][0]["reason"].is_string(),
+            "{old} stores its reasons as text"
+        );
+        let golden = std::fs::read_to_string(golden_dir().join(current)).unwrap();
+        assert_eq!(render(old, &value), golden, "{old} must read as {current}");
+    }
+}
+
+/// Catches reading that rewrites what a blocked reason says: the typed
+/// blockers read from the text form render the text the document stored.
+#[test]
+fn test_blocked_reasons_read_from_text_render_the_text_they_stored() {
+    let text = std::fs::read_to_string(golden_dir().join("legacy/desired-unit-blocked.v1.yaml")).unwrap();
+    let stored: Value = serde_saphyr::from_str(&text).unwrap();
+    let document: DesiredUnit = serde_saphyr::from_str(&text).unwrap();
+    let Readiness::Blocked { reasons } = &document.readiness else {
+        panic!("the document is blocked");
+    };
+    let stored: Vec<&str> = stored["readiness"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason["reason"].as_str().unwrap())
+        .collect();
+    let rendered: Vec<String> = reasons.iter().map(BlockedReason::message).collect();
+    assert_eq!(rendered, stored);
+}
+
+/// Catches the desired copy an observed document embeds reading differently
+/// from a desired document: the older text form reads typed there too.
+#[test]
+fn test_an_observed_unit_reads_the_text_blocked_reasons_of_its_desired_copy() {
+    let mut document = samples()
+        .into_iter()
+        .find(|(name, _)| *name == "observed-unit.v1.yaml")
+        .unwrap()
+        .1;
+    document["desired"]["readiness"] = json!({"state": "blocked", "reasons": [{"pointer": "/values/host", "reason": "infra/network has no current receipt"}]});
+    let observed: ObservedUnit = serde_json::from_value(document).unwrap();
+    let Readiness::Blocked { reasons } = &observed.desired.unwrap().readiness else {
+        panic!("the copy is blocked");
+    };
+    assert_eq!(reasons[0].message(), "infra/network has no current receipt");
+    assert_eq!(
+        reasons[0].blocker.producer().map(ToString::to_string).as_deref(),
+        Some("infra/network")
+    );
 }
 
 #[test]

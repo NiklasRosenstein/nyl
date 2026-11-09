@@ -237,9 +237,8 @@ before never satisfies a reference.
   producer environment records another value than the one it resolved. An
   environment whose state cannot be read is a `NYL-STATE-UNAVAILABLE` warning;
   its consumers are not compared. A consumer in another environment that waits
-  for a value is not found yet (a current limitation, tracked by
-  [#248](https://github.com/NiklasRosenstein/nyl/issues/248)): it stays
-  `blocked` and resolves the recorded value at its own next `reconcile`.
+  for a value that has now arrived is found the same way: `nyl observe` names it
+  as ready, and `nyl status -e prod` shows it `ready` rather than `blocked`.
 - **What is written.** The record changes only when a value arrives, changes,
   or becomes pending again, or when the last successful read is older than an
   hour (half the `maxAge` when that is shorter), so an unchanged read writes

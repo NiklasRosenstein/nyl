@@ -9,9 +9,13 @@
 //! Every document carries `apiVersion` and `kind`, and the version in
 //! `apiVersion` is the format version of that kind. Readers reject a version
 //! or kind they do not know, through the marker types below, so a newer
-//! format is never misread. A format change adds a version with a migration;
-//! golden files under `crates/nyl-core/tests/golden/state/` cover every kind
-//! and version.
+//! format is never misread. A format change either adds a version with a
+//! migration or changes the format in place, decided for each change with the
+//! user; golden files under `crates/nyl-core/tests/golden/state/` cover every
+//! kind and version. The blocked reasons of `DesiredUnit` changed in place in
+//! `gitops.nyl/v1`: they are written typed ([`super::blocked::Blocker`]), and
+//! the reader still accepts the text form of earlier releases
+//! ([`super::blocked::BlockedReason`]).
 //!
 //! Lifecycle and conditions are enums that carry their data, so every state
 //! a unit can be in is spelled out and exhaustive matching forces each new
@@ -27,6 +31,8 @@ use super::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, JsonPoin
 use super::ports::StateSide;
 use super::time::Timestamp;
 use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS};
+
+pub use super::blocked::BlockedReason;
 
 /// A unit struct that serializes as the constant string `$value` and
 /// refuses every other string on deserialization with `$message`.
@@ -320,6 +326,9 @@ pub struct UnitIdentity {
 }
 
 /// `desired/units/<unit>.yaml`.
+///
+/// Its blocked reasons are stored typed ([`super::blocked::Blocker`]); the
+/// text form that releases before this change wrote still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredUnit {
@@ -562,15 +571,6 @@ pub struct PromotionProvenance {
 pub enum Readiness {
     Ready,
     Blocked { reasons: Vec<BlockedReason> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct BlockedReason {
-    /// Location of the unresolved reference, or empty for a `dependsOn` entry.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub pointer: String,
-    pub reason: String,
 }
 
 /// `observed/units/<unit>.yaml`: the latest receipt and condition.
@@ -1189,20 +1189,36 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         schema
     }
     let schemas: BTreeMap<_, _> = [
-        ("state-record", schema::<StateRecord>("StateRecord")),
-        ("environment-record", schema::<EnvironmentRecord>("EnvironmentRecord")),
-        ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
-        ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
-        ("artifact", schema::<ArtifactDocument>("Artifact")),
-        ("drift-record", schema::<DriftRecord>("DriftRecord")),
-        ("observation-record", schema::<ObservationRecord>("ObservationRecord")),
-        ("attestation-record", schema::<AttestationRecord>("AttestationRecord")),
-        ("lease", schema::<Lease>("Lease")),
-        ("run", schema::<Run>("Run")),
-        ("signal", schema::<Signal>("Signal")),
+        (API_VERSION_GITOPS, "state-record", schema::<StateRecord>("StateRecord")),
+        (
+            API_VERSION_GITOPS,
+            "environment-record",
+            schema::<EnvironmentRecord>("EnvironmentRecord"),
+        ),
+        (API_VERSION_GITOPS, "desired-unit", schema::<DesiredUnit>("DesiredUnit")),
+        (
+            API_VERSION_GITOPS,
+            "observed-unit",
+            schema::<ObservedUnit>("ObservedUnit"),
+        ),
+        (API_VERSION_GITOPS, "artifact", schema::<ArtifactDocument>("Artifact")),
+        (API_VERSION_GITOPS, "drift-record", schema::<DriftRecord>("DriftRecord")),
+        (
+            API_VERSION_GITOPS,
+            "observation-record",
+            schema::<ObservationRecord>("ObservationRecord"),
+        ),
+        (
+            API_VERSION_GITOPS,
+            "attestation-record",
+            schema::<AttestationRecord>("AttestationRecord"),
+        ),
+        (API_VERSION_GITOPS, "lease", schema::<Lease>("Lease")),
+        (API_VERSION_GITOPS, "run", schema::<Run>("Run")),
+        (API_VERSION_GITOPS, "signal", schema::<Signal>("Signal")),
     ]
     .into_iter()
-    .map(|(slug, schema)| (format!("{API_VERSION_GITOPS}/state/{slug}.schema.json"), schema))
+    .map(|(version, slug, schema)| (format!("{version}/state/{slug}.schema.json"), schema))
     .collect();
     schemas
 }

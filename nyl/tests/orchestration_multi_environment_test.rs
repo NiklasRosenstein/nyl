@@ -7,9 +7,11 @@ use nyl::orchestration::run::{CommandOutcome, Wiring};
 use nyl_orchestration::fault::NoFaults;
 use nyl_orchestration::shell::run::Cancellation;
 use nyl_units::process::ProcessRunner;
+use scenario::observing::{pending, value, Observing, Probe, Read};
 use scenario::runner::AUTHOR;
 use scenario::shell::{self, project, NYL_TOML};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const PRODUCER: &str = r#"apiVersion: units.gitops.nyl/v1
@@ -53,6 +55,15 @@ impl Harness {
     }
 
     fn with_units(producer: &str, consumer: &str) -> Self {
+        Self::build(producer, consumer, None)
+    }
+
+    /// Units whose Command driver reads what `probe` scripts for observed values.
+    fn observing(producer: &str, consumer: &str, probe: &Arc<Probe>) -> Self {
+        Self::build(producer, consumer, Some(probe))
+    }
+
+    fn build(producer: &str, consumer: &str, probe: Option<&Arc<Probe>>) -> Self {
         let environment = |name: &str| {
             format!("apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: {name}\n  labels: {{stage: test}}\nspec:\n  unitSelector:\n    matchLabels: {{scope: {name}}}\n  allowUnprotectedSource: true\n")
         };
@@ -64,8 +75,15 @@ impl Harness {
             ("nyl/consumer.yaml", consumer),
             ("nyl/group.yaml", "apiVersion: gitops.nyl/v1\nkind: EnvironmentGroup\nmetadata: {name: testing}\nspec:\n  environmentSelector:\n    matchLabels: {stage: test}\n"),
         ]);
+        let mut shell = shell::Harness::new(project.path(), true);
+        if let Some(probe) = probe {
+            shell.drivers.register(Arc::new(Observing {
+                inner: nyl_units::command::CommandDriver,
+                probe: probe.clone(),
+            }));
+        }
         let harness = Self {
-            shell: shell::Harness::new(project.path(), true),
+            shell,
             _project: project,
         };
         for name in ["infra", "app"] {
@@ -140,10 +158,9 @@ fn test_multi_environment_plan_blocks_consumers_on_planned_producer_changes_and_
     assert_eq!(plan.exit, 2, "{}", plan.stderr);
     let app = &section(&plan, "app")["units"]["app"];
     assert_eq!(app["state"], "blocked");
-    assert!(
-        app["blockedBy"]
-            .to_string()
-            .contains("infra/network has a planned change"),
+    assert_eq!(
+        app["blockedBy"],
+        json!([{"pointer": "/values/network", "environment": "infra", "unit": "network", "reason": "planned-change"}]),
         "{app}"
     );
     let teardown = harness.invoke(&["teardown", "-e", "infra", "--unit", "network", "-o", "json"]);
@@ -297,4 +314,86 @@ fn test_a_consumer_waits_for_an_attestation_of_another_environments_unit() {
         assert_eq!(rejected.exit, 1, "{requirement}: {}", rejected.stderr);
         assert!(rejected.stderr.contains(code), "{requirement}: {}", rejected.stderr);
     }
+}
+
+/// A consumer in one environment waits for an observed value of a unit in
+/// another; once `nyl observe` records the value, both commands name the
+/// consumer, and it proceeds.
+///
+/// Catches the cross-environment wait being stored in a form that loses the
+/// producer's environment (the blocker read back from text, where
+/// `<environment>/<unit>` is no unit name): the stored document names the
+/// producer with its environment as typed data, `nyl observe -e infra` and
+/// `nyl status -e app` recognize the waiting consumer as able to resolve, and
+/// the consumer executes with the value after it arrives.
+#[test]
+fn test_a_consumer_waits_for_an_observed_value_of_another_environments_unit_then_proceeds() {
+    let producer = PRODUCER.replace(
+        "  outputs:\n    id: {type: string}\n",
+        "  outputs:\n    id: {type: string}\n  observations:\n    ip: {type: string, from: {service: web}}\n",
+    );
+    assert!(producer.contains("observations:"), "{producer}");
+    let consumer = CONSUMER.replace(
+        "    network: {fromUnit: {environment: infra, unit: network, output: id}}\n",
+        "    address: {fromUnit: {environment: infra, unit: network, observation: ip}}\n",
+    );
+    assert!(consumer.contains("observation: ip"), "{consumer}");
+    let probe = Arc::new(Probe::default());
+    let harness = Harness::observing(&producer, &consumer, &probe);
+
+    probe.script("network", [Read::Values(vec![pending("ip", "no address yet")])]);
+    let waiting = harness.invoke(&["reconcile", "-e", "infra", "-e", "app", "-o", "json"]);
+    assert_eq!(waiting.exit, 2, "{}", waiting.stderr);
+    assert_eq!(section(&waiting, "infra")["units"]["network"]["result"], "executed");
+    assert_eq!(
+        section(&waiting, "app")["units"]["app"]["blockedBy"],
+        json!([{
+            "pointer": "/values/address",
+            "environment": "infra",
+            "unit": "network",
+            "reason": "observation-pending",
+            "observation": "ip",
+        }])
+    );
+    let shown = harness.invoke(&["status", "-e", "app"]);
+    assert!(
+        shown.stdout.contains("observed value ip of infra/network"),
+        "{}",
+        shown.stdout
+    );
+    let stored = harness
+        .shell
+        .show("refs/heads/nyl/app/desired", "desired/units/app.yaml");
+    assert!(
+        stored.contains("type: observation")
+            && stored.contains("environment: infra")
+            && stored.contains("name: ip")
+            && stored.contains("why: no address yet"),
+        "{stored}"
+    );
+
+    probe.script("network", [Read::Values(vec![value("ip", json!("203.0.113.10"))])]);
+    let observed = harness.invoke(&["observe", "-e", "infra"]);
+    assert_eq!(observed.exit, 0, "{}", observed.stderr);
+    assert!(
+        observed.stderr.contains("NYL-OBSERVATION-CHANGED")
+            && observed
+                .stderr
+                .contains("observed value ip of infra/network has a value now, so app/app can resolve"),
+        "{}",
+        observed.stderr
+    );
+    let ready = harness.invoke(&["status", "-e", "app", "-o", "json"]);
+    let unit = &section(&ready, "app")["units"]["app"];
+    assert_eq!(unit["state"], "ready", "{}", ready.stdout);
+    assert!(
+        unit["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("observed value ip of infra/network arrived")),
+        "{unit}"
+    );
+    let run = harness.invoke(&["reconcile", "-e", "app", "-o", "json"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert_eq!(section(&run, "app")["units"]["app"]["result"], "executed");
+    assert!(section(&run, "app")["units"]["app"].get("blockedBy").is_none());
 }

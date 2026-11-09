@@ -324,6 +324,7 @@ pub fn blocked_references(
     planned: &BTreeMap<EnvironmentName, BTreeSet<nyl_core::orchestration::ids::UnitName>>,
     unavailable: &BTreeSet<EnvironmentName>,
 ) -> Vec<nyl_core::orchestration::state::BlockedReason> {
+    use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
     use nyl_core::orchestration::ids::UnitName;
     use nyl_core::orchestration::state::BlockedReason;
     let mut reasons = Vec::new();
@@ -334,14 +335,15 @@ pub fn blocked_references(
         let Ok(environment) = EnvironmentName::new(environment) else {
             return;
         };
-        let reason = if unavailable.contains(&environment) {
-            format!("{environment}/{unit} waits because its producer environment failed or is waiting")
+        let producer = ProducerRef::new(Some(environment.clone()), unit.clone());
+        let blocker = if unavailable.contains(&environment) {
+            Blocker::ProducerUnavailable { producer }
         } else if planned.get(&environment).is_some_and(|units| units.contains(&unit)) {
-            format!("{environment}/{unit} has a planned change; waiting for its new receipt")
+            Blocker::PlannedChange { producer }
         } else {
             return;
         };
-        reasons.push(BlockedReason { pointer, reason });
+        reasons.push(BlockedReason::new(pointer, blocker));
     };
     if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
         for binding in references {

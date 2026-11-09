@@ -33,4 +33,7 @@ readiness:
   state: blocked
   reasons:
   - pointer: /values/host
-    reason: network has no current receipt
+    blocker:
+      type: no-current-receipt
+      producer:
+        unit: network

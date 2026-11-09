@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
+use nyl_core::orchestration::blocked::ProducerRef;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{CommitIdentity, StateStore};
@@ -915,10 +916,10 @@ pub fn detail(unit: &UnitReport) -> String {
             unit.blocked_by
                 .iter()
                 .map(|blocked| {
-                    let producer = blocked.unit.as_ref().map(|unit| match &blocked.environment {
-                        Some(environment) => format!("{environment}/{unit}"),
-                        None => unit.to_string(),
-                    });
+                    let producer = blocked
+                        .unit
+                        .as_ref()
+                        .map(|unit| ProducerRef::new(blocked.environment.clone(), unit.clone()));
                     match (producer, &blocked.attestation, &blocked.observation) {
                         (Some(producer), Some(attestation), _) => format!(
                             "{} waits for attestation {attestation} of {producer} ({})",

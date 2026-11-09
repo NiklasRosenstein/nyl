@@ -314,7 +314,8 @@ fn changed_consumer_warnings(
 /// `NYL-OBSERVATION-CHANGED` for each consumer in another environment that
 /// reads an observed value of this one through a cross-environment
 /// reference and resolved another value than `observed` (this environment's
-/// snapshot with the values written) holds.
+/// snapshot with the values written) holds, or that waits for a value of this
+/// environment that `observed` now holds.
 ///
 /// The other environments' snapshots are read like a reconcile reads its
 /// producers' (no lease, no write). One whose location cannot be resolved,

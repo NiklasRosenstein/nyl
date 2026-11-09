@@ -62,10 +62,9 @@ fn test_scoped_plan_blocks_on_changed_producer_omitted_from_report() {
         assert_eq!(infra["units"].as_object().unwrap().len(), selected.len() - 1);
         let app = &environments.iter().find(|section| section["name"] == "app").unwrap()["units"]["app"];
         assert_eq!(app["state"], "blocked");
-        assert!(
-            app["blockedBy"]
-                .to_string()
-                .contains("infra/network has a planned change"),
+        assert_eq!(
+            app["blockedBy"],
+            serde_json::json!([{"pointer": "/values/network", "environment": "infra", "unit": "network", "reason": "planned-change"}]),
             "{app}"
         );
     }

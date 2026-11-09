@@ -37,6 +37,7 @@ macro_rules! string_serde {
     };
 }
 
+pub mod blocked;
 pub mod codes;
 pub mod driver;
 pub mod graph;

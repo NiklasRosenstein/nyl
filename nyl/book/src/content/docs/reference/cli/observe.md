@@ -79,10 +79,10 @@ An environment whose state location cannot be resolved, or whose state cannot be
 read, is a `NYL-STATE-UNAVAILABLE` warning and its consumers are not compared;
 the exit code does not change. `nyl status -e prod` shows `dns` as `ready`.
 
-A consumer in another environment that waits for a value that has not arrived is
-not named yet; it stays `blocked` until its own next reconcile resolves the
-recorded value. This is a current limitation, tracked by
-[#248](https://github.com/NiklasRosenstein/nyl/issues/248).
+A consumer in another environment that was blocked waiting for a value that now
+has one is named too, as `has a value now, so prod/dns can resolve`. It is judged
+as its reconcile will resolve the reference, so a consumer that also requires an
+attestation the producer lacks stays `blocked`.
 
 `observe` does not apply a consumer's changed inputs: that reconcile executes
 it, under its own `approval`, as it does for any changed input.

@@ -2638,9 +2638,19 @@ published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form (RFC 8785), so formatting never
 affects them. An integer beyond ±(2^53 - 1), which RFC 8785 would round to a
 double, is written with its exact decimal digits, so two values never share a
-digest. The version in `apiVersion` is the format version of each kind:
-a format change adds a version with a migration from the previous one, golden
-files cover every version, and a reader rejects a version it does not know.
+digest. The version in `apiVersion` is the format version of each kind, golden
+files cover every version, and a reader rejects a version it does not know. A
+format change either bumps the version with a migration from the previous one
+or changes the format in place; which one is decided for each change with the
+user, never by the change alone. Every kind is at `gitops.nyl/v1`. The change
+to the stored blocked reasons of `DesiredUnit` (and so of the desired copy an
+`ObservedUnit` embeds) changed `v1` in place, by that decision: `readiness.reasons`
+stores a typed `blocker` where Nyl 0.6 stored the `reason` text. This Nyl still
+reads the text form, typing each reason once from its wording (text it does not
+recognize becomes an `other` blocker with the text unchanged), and writes the
+typed form with the next transition that touches the document. The change is
+breaking in one direction: a Nyl 0.6 cannot read a document written in the typed
+form, so every user of a state repository upgrades together.
 
 A directory of documents has no version of its own, such as a checkpoint on a
 run ref, `checkpoints/<n>-<unit>/`: its members are the versioned documents,
@@ -2708,7 +2718,9 @@ readiness: {state: ready}
 # while blocked:
 # readiness:
 #   state: blocked
-#   reasons: [{pointer: /variables/vpc_id, reason: network has no current receipt}]
+#   reasons:
+#   - pointer: /variables/vpc_id
+#     blocker: {type: no-current-receipt, producer: {unit: network}}
 ```
 
 - `sourceRevision` is S. Resolution writes the resolved commit into every Git
@@ -2742,6 +2754,21 @@ readiness: {state: ready}
   release version, and external tool versions, so a new source commit with
   identical inputs, a producer re-execution that yields identical outputs, or a
   Nyl upgrade does not change it.
+- `readiness.reasons` stores each blocker as data, never as text. `blocker.type`
+  is `no-current-receipt`, `attestation` (with `name` and `state: pending |
+  failing`), `observation` (with `name` and the driver's `why`),
+  `planned-change` or `producer-unavailable` (the waits of a multi-environment
+  run for a producer of another environment), or `other` (with a `message`,
+  for what only text describes, such as a fenced incarnation). All but `other`
+  carry the `producer` as `{environment?, unit}`; `environment` is absent for a unit of the unit's own environment, so
+  a producer of another environment is a typed reference rather than an
+  `<environment>/<unit>` string. The report's stable `blockedBy` reasons, the
+  attestation and observation warnings, and whether a blocked consumer can
+  resolve again once its observed value arrives read these fields; none of
+  them reads text. The human text (`network has no current receipt`,
+  `attestation healthy of infra/network is pending`, `observation ip of
+  kubernetes is pending: <why>`) is rendered from the blocker in one place,
+  `Blocker::message`, for tables, `message` fields, and blocked results.
 - A blocked unit keeps its rendered spec and source commit, so a later wave of
   the same run resolves it from new evidence without rereading source. Each
   run renders every unit from its own source commit S, so the next run
@@ -3005,13 +3032,13 @@ spec:
   read is a `NYL-STATE-UNAVAILABLE` warning of the command, never a failure; its
   consumers were not compared.
 
-  Across environments only a changed value is found, from the typed reference
-  and the resolved spec. A consumer that waits for another environment's
-  `pending` value is `blocked` and runs when its own next `reconcile` resolves
-  the recorded value; the "arrived" case above is found within an environment
-  only. That is a current limitation, tracked by issue #248, not part of the
-  contract: a stored blocked reason names `<environment>/<unit>`, which the
-  reason reader cannot attribute to a producer.
+  A consumer that waits for another environment's `pending` value is found the
+  same way, from the typed `observation` blocker, which names the producer with
+  its environment: it is `ready` once the producer environment records a value
+  that the consumer's own reference would read (through the reference resolver,
+  so an unmet attestation requirement or a producer being removed keeps it
+  `blocked`), and `nyl observe -e <producer environment>` names it with
+  `arrived`.
 - **Waiting.** After the run executes a unit, a `pending` observation is
   polled under the run's lease until it has a value or `observationWait` has
   passed since the execution finished, within the unit's `timeout`; the run

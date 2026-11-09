@@ -45,6 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nyl_core::orchestration::blocked::Blocker;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{Driver, DriverSet, OwnershipScope};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, Uid, UnitName};
@@ -312,10 +313,7 @@ fn fenced_readiness(name: &UnitName, stored: &DesiredUnit) -> Readiness {
         ),
     };
     Readiness::Blocked {
-        reasons: vec![BlockedReason {
-            pointer: String::new(),
-            reason: why,
-        }],
+        reasons: vec![BlockedReason::new(String::new(), Blocker::other(why))],
     }
 }
 
